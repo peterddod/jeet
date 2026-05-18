@@ -158,15 +158,18 @@ cargo fmt --check
 
 ### Maintainer: Homebrew tap auto-update (CI)
 
-Release workflows push an updated formula to [`homebrew-jeet`](https://github.com/peterddod/homebrew-jeet). The default `GITHUB_TOKEN` cannot write to other repos, so add a PAT:
+Release workflows push an updated formula to [`homebrew-jeet`](https://github.com/peterddod/homebrew-jeet). The default `GITHUB_TOKEN` cannot write to other repos — you **must** add a PAT:
 
-1. GitHub → **Settings → Developer settings → Personal access tokens**
-2. Create a **fine-grained token** (or classic `repo` scope) with **Read and Write** on `peterddod/homebrew-jeet` only
-3. On repo **peterddod/jeet** → **Settings → Secrets and variables → Actions**
-4. **New repository secret:** name `HOMEBREW_TAP_TOKEN`, value = the PAT
-5. Re-run the failed **homebrew-tap** job (or tag a new release)
+1. GitHub → **Settings → Developer settings → Personal access tokens → Fine-grained tokens**
+2. **Repository access:** only `peterddod/homebrew-jeet` (not the main `jeet` repo)
+3. **Permissions → Repository → Contents:** Read and write
+4. On repo **peterddod/jeet** → **Settings → Secrets and variables → Actions**
+5. **New repository secret:** name `HOMEBREW_TAP_TOKEN`, value = the PAT
+6. Re-run the failed **homebrew-tap** job or tag a new release
 
-The workflow uses `secrets.HOMEBREW_TAP_TOKEN || github.token` in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+The workflow no longer falls back to `GITHUB_TOKEN` (that always 403s on the tap). If the secret is missing or scoped to the wrong repo, **homebrew-tap** fails with a clear error.
+
+Implementation: [`packaging/homebrew/push-formula.sh`](packaging/homebrew/push-formula.sh) and [`secrets.HOMEBREW_TAP_TOKEN`](.github/workflows/release.yml) in the release workflow.
 
 ## License
 

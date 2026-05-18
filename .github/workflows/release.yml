@@ -147,7 +147,6 @@ jobs:
   homebrew-tap:
     needs: release
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -172,14 +171,7 @@ jobs:
 
       - name: Push to homebrew-jeet tap
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/peterddod/homebrew-jeet.git" tap
-          cp Formula/jeet.rb tap/Formula/jeet.rb
-          cd tap
-          git add Formula/jeet.rb
-          git diff --staged --quiet && echo "formula unchanged" && exit 0
-          git commit -m "chore: update jeet formula to ${GITHUB_REF_NAME}"
-          git push
+          chmod +x packaging/homebrew/push-formula.sh
+          packaging/homebrew/push-formula.sh Formula/jeet.rb "${GITHUB_REF_NAME}"
