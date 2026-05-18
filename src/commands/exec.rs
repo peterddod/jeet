@@ -19,12 +19,7 @@ pub struct EphemeralSession {
     pub branch_created: Option<String>,
 }
 
-pub fn run(
-    app: &App,
-    filter: &str,
-    branch: Option<&str>,
-    ephemeral: bool,
-) -> Result<()> {
+pub fn run(app: &App, filter: &str, branch: Option<&str>, ephemeral: bool) -> Result<()> {
     if !io::stdout().is_terminal() && std::env::var("JEET_EXEC_INIT").is_err() {
         bail!("jeet exec requires an interactive terminal; use `jeet path` for scripting");
     }
@@ -66,7 +61,10 @@ pub fn create_ephemeral_worktree(
     }
 
     let start = resolve_start_point(&trunk, &repo.default_branch)?;
-    if git::ref_exists(&trunk, &format!("refs/remotes/origin/{}", repo.default_branch))? {
+    if git::ref_exists(
+        &trunk,
+        &format!("refs/remotes/origin/{}", repo.default_branch),
+    )? {
         let _ = git::fetch(&trunk, "origin", &repo.default_branch);
     }
 

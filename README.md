@@ -70,6 +70,30 @@ jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on e
 
 Ephemeral sessions warn on uncommitted changes when you exit, then remove the worktree anyway.
 
+## Tab completion
+
+`eval "$(jeet init-shell)"` installs completion for **all** subcommands (`ls`, `exec`, `worktree`, …) plus wrapper `jeet cd`. Repo filters and `--branch` values come from your jeet index.
+
+Manual install (without the full wrapper):
+
+```bash
+# zsh
+source <(jeet completions zsh)
+
+# bash
+source <(jeet completions bash)
+
+# fish
+jeet completions fish | source
+```
+
+Shell scripts can query candidates directly:
+
+```bash
+jeet complete repos
+jeet complete branches acme/widget
+```
+
 ## Migration from v0.1.x
 
 | v0.1.x | v0.2.0 |
@@ -124,6 +148,18 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+### Maintainer: Homebrew tap auto-update (CI)
+
+Release workflows push an updated formula to [`homebrew-jeet`](https://github.com/peterddod/homebrew-jeet). The default `GITHUB_TOKEN` cannot write to other repos, so add a PAT:
+
+1. GitHub → **Settings → Developer settings → Personal access tokens**
+2. Create a **fine-grained token** (or classic `repo` scope) with **Read and Write** on `peterddod/homebrew-jeet` only
+3. On repo **peterddod/jeet** → **Settings → Secrets and variables → Actions**
+4. **New repository secret:** name `HOMEBREW_TAP_TOKEN`, value = the PAT
+5. Re-run the failed **homebrew-tap** job (or tag a new release)
+
+The workflow uses `secrets.HOMEBREW_TAP_TOKEN || github.token` in [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## License
 

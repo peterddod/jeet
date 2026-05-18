@@ -144,12 +144,44 @@ fn ls_after_adopt_and_scan() {
 }
 
 #[test]
-fn init_shell_prints_wrapper() {
+fn complete_repos_lists_adopted() {
+    let home = TempDir::new().unwrap();
+    let env_home = home.path().to_string_lossy().to_string();
+
+    let repo_dir = TempDir::new().unwrap();
+    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/complete.git");
+
+    jeet_bin()
+        .args(["adopt", repo_dir.path().to_str().unwrap()])
+        .env("JEET_HOME", &env_home)
+        .output()
+        .unwrap();
+
+    let output = jeet_bin()
+        .args(["complete", "repos"])
+        .env("JEET_HOME", &env_home)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("acme/complete"));
+}
+
+#[test]
+fn completions_zsh_generates() {
+    let output = jeet_bin().args(["completions", "zsh"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("_jeet"));
+}
+
+#[test]
+fn init_shell_includes_completion() {
     let output = jeet_bin().args(["init-shell"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("jeet()"));
-    assert!(stdout.contains("command jeet path"));
+    assert!(stdout.contains("completions zsh"));
+    assert!(stdout.contains("_jeet_wrapper"));
 }
 
 #[test]

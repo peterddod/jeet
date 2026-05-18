@@ -1,5 +1,6 @@
 pub mod adopt;
 pub mod clone;
+pub mod completions;
 pub mod exec;
 pub mod ls;
 pub mod path;

@@ -1,4 +1,7 @@
 use clap::{Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
+
+use crate::completion_candidates::{all_branch_candidates, repo_filter_candidates};
 
 #[derive(Parser)]
 #[command(
@@ -16,11 +19,17 @@ pub enum Commands {
     /// Clone a repository into the canonical store
     Clone { url: String },
     /// Register an existing local repository in the index
-    Adopt { path: String },
+    Adopt {
+        #[arg(value_hint = clap::ValueHint::DirPath)]
+        path: String,
+    },
     /// Scan configured roots and index git repositories
     Scan,
     /// List indexed repositories
-    Ls { filter: Option<String> },
+    Ls {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        filter: Option<String>,
+    },
     /// Worktree operations
     Worktree {
         #[command(subcommand)]
@@ -28,14 +37,16 @@ pub enum Commands {
     },
     /// Print the filesystem path to a repo trunk or worktree
     Path {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
         branch: Option<String>,
     },
     /// Start a subshell in a repo trunk or worktree
     Exec {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
         branch: Option<String>,
         /// Create a throwaway worktree that is removed when the shell exits
         #[arg(long)]
@@ -43,17 +54,38 @@ pub enum Commands {
     },
     /// Print shell integration snippet for native cd
     InitShell,
+    /// Generate shell completion scripts (bash, zsh, fish, …)
+    Completions {
+        #[arg(value_enum)]
+        shell: crate::commands::completions::CompletionShell,
+    },
+    /// Print completion candidates for shell scripts (repos, branches)
+    Complete {
+        /// Candidate set: repos or branches
+        what: String,
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        filter: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
     /// Create a worktree at the global mirror path
-    Add { filter: String, branch: String },
+    Add {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        filter: String,
+        branch: String,
+    },
     /// List worktrees for one or all repos
-    Ls { filter: Option<String> },
+    Ls {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        filter: Option<String>,
+    },
     /// Remove a worktree
     Remove {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String,
+        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
         branch: String,
         #[arg(long, short)]
         force: bool,
