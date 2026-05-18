@@ -142,6 +142,50 @@ pub fn worktree_add_existing_branch(repo_path: &Path, dest: &Path, branch: &str)
     Ok(())
 }
 
+pub fn worktree_add_detached(repo_path: &Path, dest: &Path, start_point: &str) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).context("create worktree parent dirs")?;
+    }
+    let status = Command::new("git")
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "worktree",
+            "add",
+            "--detach",
+            &dest.to_string_lossy(),
+            start_point,
+        ])
+        .status()
+        .context("spawn git worktree add --detach")?;
+    if !status.success() {
+        bail!("git worktree add --detach failed");
+    }
+    Ok(())
+}
+
+pub fn status_porcelain(repo_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .context("spawn git status --porcelain")?;
+    if !output.status.success() {
+        bail!("git status --porcelain failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "branch", "-D", branch])
+        .status()
+        .context("spawn git branch -D")?;
+    if !status.success() {
+        bail!("git branch -D {branch} failed");
+    }
+    Ok(())
+}
+
 pub fn worktree_remove(repo_path: &Path, wt_path: &Path, force: bool) -> Result<()> {
     let mut args = vec![
         "-C".to_string(),

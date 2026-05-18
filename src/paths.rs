@@ -14,6 +14,14 @@ pub fn worktree_path(worktrees_root: &Path, id: &RepoIdentity, branch: &str) -> 
         .join(branch_slug(branch))
 }
 
+pub fn ephemeral_path(ephemeral_root: &Path, id: &RepoIdentity, session_id: &str) -> PathBuf {
+    ephemeral_root
+        .join(&id.host)
+        .join(&id.owner)
+        .join(&id.repo)
+        .join(session_id)
+}
+
 pub fn branch_slug(branch: &str) -> String {
     branch
         .chars()

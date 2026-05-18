@@ -26,4 +26,8 @@ impl App {
     pub fn worktrees_root(&self) -> PathBuf {
         config::worktrees_root(&self.home)
     }
+
+    pub fn ephemeral_root(&self) -> PathBuf {
+        config::ephemeral_root(&self.home)
+    }
 }

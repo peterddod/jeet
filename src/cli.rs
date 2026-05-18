@@ -20,7 +20,7 @@ pub enum Commands {
     /// Scan configured roots and index git repositories
     Scan,
     /// List indexed repositories
-    List { filter: Option<String> },
+    Ls { filter: Option<String> },
     /// Worktree operations
     Worktree {
         #[command(subcommand)]
@@ -32,14 +32,14 @@ pub enum Commands {
         #[arg(long)]
         branch: Option<String>,
     },
-    /// Change directory to a repo trunk or worktree
-    Cd {
+    /// Start a subshell in a repo trunk or worktree
+    Exec {
         filter: String,
         #[arg(long)]
         branch: Option<String>,
-        /// Print a cd command for eval instead of starting a subshell
+        /// Create a throwaway worktree that is removed when the shell exits
         #[arg(long)]
-        print: bool,
+        ephemeral: bool,
     },
     /// Print shell integration snippet for native cd
     InitShell,
@@ -50,7 +50,7 @@ pub enum WorktreeCommands {
     /// Create a worktree at the global mirror path
     Add { filter: String, branch: String },
     /// List worktrees for one or all repos
-    List { filter: Option<String> },
+    Ls { filter: Option<String> },
     /// Remove a worktree
     Remove {
         filter: String,

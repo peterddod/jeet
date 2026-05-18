@@ -57,7 +57,7 @@ fn path_resolves_after_adopt() {
 }
 
 #[test]
-fn worktree_add_list_remove_flow() {
+fn worktree_add_ls_remove_flow() {
     let home = TempDir::new().unwrap();
     let env_home = home.path().to_string_lossy().to_string();
 
@@ -91,7 +91,7 @@ fn worktree_add_list_remove_flow() {
     assert!(std::path::Path::new(&wt_path).exists());
 
     let output = jeet_bin()
-        .args(["worktree", "list", "acme/demo"])
+        .args(["worktree", "ls", "acme/demo"])
         .env("JEET_HOME", &env_home)
         .output()
         .unwrap();
@@ -108,7 +108,7 @@ fn worktree_add_list_remove_flow() {
 }
 
 #[test]
-fn list_after_adopt_and_scan() {
+fn ls_after_adopt_and_scan() {
     let home = TempDir::new().unwrap();
     let env_home = home.path().to_string_lossy().to_string();
 
@@ -135,7 +135,7 @@ fn list_after_adopt_and_scan() {
     assert!(output.status.success());
 
     let output = jeet_bin()
-        .args(["list", "scanned"])
+        .args(["ls", "scanned"])
         .env("JEET_HOME", &env_home)
         .output()
         .unwrap();
@@ -153,12 +153,21 @@ fn init_shell_prints_wrapper() {
 }
 
 #[test]
-fn cd_print_mode() {
+fn cd_subcommand_not_in_binary() {
+    let output = jeet_bin().args(["cd", "acme/widget"]).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cd") || stderr.contains("subcommand"));
+}
+
+#[test]
+fn ephemeral_exec_cleans_up_and_warns_when_dirty() {
     let home = TempDir::new().unwrap();
     let env_home = home.path().to_string_lossy().to_string();
+    let ephemeral_root = home.path().join("ephemeral");
 
     let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/cdtest.git");
+    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/ephemeral.git");
 
     jeet_bin()
         .args(["adopt", repo_dir.path().to_str().unwrap()])
@@ -166,22 +175,34 @@ fn cd_print_mode() {
         .output()
         .unwrap();
 
-    let path_output = jeet_bin()
-        .args(["path", "acme/cdtest"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    let expected = String::from_utf8_lossy(&path_output.stdout)
-        .trim()
-        .to_string();
-
     let output = jeet_bin()
-        .args(["cd", "--print", "acme/cdtest"])
+        .args(["exec", "acme/ephemeral", "--ephemeral"])
         .env("JEET_HOME", &env_home)
+        .env("JEET_SHELL", "/bin/sh")
+        .env("JEET_EXEC_INIT", "touch dirty-file && exit 0")
         .output()
         .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.starts_with("cd '"));
-    assert!(stdout.contains(&expected));
+
+    if !output.status.success() {
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert!(output.status.success(), "ephemeral exec failed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("uncommitted changes"));
+
+    let remaining: Vec<_> = std::fs::read_dir(&ephemeral_root)
+        .map(|rd| rd.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    assert!(
+        remaining.is_empty(),
+        "ephemeral directory should be cleaned up"
+    );
+}
+
+#[test]
+fn list_subcommand_removed() {
+    let output = jeet_bin().args(["list"]).output().unwrap();
+    assert!(!output.status.success());
 }

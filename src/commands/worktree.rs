@@ -55,7 +55,7 @@ pub fn add(app: &App, filter: &str, branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list_cmd(app: &App, filter: Option<&str>) -> Result<()> {
+pub fn ls_cmd(app: &App, filter: Option<&str>) -> Result<()> {
     let repos = if let Some(f) = filter {
         vec![resolve::resolve_repo_filter(&app.db, f)?]
     } else {
@@ -92,7 +92,7 @@ pub fn remove(app: &App, filter: &str, branch: &str, force: bool) -> Result<()> 
     Ok(())
 }
 
-fn resolve_start_point(trunk: &Path, default_branch: &str) -> Result<String> {
+pub fn resolve_start_point(trunk: &Path, default_branch: &str) -> Result<String> {
     let origin_ref = format!("refs/remotes/origin/{default_branch}");
     if git::ref_exists(trunk, &origin_ref)? {
         return Ok(format!("origin/{default_branch}"));

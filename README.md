@@ -31,18 +31,15 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.1.1
-```
-
-Or from a checkout:
-
-```bash
-cargo install --path .
+cargo install --git https://github.com/peterddod/jeet --tag v0.2.0
 ```
 
 ## Quick start
 
 ```bash
+# Shell integration (required for `jeet cd`)
+eval "$(jeet init-shell)"
+
 # Clone into the canonical store
 jeet clone https://github.com/acme/widget.git
 
@@ -53,25 +50,34 @@ jeet adopt ~/Projects/exceed
 jeet scan
 
 # List indexed repos
-jeet list
-jeet list acme
+jeet ls
+jeet ls acme
 
 # Worktrees
 jeet worktree add acme/widget feature-x
-jeet worktree list acme/widget
+jeet worktree ls acme/widget
 jeet worktree remove acme/widget feature-x
 
-# Jump to a repo
-jeet path acme/widget
-jeet path acme/widget --branch feature-x
-
-# Native cd (recommended)
-eval "$(jeet init-shell)"
-jeet cd acme/widget
-jeet cd acme/widget --branch feature-x
+# Navigation
+jeet path acme/widget                    # print path (scripting)
+jeet cd acme/widget                      # native cd (requires init-shell)
+jeet exec acme/widget                    # subshell in trunk
+jeet exec acme/widget --branch feature-x # subshell in worktree
+jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on exit)
 ```
 
-Without shell integration, `jeet cd` starts a subshell in the target directory.
+`jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
+
+Ephemeral sessions warn on uncommitted changes when you exit, then remove the worktree anyway.
+
+## Migration from v0.1.x
+
+| v0.1.x | v0.2.0 |
+|--------|--------|
+| `jeet list` | `jeet ls` |
+| `jeet worktree list` | `jeet worktree ls` |
+| `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
+| `jeet cd --print` | `jeet path` |
 
 ## Configuration
 
@@ -97,6 +103,8 @@ export JEET_HOME=/tmp/jeet-test
     github.com/acme/widget/          # trunk (default branch)
   worktrees/
     github.com/acme/widget/feature-x/
+  ephemeral/
+    github.com/acme/widget/<uuid>/    # temporary exec --ephemeral checkouts
 ```
 
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.
@@ -107,11 +115,7 @@ Branch names are converted to filesystem-safe slugs (`feat/foo` → `feat-foo`).
 
 ## Packaging
 
-Release tags build:
-
-- Prebuilt binaries (Linux + macOS, x86_64 and arm64)
-- `.deb` packages published to the [GitHub Pages apt repo](https://peterddod.github.io/jeet)
-- An updated [Homebrew tap](https://github.com/peterddod/homebrew-jeet)
+Release tags build prebuilt binaries, `.deb` packages, and update the Homebrew tap automatically.
 
 ## Development
 
