@@ -27,7 +27,7 @@ pub fn generate_script(shell: CompletionShell) -> Result<String> {
     };
     let mut buf = Vec::new();
     generate(generator, &mut cmd, "jeet", &mut buf);
-    Ok(String::from_utf8(buf).context("completion script was not valid utf-8")?)
+    String::from_utf8(buf).context("completion script was not valid utf-8")
 }
 
 pub fn run(shell: CompletionShell) -> Result<()> {
