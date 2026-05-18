@@ -1,0 +1,85 @@
+name: Publish apt repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (e.g. v0.1.1)
+        required: true
+        default: v0.1.1
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  apt-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p debs
+          gh release download "${{ inputs.tag }}" \
+            --repo peterddod/jeet \
+            --pattern '*.deb' \
+            --dir debs
+          ls -la debs
+
+      - name: Build apt repository
+        run: |
+          chmod +x packaging/apt/publish-repo.sh
+          mkdir -p apt-out
+          mapfile -t DEBS < <(find debs -name '*.deb' | sort)
+          packaging/apt/publish-repo.sh apt-out "${DEBS[@]}"
+          cp packaging/apt/deb-install.sh apt-out/deb-install.sh
+
+      - name: Upload apt repo to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-out
+
+      - name: Deploy GitHub Pages
+        uses: actions/deploy-pages@v4
+
+  homebrew-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ inputs.tag }}" \
+            --repo peterddod/jeet \
+            --pattern '*.tar.gz' \
+            --dir assets
+          ls -la assets
+
+      - name: Generate Homebrew formula
+        run: |
+          chmod +x packaging/homebrew/update-formula.sh
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          mkdir -p Formula
+          packaging/homebrew/update-formula.sh "${VERSION}" assets Formula/jeet.rb
+
+      - name: Push to homebrew-jeet tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || github.token }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/peterddod/homebrew-jeet.git" tap
+          cp Formula/jeet.rb tap/Formula/jeet.rb
+          cd tap
+          git add Formula/jeet.rb
+          git diff --staged --quiet && echo "formula unchanged" && exit 0
+          git commit -m "chore: update jeet formula to ${{ inputs.tag }}"
+          git push

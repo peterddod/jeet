@@ -103,6 +103,7 @@ jobs:
   apt-repo:
     needs: release
     runs-on: ubuntu-latest
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
 
@@ -162,8 +163,8 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/peterddod/homebrew-jeet.git" tap
           cp Formula/jeet.rb tap/Formula/jeet.rb
           cd tap
