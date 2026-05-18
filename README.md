@@ -14,7 +14,7 @@ Global git repository index and worktree manager.
 ## Install
 
 ```bash
-cargo install --git https://github.com/YOUR_USER/jeet --tag v0.1.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.1.0
 ```
 
 Or from a checkout:
