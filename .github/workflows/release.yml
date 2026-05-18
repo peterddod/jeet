@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            deb: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            deb: true
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            deb: false
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            deb: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross tooling (Linux arm64)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STEM="jeet-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${STEM}"
+          cp "target/${{ matrix.target }}/release/jeet" "dist/${STEM}/jeet"
+          tar -czf "dist/${STEM}.tar.gz" -C "dist/${STEM}" jeet
+
+      - name: Build .deb (Linux)
+        if: matrix.deb == true
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build --target ${{ matrix.target }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jeet-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            target/${{ matrix.target }}/debian/*.deb
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Flatten release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' \) -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+
+  apt-repo:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build apt repository
+        run: |
+          chmod +x packaging/apt/publish-repo.sh
+          mkdir -p apt-out
+          mapfile -t DEBS < <(find artifacts -name '*.deb' | sort)
+          if ((${#DEBS[@]} == 0)); then
+            echo "no deb packages found" >&2
+            exit 1
+          fi
+          packaging/apt/publish-repo.sh apt-out "${DEBS[@]}"
+          cp packaging/apt/deb-install.sh apt-out/deb-install.sh
+
+      - name: Upload apt repo to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-out
+
+      - name: Deploy GitHub Pages
+        uses: actions/deploy-pages@v4
+
+  homebrew-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Flatten tarballs
+        run: |
+          mkdir -p assets
+          find artifacts -name '*.tar.gz' -exec cp {} assets/ \;
+          ls -la assets
+
+      - name: Generate Homebrew formula
+        run: |
+          chmod +x packaging/homebrew/update-formula.sh
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p Formula
+          packaging/homebrew/update-formula.sh "${VERSION}" assets Formula/jeet.rb
+
+      - name: Push to homebrew-jeet tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/peterddod/homebrew-jeet.git" tap
+          cp Formula/jeet.rb tap/Formula/jeet.rb
+          cd tap
+          git add Formula/jeet.rb
+          git diff --staged --quiet && echo "formula unchanged" && exit 0
+          git commit -m "chore: update jeet formula to ${GITHUB_REF_NAME}"
+          git push

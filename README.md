@@ -4,17 +4,34 @@ Global git repository index and worktree manager.
 
 `jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
 
-## MVP scope
-
-- Canonical trunk store at `~/.jeet/store/<host>/<owner>/<repo>/`
-- Global worktree mirror at `~/.jeet/worktrees/<host>/<owner>/<repo>/<branch-slug>/`
-- SQLite index at `~/.jeet/index.db`
-- Commands: `clone`, `adopt`, `scan`, `list`, `worktree`, `path`, `cd`, `init-shell`
-
 ## Install
 
+### Homebrew
+
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.1.0
+brew tap peterddod/jeet
+brew install jeet
+```
+
+### apt (Debian / Ubuntu)
+
+```bash
+curl -fsSL https://peterddod.github.io/jeet/deb-install.sh | bash
+```
+
+Or manually:
+
+```bash
+echo "deb [trusted=yes] https://peterddod.github.io/jeet stable main" \
+  | sudo tee /etc/apt/sources.list.d/jeet.list
+sudo apt update
+sudo apt install jeet
+```
+
+### cargo
+
+```bash
+cargo install --git https://github.com/peterddod/jeet --tag v0.1.1
 ```
 
 Or from a checkout:
@@ -87,6 +104,14 @@ Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique s
 ## Branch slugs
 
 Branch names are converted to filesystem-safe slugs (`feat/foo` → `feat-foo`).
+
+## Packaging
+
+Release tags build:
+
+- Prebuilt binaries (Linux + macOS, x86_64 and arm64)
+- `.deb` packages published to the [GitHub Pages apt repo](https://peterddod.github.io/jeet)
+- An updated [Homebrew tap](https://github.com/peterddod/homebrew-jeet)
 
 ## Development
 

@@ -1,6 +1,6 @@
 [package]
 name = "jeet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Global git repo index and worktree manager"
 license = "MIT"
@@ -18,3 +18,18 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "Peter <peterddod@users.noreply.github.com>"
+copyright = "2026, jeet contributors"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+jeet manages a canonical store of git repository trunks, mirrors worktrees \
+under a predictable layout, and maintains a SQLite index for discovery."""
+depends = "$auto, git"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/jeet", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/jeet/README", "644"],
+]
