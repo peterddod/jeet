@@ -180,8 +180,14 @@ fn init_shell_includes_completion() {
     let output = jeet_bin().args(["init-shell"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("completions zsh"));
+    assert!(stdout.contains("jeet()"));
+    assert!(stdout.contains("command jeet path"));
     assert!(stdout.contains("_jeet_wrapper"));
+    assert!(stdout.contains("_jeet"));
+    assert!(
+        !stdout.contains("source <"),
+        "init-shell should inline completions, not use source"
+    );
 }
 
 #[test]

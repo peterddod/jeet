@@ -59,6 +59,7 @@ class Jeet < Formula
 
   def install
     bin.install "jeet"
+    generate_completions_from_executable(bin/"jeet", "completions")
   end
 
   test do

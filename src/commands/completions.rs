@@ -1,6 +1,6 @@
-use std::io;
+use std::io::{self, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, ValueEnum};
 use clap_complete::{generate, Shell};
 
@@ -16,7 +16,7 @@ pub enum CompletionShell {
     Zsh,
 }
 
-pub fn run(shell: CompletionShell) -> Result<()> {
+pub fn generate_script(shell: CompletionShell) -> Result<String> {
     let mut cmd = Cli::command();
     let generator = match shell {
         CompletionShell::Bash => Shell::Bash,
@@ -25,7 +25,13 @@ pub fn run(shell: CompletionShell) -> Result<()> {
         CompletionShell::PowerShell => Shell::PowerShell,
         CompletionShell::Zsh => Shell::Zsh,
     };
-    generate(generator, &mut cmd, "jeet", &mut io::stdout());
+    let mut buf = Vec::new();
+    generate(generator, &mut cmd, "jeet", &mut buf);
+    Ok(String::from_utf8(buf).context("completion script was not valid utf-8")?)
+}
+
+pub fn run(shell: CompletionShell) -> Result<()> {
+    io::stdout().write_all(generate_script(shell)?.as_bytes())?;
     Ok(())
 }
 

@@ -24,3 +24,15 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      - name: Verify deb includes shell completions
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x packaging/completions/generate.sh
+          cargo build --release --locked
+          packaging/completions/generate.sh target/release/jeet
+          cargo install cargo-deb --locked
+          cargo deb --no-build
+          dpkg-deb -c target/debian/jeet_*.deb | tee /tmp/jeet-deb-contents.txt
+          grep -q 'usr/share/bash-completion/completions/jeet' /tmp/jeet-deb-contents.txt
+          grep -q 'usr/share/zsh/vendor-completions/_jeet' /tmp/jeet-deb-contents.txt
+          grep -q 'usr/share/fish/vendor_completions.d/jeet.fish' /tmp/jeet-deb-contents.txt

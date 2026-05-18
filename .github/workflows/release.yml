@@ -54,6 +54,17 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Generate shell completions
+        if: matrix.deb == true
+        run: |
+          chmod +x packaging/completions/generate.sh
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cargo build --release --locked
+            packaging/completions/generate.sh target/release/jeet
+          else
+            packaging/completions/generate.sh "target/${{ matrix.target }}/release/jeet"
+          fi
+
       - name: Package tarball
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

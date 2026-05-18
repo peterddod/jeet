@@ -1,6 +1,6 @@
 [package]
 name = "jeet"
-version = "0.2.1"
+version = "0.2.3"
 edition = "2021"
 description = "Global git repo index and worktree manager"
 license = "MIT"
@@ -29,9 +29,14 @@ extended-description = """\
 jeet manages a canonical store of git repository trunks, mirrors worktrees \
 under a predictable layout, and maintains a SQLite index for discovery."""
 depends = "$auto, git"
+recommends = "bash-completion"
 section = "utility"
 priority = "optional"
 assets = [
     ["target/release/jeet", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/jeet/README", "644"],
+    ["packaging/completions/jeet.bash", "usr/share/bash-completion/completions/jeet", "644"],
+    ["packaging/completions/_jeet", "usr/share/zsh/vendor-completions/_jeet", "644"],
+    ["packaging/completions/_jeet", "usr/share/zsh/site-functions/_jeet", "644"],
+    ["packaging/completions/jeet.fish", "usr/share/fish/vendor_completions.d/jeet.fish", "644"],
 ]

@@ -72,19 +72,26 @@ Ephemeral sessions warn on uncommitted changes when you exit, then remove the wo
 
 ## Tab completion
 
-`eval "$(jeet init-shell)"` installs completion for **all** subcommands (`ls`, `exec`, `worktree`, …) plus wrapper `jeet cd`. Repo filters and `--branch` values come from your jeet index.
+### Homebrew and apt
 
-Manual install (without the full wrapper):
+`brew install jeet` and `apt install jeet` ship completion scripts to the standard system paths (bash, zsh, fish). Open a **new shell** and tab completion works for the `jeet` binary — subcommands, repo filters, and `--branch` values from your index.
+
+- **bash (Linux):** requires the `bash-completion` package (recommended by the `.deb`).
+- **bash (macOS):** install Homebrew `bash-completion@2` and load it in your profile.
+- **zsh:** needs `compinit` (default on interactive zsh). Homebrew users should have `eval "$(brew shellenv)"` in `~/.zprofile` / `~/.zshrc`.
+
+### `jeet cd` wrapper
+
+The `jeet cd` command is a shell function, not a binary subcommand. Add **one line** to `~/.zshrc` or `~/.bashrc` for native `cd` plus wrapper tab completion:
 
 ```bash
-# zsh
-source <(jeet completions zsh)
+eval "$(jeet init-shell)"
+```
 
-# bash
-source <(jeet completions bash)
+Manual install for other shells:
 
-# fish
-jeet completions fish | source
+```bash
+jeet completions fish > ~/.config/fish/completions/jeet.fish
 ```
 
 Shell scripts can query candidates directly:
