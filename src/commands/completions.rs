@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, ValueEnum};
-use clap_complete::{generate, Shell};
+use clap_complete::env::{Bash, Elvish, EnvCompleter, Fish, Powershell, Zsh};
 
 use crate::cli::Cli;
 use crate::completion_candidates;
@@ -16,17 +16,32 @@ pub enum CompletionShell {
     Zsh,
 }
 
+/// Dynamic shell registration (`COMPLETE=$shell jeet`) with index-backed candidates.
 pub fn generate_script(shell: CompletionShell) -> Result<String> {
     let mut cmd = Cli::command();
-    let generator = match shell {
-        CompletionShell::Bash => Shell::Bash,
-        CompletionShell::Elvish => Shell::Elvish,
-        CompletionShell::Fish => Shell::Fish,
-        CompletionShell::PowerShell => Shell::PowerShell,
-        CompletionShell::Zsh => Shell::Zsh,
-    };
+    cmd.build();
+    let name = cmd.get_name();
+    let bin = cmd.get_bin_name().unwrap_or(name);
+
     let mut buf = Vec::new();
-    generate(generator, &mut cmd, "jeet", &mut buf);
+    match shell {
+        CompletionShell::Bash => {
+            Bash.write_registration("COMPLETE", name, bin, bin, &mut buf)?;
+        }
+        CompletionShell::Elvish => {
+            Elvish.write_registration("COMPLETE", name, bin, bin, &mut buf)?;
+        }
+        CompletionShell::Fish => {
+            Fish.write_registration("COMPLETE", name, bin, bin, &mut buf)?;
+        }
+        CompletionShell::PowerShell => {
+            Powershell.write_registration("COMPLETE", name, bin, bin, &mut buf)?;
+        }
+        CompletionShell::Zsh => {
+            Zsh.write_registration("COMPLETE", name, bin, bin, &mut buf)?;
+        }
+    }
+
     String::from_utf8(buf).context("completion script was not valid utf-8")
 }
 

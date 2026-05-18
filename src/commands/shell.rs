@@ -36,7 +36,7 @@ jeet() {
     compadd -- $(command jeet complete branches "${words[3]}" 2>/dev/null)
     return
   fi
-  _jeet "$@"
+  _clap_dynamic_completer_jeet "$@"
 }
 compdef _jeet_wrapper jeet
 fi
@@ -59,7 +59,7 @@ fi
     mapfile -t COMPREPLY < <(compgen -W "$(command jeet complete branches "${COMP_WORDS[2]}" 2>/dev/null)" -- "$cur")
     return
   fi
-  _jeet "$@"
+    _clap_complete_jeet "$@"
 }
 complete -o default -o nospace -F _jeet_wrapper_bash jeet
 fi

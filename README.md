@@ -74,7 +74,7 @@ Ephemeral sessions warn on uncommitted changes when you exit, then remove the wo
 
 ### Homebrew and apt
 
-`brew install jeet` and `apt install jeet` ship completion scripts to the standard system paths (bash, zsh, fish). Open a **new shell** and tab completion works for the `jeet` binary — subcommands, repo filters, and `--branch` values from your index.
+`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters and `--branch` values come from your index (not directory listing).
 
 - **bash (Linux):** requires the `bash-completion` package (recommended by the `.deb`).
 - **bash (macOS):** install Homebrew `bash-completion@2` and load it in your profile.

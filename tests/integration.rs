@@ -168,11 +168,38 @@ fn complete_repos_lists_adopted() {
 }
 
 #[test]
-fn completions_zsh_generates() {
+fn completions_zsh_generates_dynamic() {
     let output = jeet_bin().args(["completions", "zsh"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_jeet"));
+    assert!(stdout.contains("_clap_dynamic_completer_jeet"));
+    assert!(stdout.contains("COMPLETE"));
+}
+
+#[test]
+fn dynamic_completion_lists_repos_for_exec() {
+    let home = TempDir::new().unwrap();
+    let env_home = home.path().to_string_lossy().to_string();
+    let repo_dir = TempDir::new().unwrap();
+    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/dynamic.git");
+
+    jeet_bin()
+        .args(["adopt", repo_dir.path().to_str().unwrap()])
+        .env("JEET_HOME", &env_home)
+        .output()
+        .unwrap();
+
+    let output = jeet_bin()
+        .env("JEET_HOME", &env_home)
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "jeet", "exec", ""])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("acme/dynamic"));
 }
 
 #[test]
@@ -183,7 +210,7 @@ fn init_shell_includes_completion() {
     assert!(stdout.contains("jeet()"));
     assert!(stdout.contains("command jeet path"));
     assert!(stdout.contains("_jeet_wrapper"));
-    assert!(stdout.contains("_jeet"));
+    assert!(stdout.contains("_clap_dynamic_completer_jeet"));
     assert!(
         !stdout.contains("source <"),
         "init-shell should inline completions, not use source"

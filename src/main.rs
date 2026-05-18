@@ -10,11 +10,14 @@ mod remote;
 mod resolve;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 
 use cli::{Cli, Commands, WorktreeCommands};
 
 fn main() -> Result<()> {
+    CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     match cli.command {
