@@ -8,6 +8,8 @@ Global git repository index and worktree manager.
 
 `jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
 
+Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
+
 ## Install
 
 ### Homebrew
