@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="jeet — global git repository index and worktree manager" width="800">
+</p>
+
 # jeet
 
 Global git repository index and worktree manager.
