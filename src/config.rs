@@ -50,6 +50,11 @@ pub fn ephemeral_root(home: &Path) -> PathBuf {
     home.join("ephemeral")
 }
 
+#[allow(dead_code)]
+pub fn sessions_root(home: &Path) -> PathBuf {
+    home.join("sessions")
+}
+
 pub fn load_or_create(home: &Path) -> Result<Config> {
     std::fs::create_dir_all(home).context("create jeet home")?;
     let path = config_path(home);

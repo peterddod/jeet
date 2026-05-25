@@ -7,3 +7,4 @@ pub mod path;
 pub mod scan;
 pub mod shell;
 pub mod worktree;
+pub mod sessions;
