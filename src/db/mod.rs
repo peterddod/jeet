@@ -13,6 +13,17 @@ pub struct RepoRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub id: String,             // UUID
+    pub name: String,           // User-defined session name
+    pub repo_id: String,
+    pub branch: Option<String>,
+    pub trunk_path: String,     // Path to workspace copy
+    pub created_at: i64,
+    pub status: String,         // running|stopped|error
+}
+
+#[derive(Debug, Clone)]
 pub struct WorktreeRecord {
     pub repo_id: String,
     pub branch: String,
@@ -53,6 +64,15 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 UNIQUE(repo_id, branch)
             );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                repo_id TEXT NOT NULL REFERENCES repos(id),
+                branch TEXT,
+                trunk_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                status TEXT DEFAULT 'running'
+            );
             ",
         )?;
         Ok(())
@@ -79,8 +99,7 @@ impl Database {
     }
 
     pub fn delete_worktrees_for_repo(&self, repo_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM worktrees WHERE repo_id = ?1", params![repo_id])?;
+        self.conn.execute("DELETE FROM worktrees WHERE repo_id = ?1", params![repo_id])?;
         Ok(())
     }
 
@@ -189,5 +208,80 @@ impl Database {
             }));
         }
         Ok(None)
+    }
+
+    pub fn upsert_session(&self, session: &SessionRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sessions (id, name, repo_id, branch, trunk_path, created_at, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(name) DO UPDATE SET
+               repo_id = excluded.repo_id,
+               branch = excluded.branch,
+               trunk_path = excluded.trunk_path,
+               created_at = excluded.created_at,
+               status = excluded.status",
+            params![
+                session.id,
+                session.name,
+                session.repo_id,
+                session.branch.as_deref(),
+                session.trunk_path,
+                session.created_at,
+                session.status,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session_by_name(&self, name: &str) -> Result<Option<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, repo_id, branch, trunk_path, created_at, status FROM sessions WHERE name = ?1",
+        )?;
+        let mut rows = stmt.query(params![name])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(SessionRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                repo_id: row.get(2)?,
+                branch: row.get::<_, Option<String>>(3)?,
+                trunk_path: row.get(4)?,
+                created_at: row.get(5)?,
+                status: row.get(6)?,
+            }));
+        }
+        Ok(None)
+    }
+
+    pub fn list_sessions(&self, filter: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, repo_id, branch, trunk_path, created_at, status FROM sessions ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SessionRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                repo_id: row.get(2)?,
+                branch: row.get::<_, Option<String>>(3)?,
+                trunk_path: row.get(4)?,
+                created_at: row.get(5)?,
+                status: row.get(6)?,
+            })
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        if let Some(f) = filter {
+            let f = f.to_lowercase();
+            sessions.retain(|s| {
+                s.name.to_lowercase().contains(&f) || s.repo_id.to_lowercase().contains(&f)
+            });
+        }
+        Ok(sessions)
+    }
+
+    pub fn delete_session(&self, name: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM sessions WHERE name = ?1", params![name])?;
+        Ok(())
     }
 }
