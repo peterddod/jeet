@@ -5,5 +5,6 @@ pub mod exec;
 pub mod ls;
 pub mod path;
 pub mod scan;
+pub mod install_shell;
 pub mod shell;
 pub mod worktree;
