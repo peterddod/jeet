@@ -15,14 +15,18 @@ pub fn run() -> Result<()> {
         }
     };
 
-    let marker = "# jeet shell integration — run 'jeet cd'";
-    let init_line = "eval \"$(jeet init-shell)\"";
-    let full_line = format!("{}\n{}", marker, init_line);
+    let _marker = "# jeet shell integration — run 'jeet cd'";
+    let install_line = "source <(jeet init-shell)";
 
-    // Check if already configured
+    // Check if already configured (look for exact match at line start, skip comments)
     if rc_file.exists() {
         let content = fs::read_to_string(&rc_file).context("read rc file")?;
-        if content.contains(marker) || content.contains("jeet init-shell") {
+        let has_install = content.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('#') && trimmed == "source <(jeet init-shell)"
+        });
+
+        if has_install {
             println!(
                 "{}: jeet shell integration already configured",
                 rc_file.display()
@@ -39,9 +43,9 @@ pub fn run() -> Result<()> {
         .context("open rc file")?;
 
     writeln!(file).context("write newline")?;
-    writeln!(file, "{}", full_line).context("write jeet config line")?;
+    writeln!(file, "{}", install_line).context("write jeet config line")?;
 
-    println!("Added to {}: {}", rc_file.display(), init_line);
+    println!("Added to {}: {}", rc_file.display(), install_line);
     println!();
     println!(
         "Run `source {}` to enable jeet cd in this shell.",
