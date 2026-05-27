@@ -9,10 +9,7 @@ pub fn run() -> Result<()> {
     let rc_file: PathBuf = match detect_rc_file(&shell) {
         Some(path) => path.into(),
         None => {
-            eprintln!(
-                "Unsupported shell: {}\nSupported shells: zsh, bash",
-                shell
-            );
+            eprintln!("Unsupported shell: {}\nSupported shells: zsh, bash", shell);
             eprintln!("Run jeet install-shell from a supported shell");
             anyhow::bail!("unsupported shell");
         }
@@ -27,7 +24,7 @@ pub fn run() -> Result<()> {
         let content = fs::read_to_string(&rc_file).context("read rc file")?;
         if content.contains(marker) || content.contains("jeet init-shell") {
             println!(
-                 "{}: jeet shell integration already configured",
+                "{}: jeet shell integration already configured",
                 rc_file.display()
             );
             return Ok(());
@@ -37,9 +34,9 @@ pub fn run() -> Result<()> {
     // Append to rc file
     let mut file = OpenOptions::new()
         .create(true)
-         .append(true)
-         .open(&rc_file)
-         .context("open rc file")?;
+        .append(true)
+        .open(&rc_file)
+        .context("open rc file")?;
 
     writeln!(file).context("write newline")?;
     writeln!(file, "{}", full_line).context("write jeet config line")?;
@@ -47,7 +44,7 @@ pub fn run() -> Result<()> {
     println!("Added to {}: {}", rc_file.display(), init_line);
     println!();
     println!(
-         "Run `source {}` to enable jeet cd in this shell.",
+        "Run `source {}` to enable jeet cd in this shell.",
         rc_file.display()
     );
 

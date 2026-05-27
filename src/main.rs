@@ -47,7 +47,11 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::path::run(&app, &filter, branch.as_deref())
         }
-        Commands::Exec { filter, branch, ephemeral } => {
+        Commands::Exec {
+            filter,
+            branch,
+            ephemeral,
+        } => {
             let app = context::App::open()?;
             commands::exec::run(&app, &filter, branch.as_deref(), ephemeral)
         }
@@ -60,10 +64,14 @@ fn main() -> Result<()> {
                 let app = context::App::open()?;
                 commands::worktree::ls_cmd(&app, filter.as_deref())
             }
-            WorktreeCommands::Remove { filter, branch, force } => {
+            WorktreeCommands::Remove {
+                filter,
+                branch,
+                force,
+            } => {
                 let app = context::App::open()?;
                 commands::worktree::remove(&app, &filter, &branch, force)
             }
-         },
+        },
     }
 }

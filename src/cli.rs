@@ -54,7 +54,7 @@ pub enum Commands {
     },
     /// Print shell integration snippet for native cd
     InitShell,
-     /// Configure shell integration in ~/.zshrc or ~/.bashrc
+    /// Configure shell integration in ~/.zshrc or ~/.bashrc
     InstallShell,
     /// Generate shell completion scripts (bash, zsh, fish, …)
     Completions {
