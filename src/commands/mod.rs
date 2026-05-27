@@ -2,6 +2,7 @@ pub mod adopt;
 pub mod clone;
 pub mod completions;
 pub mod exec;
+pub mod install_shell;
 pub mod ls;
 pub mod path;
 pub mod scan;

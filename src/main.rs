@@ -26,38 +26,52 @@ fn main() -> Result<()> {
             commands::completions::run_complete(&what, filter.as_deref())
         }
         Commands::InitShell => commands::shell::run_init_shell(),
-        other => {
+        Commands::InstallShell => commands::install_shell::run(),
+        Commands::Clone { url } => {
             let app = context::App::open()?;
-            match other {
-                Commands::Clone { url } => commands::clone::run(&app, &url),
-                Commands::Adopt { path } => commands::adopt::run(&app, &path),
-                Commands::Scan => commands::scan::run(&app),
-                Commands::Ls { filter } => commands::ls::run(&app, filter.as_deref()),
-                Commands::Worktree { command } => match command {
-                    WorktreeCommands::Add { filter, branch } => {
-                        commands::worktree::add(&app, &filter, &branch)
-                    }
-                    WorktreeCommands::Ls { filter } => {
-                        commands::worktree::ls_cmd(&app, filter.as_deref())
-                    }
-                    WorktreeCommands::Remove {
-                        filter,
-                        branch,
-                        force,
-                    } => commands::worktree::remove(&app, &filter, &branch, force),
-                },
-                Commands::Path { filter, branch } => {
-                    commands::path::run(&app, &filter, branch.as_deref())
-                }
-                Commands::Exec {
-                    filter,
-                    branch,
-                    ephemeral,
-                } => commands::exec::run(&app, &filter, branch.as_deref(), ephemeral),
-                Commands::InitShell | Commands::Completions { .. } | Commands::Complete { .. } => {
-                    unreachable!()
-                }
-            }
+            commands::clone::run(&app, &url)
         }
+        Commands::Adopt { path } => {
+            let app = context::App::open()?;
+            commands::adopt::run(&app, &path)
+        }
+        Commands::Scan => {
+            let app = context::App::open()?;
+            commands::scan::run(&app)
+        }
+        Commands::Ls { filter } => {
+            let app = context::App::open()?;
+            commands::ls::run(&app, filter.as_deref())
+        }
+        Commands::Path { filter, branch } => {
+            let app = context::App::open()?;
+            commands::path::run(&app, &filter, branch.as_deref())
+        }
+        Commands::Exec {
+            filter,
+            branch,
+            ephemeral,
+        } => {
+            let app = context::App::open()?;
+            commands::exec::run(&app, &filter, branch.as_deref(), ephemeral)
+        }
+        Commands::Worktree { command } => match command {
+            WorktreeCommands::Add { filter, branch } => {
+                let app = context::App::open()?;
+                commands::worktree::add(&app, &filter, &branch)
+            }
+            WorktreeCommands::Ls { filter } => {
+                let app = context::App::open()?;
+                commands::worktree::ls_cmd(&app, filter.as_deref())
+            }
+            WorktreeCommands::Remove {
+                filter,
+                branch,
+                force,
+            } => {
+                let app = context::App::open()?;
+                commands::worktree::remove(&app, &filter, &branch, force)
+            }
+        },
     }
 }
