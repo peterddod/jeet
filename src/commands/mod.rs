@@ -1,4 +1,5 @@
 pub mod adopt;
+pub mod checkout;
 pub mod clone;
 pub mod completions;
 pub mod exec;

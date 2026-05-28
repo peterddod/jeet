@@ -16,8 +16,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Clone a repository into the canonical store
+    /// Clone a repository into the canonical store  
     Clone { url: String },
+
     /// Register an existing local repository in the index
     Adopt {
         #[arg(value_hint = clap::ValueHint::DirPath)]
@@ -25,71 +26,79 @@ pub enum Commands {
     },
     /// Scan configured roots and index git repositories
     Scan,
-    /// List indexed repositories
+
+    /// List indexed repositories  
     Ls {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: Option<String>,
     },
-    /// Worktree operations
+
+    /// Worktree operations - manage workspace worktrees for branch testing / isolation
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommands,
     },
-    /// Print the filesystem path to a repo trunk or worktree
+
+    /// Checkout a branch to navigate its workspace - cd into the workspace at that location  
+    Checkout {
+        branch_name: Option<String>, // Branch name; if omitted, error
+        repo_filter: Option<String>, // Repo filter like "." or "project/"; if omitted, auto-detect from CWD
+        #[arg(short, long)]
+        create_branch: bool, // Create a new branch (-c, equivalent to git checkout -b)
+        #[arg(long)]
+        start_point: Option<String>, // Start point for new branch
+    },
+
+    /// Print a file path to repository trunk or worktree location
     Path {
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String,
         #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
         branch: Option<String>,
     },
-    /// Start a subshell in a repo trunk or worktree
+
+    /// Execute an interactive shell in a repo/trunk/worktree workspace (provides CWD)
     Exec {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: String,
-        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
-        branch: Option<String>,
-        /// Create a throwaway worktree that is removed when the shell exits
+        filter: String, // Repo path filter like "."
         #[arg(long)]
-        ephemeral: bool,
+        ephemeral: bool, // Auto-cleanup on exit?
     },
-    /// Print shell integration snippet for native cd
+
+    /// Print shell integration snippet for native cd command
     InitShell,
+
     /// Configure shell integration in ~/.zshrc or ~/.bashrc
     InstallShell,
-    /// Generate shell completion scripts (bash, zsh, fish, …)
+
+    /// Generate completion scripts for different shells  
     Completions {
         #[arg(value_enum)]
         shell: crate::commands::completions::CompletionShell,
     },
-    /// Print completion candidates for shell scripts (repos, branches)
-    Complete {
-        /// Candidate set: repos or branches
-        what: String,
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: Option<String>,
-    },
+
+    /// Query & list completion candidates (repos, branches)
+    Complete { what: String },
 }
 
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
-    /// Create a worktree at the global mirror path
+    /// Add a new branch as worktree - similar to worktree.add()
     Add {
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: String,
-        branch: String,
+        filter: String, // Repo path/namne like "."
+        branch: String, // Branch name "feature-X"
     },
-    /// List worktrees for one or all repos
+
+    /// List all worktrees showing detached branches
     Ls {
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: Option<String>,
+        filter: Option<String>, // Repo filter to list just those worktrees
     },
-    /// Remove a worktree
+
+    /// Remove a detached workspace for a branch (disconnect it)  
     Remove {
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: String,
+        filter: String, // Repo path like "."
         #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
-        branch: String,
-        #[arg(long, short)]
-        force: bool,
+        branch: String, // Branch name "main-branch"
+        #[arg(short, long)]
+        force: bool, // Delete workspace contents?
     },
 }
