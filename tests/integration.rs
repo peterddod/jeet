@@ -208,7 +208,8 @@ fn init_shell_includes_completion() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("jeet()"));
-    assert!(stdout.contains("command jeet path"));
+    assert!(stdout.contains("_JEET_BIN"));
+    assert!(stdout.contains("checkout"));
     assert!(stdout.contains("_jeet_wrapper"));
     assert!(stdout.contains("_clap_dynamic_completer_jeet"));
     assert!(
