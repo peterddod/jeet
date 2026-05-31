@@ -210,14 +210,16 @@ fn checkout_local_branch(
 ) -> Result<()> {
     // Check if worktree already exists in registry
     if let Some(existing) = app.db.get_worktree(&repo.id, branch)? {
-        eprintln!("jeet: using existing workspace '{}'", branch);
-
         // Check if worktree directory still exists
         let wt_path = Path::new(&existing.path);
         if !wt_path.exists() {
             eprintln!("jeet: warning: worktree path missing, recreating...");
             git::worktree_add_existing_branch(trunk, wt_path, branch)?;
         }
+
+        // Print path to stdout for shell wrapper to capture
+        println!("{}", wt_path.display());
+        eprintln!("jeet: using existing workspace '{}'", branch);
 
         // Change to existing worktree directory
         std::env::set_current_dir(wt_path).context("cd to worktree")?;
@@ -265,7 +267,11 @@ fn upsert_worktree_and_cd(
         created_at: now,
     })?;
 
-    println!(
+    // Print path to stdout for shell wrapper to capture (like `jeet path`)
+    println!("{}", worktree_dir.display());
+
+    // Also print status to stderr for user feedback
+    eprintln!(
         "jeet: checked out '{}' at {}",
         branch,
         worktree_dir.display()

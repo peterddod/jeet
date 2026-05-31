@@ -39,9 +39,11 @@ pub enum Commands {
         command: WorktreeCommands,
     },
 
-    /// Checkout a branch to navigate its workspace - cd into the workspace at that location  
+    /// Checkout a branch to navigate its workspace - cd into the workspace at that location
     Checkout {
+        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
         branch_name: Option<String>, // Branch name; if omitted, error
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         repo_filter: Option<String>, // Repo filter like "." or "project/"; if omitted, auto-detect from CWD
         #[arg(short, long)]
         create_branch: bool, // Create a new branch (-c, equivalent to git checkout -b)
