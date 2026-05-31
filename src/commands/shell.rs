@@ -19,7 +19,7 @@ jeet() {
     builtin cd -- "$("$_JEET_BIN" path "$@")"
   elif [[ "$1" == "checkout" ]]; then
     shift
-    _jeet_path=$("$_JEET_BIN" checkout "$@" 2>/dev/null)
+    _jeet_path=$("$_JEET_BIN" checkout "$@")
     _jeet_path="${_jeet_path%%$'\n'*}"
     if [[ -d "$_jeet_path" ]]; then
       builtin cd -- "$_jeet_path"

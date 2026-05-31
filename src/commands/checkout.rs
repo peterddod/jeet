@@ -91,7 +91,7 @@ fn run_create_branch(
         bail!("worktree path already exists: {}", worktree_dir.display());
     }
 
-    println!("jeet: creating workspace at {}", worktree_dir.display());
+    eprintln!("jeet: creating workspace at {}", worktree_dir.display());
     git::worktree_add_new_branch(trunk, &worktree_dir, branch, &effective_start)?;
 
     // Upsert registry and change directory
