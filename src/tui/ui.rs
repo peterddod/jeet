@@ -12,7 +12,7 @@ use crate::worktrees::WorktreeStatus;
 const HINTS: &str =
     "↑↓ move  → open  ← back  ⏎ edit  w worktrees  s sessions  c agent  . hidden  ? help  q quit";
 
-pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) {
+pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -24,7 +24,17 @@ pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) 
         .split(frame.area());
 
     draw_header(frame, chunks[0], explorer);
-    draw_listing(frame, chunks[1], explorer, list_state);
+    {
+        // Split the borrow: the list widget needs its scroll state mutably
+        // while the entries it renders are borrowed immutably.
+        let Explorer {
+            entries,
+            selected,
+            list,
+            ..
+        } = &mut *explorer;
+        draw_listing(frame, chunks[1], entries, *selected, list);
+    }
 
     let status = Paragraph::new(Line::from(Span::styled(
         explorer.status_line.clone(),
@@ -42,6 +52,27 @@ pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) 
     if let Some(overlay) = &explorer.overlay {
         draw_overlay(frame, explorer, overlay);
     }
+    if let Some(working) = &explorer.working {
+        draw_working(frame, working);
+    }
+}
+
+/// A small banner shown while a background job runs, so a slow push or a big
+/// worktree scan never looks like a hang.
+fn draw_working(frame: &mut Frame, working: &str) {
+    let area = content_rect(44, 1, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            working.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL)),
+        area,
+    );
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
@@ -108,10 +139,15 @@ pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
     }
 }
 
-fn draw_listing(frame: &mut Frame, area: Rect, explorer: &Explorer, list_state: &mut ListState) {
+fn draw_listing(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[super::state::FsEntry],
+    selected: usize,
+    list_state: &mut ListState,
+) {
     let width = area.width.saturating_sub(4) as usize;
-    let items: Vec<ListItem> = explorer
-        .entries
+    let items: Vec<ListItem> = entries
         .iter()
         .map(|entry| {
             let (marker, style) = if entry.is_dir {
@@ -136,16 +172,16 @@ fn draw_listing(frame: &mut Frame, area: Rect, explorer: &Explorer, list_state: 
         })
         .collect();
 
-    let title = if explorer.entries.is_empty() {
+    let title = if entries.is_empty() {
         " empty directory ".to_string()
     } else {
-        format!(" {} items ", explorer.entries.len())
+        format!(" {} items ", entries.len())
     };
 
-    list_state.select(if explorer.entries.is_empty() {
+    list_state.select(if entries.is_empty() {
         None
     } else {
-        Some(explorer.selected.min(explorer.entries.len() - 1))
+        Some(selected.min(entries.len() - 1))
     });
 
     let list = List::new(items)

@@ -10,6 +10,8 @@ pub mod ui;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::backend::CrosstermBackend;
@@ -19,7 +21,6 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::agent::{self, AgentSpec};
@@ -126,10 +127,51 @@ fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
     Ok(out)
 }
 
+/// Run `job` on a background thread while the UI keeps drawing.
+///
+/// git is slow and the network is slower — a `git push` on worktree creation
+/// froze the whole explorer for as long as the remote took, with nothing on
+/// screen to say why. Keystrokes that arrive meanwhile are dropped rather than
+/// queued, so they cannot fire against a screen the user never saw.
+fn with_progress<T: Send>(
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    label: &str,
+    job: impl FnOnce() -> T + Send,
+) -> Result<T> {
+    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    let (tx, rx) = mpsc::channel();
+
+    let outcome = std::thread::scope(|scope| -> Result<T> {
+        scope.spawn(move || {
+            let _ = tx.send(job());
+        });
+        let mut tick = 0usize;
+        loop {
+            match rx.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("background task failed")
+                }
+            }
+            explorer.working = Some(format!(" {} {label} ", FRAMES[tick % FRAMES.len()]));
+            terminal.draw(|frame| ui::draw(frame, explorer))?;
+            tick += 1;
+            while event::poll(Duration::from_millis(0))? {
+                let _ = event::read();
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        }
+    });
+
+    explorer.working = None;
+    outcome
+}
+
 fn event_loop(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
-    let mut list_state = ListState::default();
     while !explorer.should_quit {
-        terminal.draw(|frame| ui::draw(frame, explorer, &mut list_state))?;
+        terminal.draw(|frame| ui::draw(frame, explorer))?;
         let Event::Key(key) = event::read()? else {
             continue;
         };
@@ -207,7 +249,7 @@ fn handle_browse_key(
         }
         KeyCode::Char('c') => launch_agent(app, terminal, explorer, &[])?,
         KeyCode::Char('s') => open_sessions(explorer),
-        KeyCode::Char('w') => open_worktrees(app, explorer),
+        KeyCode::Char('w') => open_worktrees(app, terminal, explorer),
         KeyCode::Char('?') => explorer.overlay = Some(Overlay::Help),
         _ => {}
     }
@@ -230,7 +272,7 @@ fn handle_overlay_key(
         Overlay::Message { from_panel, .. } => {
             if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                 if from_panel {
-                    open_worktrees(app, explorer);
+                    open_worktrees(app, terminal, explorer);
                 }
             } else {
                 explorer.overlay = Some(overlay);
@@ -280,7 +322,7 @@ fn handle_overlay_key(
                 })
             }
             KeyCode::Char('e') => {
-                create_worktree(app, explorer, None)?;
+                create_worktree(app, terminal, explorer, None)?;
             }
             KeyCode::Char('m') => match explorer.worktree_rows.get(selected) {
                 Some(row) if row.entry.kind == WorktreeKind::Trunk => {
@@ -326,7 +368,7 @@ fn handle_overlay_key(
                 }
                 None => explorer.overlay = Some(Overlay::Worktrees { selected }),
             },
-            KeyCode::Char('r') => open_worktrees(app, explorer),
+            KeyCode::Char('r') => open_worktrees(app, terminal, explorer),
             _ => explorer.overlay = Some(Overlay::Worktrees { selected }),
         },
         Overlay::Sessions {
@@ -352,8 +394,10 @@ fn handle_overlay_key(
             _ => explorer.overlay = Some(Overlay::Sessions { sessions, selected }),
         },
         Overlay::RenameWorktree { index, mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, explorer),
-            KeyCode::Enter => rename_worktree(app, explorer, index, input.trim().to_string())?,
+            KeyCode::Esc => open_worktrees(app, terminal, explorer),
+            KeyCode::Enter => {
+                rename_worktree(app, terminal, explorer, index, input.trim().to_string())?
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 input.clear();
                 explorer.overlay = Some(Overlay::RenameWorktree { index, input });
@@ -373,10 +417,15 @@ fn handle_overlay_key(
             _ => explorer.overlay = Some(Overlay::RenameWorktree { index, input }),
         },
         Overlay::NewWorktree { mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, explorer),
+            KeyCode::Esc => open_worktrees(app, terminal, explorer),
             KeyCode::Enter => {
                 let name = input.trim().to_string();
-                create_worktree(app, explorer, Some(name).filter(|n| !n.is_empty()))?;
+                create_worktree(
+                    app,
+                    terminal,
+                    explorer,
+                    Some(name).filter(|n| !n.is_empty()),
+                )?;
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 input.clear();
@@ -403,13 +452,17 @@ fn handle_overlay_key(
             index,
         } => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => match action {
-                PendingAction::RemoveWorktree => remove_worktree(app, explorer, index, false)?,
+                PendingAction::RemoveWorktree => {
+                    remove_worktree(app, terminal, explorer, index, false)?
+                }
             },
             KeyCode::Char('f') | KeyCode::Char('F') => match action {
-                PendingAction::RemoveWorktree => remove_worktree(app, explorer, index, true)?,
+                PendingAction::RemoveWorktree => {
+                    remove_worktree(app, terminal, explorer, index, true)?
+                }
             },
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                open_worktrees(app, explorer);
+                open_worktrees(app, terminal, explorer);
             }
             _ => {
                 explorer.overlay = Some(Overlay::Confirm {
@@ -461,8 +514,16 @@ fn delete_summary(row: &WorktreeRow) -> Vec<String> {
     lines
 }
 
-fn open_worktrees(app: &App, explorer: &mut Explorer) {
-    match collect_rows(app, &explorer.repo, &explorer.root) {
+fn open_worktrees(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
+    let repo = explorer.repo.clone();
+    let root = explorer.root.clone();
+    let rows = match with_progress(terminal, explorer, "reading worktrees", || {
+        collect_rows(app, &repo, &root)
+    }) {
+        Ok(rows) => rows,
+        Err(e) => Err(e),
+    };
+    match rows {
         Ok(rows) => {
             let selected = rows.iter().position(|r| r.current).unwrap_or(0);
             explorer.worktree_rows = rows;
@@ -483,14 +544,40 @@ fn collect_rows(app: &App, repo: &RepoRecord, current_root: &Path) -> Result<Vec
     // One comparison base for the whole repo rather than one per row: it costs
     // a git subprocess and the answer cannot differ between worktrees.
     let base = worktrees::comparison_base(repo);
-    Ok(worktrees::list(app, repo)?
-        .into_iter()
-        .map(|entry| WorktreeRow {
-            status: worktrees::status_against(&entry, &base),
-            current: crate::resolve::same_path(&entry.path, current_root),
-            entry,
-        })
-        .collect())
+    let entries = worktrees::list(app, repo)?;
+
+    // Each row costs several git subprocesses, and they are independent, so
+    // fan them out instead of paying for them one after another.
+    const LANES: usize = 8;
+    let lane_size = entries.len().div_ceil(LANES).max(1);
+    let lanes: Vec<Vec<_>> = entries
+        .chunks(lane_size)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+
+    let rows = std::thread::scope(|scope| {
+        let handles: Vec<_> = lanes
+            .into_iter()
+            .map(|lane| {
+                let base = base.clone();
+                scope.spawn(move || {
+                    lane.into_iter()
+                        .map(|entry| WorktreeRow {
+                            status: worktrees::status_against(&entry, &base),
+                            current: crate::resolve::same_path(&entry.path, current_root),
+                            entry,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .flatten()
+            .collect::<Vec<_>>()
+    });
+    Ok(rows)
 }
 
 fn open_sessions(explorer: &mut Explorer) {
@@ -534,14 +621,25 @@ fn open_sessions(explorer: &mut Explorer) {
     }
 }
 
-fn create_worktree(app: &App, explorer: &mut Explorer, name: Option<String>) -> Result<()> {
-    let result = match &name {
-        Some(branch) => worktrees::create_named(app, &explorer.repo, branch, true),
-        None => worktrees::create_detached(app, &explorer.repo).map(|path| worktrees::Outcome {
+fn create_worktree(
+    app: &App,
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    name: Option<String>,
+) -> Result<()> {
+    let repo = explorer.repo.clone();
+    let label = match &name {
+        Some(branch) => format!("creating {branch} and publishing it"),
+        None => "creating a detached worktree".to_string(),
+    };
+    let branch = name.clone();
+    let result = with_progress(terminal, explorer, &label, move || match &branch {
+        Some(branch) => worktrees::create_named(app, &repo, branch, true),
+        None => worktrees::create_detached(app, &repo).map(|path| worktrees::Outcome {
             path,
             warnings: Vec::new(),
         }),
-    };
+    })?;
     match result {
         Ok(created) => {
             switch_worktree(app, explorer, &created.path)?;
@@ -569,6 +667,7 @@ fn create_worktree(app: &App, explorer: &mut Explorer, name: Option<String>) -> 
 /// Rename the worktree at `index`, following it if it is the one we are in.
 fn rename_worktree(
     app: &App,
+    terminal: &mut Tui,
     explorer: &mut Explorer,
     index: usize,
     new_name: String,
@@ -584,7 +683,16 @@ fn rename_worktree(
         .map(|rest| rest.to_path_buf())
         .ok();
 
-    match worktrees::rename(app, &explorer.repo, &row.entry, &new_name, true) {
+    let repo = explorer.repo.clone();
+    let entry = row.entry.clone();
+    let target = new_name.clone();
+    let outcome = with_progress(
+        terminal,
+        explorer,
+        &format!("renaming to {new_name} and publishing it"),
+        move || worktrees::rename(app, &repo, &entry, &target, true),
+    )?;
+    match outcome {
         Ok(renamed) => {
             if following {
                 switch_worktree(app, explorer, &renamed.path)?;
@@ -597,7 +705,7 @@ fn rename_worktree(
                     }
                 }
             }
-            open_worktrees(app, explorer);
+            open_worktrees(app, terminal, explorer);
             let mut status = format!("renamed {was} to {new_name}");
             if !renamed.warnings.is_empty() {
                 status.push_str(&format!(" — {}", renamed.warnings.join("; ")));
@@ -618,14 +726,28 @@ fn rename_worktree(
 /// Remove the worktree at `index`. Without `force`, git independently
 /// re-checks for modified, untracked and submodule content at removal time —
 /// which catches anything written since the dialog's status was sampled.
-fn remove_worktree(app: &App, explorer: &mut Explorer, index: usize, force: bool) -> Result<()> {
+fn remove_worktree(
+    app: &App,
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    index: usize,
+    force: bool,
+) -> Result<()> {
     let Some(row) = explorer.worktree_rows.get(index).cloned() else {
-        open_worktrees(app, explorer);
+        open_worktrees(app, terminal, explorer);
         return Ok(());
     };
-    match worktrees::remove(app, &explorer.repo, &row.entry, force) {
+    let repo = explorer.repo.clone();
+    let entry = row.entry.clone();
+    let outcome = with_progress(
+        terminal,
+        explorer,
+        &format!("removing {}", row.entry.display_name()),
+        move || worktrees::remove(app, &repo, &entry, force),
+    )?;
+    match outcome {
         Ok(()) => {
-            open_worktrees(app, explorer);
+            open_worktrees(app, terminal, explorer);
             explorer.set_status(format!("removed {}", row.entry.display_name()));
         }
         Err(e) => {

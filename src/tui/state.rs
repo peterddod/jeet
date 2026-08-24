@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use ratatui::widgets::ListState;
 
 use crate::agent::{AgentSession, AgentSpec};
 use crate::db::RepoRecord;
@@ -100,6 +101,11 @@ pub struct Explorer {
     /// Worktrees of this repo, refreshed whenever the overlay is opened.
     pub worktree_rows: Vec<WorktreeRow>,
     pub status_line: String,
+    /// Set while a slow operation runs in the background, so the UI can say so.
+    pub working: Option<String>,
+    /// Scroll position of the file list, kept here so a redraw mid-operation
+    /// does not jump the view back to the top.
+    pub list: ListState,
     pub agent: AgentSpec,
     pub should_quit: bool,
     pub exit: Exit,
@@ -131,6 +137,8 @@ impl Explorer {
             overlay: None,
             worktree_rows: Vec::new(),
             status_line: String::new(),
+            working: None,
+            list: ListState::default(),
             agent,
             should_quit: false,
             exit: Exit::Stay,

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -20,8 +21,13 @@ pub struct WorktreeRecord {
     pub created_at: i64,
 }
 
+/// The index.
+///
+/// The connection sits behind a mutex so `&App` is `Sync`: the explorer runs
+/// slow git work on a background thread while it keeps drawing, and that thread
+/// needs to share the app.
 pub struct Database {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -30,13 +36,21 @@ impl Database {
             std::fs::create_dir_all(parent).context("create index db parent")?;
         }
         let conn = Connection::open(path).context("open index db")?;
-        let db = Self { conn };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.migrate()?;
         Ok(db)
     }
 
+    /// Recover from a poisoned lock rather than propagating a panic: a failed
+    /// query in another thread must not take the index down with it.
+    fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
+        self.conn().execute_batch(
             "
             CREATE TABLE IF NOT EXISTS repos (
                 id TEXT PRIMARY KEY,
@@ -59,7 +73,7 @@ impl Database {
     }
 
     pub fn upsert_repo(&self, repo: &RepoRecord) -> Result<()> {
-        self.conn.execute(
+        self.conn().execute(
             "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
@@ -79,13 +93,13 @@ impl Database {
     }
 
     pub fn delete_worktrees_for_repo(&self, repo_id: &str) -> Result<()> {
-        self.conn
+        self.conn()
             .execute("DELETE FROM worktrees WHERE repo_id = ?1", params![repo_id])?;
         Ok(())
     }
 
     pub fn upsert_worktree(&self, wt: &WorktreeRecord) -> Result<()> {
-        self.conn.execute(
+        self.conn().execute(
             "INSERT INTO worktrees (repo_id, branch, path, created_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(repo_id, branch) DO UPDATE SET
@@ -97,7 +111,7 @@ impl Database {
     }
 
     pub fn remove_worktree(&self, repo_id: &str, branch: &str) -> Result<()> {
-        self.conn.execute(
+        self.conn().execute(
             "DELETE FROM worktrees WHERE repo_id = ?1 AND branch = ?2",
             params![repo_id, branch],
         )?;
@@ -105,7 +119,8 @@ impl Database {
     }
 
     pub fn list_repos(&self, filter: Option<&str>) -> Result<Vec<RepoRecord>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT id, trunk_path, remote_url, default_branch, managed FROM repos ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -131,7 +146,8 @@ impl Database {
     }
 
     pub fn get_repo(&self, id: &str) -> Result<Option<RepoRecord>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT id, trunk_path, remote_url, default_branch, managed FROM repos WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -148,7 +164,8 @@ impl Database {
     }
 
     pub fn list_worktrees(&self, repo_id: &str) -> Result<Vec<WorktreeRecord>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT repo_id, branch, path, created_at FROM worktrees WHERE repo_id = ?1 ORDER BY branch",
         )?;
         let rows = stmt.query_map(params![repo_id], |row| {
@@ -167,7 +184,7 @@ impl Database {
     }
 
     pub fn worktree_count(&self, repo_id: &str) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
+        let count: i64 = self.conn().query_row(
             "SELECT COUNT(*) FROM worktrees WHERE repo_id = ?1",
             params![repo_id],
             |row| row.get(0),
@@ -176,7 +193,8 @@ impl Database {
     }
 
     pub fn get_worktree(&self, repo_id: &str, branch: &str) -> Result<Option<WorktreeRecord>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT repo_id, branch, path, created_at FROM worktrees WHERE repo_id = ?1 AND branch = ?2",
         )?;
         let mut rows = stmt.query(params![repo_id, branch])?;

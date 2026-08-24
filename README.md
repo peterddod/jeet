@@ -125,6 +125,10 @@ In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
 name field in the new/rename prompts. Deleting asks first: `y` removes, and
 `f` forces past git's refusal when the worktree still holds work.
 
+Anything slow — reading a repo's worktrees, or creating and renaming, which
+push to `origin` — runs in the background with a progress indicator, so the
+explorer keeps drawing instead of freezing on the network.
+
 Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
 
