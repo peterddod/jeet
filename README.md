@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.2.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.3.0
 ```
 
 ## Quick start
@@ -68,16 +68,22 @@ jeet                                     # open the file explorer there
 # Worktrees — from anywhere inside a repo or worktree
 jeet worktree feature-x                  # branch feature-x, published to origin
 jeet worktree                            # detached checkout of the default branch
+jeet worktree rename login-page          # name a scratchpad once you know what it is
 jeet worktree ls acme/widget             # with dirty + diff counters
 jeet worktree clean                      # drop worktrees holding no work
-jeet worktree remove acme/widget feature-x
+jeet worktree add acme/widget feature-x  # explicit form; does not push
+jeet worktree remove acme/widget feature-x [--force]
 
 # Navigation
 jeet path acme/widget                    # print path (scripting)
 jeet cd acme/widget                      # native cd (requires init-shell)
+jeet checkout feature-x                  # cd into that branch's worktree, creating it if needed
 jeet exec acme/widget                    # subshell in trunk
 jeet exec acme/widget --branch feature-x # subshell in worktree
 jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on exit)
+
+# Coding agents
+jeet sessions                            # previous agent sessions for this worktree
 ```
 
 ## The explorer
@@ -109,8 +115,15 @@ jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 | `.` | toggle hidden files |
 | `g` / `G` | jump to the top / bottom |
 | `r` | refresh the listing and the counters |
+| `g` / `G`, `Home` / `End` | jump to the top / bottom |
+| `PageUp` / `PageDown` | move ten rows |
+| `r` | refresh the listing and the counters |
 | `q` | quit, leaving your shell in the directory you were browsing |
-| `esc` | quit without moving your shell |
+| `esc` | quit without moving your shell (unless it moved out from under you) |
+
+In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
+name field in the new/rename prompts. Deleting asks first: `y` removes, and
+`f` forces past git's refusal when the worktree still holds work.
 
 Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
@@ -139,8 +152,9 @@ jeet worktree rename login-page
 
 Both forms work from **anywhere** inside a repo or one of its worktrees, not
 just the root, and both drop you into the new worktree when the shell wrapper is
-installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live
-under `~/.jeet/ephemeral` and are what `jeet worktree clean` collects.
+installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live under
+`~/.jeet/ephemeral`. `jeet worktree clean` collects both — see below for exactly
+what it will and will not delete.
 
 ### Renaming
 
@@ -149,6 +163,10 @@ jeet worktree rename login-page          # rename the worktree you are in
 jeet worktree rename old-name new-name   # or name the one to rename
 jeet worktree rename login-page --no-push
 ```
+
+Like `jeet worktree <name>`, renaming **publishes the new branch to `origin`**
+unless you pass `--no-push`. Renaming onto a name that already exists on the
+remote is refused rather than pushed over.
 
 Renaming a **detached** worktree creates that branch at its current HEAD and
 moves it out of the ephemeral root, so a throwaway scratchpad becomes a real
@@ -177,13 +195,28 @@ jeet worktree clean --yes
 jeet worktree clean --all --force
 ```
 
-`clean` removes detached checkouts and branch worktrees that hold nothing you
-would miss, and reports the ones it keeps with the reason — uncommitted changes,
-or commits that are not on the default branch yet. `--all` includes worktrees
-jeet did not create; `--force` removes even those holding work. Stale entries
-whose directory is gone are pruned either way. You can do the same thing
-interactively with `d` in the explorer's worktree panel, which shows the same
-counters before it asks.
+`clean` removes worktrees that hold nothing you would miss, and reports the ones
+it keeps with the reason. What counts as something to lose:
+
+- **uncommitted changes** or **commits not on the default branch** — kept unless
+  `--force`.
+- **anything jeet could not assess** (a git error, a default branch that no
+  longer resolves) — kept, because "I could not tell" must never read as "safe
+  to delete".
+- **ignored files** (`.env`, local databases, build output) — git deletes these
+  without complaint, so jeet counts them separately. They are named in the
+  report so an interactive run can decide, and an unattended `--yes` run keeps
+  the worktree rather than destroying them silently. `--force` discards them.
+
+Scope is separate from all of that. By default `clean` only touches worktrees
+jeet created; **`--all` also deletes worktrees you made yourself, wherever you
+put them**. `--force` never widens scope — it only decides whether work already
+in scope may be discarded.
+
+Removal itself is not forced: git independently re-checks for modified,
+untracked and submodule content at removal time, and jeet reports the refusal
+rather than overriding it. `d` in the explorer's worktree panel does the same,
+showing the counters before it asks; `y` removes and `f` forces.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
 
@@ -205,6 +238,12 @@ The `jeet cd` command is a shell function, not a binary subcommand. Add **one li
 
 ```bash
 eval "$(jeet init-shell)"
+```
+
+Or let jeet write that line for you:
+
+```bash
+jeet install-shell
 ```
 
 Manual install for other shells:
@@ -241,6 +280,8 @@ jeet complete branches acme/widget
 - `jeet sessions` lists the coding-agent sessions recorded for a worktree.
 - The `init-shell` wrapper now follows a `cd` hand-off, so the explorer and
   `jeet worktree` can leave your shell in the right directory.
+- `jeet exec --branch <name>` works (the flag was previously documented but
+  never wired up).
 
 ## Configuration
 
@@ -248,8 +289,11 @@ On first run, `jeet` creates `~/.jeet/config.toml`:
 
 ```toml
 scan_roots = ["~/Projects", "~/code"]
+```
 
-# optional
+Two optional keys are not written by default; add them yourself to override:
+
+```toml
 editor = "vim"       # opened by ⏎ in the explorer; defaults to $VISUAL/$EDITOR
 agent = "claude"     # launched by `c`; may include arguments
 ```

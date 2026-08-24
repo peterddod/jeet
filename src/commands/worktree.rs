@@ -103,7 +103,8 @@ pub fn remove(app: &App, filter: &str, branch: &str, force: bool) -> Result<()> 
         .find(|e| e.branch.as_deref() == Some(branch) && e.kind != WorktreeKind::Trunk)
         .ok_or_else(|| anyhow::anyhow!("no worktree for branch {branch} on {}", repo.id))?;
 
-    worktrees::remove(app, &repo, entry, force)?;
+    worktrees::remove(app, &repo, entry, force)
+        .map_err(|e| anyhow::anyhow!("{e:#}\nre-run with --force to remove it anyway"))?;
     println!("removed worktree {branch} from {}", repo.id);
     Ok(())
 }
@@ -189,10 +190,31 @@ pub fn clean(
         Some(f) => vec![resolve::resolve_repo_filter(&app.db, f)?],
         None => vec![repo_from_filter_or_cwd(app, None)?],
     };
-    let opts = CleanOptions { all, force };
+    let opts = CleanOptions {
+        all,
+        force,
+        // --dry-run still prints the report for a human to read; --yes does not
+        // pause for one, so it must not discard anything on its own judgement.
+        unattended: assume_yes && !dry_run,
+    };
+
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| resolve::resolve_context(app, &cwd).ok())
+        .map(|ctx| ctx.root);
 
     for repo in repos {
-        let candidates = worktrees::clean_candidates(app, &repo, opts)?;
+        let mut candidates = worktrees::clean_candidates(app, &repo, opts)?;
+        // Removing the directory the shell is sitting in leaves the user
+        // nowhere; the explorer already refuses this, so the CLI should too.
+        if let Some(here) = &here {
+            for candidate in &mut candidates {
+                if resolve::same_path(&candidate.entry.path, here) {
+                    candidate.removable = false;
+                    candidate.reason = "you are standing in it".to_string();
+                }
+            }
+        }
         if candidates.is_empty() {
             println!("{}: no worktrees besides the trunk", repo.id);
             continue;
@@ -232,9 +254,15 @@ pub fn clean(
         }
 
         for candidate in removable {
-            match worktrees::remove(app, &repo, &candidate.entry, true) {
+            // Not an unconditional force: without it git independently re-checks
+            // for modified, untracked and submodule content at removal time,
+            // which catches anything written since we classified this worktree.
+            match worktrees::remove(app, &repo, &candidate.entry, force) {
                 Ok(()) => println!("  removed {}", candidate.entry.path.display()),
-                Err(e) => eprintln!("  failed to remove {}: {e}", candidate.entry.path.display()),
+                Err(e) => eprintln!(
+                    "  kept {}: {e:#} (--force to remove anyway)",
+                    candidate.entry.path.display()
+                ),
             }
         }
     }

@@ -70,6 +70,8 @@ pub enum Overlay {
     Message {
         title: String,
         lines: Vec<String>,
+        /// Return to the worktree panel when dismissed, rather than the browser.
+        from_panel: bool,
     },
 }
 
@@ -139,15 +141,23 @@ impl Explorer {
 
     /// Re-read the current directory, optionally keeping the cursor on `keep`.
     pub fn reload(&mut self, keep: Option<&Path>) -> Result<()> {
-        self.entries = read_dir(&self.cwd, self.show_hidden)?;
+        let cwd = self.cwd.clone();
+        self.show(cwd, keep)
+    }
+
+    /// List `dir` and move there, leaving state untouched if it cannot be read.
+    ///
+    /// Committing the path before the listing succeeds is how you end up with a
+    /// header describing one directory and a file list showing another — which
+    /// then opens the wrong file.
+    pub fn show(&mut self, dir: PathBuf, keep: Option<&Path>) -> Result<()> {
+        let entries = read_dir(&dir, self.show_hidden)?;
         self.selected = match keep {
-            Some(path) => self
-                .entries
-                .iter()
-                .position(|e| e.path == path)
-                .unwrap_or(0),
+            Some(path) => entries.iter().position(|e| e.path == path).unwrap_or(0),
             None => 0,
         };
+        self.cwd = dir;
+        self.entries = entries;
         Ok(())
     }
 
@@ -181,22 +191,25 @@ impl Explorer {
         if !entry.is_dir {
             return Ok(false);
         }
-        self.cwd = entry.path;
-        self.reload(None)?;
+        self.show(entry.path, None)?;
         Ok(true)
     }
 
     /// Go to the parent directory, never above the worktree root.
+    ///
+    /// The comparison is deliberately lexical: a symlink that resolves back to
+    /// the root (`ln -s . loop`) is a directory you can descend into, and
+    /// canonicalising here would refuse to let you back out of it.
     pub fn ascend(&mut self) -> Result<bool> {
-        if crate::resolve::same_path(&self.cwd, &self.root) {
+        if self.cwd == self.root {
             self.status_line = "at the worktree root".to_string();
             return Ok(false);
         }
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
             return Ok(false);
         };
-        let previous = std::mem::replace(&mut self.cwd, parent);
-        self.reload(Some(&previous))?;
+        let previous = self.cwd.clone();
+        self.show(parent, Some(&previous))?;
         Ok(true)
     }
 
@@ -217,7 +230,7 @@ impl Explorer {
         self.exit = if crate::resolve::same_path(&self.cwd, &self.origin) {
             Exit::Stay
         } else {
-            Exit::ChangeDir(self.cwd.clone())
+            Exit::ChangeDir(self.landing_dir())
         };
         self.should_quit = true;
     }
@@ -228,9 +241,19 @@ impl Explorer {
         self.exit = if self.origin.is_dir() {
             Exit::Stay
         } else {
-            Exit::ChangeDir(self.cwd.clone())
+            Exit::ChangeDir(self.landing_dir())
         };
         self.should_quit = true;
+    }
+
+    /// Somewhere that still exists to leave the shell in.
+    fn landing_dir(&self) -> PathBuf {
+        for candidate in [&self.cwd, &self.root] {
+            if candidate.is_dir() {
+                return candidate.clone();
+            }
+        }
+        PathBuf::from(&self.repo.trunk_path)
     }
 }
 
@@ -386,15 +409,45 @@ mod tests {
         assert_eq!(explorer.selected, explorer.entries.len() - 1);
     }
 
+    /// After a rename the explorer follows the worktree to its new home, so
+    /// `origin` is stale. Quitting must hand the shell the new location — and
+    /// crucially, one that exists.
     #[test]
-    fn quitting_in_place_follows_a_vanished_directory() {
+    fn quitting_follows_a_worktree_that_moved_underneath_it() {
         let dir = fixture();
-        let moved = dir.path().join("src");
-        let mut explorer = explorer_at(&moved);
-        explorer.root = dir.path().to_path_buf();
-        std::fs::remove_dir_all(&moved).unwrap();
+        let old = dir.path().join("src");
+        let mut explorer = explorer_at(&old);
+
+        // The rename: the tree moved, and the explorer moved with it.
+        let new = dir.path().join("renamed");
+        std::fs::create_dir(&new).unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
+        explorer.root = new.clone();
+        explorer.cwd = new.clone();
+
         explorer.quit_in_place();
-        assert_eq!(explorer.exit, Exit::ChangeDir(moved));
+        assert_eq!(explorer.exit, Exit::ChangeDir(new.clone()));
+        assert!(new.is_dir(), "handed the shell a path that does not exist");
+    }
+
+    /// If everything under the cursor has gone, fall back to somewhere real
+    /// rather than asking the shell to cd into a deleted directory.
+    #[test]
+    fn quitting_falls_back_when_the_browsed_directory_is_gone() {
+        let dir = fixture();
+        let gone = dir.path().join("src");
+        let mut explorer = explorer_at(&gone);
+        explorer.root = dir.path().to_path_buf();
+        std::fs::remove_dir_all(&gone).unwrap();
+
+        explorer.quit_in_place();
+        match &explorer.exit {
+            Exit::ChangeDir(path) => {
+                assert_eq!(path, dir.path());
+                assert!(path.is_dir());
+            }
+            other => panic!("expected a fallback directory, got {other:?}"),
+        }
     }
 
     #[test]

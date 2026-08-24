@@ -34,19 +34,33 @@ impl Default for Config {
 impl Config {
     /// Editor command line, honouring `JEET_EDITOR`, then config, then `$VISUAL`/`$EDITOR`.
     pub fn editor_command(&self) -> String {
-        env_non_empty("JEET_EDITOR")
-            .or_else(|| self.editor.clone().filter(|s| !s.trim().is_empty()))
-            .or_else(|| env_non_empty("VISUAL"))
-            .or_else(|| env_non_empty("EDITOR"))
-            .unwrap_or_else(|| "vim".to_string())
+        first_set(
+            [
+                env_non_empty("JEET_EDITOR"),
+                self.editor.clone(),
+                env_non_empty("VISUAL"),
+                env_non_empty("EDITOR"),
+            ],
+            "vim",
+        )
     }
 
     /// Coding agent command line, honouring `JEET_AGENT`, then config.
     pub fn agent_command(&self) -> String {
-        env_non_empty("JEET_AGENT")
-            .or_else(|| self.agent.clone().filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| "claude".to_string())
+        first_set(
+            [env_non_empty("JEET_AGENT"), self.agent.clone(), None, None],
+            "claude",
+        )
     }
+}
+
+/// First non-blank candidate, in precedence order, else `default`.
+fn first_set(candidates: [Option<String>; 4], default: &str) -> String {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -151,14 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn config_values_win_over_defaults() {
-        let config = Config {
-            editor: Some("hx".into()),
-            agent: Some("aider --model x".into()),
-            ..Config::default()
-        };
-        assert_eq!(config.editor_command(), "hx");
-        assert_eq!(config.agent_command(), "aider --model x");
+    fn precedence_prefers_the_first_set_candidate() {
+        // Exercised directly so the test does not depend on the ambient
+        // JEET_EDITOR/VISUAL/EDITOR of whoever runs it.
+        assert_eq!(
+            first_set([None, Some("hx".into()), Some("vi".into()), None], "vim"),
+            "hx"
+        );
+        assert_eq!(
+            first_set([Some("code".into()), Some("hx".into()), None, None], "vim"),
+            "code"
+        );
+        assert_eq!(
+            first_set([None, Some("  ".into()), None, None], "vim"),
+            "vim"
+        );
+        assert_eq!(first_set([None, None, None, None], "claude"), "claude");
     }
 
     #[test]

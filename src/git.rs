@@ -47,13 +47,21 @@ where
     Ok(())
 }
 
+/// git prints progress before it fails, so prefer the diagnostic over line one.
 fn first_error_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
-    text.lines()
+    let lines: Vec<&str> = text
+        .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("no output")
-        .to_string()
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or_else(|| lines.last())
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "no output".to_string())
 }
 
 pub fn clone_repo(url: &str, dest: &Path) -> Result<()> {
@@ -99,6 +107,13 @@ pub fn default_branch(repo_path: &Path) -> Result<String> {
         if let Some(branch) = s.trim().strip_prefix("origin/") {
             return Ok(branch.to_string());
         }
+    }
+    // No `origin/HEAD` — the normal state for a repo built with `git remote add`
+    // rather than cloned. The branch actually checked out is a far better guess
+    // than assuming "main": guessing wrong leaves the repo unable to create any
+    // worktree at all, because no start point resolves.
+    if let Some(branch) = head_branch(repo_path) {
+        return Ok(branch);
     }
     Ok("main".to_string())
 }
@@ -423,12 +438,41 @@ pub fn head_short_sha(path: &Path) -> Option<String> {
     }
 }
 
-/// Number of entries reported by `git status --porcelain` (uncommitted work).
-pub fn dirty_count(path: &Path) -> usize {
-    match status_porcelain(path) {
-        Ok(text) => text.lines().filter(|l| !l.trim().is_empty()).count(),
-        Err(_) => 0,
+/// `(uncommitted, ignored)` entry counts for a worktree.
+///
+/// `--untracked-files=normal` overrides a repo or user `status.showUntrackedFiles=no`,
+/// which would otherwise hide untracked work and make a worktree look disposable.
+/// Ignored files are counted separately: git will happily delete them, but they
+/// are frequently the `.env` a user cannot regenerate.
+pub fn status_counts(path: &Path) -> Result<(usize, usize)> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--ignored=matching",
+        ])
+        .output()
+        .context("spawn git status --porcelain")?;
+    if !output.status.success() {
+        bail!("git status failed: {}", first_error_line(&output.stderr));
     }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut dirty = 0;
+    let mut ignored = 0;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with("!!") {
+            ignored += 1;
+        } else {
+            dirty += 1;
+        }
+    }
+    Ok((dirty, ignored))
 }
 
 /// `(ahead, behind)` commit counts of HEAD relative to `base`.
@@ -459,17 +503,42 @@ fn parse_left_right(text: &str) -> Option<(usize, usize)> {
 }
 
 /// `(files, insertions, deletions)` between the merge base with `base` and the
-/// working tree (so uncommitted edits are included in the counter).
+/// working tree, so uncommitted edits count towards the diff counter.
+///
+/// Note this diffs against the merge base directly rather than using `base...`,
+/// which is `merge-base..HEAD` and would leave uncommitted work out.
 pub fn diff_stat(path: &Path, base: &str) -> Option<(usize, usize, usize)> {
-    let range = format!("{base}...");
+    let merge_base = merge_base(path, base)?;
     let output = Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "diff", "--numstat", &range])
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "diff",
+            "--numstat",
+            &merge_base,
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     Some(parse_numstat(&String::from_utf8_lossy(&output.stdout)))
+}
+
+pub fn merge_base(path: &Path, base: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "merge-base", base, "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
 }
 
 fn parse_numstat(text: &str) -> (usize, usize, usize) {

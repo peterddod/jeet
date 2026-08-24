@@ -61,14 +61,23 @@ impl WorktreeEntry {
 }
 
 /// Uncommitted work and divergence from the repository's default branch.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Every field is only meaningful when the corresponding probe succeeded — see
+/// [`WorktreeStatus::unknown`]. A failed probe must never read as "clean",
+/// because that answer is what authorises deleting the worktree.
+#[derive(Debug, Clone, Default)]
 pub struct WorktreeStatus {
     pub dirty: usize,
+    /// Files git is ignoring. git deletes these without complaint, and they are
+    /// often the one thing in the tree that cannot be regenerated.
+    pub ignored: usize,
     pub ahead: usize,
     pub behind: usize,
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
+    /// Why jeet could not assess this worktree, if it could not.
+    pub unknown: Option<String>,
 }
 
 impl WorktreeStatus {
@@ -76,8 +85,16 @@ impl WorktreeStatus {
         self.dirty > 0 || self.ahead > 0
     }
 
+    /// Anything at all that removing the worktree would destroy.
+    pub fn has_anything_to_lose(&self) -> bool {
+        self.has_work() || self.ignored > 0 || self.unknown.is_some()
+    }
+
     /// Compact `+12/-3 in 4 files` style diff counter against the default branch.
     pub fn diff_summary(&self) -> String {
+        if self.unknown.is_some() {
+            return "unknown".to_string();
+        }
         if self.files_changed == 0 {
             return "no diff".to_string();
         }
@@ -120,7 +137,12 @@ pub fn resolve_start_point(trunk: &Path, default_branch: &str) -> Result<String>
 }
 
 /// Ref used as the comparison base for diff counters.
-pub fn comparison_base(trunk: &Path, default_branch: &str) -> String {
+///
+/// Resolved once per repository rather than per worktree: it costs a git
+/// subprocess and the answer is the same for every row.
+pub fn comparison_base(repo: &RepoRecord) -> String {
+    let trunk = Path::new(&repo.trunk_path);
+    let default_branch = &repo.default_branch;
     if git::ref_exists(trunk, &format!("refs/remotes/origin/{default_branch}")).unwrap_or(false) {
         format!("origin/{default_branch}")
     } else {
@@ -171,20 +193,50 @@ pub fn list(app: &App, repo: &RepoRecord) -> Result<Vec<WorktreeEntry>> {
 }
 
 pub fn status_for(repo: &RepoRecord, entry: &WorktreeEntry) -> WorktreeStatus {
+    status_against(entry, &comparison_base(repo))
+}
+
+/// Assess one worktree against an already-resolved comparison base.
+///
+/// Any probe that fails leaves `unknown` set rather than reporting zero, so a
+/// git error can never masquerade as "nothing to lose".
+pub fn status_against(entry: &WorktreeEntry, base: &str) -> WorktreeStatus {
     if entry.missing {
-        return WorktreeStatus::default();
+        return WorktreeStatus {
+            unknown: Some("directory is missing".to_string()),
+            ..WorktreeStatus::default()
+        };
     }
-    let base = comparison_base(Path::new(&repo.trunk_path), &repo.default_branch);
-    let (ahead, behind) = git::ahead_behind(&entry.path, &base).unwrap_or((0, 0));
+
+    let (dirty, ignored) = match git::status_counts(&entry.path) {
+        Ok(counts) => counts,
+        Err(e) => {
+            return WorktreeStatus {
+                unknown: Some(format!("could not read status ({e})")),
+                ..WorktreeStatus::default()
+            }
+        }
+    };
+    let Some((ahead, behind)) = git::ahead_behind(&entry.path, base) else {
+        return WorktreeStatus {
+            dirty,
+            ignored,
+            unknown: Some(format!("could not compare against {base}")),
+            ..WorktreeStatus::default()
+        };
+    };
     let (files_changed, insertions, deletions) =
-        git::diff_stat(&entry.path, &base).unwrap_or((0, 0, 0));
+        git::diff_stat(&entry.path, base).unwrap_or((0, 0, 0));
+
     WorktreeStatus {
-        dirty: git::dirty_count(&entry.path),
+        dirty,
+        ignored,
         ahead,
         behind,
         files_changed,
         insertions,
         deletions,
+        unknown: None,
     }
 }
 
@@ -206,6 +258,15 @@ pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> R
     let dest = paths::worktree_path(&app.worktrees_root(), &identity, branch);
 
     if dest.exists() {
+        // Branch slugs are lossy (`feat/x` and `feat-x` share a directory) and
+        // a failed `worktree add` can leave a stray directory behind, so prove
+        // this really is our worktree on our branch before handing it back.
+        verify_worktree(&trunk, &dest, branch).with_context(|| {
+            format!(
+                "{} already exists but is not the worktree for {branch}",
+                dest.display()
+            )
+        })?;
         register(app, repo, branch, &dest)?;
         return Ok(Outcome {
             path: dest,
@@ -220,10 +281,16 @@ pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> R
         let _ = git::fetch(&trunk, "origin", &repo.default_branch);
     }
 
-    let existing_branch = git::branch_exists(&trunk, branch)?;
-    if existing_branch {
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    if git::branch_exists(&trunk, branch)? {
         git::worktree_add_existing_branch(&trunk, &dest, branch)
             .context("add worktree for existing branch")?;
+    } else if git::ref_exists(&trunk, &remote_ref)? {
+        // The branch already exists on the remote: check that out rather than
+        // starting a fresh one from the default branch, which would otherwise
+        // be pushed straight over somebody else's work.
+        git::worktree_add_new_branch(&trunk, &dest, branch, &format!("origin/{branch}"))
+            .context("add worktree tracking the existing remote branch")?;
     } else {
         let start = resolve_start_point(&trunk, &repo.default_branch)?;
         git::worktree_add_new_branch(&trunk, &dest, branch, &start)
@@ -276,6 +343,20 @@ pub fn create_detached(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Confirm `dest` is a worktree of `trunk` with `branch` checked out.
+fn verify_worktree(trunk: &Path, dest: &Path, branch: &str) -> Result<()> {
+    let dest_common = git::git_common_dir(dest).context("not a git worktree")?;
+    let trunk_common = git::git_common_dir(trunk).context("trunk is not a git repository")?;
+    if !resolve::same_path(&dest_common, &trunk_common) {
+        bail!("it belongs to a different repository");
+    }
+    match git::head_branch(dest) {
+        Some(head) if head == branch => Ok(()),
+        Some(head) => bail!("it has {head} checked out"),
+        None => bail!("its HEAD is detached"),
+    }
+}
+
 fn register(app: &App, repo: &RepoRecord, branch: &str, dest: &Path) -> Result<()> {
     app.db.upsert_worktree(&WorktreeRecord {
         repo_id: repo.id.clone(),
@@ -319,6 +400,11 @@ pub fn rename(
     }
     if git::branch_exists(&trunk, new_name)? {
         bail!("branch {new_name} already exists");
+    }
+    if push && git::ref_exists(&trunk, &format!("refs/remotes/origin/{new_name}"))? {
+        bail!(
+            "origin/{new_name} already exists; renaming onto it would publish this worktree over that branch. Pick another name, or pass --no-push to rename locally"
+        );
     }
 
     let old_branch = entry.branch.clone();
@@ -372,10 +458,15 @@ pub fn rename(
             ));
         }
     }
+    // Only meaningful when the branch tracked its *own* published copy — a
+    // jeet-created branch that was never pushed tracks origin/<default>, and
+    // telling the user to delete that would be catastrophic advice.
     if let (Some(old), Some(upstream)) = (&old_branch, &old_upstream) {
-        warnings.push(format!(
-            "{upstream} still exists; delete it with `git push origin --delete {old}`"
-        ));
+        if upstream == &format!("origin/{old}") {
+            warnings.push(format!(
+                "{upstream} still exists; delete it with `git push origin --delete {old}`"
+            ));
+        }
     }
 
     Ok(Outcome {
@@ -392,10 +483,10 @@ pub fn remove(app: &App, repo: &RepoRecord, entry: &WorktreeEntry, force: bool) 
     }
 
     if !force && !entry.missing {
-        let dirty = git::dirty_count(&entry.path);
+        let (dirty, _) = git::status_counts(&entry.path)?;
         if dirty > 0 {
             bail!(
-                "{} has {dirty} uncommitted change{}; re-run with --force to discard",
+                "{} has {dirty} uncommitted change{}",
                 entry.display_name(),
                 if dirty == 1 { "" } else { "s" }
             );
@@ -403,8 +494,20 @@ pub fn remove(app: &App, repo: &RepoRecord, entry: &WorktreeEntry, force: bool) 
     }
 
     if entry.missing {
+        // `git worktree prune` is repo-wide: it unregisters every currently
+        // missing worktree, not just this one. Only reach for it when the
+        // caller has actually asked to discard, and say what it does.
+        if !force {
+            bail!(
+                "{} is registered with git but missing on disk (pruning it unregisters every missing worktree in the repo)",
+                entry.path.display()
+            );
+        }
         git::worktree_prune(&trunk).context("prune stale worktrees")?;
     } else {
+        // Pass the caller's choice through: without --force git independently
+        // re-checks for modified, untracked and submodule content at removal
+        // time, which catches anything that appeared since we assessed it.
         git::worktree_remove(&trunk, &entry.path, force).context("remove worktree")?;
     }
 
@@ -434,10 +537,13 @@ pub fn prune_empty_parents(path: &Path, roots: &[PathBuf]) {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CleanOptions {
-    /// Also consider worktrees jeet did not create.
+    /// Also consider worktrees jeet did not create — these live wherever the
+    /// user put them, so removing one deletes a directory they chose.
     pub all: bool,
-    /// Treat worktrees that still hold work as removable.
+    /// Discard worktrees that still hold work.
     pub force: bool,
+    /// Nobody is watching the report, so anything destructive must fail closed.
+    pub unattended: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -449,47 +555,78 @@ pub struct CleanCandidate {
 }
 
 /// Classify every non-trunk worktree of `repo` for cleaning.
+///
+/// The scope gate (which worktrees are eligible at all) is applied *before* the
+/// content checks, so `--force` can never widen scope — it only decides whether
+/// work already in scope may be discarded.
 pub fn clean_candidates(
     app: &App,
     repo: &RepoRecord,
     opts: CleanOptions,
 ) -> Result<Vec<CleanCandidate>> {
+    let base = comparison_base(repo);
     let mut out = Vec::new();
+
     for entry in list(app, repo)? {
         if entry.kind == WorktreeKind::Trunk {
             continue;
         }
-        let status = status_for(repo, &entry);
 
-        let (removable, reason) = if entry.missing {
-            (true, "directory missing (stale git metadata)".to_string())
-        } else if status.dirty > 0 && !opts.force {
-            (
-                false,
-                format!(
-                    "{} uncommitted change{}",
-                    status.dirty,
-                    if status.dirty == 1 { "" } else { "s" }
-                ),
-            )
-        } else if status.ahead > 0 && !opts.force {
-            (
-                false,
-                format!(
-                    "{} commit{} not on {}",
-                    status.ahead,
-                    if status.ahead == 1 { "" } else { "s" },
-                    repo.default_branch
-                ),
-            )
-        } else if status.has_work() {
-            (true, "forced (work will be discarded)".to_string())
-        } else if entry.kind == WorktreeKind::Ephemeral {
-            (true, "ephemeral checkout".to_string())
-        } else if opts.all || entry.kind == WorktreeKind::Managed {
-            (true, "nothing to lose".to_string())
+        // 1. Scope: is this jeet's to remove?
+        if entry.kind == WorktreeKind::External && !opts.all {
+            out.push(CleanCandidate {
+                status: status_against(&entry, &base),
+                entry,
+                removable: false,
+                reason: "jeet did not create this worktree (--all to include it)".to_string(),
+            });
+            continue;
+        }
+
+        let status = status_against(&entry, &base);
+
+        // 2. Content that must not be discarded without an explicit --force.
+        let blocker = if entry.missing {
+            Some("directory is missing; pruning it unregisters every missing worktree".to_string())
+        } else if let Some(why) = status.unknown.clone() {
+            Some(why)
+        } else if status.dirty > 0 {
+            Some(format!(
+                "{} uncommitted change{}",
+                status.dirty,
+                if status.dirty == 1 { "" } else { "s" }
+            ))
+        } else if status.ahead > 0 {
+            Some(format!(
+                "{} commit{} not on {}",
+                status.ahead,
+                if status.ahead == 1 { "" } else { "s" },
+                repo.default_branch
+            ))
         } else {
-            (false, "external worktree (use --all)".to_string())
+            None
+        };
+
+        // 3. Ignored files are git's to delete, but they are also where the
+        //    unrecoverable things live (.env, local databases). They do not
+        //    block an interactive run — the reason line names them and the user
+        //    confirms — but an unattended run must not destroy them silently.
+        let ignored_note = (status.ignored > 0).then(|| {
+            format!(
+                "{} ignored file{} will be deleted",
+                status.ignored,
+                if status.ignored == 1 { "" } else { "s" }
+            )
+        });
+
+        let (removable, reason) = match (&blocker, opts.force) {
+            (Some(why), false) => (false, why.clone()),
+            (Some(why), true) => (true, format!("forced — {why}")),
+            (None, _) => match (&ignored_note, opts.force, opts.unattended) {
+                (Some(note), false, true) => (false, format!("{note} (--force to discard them)")),
+                (Some(note), _, _) => (true, format!("clean, but {note}")),
+                (None, _, _) => (true, "nothing to lose".to_string()),
+            },
         };
 
         out.push(CleanCandidate {

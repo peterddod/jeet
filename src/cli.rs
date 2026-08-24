@@ -66,6 +66,9 @@ pub enum Commands {
     Exec {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String, // Repo path filter like "."
+        /// Open the worktree for this branch instead of the trunk
+        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
+        branch: Option<String>,
         #[arg(long)]
         ephemeral: bool, // Auto-cleanup on exit?
     },

@@ -28,8 +28,11 @@ pub struct AgentSpec {
 
 impl AgentSpec {
     pub fn from_config(config: &Config) -> Result<Self> {
-        let command = config.agent_command();
-        let argv = split_command(&command);
+        Self::from_command(&config.agent_command())
+    }
+
+    pub fn from_command(command: &str) -> Result<Self> {
+        let argv = split_command(command);
         if argv.is_empty() {
             bail!("no coding agent configured (set `agent` in config.toml or $JEET_AGENT)");
         }
@@ -263,25 +266,28 @@ mod tests {
 
     #[test]
     fn detects_claude_agent() {
-        let config = Config {
-            agent: Some("claude --verbose".into()),
-            ..Config::default()
-        };
-        let spec = AgentSpec::from_config(&config).unwrap();
+        let spec = AgentSpec::from_command("claude --verbose").unwrap();
         assert_eq!(spec.kind, AgentKind::ClaudeCode);
         assert_eq!(spec.argv, vec!["claude", "--verbose"]);
         assert!(spec.supports_sessions());
+        assert_eq!(
+            spec.resume_args("abc").unwrap(),
+            vec!["--resume".to_string(), "abc".to_string()]
+        );
+    }
+
+    #[test]
+    fn detects_claude_by_path_not_just_name() {
+        let spec = AgentSpec::from_command("/opt/bin/claude").unwrap();
+        assert_eq!(spec.kind, AgentKind::ClaudeCode);
     }
 
     #[test]
     fn unknown_agent_has_no_sessions() {
-        let config = Config {
-            agent: Some("aider".into()),
-            ..Config::default()
-        };
-        let spec = AgentSpec::from_config(&config).unwrap();
+        let spec = AgentSpec::from_command("aider").unwrap();
         assert!(!spec.supports_sessions());
         assert!(spec.resume_args("x").is_none());
+        assert!(sessions_for(&spec, Path::new("/tmp")).is_err());
     }
 
     #[test]

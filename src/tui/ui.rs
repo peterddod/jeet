@@ -18,7 +18,7 @@ pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) 
         .constraints([
             Constraint::Length(4),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -29,7 +29,8 @@ pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) 
     let status = Paragraph::new(Line::from(Span::styled(
         explorer.status_line.clone(),
         Style::default().fg(Color::Yellow),
-    )));
+    )))
+    .wrap(Wrap { trim: true });
     frame.render_widget(status, chunks[2]);
 
     let hints = Paragraph::new(Line::from(Span::styled(
@@ -204,9 +205,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(
-                            " worktrees · ⏎ switch  n new  e detached  m rename  d delete  esc close ",
-                        )
+                        .title(" worktrees · ⏎ switch  n new  e detached  m rename  d delete ")
                         .title_style(Style::default().fg(Color::Green)),
                 )
                 .highlight_style(
@@ -353,7 +352,9 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             index: _,
             action: _,
         } => {
-            let area = centered_rect(64, 45, frame.area());
+            // Sized to its content: a destructive prompt that silently clips
+            // its own warnings (or its y/n line) is worse than no prompt.
+            let area = content_rect(66, lines.len() + 4, frame.area());
             frame.render_widget(Clear, area);
             let mut body: Vec<Line> = lines
                 .iter()
@@ -361,7 +362,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .collect();
             body.push(Line::from(""));
             body.push(Line::from(Span::styled(
-                "y confirm · n cancel",
+                "y remove · f force (discard the above) · n cancel",
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(
@@ -387,6 +388,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 ("c", "start a coding agent at the worktree root"),
                 ("s", "previous agent sessions for this worktree"),
                 ("w", "worktrees: switch, create, rename or delete"),
+                ("", "  in the panel: r refresh, esc close"),
                 (".", "toggle hidden files"),
                 ("g / G", "jump to the top / bottom"),
                 ("r", "refresh the listing and counters"),
@@ -417,8 +419,12 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 area,
             );
         }
-        Overlay::Message { title, lines } => {
-            let area = centered_rect(60, 30, frame.area());
+        Overlay::Message {
+            title,
+            lines,
+            from_panel: _,
+        } => {
+            let area = content_rect(64, lines.len() + 4, frame.area());
             frame.render_widget(Clear, area);
             let mut body: Vec<Line> = lines
                 .iter()
@@ -460,6 +466,29 @@ pub fn truncate(text: &str, width: usize) -> String {
     }
     let head: String = text.chars().take(width.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+/// A centered box `lines` rows tall (plus borders), clamped to the frame.
+fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
+    let wanted = (lines as u16).saturating_add(2);
+    let height = wanted.min(area.height);
+    let top = area.height.saturating_sub(height) / 2;
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

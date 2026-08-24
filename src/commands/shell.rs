@@ -11,35 +11,64 @@ pub fn run_init_shell() -> Result<()> {
     let mut out = String::from(
         r#"# jeet shell integration — add one line to ~/.zshrc or ~/.bashrc:
 #   eval "$(jeet init-shell)"
-# Capture binary path at eval time (before function definition)
-_JEET_BIN="$(which jeet 2>/dev/null || echo jeet)"
+# Resolve the binary, not the function: zsh's `which` prints function bodies and
+# a bare-word fallback would make the wrapper call itself.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  _JEET_BIN="$(whence -p jeet 2>/dev/null)"
+else
+  _JEET_BIN="$(type -P jeet 2>/dev/null)"
+fi
 jeet() {
-  if [[ "$1" == "cd" ]]; then
+  local _jeet_bin _jeet_status _jeet_target _jeet_out
+  # Re-resolve if the rc file was eval'd before PATH knew about jeet.
+  _jeet_bin="${_JEET_BIN:-}"
+  if [ -z "$_jeet_bin" ]; then
+    if [ -n "${ZSH_VERSION:-}" ]; then
+      _jeet_bin="$(whence -p jeet 2>/dev/null)"
+    else
+      _jeet_bin="$(type -P jeet 2>/dev/null)"
+    fi
+  fi
+  if [ -z "$_jeet_bin" ]; then
+    echo "jeet: could not find the jeet binary on PATH" >&2
+    return 127
+  fi
+
+  if [[ "${1:-}" == "cd" ]]; then
     shift
-    builtin cd -- "$("$_JEET_BIN" path "$@")"
+    _jeet_target="$("$_jeet_bin" path "$@")" || return $?
+    [ -n "$_jeet_target" ] || return 1
+    builtin cd -- "$_jeet_target"
     return $?
   fi
-  if [[ "$1" == "checkout" ]]; then
+  if [[ "${1:-}" == "checkout" ]]; then
     shift
-    _jeet_path=$("$_JEET_BIN" checkout "$@")
-    _jeet_path="${_jeet_path%%$'\n'*}"
-    if [[ -d "$_jeet_path" ]]; then
-      builtin cd -- "$_jeet_path"
+    _jeet_out="$("$_jeet_bin" checkout "$@")"
+    _jeet_status=$?
+    _jeet_out="${_jeet_out%%$'\n'*}"
+    if [[ -d "$_jeet_out" ]]; then
+      builtin cd -- "$_jeet_out"
     fi
-    return 0
+    return $_jeet_status
   fi
+
   # Everything else runs the binary, which may ask us to cd by writing a path
-  # to $JEET_CD_FILE (the explorer and `jeet worktree` both do).
-  local _jeet_cd_file _jeet_status _jeet_target
-  _jeet_cd_file="$(mktemp "${TMPDIR:-/tmp}/jeet-cd.XXXXXX" 2>/dev/null)" || _jeet_cd_file=""
-  JEET_CD_FILE="$_jeet_cd_file" "$_JEET_BIN" "$@"
+  # to $JEET_CD_FILE (the explorer and `jeet worktree` both do). One mktemp file
+  # per shell, reused, so an interrupted run cannot leave a trail of them.
+  if [[ -z "${_JEET_CD_FILE:-}" || ! -f "${_JEET_CD_FILE:-}" ]]; then
+    _JEET_CD_FILE="$(mktemp "${TMPDIR:-/tmp}/jeet-cd.XXXXXX" 2>/dev/null)" || _JEET_CD_FILE=""
+  fi
+  if [[ -n "$_JEET_CD_FILE" ]]; then
+    : >"$_JEET_CD_FILE"
+  fi
+  JEET_CD_FILE="$_JEET_CD_FILE" "$_jeet_bin" "$@"
   _jeet_status=$?
-  if [[ -n "$_jeet_cd_file" ]]; then
-    if [[ -s "$_jeet_cd_file" ]]; then
-      _jeet_target="$(cat "$_jeet_cd_file")"
-      [[ -d "$_jeet_target" ]] && builtin cd -- "$_jeet_target"
+  if [[ -n "$_JEET_CD_FILE" && -s "$_JEET_CD_FILE" ]]; then
+    _jeet_target="$(cat "$_JEET_CD_FILE")"
+    : >"$_JEET_CD_FILE"
+    if [[ -d "$_jeet_target" ]]; then
+      builtin cd -- "$_jeet_target"
     fi
-    rm -f "$_jeet_cd_file"
   fi
   return $_jeet_status
 }
@@ -71,7 +100,7 @@ jeet() {
   fi
   _clap_dynamic_completer_jeet "$@"
 }
-compdef _jeet_wrapper jeet
+(( $+functions[compdef] )) && compdef _jeet_wrapper jeet
 fi
 
 "#,

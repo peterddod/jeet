@@ -70,9 +70,13 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::path::run(&app, &filter, branch.as_deref())?;
         }
-        Commands::Exec { filter, ephemeral } => {
+        Commands::Exec {
+            filter,
+            branch,
+            ephemeral,
+        } => {
             let app = context::App::open()?;
-            commands::exec::run(&app, &filter, None /* branch */, ephemeral)?;
+            commands::exec::run(&app, &filter, branch.as_deref(), ephemeral)?;
         }
         Commands::Explore => {
             let app = context::App::open()?;
