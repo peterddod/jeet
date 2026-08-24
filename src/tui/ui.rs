@@ -1,0 +1,445 @@
+//! Rendering for the explorer.
+
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Frame;
+
+use super::state::{human_size, Explorer, Overlay};
+use crate::worktrees::WorktreeStatus;
+
+const HINTS: &str =
+    "↑↓ move  → open  ← back  ⏎ edit  w worktrees  s sessions  c agent  . hidden  ? help  q quit";
+
+pub fn draw(frame: &mut Frame, explorer: &Explorer, list_state: &mut ListState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+
+    draw_header(frame, chunks[0], explorer);
+    draw_listing(frame, chunks[1], explorer, list_state);
+
+    let status = Paragraph::new(Line::from(Span::styled(
+        explorer.status_line.clone(),
+        Style::default().fg(Color::Yellow),
+    )));
+    frame.render_widget(status, chunks[2]);
+
+    let hints = Paragraph::new(Line::from(Span::styled(
+        HINTS,
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(hints, chunks[3]);
+
+    if let Some(overlay) = &explorer.overlay {
+        draw_overlay(frame, explorer, overlay);
+    }
+}
+
+fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
+    let worktree_line = Line::from(vec![
+        Span::styled("worktree ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            explorer.root_label.clone(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("[{}]", explorer.root_kind),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw("  "),
+        status_span(&explorer.root_status),
+        Span::raw("  "),
+        Span::styled(
+            explorer.root_status.diff_summary(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!(" vs {}", explorer.repo.default_branch),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+
+    let path_line = Line::from(vec![
+        Span::styled("path     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(explorer.breadcrumb(), Style::default().fg(Color::Cyan)),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" jeet · {} ", explorer.repo.id),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Left);
+
+    frame.render_widget(
+        Paragraph::new(vec![worktree_line, path_line]).block(block),
+        area,
+    );
+}
+
+pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
+    if status.dirty > 0 {
+        Span::styled(
+            format!("{} uncommitted", status.dirty),
+            Style::default().fg(Color::Red),
+        )
+    } else if status.ahead > 0 || status.behind > 0 {
+        Span::styled(
+            format!("↑{} ↓{}", status.ahead, status.behind),
+            Style::default().fg(Color::Blue),
+        )
+    } else {
+        Span::styled("clean", Style::default().fg(Color::Green))
+    }
+}
+
+fn draw_listing(frame: &mut Frame, area: Rect, explorer: &Explorer, list_state: &mut ListState) {
+    let width = area.width.saturating_sub(4) as usize;
+    let items: Vec<ListItem> = explorer
+        .entries
+        .iter()
+        .map(|entry| {
+            let (marker, style) = if entry.is_dir {
+                ("▸ ", Style::default().fg(Color::Cyan))
+            } else {
+                ("  ", Style::default())
+            };
+            let name = entry.display_name();
+            let size = if entry.is_dir {
+                String::new()
+            } else {
+                human_size(entry.size)
+            };
+            let used = marker.chars().count() + name.chars().count() + size.chars().count();
+            let pad = width.saturating_sub(used).max(1);
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(name, style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(size, Style::default().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+
+    let title = if explorer.entries.is_empty() {
+        " empty directory ".to_string()
+    } else {
+        format!(" {} items ", explorer.entries.len())
+    };
+
+    list_state.select(if explorer.entries.is_empty() {
+        None
+    } else {
+        Some(explorer.selected.min(explorer.entries.len() - 1))
+    });
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(list, area, list_state);
+}
+
+fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
+    match overlay {
+        Overlay::Worktrees { selected } => {
+            let rows = &explorer.worktree_rows;
+            let area = centered_rect(80, 70, frame.area());
+            frame.render_widget(Clear, area);
+            let items: Vec<ListItem> = rows
+                .iter()
+                .map(|row| {
+                    let marker = if row.current { "● " } else { "  " };
+                    let mut spans = vec![
+                        Span::styled(marker, Style::default().fg(Color::Green)),
+                        Span::styled(
+                            format!("{:<26}", truncate(&row.entry.display_name(), 26)),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::styled(
+                            format!("{:<10}", row.entry.kind.label()),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                        status_span(&row.status),
+                        Span::raw("  "),
+                        Span::styled(
+                            row.status.diff_summary(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ];
+                    if row.entry.missing {
+                        spans.push(Span::styled(
+                            "  MISSING",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+
+            let mut state = ListState::default();
+            state.select(if rows.is_empty() {
+                None
+            } else {
+                Some((*selected).min(rows.len() - 1))
+            });
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" worktrees · ⏎ switch  n new  e ephemeral  d delete  esc close ")
+                        .title_style(Style::default().fg(Color::Green)),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                );
+            frame.render_stateful_widget(list, area, &mut state);
+        }
+        Overlay::Sessions { sessions, selected } => {
+            let area = centered_rect(85, 70, frame.area());
+            frame.render_widget(Clear, area);
+            let items: Vec<ListItem> = sessions
+                .iter()
+                .map(|session| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{:<10}", session.age()),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::styled(
+                            format!("{:<9}", format!("{} msgs", session.entries)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(truncate(&session.summary, 60)),
+                    ]))
+                })
+                .collect();
+            let mut state = ListState::default();
+            state.select(if sessions.is_empty() {
+                None
+            } else {
+                Some((*selected).min(sessions.len() - 1))
+            });
+            let title = format!(
+                " {} sessions · ⏎ resume  esc close ",
+                explorer.agent.display()
+            );
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .title_style(Style::default().fg(Color::Green)),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                );
+            frame.render_stateful_widget(list, area, &mut state);
+        }
+        Overlay::NewWorktree { input } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+            let body = vec![
+                Line::from(vec![
+                    Span::styled("branch ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        input.clone(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "⏎ create and publish to origin · empty name creates a detached checkout",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "esc cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" new worktree ")
+                            .title_style(Style::default().fg(Color::Green)),
+                    )
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+        }
+        Overlay::Confirm {
+            title,
+            lines,
+            index: _,
+            action: _,
+        } => {
+            let area = centered_rect(64, 45, frame.area());
+            frame.render_widget(Clear, area);
+            let mut body: Vec<Line> = lines
+                .iter()
+                .map(|l| Line::from(Span::raw(l.clone())))
+                .collect();
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "y confirm · n cancel",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" {title} "))
+                            .title_style(Style::default().fg(Color::Red)),
+                    )
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+        }
+        Overlay::Help => {
+            let area = centered_rect(64, 70, frame.area());
+            frame.render_widget(Clear, area);
+            let rows = [
+                ("↑ / k, ↓ / j", "move up and down this level"),
+                ("→ / l", "expand: enter the highlighted folder"),
+                ("← / h", "back: leave the folder (stops at the root)"),
+                ("⏎", "folder: enter · file: open in your editor"),
+                ("c", "start a coding agent at the worktree root"),
+                ("s", "previous agent sessions for this worktree"),
+                ("w", "worktrees: switch, create or delete"),
+                (".", "toggle hidden files"),
+                ("g / G", "jump to the top / bottom"),
+                ("r", "refresh the listing and counters"),
+                ("q", "quit, leaving the shell in this directory"),
+                ("esc", "quit without moving the shell"),
+            ];
+            let body: Vec<Line> = rows
+                .iter()
+                .map(|(key, description)| {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{key:<14}"),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(*description),
+                    ])
+                })
+                .collect();
+            frame.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" keys · esc close ")
+                        .title_style(Style::default().fg(Color::Green)),
+                ),
+                area,
+            );
+        }
+        Overlay::Message { title, lines } => {
+            let area = centered_rect(60, 30, frame.area());
+            frame.render_widget(Clear, area);
+            let mut body: Vec<Line> = lines
+                .iter()
+                .map(|l| Line::from(Span::raw(l.clone())))
+                .collect();
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "esc close",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" {title} "))
+                            .title_style(Style::default().fg(Color::Yellow)),
+                    )
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+        }
+    }
+}
+
+/// Truncate from the left, keeping the tail — right for paths.
+pub fn truncate_start(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(count - width.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
+pub fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncates_with_ellipsis() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn truncates_paths_from_the_left() {
+        assert_eq!(truncate_start("/a/b", 10), "/a/b");
+        assert_eq!(truncate_start("/very/long/path/file", 10), "…path/file");
+    }
+}

@@ -8,6 +8,8 @@ Global git repository index and worktree manager.
 
 `jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
 
+Run `jeet` with no arguments inside a repo and you get a file explorer: one level of the tree at a time, your current worktree pinned to the top, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
+
 Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
 
 ## Install
@@ -59,9 +61,15 @@ jeet scan
 jeet ls
 jeet ls acme
 
-# Worktrees
-jeet worktree add acme/widget feature-x
-jeet worktree ls acme/widget
+# Explore (this is the main event)
+jeet cd acme/widget                      # jump to the trunk
+jeet                                     # open the file explorer there
+
+# Worktrees — from anywhere inside a repo or worktree
+jeet worktree feature-x                  # branch feature-x, published to origin
+jeet worktree                            # detached checkout of the default branch
+jeet worktree ls acme/widget             # with dirty + diff counters
+jeet worktree clean                      # drop worktrees holding no work
 jeet worktree remove acme/widget feature-x
 
 # Navigation
@@ -71,6 +79,77 @@ jeet exec acme/widget                    # subshell in trunk
 jeet exec acme/widget --branch feature-x # subshell in worktree
 jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on exit)
 ```
+
+## The explorer
+
+```bash
+jeet          # inside any repo, trunk or worktree (also `jeet explore`)
+```
+
+```
+┌ jeet · github.com/acme/widget ────────────────────────────────┐
+│worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
+│path     /src                                                  │
+└───────────────────────────────────────────────────────────────┘
+┌ 2 items ──────────────────────────────────────────────────────┐
+│▸ commands/                                                    │
+│  main.rs                                                 13B  │
+└───────────────────────────────────────────────────────────────┘
+```
+
+| key | action |
+|-----|--------|
+| `↑` / `↓` (or `k` / `j`) | move within the current level |
+| `→` / `l` | expand: step into the highlighted folder |
+| `←` / `h` | back: leave the folder (never above the worktree root) |
+| `⏎` | folder: step in · file: open it in your editor |
+| `c` | start a coding agent from the worktree root |
+| `s` | previous agent sessions for this worktree (⏎ resumes one) |
+| `w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `d` delete |
+| `.` | toggle hidden files |
+| `g` / `G` | jump to the top / bottom |
+| `r` | refresh the listing and the counters |
+| `q` | quit, leaving your shell in the directory you were browsing |
+| `esc` | quit without moving your shell |
+
+Leaving your shell in the right directory needs the shell wrapper
+(`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
+
+The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
+agent defaults to `claude`. Both are configurable (see below). Session listing
+knows Claude Code's transcript store — other agents still launch with `c`, they
+just have no session history to show.
+
+## Worktrees
+
+```bash
+jeet worktree feature-x     # create the branch, worktree it, push it to origin
+jeet worktree               # detached checkout of the default branch
+jeet worktree feature-x --no-push
+jeet worktree feature-x --repo acme/widget
+```
+
+Both forms work from **anywhere** inside a repo or one of its worktrees, not
+just the root, and both drop you into the new worktree when the shell wrapper is
+installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live
+under `~/.jeet/ephemeral` and are what `jeet worktree clean` collects.
+
+### Cleaning up
+
+```bash
+jeet worktree ls acme/widget    # every worktree with its counters
+jeet worktree clean --dry-run   # what would go, and why the rest stays
+jeet worktree clean --yes
+jeet worktree clean --all --force
+```
+
+`clean` removes detached checkouts and branch worktrees that hold nothing you
+would miss, and reports the ones it keeps with the reason — uncommitted changes,
+or commits that are not on the default branch yet. `--all` includes worktrees
+jeet did not create; `--force` removes even those holding work. Stale entries
+whose directory is gone are pruned either way. You can do the same thing
+interactively with `d` in the explorer's worktree panel, which shows the same
+counters before it asks.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
 
@@ -116,13 +195,31 @@ jeet complete branches acme/widget
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
 
+## What's new in v0.3
+
+- `jeet` with no arguments opens the file explorer (`jeet explore`).
+- `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
+  publishes the branch to `origin`, no name gives you a detached checkout.
+- `jeet worktree clean` and the explorer's worktree panel delete worktrees,
+  showing uncommitted work and a diff counter against the default branch first.
+- `jeet sessions` lists the coding-agent sessions recorded for a worktree.
+- The `init-shell` wrapper now follows a `cd` hand-off, so the explorer and
+  `jeet worktree` can leave your shell in the right directory.
+
 ## Configuration
 
 On first run, `jeet` creates `~/.jeet/config.toml`:
 
 ```toml
 scan_roots = ["~/Projects", "~/code"]
+
+# optional
+editor = "vim"       # opened by ⏎ in the explorer; defaults to $VISUAL/$EDITOR
+agent = "claude"     # launched by `c`; may include arguments
 ```
+
+Both accept arguments (`editor = "code --wait"`) and are overridden by
+`JEET_EDITOR` / `JEET_AGENT`.
 
 Override the home directory for testing:
 
@@ -141,7 +238,7 @@ export JEET_HOME=/tmp/jeet-test
   worktrees/
     github.com/acme/widget/feature-x/
   ephemeral/
-    github.com/acme/widget/<uuid>/    # temporary exec --ephemeral checkouts
+    github.com/acme/widget/<uuid>/    # detached checkouts (exec --ephemeral, jeet worktree)
 ```
 
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.

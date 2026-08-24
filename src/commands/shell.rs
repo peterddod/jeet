@@ -17,16 +17,31 @@ jeet() {
   if [[ "$1" == "cd" ]]; then
     shift
     builtin cd -- "$("$_JEET_BIN" path "$@")"
-  elif [[ "$1" == "checkout" ]]; then
+    return $?
+  fi
+  if [[ "$1" == "checkout" ]]; then
     shift
     _jeet_path=$("$_JEET_BIN" checkout "$@")
     _jeet_path="${_jeet_path%%$'\n'*}"
     if [[ -d "$_jeet_path" ]]; then
       builtin cd -- "$_jeet_path"
     fi
-  else
-    "$_JEET_BIN" "$@"
+    return 0
   fi
+  # Everything else runs the binary, which may ask us to cd by writing a path
+  # to $JEET_CD_FILE (the explorer and `jeet worktree` both do).
+  local _jeet_cd_file _jeet_status _jeet_target
+  _jeet_cd_file="$(mktemp "${TMPDIR:-/tmp}/jeet-cd.XXXXXX" 2>/dev/null)" || _jeet_cd_file=""
+  JEET_CD_FILE="$_jeet_cd_file" "$_JEET_BIN" "$@"
+  _jeet_status=$?
+  if [[ -n "$_jeet_cd_file" ]]; then
+    if [[ -s "$_jeet_cd_file" ]]; then
+      _jeet_target="$(cat "$_jeet_cd_file")"
+      [[ -d "$_jeet_target" ]] && builtin cd -- "$_jeet_target"
+    fi
+    rm -f "$_jeet_cd_file"
+  fi
+  return $_jeet_status
 }
 
 "#,

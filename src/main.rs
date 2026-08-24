@@ -1,3 +1,5 @@
+mod agent;
+mod cd;
 mod cli;
 
 mod commands;
@@ -9,19 +11,26 @@ mod git;
 mod paths;
 mod remote;
 mod resolve;
+mod tui;
+mod worktrees;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
-use cli::{Cli, Commands, WorktreeCommands};
+use cli::{Cli, Commands, WorktreeArgs, WorktreeCommands};
 
 fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        let app = context::App::open()?;
+        return commands::explore::run(&app);
+    };
+
+    match command {
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
@@ -65,24 +74,54 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::exec::run(&app, &filter, None /* branch */, ephemeral)?;
         }
-        Commands::Worktree { command } => match command {
-            WorktreeCommands::Add { filter, branch } => {
-                let app = context::App::open()?;
-                commands::worktree::add(&app, &filter, &branch)?;
+        Commands::Explore => {
+            let app = context::App::open()?;
+            commands::explore::run(&app)?;
+        }
+        Commands::Sessions => {
+            let app = context::App::open()?;
+            commands::sessions::run(&app)?;
+        }
+        Commands::Worktree(WorktreeArgs {
+            command,
+            name,
+            repo,
+            no_push,
+        }) => {
+            let app = context::App::open()?;
+            match command {
+                None => {
+                    commands::worktree::create(&app, name.as_deref(), repo.as_deref(), !no_push)?
+                }
+                Some(WorktreeCommands::Add {
+                    filter,
+                    branch,
+                    push,
+                }) => commands::worktree::add(&app, &filter, &branch, push)?,
+                Some(WorktreeCommands::Clean {
+                    filter,
+                    all,
+                    force,
+                    dry_run,
+                    assume_yes,
+                }) => commands::worktree::clean(
+                    &app,
+                    filter.as_deref(),
+                    all,
+                    force,
+                    dry_run,
+                    assume_yes,
+                )?,
+                Some(WorktreeCommands::Ls { filter }) => {
+                    commands::worktree::ls_cmd(&app, filter.as_deref())?
+                }
+                Some(WorktreeCommands::Remove {
+                    filter,
+                    branch,
+                    force,
+                }) => commands::worktree::remove(&app, &filter, &branch, force)?,
             }
-            WorktreeCommands::Ls { filter } => {
-                let app = context::App::open()?;
-                commands::worktree::ls_cmd(&app, filter.as_deref())?;
-            }
-            WorktreeCommands::Remove {
-                filter,
-                branch,
-                force,
-            } => {
-                let app = context::App::open()?;
-                commands::worktree::remove(&app, &filter, &branch, force)?;
-            }
-        },
+        }
     }
     Ok(())
 }
