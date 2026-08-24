@@ -188,16 +188,16 @@ pub fn status_for(repo: &RepoRecord, entry: &WorktreeEntry) -> WorktreeStatus {
     }
 }
 
-/// A newly created worktree, plus anything the caller should tell the user
-/// about that is not serious enough to fail on (a failed publish, say).
+/// The worktree a command left you with, plus anything worth telling the user
+/// that is not serious enough to fail on (a failed publish, say).
 #[derive(Debug, Clone)]
-pub struct Created {
+pub struct Outcome {
     pub path: PathBuf,
     pub warnings: Vec<String>,
 }
 
 /// Create (or reuse) a worktree for `branch`, publishing the branch when asked.
-pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> Result<Created> {
+pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> Result<Outcome> {
     let trunk = PathBuf::from(&repo.trunk_path);
     if !trunk.exists() {
         bail!("trunk path does not exist: {}", repo.trunk_path);
@@ -207,7 +207,7 @@ pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> R
 
     if dest.exists() {
         register(app, repo, branch, &dest)?;
-        return Ok(Created {
+        return Ok(Outcome {
             path: dest,
             warnings: vec![format!("reusing the existing worktree for {branch}")],
         });
@@ -243,7 +243,7 @@ pub fn create_named(app: &App, repo: &RepoRecord, branch: &str, push: bool) -> R
         }
     }
 
-    Ok(Created {
+    Ok(Outcome {
         path: dest,
         warnings,
     })
@@ -282,6 +282,105 @@ fn register(app: &App, repo: &RepoRecord, branch: &str, dest: &Path) -> Result<(
         branch: branch.to_string(),
         path: dest.to_string_lossy().to_string(),
         created_at: now_secs(),
+    })
+}
+
+/// Give a worktree a (new) branch name, moving it to match.
+///
+/// A detached scratchpad gets a branch created at its current HEAD — nothing in
+/// the working tree is touched, so uncommitted work survives the promotion —
+/// and moves out of the ephemeral root so `clean` stops treating it as
+/// disposable. A named worktree has its branch renamed instead. Worktrees jeet
+/// does not manage keep their directory where the user put it.
+pub fn rename(
+    app: &App,
+    repo: &RepoRecord,
+    entry: &WorktreeEntry,
+    new_name: &str,
+    push: bool,
+) -> Result<Outcome> {
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let new_name = new_name.trim();
+
+    if entry.kind == WorktreeKind::Trunk {
+        bail!("refusing to rename the trunk checkout");
+    }
+    if entry.missing {
+        bail!(
+            "{} is registered with git but missing on disk",
+            entry.path.display()
+        );
+    }
+    if new_name.is_empty() {
+        bail!("branch name cannot be empty");
+    }
+    if entry.branch.as_deref() == Some(new_name) {
+        bail!("{new_name} is already the branch name");
+    }
+    if git::branch_exists(&trunk, new_name)? {
+        bail!("branch {new_name} already exists");
+    }
+
+    let old_branch = entry.branch.clone();
+    let old_upstream = old_branch
+        .as_deref()
+        .and_then(|b| git::upstream_of(&entry.path, b));
+
+    // Managed and ephemeral worktrees live at a path derived from the branch,
+    // so they follow the rename; anything the user placed themselves stays put.
+    let identity = remote::identity_from_id(&repo.id)?;
+    let dest = match entry.kind {
+        WorktreeKind::External => entry.path.clone(),
+        _ => paths::worktree_path(&app.worktrees_root(), &identity, new_name),
+    };
+    let moving = !resolve::same_path(&dest, &entry.path);
+    if moving && dest.exists() {
+        bail!("worktree path already exists: {}", dest.display());
+    }
+
+    match &old_branch {
+        Some(_) => git::rename_current_branch(&entry.path, new_name)
+            .context("rename the worktree's branch")?,
+        None => git::checkout_new_branch_here(&entry.path, new_name)
+            .context("create a branch for the detached worktree")?,
+    }
+
+    let mut warnings = Vec::new();
+    if moving {
+        git::worktree_move(&trunk, &entry.path, &dest).with_context(|| {
+            format!("branch is now {new_name}, but the worktree could not be moved")
+        })?;
+    } else if entry.kind == WorktreeKind::External {
+        warnings.push(format!(
+            "left the worktree at {} (jeet did not create it)",
+            entry.path.display()
+        ));
+    }
+
+    if let Some(old) = &old_branch {
+        let _ = app.db.remove_worktree(&repo.id, old);
+    }
+    register(app, repo, new_name, &dest)?;
+    prune_empty_parents(&entry.path, &[app.worktrees_root(), app.ephemeral_root()]);
+
+    if push {
+        if !git::remote_exists(&trunk, "origin") {
+            warnings.push("no origin remote; branch was not published".to_string());
+        } else if let Err(e) = git::push_set_upstream(&dest, "origin", new_name) {
+            warnings.push(format!(
+                "could not publish {new_name} to origin ({e}); push it yourself when you can"
+            ));
+        }
+    }
+    if let (Some(old), Some(upstream)) = (&old_branch, &old_upstream) {
+        warnings.push(format!(
+            "{upstream} still exists; delete it with `git push origin --delete {old}`"
+        ));
+    }
+
+    Ok(Outcome {
+        path: dest,
+        warnings,
     })
 }
 

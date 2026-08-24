@@ -54,6 +54,11 @@ pub enum Overlay {
     NewWorktree {
         input: String,
     },
+    /// Rename the worktree at this index into [`Explorer::worktree_rows`].
+    RenameWorktree {
+        index: usize,
+        input: String,
+    },
     Confirm {
         title: String,
         lines: Vec<String>,
@@ -218,7 +223,13 @@ impl Explorer {
     }
 
     pub fn quit_in_place(&mut self) {
-        self.exit = Exit::Stay;
+        // A rename can move the directory the shell is sitting in out from
+        // under it; leaving it somewhere that no longer exists helps nobody.
+        self.exit = if self.origin.is_dir() {
+            Exit::Stay
+        } else {
+            Exit::ChangeDir(self.cwd.clone())
+        };
         self.should_quit = true;
     }
 }
@@ -376,8 +387,23 @@ mod tests {
     }
 
     #[test]
+    fn quitting_in_place_follows_a_vanished_directory() {
+        let dir = fixture();
+        let moved = dir.path().join("src");
+        let mut explorer = explorer_at(&moved);
+        explorer.root = dir.path().to_path_buf();
+        std::fs::remove_dir_all(&moved).unwrap();
+        explorer.quit_in_place();
+        assert_eq!(explorer.exit, Exit::ChangeDir(moved));
+    }
+
+    #[test]
     fn quitting_in_place_does_not_move_the_shell() {
         let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        explorer.quit_in_place();
+        assert_eq!(explorer.exit, Exit::Stay);
+
         let mut explorer = explorer_at(dir.path());
         explorer.quit_here();
         assert_eq!(explorer.exit, Exit::Stay);

@@ -98,6 +98,18 @@ fn main() -> Result<()> {
                     branch,
                     push,
                 }) => commands::worktree::add(&app, &filter, &branch, push)?,
+                Some(WorktreeCommands::Rename {
+                    name,
+                    new_name,
+                    repo,
+                    no_push,
+                }) => commands::worktree::rename(
+                    &app,
+                    &name,
+                    new_name.as_deref(),
+                    repo.as_deref(),
+                    !no_push,
+                )?,
                 Some(WorktreeCommands::Clean {
                     filter,
                     all,

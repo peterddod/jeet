@@ -570,3 +570,149 @@ fn init_shell_wires_up_the_cd_handoff() {
     assert!(stdout.contains("JEET_CD_FILE"));
     assert!(stdout.contains("builtin cd --"));
 }
+
+// ---------------------------------------------------------------------------
+// renaming worktrees, including promoting a detached scratchpad
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rename_promotes_a_detached_scratchpad_and_keeps_the_work() {
+    let lab = lab("scratchpad");
+
+    let output = lab.jeet(&["worktree"], &lab.repo);
+    assert!(output.status.success());
+    let scratch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let scratch = std::path::Path::new(&scratch);
+    assert!(scratch.to_string_lossy().contains("ephemeral"));
+
+    // Work that must survive the promotion: one commit and one untracked file.
+    std::fs::write(scratch.join("idea.txt"), "an idea\n").unwrap();
+    git(&["add", "-A"], scratch);
+    git(&["commit", "-qm", "the idea"], scratch);
+    std::fs::write(scratch.join("still-thinking.txt"), "wip").unwrap();
+
+    let output = lab.jeet(&["worktree", "rename", "login-page"], scratch);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let promoted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let promoted = std::path::Path::new(&promoted);
+
+    assert!(!scratch.exists(), "the scratchpad should have moved");
+    assert!(promoted.is_dir(), "promoted worktree missing");
+    assert!(
+        !promoted.to_string_lossy().contains("ephemeral"),
+        "still ephemeral: {}",
+        promoted.display()
+    );
+    assert!(promoted.join("idea.txt").exists(), "commit lost");
+    assert!(
+        promoted.join("still-thinking.txt").exists(),
+        "uncommitted work lost"
+    );
+
+    let head = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(promoted)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "login-page");
+    assert!(
+        lab.branches_on_remote().contains("login-page"),
+        "branch was not published: {}",
+        lab.branches_on_remote()
+    );
+
+    // The promoted worktree is no longer disposable.
+    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[keep]"), "{stdout}");
+    assert!(stdout.contains("login-page"), "{stdout}");
+}
+
+#[test]
+fn rename_moves_a_named_worktree_and_flags_the_stale_remote_branch() {
+    let lab = lab("renaming");
+
+    let output = lab.jeet(&["worktree", "old-name"], &lab.repo);
+    assert!(output.status.success());
+    let old = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let output = lab.jeet(&["worktree", "rename", "old-name", "new-name"], &lab.repo);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let new = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(new.ends_with("new-name"), "{new}");
+    assert!(!std::path::Path::new(&old).exists());
+    assert!(std::path::Path::new(&new).is_dir());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("origin/old-name still exists"), "{stderr}");
+    assert!(lab.branches_on_remote().contains("new-name"));
+}
+
+#[test]
+fn rename_refuses_names_that_are_already_taken() {
+    let lab = lab("collision");
+    lab.jeet(&["worktree", "first", "--no-push"], &lab.repo);
+    lab.jeet(&["worktree", "second", "--no-push"], &lab.repo);
+
+    let output = lab.jeet(&["worktree", "rename", "first", "second"], &lab.repo);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already exists"), "{stderr}");
+}
+
+#[test]
+fn rename_takes_the_shell_with_it() {
+    let lab = lab("following");
+    let output = lab.jeet(&["worktree", "--no-push"], &lab.repo);
+    assert!(output.status.success());
+    let scratch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let nested = std::path::Path::new(&scratch).join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let cd_file = std::path::Path::new(&lab.home).join("rename-cd");
+    let output = jeet_bin()
+        .args(["worktree", "rename", "named-now", "--no-push"])
+        .current_dir(&nested)
+        .env("JEET_HOME", &lab.home)
+        .env("JEET_CD_FILE", &cd_file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // We were inside the worktree, in a subdirectory: land in the same place.
+    let landed = std::fs::read_to_string(&cd_file).unwrap();
+    assert!(landed.ends_with("named-now/nested"), "landed in {landed:?}");
+    assert!(std::path::Path::new(landed.trim()).is_dir());
+}
+
+#[test]
+fn renaming_someone_elses_worktree_leaves_the_shell_alone() {
+    let lab = lab("elsewhere");
+    lab.jeet(&["worktree", "target", "--no-push"], &lab.repo);
+
+    let cd_file = std::path::Path::new(&lab.home).join("no-cd");
+    let output = jeet_bin()
+        .args(["worktree", "rename", "target", "retarget", "--no-push"])
+        .current_dir(&lab.repo)
+        .env("JEET_HOME", &lab.home)
+        .env("JEET_CD_FILE", &cd_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        !cd_file.exists() || std::fs::read_to_string(&cd_file).unwrap().is_empty(),
+        "should not move the shell into a worktree it was not in"
+    );
+}

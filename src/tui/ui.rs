@@ -204,7 +204,9 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" worktrees · ⏎ switch  n new  e ephemeral  d delete  esc close ")
+                        .title(
+                            " worktrees · ⏎ switch  n new  e detached  m rename  d delete  esc close ",
+                        )
                         .title_style(Style::default().fg(Color::Green)),
                 )
                 .highlight_style(
@@ -256,6 +258,58 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                         .add_modifier(Modifier::BOLD),
                 );
             frame.render_stateful_widget(list, area, &mut state);
+        }
+        Overlay::RenameWorktree { index, input } => {
+            let area = centered_rect(64, 30, frame.area());
+            frame.render_widget(Clear, area);
+            let current = explorer
+                .worktree_rows
+                .get(*index)
+                .map(|row| row.entry.display_name())
+                .unwrap_or_default();
+            let detached = explorer
+                .worktree_rows
+                .get(*index)
+                .map(|row| row.entry.branch.is_none())
+                .unwrap_or(false);
+            let explain = if detached {
+                "⏎ creates this branch at the scratchpad's HEAD and keeps your work"
+            } else {
+                "⏎ renames the branch and moves the worktree to match"
+            };
+            let body = vec![
+                Line::from(vec![
+                    Span::styled("renaming ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(current, Style::default().fg(Color::Magenta)),
+                ]),
+                Line::from(vec![
+                    Span::styled("to       ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        input.clone(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(explain, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "ctrl-u clear · esc cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" rename worktree ")
+                            .title_style(Style::default().fg(Color::Green)),
+                    )
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
         }
         Overlay::NewWorktree { input } => {
             let area = centered_rect(60, 25, frame.area());
@@ -332,7 +386,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 ("⏎", "folder: enter · file: open in your editor"),
                 ("c", "start a coding agent at the worktree root"),
                 ("s", "previous agent sessions for this worktree"),
-                ("w", "worktrees: switch, create or delete"),
+                ("w", "worktrees: switch, create, rename or delete"),
                 (".", "toggle hidden files"),
                 ("g / G", "jump to the top / bottom"),
                 ("r", "refresh the listing and counters"),

@@ -187,6 +187,70 @@ pub fn worktree_add_detached(repo_path: &Path, dest: &Path, start_point: &str) -
     )
 }
 
+/// Create `branch` at the worktree's current HEAD and check it out there.
+///
+/// This is how a detached scratchpad becomes a real branch in place.
+pub fn checkout_new_branch_here(wt_path: &Path, branch: &str) -> Result<()> {
+    run_git(
+        ["-C", &wt_path.to_string_lossy(), "checkout", "-b", branch],
+        "git checkout -b",
+    )
+}
+
+/// Rename the branch checked out in `wt_path`.
+pub fn rename_current_branch(wt_path: &Path, new_name: &str) -> Result<()> {
+    run_git(
+        ["-C", &wt_path.to_string_lossy(), "branch", "-m", new_name],
+        "git branch -m",
+    )
+}
+
+/// Relocate a linked worktree, keeping git's bookkeeping in step.
+///
+/// `dest` must not exist: git moves a worktree *into* an existing directory.
+pub fn worktree_move(repo_path: &Path, from: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        bail!("destination already exists: {}", dest.display());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).context("create worktree parent dirs")?;
+    }
+    run_git(
+        [
+            "-C",
+            &repo_path.to_string_lossy(),
+            "worktree",
+            "move",
+            &from.to_string_lossy(),
+            &dest.to_string_lossy(),
+        ],
+        "git worktree move",
+    )
+}
+
+/// The upstream ref a branch tracks, if any.
+pub fn upstream_of(wt_path: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &wt_path.to_string_lossy(),
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if upstream.is_empty() {
+        None
+    } else {
+        Some(upstream)
+    }
+}
+
 pub fn status_porcelain(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"])

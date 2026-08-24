@@ -108,6 +108,74 @@ pub fn remove(app: &App, filter: &str, branch: &str, force: bool) -> Result<()> 
     Ok(())
 }
 
+/// `jeet worktree rename [old] <new>` — rename a worktree's branch.
+///
+/// With one name, the worktree you are standing in is renamed; with two, the
+/// first picks the worktree. Detached scratchpads get a branch created at their
+/// current HEAD, so you can start one before you know what it is.
+pub fn rename(
+    app: &App,
+    name: &str,
+    new_name: Option<&str>,
+    repo_filter: Option<&str>,
+    push: bool,
+) -> Result<()> {
+    let repo = repo_from_filter_or_cwd(app, repo_filter)?;
+    let entries = worktrees::list(app, &repo)?;
+
+    let (entry, target) = match new_name {
+        // Two names: the first picks the worktree to rename.
+        Some(new_name) => {
+            let entry = entries
+                .iter()
+                .find(|e| e.branch.as_deref() == Some(name) && e.kind != WorktreeKind::Trunk)
+                .ok_or_else(|| anyhow::anyhow!("no worktree for branch {name} on {}", repo.id))?;
+            (entry, new_name)
+        }
+        // One name: rename wherever we are standing.
+        None => {
+            let cwd = std::env::current_dir()?;
+            let root = resolve::resolve_context(app, &cwd)?.root;
+            let entry = entries
+                .iter()
+                .find(|e| resolve::same_path(&e.path, &root))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not tell which worktree {} belongs to; name it explicitly: jeet worktree rename <old> {name}",
+                        root.display()
+                    )
+                })?;
+            (entry, name)
+        }
+    };
+
+    let was = entry.display_name();
+    // If we are standing inside the worktree being moved, our directory is
+    // about to go stale — follow it, keeping the sub-path we were browsing.
+    let follow = std::env::current_dir().ok().and_then(|cwd| {
+        cwd.strip_prefix(&entry.path)
+            .map(|rest| rest.to_path_buf())
+            .ok()
+    });
+
+    let renamed = worktrees::rename(app, &repo, entry, target, push)?;
+    for warning in &renamed.warnings {
+        eprintln!("jeet: {warning}");
+    }
+    eprintln!("jeet: {was} -> {target} at {}", renamed.path.display());
+
+    println!("{}", renamed.path.display());
+    if let Some(rest) = follow {
+        let landing = renamed.path.join(rest);
+        cd::request(if landing.is_dir() {
+            &landing
+        } else {
+            &renamed.path
+        })?;
+    }
+    Ok(())
+}
+
 /// `jeet worktree clean` — drop worktrees that hold no work, reporting the rest.
 pub fn clean(
     app: &App,

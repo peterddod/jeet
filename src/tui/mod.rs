@@ -222,6 +222,21 @@ fn handle_overlay_key(
             KeyCode::Char('e') => {
                 create_worktree(app, explorer, None)?;
             }
+            KeyCode::Char('m') => match explorer.worktree_rows.get(selected) {
+                Some(row) if row.entry.kind == WorktreeKind::Trunk => {
+                    explorer.overlay = Some(Overlay::Message {
+                        title: "cannot rename".into(),
+                        lines: vec!["the trunk checkout keeps the default branch".into()],
+                    });
+                }
+                Some(row) => {
+                    explorer.overlay = Some(Overlay::RenameWorktree {
+                        index: selected,
+                        input: row.entry.branch.clone().unwrap_or_default(),
+                    });
+                }
+                None => {}
+            },
             KeyCode::Char('d') => match explorer.worktree_rows.get(selected) {
                 Some(row) if row.entry.kind == WorktreeKind::Trunk => {
                     explorer.overlay = Some(Overlay::Message {
@@ -273,11 +288,32 @@ fn handle_overlay_key(
             },
             _ => explorer.overlay = Some(Overlay::Sessions { sessions, selected }),
         },
+        Overlay::RenameWorktree { index, mut input } => match key.code {
+            KeyCode::Esc => open_worktrees(app, explorer),
+            KeyCode::Enter => rename_worktree(app, explorer, index, input.trim().to_string())?,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.clear();
+                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
+            }
+            _ => explorer.overlay = Some(Overlay::RenameWorktree { index, input }),
+        },
         Overlay::NewWorktree { mut input } => match key.code {
             KeyCode::Esc => {}
             KeyCode::Enter => {
                 let name = input.trim().to_string();
                 create_worktree(app, explorer, Some(name).filter(|n| !n.is_empty()))?;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.clear();
+                explorer.overlay = Some(Overlay::NewWorktree { input });
             }
             KeyCode::Backspace => {
                 input.pop();
@@ -406,7 +442,7 @@ fn open_sessions(explorer: &mut Explorer) {
 fn create_worktree(app: &App, explorer: &mut Explorer, name: Option<String>) -> Result<()> {
     let result = match &name {
         Some(branch) => worktrees::create_named(app, &explorer.repo, branch, true),
-        None => worktrees::create_detached(app, &explorer.repo).map(|path| worktrees::Created {
+        None => worktrees::create_detached(app, &explorer.repo).map(|path| worktrees::Outcome {
             path,
             warnings: Vec::new(),
         }),
@@ -427,6 +463,54 @@ fn create_worktree(app: &App, explorer: &mut Explorer, name: Option<String>) -> 
         Err(e) => {
             explorer.overlay = Some(Overlay::Message {
                 title: "could not create worktree".into(),
+                lines: vec![e.to_string()],
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rename the worktree at `index`, following it if it is the one we are in.
+fn rename_worktree(
+    app: &App,
+    explorer: &mut Explorer,
+    index: usize,
+    new_name: String,
+) -> Result<()> {
+    let Some(row) = explorer.worktree_rows.get(index).cloned() else {
+        return Ok(());
+    };
+    let was = row.entry.display_name();
+    let following = crate::resolve::same_path(&row.entry.path, &explorer.root);
+    let sub_path = explorer
+        .cwd
+        .strip_prefix(&row.entry.path)
+        .map(|rest| rest.to_path_buf())
+        .ok();
+
+    match worktrees::rename(app, &explorer.repo, &row.entry, &new_name, true) {
+        Ok(renamed) => {
+            if following {
+                switch_worktree(app, explorer, &renamed.path)?;
+                // Stay in the directory we were browsing, under its new home.
+                if let Some(rest) = sub_path.filter(|p| !p.as_os_str().is_empty()) {
+                    let landing = renamed.path.join(rest);
+                    if landing.is_dir() {
+                        explorer.cwd = landing;
+                        explorer.reload(None)?;
+                    }
+                }
+            }
+            open_worktrees(app, explorer);
+            let mut status = format!("renamed {was} to {new_name}");
+            if !renamed.warnings.is_empty() {
+                status.push_str(&format!(" — {}", renamed.warnings.join("; ")));
+            }
+            explorer.set_status(status);
+        }
+        Err(e) => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "could not rename".into(),
                 lines: vec![e.to_string()],
             });
         }

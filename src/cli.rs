@@ -117,6 +117,21 @@ pub enum WorktreeCommands {
         push: bool,
     },
 
+    /// Rename a worktree's branch, or name a detached scratchpad
+    Rename {
+        /// New name, or the existing worktree when a second name follows
+        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
+        name: String,
+        /// New name, when the first argument picked the worktree to rename
+        new_name: Option<String>,
+        /// Repository to act on; defaults to the one containing the current directory
+        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
+        /// Rename locally without publishing the branch to origin
+        #[arg(long)]
+        no_push: bool,
+    },
+
     /// Remove worktrees that hold no uncommitted or unmerged work
     Clean {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]

@@ -105,7 +105,7 @@ jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 | `⏎` | folder: step in · file: open it in your editor |
 | `c` | start a coding agent from the worktree root |
 | `s` | previous agent sessions for this worktree (⏎ resumes one) |
-| `w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `d` delete |
+| `w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete |
 | `.` | toggle hidden files |
 | `g` / `G` | jump to the top / bottom |
 | `r` | refresh the listing and the counters |
@@ -129,10 +129,44 @@ jeet worktree feature-x --no-push
 jeet worktree feature-x --repo acme/widget
 ```
 
+Scratchpad first, name it later:
+
+```bash
+jeet worktree               # detached: poke at something
+# ...an hour of hacking...
+jeet worktree rename login-page
+```
+
 Both forms work from **anywhere** inside a repo or one of its worktrees, not
 just the root, and both drop you into the new worktree when the shell wrapper is
 installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live
 under `~/.jeet/ephemeral` and are what `jeet worktree clean` collects.
+
+### Renaming
+
+```bash
+jeet worktree rename login-page          # rename the worktree you are in
+jeet worktree rename old-name new-name   # or name the one to rename
+jeet worktree rename login-page --no-push
+```
+
+Renaming a **detached** worktree creates that branch at its current HEAD and
+moves it out of the ephemeral root, so a throwaway scratchpad becomes a real
+branch once you know what it is. Nothing in the working tree is touched —
+uncommitted and untracked files come along — and `clean` stops treating it as
+disposable.
+
+Renaming a **named** worktree renames its branch and moves the directory to
+match. If the old branch was already published, jeet says so rather than
+deleting anything on the remote for you:
+
+```
+jeet: origin/old-name still exists; delete it with `git push origin --delete old-name`
+```
+
+If your shell was inside the worktree, it follows the move — right down to the
+subdirectory you were standing in. Worktrees jeet did not create keep their
+directory where you put it; only the branch is renamed.
 
 ### Cleaning up
 
@@ -200,6 +234,8 @@ jeet complete branches acme/widget
 - `jeet` with no arguments opens the file explorer (`jeet explore`).
 - `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
   publishes the branch to `origin`, no name gives you a detached checkout.
+- `jeet worktree rename [old] <new>` renames a worktree's branch, and turns a
+  detached scratchpad into a named branch without disturbing your work.
 - `jeet worktree clean` and the explorer's worktree panel delete worktrees,
   showing uncommitted work and a diff counter against the default branch first.
 - `jeet sessions` lists the coding-agent sessions recorded for a worktree.
