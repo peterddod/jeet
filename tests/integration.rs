@@ -1051,3 +1051,49 @@ pwd"#,
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A dry run must report the same verdict as the run it previews — otherwise
+/// `--dry-run` says "remove" for a worktree that the real command then keeps.
+#[test]
+fn dry_run_previews_the_same_policy_it_would_apply() {
+    let lab = lab("preview");
+    std::fs::write(lab.repo.join(".gitignore"), ".env\n").unwrap();
+    git(&["add", "-A"], &lab.repo);
+    git(&["commit", "-qm", "ignore env"], &lab.repo);
+
+    let output = lab.jeet(&["worktree", "previewed", "--no-push"], &lab.repo);
+    let wt = path_from(&output);
+    std::fs::write(wt.join(".env"), "SECRET=1").unwrap();
+
+    let verdict = |args: &[&str]| -> String {
+        let out = lab.jeet(args, &lab.repo);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout
+            .lines()
+            .find(|l| l.contains("previewed"))
+            .unwrap_or("")
+            .to_string();
+        if line.contains("[remove]") {
+            "remove".into()
+        } else if line.contains("[keep]") {
+            "keep".into()
+        } else {
+            format!("unrecognised: {line}")
+        }
+    };
+
+    // Unattended: the preview and the run must agree...
+    assert_eq!(
+        verdict(&["worktree", "clean", "--dry-run", "--yes"]),
+        "keep"
+    );
+    assert!(wt.join(".env").exists());
+    assert_eq!(verdict(&["worktree", "clean", "--yes"]), "keep");
+    assert!(
+        wt.join(".env").exists(),
+        "the run discarded what the preview kept"
+    );
+
+    // ...and an interactive preview reports the interactive policy.
+    assert_eq!(verdict(&["worktree", "clean", "--dry-run"]), "remove");
+}

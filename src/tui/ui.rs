@@ -124,6 +124,11 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
 }
 
 pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
+    // "Could not tell" must never render as "clean" — that is the reading that
+    // makes a worktree look safe to delete.
+    if status.unknown.is_some() {
+        return Span::styled("unknown", Style::default().fg(Color::Red));
+    }
     if status.dirty > 0 {
         Span::styled(
             format!("{} uncommitted", status.dirty),
@@ -554,6 +559,17 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    /// The panel row must not call an unassessable worktree "clean".
+    #[test]
+    fn unknown_status_is_never_rendered_as_clean() {
+        let unknown = WorktreeStatus {
+            unknown: Some("could not compare against origin/main".into()),
+            ..WorktreeStatus::default()
+        };
+        assert_eq!(status_span(&unknown).content, "unknown");
+        assert_eq!(status_span(&WorktreeStatus::default()).content, "clean");
     }
 
     #[test]

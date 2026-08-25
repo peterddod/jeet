@@ -193,9 +193,11 @@ pub fn clean(
     let opts = CleanOptions {
         all,
         force,
-        // --dry-run still prints the report for a human to read; --yes does not
-        // pause for one, so it must not discard anything on its own judgement.
-        unattended: assume_yes && !dry_run,
+        // --yes does not pause for a human to read the report, so it must not
+        // discard anything on its own judgement. This tracks --yes even under
+        // --dry-run: a preview that reports a different verdict than the run it
+        // previews is worse than no preview.
+        unattended: assume_yes,
     };
 
     let here = std::env::current_dir()

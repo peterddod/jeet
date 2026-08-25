@@ -29,6 +29,11 @@ where
     let mut cmd = Command::new("git");
     cmd.args(args);
     if CAPTURE_OUTPUT.load(Ordering::Relaxed) {
+        // The explorer runs git behind a progress indicator with its output
+        // captured, so a credential prompt would be invisible and would block
+        // on a stdin the TUI is already reading. Fail fast with a message the
+        // user can actually see instead.
+        cmd.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
         let output = cmd.output().with_context(|| format!("spawn {what}"))?;
         if !output.status.success() {
             bail!("{what} failed: {}", first_error_line(&output.stderr));
