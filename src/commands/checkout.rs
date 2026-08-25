@@ -74,7 +74,7 @@ fn run_create_branch(
     let effective_start = if let Some(sp) = start_point {
         sp.to_string()
     } else {
-        crate::commands::worktree::resolve_start_point(trunk, &repo.default_branch)
+        crate::worktrees::resolve_start_point(trunk, &repo.default_branch)
             .unwrap_or_else(|_| repo.default_branch.clone())
     };
 

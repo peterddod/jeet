@@ -8,6 +8,13 @@ use crate::git;
 use crate::remote;
 
 pub fn run(app: &App, path: &str) -> Result<()> {
+    let repo = adopt_path(app, path)?;
+    println!("adopted {} at {}", repo.id, repo.trunk_path);
+    Ok(())
+}
+
+/// Index the repository containing `path`, returning the stored record.
+pub fn adopt_path(app: &App, path: &str) -> Result<RepoRecord> {
     let path = crate::config::expand_path(path);
     let toplevel = git::git_toplevel(&path).context("adopt path")?;
     let remote_url = git::origin_url(&toplevel).context("read origin remote")?;
@@ -25,8 +32,7 @@ pub fn run(app: &App, path: &str) -> Result<()> {
 
     sync_worktrees(app, &repo)?;
 
-    println!("adopted {} at {}", repo.id, repo.trunk_path);
-    Ok(())
+    Ok(repo)
 }
 
 pub fn sync_worktrees(app: &App, repo: &RepoRecord) -> Result<()> {

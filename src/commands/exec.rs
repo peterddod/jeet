@@ -6,12 +6,12 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::commands::path;
-use crate::commands::worktree::resolve_start_point;
 use crate::context::App;
 use crate::git;
 use crate::paths;
 use crate::remote;
 use crate::resolve;
+use crate::worktrees::resolve_start_point;
 
 pub struct EphemeralSession {
     pub wt_path: PathBuf,
@@ -117,20 +117,8 @@ pub fn cleanup_ephemeral_worktree(app: &App, session: &EphemeralSession) -> Resu
         }
     }
 
-    remove_empty_parents(&session.wt_path, &app.ephemeral_root());
+    crate::worktrees::prune_empty_parents(&session.wt_path, &[app.ephemeral_root()]);
     Ok(())
-}
-
-fn remove_empty_parents(mut path: &Path, ephemeral_root: &Path) {
-    while let Some(parent) = path.parent() {
-        if parent == ephemeral_root {
-            break;
-        }
-        match std::fs::remove_dir(parent) {
-            Ok(()) => path = parent,
-            Err(_) => break,
-        }
-    }
 }
 
 fn exec_shell(target: &Path) -> Result<i32> {

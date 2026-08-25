@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completion_candidates::{all_branch_candidates, repo_filter_candidates};
@@ -10,8 +10,9 @@ use crate::completion_candidates::{all_branch_candidates, repo_filter_candidates
     about = "Global git repo index and worktree manager"
 )]
 pub struct Cli {
+    /// Omit the subcommand to open the file explorer for the repo you are in.
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -33,11 +34,14 @@ pub enum Commands {
         filter: Option<String>,
     },
 
-    /// Worktree operations - manage workspace worktrees for branch testing / isolation
-    Worktree {
-        #[command(subcommand)]
-        command: WorktreeCommands,
-    },
+    /// Open the file explorer for the repository you are in
+    Explore,
+
+    /// List previous coding-agent sessions for the current worktree
+    Sessions,
+
+    /// Worktree operations - with no subcommand, create a worktree here
+    Worktree(WorktreeArgs),
 
     /// Checkout a branch to navigate its workspace - cd into the workspace at that location
     Checkout {
@@ -62,6 +66,9 @@ pub enum Commands {
     Exec {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String, // Repo path filter like "."
+        /// Open the worktree for this branch instead of the trunk
+        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
+        branch: Option<String>,
         #[arg(long)]
         ephemeral: bool, // Auto-cleanup on exit?
     },
@@ -82,12 +89,68 @@ pub enum Commands {
     Complete { what: String },
 }
 
+/// `jeet worktree [name]` plus the explicit sub-operations.
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct WorktreeArgs {
+    #[command(subcommand)]
+    pub command: Option<WorktreeCommands>,
+
+    /// Branch to create and publish to origin; omit for a detached checkout
+    #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
+    pub name: Option<String>,
+
+    /// Repository to act on; defaults to the one containing the current directory
+    #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+    pub repo: Option<String>,
+
+    /// Create the branch locally without pushing it to origin
+    #[arg(long)]
+    pub no_push: bool,
+}
+
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
     /// Add a new branch as worktree - similar to worktree.add()
     Add {
         filter: String, // Repo path/namne like "."
         branch: String, // Branch name "feature-X"
+        /// Also publish the branch to origin
+        #[arg(long)]
+        push: bool,
+    },
+
+    /// Rename a worktree's branch, or name a detached scratchpad
+    Rename {
+        /// New name, or the existing worktree when a second name follows
+        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
+        name: String,
+        /// New name, when the first argument picked the worktree to rename
+        new_name: Option<String>,
+        /// Repository to act on; defaults to the one containing the current directory
+        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
+        /// Rename locally without publishing the branch to origin
+        #[arg(long)]
+        no_push: bool,
+    },
+
+    /// Remove worktrees that hold no uncommitted or unmerged work
+    Clean {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        filter: Option<String>,
+        /// Also consider worktrees jeet did not create
+        #[arg(long)]
+        all: bool,
+        /// Remove worktrees even when they still hold work
+        #[arg(long)]
+        force: bool,
+        /// Report what would be removed without touching anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation
+        #[arg(short = 'y', long = "yes")]
+        assume_yes: bool,
     },
 
     /// List all worktrees showing detached branches

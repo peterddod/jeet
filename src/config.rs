@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default = "default_scan_roots")]
     pub scan_roots: Vec<String>,
+
+    /// Command used to open files from the explorer (default: $VISUAL/$EDITOR, else `vim`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<String>,
+
+    /// Coding agent launched with `c` in the explorer (default: `claude`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 fn default_scan_roots() -> Vec<String> {
@@ -17,8 +25,73 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             scan_roots: default_scan_roots(),
+            editor: None,
+            agent: None,
         }
     }
+}
+
+impl Config {
+    /// Editor command line, honouring `JEET_EDITOR`, then config, then `$VISUAL`/`$EDITOR`.
+    pub fn editor_command(&self) -> String {
+        first_set(
+            [
+                env_non_empty("JEET_EDITOR"),
+                self.editor.clone(),
+                env_non_empty("VISUAL"),
+                env_non_empty("EDITOR"),
+            ],
+            "vim",
+        )
+    }
+
+    /// Coding agent command line, honouring `JEET_AGENT`, then config.
+    pub fn agent_command(&self) -> String {
+        first_set([env_non_empty("JEET_AGENT"), self.agent.clone()], "claude")
+    }
+}
+
+/// First non-blank candidate, in precedence order, else `default`.
+fn first_set(candidates: impl IntoIterator<Item = Option<String>>, default: &str) -> String {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Split a configured command line into program + args, honouring simple quoting.
+pub fn split_command(cmd: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+
+    for c in cmd.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => current.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                has_token = true;
+            }
+            None if c.is_whitespace() => {
+                if has_token || !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            None => current.push(c),
+        }
+    }
+    if has_token || !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 pub fn jeet_home() -> Result<PathBuf> {
@@ -71,4 +144,51 @@ pub fn expand_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_commands_with_quotes() {
+        assert_eq!(split_command("vim"), vec!["vim"]);
+        assert_eq!(split_command("code --wait"), vec!["code", "--wait"]);
+        assert_eq!(
+            split_command("claude --append \"be brief\""),
+            vec!["claude", "--append", "be brief"]
+        );
+        assert!(split_command("   ").is_empty());
+    }
+
+    #[test]
+    fn precedence_prefers_the_first_set_candidate() {
+        // Exercised directly so the test does not depend on the ambient
+        // JEET_EDITOR/VISUAL/EDITOR of whoever runs it.
+        assert_eq!(
+            first_set([None, Some("hx".into()), Some("vi".into()), None], "vim"),
+            "hx"
+        );
+        assert_eq!(
+            first_set([Some("code".into()), Some("hx".into()), None, None], "vim"),
+            "code"
+        );
+        assert_eq!(
+            first_set([None, Some("  ".into()), None, None], "vim"),
+            "vim"
+        );
+        assert_eq!(first_set([None, None, None, None], "claude"), "claude");
+    }
+
+    #[test]
+    fn config_round_trips_without_optional_fields() {
+        let text = "scan_roots = [\"~/src\"]\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.scan_roots, vec!["~/src".to_string()]);
+        assert!(config.editor.is_none());
+        assert!(config.agent.is_none());
+        // serialising again must not invent keys
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("editor"), "{out}");
+    }
 }

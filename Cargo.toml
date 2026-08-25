@@ -1,6 +1,6 @@
 [package]
 name = "jeet"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 description = "Global git repo index and worktree manager"
 license = "MIT"
@@ -17,9 +17,14 @@ thiserror = "2"
 toml = "0.8"
 walkdir = "2"
 uuid = { version = "1", features = ["v4"] }
+ratatui = "0.29"
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target."cfg(unix)".dependencies]
+signal-hook = { version = "0.3", default-features = false }
 
 [package.metadata.deb]
 maintainer = "Peter <peterddod@users.noreply.github.com>"
