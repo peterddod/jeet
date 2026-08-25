@@ -4,6 +4,7 @@
 //! Claude Code it can additionally enumerate the sessions already recorded for
 //! a worktree so you can resume one instead of starting fresh.
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
@@ -182,12 +183,15 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
 
 /// Best-effort first prompt (or recorded summary) plus the transcript length.
 fn summarise_session(path: &Path) -> (String, usize) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // Transcripts run to many megabytes and the overlay summarises every
+    // session in the project, so read them a line at a time rather than
+    // holding the sum of all of them in memory at once.
+    let Ok(file) = std::fs::File::open(path) else {
         return ("(unreadable transcript)".to_string(), 0);
     };
     let mut summary = None;
     let mut count = 0;
-    for line in text.lines() {
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
@@ -195,7 +199,7 @@ fn summarise_session(path: &Path) -> (String, usize) {
         if summary.is_some() {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
             summary = extract_summary(&value);
         }
     }

@@ -33,7 +33,9 @@ where
         // captured, so a credential prompt would be invisible and would block
         // on a stdin the TUI is already reading. Fail fast with a message the
         // user can actually see instead.
-        cmd.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+        cmd.env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .stdin(Stdio::null());
         let output = cmd.output().with_context(|| format!("spawn {what}"))?;
         if !output.status.success() {
             bail!("{what} failed: {}", first_error_line(&output.stderr));

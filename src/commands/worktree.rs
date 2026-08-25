@@ -71,8 +71,11 @@ pub fn ls_cmd(app: &App, filter: Option<&str>) -> Result<()> {
                 continue;
             }
         };
+        // Resolved once per repository: it costs a git subprocess and cannot
+        // differ between worktrees.
+        let base = worktrees::comparison_base(&repo);
         for entry in entries {
-            let status = worktrees::status_for(&repo, &entry);
+            let status = worktrees::status_against(&entry, &base);
             let mut notes = vec![format!("[{}]", entry.kind.label())];
             if entry.missing {
                 notes.push("MISSING".to_string());

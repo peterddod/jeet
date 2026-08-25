@@ -47,15 +47,12 @@ impl Config {
 
     /// Coding agent command line, honouring `JEET_AGENT`, then config.
     pub fn agent_command(&self) -> String {
-        first_set(
-            [env_non_empty("JEET_AGENT"), self.agent.clone(), None, None],
-            "claude",
-        )
+        first_set([env_non_empty("JEET_AGENT"), self.agent.clone()], "claude")
     }
 }
 
 /// First non-blank candidate, in precedence order, else `default`.
-fn first_set(candidates: [Option<String>; 4], default: &str) -> String {
+fn first_set(candidates: impl IntoIterator<Item = Option<String>>, default: &str) -> String {
     candidates
         .into_iter()
         .flatten()

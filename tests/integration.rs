@@ -1038,10 +1038,11 @@ pwd"#,
         lab.repo.display(),
     );
 
-    let output = Command::new("bash")
+    let mut cmd = Command::new("bash");
+    hermetic_git(&mut cmd);
+    let output = cmd
         .args(["--noprofile", "--norc", "-c", &program])
         .env("JEET_HOME", &lab.home)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .unwrap();
     let landed = String::from_utf8_lossy(&output.stdout).trim().to_string();

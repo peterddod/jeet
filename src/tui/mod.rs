@@ -517,12 +517,10 @@ fn delete_summary(row: &WorktreeRow) -> Vec<String> {
 fn open_worktrees(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
     let repo = explorer.repo.clone();
     let root = explorer.root.clone();
-    let rows = match with_progress(terminal, explorer, "reading worktrees", || {
+    let rows = with_progress(terminal, explorer, "reading worktrees", || {
         collect_rows(app, &repo, &root)
-    }) {
-        Ok(rows) => rows,
-        Err(e) => Err(e),
-    };
+    })
+    .and_then(|inner| inner);
     match rows {
         Ok(rows) => {
             let selected = rows.iter().position(|r| r.current).unwrap_or(0);

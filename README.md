@@ -92,7 +92,7 @@ jeet sessions                            # previous agent sessions for this work
 jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 ```
 
-```
+```text
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
 │worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
 │path     /src                                                  │
@@ -113,8 +113,6 @@ jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 | `s` | previous agent sessions for this worktree (⏎ resumes one) |
 | `w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete |
 | `.` | toggle hidden files |
-| `g` / `G` | jump to the top / bottom |
-| `r` | refresh the listing and the counters |
 | `g` / `G`, `Home` / `End` | jump to the top / bottom |
 | `PageUp` / `PageDown` | move ten rows |
 | `r` | refresh the listing and the counters |
@@ -182,7 +180,7 @@ Renaming a **named** worktree renames its branch and moves the directory to
 match. If the old branch was already published, jeet says so rather than
 deleting anything on the remote for you:
 
-```
+```text
 jeet: origin/old-name still exists; delete it with `git push origin --delete old-name`
 ```
 
