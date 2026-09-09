@@ -647,7 +647,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
 }
 
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 22] = [
+const HELP: [(&str, &str); 23] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -661,6 +661,7 @@ const HELP: [(&str, &str); 22] = [
     ("←", "back: leave the folder (stops at the root)"),
     ("⏎", "folder: enter · file: open in your editor"),
     ("click", "a row to enter or select it, a path crumb to jump"),
+    ("shift-drag", "select text — jeet has the mouse otherwise"),
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
     ("ctrl-a", "start a coding agent at the worktree root"),
@@ -1011,9 +1012,11 @@ mod tests {
                     screen.contains(key) && screen.contains(tail),
                     "{width}x{height}: last row unreachable at scroll {max_scroll}\n{screen}"
                 );
-                // And the test is not vacuous: where there is scrolling to do,
-                // the last row is genuinely off-screen until it is done.
-                if max_scroll > 0 {
+                // And the test is not vacuous: where there is enough scrolling
+                // to push a content row off — one notch may only be taking up
+                // the table's trailing blank — the last row is genuinely
+                // off-screen until the scrolling is done.
+                if max_scroll > 1 {
                     assert!(
                         !render_help(width, height, 0).contains(tail),
                         "{width}x{height}: nothing was actually scrolled"

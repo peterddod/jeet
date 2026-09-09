@@ -141,8 +141,15 @@ match sorts to the top whatever else the filter caught.
 | `⏎` | folder: step in · file: open it in your editor |
 | click | a folder to step into it, a file to select it, a path crumb to jump up |
 | scroll | move the cursor |
+| shift-drag | select text (see below) |
 | `Home` / `End` | jump to the top / bottom |
 | `PageUp` / `PageDown` | move ten rows |
+
+While the explorer is up it has the mouse, which means your terminal's own
+click-drag text selection is off for as long as it runs. Hold **shift** while
+dragging to select as you normally would — every terminal that reports mouse
+events supports that escape hatch. jeet gives the mouse back whenever it steps
+aside for an editor or an agent, and on the way out however it leaves.
 
 ### Everything else
 

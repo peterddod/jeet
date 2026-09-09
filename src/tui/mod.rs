@@ -528,8 +528,12 @@ fn handle_overlay_key(
         Overlay::Help { scroll } => {
             // On a terminal too small for the whole list, the rows wrap past
             // the bottom of the panel; scrolling is how the rest is reached.
-            let size = terminal.size()?;
-            let max = ui::help_geometry(Rect::new(0, 0, size.width, size.height)).1;
+            // If the terminal cannot be measured, hold the scroll where it is
+            // rather than let the `?` take the panel down with it.
+            let max = match terminal.size() {
+                Ok(size) => ui::help_geometry(Rect::new(0, 0, size.width, size.height)).1,
+                Err(_) => scroll,
+            };
             let moved = match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Ok(()),
                 // Clamped on the way up as well as down: a stored scroll left
