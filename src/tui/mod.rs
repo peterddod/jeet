@@ -339,7 +339,11 @@ fn handle_browse_key(
         }
         KeyCode::Esc => {
             // Escape backs out of what you typed before it backs out of jeet.
-            if !explorer.clear_filter() {
+            // Clearing takes the status with it: a "nothing matches" left over
+            // the full listing describes a state that is no longer on screen.
+            if explorer.clear_filter() {
+                explorer.set_status("");
+            } else {
                 explorer.quit_in_place();
             }
         }

@@ -196,8 +196,12 @@ impl Explorer {
         let chosen = self.chosen;
         let listed = self.show(cwd, keep);
         self.filter = filter;
-        self.chosen = chosen;
         self.refocus(keep);
+        // The choice survives only if the row it was does: where `keep` is
+        // gone, `refocus` has put the cursor on the top match, and nobody
+        // chose that.
+        self.chosen = chosen
+            && keep.is_some_and(|path| self.selected_entry().is_some_and(|e| e.path == path));
         listed
     }
 
@@ -1106,6 +1110,60 @@ mod tests {
         let mut explorer = explorer_at(shared.path());
         assert!(explorer.complete());
         assert_eq!(explorer.filter, "build-");
+    }
+
+    /// A refresh that loses the row the cursor was on leaves it on the top
+    /// match, which nobody chose — `/` must not treat that as a choice.
+    #[test]
+    fn a_choice_does_not_survive_the_row_it_was() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("src-old")).unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("src".into());
+        explorer.move_cursor(1);
+        let gone = explorer.selected_entry().unwrap().path.clone();
+
+        std::fs::remove_dir(&gone).unwrap();
+        explorer.reload(Some(&gone)).unwrap();
+        assert_eq!(explorer.selected_entry().unwrap().name, "src");
+        assert_eq!(
+            explorer.descend_typed().unwrap().as_deref(),
+            Some("src"),
+            "the filter names src outright, so that much still holds"
+        );
+
+        // But with an ambiguous filter and no surviving choice, nothing moves.
+        for name in ["src-new", "sound"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut explorer = explorer_at(dir.path());
+        explorer.set_filter("s".into());
+        explorer.move_cursor(1);
+        let gone = explorer.selected_entry().unwrap().path.clone();
+        std::fs::remove_dir(&gone).unwrap();
+        explorer.reload(Some(&gone)).unwrap();
+        assert!(explorer.visible_len() > 1, "the filter is still ambiguous");
+        assert_eq!(explorer.descend_typed().unwrap(), None);
+    }
+
+    /// A choice that survives a refresh is still a choice.
+    #[test]
+    fn a_choice_survives_a_refresh_that_keeps_it() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("src-old")).unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("src".into());
+        explorer.move_cursor(1);
+        let keep = explorer.selected_entry().unwrap().path.clone();
+        explorer.reload(Some(&keep)).unwrap();
+        assert_eq!(
+            explorer.descend_typed().unwrap().as_deref(),
+            Some("src-old")
+        );
     }
 
     #[test]

@@ -313,12 +313,7 @@ fn draw_listing(
         })
         .collect();
 
-    let title = match (entries.is_empty(), filter.is_empty()) {
-        (true, true) => " empty directory ".to_string(),
-        (true, false) => no_match_title(filter, area.width),
-        (false, true) => format!(" {} items ", entries.len()),
-        (false, false) => format!(" {} of {total} items ", entries.len()),
-    };
+    let title = listing_title(entries.len(), total, filter, area.width);
 
     list_state.select(if entries.is_empty() {
         None
@@ -336,20 +331,31 @@ fn draw_listing(
     frame.render_stateful_widget(list, area, list_state);
 }
 
-/// The title for a filter that matched nothing, cut to the block's border run
-/// — the pane less its two corners. The title is drawn *into* that border, so
-/// an overrun eats it rather than being clipped harmlessly.
-fn no_match_title(filter: &str, pane: u16) -> String {
+/// The listing block's title, cut to its border run — the pane less its two
+/// corners. A title is drawn *into* that border, so an overrun eats it rather
+/// than being clipped harmlessly.
+fn listing_title(shown: usize, total: usize, filter: &str, pane: u16) -> String {
     let run = (pane as usize).saturating_sub(2);
-    let fixed = NO_MATCH_TITLE.chars().count();
-    if run <= fixed {
-        // No room to quote anything into: say the short version, cut to fit.
-        return truncate(" nothing matches ", run);
-    }
-    format!(
-        " nothing matches \"{}\" ",
-        truncate_start(filter, run - fixed)
-    )
+    // An empty directory is empty whatever was typed at it — the same thing
+    // the status line says for the same state.
+    let title = if total == 0 {
+        " empty directory ".to_string()
+    } else if shown == 0 {
+        let fixed = NO_MATCH_TITLE.chars().count();
+        if run <= fixed {
+            // No room to quote anything into: the short version, cut to fit.
+            return truncate(" nothing matches ", run);
+        }
+        format!(
+            " nothing matches \"{}\" ",
+            truncate_start(filter, run - fixed)
+        )
+    } else if filter.is_empty() {
+        format!(" {shown} items ")
+    } else {
+        format!(" {shown} of {total} items ")
+    };
+    truncate(&title, run)
 }
 
 fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
@@ -1020,20 +1026,26 @@ mod tests {
         }
     }
 
-    /// The listing title sits in the block's own top border, so a title wider
-    /// than the run between its corners eats the border rather than clipping.
+    /// A title is drawn into the block's own top border, so one wider than the
+    /// run between its corners eats the border rather than clipping.
     #[test]
-    fn the_no_match_title_stays_inside_its_border() {
+    fn the_listing_title_stays_inside_its_border() {
         for pane in 0u16..120 {
             let run = (pane as usize).saturating_sub(2);
-            for filter in ["x", &"Q".repeat(200), "日本語のディレクトリ", "❤️❤️"]
+            for filter in ["", "x", &"Q".repeat(200), "日本語のディレクトリ", "❤️❤️"]
             {
-                let title = no_match_title(filter, pane);
-                assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+                for (shown, total) in [(0, 0), (0, 9), (3, 9), (9, 9), (999_999, 999_999)] {
+                    let title = listing_title(shown, total, filter, pane);
+                    assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+                }
             }
         }
-        // With room, it says the whole thing.
-        assert_eq!(no_match_title("zz", 40), " nothing matches \"zz\" ");
+        // With room, each case says its whole piece — and an empty directory
+        // is empty whatever was typed at it.
+        assert_eq!(listing_title(0, 0, "x", 40), " empty directory ");
+        assert_eq!(listing_title(0, 9, "zz", 40), " nothing matches \"zz\" ");
+        assert_eq!(listing_title(9, 9, "", 40), " 9 items ");
+        assert_eq!(listing_title(3, 9, "z", 40), " 3 of 9 items ");
     }
 
     /// The header's filter line does not wrap, so what it draws has to fit the
