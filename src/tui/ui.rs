@@ -10,26 +10,45 @@ use unicode_width::UnicodeWidthStr;
 use super::state::{human_size, Explorer, Overlay};
 use crate::worktrees::WorktreeStatus;
 
-/// The hint line, widest first. A one-row paragraph does not wrap, so a hint
-/// that does not fit is not shortened, it is cut off — and what falls off the
-/// end is `F1 help` and `^q quit`, the two that replaced keys people knew.
-const HINTS: [&str; 3] = [
-    "type to filter  ⇥ complete  / enter  ↑↓ move  ⏎ open  ^w worktrees  ^s sessions  ^a agent  ^d hidden  F1 help  ^q quit",
-    "type to filter  ⇥ complete  / enter  ^w worktrees  F1 help  ^q quit",
-    "type to filter  F1 help  ^q quit",
+/// The hint row, as segments. It is one non-wrapping line, so what does not
+/// fit is not shortened but cut off — and the two that would go first are the
+/// ones that replaced keys people knew. So the head and the tail always stay,
+/// and the middle is dropped from the right until the rest fits.
+const HINT_HEAD: &str = "type to filter";
+const HINT_MIDDLE: [&str; 8] = [
+    "⇥ complete",
+    "/ enter",
+    "↑↓ move",
+    "⏎ open",
+    "^w worktrees",
+    "^s sessions",
+    "^a agent",
+    "^d hidden",
 ];
+const HINT_TAIL: [&str; 2] = ["F1 help", "^q quit"];
 
-/// The widest hint line that fits, or the shortest if none of them do.
-fn hints(width: u16) -> &'static str {
-    HINTS
-        .iter()
-        .find(|hint| hint.width() <= width as usize)
-        .unwrap_or(&HINTS[HINTS.len() - 1])
+/// The most hints that fit `width`, or the head and tail alone if none do.
+fn hints(width: u16) -> String {
+    let mut line = String::new();
+    for keep in (0..=HINT_MIDDLE.len()).rev() {
+        line = std::iter::once(HINT_HEAD)
+            .chain(HINT_MIDDLE[..keep].iter().copied())
+            .chain(HINT_TAIL)
+            .collect::<Vec<_>>()
+            .join("  ");
+        if line.width() <= width as usize {
+            break;
+        }
+    }
+    line
 }
 
 /// Column the header's value column starts at: one for the border, plus the
 /// width of the widest label. Clicks on the breadcrumb are measured from here.
 const LABEL_WIDTH: u16 = 9;
+
+/// Width of the key column in the help table.
+const KEY_WIDTH: usize = 13;
 
 pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     let chunks = Layout::default()
@@ -485,8 +504,6 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             );
         }
         Overlay::Help => {
-            let area = content_rect(66, 20, frame.area());
-            frame.render_widget(Clear, area);
             let rows = [
                 (
                     "a-z, 0-9, …",
@@ -510,14 +527,21 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 ("ctrl-d", "toggle hidden dotfiles"),
                 ("ctrl-r", "refresh the listing and counters"),
                 ("ctrl-q", "quit, leaving the shell in this directory"),
+                ("F1 / ctrl-g", "this list"),
                 ("esc", "clear the filter, or quit without moving the shell"),
             ];
             let body: Vec<Line> = rows
                 .iter()
                 .map(|(key, description)| {
+                    // A spacer has to be an empty line, not a padded one: the
+                    // wrapper turns a whitespace-only line into two, and the
+                    // rows that fall off the bottom are the ones at the end.
+                    if key.is_empty() && description.is_empty() {
+                        return Line::from("");
+                    }
                     Line::from(vec![
                         Span::styled(
-                            format!("{key:<13}"),
+                            format!("{key:<width$}", width = KEY_WIDTH),
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -526,13 +550,26 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                     ])
                 })
                 .collect();
+            // Sized to the table rather than to a share of the frame: a key
+            // list that clips its own descriptions explains nothing.
+            let widest = rows
+                .iter()
+                .map(|(_, description)| KEY_WIDTH + description.width())
+                .max()
+                .unwrap_or(0);
+            let area = fitted_rect(widest, rows.len(), frame.area());
+            frame.render_widget(Clear, area);
             frame.render_widget(
-                Paragraph::new(body).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" keys · esc close ")
-                        .title_style(Style::default().fg(Color::Green)),
-                ),
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" keys · esc close ")
+                            .title_style(Style::default().fg(Color::Green)),
+                    )
+                    // Narrower than the table still shows every description,
+                    // wrapped, rather than half of each.
+                    .wrap(Wrap { trim: false }),
                 area,
             );
         }
@@ -583,6 +620,18 @@ pub fn truncate(text: &str, width: usize) -> String {
     }
     let head: String = text.chars().take(width.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+/// A centered box sized to its content (plus borders), clamped to the frame.
+fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
+    let width = (cols as u16).saturating_add(2).min(area.width);
+    let height = (lines as u16).saturating_add(2).min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// A centered box `lines` rows tall (plus borders), clamped to the frame.
@@ -652,18 +701,24 @@ mod tests {
     /// that would go first are the ones that replaced keys people knew.
     #[test]
     fn hints_shrink_to_fit_the_terminal() {
-        assert_eq!(hints(200), HINTS[0]);
-        assert_eq!(hints(80), HINTS[1]);
-        assert_eq!(hints(40), HINTS[2]);
-        assert_eq!(hints(10), HINTS[2]);
-        for width in [200u16, 80, 40] {
+        // Every width keeps the head and the tail, and never overflows.
+        for width in [200u16, 118, 100, 90, 80, 70, 40, 32, 10] {
             let hint = hints(width);
-            assert!(hint.width() <= width as usize);
+            assert!(hint.starts_with(HINT_HEAD), "{width}: {hint}");
             assert!(
                 hint.contains("F1 help") && hint.contains("^q quit"),
-                "{hint}"
+                "{width}: {hint}"
             );
+            if width >= 32 {
+                assert!(hint.width() <= width as usize, "{width}: {hint}");
+            }
         }
+        // Room for everything means everything is shown.
+        let full = hints(200);
+        assert!(HINT_MIDDLE.iter().all(|h| full.contains(h)), "{full}");
+        // Widening the terminal never shows fewer hints.
+        let widths: Vec<usize> = (30..=130).map(|w| hints(w).width()).collect();
+        assert!(widths.windows(2).all(|w| w[0] <= w[1]), "{widths:?}");
     }
 
     #[test]

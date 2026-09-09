@@ -885,8 +885,6 @@ mod tests {
         assert_eq!(explorer.selected_entry().unwrap().name, "README.md");
     }
 
-    /// A refresh that fails must not leave the filter box empty while the
-    /// listing is still filtered — the rows would lie about what is on screen.
     /// A double-click is two presses: the first enters the folder, and the
     /// second must not enter whatever the child listing slid under the cursor.
     #[test]
@@ -902,6 +900,11 @@ mod tests {
         // A triple-click gets no third action either.
         assert!(explorer.is_double_click(4, 7));
         // A different cell is a deliberate click, however fast.
+        assert!(!explorer.is_double_click(4, 8));
+
+        // The window is anchored on the click we acted on, so clicking on and
+        // on in one place keeps working rather than going dead after the first.
+        std::thread::sleep(DOUBLE_CLICK + Duration::from_millis(50));
         assert!(!explorer.is_double_click(4, 8));
     }
 
@@ -937,6 +940,8 @@ mod tests {
         assert_eq!(completion(&["Éclair", "éclipse"], "é"), Some("Écl".into()));
     }
 
+    /// A refresh that fails must not leave the filter box empty while the
+    /// listing is still filtered — the rows would lie about what is on screen.
     #[test]
     fn a_failed_reload_keeps_the_filter_it_was_showing() {
         let dir = fixture();

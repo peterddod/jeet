@@ -149,7 +149,7 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
 | `esc` | quit without moving your shell (unless it moved out from under you) |
-| `F1` | the key list, in jeet |
+| `F1` or `ctrl-g` | the key list, in jeet |
 
 In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
 name field in the new/rename prompts. Deleting asks first: `y` removes, and
@@ -309,7 +309,7 @@ jeet complete branches acme/widget
 - The explorer filters as you type, completes with `⇥`, walks into a folder on
   `/`, and follows the mouse. Its commands moved onto `ctrl` to leave the
   letters for typing: `ctrl-w` worktrees, `ctrl-s` sessions, `ctrl-a` agent,
-  `ctrl-d` dotfiles, `ctrl-r` refresh, `ctrl-q` quit, `F1` help.
+  `ctrl-d` dotfiles, `ctrl-r` refresh, `ctrl-q` quit, `F1`/`ctrl-g` help.
 - `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
   publishes the branch to `origin`, no name gives you a detached checkout.
 - `jeet worktree rename [old] <new>` renames a worktree's branch, and turns a

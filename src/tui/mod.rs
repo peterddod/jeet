@@ -261,7 +261,11 @@ fn handle_browse_key(
         KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
         KeyCode::Char('s') if ctrl => open_sessions(explorer),
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
+        // F1 alone would do, except macOS gives it to the media keys by
+        // default and some terminals keep it for their own menu. ctrl-g is
+        // "get help" in nano, and it always arrives.
         KeyCode::F(1) => explorer.overlay = Some(Overlay::Help),
+        KeyCode::Char('g') if ctrl => explorer.overlay = Some(Overlay::Help),
 
         // Filter editing.
         KeyCode::Tab => match explorer.complete() {
@@ -273,9 +277,19 @@ fn handle_browse_key(
             explorer.set_status("");
         }
         // A path separator means "go in", the way it does while typing a path.
-        KeyCode::Char('/') | KeyCode::Char('\\') if !ctrl => match explorer.descend_typed()? {
+        // `/` cannot appear in a Unix filename, so it always navigates.
+        KeyCode::Char('/') if !ctrl => match explorer.descend_typed()? {
             Some(name) => explorer.set_status(format!("entered {name}/")),
             None => explorer.set_status("filter does not name one folder — ⇥ to complete"),
+        },
+        // `\` can, so it only navigates when the filter does name a folder;
+        // otherwise it is an ordinary character in `weird\name.txt`.
+        KeyCode::Char('\\') if !ctrl => match explorer.descend_typed()? {
+            Some(name) => explorer.set_status(format!("entered {name}/")),
+            None => {
+                explorer.push_filter('\\');
+                explorer.set_status("");
+            }
         },
         KeyCode::Esc => {
             // Escape backs out of what you typed before it backs out of jeet.
