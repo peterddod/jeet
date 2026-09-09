@@ -27,20 +27,25 @@ const HINT_MIDDLE: [&str; 8] = [
 ];
 const HINT_TAIL: [&str; 2] = ["F1 help", "^q quit"];
 
-/// The most hints that fit `width`, or the head and tail alone if none do.
+/// The most hints that fit `width`. Below the width of even the head and the
+/// tail it keeps giving up ground, down to the way out on its own: a hint row
+/// clipped mid-word tells the user nothing, and `q` no longer quits.
 fn hints(width: u16) -> String {
-    let mut line = String::new();
-    for keep in (0..=HINT_MIDDLE.len()).rev() {
-        line = std::iter::once(HINT_HEAD)
+    let width = width as usize;
+    let with_middle = |keep: usize| {
+        std::iter::once(HINT_HEAD)
             .chain(HINT_MIDDLE[..keep].iter().copied())
             .chain(HINT_TAIL)
             .collect::<Vec<_>>()
-            .join("  ");
-        if line.width() <= width as usize {
-            break;
-        }
-    }
-    line
+            .join("  ")
+    };
+    let last = HINT_TAIL[HINT_TAIL.len() - 1];
+    (0..=HINT_MIDDLE.len())
+        .rev()
+        .map(with_middle)
+        .chain([HINT_TAIL.join("  "), last.to_string()])
+        .find(|line| line.width() <= width)
+        .unwrap_or_else(|| last.to_string())
 }
 
 /// Column the header's value column starts at: one for the border, plus the
@@ -61,15 +66,13 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         ])
         .split(frame.area());
 
-    draw_header(frame, chunks[0], explorer);
+    let path_row = draw_header(frame, chunks[0], explorer);
     // Remember where things landed so a click next frame can be mapped back to
-    // the row or the path segment under it.
+    // the row or the path segment under it. A path line the header had no room
+    // to draw leaves nothing to click, and the row it would have been on is a
+    // border or a listing row — clicking either must not navigate.
     explorer.list_area = chunks[1];
-    // Only when the header actually got its three rows: ratatui shrinks a
-    // `Length` constraint on a short terminal, and row 2 is then the header's
-    // bottom border, or a listing row — clicking either must not navigate.
-    explorer.breadcrumb_origin =
-        (chunks[0].height >= 4).then(|| (chunks[0].x + 1 + LABEL_WIDTH, chunks[0].y + 2));
+    explorer.breadcrumb_origin = path_row.map(|y| (chunks[0].x + 1 + LABEL_WIDTH, y));
     {
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
@@ -133,7 +136,9 @@ fn draw_working(frame: &mut Frame, working: &str) {
     );
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
+/// Draw the header, returning the screen row the breadcrumb landed on — or
+/// none when the terminal was too short to keep the path line.
+fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16> {
     let worktree_line = Line::from(vec![
         Span::styled("worktree ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -203,10 +208,22 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
         ))
         .title_alignment(Alignment::Left);
 
-    frame.render_widget(
-        Paragraph::new(vec![worktree_line, path_line, filter_line]).block(block),
-        area,
-    );
+    // ratatui shrinks a `Length` constraint on a short terminal, so the header
+    // does not always get its three rows. Give them up from the top: the
+    // worktree summary is a standing fact and the path is repeated in the rows
+    // below, but the filter is live and being typed into — a filter you cannot
+    // see, narrowing a listing you can, is the one that misleads.
+    const PATH: usize = 1;
+    let mut rows = vec![worktree_line, path_line, filter_line];
+    let mut dropped = 0usize;
+    while rows.len() > area.height.saturating_sub(2) as usize {
+        rows.remove(0);
+        dropped += 1;
+    }
+    let path_row = (dropped <= PATH).then(|| area.y + 1 + (PATH - dropped) as u16);
+
+    frame.render_widget(Paragraph::new(rows).block(block), area);
+    path_row
 }
 
 pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
@@ -632,8 +649,23 @@ pub fn help_body(width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// Greedy word wrap, breaking a word that is wider than the line itself.
+/// Greedy word wrap that keeps a description's own leading indent, which is
+/// what marks a row as a continuation of the one above rather than a command
+/// of its own.
 fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    let body = text.trim_start_matches(' ');
+    let indent = text.len() - body.len();
+    let mut lines = wrap_words(body, width.saturating_sub(indent).max(1));
+    if indent > 0 {
+        if let Some(first) = lines.first_mut() {
+            first.insert_str(0, &" ".repeat(indent));
+        }
+    }
+    lines
+}
+
+/// Greedy word wrap, breaking a word that is wider than the line itself.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split(' ') {
@@ -790,17 +822,17 @@ mod tests {
     /// that would go first are the ones that replaced keys people knew.
     #[test]
     fn hints_shrink_to_fit_the_terminal() {
-        // Every width keeps the head and the tail, and never overflows.
-        for width in [200u16, 118, 100, 90, 80, 70, 40, 32, 10] {
+        // No width overflows, and every one of them keeps the way out — `q`
+        // does not quit any more, so `^q quit` is the last thing to go.
+        for width in 7u16..=200 {
+            let hint = hints(width);
+            assert!(hint.width() <= width as usize, "{width}: {hint}");
+            assert!(hint.contains("^q quit"), "{width}: {hint}");
+        }
+        for width in [200u16, 118, 100, 90, 80, 70, 40, 32] {
             let hint = hints(width);
             assert!(hint.starts_with(HINT_HEAD), "{width}: {hint}");
-            assert!(
-                hint.contains("F1 help") && hint.contains("^q quit"),
-                "{width}: {hint}"
-            );
-            if width >= 32 {
-                assert!(hint.width() <= width as usize, "{width}: {hint}");
-            }
+            assert!(hint.contains("F1 help"), "{width}: {hint}");
         }
         // Room for everything means everything is shown.
         let full = hints(200);
@@ -874,6 +906,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The row under `ctrl-w` is indented to read as its continuation; wrapping
+    /// must not flatten it into a command of its own.
+    #[test]
+    fn a_continuation_row_keeps_its_indent() {
+        let (key, description) = HELP
+            .iter()
+            .find(|(_, d)| d.starts_with("  in the panel"))
+            .unwrap();
+        assert!(key.is_empty(), "the continuation row has no key of its own");
+        for width in [40u16, 60, 80, 120] {
+            let line = help_body(width)
+                .into_iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains("in the panel")))
+                .unwrap_or_else(|| panic!("width {width}: row missing"));
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let indent = text.len() - text.trim_start().len();
+            let expected = KEY_WIDTH + (description.len() - description.trim_start().len());
+            assert_eq!(indent, expected, "width {width}: {text:?}");
         }
     }
 
