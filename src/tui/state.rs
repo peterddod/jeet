@@ -233,6 +233,11 @@ impl Explorer {
     /// again on whatever the new listing slid underneath that is the bug.
     /// Within a cell either way, because a mouse rarely comes to rest on
     /// exactly the same one twice.
+    ///
+    /// The cost is that clicking down through nested folders faster than a
+    /// double-click drops every other press. That is the same ambiguity from
+    /// the other side — at that speed the two gestures are the same events —
+    /// and [`DOUBLE_CLICK`] is the interval every platform draws the line at.
     pub fn is_double_click(&self, column: u16, row: u16) -> bool {
         self.last_navigating_click.is_some_and(|(at, c, r)| {
             c.abs_diff(column) <= 1 && r.abs_diff(row) <= 1 && Instant::now() - at < DOUBLE_CLICK
@@ -288,8 +293,11 @@ impl Explorer {
         self.matches.len()
     }
 
-    /// Replace the filter. The cursor goes back to the top match, so the row
-    /// ⇥ would complete is always the highlighted one.
+    /// Replace the filter, putting the cursor back on the top match.
+    ///
+    /// Right for typing, which narrows: the row that was highlighted may be
+    /// gone, and the row ⇥ would complete should be the one under the cursor.
+    /// Deleting goes through [`Explorer::widened`] instead.
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.refocus(None);
@@ -311,9 +319,8 @@ impl Explorer {
         if self.filter.is_empty() {
             return false;
         }
-        let mut filter = std::mem::take(&mut self.filter);
-        filter.pop();
-        self.set_filter(filter);
+        self.filter.pop();
+        self.widened();
         true
     }
 
@@ -323,8 +330,19 @@ impl Explorer {
         if self.filter.is_empty() {
             return false;
         }
-        self.set_filter(String::new());
+        self.filter.clear();
+        self.widened();
         true
+    }
+
+    /// Re-match after the filter got shorter, keeping the cursor where it is.
+    ///
+    /// Widening can only add rows, so the row under the cursor is still there
+    /// — and jumping back to the top would leave ⏎ opening something other
+    /// than what the user was looking at when they pressed ⌫.
+    fn widened(&mut self) {
+        let keep = self.selected_entry().map(|entry| entry.path.clone());
+        self.refocus(keep.as_deref());
     }
 
     /// ⇥: extend the filter as far as the matches agree, the way a shell does.
@@ -1035,6 +1053,33 @@ mod tests {
 
     /// A key that could do nothing must do nothing — including not moving the
     /// cursor, which is a visible edit in answer to an inert keystroke.
+    /// Widening the filter can only add rows, so the row under the cursor is
+    /// still there — and ⏎ after ⌫ must still open what was highlighted.
+    #[test]
+    fn deleting_from_the_filter_keeps_the_cursor_where_it_is() {
+        let dir = TempDir::new().unwrap();
+        for name in ["alpha", "beta", "betamax"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("beta".into());
+        explorer.move_cursor(1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "betamax");
+
+        explorer.pop_filter();
+        assert_eq!(explorer.filter, "bet");
+        assert_eq!(explorer.selected_entry().unwrap().name, "betamax");
+
+        explorer.clear_filter();
+        assert_eq!(explorer.selected_entry().unwrap().name, "betamax");
+
+        // Typing is the other direction: it narrows, so the cursor goes back
+        // to the top match, which is the row ⇥ would complete.
+        explorer.set_filter("beta".into());
+        assert_eq!(explorer.selected_entry().unwrap().name, "beta");
+    }
+
     #[test]
     fn backspace_and_clear_leave_an_empty_filter_alone() {
         let dir = fixture();
