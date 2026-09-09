@@ -122,8 +122,13 @@ and the level narrows to what matches, case-insensitively, with names that
 `⇥` fills in like a shell: with one match it completes the name outright, with
 several it stops where they stop agreeing. Press it again and it takes the
 highlighted row rather than sitting there — so arrowing down first completes
-towards that row, and the cursor stays on it. `/` then walks in, so `sr⇥/` gets
+towards that row, and the cursor stays on it. With nothing typed it only fills
+in what every name shares, as a shell does. `/` then walks in, so `sr⇥/` gets
 you into `src/` without leaving the keyboard, exactly as typing a path does.
+
+`/` needs the filter to settle on one folder — the name typed out in full, or
+the only thing still matching. Where it does not, arrow onto the folder you
+mean and `/` goes there, the same row `⏎` and `→` would act on.
 
 ### Moving around
 
