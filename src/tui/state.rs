@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
+use unicode_width::UnicodeWidthStr;
 
 use crate::agent::{AgentSession, AgentSpec};
 use crate::db::RepoRecord;
@@ -171,11 +172,14 @@ impl Explorer {
     /// unlike [`Explorer::show`] it must not throw away what the user typed.
     pub fn reload(&mut self, keep: Option<&Path>) -> Result<()> {
         let cwd = self.cwd.clone();
+        // Put the filter back whether or not the listing worked: bailing out
+        // with it cleared but the rows still filtered shows a subset of the
+        // directory with nothing on screen to say why.
         let filter = std::mem::take(&mut self.filter);
-        self.show(cwd, keep)?;
+        let listed = self.show(cwd, keep);
         self.filter = filter;
         self.refocus(keep);
-        Ok(())
+        listed
     }
 
     /// List `dir` and move there, leaving state untouched if it cannot be read.
@@ -339,15 +343,20 @@ impl Explorer {
         self.entries[index].is_dir.then_some(index)
     }
 
-    /// Directory a click `offset` characters into the breadcrumb points at.
+    /// Directory a click `offset` columns into the breadcrumb points at.
     ///
     /// The separator after a segment belongs to that segment, so clicking
-    /// anywhere in `/src/` lands in `src`.
+    /// anywhere in `/src/` lands in `src`. Offsets are screen columns, so the
+    /// walk measures display width — a directory named in CJK is two columns
+    /// per character and a click past it must not land short.
     pub fn breadcrumb_target(&self, offset: usize) -> Option<PathBuf> {
+        // Outside the worktree the breadcrumb is an absolute path whose
+        // segments are not ours to walk back up.
+        if !self.cwd.starts_with(&self.root) {
+            return None;
+        }
         let crumb = self.breadcrumb();
-        // Outside the worktree the breadcrumb is an absolute path we have no
-        // business slicing into pieces.
-        if !crumb.starts_with('/') || offset >= crumb.chars().count() {
+        if offset >= crumb.width() {
             return None;
         }
         let mut dir = self.root.clone();
@@ -357,7 +366,7 @@ impl Explorer {
                 return Some(dir);
             }
             dir.push(segment);
-            cursor += 1 + segment.chars().count();
+            cursor += "/".width() + segment.width();
         }
         Some(dir)
     }
@@ -836,6 +845,56 @@ mod tests {
         explorer.reload(Some(&keep)).unwrap();
         assert_eq!(explorer.filter, "a");
         assert_eq!(explorer.selected_entry().unwrap().name, "README.md");
+    }
+
+    /// A refresh that fails must not leave the filter box empty while the
+    /// listing is still filtered — the rows would lie about what is on screen.
+    #[test]
+    fn a_failed_reload_keeps_the_filter_it_was_showing() {
+        let dir = fixture();
+        let gone = dir.path().join("src");
+        let mut explorer = explorer_at(&gone);
+        std::fs::create_dir(gone.join("keep")).unwrap();
+        explorer.reload(None).unwrap();
+        explorer.set_filter("keep".into());
+
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert!(explorer.reload(None).is_err());
+        assert_eq!(explorer.filter, "keep");
+        assert_eq!(explorer.visible_len(), 1);
+    }
+
+    /// Outside the worktree the breadcrumb is a bare absolute path, and its
+    /// segments are not ancestors we may walk back up to.
+    #[test]
+    fn a_breadcrumb_outside_the_root_is_not_clickable() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        explorer.root = dir.path().join("src");
+        assert_eq!(explorer.breadcrumb(), dir.path().display().to_string());
+        assert_eq!(explorer.breadcrumb_target(1), None);
+    }
+
+    /// Clicks arrive as screen columns, and a wide character occupies two of
+    /// them — measuring in `char`s would land a click short of its segment.
+    #[test]
+    fn crumb_offsets_are_screen_columns_not_characters() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("日本").join("tui");
+        std::fs::create_dir_all(&nested).unwrap();
+        let mut explorer = explorer_at(dir.path());
+        explorer.show(nested.clone(), None).unwrap();
+        assert_eq!(explorer.breadcrumb(), "/日本/tui");
+
+        // "/" + 4 columns of 日本 + "/" = column 5 is the first of "tui".
+        assert_eq!(
+            explorer.breadcrumb_target(0),
+            Some(dir.path().to_path_buf())
+        );
+        assert_eq!(explorer.breadcrumb_target(4), Some(dir.path().join("日本")));
+        assert_eq!(explorer.breadcrumb_target(5), Some(dir.path().join("日本")));
+        assert_eq!(explorer.breadcrumb_target(6), Some(nested));
+        assert_eq!(explorer.breadcrumb_target(9), None);
     }
 
     #[test]

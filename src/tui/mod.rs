@@ -901,15 +901,15 @@ fn remove_worktree(
 /// Move the explorer to another worktree, leaving it where it was if the new
 /// root cannot be listed (it may have been removed since the panel was built).
 fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()> {
-    let entries = state::read_dir(path, explorer.show_hidden)?;
+    // Listing first, and through `show` rather than by hand: it bails before
+    // touching anything if the new root cannot be read, and it is the only
+    // thing that keeps the filter and the visible rows in step with `entries`.
+    explorer.show(path.to_path_buf(), None)?;
     let (label, kind, status) = describe_root(app, &explorer.repo, path);
     explorer.root = path.to_path_buf();
     explorer.root_label = label;
     explorer.root_kind = kind;
     explorer.root_status = status;
-    explorer.cwd = path.to_path_buf();
-    explorer.entries = entries;
-    explorer.selected = 0;
     explorer.overlay = None;
     Ok(())
 }
