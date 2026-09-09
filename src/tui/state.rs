@@ -281,17 +281,28 @@ impl Explorer {
 
     /// Delete the last character. Returns false when there was nothing to
     /// delete, so the caller can say so rather than looking inert.
+    ///
+    /// Nothing to delete means nothing changes at all: going through
+    /// `set_filter` would send the cursor back to the top row, which is a
+    /// visible edit in answer to a key that did nothing.
     pub fn pop_filter(&mut self) -> bool {
+        if self.filter.is_empty() {
+            return false;
+        }
         let mut filter = std::mem::take(&mut self.filter);
-        let popped = filter.pop().is_some();
+        filter.pop();
         self.set_filter(filter);
-        popped
+        true
     }
 
+    /// Empty the filter, returning false when it was empty already — and, as
+    /// with [`Explorer::pop_filter`], leaving the cursor alone in that case.
     pub fn clear_filter(&mut self) -> bool {
-        let had = !self.filter.is_empty();
+        if self.filter.is_empty() {
+            return false;
+        }
         self.set_filter(String::new());
-        had
+        true
     }
 
     /// ⇥: extend the filter as far as the matches agree, the way a shell does.
@@ -516,14 +527,20 @@ pub fn filter_matches(entries: &[FsEntry], filter: &str) -> Vec<usize> {
 /// nothing.
 pub fn completion(names: &[&str], chosen: usize, filter: &str) -> Option<String> {
     let pick = *names.get(chosen).or_else(|| names.first())?;
-    let agreed: Vec<&str> = names
-        .iter()
-        .copied()
-        .filter(|n| starts_with_ignore_case(n, filter))
-        .collect();
-    let shared = common_prefix(&agreed);
-    if shared.chars().count() > filter.chars().count() {
-        return Some(shared);
+    // Only names that start with the filter can extend it — and only while the
+    // highlighted one is among them. Highlight a name the filter matches in
+    // the middle and that shared prefix belongs to rows the user has arrowed
+    // past; extending to it would drag the cursor onto one of them.
+    if starts_with_ignore_case(pick, filter) {
+        let agreed: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| starts_with_ignore_case(n, filter))
+            .collect();
+        let shared = common_prefix(&agreed);
+        if shared.chars().count() > filter.chars().count() {
+            return Some(shared);
+        }
     }
     (pick != filter).then(|| pick.to_string())
 }
@@ -876,6 +893,46 @@ mod tests {
         assert!(explorer.complete());
         assert_eq!(explorer.filter, "sou");
         assert_eq!(explorer.selected_entry().unwrap().name, "source");
+    }
+
+    /// The highlighted row can be one the filter matches in the middle. ⇥ must
+    /// still work towards it, not towards the prefix matches above it.
+    #[test]
+    fn tab_respects_a_highlighted_substring_match() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("mem.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("me".into());
+        explorer.move_cursor(1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "README.md");
+
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, "README.md");
+        assert_eq!(explorer.selected_entry().unwrap().name, "README.md");
+    }
+
+    /// A key that could do nothing must do nothing — including not moving the
+    /// cursor, which is a visible edit in answer to an inert keystroke.
+    #[test]
+    fn backspace_and_clear_leave_an_empty_filter_alone() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        explorer.move_cursor(2);
+        let was = explorer.selected;
+
+        assert!(!explorer.pop_filter());
+        assert_eq!(explorer.selected, was);
+        assert!(!explorer.clear_filter());
+        assert_eq!(explorer.selected, was);
+
+        // With something typed they both do their job.
+        explorer.set_filter("re".into());
+        assert!(explorer.pop_filter());
+        assert_eq!(explorer.filter, "r");
+        assert!(explorer.clear_filter());
+        assert!(explorer.filter.is_empty());
     }
 
     #[test]
