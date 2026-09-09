@@ -48,7 +48,9 @@ const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
 /// Why there is no row under the cursor: the filter, or the directory itself.
 /// Telling someone to widen a filter they have not typed helps nobody.
 fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
-    if explorer.filter.is_empty() {
+    // The directory, not the filter: typing into an empty one leaves nothing
+    // for ⌫ to bring back, however much of it there is to delete.
+    if explorer.entries.is_empty() {
         "this directory is empty"
     } else {
         NO_MATCH

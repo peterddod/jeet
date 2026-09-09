@@ -57,6 +57,9 @@ const LABEL_WIDTH: u16 = 9;
 /// Width of the key column in the help table.
 const KEY_WIDTH: usize = 13;
 
+/// The listing title's fixed text, around the filter that matched nothing.
+const NO_MATCH_TITLE: &str = " nothing matches \"\" ";
+
 pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -310,7 +313,16 @@ fn draw_listing(
 
     let title = match (entries.is_empty(), filter.is_empty()) {
         (true, true) => " empty directory ".to_string(),
-        (true, false) => format!(" nothing matches \"{filter}\" "),
+        // Bounded like everything else drawn from a name the user typed: the
+        // title sits in the block's top border, and an overrun eats it. The
+        // budget is the border run — the pane less its two corners — less the
+        // fixed text the filter is quoted inside.
+        (true, false) => {
+            let room = (area.width as usize)
+                .saturating_sub(2)
+                .saturating_sub(NO_MATCH_TITLE.chars().count());
+            format!(" nothing matches \"{}\" ", truncate_start(filter, room))
+        }
         (false, true) => format!(" {} items ", entries.len()),
         (false, false) => format!(" {} of {total} items ", entries.len()),
     };
@@ -997,6 +1009,36 @@ mod tests {
             let indent = text.len() - text.trim_start().len();
             let expected = KEY_WIDTH + (description.len() - description.trim_start().len());
             assert_eq!(indent, expected, "width {width}: {text:?}");
+        }
+    }
+
+    /// The listing title sits in the block's own top border, so a filter long
+    /// enough to overrun it eats the border rather than being clipped.
+    #[test]
+    fn the_no_match_title_stays_inside_its_border() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for width in [20u16, 40, 60, 100] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            let mut list_state = ListState::default();
+            terminal
+                .draw(|frame| {
+                    draw_listing(
+                        frame,
+                        frame.area(),
+                        &[],
+                        1,
+                        &"Q".repeat(120),
+                        0,
+                        &mut list_state,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(top.starts_with('┌'), "{width}: {top}");
+            assert!(top.ends_with('┐'), "{width}: {top}");
         }
     }
 
