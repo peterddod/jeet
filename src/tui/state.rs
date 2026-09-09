@@ -114,6 +114,9 @@ pub struct Explorer {
     pub cwd: PathBuf,
     /// Everything in `cwd`, unfiltered.
     pub entries: Vec<FsEntry>,
+    /// Dotfiles in `cwd` that `show_hidden` is leaving out, so a directory
+    /// that looks empty can say which kind of empty it is.
+    pub hidden: usize,
     /// What the user has typed to narrow the listing down.
     pub filter: String,
     /// Indices into [`Explorer::entries`] that `filter` keeps, in display
@@ -169,6 +172,7 @@ impl Explorer {
             origin: cwd.clone(),
             cwd,
             entries: Vec::new(),
+            hidden: 0,
             filter: String::new(),
             matches: Vec::new(),
             selected: 0,
@@ -253,9 +257,10 @@ impl Explorer {
     /// Moving directories clears the filter: it was typed against the level you
     /// just left, and carrying it over hides most of the one you arrived in.
     pub fn show(&mut self, dir: PathBuf, keep: Option<&Path>) -> Result<()> {
-        let entries = read_dir(&dir, self.show_hidden)?;
+        let (entries, hidden) = read_dir(&dir, self.show_hidden)?;
         self.cwd = dir;
         self.entries = entries;
+        self.hidden = hidden;
         self.filter.clear();
         self.refocus(keep);
         Ok(())
@@ -633,9 +638,14 @@ fn common_prefix(names: &[&str]) -> String {
     first.chars().take(len).collect()
 }
 
-/// Directories first, then files, both case-insensitive by name.
-pub fn read_dir(dir: &Path, show_hidden: bool) -> Result<Vec<FsEntry>> {
+/// Directories first, then files, both case-insensitive by name — along with
+/// how many dotfiles were left out.
+///
+/// The count is what lets an empty-looking directory say which kind of empty
+/// it is: nothing there at all, or nothing there that is being shown.
+pub fn read_dir(dir: &Path, show_hidden: bool) -> Result<(Vec<FsEntry>, usize)> {
     let mut entries = Vec::new();
+    let mut hidden = 0usize;
     let iter = match std::fs::read_dir(dir) {
         Ok(iter) => iter,
         Err(e) => anyhow::bail!("cannot read {}: {e}", dir.display()),
@@ -643,6 +653,7 @@ pub fn read_dir(dir: &Path, show_hidden: bool) -> Result<Vec<FsEntry>> {
     for entry in iter.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !show_hidden && name.starts_with('.') {
+            hidden += 1;
             continue;
         }
         let metadata = entry.metadata().ok();
@@ -663,7 +674,7 @@ pub fn read_dir(dir: &Path, show_hidden: bool) -> Result<Vec<FsEntry>> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
     });
-    Ok(entries)
+    Ok((entries, hidden))
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -698,17 +709,19 @@ mod tests {
     #[test]
     fn lists_dirs_first_and_hides_dotfiles() {
         let dir = fixture();
-        let entries = read_dir(dir.path(), false).unwrap();
+        let (entries, hidden) = read_dir(dir.path(), false).unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["src", "alpha.txt", "README.md"]);
+        assert_eq!(hidden, 1, "the dotfile left out is counted");
     }
 
     #[test]
     fn shows_dotfiles_when_asked() {
         let dir = fixture();
-        let entries = read_dir(dir.path(), true).unwrap();
+        let (entries, hidden) = read_dir(dir.path(), true).unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec![".hidden", "src", "alpha.txt", "README.md"]);
+        assert_eq!(hidden, 0, "nothing is left out");
     }
 
     #[test]

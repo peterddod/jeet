@@ -49,11 +49,13 @@ const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
 /// Telling someone to widen a filter they have not typed helps nobody.
 fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
     // The directory, not the filter: typing into an empty one leaves nothing
-    // for ⌫ to bring back, however much of it there is to delete.
-    if explorer.entries.is_empty() {
-        "this directory is empty"
-    } else {
-        NO_MATCH
+    // for ⌫ to bring back, however much of it there is to delete. And a
+    // directory holding only dotfiles is not empty — pointing at ⌫ or calling
+    // it empty both steer away from the key that would actually show them.
+    match (explorer.entries.is_empty(), explorer.hidden) {
+        (false, _) => NO_MATCH,
+        (true, 0) => "this directory is empty",
+        (true, _) => "nothing here but hidden files — ctrl-d shows them",
     }
 }
 

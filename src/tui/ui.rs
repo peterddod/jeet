@@ -91,6 +91,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         // while the entries it renders are borrowed immutably.
         let Explorer {
             entries,
+            hidden,
             matches,
             selected,
             filter,
@@ -102,10 +103,13 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         draw_listing(
             frame,
             chunks[1],
-            &rows,
-            entries.len(),
-            filter,
-            *selected,
+            Listing {
+                rows: &rows,
+                total: entries.len(),
+                hidden: *hidden,
+                filter,
+                selected: *selected,
+            },
             list,
         );
     }
@@ -275,15 +279,26 @@ pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
     }
 }
 
-fn draw_listing(
-    frame: &mut Frame,
-    area: Rect,
-    entries: &[&super::state::FsEntry],
+/// What the file list needs in order to draw itself, gathered up rather than
+/// spread across half a dozen positional arguments.
+struct Listing<'a> {
+    rows: &'a [&'a super::state::FsEntry],
+    /// Everything in the directory, so a filtered listing can say "3 of 9".
     total: usize,
-    filter: &str,
+    /// Dotfiles left out, so an empty-looking pane can say which kind it is.
+    hidden: usize,
+    filter: &'a str,
     selected: usize,
-    list_state: &mut ListState,
-) {
+}
+
+fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mut ListState) {
+    let Listing {
+        rows: entries,
+        total,
+        hidden,
+        filter,
+        selected,
+    } = listing;
     let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = entries
         .iter()
@@ -313,7 +328,7 @@ fn draw_listing(
         })
         .collect();
 
-    let title = listing_title(entries.len(), total, filter, area.width);
+    let title = listing_title(entries.len(), total, hidden, filter, area.width);
 
     list_state.select(if entries.is_empty() {
         None
@@ -334,11 +349,14 @@ fn draw_listing(
 /// The listing block's title, cut to its border run — the pane less its two
 /// corners. A title is drawn *into* that border, so an overrun eats it rather
 /// than being clipped harmlessly.
-fn listing_title(shown: usize, total: usize, filter: &str, pane: u16) -> String {
+fn listing_title(shown: usize, total: usize, hidden: usize, filter: &str, pane: u16) -> String {
     let run = (pane as usize).saturating_sub(2);
     // An empty directory is empty whatever was typed at it — the same thing
-    // the status line says for the same state.
-    let title = if total == 0 {
+    // the status line says for the same state — and one holding only dotfiles
+    // is not empty, it is hiding what it holds.
+    let title = if total == 0 && hidden > 0 {
+        format!(" {hidden} hidden · ctrl-d shows them ")
+    } else if total == 0 {
         " empty directory ".to_string()
     } else if shown == 0 {
         let fixed = NO_MATCH_TITLE.chars().count();
@@ -635,7 +653,7 @@ const HELP: [(&str, &str); 22] = [
         "type to filter this level (live, no key needed)",
     ),
     ("⇥", "complete the filter, as far as the matches agree"),
-    ("/ or \\", "enter the folder the filter names"),
+    ("/ or \\", "enter the highlighted folder, filtering afresh"),
     ("⌫ / ctrl-u", "delete a character / clear the filter"),
     ("", ""),
     ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
@@ -1035,17 +1053,24 @@ mod tests {
             for filter in ["", "x", &"Q".repeat(200), "日本語のディレクトリ", "❤️❤️"]
             {
                 for (shown, total) in [(0, 0), (0, 9), (3, 9), (9, 9), (999_999, 999_999)] {
-                    let title = listing_title(shown, total, filter, pane);
-                    assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+                    for hidden in [0, 7, 999_999] {
+                        let title = listing_title(shown, total, hidden, filter, pane);
+                        assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+                    }
                 }
             }
         }
         // With room, each case says its whole piece — and an empty directory
         // is empty whatever was typed at it.
-        assert_eq!(listing_title(0, 0, "x", 40), " empty directory ");
-        assert_eq!(listing_title(0, 9, "zz", 40), " nothing matches \"zz\" ");
-        assert_eq!(listing_title(9, 9, "", 40), " 9 items ");
-        assert_eq!(listing_title(3, 9, "z", 40), " 3 of 9 items ");
+        assert_eq!(listing_title(0, 0, 0, "x", 40), " empty directory ");
+        assert_eq!(
+            listing_title(0, 0, 3, "", 40),
+            " 3 hidden · ctrl-d shows them ",
+            "a directory holding only dotfiles is not empty"
+        );
+        assert_eq!(listing_title(0, 9, 0, "zz", 40), " nothing matches \"zz\" ");
+        assert_eq!(listing_title(9, 9, 0, "", 40), " 9 items ");
+        assert_eq!(listing_title(3, 9, 0, "z", 40), " 3 of 9 items ");
     }
 
     /// The header's filter line does not wrap, so what it draws has to fit the
