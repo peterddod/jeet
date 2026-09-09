@@ -423,6 +423,7 @@ fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
                     // crumb click can be undone by pressing → straight back.
                     let came_from = descendant_of(&dir, &explorer.cwd);
                     explorer.show(dir, came_from.as_deref())?;
+                    explorer.note_navigating_click(mouse.column, mouse.row);
                     explorer.set_status("");
                 }
             } else if let Some(row) = clicked_row(explorer, mouse.column, mouse.row) {
@@ -433,6 +434,7 @@ fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
                     let is_dir = explorer.selected_entry().map(|e| e.is_dir) == Some(true);
                     if is_dir {
                         explorer.descend()?;
+                        explorer.note_navigating_click(mouse.column, mouse.row);
                     }
                     explorer.set_status("");
                 }

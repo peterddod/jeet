@@ -130,9 +130,9 @@ pub struct Explorer {
     /// The cells the breadcrumb was drawn into, same deal, or none when the
     /// terminal was too short to draw the path line at all.
     pub breadcrumb_area: Option<Rect>,
-    /// When and where the last click landed, so the second press of a
-    /// double-click can be told from a deliberate one.
-    last_click: Option<(Instant, u16, u16)>,
+    /// When and where the last click that *moved* us landed, so the second
+    /// press of a double-click can be told from a deliberate one.
+    last_navigating_click: Option<(Instant, u16, u16)>,
 }
 
 /// Two presses on the same cell inside this window are one double-click.
@@ -171,7 +171,7 @@ impl Explorer {
             exit: Exit::Stay,
             list_area: Rect::default(),
             breadcrumb_area: None,
-            last_click: None,
+            last_navigating_click: None,
         };
         explorer.reload(None)?;
         Ok(explorer)
@@ -208,25 +208,28 @@ impl Explorer {
         Ok(self.show_hidden)
     }
 
-    /// Whether this press is the tail of a double-click on the same cell, and
-    /// so should be swallowed rather than acted on.
+    /// Whether this press is the tail of a double-click that has already moved
+    /// us, and so should be swallowed rather than acted on.
     ///
-    /// The window stays anchored on the press we acted on, never on the ones
-    /// we discarded — otherwise a sustained series of clicks in one place,
-    /// each inside the window of the last, would act exactly once however long
-    /// it went on.
-    pub fn is_double_click(&mut self, column: u16, row: u16) -> bool {
-        let now = Instant::now();
-        // A cell either way: a mouse rarely comes to rest on exactly the same
-        // one twice, and a press that drifted by one is still the second half
-        // of a double-click, not a new one.
-        if self.last_click.is_some_and(|(at, c, r)| {
-            c.abs_diff(column) <= 1 && r.abs_diff(row) <= 1 && now - at < DOUBLE_CLICK
-        }) {
-            return true;
-        }
-        self.last_click = Some((now, column, row));
-        false
+    /// Only a click that *navigated* arms this. A click that merely selected a
+    /// file changed nothing under the pointer, so whatever follows it is
+    /// harmless and deliberate; it is stepping into a folder and then acting
+    /// again on whatever the new listing slid underneath that is the bug.
+    /// Within a cell either way, because a mouse rarely comes to rest on
+    /// exactly the same one twice.
+    pub fn is_double_click(&self, column: u16, row: u16) -> bool {
+        self.last_navigating_click.is_some_and(|(at, c, r)| {
+            c.abs_diff(column) <= 1 && r.abs_diff(row) <= 1 && Instant::now() - at < DOUBLE_CLICK
+        })
+    }
+
+    /// Record a click that stepped somewhere, arming the guard above.
+    ///
+    /// Only ever the click we acted on, never one we discarded — otherwise a
+    /// sustained series of clicks in one place, each inside the window of the
+    /// last, would act exactly once however long it went on.
+    pub fn note_navigating_click(&mut self, column: u16, row: u16) {
+        self.last_navigating_click = Some((Instant::now(), column, row));
     }
 
     /// List `dir` and move there, leaving state untouched if it cannot be read.
@@ -1109,29 +1112,38 @@ mod tests {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
 
+        // Nothing has moved us yet, so nothing is suspect.
         assert!(!explorer.is_double_click(4, 7));
+
+        explorer.note_navigating_click(4, 7);
         assert!(
             explorer.is_double_click(4, 7),
             "same cell, immediately after"
         );
-        // A triple-click gets no third action either.
-        assert!(explorer.is_double_click(4, 7));
-        // Nor does a press that drifted a cell — a mouse rarely lands twice
-        // on exactly the same one.
+        // Nor a press that drifted a cell — a mouse rarely lands twice on
+        // exactly the same one.
         assert!(explorer.is_double_click(5, 8));
         // Somewhere else is a deliberate click, however fast.
         assert!(!explorer.is_double_click(20, 14));
 
+        // A click that only selected a file changed nothing under the pointer,
+        // so it arms nothing and the next click is free to act.
+        let explorer = explorer_at(dir.path());
+        assert!(!explorer.is_double_click(4, 7));
+        assert!(!explorer.is_double_click(4, 7));
+
+        // And the window is anchored on the click we acted on, not on the ones
+        // we discarded: clicking on and on in one place keeps working rather
+        // than going dead after the first.
+        let mut explorer = explorer_at(dir.path());
         let mut acted = 0;
         for _ in 0..4 {
             std::thread::sleep(DOUBLE_CLICK / 2);
             if !explorer.is_double_click(40, 20) {
                 acted += 1;
+                explorer.note_navigating_click(40, 20);
             }
         }
-        // Anchored on the acted press, every other one of these clears the
-        // window. Anchored on every press — the bug — only the first ever
-        // would, however long the clicking went on.
         assert!(acted >= 2, "only {acted} of 4 clicks acted");
     }
 
