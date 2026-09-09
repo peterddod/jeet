@@ -393,22 +393,28 @@ impl Explorer {
 
     /// The folder `/` would enter: the one the filter names outright, or the
     /// only thing it matches at all.
+    ///
+    /// Moving the cursor off the top match settles it: with `src/` and
+    /// `src-old/` both matching `src`, arrowing onto `src-old` and pressing
+    /// `/` goes there, because ⏎, → and a click all act on the highlighted
+    /// row too. Left at the top, the filter alone decides, so a single letter
+    /// does not walk into whichever folder happens to sort first.
     fn typed_dir(&self) -> Option<usize> {
         if self.filter.is_empty() {
             return None;
         }
         let needle = self.filter.to_lowercase();
-        let named = self
-            .matches
-            .iter()
-            .copied()
-            .find(|&i| self.entries[i].name.to_lowercase() == needle);
-        let index = match named {
-            Some(index) => index,
-            None => match self.matches.as_slice() {
-                [only] => *only,
-                _ => return None,
-            },
+        let index = match self.matches.get(self.selected).copied() {
+            Some(highlighted) if self.selected > 0 => highlighted,
+            _ => self
+                .matches
+                .iter()
+                .copied()
+                .find(|&i| self.entries[i].name.to_lowercase() == needle)
+                .or(match self.matches.as_slice() {
+                    [only] => Some(*only),
+                    _ => None,
+                })?,
         };
         self.entries[index].is_dir.then_some(index)
     }
@@ -550,6 +556,12 @@ pub fn completion(names: &[&str], chosen: usize, filter: &str) -> Option<String>
         if shared.chars().count() > filter.chars().count() {
             return Some(shared);
         }
+    }
+    // With nothing typed, ⇥ only ever fills in what every name shares, as a
+    // shell does. Taking the highlighted one outright would collapse a
+    // directory the user has not narrowed at all down to a single row.
+    if filter.is_empty() {
+        return None;
     }
     (pick != filter).then(|| pick.to_string())
 }
@@ -1011,6 +1023,52 @@ mod tests {
         explorer.set_filter("src".into());
         assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
         assert_eq!(explorer.cwd, dir.path().join("src"));
+    }
+
+    /// `/` acts on the row under the cursor, like ⏎, → and a click do — an
+    /// exact name match elsewhere in the listing must not win over it.
+    #[test]
+    fn slash_follows_the_cursor_when_the_filter_is_ambiguous() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("src-old")).unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("src".into());
+        explorer.move_cursor(1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "src-old");
+        assert_eq!(
+            explorer.descend_typed().unwrap().as_deref(),
+            Some("src-old")
+        );
+        assert_eq!(explorer.cwd, dir.path().join("src-old"));
+
+        // Left at the top match, the filter alone decides — a single letter
+        // must not walk into whichever folder happens to sort first.
+        let mut explorer = explorer_at(dir.path());
+        explorer.set_filter("s".into());
+        assert_eq!(explorer.descend_typed().unwrap(), None);
+        explorer.set_filter("src".into());
+        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+    }
+
+    /// With nothing typed, ⇥ fills in what every name shares and no more —
+    /// dumping a whole filename in would collapse the listing to one row.
+    #[test]
+    fn tab_on_an_empty_filter_does_not_pick_a_file_for_you() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        assert!(!explorer.complete());
+        assert!(explorer.filter.is_empty());
+        assert_eq!(explorer.visible_len(), 3);
+
+        // Where the names do share a prefix, it still fills that in.
+        let shared = TempDir::new().unwrap();
+        std::fs::create_dir(shared.path().join("build-web")).unwrap();
+        std::fs::create_dir(shared.path().join("build-api")).unwrap();
+        let mut explorer = explorer_at(shared.path());
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, "build-");
     }
 
     #[test]

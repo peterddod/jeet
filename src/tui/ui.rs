@@ -192,19 +192,32 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16
             ),
         ])
     } else {
+        // The line does not wrap, so a long filter — ⇥ completing a long name
+        // gets you one easily — would otherwise push its own tail, the cursor
+        // and the counter off the border, and ⌫ would look inert because the
+        // characters going away were never on screen. Keep the tail: it is the
+        // end being typed at.
+        let counter = format!("  {} of {}", explorer.visible_len(), explorer.entries.len());
+        let interior = area.width.saturating_sub(2) as usize;
+        let fixed = LABEL_WIDTH as usize + 1; // label, plus the cursor block
+        let mut room = interior.saturating_sub(fixed + counter.width());
+        // Too tight for both: the filter is what the user is looking at.
+        let counter = if room < 8 {
+            room = interior.saturating_sub(fixed);
+            String::new()
+        } else {
+            counter
+        };
         Line::from(vec![
             Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                explorer.filter.clone(),
+                truncate_start(&explorer.filter, room.max(1)),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("  {} of {}", explorer.visible_len(), explorer.entries.len()),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(counter, Style::default().fg(Color::DarkGray)),
         ])
     };
 
