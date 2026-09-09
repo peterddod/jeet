@@ -372,11 +372,11 @@ impl Explorer {
 
     /// Whether adding `c` to the filter would still match something here.
     pub fn filter_would_match(&self, c: char) -> bool {
-        let mut wider = self.filter.clone();
-        wider.push(c);
+        let mut wider = self.filter.to_lowercase();
+        wider.extend(c.to_lowercase());
         self.entries
             .iter()
-            .any(|entry| entry.name.to_lowercase().contains(&wider.to_lowercase()))
+            .any(|entry| entry.name.to_lowercase().contains(&wider))
     }
 
     /// `/`: step into the folder the filter spells out, as you would while

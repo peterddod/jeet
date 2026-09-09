@@ -45,6 +45,16 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// Said when a key needs a highlighted row and the filter has left none.
 const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
 
+/// Why there is no row under the cursor: the filter, or the directory itself.
+/// Telling someone to widen a filter they have not typed helps nobody.
+fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
+    if explorer.filter.is_empty() {
+        "this directory is empty"
+    } else {
+        NO_MATCH
+    }
+}
+
 /// Said when a path separator has no single folder to step into.
 const NOT_ONE_FOLDER: &str = "filter does not name one folder — ⇥ to complete";
 
@@ -326,7 +336,7 @@ fn handle_browse_key(
                 explorer.set_status("");
             }
             Some(false) => explorer.set_status("not a directory — press ⏎ to open it"),
-            None => explorer.set_status(NO_MATCH),
+            None => explorer.set_status(nothing_to_act_on(explorer)),
         },
         KeyCode::Left => {
             if explorer.ascend()? {
@@ -352,7 +362,7 @@ fn handle_browse_key(
 /// ⏎ and a click on the highlighted row: folders open, files go to the editor.
 fn enter_selected(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
     let Some(entry) = explorer.selected_entry().cloned() else {
-        explorer.set_status(NO_MATCH);
+        explorer.set_status(nothing_to_act_on(explorer));
         return Ok(());
     };
     if entry.is_dir {
@@ -484,7 +494,10 @@ fn handle_overlay_key(
             let max = ui::help_geometry(Rect::new(0, 0, size.width, size.height)).1;
             let moved = match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Ok(()),
-                KeyCode::Up => scroll.saturating_sub(1),
+                // Clamped on the way up as well as down: a stored scroll left
+                // over from a smaller terminal would otherwise take several
+                // presses to come back into range, looking dead throughout.
+                KeyCode::Up => scroll.min(max).saturating_sub(1),
                 KeyCode::Down => (scroll + 1).min(max),
                 KeyCode::PageUp | KeyCode::Home => 0,
                 KeyCode::PageDown | KeyCode::End => max,

@@ -45,7 +45,9 @@ fn hints(width: u16) -> String {
         .map(with_middle)
         .chain([HINT_TAIL.join("  "), last.to_string()])
         .find(|line| line.width() <= width)
-        .unwrap_or_else(|| last.to_string())
+        // Narrower than even that: say as much of it as there is room for
+        // rather than let the terminal cut it off wherever it lands.
+        .unwrap_or_else(|| truncate(last, width))
 }
 
 /// Column the header's value column starts at: one for the border, plus the
@@ -279,7 +281,10 @@ fn draw_listing(
             } else {
                 human_size(entry.size)
             };
-            let used = marker.chars().count() + name.chars().count() + size.chars().count();
+            // Display width, not character count: a CJK name is two columns
+            // per character and padding it by count pushes the size off the
+            // right edge of the pane.
+            let used = marker.width() + name.width() + size.width();
             let pad = width.saturating_sub(used).max(1);
             ListItem::new(Line::from(vec![
                 Span::styled(marker, style),
@@ -832,12 +837,16 @@ mod tests {
     /// that would go first are the ones that replaced keys people knew.
     #[test]
     fn hints_shrink_to_fit_the_terminal() {
-        // No width overflows, and every one of them keeps the way out — `q`
-        // does not quit any more, so `^q quit` is the last thing to go.
-        for width in 7u16..=200 {
+        // No width overflows, however narrow — not even one too small for the
+        // last hint standing.
+        for width in 1u16..=200 {
             let hint = hints(width);
-            assert!(hint.width() <= width as usize, "{width}: {hint}");
-            assert!(hint.contains("^q quit"), "{width}: {hint}");
+            assert!(hint.width() <= width as usize, "{width}: {hint:?}");
+        }
+        // And every width with room for it keeps the way out: `q` does not
+        // quit any more, so `^q quit` is the last thing to go.
+        for width in 7u16..=200 {
+            assert!(hints(width).contains("^q quit"), "{width}");
         }
         for width in [200u16, 118, 100, 90, 80, 70, 40, 32] {
             let hint = hints(width);
