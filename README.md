@@ -114,6 +114,7 @@ and the level narrows to what matches, case-insensitively, with names that
 | any letter, digit or symbol | filter this level |
 | `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
 | `/` or `\` | step into the folder the filter names, and start a fresh filter |
+| | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
 | `⌫` | delete a character |
 | `ctrl-u` | clear the filter |
 | `esc` | clear the filter — or, with nothing typed, quit |
@@ -155,7 +156,8 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
 name field in the new/rename prompts. Deleting asks first: `y` removes, and
 `f` forces past git's refusal when the worktree still holds work. The panels
-are keyboard-driven, so single letters still work inside them.
+are keyboard-driven, so single letters still work inside them, and the key
+that opened one closes it again.
 
 Anything slow — reading a repo's worktrees, or creating and renaming, which
 push to `origin` — runs in the background with a progress indicator, so the
