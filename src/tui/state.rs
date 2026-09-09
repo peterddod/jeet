@@ -82,6 +82,18 @@ pub enum Overlay {
     },
 }
 
+/// What `/` did, so the caller can explain a step that did not happen without
+/// having to work out why for itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Stepped into this folder.
+    Entered(String),
+    /// The filter or the cursor settled on something, but it is a file.
+    NotADirectory,
+    /// Neither settled on anything.
+    Unresolved,
+}
+
 /// How the explorer finished, which decides where the shell ends up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exit {
@@ -432,45 +444,47 @@ impl Explorer {
             .any(|entry| entry.name.to_lowercase().contains(&wider))
     }
 
-    /// `/`: step into the folder the filter spells out, as you would while
-    /// typing a path. Returns the name entered, or none when the filter does
-    /// not settle on exactly one folder.
-    pub fn descend_typed(&mut self) -> Result<Option<String>> {
-        let Some(index) = self.typed_dir() else {
-            return Ok(None);
+    /// `/`: step into the folder the filter or the cursor settles on, as you
+    /// would while typing a path.
+    pub fn descend_typed(&mut self) -> Result<Step> {
+        let Some(index) = self.typed_target() else {
+            return Ok(Step::Unresolved);
         };
         let entry = self.entries[index].clone();
+        if !entry.is_dir {
+            return Ok(Step::NotADirectory);
+        }
         self.show(entry.path, None)?;
-        Ok(Some(entry.name))
+        Ok(Step::Entered(entry.name))
     }
 
-    /// The folder `/` would enter: the one the filter names outright, or the
-    /// only thing it matches at all.
+    /// The entry `/` resolves to, folder or not — so the caller can say which
+    /// of the two reasons it did not step anywhere, rather than guess.
     ///
-    /// Putting the cursor somewhere settles it: with `src/` and `src-old/`
-    /// both matching `src`, arrowing onto either and pressing `/` goes there,
-    /// because ⏎, → and a click all act on the highlighted row too. Until the
-    /// cursor is chosen the filter alone decides, so a single letter does not
-    /// walk into whichever folder happens to sort first.
-    fn typed_dir(&self) -> Option<usize> {
-        // A row the user put the cursor on is what `/` acts on, filter or no
-        // filter — it is the row ⏎ and → would act on.
-        let index = if self.chosen {
-            self.matches.get(self.selected).copied()?
-        } else if self.filter.is_empty() {
-            return None;
-        } else {
+    /// A row the user put the cursor on wins, with or without a filter: it is
+    /// the row ⏎ and → act on. Failing that the filter has to settle it, by
+    /// naming something outright or by leaving one thing on screen — so a
+    /// single letter does not walk into whichever folder happens to sort
+    /// first, but the only folder there is needs no disambiguating.
+    fn typed_target(&self) -> Option<usize> {
+        if self.chosen {
+            return self.matches.get(self.selected).copied();
+        }
+        if !self.filter.is_empty() {
             let needle = self.filter.to_lowercase();
-            self.matches
+            let named = self
+                .matches
                 .iter()
                 .copied()
-                .find(|&i| self.entries[i].name.to_lowercase() == needle)
-                .or(match self.matches.as_slice() {
-                    [only] => Some(*only),
-                    _ => None,
-                })?
-        };
-        self.entries[index].is_dir.then_some(index)
+                .find(|&i| self.entries[i].name.to_lowercase() == needle);
+            if named.is_some() {
+                return named;
+            }
+        }
+        match self.matches.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
     }
 
     /// Directory a click `offset` columns into the breadcrumb points at.
@@ -1037,7 +1051,10 @@ mod tests {
         let mut explorer = explorer_at(dir.path());
 
         explorer.set_filter("src".into());
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into())
+        );
         assert_eq!(explorer.cwd, dir.path().join("src"));
         assert!(
             explorer.filter.is_empty(),
@@ -1067,7 +1084,10 @@ mod tests {
         explorer.reload(None).unwrap();
         explorer.set_filter("weird".into());
         assert!(!explorer.filter_would_match('\\'));
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("weird"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("weird".into())
+        );
     }
 
     /// A cursor the user put somewhere is what `/` acts on, with or without a
@@ -1078,33 +1098,60 @@ mod tests {
         let mut explorer = explorer_at(dir.path());
 
         // Untouched: nothing typed, nothing chosen, nothing to enter.
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
 
         // An arrow that clamps against the top has chosen nothing either.
         explorer.move_cursor(-1);
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
 
         // Actually moving onto the folder does choose it.
         explorer.move_cursor(1);
         explorer.move_cursor(-1);
         assert_eq!(explorer.selected_entry().unwrap().name, "src");
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into())
+        );
     }
 
+    /// `/` says which of the two reasons it did not step, so the explorer can
+    /// answer "that is a file" rather than send the user off completing a
+    /// filter that already names it.
     #[test]
-    fn slash_does_nothing_without_a_single_folder_to_enter() {
+    fn slash_says_why_it_did_not_step() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
 
-        // A file is not a folder.
+        // A file is not a folder — and the filter names it exactly.
         explorer.set_filter("alpha".into());
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::NotADirectory);
         assert_eq!(explorer.cwd, dir.path());
 
-        // Nothing typed at all.
+        // Nothing typed, several things on screen: nothing has settled it.
         explorer.set_filter(String::new());
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
         assert_eq!(explorer.cwd, dir.path());
+
+        // Several matches, none named outright: likewise.
+        explorer.set_filter("a".into());
+        assert!(explorer.visible_len() > 1);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
+    }
+
+    /// The only thing on screen needs no disambiguating, typed at or not —
+    /// and in a one-row listing the arrows cannot choose it for you.
+    #[test]
+    fn slash_enters_the_only_thing_there_is() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("only")).unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        assert_eq!(explorer.visible_len(), 1);
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("only".into())
+        );
+        assert_eq!(explorer.cwd, dir.path().join("only"));
     }
 
     /// Typing a folder's full name wins even when it is also a prefix of
@@ -1117,7 +1164,10 @@ mod tests {
         let mut explorer = explorer_at(dir.path());
 
         explorer.set_filter("src".into());
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into())
+        );
         assert_eq!(explorer.cwd, dir.path().join("src"));
     }
 
@@ -1134,8 +1184,8 @@ mod tests {
         explorer.move_cursor(1);
         assert_eq!(explorer.selected_entry().unwrap().name, "src-old");
         assert_eq!(
-            explorer.descend_typed().unwrap().as_deref(),
-            Some("src-old")
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src-old".into())
         );
         assert_eq!(explorer.cwd, dir.path().join("src-old"));
 
@@ -1146,15 +1196,21 @@ mod tests {
         explorer.move_cursor(1);
         explorer.move_cursor(-1);
         assert_eq!(explorer.selected_entry().unwrap().name, "src");
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into())
+        );
 
         // Untouched, the filter alone decides — a single letter must not walk
         // into whichever folder happens to sort first.
         let mut explorer = explorer_at(dir.path());
         explorer.set_filter("s".into());
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
         explorer.set_filter("src".into());
-        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into())
+        );
 
         // And typing again voids an earlier choice: the matches re-sort and
         // the cursor goes back to the top, so nothing has been chosen since.
@@ -1162,7 +1218,7 @@ mod tests {
         explorer.set_filter("s".into());
         explorer.move_cursor(1);
         explorer.push_filter('r');
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
     }
 
     /// With nothing typed, ⇥ fills in what every name shares and no more —
@@ -1201,8 +1257,8 @@ mod tests {
         explorer.reload(Some(&gone)).unwrap();
         assert_eq!(explorer.selected_entry().unwrap().name, "src");
         assert_eq!(
-            explorer.descend_typed().unwrap().as_deref(),
-            Some("src"),
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src".into()),
             "the filter names src outright, so that much still holds"
         );
 
@@ -1217,7 +1273,7 @@ mod tests {
         std::fs::remove_dir(&gone).unwrap();
         explorer.reload(Some(&gone)).unwrap();
         assert!(explorer.visible_len() > 1, "the filter is still ambiguous");
-        assert_eq!(explorer.descend_typed().unwrap(), None);
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
     }
 
     /// A choice that survives a refresh is still a choice.
@@ -1233,8 +1289,8 @@ mod tests {
         let keep = explorer.selected_entry().unwrap().path.clone();
         explorer.reload(Some(&keep)).unwrap();
         assert_eq!(
-            explorer.descend_typed().unwrap().as_deref(),
-            Some("src-old")
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src-old".into())
         );
     }
 

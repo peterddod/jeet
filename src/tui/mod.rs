@@ -38,7 +38,7 @@ use crate::db::RepoRecord;
 use crate::resolve::RepoContext;
 use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
 
-use state::{Exit, Explorer, Overlay, PendingAction, WorktreeRow};
+use state::{Exit, Explorer, Overlay, PendingAction, Step, WorktreeRow};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -66,17 +66,19 @@ const NOTHING_TYPED: &str = "type a folder's name, or ↑↓ onto one";
 /// Said when the highlighted row is a file and the key wanted a folder.
 const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
 
-/// Why `/` did not step anywhere.
-fn no_folder_to_enter(explorer: &Explorer) -> &'static str {
-    if explorer.visible_len() == 0 {
-        // Nothing on screen at all: the same two reasons ⇥, → and ⏎ give.
-        nothing_to_act_on(explorer)
-    } else if !explorer.filter.is_empty() {
-        NOT_ONE_FOLDER
-    } else if explorer.selected_entry().is_some_and(|entry| !entry.is_dir) {
-        NOT_A_DIRECTORY
-    } else {
-        NOTHING_TYPED
+/// Report a `/` that did not step anywhere. `Step` says which case it was, so
+/// there is nothing here to work out — only which words to use.
+fn report_step(explorer: &mut Explorer, step: Step) {
+    match step {
+        Step::Entered(name) => explorer.set_status(format!("entered {name}/")),
+        Step::NotADirectory => explorer.set_status(NOT_A_DIRECTORY),
+        Step::Unresolved if explorer.visible_len() == 0 => {
+            // Nothing on screen at all: the same two reasons ⇥, → and ⏎ give.
+            let why = nothing_to_act_on(explorer);
+            explorer.set_status(why);
+        }
+        Step::Unresolved if explorer.filter.is_empty() => explorer.set_status(NOTHING_TYPED),
+        Step::Unresolved => explorer.set_status(NOT_ONE_FOLDER),
     }
 }
 
@@ -336,13 +338,10 @@ fn handle_browse_key(
         }
         // A path separator means "go in", the way it does while typing a path.
         // `/` cannot appear in a Unix filename, so it always navigates.
-        KeyCode::Char('/') if !ctrl => match explorer.descend_typed()? {
-            Some(name) => explorer.set_status(format!("entered {name}/")),
-            None => {
-                let why = no_folder_to_enter(explorer);
-                explorer.set_status(why);
-            }
-        },
+        KeyCode::Char('/') if !ctrl => {
+            let step = explorer.descend_typed()?;
+            report_step(explorer, step);
+        }
         // `\` can, so it types whenever there is still a name it could be part
         // of — `weird\name.txt` stays reachable even beside a `weird/` — and
         // means "go in" only when there is not.
@@ -354,13 +353,8 @@ fn handle_browse_key(
                 // Nothing it could be part of, so it means "go in" — and when
                 // there is nothing to go into either, say so rather than
                 // typing a character that is guaranteed to match nothing.
-                match explorer.descend_typed()? {
-                    Some(name) => explorer.set_status(format!("entered {name}/")),
-                    None => {
-                        let why = no_folder_to_enter(explorer);
-                        explorer.set_status(why);
-                    }
-                }
+                let step = explorer.descend_typed()?;
+                report_step(explorer, step);
             }
         }
         KeyCode::Esc => {
