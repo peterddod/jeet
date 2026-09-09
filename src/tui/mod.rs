@@ -286,15 +286,23 @@ fn handle_browse_key(
             Some(name) => explorer.set_status(format!("entered {name}/")),
             None => explorer.set_status("filter does not name one folder — ⇥ to complete"),
         },
-        // `\` can, so it only navigates when the filter does name a folder;
-        // otherwise it is an ordinary character in `weird\name.txt`.
-        KeyCode::Char('\\') if !ctrl => match explorer.descend_typed()? {
-            Some(name) => explorer.set_status(format!("entered {name}/")),
-            None => {
-                explorer.push_filter('\\');
-                explorer.set_status("");
+        // `\` can, so it types whenever there is still a name it could be part
+        // of — `weird\name.txt` stays reachable even beside a `weird/` — and
+        // means "go in" only when there is not.
+        KeyCode::Char('\\') if !ctrl => {
+            let entered = if explorer.filter_would_match('\\') {
+                None
+            } else {
+                explorer.descend_typed()?
+            };
+            match entered {
+                Some(name) => explorer.set_status(format!("entered {name}/")),
+                None => {
+                    explorer.push_filter('\\');
+                    explorer.set_status("");
+                }
             }
-        },
+        }
         KeyCode::Esc => {
             // Escape backs out of what you typed before it backs out of jeet.
             if !explorer.clear_filter() {
@@ -437,15 +445,28 @@ fn handle_overlay_key(
     overlay: Overlay,
     key: KeyEvent,
 ) -> Result<()> {
-    // The browse-mode shortcuts are all ctrl-modified, and none of them mean
-    // anything in a panel. Letting them through makes ctrl-d ask to delete a
-    // worktree and ctrl-e create one. The prompts are the exception: they take
-    // typed input, and ctrl-u clears it.
+    // A panel's own key closes it again, the way it did when these were bare
+    // letters — the overlay is already taken, so returning drops it.
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let toggled_shut = match (&overlay, key.code) {
+        (Overlay::Worktrees { .. }, KeyCode::Char('w')) => ctrl,
+        (Overlay::Sessions { .. }, KeyCode::Char('s')) => ctrl,
+        (Overlay::Help { .. }, KeyCode::Char('g')) => ctrl,
+        (Overlay::Help { .. }, KeyCode::F(1)) => true,
+        _ => false,
+    };
+    if toggled_shut {
+        return Ok(());
+    }
+
+    // Otherwise the browse-mode shortcuts mean nothing in a panel, and letting
+    // them through makes ctrl-d ask to delete a worktree and ctrl-e create one.
+    // The prompts are the exception: they take typed input, and ctrl-u clears.
     let typing = matches!(
         overlay,
         Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. }
     );
-    if !typing && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if !typing && ctrl {
         explorer.overlay = Some(overlay);
         return Ok(());
     }

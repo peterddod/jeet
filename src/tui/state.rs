@@ -370,6 +370,15 @@ impl Explorer {
         Ok(true)
     }
 
+    /// Whether adding `c` to the filter would still match something here.
+    pub fn filter_would_match(&self, c: char) -> bool {
+        let mut wider = self.filter.clone();
+        wider.push(c);
+        self.entries
+            .iter()
+            .any(|entry| entry.name.to_lowercase().contains(&wider.to_lowercase()))
+    }
+
     /// `/`: step into the folder the filter spells out, as you would while
     /// typing a path. Returns the name entered, or none when the filter does
     /// not settle on exactly one folder.
@@ -947,6 +956,31 @@ mod tests {
             explorer.filter.is_empty(),
             "the filter must reset on the way in"
         );
+    }
+
+    /// `\` has to stay typeable next to a folder of the same name, or the file
+    /// it belongs to cannot be filtered for at all.
+    #[test]
+    fn a_backslash_that_could_belong_to_a_name_is_not_navigation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("weird")).unwrap();
+        std::fs::write(dir.path().join("weird\\name.txt"), "x").unwrap();
+        let explorer_dir = dir.path().to_path_buf();
+        let mut explorer = explorer_at(&explorer_dir);
+
+        explorer.set_filter("weird".into());
+        assert!(
+            explorer.filter_would_match('\\'),
+            "there is still a name the backslash could be part of"
+        );
+
+        // With the file gone there is nothing left it could type towards, and
+        // the folder of that name is what it means.
+        std::fs::remove_file(dir.path().join("weird\\name.txt")).unwrap();
+        explorer.reload(None).unwrap();
+        explorer.set_filter("weird".into());
+        assert!(!explorer.filter_would_match('\\'));
+        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("weird"));
     }
 
     #[test]
