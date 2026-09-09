@@ -60,6 +60,18 @@ fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
 /// Said when a path separator has no single folder to step into.
 const NOT_ONE_FOLDER: &str = "filter does not name one folder — ⇥ to complete";
 
+/// The same, with nothing typed, where ⇥ has nothing to work from either.
+const NOTHING_TYPED: &str = "type a folder's name, or ↑↓ onto one";
+
+/// Why `/` did not step anywhere.
+fn no_folder_to_enter(explorer: &Explorer) -> &'static str {
+    if explorer.filter.is_empty() {
+        NOTHING_TYPED
+    } else {
+        NOT_ONE_FOLDER
+    }
+}
+
 /// Ask the terminal for button and wheel reports, in SGR encoding.
 ///
 /// Not crossterm's `EnableMouseCapture`: that also turns on `?1003h`,
@@ -318,7 +330,10 @@ fn handle_browse_key(
         // `/` cannot appear in a Unix filename, so it always navigates.
         KeyCode::Char('/') if !ctrl => match explorer.descend_typed()? {
             Some(name) => explorer.set_status(format!("entered {name}/")),
-            None => explorer.set_status(NOT_ONE_FOLDER),
+            None => {
+                let why = no_folder_to_enter(explorer);
+                explorer.set_status(why);
+            }
         },
         // `\` can, so it types whenever there is still a name it could be part
         // of — `weird\name.txt` stays reachable even beside a `weird/` — and
@@ -333,7 +348,10 @@ fn handle_browse_key(
                 // typing a character that is guaranteed to match nothing.
                 match explorer.descend_typed()? {
                     Some(name) => explorer.set_status(format!("entered {name}/")),
-                    None => explorer.set_status(NOT_ONE_FOLDER),
+                    None => {
+                        let why = no_folder_to_enter(explorer);
+                        explorer.set_status(why);
+                    }
                 }
             }
         }

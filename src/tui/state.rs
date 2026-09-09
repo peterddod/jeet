@@ -358,18 +358,27 @@ impl Explorer {
         }
         let len = self.matches.len() as isize;
         let next = self.selected as isize + delta;
-        self.selected = next.clamp(0, len - 1) as usize;
-        self.chosen = true;
+        self.put_cursor(next.clamp(0, len - 1) as usize);
     }
 
     pub fn select_first(&mut self) {
-        self.selected = 0;
-        self.chosen = true;
+        self.put_cursor(0);
     }
 
     pub fn select_last(&mut self) {
-        self.selected = self.matches.len().saturating_sub(1);
-        self.chosen = true;
+        self.put_cursor(self.matches.len().saturating_sub(1));
+    }
+
+    /// Move the cursor, counting it as chosen only if it actually moved.
+    ///
+    /// An arrow at the end of the list, or a scroll notch against the top, has
+    /// put the cursor nowhere — and arming `/` off one of those would turn a
+    /// filter the user knows is ambiguous into a step into its first folder.
+    fn put_cursor(&mut self, index: usize) {
+        if index != self.selected {
+            self.selected = index;
+            self.chosen = true;
+        }
     }
 
     /// Put the cursor on a visible row, ignoring one that is not there.
@@ -424,21 +433,22 @@ impl Explorer {
     /// cursor is chosen the filter alone decides, so a single letter does not
     /// walk into whichever folder happens to sort first.
     fn typed_dir(&self) -> Option<usize> {
-        if self.filter.is_empty() {
+        // A row the user put the cursor on is what `/` acts on, filter or no
+        // filter — it is the row ⏎ and → would act on.
+        let index = if self.chosen {
+            self.matches.get(self.selected).copied()?
+        } else if self.filter.is_empty() {
             return None;
-        }
-        let needle = self.filter.to_lowercase();
-        let index = match self.matches.get(self.selected).copied() {
-            Some(highlighted) if self.chosen => highlighted,
-            _ => self
-                .matches
+        } else {
+            let needle = self.filter.to_lowercase();
+            self.matches
                 .iter()
                 .copied()
                 .find(|&i| self.entries[i].name.to_lowercase() == needle)
                 .or(match self.matches.as_slice() {
                     [only] => Some(*only),
                     _ => None,
-                })?,
+                })?
         };
         self.entries[index].is_dir.then_some(index)
     }
@@ -1017,6 +1027,27 @@ mod tests {
         explorer.set_filter("weird".into());
         assert!(!explorer.filter_would_match('\\'));
         assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("weird"));
+    }
+
+    /// A cursor the user put somewhere is what `/` acts on, with or without a
+    /// filter — and an arrow that could not move has put it nowhere.
+    #[test]
+    fn slash_follows_a_chosen_cursor_even_with_nothing_typed() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+
+        // Untouched: nothing typed, nothing chosen, nothing to enter.
+        assert_eq!(explorer.descend_typed().unwrap(), None);
+
+        // An arrow that clamps against the top has chosen nothing either.
+        explorer.move_cursor(-1);
+        assert_eq!(explorer.descend_typed().unwrap(), None);
+
+        // Actually moving onto the folder does choose it.
+        explorer.move_cursor(1);
+        explorer.move_cursor(-1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "src");
+        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
     }
 
     #[test]
