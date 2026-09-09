@@ -1249,7 +1249,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let odd = dir.path().join(OsString::from_vec(b"od\xffd".to_vec()));
         let nested = odd.join("tui");
-        std::fs::create_dir_all(&nested).unwrap();
+        if std::fs::create_dir_all(&nested).is_err() {
+            // APFS and other UTF-8-enforcing filesystems will not hold this
+            // name at all, so there is nothing here to get wrong.
+            return;
+        }
         let mut explorer = explorer_at(dir.path());
         explorer.show(nested.clone(), None).unwrap();
 
