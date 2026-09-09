@@ -629,7 +629,8 @@ pub fn help_body(width: u16) -> Vec<Line<'static>> {
     // Below this there is no room for a description beside its key, so the key
     // takes a line of its own and the description follows, indented.
     let two_column = width >= KEY_WIDTH + 16;
-    let indent = if two_column { KEY_WIDTH } else { 2 };
+    // Never so far in that there is no room left to indent anything onto.
+    let indent = if two_column { KEY_WIDTH } else { 2 }.min(width.saturating_sub(1));
     let mut lines = Vec::new();
     for (key, description) in HELP {
         if key.is_empty() && description.is_empty() {
@@ -646,7 +647,16 @@ pub fn help_body(width: u16) -> Vec<Line<'static>> {
         };
         let mut rest = wrap_columns(description, width.saturating_sub(indent).max(1));
         if !two_column {
-            lines.push(Line::from(vec![key_span()]));
+            // No padding to a column that is not there: the key takes its own
+            // line, wrapped to the panel rather than clipped by it.
+            for part in wrap_columns(key, width) {
+                lines.push(Line::from(Span::styled(
+                    part,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
         } else {
             let first = if rest.is_empty() {
                 String::new()
@@ -667,7 +677,7 @@ pub fn help_body(width: u16) -> Vec<Line<'static>> {
 /// of its own.
 fn wrap_columns(text: &str, width: usize) -> Vec<String> {
     let body = text.trim_start_matches(' ');
-    let indent = text.len() - body.len();
+    let indent = (text.len() - body.len()).min(width.saturating_sub(1));
     let mut lines = wrap_words(body, width.saturating_sub(indent).max(1));
     if indent > 0 {
         if let Some(first) = lines.first_mut() {
@@ -952,7 +962,7 @@ mod tests {
     /// Wrapping never puts more on a line than the panel has room for.
     #[test]
     fn the_help_panel_never_overflows_its_width() {
-        for width in 16u16..100 {
+        for width in 1u16..100 {
             for line in help_body(width) {
                 let drawn: usize = line.spans.iter().map(|s| s.content.width()).sum();
                 assert!(drawn <= width as usize, "width {width}: {drawn} columns");

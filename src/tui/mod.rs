@@ -231,9 +231,20 @@ fn event_loop(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<
 }
 
 fn handle_key(app: &App, terminal: &mut Tui, explorer: &mut Explorer, key: KeyEvent) -> Result<()> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-        explorer.quit_in_place();
-        return Ok(());
+    // Both ways out, before anything else can swallow them: a panel takes the
+    // whole keyboard while it is up, and these are the only keys that quit.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                explorer.quit_in_place();
+                return Ok(());
+            }
+            KeyCode::Char('q') => {
+                explorer.quit_here();
+                return Ok(());
+            }
+            _ => {}
+        }
     }
     match explorer.overlay.take() {
         Some(overlay) => handle_overlay_key(app, terminal, explorer, overlay, key),
@@ -250,8 +261,8 @@ fn handle_browse_key(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Commands first: with the filter live, every one of them needs a ctrl
-        // to keep the letter itself available for typing.
-        KeyCode::Char('q') if ctrl => explorer.quit_here(),
+        // to keep the letter itself available for typing. ctrl-q and ctrl-c
+        // are handled before this, so they work from inside a panel too.
         KeyCode::Char('u') if ctrl => {
             if explorer.clear_filter() {
                 explorer.set_status("");
