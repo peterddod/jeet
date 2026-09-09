@@ -63,12 +63,20 @@ const NOT_ONE_FOLDER: &str = "filter does not name one folder — ⇥ to complet
 /// The same, with nothing typed, where ⇥ has nothing to work from either.
 const NOTHING_TYPED: &str = "type a folder's name, or ↑↓ onto one";
 
+/// Said when the highlighted row is a file and the key wanted a folder.
+const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
+
 /// Why `/` did not step anywhere.
 fn no_folder_to_enter(explorer: &Explorer) -> &'static str {
-    if explorer.filter.is_empty() {
-        NOTHING_TYPED
-    } else {
+    if explorer.visible_len() == 0 {
+        // Nothing on screen at all: the same two reasons ⇥, → and ⏎ give.
+        nothing_to_act_on(explorer)
+    } else if !explorer.filter.is_empty() {
         NOT_ONE_FOLDER
+    } else if explorer.selected_entry().is_some_and(|entry| !entry.is_dir) {
+        NOT_A_DIRECTORY
+    } else {
+        NOTHING_TYPED
     }
 }
 
@@ -378,7 +386,7 @@ fn handle_browse_key(
                 explorer.descend()?;
                 explorer.set_status("");
             }
-            Some(false) => explorer.set_status("not a directory — press ⏎ to open it"),
+            Some(false) => explorer.set_status(NOT_A_DIRECTORY),
             None => explorer.set_status(nothing_to_act_on(explorer)),
         },
         KeyCode::Left => {

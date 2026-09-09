@@ -12,7 +12,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
 
-    /// Coding agent launched with `c` in the explorer (default: `claude`).
+    /// Coding agent launched with ctrl-a in the explorer (default: `claude`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 }

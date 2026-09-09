@@ -335,9 +335,29 @@ impl Explorer {
     ///
     /// Returns false when there is nothing left to add.
     pub fn complete(&mut self) -> bool {
-        let names: Vec<&str> = self.visible().map(|e| e.name.as_str()).collect();
-        let Some(completed) = completion(&names, self.selected, &self.filter) else {
-            return false;
+        let (completed, highlighted) = {
+            let names: Vec<&str> = self.visible().map(|e| e.name.as_str()).collect();
+            let Some(completed) = completion(&names, self.selected, &self.filter) else {
+                return false;
+            };
+            let highlighted = names
+                .get(self.selected)
+                .or(names.first())
+                .map(|name| (*name).to_string());
+            (completed, highlighted)
+        };
+        // Never complete into a filter that matches nothing. Case folding is
+        // not a per-character business — Greek Σ lowercases differently at the
+        // end of a word than inside one — so a prefix sliced out of one name
+        // can fail to match the very names it was drawn from. A whole name
+        // always matches itself, so fall back to the highlighted one.
+        let completed = if filter_matches(&self.entries, &completed).is_empty() {
+            match highlighted {
+                Some(name) if name != self.filter => name,
+                _ => return false,
+            }
+        } else {
+            completed
         };
         let keep = self.selected_entry().map(|e| e.path.clone());
         self.filter = completed;
@@ -893,6 +913,27 @@ mod tests {
     }
 
     /// A substring match must never shorten what the user typed.
+    /// Lowercasing is not per-character — Greek Σ folds to ς at the end of a
+    /// word and σ inside one — so a prefix sliced out of a name can fail to
+    /// match the names it came from. ⇥ must never leave an empty pane.
+    #[test]
+    fn tab_never_completes_into_nothing() {
+        let dir = TempDir::new().unwrap();
+        for name in ["ΑΣΑ", "ΑΣΒ"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("α".into());
+        assert_eq!(explorer.visible_len(), 2);
+        explorer.complete();
+        assert!(
+            explorer.visible_len() > 0,
+            "⇥ left {:?} matching nothing",
+            explorer.filter
+        );
+    }
+
     #[test]
     fn tab_never_takes_characters_away() {
         assert_eq!(
