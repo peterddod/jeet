@@ -45,6 +45,9 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// Said when a key needs a highlighted row and the filter has left none.
 const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
 
+/// Said when a path separator has no single folder to step into.
+const NOT_ONE_FOLDER: &str = "filter does not name one folder — ⇥ to complete";
+
 /// Ask the terminal for button and wheel reports, in SGR encoding.
 ///
 /// Not crossterm's `EnableMouseCapture`: that also turns on `?1003h`,
@@ -284,22 +287,22 @@ fn handle_browse_key(
         // `/` cannot appear in a Unix filename, so it always navigates.
         KeyCode::Char('/') if !ctrl => match explorer.descend_typed()? {
             Some(name) => explorer.set_status(format!("entered {name}/")),
-            None => explorer.set_status("filter does not name one folder — ⇥ to complete"),
+            None => explorer.set_status(NOT_ONE_FOLDER),
         },
         // `\` can, so it types whenever there is still a name it could be part
         // of — `weird\name.txt` stays reachable even beside a `weird/` — and
         // means "go in" only when there is not.
         KeyCode::Char('\\') if !ctrl => {
-            let entered = if explorer.filter_would_match('\\') {
-                None
+            if explorer.filter_would_match('\\') {
+                explorer.push_filter('\\');
+                explorer.set_status("");
             } else {
-                explorer.descend_typed()?
-            };
-            match entered {
-                Some(name) => explorer.set_status(format!("entered {name}/")),
-                None => {
-                    explorer.push_filter('\\');
-                    explorer.set_status("");
+                // Nothing it could be part of, so it means "go in" — and when
+                // there is nothing to go into either, say so rather than
+                // typing a character that is guaranteed to match nothing.
+                match explorer.descend_typed()? {
+                    Some(name) => explorer.set_status(format!("entered {name}/")),
+                    None => explorer.set_status(NOT_ONE_FOLDER),
                 }
             }
         }
@@ -381,7 +384,10 @@ fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
                 return Ok(());
             }
             if let Some(dir) = clicked_breadcrumb(explorer, mouse.column, mouse.row) {
-                if !crate::resolve::same_path(&dir, &explorer.cwd) {
+                // Lexical, like `ascend`: a symlink that resolves back to a
+                // parent (`ln -s . loop`) is a directory you can be inside,
+                // and canonicalising here would refuse to let you climb out.
+                if dir != explorer.cwd {
                     // Land on the folder we came out of, the way ← does, so a
                     // crumb click can be undone by pressing → straight back.
                     let came_from = descendant_of(&dir, &explorer.cwd);
