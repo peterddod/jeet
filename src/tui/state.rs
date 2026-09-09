@@ -217,10 +217,12 @@ impl Explorer {
     /// it went on.
     pub fn is_double_click(&mut self, column: u16, row: u16) -> bool {
         let now = Instant::now();
-        if self
-            .last_click
-            .is_some_and(|(at, c, r)| (c, r) == (column, row) && now - at < DOUBLE_CLICK)
-        {
+        // A cell either way: a mouse rarely comes to rest on exactly the same
+        // one twice, and a press that drifted by one is still the second half
+        // of a double-click, not a new one.
+        if self.last_click.is_some_and(|(at, c, r)| {
+            c.abs_diff(column) <= 1 && r.abs_diff(row) <= 1 && now - at < DOUBLE_CLICK
+        }) {
             return true;
         }
         self.last_click = Some((now, column, row));
@@ -1114,13 +1116,16 @@ mod tests {
         );
         // A triple-click gets no third action either.
         assert!(explorer.is_double_click(4, 7));
-        // A different cell is a deliberate click, however fast.
-        assert!(!explorer.is_double_click(4, 8));
+        // Nor does a press that drifted a cell — a mouse rarely lands twice
+        // on exactly the same one.
+        assert!(explorer.is_double_click(5, 8));
+        // Somewhere else is a deliberate click, however fast.
+        assert!(!explorer.is_double_click(20, 14));
 
         let mut acted = 0;
         for _ in 0..4 {
             std::thread::sleep(DOUBLE_CLICK / 2);
-            if !explorer.is_double_click(9, 9) {
+            if !explorer.is_double_click(40, 20) {
                 acted += 1;
             }
         }

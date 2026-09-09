@@ -787,15 +787,16 @@ pub fn truncate_start(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
+    // Measured on the string being built, never as a sum of per-character
+    // widths: an emoji presentation sequence is one column wider than its
+    // parts add up to, and the difference is what runs off the end of the box.
     let mut tail = String::new();
-    let mut used = 0usize;
     for c in text.chars().rev() {
-        let w = c.width().unwrap_or(0);
-        if used + w > width - 1 {
+        tail.insert(0, c);
+        if tail.width() > width - 1 {
+            tail.remove(0);
             break;
         }
-        tail.insert(0, c);
-        used += w;
     }
     format!("…{tail}")
 }
@@ -809,14 +810,12 @@ pub fn truncate(text: &str, width: usize) -> String {
         return String::new();
     }
     let mut head = String::new();
-    let mut used = 0usize;
     for c in text.chars() {
-        let w = c.width().unwrap_or(0);
-        if used + w > width - 1 {
+        head.push(c);
+        if head.width() > width - 1 {
+            head.pop();
             break;
         }
-        head.push(c);
-        used += w;
     }
     format!("{head}…")
 }
@@ -1103,7 +1102,15 @@ mod tests {
     #[test]
     fn truncation_is_measured_in_columns() {
         for width in 0usize..12 {
-            for text in ["日本語のディレクトリ", "plain-ascii-name", "mixed日本ab"] {
+            // Including sequences whose width is not the sum of their parts:
+            // an emoji presentation selector widens the character before it.
+            for text in [
+                "日本語のディレクトリ",
+                "plain-ascii-name",
+                "mixed日本ab",
+                "❤️❤️❤️",
+                "a❤️b日c",
+            ] {
                 assert!(truncate(text, width).width() <= width, "{text} {width}");
                 assert!(
                     truncate_start(text, width).width() <= width,
