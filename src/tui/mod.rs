@@ -1,9 +1,13 @@
 //! The `jeet` file explorer.
 //!
 //! Running `jeet` with no arguments inside a repository opens this: a single
-//! level of the tree at a time, arrow keys to move through it, and shortcuts
-//! for the things you actually came to do — switch worktree, edit a file, or
-//! hand the worktree to a coding agent.
+//! level of the tree at a time, arrow keys or the mouse to move through it,
+//! and shortcuts for the things you actually came to do — switch worktree,
+//! edit a file, or hand the worktree to a coding agent.
+//!
+//! Typing filters the level you are on from the moment the window opens, so
+//! every command that is not navigation carries a ctrl: a bare letter belongs
+//! to the filter, not to a shortcut.
 
 pub mod state;
 pub mod ui;
@@ -16,7 +20,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -33,6 +40,9 @@ use state::{Exit, Explorer, Overlay, PendingAction, WorktreeRow};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+/// Said when a key needs a highlighted row and the filter has left none.
+const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
+
 /// Run the explorer, returning where the shell should end up.
 pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
     let spec = AgentSpec::from_config(&app.config)?;
@@ -48,7 +58,7 @@ pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
         spec,
     )?;
     explorer.set_status(format!(
-        "{} · press ? for keys",
+        "{} · type to filter · F1 for keys",
         explorer.repo.trunk_path.clone()
     ));
 
@@ -66,7 +76,7 @@ fn init_terminal() -> Result<Tui> {
     install_safety_net();
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
     Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")
 }
 
@@ -107,12 +117,22 @@ fn install_safety_net() {
 /// Best-effort teardown for paths that cannot return a `Result`.
 fn emergency_restore() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    );
 }
 
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode().context("disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .context("leave alternate screen")?;
     terminal.show_cursor().context("show cursor")?;
     Ok(())
 }
@@ -122,7 +142,12 @@ fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
     restore_terminal(terminal)?;
     let out = f();
     enable_raw_mode().context("enable raw mode")?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen).context("enter alternate screen")?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )
+    .context("enter alternate screen")?;
     terminal.clear().context("clear terminal")?;
     Ok(out)
 }
@@ -172,13 +197,14 @@ fn with_progress<T: Send>(
 fn event_loop(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
     while !explorer.should_quit {
         terminal.draw(|frame| ui::draw(frame, explorer))?;
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let outcome = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                handle_key(app, terminal, explorer, key)
+            }
+            Event::Mouse(mouse) => handle_mouse(explorer, mouse),
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if let Err(e) = handle_key(app, terminal, explorer, key) {
+        if let Err(e) = outcome {
             explorer.set_status(format!("error: {e}"));
         }
     }
@@ -202,36 +228,17 @@ fn handle_browse_key(
     explorer: &mut Explorer,
     key: KeyEvent,
 ) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('q') => explorer.quit_here(),
-        KeyCode::Esc => explorer.quit_in_place(),
-        KeyCode::Up | KeyCode::Char('k') => explorer.move_cursor(-1),
-        KeyCode::Down | KeyCode::Char('j') => explorer.move_cursor(1),
-        KeyCode::PageUp => explorer.move_cursor(-10),
-        KeyCode::PageDown => explorer.move_cursor(10),
-        KeyCode::Char('g') | KeyCode::Home => explorer.select_first(),
-        KeyCode::Char('G') | KeyCode::End => explorer.select_last(),
-        KeyCode::Right | KeyCode::Char('l') => {
-            if !explorer.descend()? {
-                explorer.set_status("not a directory — press ⏎ to open it");
-            } else {
+        // Commands first: with the filter live, every one of them needs a ctrl
+        // to keep the letter itself available for typing.
+        KeyCode::Char('q') if ctrl => explorer.quit_here(),
+        KeyCode::Char('u') if ctrl => {
+            if explorer.clear_filter() {
                 explorer.set_status("");
             }
         }
-        KeyCode::Left | KeyCode::Char('h') => {
-            if explorer.ascend()? {
-                explorer.set_status("");
-            }
-        }
-        KeyCode::Enter => {
-            let is_dir = explorer.selected_entry().map(|e| e.is_dir).unwrap_or(false);
-            if is_dir {
-                explorer.descend()?;
-            } else if let Some(entry) = explorer.selected_entry().cloned() {
-                open_editor(app, terminal, explorer, &entry.path)?;
-            }
-        }
-        KeyCode::Char('.') => {
+        KeyCode::Char('d') if ctrl => {
             let keep = explorer.selected_entry().map(|e| e.path.clone());
             explorer.show_hidden = !explorer.show_hidden;
             explorer.reload(keep.as_deref())?;
@@ -241,19 +248,146 @@ fn handle_browse_key(
                 "hiding hidden files"
             });
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('r') if ctrl => {
             let keep = explorer.selected_entry().map(|e| e.path.clone());
             explorer.reload(keep.as_deref())?;
             refresh_root_status(app, explorer);
             explorer.set_status("refreshed");
         }
-        KeyCode::Char('c') => launch_agent(app, terminal, explorer, &[])?,
-        KeyCode::Char('s') => open_sessions(explorer),
-        KeyCode::Char('w') => open_worktrees(app, terminal, explorer),
-        KeyCode::Char('?') => explorer.overlay = Some(Overlay::Help),
+        KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
+        KeyCode::Char('s') if ctrl => open_sessions(explorer),
+        KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
+        KeyCode::F(1) => explorer.overlay = Some(Overlay::Help),
+
+        // Filter editing.
+        KeyCode::Tab => match explorer.complete() {
+            true => explorer.set_status(""),
+            false => explorer.set_status("nothing more to complete"),
+        },
+        KeyCode::Backspace => {
+            explorer.pop_filter();
+            explorer.set_status("");
+        }
+        // A path separator means "go in", the way it does while typing a path.
+        KeyCode::Char('/') | KeyCode::Char('\\') if !ctrl => match explorer.descend_typed()? {
+            Some(name) => explorer.set_status(format!("entered {name}/")),
+            None => explorer.set_status("filter does not name one folder — ⇥ to complete"),
+        },
+        KeyCode::Esc => {
+            // Escape backs out of what you typed before it backs out of jeet.
+            if !explorer.clear_filter() {
+                explorer.quit_in_place();
+            }
+        }
+
+        // Navigation, which never collides with typing.
+        KeyCode::Up => explorer.move_cursor(-1),
+        KeyCode::Down => explorer.move_cursor(1),
+        KeyCode::PageUp => explorer.move_cursor(-10),
+        KeyCode::PageDown => explorer.move_cursor(10),
+        KeyCode::Home => explorer.select_first(),
+        KeyCode::End => explorer.select_last(),
+        KeyCode::Right => match explorer.selected_entry().map(|e| e.is_dir) {
+            Some(true) => {
+                explorer.descend()?;
+                explorer.set_status("");
+            }
+            Some(false) => explorer.set_status("not a directory — press ⏎ to open it"),
+            None => explorer.set_status(NO_MATCH),
+        },
+        KeyCode::Left => {
+            if explorer.ascend()? {
+                explorer.set_status("");
+            }
+        }
+        KeyCode::Enter => enter_selected(app, terminal, explorer)?,
+
+        // Anything else printable is filter input.
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            explorer.push_filter(c);
+            explorer.set_status("");
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// ⏎ and a click on the highlighted row: folders open, files go to the editor.
+fn enter_selected(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
+    let Some(entry) = explorer.selected_entry().cloned() else {
+        explorer.set_status(NO_MATCH);
+        return Ok(());
+    };
+    if entry.is_dir {
+        explorer.descend()?;
+        explorer.set_status("");
+    } else {
+        open_editor(app, terminal, explorer, &entry.path)?;
+    }
+    Ok(())
+}
+
+/// Clicks and the wheel, while the browser is in front.
+///
+/// Overlays are keyboard-driven, so a click that lands on one is swallowed
+/// rather than acting on the list hidden behind it.
+fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
+    if explorer.overlay.is_some() || explorer.working.is_some() {
+        return Ok(());
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollUp => explorer.move_cursor(-1),
+        MouseEventKind::ScrollDown => explorer.move_cursor(1),
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(dir) = clicked_breadcrumb(explorer, mouse.column, mouse.row) {
+                if !crate::resolve::same_path(&dir, &explorer.cwd) {
+                    explorer.show(dir, None)?;
+                    explorer.set_status("");
+                }
+            } else if let Some(row) = clicked_row(explorer, mouse.column, mouse.row) {
+                if explorer.select_visible(row) {
+                    // A folder opens on a single click — that is what clicking
+                    // a folder means everywhere else. Files only get selected;
+                    // handing a file to an editor is too much for a stray click.
+                    let is_dir = explorer.selected_entry().map(|e| e.is_dir) == Some(true);
+                    if is_dir {
+                        explorer.descend()?;
+                    }
+                    explorer.set_status("");
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Which visible row a click landed on, accounting for the border and for how
+/// far the list has scrolled.
+fn clicked_row(explorer: &Explorer, column: u16, row: u16) -> Option<usize> {
+    let area = explorer.list_area;
+    let inside = column > area.x
+        && column < area.x + area.width.saturating_sub(1)
+        && row > area.y
+        && row < area.y + area.height.saturating_sub(1);
+    if !inside {
+        return None;
+    }
+    let offset = explorer.list.offset();
+    Some(offset + (row - area.y - 1) as usize)
+}
+
+/// The ancestor directory a click on the header's path line points at.
+fn clicked_breadcrumb(explorer: &Explorer, column: u16, row: u16) -> Option<PathBuf> {
+    let (x, y) = explorer.breadcrumb_origin;
+    if row != y || column < x {
+        return None;
+    }
+    explorer.breadcrumb_target((column - x) as usize)
 }
 
 fn handle_overlay_key(
@@ -598,7 +732,7 @@ fn open_sessions(explorer: &mut Explorer) {
                     format!("no {} sessions recorded for", explorer.agent.display()),
                     explorer.root.display().to_string(),
                     String::new(),
-                    "press c to start one".into(),
+                    "press ctrl-a to start one".into(),
                 ],
                 from_panel: false,
             });

@@ -9,14 +9,17 @@ use ratatui::Frame;
 use super::state::{human_size, Explorer, Overlay};
 use crate::worktrees::WorktreeStatus;
 
-const HINTS: &str =
-    "↑↓ move  → open  ← back  ⏎ edit  w worktrees  s sessions  c agent  . hidden  ? help  q quit";
+const HINTS: &str = "type to filter  ⇥ complete  / enter  ↑↓ move  ⏎ open  ^w worktrees  ^s sessions  ^a agent  ^d hidden  F1 help  ^q quit";
+
+/// Column the header's value column starts at: one for the border, plus the
+/// width of the widest label. Clicks on the breadcrumb are measured from here.
+const LABEL_WIDTH: u16 = 9;
 
 pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(3),
             Constraint::Length(2),
             Constraint::Length(1),
@@ -24,16 +27,32 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         .split(frame.area());
 
     draw_header(frame, chunks[0], explorer);
+    // Remember where things landed so a click next frame can be mapped back to
+    // the row or the path segment under it.
+    explorer.list_area = chunks[1];
+    explorer.breadcrumb_origin = (chunks[0].x + 1 + LABEL_WIDTH, chunks[0].y + 2);
     {
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
         let Explorer {
             entries,
+            matches,
             selected,
+            filter,
             list,
             ..
         } = &mut *explorer;
-        draw_listing(frame, chunks[1], entries, *selected, list);
+        let rows: Vec<&super::state::FsEntry> =
+            matches.iter().filter_map(|&i| entries.get(i)).collect();
+        draw_listing(
+            frame,
+            chunks[1],
+            &rows,
+            entries.len(),
+            filter,
+            *selected,
+            list,
+        );
     }
 
     let status = Paragraph::new(Line::from(Span::styled(
@@ -107,6 +126,34 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
         Span::styled(explorer.breadcrumb(), Style::default().fg(Color::Cyan)),
     ]);
 
+    // The filter always has a line of its own, cursor and all: it is live from
+    // the moment the explorer opens, and nothing else says so.
+    let filter_line = if explorer.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                " type to narrow this level down",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                explorer.filter.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("  {} of {}", explorer.visible_len(), explorer.entries.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
@@ -118,7 +165,7 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
         .title_alignment(Alignment::Left);
 
     frame.render_widget(
-        Paragraph::new(vec![worktree_line, path_line]).block(block),
+        Paragraph::new(vec![worktree_line, path_line, filter_line]).block(block),
         area,
     );
 }
@@ -147,7 +194,9 @@ pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
 fn draw_listing(
     frame: &mut Frame,
     area: Rect,
-    entries: &[super::state::FsEntry],
+    entries: &[&super::state::FsEntry],
+    total: usize,
+    filter: &str,
     selected: usize,
     list_state: &mut ListState,
 ) {
@@ -177,10 +226,11 @@ fn draw_listing(
         })
         .collect();
 
-    let title = if entries.is_empty() {
-        " empty directory ".to_string()
-    } else {
-        format!(" {} items ", entries.len())
+    let title = match (entries.is_empty(), filter.is_empty()) {
+        (true, true) => " empty directory ".to_string(),
+        (true, false) => format!(" nothing matches \"{filter}\" "),
+        (false, true) => format!(" {} items ", entries.len()),
+        (false, false) => format!(" {} of {total} items ", entries.len()),
     };
 
     list_state.select(if entries.is_empty() {
@@ -419,29 +469,39 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             );
         }
         Overlay::Help => {
-            let area = centered_rect(64, 70, frame.area());
+            let area = content_rect(66, 20, frame.area());
             frame.render_widget(Clear, area);
             let rows = [
-                ("↑ / k, ↓ / j", "move up and down this level"),
-                ("→ / l", "expand: enter the highlighted folder"),
-                ("← / h", "back: leave the folder (stops at the root)"),
+                (
+                    "a-z, 0-9, …",
+                    "type to filter this level (live, no key needed)",
+                ),
+                ("⇥", "complete the filter, as far as the matches agree"),
+                ("/ or \\", "enter the folder the filter names"),
+                ("⌫ / ctrl-u", "delete a character / clear the filter"),
+                ("", ""),
+                ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
+                ("→", "expand: enter the highlighted folder"),
+                ("←", "back: leave the folder (stops at the root)"),
                 ("⏎", "folder: enter · file: open in your editor"),
-                ("c", "start a coding agent at the worktree root"),
-                ("s", "previous agent sessions for this worktree"),
-                ("w", "worktrees: switch, create, rename or delete"),
+                ("click", "a row to enter or select it, a path crumb to jump"),
+                ("Home / End", "jump to the top / bottom"),
+                ("", ""),
+                ("ctrl-a", "start a coding agent at the worktree root"),
+                ("ctrl-s", "previous agent sessions for this worktree"),
+                ("ctrl-w", "worktrees: switch, create, rename or delete"),
                 ("", "  in the panel: r refresh, esc close"),
-                (".", "toggle hidden files"),
-                ("g / G", "jump to the top / bottom"),
-                ("r", "refresh the listing and counters"),
-                ("q", "quit, leaving the shell in this directory"),
-                ("esc", "quit without moving the shell"),
+                ("ctrl-d", "toggle hidden dotfiles"),
+                ("ctrl-r", "refresh the listing and counters"),
+                ("ctrl-q", "quit, leaving the shell in this directory"),
+                ("esc", "clear the filter, or quit without moving the shell"),
             ];
             let body: Vec<Line> = rows
                 .iter()
                 .map(|(key, description)| {
                     Line::from(vec![
                         Span::styled(
-                            format!("{key:<14}"),
+                            format!("{key:<13}"),
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
