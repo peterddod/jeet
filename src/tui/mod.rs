@@ -293,10 +293,18 @@ fn handle_browse_key(
         KeyCode::Char('g') if ctrl => explorer.overlay = Some(Overlay::Help { scroll: 0 }),
 
         // Filter editing.
-        KeyCode::Tab => match explorer.complete() {
-            true => explorer.set_status(""),
-            false => explorer.set_status("nothing more to complete"),
-        },
+        KeyCode::Tab => {
+            // "Nothing more to complete" is true of a filter that matches
+            // nothing, and useless: say what → and ⏎ say instead.
+            let said = if explorer.complete() {
+                ""
+            } else if explorer.visible_len() == 0 {
+                nothing_to_act_on(explorer)
+            } else {
+                "nothing more to complete"
+            };
+            explorer.set_status(said);
+        }
         KeyCode::Backspace => {
             // Nothing to delete: leave whatever the status line was saying
             // rather than blanking an error the user has not read yet.

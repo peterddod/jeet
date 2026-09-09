@@ -763,21 +763,49 @@ pub fn help_geometry(frame: Rect) -> (Rect, u16) {
     (area, lines.saturating_sub(inner_height) as u16)
 }
 
-/// Truncate from the left, keeping the tail — right for paths.
+/// Truncate from the left, keeping the tail — right for paths, and for a
+/// filter box, where the tail is the end being typed at.
+///
+/// Measured in display columns: a budget in columns spent by character count
+/// lets a CJK name run twice as wide as the space it was given.
 pub fn truncate_start(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let tail: String = text.chars().skip(count - width.saturating_sub(1)).collect();
+    if width == 0 {
+        return String::new();
+    }
+    let mut tail = String::new();
+    let mut used = 0usize;
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width - 1 {
+            break;
+        }
+        tail.insert(0, c);
+        used += w;
+    }
     format!("…{tail}")
 }
 
+/// Truncate from the right, in display columns.
 pub fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    if width == 0 {
+        return String::new();
+    }
+    let mut head = String::new();
+    let mut used = 0usize;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width - 1 {
+            break;
+        }
+        head.push(c);
+        used += w;
+    }
     format!("{head}…")
 }
 
@@ -1026,5 +1054,25 @@ mod tests {
     fn truncates_paths_from_the_left() {
         assert_eq!(truncate_start("/a/b", 10), "/a/b");
         assert_eq!(truncate_start("/very/long/path/file", 10), "…path/file");
+    }
+
+    /// The budget is screen columns, and a wide character costs two of them —
+    /// spending it by character count runs the text off its own box.
+    #[test]
+    fn truncation_is_measured_in_columns() {
+        for width in 0usize..12 {
+            for text in ["日本語のディレクトリ", "plain-ascii-name", "mixed日本ab"] {
+                assert!(truncate(text, width).width() <= width, "{text} {width}");
+                assert!(
+                    truncate_start(text, width).width() <= width,
+                    "{text} {width}"
+                );
+            }
+        }
+        // A wide name is cut where it fits, not where the count says.
+        assert_eq!(truncate("日本語", 4), "日…");
+        assert_eq!(truncate_start("日本語", 4), "…語");
+        // And one that already fits is left alone.
+        assert_eq!(truncate("日本語", 6), "日本語");
     }
 }
