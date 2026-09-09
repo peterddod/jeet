@@ -57,28 +57,21 @@ fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
     }
 }
 
-/// Said when a path separator has no single folder to step into.
-const NOT_ONE_FOLDER: &str = "filter does not name one folder — ⇥ to complete";
-
-/// The same, with nothing typed, where ⇥ has nothing to work from either.
-const NOTHING_TYPED: &str = "type a folder's name, or ↑↓ onto one";
-
 /// Said when the highlighted row is a file and the key wanted a folder.
 const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
 
-/// Report a `/` that did not step anywhere. `Step` says which case it was, so
-/// there is nothing here to work out — only which words to use.
+/// Report what `→` or `/` did. `Step` says which case it was, so there is
+/// nothing here to work out — only which words to use.
 fn report_step(explorer: &mut Explorer, step: Step) {
     match step {
         Step::Entered(name) => explorer.set_status(format!("entered {name}/")),
         Step::NotADirectory => explorer.set_status(NOT_A_DIRECTORY),
-        Step::Unresolved if explorer.visible_len() == 0 => {
-            // Nothing on screen at all: the same two reasons ⇥, → and ⏎ give.
+        // Nothing is highlighted, so there was nothing it could have meant:
+        // the same two reasons ⇥ and ⏎ give.
+        Step::Unresolved => {
             let why = nothing_to_act_on(explorer);
             explorer.set_status(why);
         }
-        Step::Unresolved if explorer.filter.is_empty() => explorer.set_status(NOTHING_TYPED),
-        Step::Unresolved => explorer.set_status(NOT_ONE_FOLDER),
     }
 }
 
@@ -375,14 +368,10 @@ fn handle_browse_key(
         KeyCode::PageDown => explorer.move_cursor(10),
         KeyCode::Home => explorer.select_first(),
         KeyCode::End => explorer.select_last(),
-        KeyCode::Right => match explorer.selected_entry().map(|e| e.is_dir) {
-            Some(true) => {
-                explorer.descend()?;
-                explorer.set_status("");
-            }
-            Some(false) => explorer.set_status(NOT_A_DIRECTORY),
-            None => explorer.set_status(nothing_to_act_on(explorer)),
-        },
+        KeyCode::Right => {
+            let step = explorer.descend_typed()?;
+            report_step(explorer, step);
+        }
         KeyCode::Left => {
             if explorer.ascend()? {
                 explorer.set_status("");

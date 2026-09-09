@@ -106,14 +106,15 @@ jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 ### Type to find things
 
 The filter is live the moment the window opens — no key to press first. Type
-and the level narrows to what matches, case-insensitively, with names that
-*start* with what you typed ahead of names that merely contain it.
+and the level narrows to what matches, case-insensitively: the name you spelled
+out in full first, then names that *start* with what you typed, then names that
+merely contain it.
 
 | key | action |
 |-----|--------|
 | any letter, digit or symbol | filter this level |
 | `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
-| `/` or `\` | step into the folder the filter names, and start a fresh filter |
+| `/` or `\` | step into the highlighted folder, and start a fresh filter |
 | | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
 | `⌫` | delete a character |
 | `ctrl-u` | clear the filter |
@@ -126,9 +127,9 @@ towards that row, and the cursor stays on it. With nothing typed it only fills
 in what every name shares, as a shell does. `/` then walks in, so `sr⇥/` gets
 you into `src/` without leaving the keyboard, exactly as typing a path does.
 
-`/` needs the filter to settle on one folder — the name typed out in full, or
-the only thing still matching. Where it does not, arrow onto the folder you
-mean and `/` goes there, the same row `⏎` and `→` would act on.
+`/` steps into the highlighted folder — the same row `⏎` and `→` act on, and
+the one you can see. Typing a folder's name out in full puts it there: an exact
+match sorts to the top whatever else the filter caught.
 
 ### Moving around
 

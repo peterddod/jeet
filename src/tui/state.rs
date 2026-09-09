@@ -121,10 +121,6 @@ pub struct Explorer {
     pub matches: Vec<usize>,
     /// Cursor position within [`Explorer::matches`], not `entries`.
     pub selected: usize,
-    /// Whether the user has put the cursor where it is, rather than the filter
-    /// having dropped it on the top match. `/` asks, because a row someone
-    /// chose is a row they meant.
-    chosen: bool,
     pub show_hidden: bool,
     pub overlay: Option<Overlay>,
     /// Worktrees of this repo, refreshed whenever the overlay is opened.
@@ -176,7 +172,6 @@ impl Explorer {
             filter: String::new(),
             matches: Vec::new(),
             selected: 0,
-            chosen: false,
             show_hidden: false,
             overlay: None,
             worktree_rows: Vec::new(),
@@ -205,15 +200,9 @@ impl Explorer {
         // with it cleared but the rows still filtered shows a subset of the
         // directory with nothing on screen to say why.
         let filter = std::mem::take(&mut self.filter);
-        let chosen = self.chosen;
         let listed = self.show(cwd, keep);
         self.filter = filter;
         self.refocus(keep);
-        // The choice survives only if the row it was does: where `keep` is
-        // gone, `refocus` has put the cursor on the top match, and nobody
-        // chose that.
-        self.chosen = chosen
-            && keep.is_some_and(|path| self.selected_entry().is_some_and(|e| e.path == path));
         listed
     }
 
@@ -268,7 +257,6 @@ impl Explorer {
         self.cwd = dir;
         self.entries = entries;
         self.filter.clear();
-        self.chosen = false;
         self.refocus(keep);
         Ok(())
     }
@@ -299,9 +287,6 @@ impl Explorer {
     /// ⇥ would complete is always the highlighted one.
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
-        // Editing the filter re-sorts the matches and drops the cursor back on
-        // the top one, so whatever row was chosen before is not chosen now.
-        self.chosen = false;
         self.refocus(None);
     }
 
@@ -390,27 +375,15 @@ impl Explorer {
         }
         let len = self.matches.len() as isize;
         let next = self.selected as isize + delta;
-        self.put_cursor(next.clamp(0, len - 1) as usize);
+        self.selected = next.clamp(0, len - 1) as usize;
     }
 
     pub fn select_first(&mut self) {
-        self.put_cursor(0);
+        self.selected = 0;
     }
 
     pub fn select_last(&mut self) {
-        self.put_cursor(self.matches.len().saturating_sub(1));
-    }
-
-    /// Move the cursor, counting it as chosen only if it actually moved.
-    ///
-    /// An arrow at the end of the list, or a scroll notch against the top, has
-    /// put the cursor nowhere — and arming `/` off one of those would turn a
-    /// filter the user knows is ambiguous into a step into its first folder.
-    fn put_cursor(&mut self, index: usize) {
-        if index != self.selected {
-            self.selected = index;
-            self.chosen = true;
-        }
+        self.selected = self.matches.len().saturating_sub(1);
     }
 
     /// Put the cursor on a visible row, ignoring one that is not there.
@@ -419,7 +392,6 @@ impl Explorer {
             return false;
         }
         self.selected = index;
-        self.chosen = true;
         true
     }
 
@@ -437,11 +409,11 @@ impl Explorer {
 
     /// Whether adding `c` to the filter would still match something here.
     pub fn filter_would_match(&self, c: char) -> bool {
-        let mut wider = self.filter.to_lowercase();
+        let mut wider = folded(&self.filter);
         wider.extend(c.to_lowercase());
         self.entries
             .iter()
-            .any(|entry| entry.name.to_lowercase().contains(&wider))
+            .any(|entry| folded(&entry.name).contains(&wider))
     }
 
     /// `/`: step into the folder the filter or the cursor settles on, as you
@@ -461,30 +433,12 @@ impl Explorer {
     /// The entry `/` resolves to, folder or not — so the caller can say which
     /// of the two reasons it did not step anywhere, rather than guess.
     ///
-    /// A row the user put the cursor on wins, with or without a filter: it is
-    /// the row ⏎ and → act on. Failing that the filter has to settle it, by
-    /// naming something outright or by leaving one thing on screen — so a
-    /// single letter does not walk into whichever folder happens to sort
-    /// first, but the only folder there is needs no disambiguating.
+    /// The highlighted row, which is the row ⏎ and → act on and the one the
+    /// user can see. Spelling a folder's name out puts it there, because
+    /// [`filter_matches`] ranks an exact name first; so does arrowing onto it
+    /// or clicking it. There is nothing else for `/` to consult.
     fn typed_target(&self) -> Option<usize> {
-        if self.chosen {
-            return self.matches.get(self.selected).copied();
-        }
-        if !self.filter.is_empty() {
-            let needle = self.filter.to_lowercase();
-            let named = self
-                .matches
-                .iter()
-                .copied()
-                .find(|&i| self.entries[i].name.to_lowercase() == needle);
-            if named.is_some() {
-                return named;
-            }
-        }
-        match self.matches.as_slice() {
-            [only] => Some(*only),
-            _ => None,
-        }
+        self.matches.get(self.selected).copied()
     }
 
     /// Directory a click `offset` columns into the breadcrumb points at.
@@ -578,28 +532,47 @@ impl Explorer {
     }
 }
 
+/// Case-folded for matching: per character, never as a whole string.
+///
+/// `str::to_lowercase` applies context rules — Greek Σ folds to ς at the end
+/// of a word, Turkish İ grows a combining dot — so folding a filter and a name
+/// separately can make a genuine prefix of that name stop matching it. Per
+/// character it is a plain substitution, applied identically to both sides.
+pub fn folded(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
 /// Indices of the entries `filter` keeps, case-insensitively.
 ///
-/// A name that starts with the filter sorts ahead of one that merely contains
-/// it, so typing `src` puts `src/` above `mysrc/` no matter how the directory
-/// itself sorts. Within each group the listing order is preserved.
+/// A name the filter spells out in full comes first, then names that start
+/// with it, then names that merely contain it — so typing `src` puts `src/`
+/// at the top whatever else matches and however the directory itself sorts.
+/// Within each group the listing order is preserved.
+///
+/// The order is what makes the highlighted row the right thing for `⏎`, `→`
+/// and `/` to act on: type a folder's name out and it is the row under the
+/// cursor.
 pub fn filter_matches(entries: &[FsEntry], filter: &str) -> Vec<usize> {
     if filter.is_empty() {
         return (0..entries.len()).collect();
     }
-    let needle = filter.to_lowercase();
+    let needle = folded(filter);
+    let mut exact = Vec::new();
     let mut prefixed = Vec::new();
     let mut contained = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let name = entry.name.to_lowercase();
-        if name.starts_with(&needle) {
+        let name = folded(&entry.name);
+        if name == needle {
+            exact.push(index);
+        } else if name.starts_with(&needle) {
             prefixed.push(index);
         } else if name.contains(&needle) {
             contained.push(index);
         }
     }
-    prefixed.append(&mut contained);
-    prefixed
+    exact.append(&mut prefixed);
+    exact.append(&mut contained);
+    exact
 }
 
 /// What ⇥ should leave in the filter box, given the names on screen and which
@@ -635,7 +608,7 @@ pub fn completion(names: &[&str], chosen: usize, filter: &str) -> Option<String>
 }
 
 fn starts_with_ignore_case(haystack: &str, prefix: &str) -> bool {
-    haystack.to_lowercase().starts_with(&prefix.to_lowercase())
+    folded(haystack).starts_with(&folded(prefix))
 }
 
 /// Longest prefix every name shares, compared without case but returned with
@@ -870,6 +843,30 @@ mod tests {
         assert_eq!(explorer.visible_len(), 3);
     }
 
+    /// Case folding must be per character: `str::to_lowercase` folds Greek Σ
+    /// to ς at the end of a word and grows a combining dot on Turkish İ, so a
+    /// filter that really is a prefix of a name could stop matching it.
+    #[test]
+    fn matching_folds_case_per_character() {
+        let dir = TempDir::new().unwrap();
+        for name in ["İstanbul", "ΑΣΑ", "ΑΣΒ"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut explorer = explorer_at(dir.path());
+
+        // `İ` lowercases to `i` plus a combining dot under any case folding, so
+        // `is` genuinely is not a substring of it — but folding the filter the
+        // same way the name is folded keeps everything else working.
+        for filter in ["i", "İs", "İstanbul", "stanbul"] {
+            explorer.set_filter(filter.into());
+            assert_eq!(explorer.visible_len(), 1, "{filter:?} should find İstanbul");
+        }
+        for filter in ["Σ", "ΑΣ", "ασ"] {
+            explorer.set_filter(filter.into());
+            assert_eq!(explorer.visible_len(), 2, "{filter:?} should find both");
+        }
+    }
+
     /// A name that starts with what was typed beats one that merely contains
     /// it, even when the directory sort would put it second.
     #[test]
@@ -1090,28 +1087,48 @@ mod tests {
         );
     }
 
-    /// A cursor the user put somewhere is what `/` acts on, with or without a
-    /// filter — and an arrow that could not move has put it nowhere.
+    /// `/` steps into the highlighted folder — the row ⏎ and → act on, and
+    /// the one the user can see — with or without a filter.
     #[test]
-    fn slash_follows_a_chosen_cursor_even_with_nothing_typed() {
-        let dir = fixture();
+    fn slash_enters_the_highlighted_folder() {
+        let dir = TempDir::new().unwrap();
+        for name in ["src", "src-old"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
         let mut explorer = explorer_at(dir.path());
 
-        // Untouched: nothing typed, nothing chosen, nothing to enter.
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
-
-        // An arrow that clamps against the top has chosen nothing either.
-        explorer.move_cursor(-1);
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
-
-        // Actually moving onto the folder does choose it.
+        // Arrowed onto it, nothing typed.
         explorer.move_cursor(1);
-        explorer.move_cursor(-1);
-        assert_eq!(explorer.selected_entry().unwrap().name, "src");
+        assert_eq!(explorer.selected_entry().unwrap().name, "src-old");
         assert_eq!(
             explorer.descend_typed().unwrap(),
-            Step::Entered("src".into())
+            Step::Entered("src-old".into())
         );
+
+        // Typed at, cursor untouched.
+        let mut explorer = explorer_at(dir.path());
+        explorer.set_filter("src-o".into());
+        assert_eq!(
+            explorer.descend_typed().unwrap(),
+            Step::Entered("src-old".into())
+        );
+    }
+
+    /// Spelling a folder's name out puts it under the cursor, whatever else
+    /// matches and however the directory itself sorts — which is what makes
+    /// "type the name, press `/`" land where it says it will.
+    #[test]
+    fn an_exact_name_is_the_highlighted_row() {
+        let dir = TempDir::new().unwrap();
+        // `src-dir/` sorts first (directories lead), and `src` is only a file,
+        // so nothing but the exact-name rule puts `src` under the cursor.
+        std::fs::create_dir(dir.path().join("src-dir")).unwrap();
+        std::fs::write(dir.path().join("src"), "x").unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("src".into());
+        assert_eq!(explorer.selected_entry().unwrap().name, "src");
+        assert_eq!(explorer.descend_typed().unwrap(), Step::NotADirectory);
     }
 
     /// `/` says which of the two reasons it did not step, so the explorer can
@@ -1122,20 +1139,14 @@ mod tests {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
 
-        // A file is not a folder — and the filter names it exactly.
         explorer.set_filter("alpha".into());
         assert_eq!(explorer.descend_typed().unwrap(), Step::NotADirectory);
         assert_eq!(explorer.cwd, dir.path());
 
-        // Nothing typed, several things on screen: nothing has settled it.
-        explorer.set_filter(String::new());
+        explorer.set_filter("zzz".into());
+        assert_eq!(explorer.visible_len(), 0);
         assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
         assert_eq!(explorer.cwd, dir.path());
-
-        // Several matches, none named outright: likewise.
-        explorer.set_filter("a".into());
-        assert!(explorer.visible_len() > 1);
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
     }
 
     /// The only thing on screen needs no disambiguating, typed at or not —
@@ -1171,56 +1182,6 @@ mod tests {
         assert_eq!(explorer.cwd, dir.path().join("src"));
     }
 
-    /// `/` acts on the row under the cursor, like ⏎, → and a click do — an
-    /// exact name match elsewhere in the listing must not win over it.
-    #[test]
-    fn slash_follows_the_cursor_when_the_filter_is_ambiguous() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::create_dir(dir.path().join("src-old")).unwrap();
-        let mut explorer = explorer_at(dir.path());
-
-        explorer.set_filter("src".into());
-        explorer.move_cursor(1);
-        assert_eq!(explorer.selected_entry().unwrap().name, "src-old");
-        assert_eq!(
-            explorer.descend_typed().unwrap(),
-            Step::Entered("src-old".into())
-        );
-        assert_eq!(explorer.cwd, dir.path().join("src-old"));
-
-        // Arrowing back onto the top row still counts as choosing it: it is
-        // the row ⏎ and → would act on, whichever index it sits at.
-        let mut explorer = explorer_at(dir.path());
-        explorer.set_filter("s".into());
-        explorer.move_cursor(1);
-        explorer.move_cursor(-1);
-        assert_eq!(explorer.selected_entry().unwrap().name, "src");
-        assert_eq!(
-            explorer.descend_typed().unwrap(),
-            Step::Entered("src".into())
-        );
-
-        // Untouched, the filter alone decides — a single letter must not walk
-        // into whichever folder happens to sort first.
-        let mut explorer = explorer_at(dir.path());
-        explorer.set_filter("s".into());
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
-        explorer.set_filter("src".into());
-        assert_eq!(
-            explorer.descend_typed().unwrap(),
-            Step::Entered("src".into())
-        );
-
-        // And typing again voids an earlier choice: the matches re-sort and
-        // the cursor goes back to the top, so nothing has been chosen since.
-        let mut explorer = explorer_at(dir.path());
-        explorer.set_filter("s".into());
-        explorer.move_cursor(1);
-        explorer.push_filter('r');
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
-    }
-
     /// With nothing typed, ⇥ fills in what every name shares and no more —
     /// dumping a whole filename in would collapse the listing to one row.
     #[test]
@@ -1238,60 +1199,6 @@ mod tests {
         let mut explorer = explorer_at(shared.path());
         assert!(explorer.complete());
         assert_eq!(explorer.filter, "build-");
-    }
-
-    /// A refresh that loses the row the cursor was on leaves it on the top
-    /// match, which nobody chose — `/` must not treat that as a choice.
-    #[test]
-    fn a_choice_does_not_survive_the_row_it_was() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::create_dir(dir.path().join("src-old")).unwrap();
-        let mut explorer = explorer_at(dir.path());
-
-        explorer.set_filter("src".into());
-        explorer.move_cursor(1);
-        let gone = explorer.selected_entry().unwrap().path.clone();
-
-        std::fs::remove_dir(&gone).unwrap();
-        explorer.reload(Some(&gone)).unwrap();
-        assert_eq!(explorer.selected_entry().unwrap().name, "src");
-        assert_eq!(
-            explorer.descend_typed().unwrap(),
-            Step::Entered("src".into()),
-            "the filter names src outright, so that much still holds"
-        );
-
-        // But with an ambiguous filter and no surviving choice, nothing moves.
-        for name in ["src-new", "sound"] {
-            std::fs::create_dir(dir.path().join(name)).unwrap();
-        }
-        let mut explorer = explorer_at(dir.path());
-        explorer.set_filter("s".into());
-        explorer.move_cursor(1);
-        let gone = explorer.selected_entry().unwrap().path.clone();
-        std::fs::remove_dir(&gone).unwrap();
-        explorer.reload(Some(&gone)).unwrap();
-        assert!(explorer.visible_len() > 1, "the filter is still ambiguous");
-        assert_eq!(explorer.descend_typed().unwrap(), Step::Unresolved);
-    }
-
-    /// A choice that survives a refresh is still a choice.
-    #[test]
-    fn a_choice_survives_a_refresh_that_keeps_it() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::create_dir(dir.path().join("src-old")).unwrap();
-        let mut explorer = explorer_at(dir.path());
-
-        explorer.set_filter("src".into());
-        explorer.move_cursor(1);
-        let keep = explorer.selected_entry().unwrap().path.clone();
-        explorer.reload(Some(&keep)).unwrap();
-        assert_eq!(
-            explorer.descend_typed().unwrap(),
-            Step::Entered("src-old".into())
-        );
     }
 
     #[test]
