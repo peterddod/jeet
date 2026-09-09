@@ -127,8 +127,9 @@ pub struct Explorer {
     /// Where the listing was drawn last frame, so a click can be mapped back
     /// to the row under it. Set by the renderer, read by the mouse handler.
     pub list_area: Rect,
-    /// Screen cell the breadcrumb's leading `/` was drawn at, same deal.
-    pub breadcrumb_origin: (u16, u16),
+    /// Screen cell the breadcrumb's leading `/` was drawn at, same deal, or
+    /// none when the terminal was too short to draw the path line at all.
+    pub breadcrumb_origin: Option<(u16, u16)>,
     /// When and where the last click landed, so the second press of a
     /// double-click can be told from a deliberate one.
     last_click: Option<(Instant, u16, u16)>,
@@ -169,7 +170,7 @@ impl Explorer {
             should_quit: false,
             exit: Exit::Stay,
             list_area: Rect::default(),
-            breadcrumb_origin: (0, 0),
+            breadcrumb_origin: None,
             last_click: None,
         };
         explorer.reload(None)?;
@@ -295,17 +296,22 @@ impl Explorer {
 
     /// ⇥: extend the filter as far as the matches agree, the way a shell does.
     ///
-    /// Returns false when there is nothing left to add — no matches, or the
-    /// filter already spells the top one out.
+    /// Works towards the highlighted row, not blindly towards the first: the
+    /// cursor stays where it was, and it is the highlighted name that gets
+    /// taken outright once the matches stop agreeing. Otherwise arrowing down
+    /// and pressing ⇥ would rewrite the filter around a different entry and
+    /// pull the cursor onto it, and ⏎ would open something else again.
+    ///
+    /// Returns false when there is nothing left to add.
     pub fn complete(&mut self) -> bool {
         let names: Vec<&str> = self.visible().map(|e| e.name.as_str()).collect();
-        match completion(&names, &self.filter) {
-            Some(completed) => {
-                self.set_filter(completed);
-                true
-            }
-            None => false,
-        }
+        let Some(completed) = completion(&names, self.selected, &self.filter) else {
+            return false;
+        };
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        self.filter = completed;
+        self.refocus(keep.as_deref());
+        true
     }
 
     pub fn selected_entry(&self) -> Option<&FsEntry> {
@@ -502,12 +508,14 @@ pub fn filter_matches(entries: &[FsEntry], filter: &str) -> Vec<usize> {
     prefixed
 }
 
-/// What ⇥ should leave in the filter box, given the names on screen.
+/// What ⇥ should leave in the filter box, given the names on screen and which
+/// of them is highlighted.
 ///
 /// Like a shell: fill in as far as every candidate agrees, and once they stop
-/// agreeing take the top one outright rather than sitting there doing nothing.
-pub fn completion(names: &[&str], filter: &str) -> Option<String> {
-    let top = *names.first()?;
+/// agreeing take the highlighted one outright rather than sitting there doing
+/// nothing.
+pub fn completion(names: &[&str], chosen: usize, filter: &str) -> Option<String> {
+    let pick = *names.get(chosen).or_else(|| names.first())?;
     let agreed: Vec<&str> = names
         .iter()
         .copied()
@@ -517,7 +525,7 @@ pub fn completion(names: &[&str], filter: &str) -> Option<String> {
     if shared.chars().count() > filter.chars().count() {
         return Some(shared);
     }
-    (top != filter).then(|| top.to_string())
+    (pick != filter).then(|| pick.to_string())
 }
 
 fn starts_with_ignore_case(haystack: &str, prefix: &str) -> bool {
@@ -789,26 +797,34 @@ mod tests {
     #[test]
     fn tab_fills_in_as_far_as_the_matches_agree() {
         // One match: complete it outright.
-        assert_eq!(completion(&["src"], "s"), Some("src".into()));
+        assert_eq!(completion(&["src"], 0, "s"), Some("src".into()));
         // Several: stop where they diverge.
-        assert_eq!(completion(&["source", "sound"], "s"), Some("sou".into()));
-        // Already at the shared prefix: take the top one rather than sit idle.
+        assert_eq!(completion(&["source", "sound"], 0, "s"), Some("sou".into()));
+        // Already at the shared prefix: take the highlighted one rather than
+        // sit idle — and it is the highlighted one, not always the first.
         assert_eq!(
-            completion(&["source", "sound"], "sou"),
+            completion(&["source", "sound"], 0, "sou"),
             Some("source".into())
         );
+        assert_eq!(
+            completion(&["source", "sound"], 1, "sou"),
+            Some("sound".into())
+        );
         // Nothing left to add.
-        assert_eq!(completion(&["src"], "src"), None);
-        assert_eq!(completion(&[], "src"), None);
+        assert_eq!(completion(&["src"], 0, "src"), None);
+        assert_eq!(completion(&[], 0, "src"), None);
         // Completion types the casing that is actually on disk.
-        assert_eq!(completion(&["README.md"], "re"), Some("README.md".into()));
+        assert_eq!(
+            completion(&["README.md"], 0, "re"),
+            Some("README.md".into())
+        );
     }
 
     /// A substring match must never shorten what the user typed.
     #[test]
     fn tab_never_takes_characters_away() {
         assert_eq!(
-            completion(&["README.md", "html"], "m"),
+            completion(&["README.md", "html"], 0, "m"),
             Some("README.md".into())
         );
     }
@@ -821,6 +837,45 @@ mod tests {
         assert!(explorer.complete());
         assert_eq!(explorer.filter, "src");
         assert!(!explorer.complete());
+    }
+
+    /// ⇥ works towards the row you are on. Completing around a different one
+    /// and dragging the cursor there means ⏎ opens something you never chose.
+    #[test]
+    fn tab_completes_the_highlighted_row_and_stays_on_it() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("styles")).unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("s".into());
+        explorer.move_cursor(1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "styles");
+
+        // The shared prefix of both is "s", so ⇥ takes the highlighted name.
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, "styles");
+        assert_eq!(explorer.selected_entry().unwrap().name, "styles");
+        assert!(!explorer.complete());
+    }
+
+    /// Extending to a shared prefix must not pull the cursor off the row it
+    /// was on, when that row is still there to be on.
+    #[test]
+    fn tab_keeps_the_cursor_where_it_was() {
+        let dir = TempDir::new().unwrap();
+        for name in ["sound", "source"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("s".into());
+        explorer.move_cursor(1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "source");
+
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, "sou");
+        assert_eq!(explorer.selected_entry().unwrap().name, "source");
     }
 
     #[test]
@@ -955,7 +1010,10 @@ mod tests {
     /// differ only in an accented letter's case still share a prefix.
     #[test]
     fn completion_folds_case_beyond_ascii() {
-        assert_eq!(completion(&["Éclair", "éclipse"], "é"), Some("Écl".into()));
+        assert_eq!(
+            completion(&["Éclair", "éclipse"], 0, "é"),
+            Some("Écl".into())
+        );
     }
 
     /// A refresh that fails must not leave the filter box empty while the

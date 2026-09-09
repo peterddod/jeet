@@ -65,7 +65,11 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     // Remember where things landed so a click next frame can be mapped back to
     // the row or the path segment under it.
     explorer.list_area = chunks[1];
-    explorer.breadcrumb_origin = (chunks[0].x + 1 + LABEL_WIDTH, chunks[0].y + 2);
+    // Only when the header actually got its three rows: ratatui shrinks a
+    // `Length` constraint on a short terminal, and row 2 is then the header's
+    // bottom border, or a listing row — clicking either must not navigate.
+    explorer.breadcrumb_origin =
+        (chunks[0].height >= 4).then(|| (chunks[0].x + 1 + LABEL_WIDTH, chunks[0].y + 2));
     {
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.

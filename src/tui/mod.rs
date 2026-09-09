@@ -274,8 +274,11 @@ fn handle_browse_key(
             false => explorer.set_status("nothing more to complete"),
         },
         KeyCode::Backspace => {
-            explorer.pop_filter();
-            explorer.set_status("");
+            // Nothing to delete: leave whatever the status line was saying
+            // rather than blanking an error the user has not read yet.
+            if explorer.pop_filter() {
+                explorer.set_status("");
+            }
         }
         // A path separator means "go in", the way it does while typing a path.
         // `/` cannot appear in a Unix filename, so it always navigates.
@@ -409,7 +412,7 @@ fn clicked_row(explorer: &Explorer, column: u16, row: u16) -> Option<usize> {
 
 /// The ancestor directory a click on the header's path line points at.
 fn clicked_breadcrumb(explorer: &Explorer, column: u16, row: u16) -> Option<PathBuf> {
-    let (x, y) = explorer.breadcrumb_origin;
+    let (x, y) = explorer.breadcrumb_origin?;
     if row != y || column < x {
         return None;
     }
