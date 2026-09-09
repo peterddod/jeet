@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{human_size, Explorer, Overlay};
 use crate::worktrees::WorktreeStatus;
@@ -516,16 +516,13 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 " keys · esc close "
             };
             frame.render_widget(
-                Paragraph::new(help_body())
+                Paragraph::new(help_body(area.width.saturating_sub(2)))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .title(title)
                             .title_style(Style::default().fg(Color::Green)),
                     )
-                    // Narrower than the table still shows every description,
-                    // wrapped, rather than half of each.
-                    .wrap(Wrap { trim: false })
                     .scroll(((*scroll).min(max_scroll), 0)),
                 area,
             );
@@ -590,26 +587,90 @@ const HELP: [(&str, &str); 22] = [
     ("", ""),
 ];
 
-fn help_body() -> Vec<Line<'static>> {
-    HELP.iter()
-        .map(|(key, description)| {
-            // A spacer has to be an empty line, not a padded one: the wrapper
-            // turns a whitespace-only line into two, and the rows that fall
-            // off the bottom are the ones at the end.
-            if key.is_empty() && description.is_empty() {
-                return Line::from("");
+/// The key list laid out for a panel `width` columns wide inside its border.
+///
+/// The wrapping is ours rather than `Wrap`'s so that the number of lines is
+/// known exactly: the panel scrolls, and a scroll limit computed from a
+/// different idea of where the lines break leaves the last rows unreachable.
+/// It also lets a continuation line hang under the description rather than
+/// restarting in the key column.
+pub fn help_body(width: u16) -> Vec<Line<'static>> {
+    let width = (width as usize).max(1);
+    // Below this there is no room for a description beside its key, so the key
+    // takes a line of its own and the description follows, indented.
+    let two_column = width >= KEY_WIDTH + 16;
+    let indent = if two_column { KEY_WIDTH } else { 2 };
+    let mut lines = Vec::new();
+    for (key, description) in HELP {
+        if key.is_empty() && description.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        let key_span = || {
+            Span::styled(
+                format!("{key:<width$}", width = KEY_WIDTH),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        let mut rest = wrap_columns(description, width.saturating_sub(indent).max(1));
+        if !two_column {
+            lines.push(Line::from(vec![key_span()]));
+        } else {
+            let first = if rest.is_empty() {
+                String::new()
+            } else {
+                rest.remove(0)
+            };
+            lines.push(Line::from(vec![key_span(), Span::raw(first)]));
+        }
+        for line in rest {
+            lines.push(Line::from(format!("{}{line}", " ".repeat(indent))));
+        }
+    }
+    lines
+}
+
+/// Greedy word wrap, breaking a word that is wider than the line itself.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        for piece in split_word(word, width) {
+            let sep = usize::from(!current.is_empty());
+            if !current.is_empty() && current.width() + sep + piece.width() > width {
+                lines.push(std::mem::take(&mut current));
+            } else if sep == 1 {
+                current.push(' ');
             }
-            Line::from(vec![
-                Span::styled(
-                    format!("{key:<width$}", width = KEY_WIDTH),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(*description),
-            ])
-        })
-        .collect()
+            current.push_str(&piece);
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A word split into chunks no wider than `width`, so one long token cannot
+/// push a line past the panel.
+fn split_word(word: &str, width: usize) -> Vec<String> {
+    if word.width() <= width {
+        return vec![word.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    for c in word.chars() {
+        if chunk.width() + c.width().unwrap_or(0) > width {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
 }
 
 /// Where the help panel goes, and how far it can scroll there.
@@ -625,19 +686,10 @@ pub fn help_geometry(frame: Rect) -> (Rect, u16) {
         .max()
         .unwrap_or(0);
     let area = fitted_rect(widest, HELP.len(), frame);
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    // Counted from the very lines that will be drawn, so the limit cannot
+    // disagree with them and strand the last row.
+    let lines = help_body(area.width.saturating_sub(2)).len();
     let inner_height = area.height.saturating_sub(2) as usize;
-    let lines: usize = HELP
-        .iter()
-        .map(|(key, description)| {
-            let row = if key.is_empty() && description.is_empty() {
-                0
-            } else {
-                KEY_WIDTH + description.width()
-            };
-            row.div_ceil(inner_width).max(1)
-        })
-        .sum();
     (area, lines.saturating_sub(inner_height) as u16)
 }
 
@@ -758,6 +810,84 @@ mod tests {
         assert!(widths.windows(2).all(|w| w[0] <= w[1]), "{widths:?}");
     }
 
+    /// Render the help panel at `scroll` and give back what is on screen.
+    fn render_help(width: u16, height: u16, scroll: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let (area, max_scroll) = help_geometry(frame.area());
+                frame.render_widget(
+                    Paragraph::new(help_body(area.width.saturating_sub(2)))
+                        .block(Block::default().borders(Borders::ALL))
+                        .scroll((scroll.min(max_scroll), 0)),
+                    area,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The panel scrolls because a small terminal wraps its rows past the
+    /// bottom. Scrolling all the way must actually reach the last one — a
+    /// limit computed from a different idea of where lines break would not.
+    #[test]
+    fn scrolling_the_help_panel_reaches_its_last_row() {
+        let last = HELP.last().map(|(k, _)| *k).unwrap();
+        assert!(last.is_empty(), "the table ends with a spacer");
+        let (key, description) = HELP[HELP.len() - 2];
+        assert_eq!(key, "esc");
+
+        // A word that appears in this row and nowhere else, so finding it on
+        // screen really does mean the last row is on screen.
+        let tail = "moving";
+        assert!(description.contains(tail));
+        assert_eq!(
+            HELP.iter().filter(|(_, d)| d.contains(tail)).count(),
+            1,
+            "{tail} is no longer unique to the last row"
+        );
+        for width in [20u16, 22, 27, 28, 40, 60, 80, 120] {
+            for height in [10u16, 16, 24, 40] {
+                let (_, max_scroll) = help_geometry(Rect::new(0, 0, width, height));
+                let screen = render_help(width, height, max_scroll);
+                assert!(
+                    screen.contains(key) && screen.contains(tail),
+                    "{width}x{height}: last row unreachable at scroll {max_scroll}\n{screen}"
+                );
+                // And the test is not vacuous: where there is scrolling to do,
+                // the last row is genuinely off-screen until it is done.
+                if max_scroll > 0 {
+                    assert!(
+                        !render_help(width, height, 0).contains(tail),
+                        "{width}x{height}: nothing was actually scrolled"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Wrapping never puts more on a line than the panel has room for.
+    #[test]
+    fn the_help_panel_never_overflows_its_width() {
+        for width in 16u16..100 {
+            for line in help_body(width) {
+                let drawn: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                assert!(drawn <= width as usize, "width {width}: {drawn} columns");
+            }
+        }
+    }
+
     /// A terminal too small for the table wraps the rows past the bottom of
     /// the panel; every one of them still has to be reachable.
     #[test]
@@ -774,19 +904,7 @@ mod tests {
             let (area, max_scroll) = help_geometry(frame);
             assert!(area.width <= w && area.height <= h, "{w}x{h}: {area:?}");
 
-            let inner_width = area.width.saturating_sub(2).max(1) as usize;
-            let lines: usize = HELP
-                .iter()
-                .map(|(key, description)| {
-                    if key.is_empty() && description.is_empty() {
-                        1
-                    } else {
-                        (KEY_WIDTH + description.width())
-                            .div_ceil(inner_width)
-                            .max(1)
-                    }
-                })
-                .sum();
+            let lines = help_body(area.width.saturating_sub(2)).len();
             let shown = area.height.saturating_sub(2) as usize + max_scroll as usize;
             assert!(
                 shown >= lines,

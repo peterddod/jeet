@@ -112,16 +112,17 @@ and the level narrows to what matches, case-insensitively, with names that
 | key | action |
 |-----|--------|
 | any letter, digit or symbol | filter this level |
-| `⇥` | complete the filter as far as the matches agree; again takes the top one |
+| `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
 | `/` or `\` | step into the folder the filter names, and start a fresh filter |
 | `⌫` | delete a character |
 | `ctrl-u` | clear the filter |
 | `esc` | clear the filter — or, with nothing typed, quit |
 
 `⇥` fills in like a shell: with one match it completes the name outright, with
-several it stops where they stop agreeing. Press it again and it takes the top
-match rather than sitting there. `/` then walks in, so `sr⇥/` gets you into
-`src/` without leaving the keyboard, exactly as typing a path does.
+several it stops where they stop agreeing. Press it again and it takes the
+highlighted row rather than sitting there — so arrowing down first completes
+towards that row, and the cursor stays on it. `/` then walks in, so `sr⇥/` gets
+you into `src/` without leaving the keyboard, exactly as typing a path does.
 
 ### Moving around
 

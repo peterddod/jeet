@@ -374,7 +374,10 @@ fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
             }
             if let Some(dir) = clicked_breadcrumb(explorer, mouse.column, mouse.row) {
                 if !crate::resolve::same_path(&dir, &explorer.cwd) {
-                    explorer.show(dir, None)?;
+                    // Land on the folder we came out of, the way ← does, so a
+                    // crumb click can be undone by pressing → straight back.
+                    let came_from = descendant_of(&dir, &explorer.cwd);
+                    explorer.show(dir, came_from.as_deref())?;
                     explorer.set_status("");
                 }
             } else if let Some(row) = clicked_row(explorer, mouse.column, mouse.row) {
@@ -408,6 +411,14 @@ fn clicked_row(explorer: &Explorer, column: u16, row: u16) -> Option<usize> {
     }
     let offset = explorer.list.offset();
     Some(offset + (row - area.y - 1) as usize)
+}
+
+/// The child of `dir` that `inside` sits under, if any — the row to leave the
+/// cursor on when climbing out to `dir`.
+fn descendant_of(dir: &Path, inside: &Path) -> Option<PathBuf> {
+    let rest = inside.strip_prefix(dir).ok()?;
+    let first = rest.components().next()?;
+    Some(dir.join(first.as_os_str()))
 }
 
 /// The ancestor directory a click on the header's path line points at.
