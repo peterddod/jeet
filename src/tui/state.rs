@@ -231,16 +231,19 @@ impl Explorer {
     /// file changed nothing under the pointer, so whatever follows it is
     /// harmless and deliberate; it is stepping into a folder and then acting
     /// again on whatever the new listing slid underneath that is the bug.
-    /// Within a cell either way, because a mouse rarely comes to rest on
-    /// exactly the same one twice.
+    /// A column either way, because a mouse rarely comes to rest on exactly
+    /// the same cell twice and a row is one target all across its width. Not
+    /// a row either way: rows are a cell tall, so one row over is a different
+    /// entry, and discarding a click on it discards a click on something the
+    /// user could see they were pointing at.
     ///
-    /// The cost is that clicking down through nested folders faster than a
-    /// double-click drops every other press. That is the same ambiguity from
-    /// the other side — at that speed the two gestures are the same events —
-    /// and [`DOUBLE_CLICK`] is the interval every platform draws the line at.
+    /// The cost is that clicking the same row twice to drill down two levels,
+    /// faster than a double-click, drops the second press. That is the same
+    /// ambiguity from the other side — at that speed the two gestures are the
+    /// same events — and [`DOUBLE_CLICK`] is where every platform draws it.
     pub fn is_double_click(&self, column: u16, row: u16) -> bool {
         self.last_navigating_click.is_some_and(|(at, c, r)| {
-            c.abs_diff(column) <= 1 && r.abs_diff(row) <= 1 && Instant::now() - at < DOUBLE_CLICK
+            r == row && c.abs_diff(column) <= 1 && Instant::now() - at < DOUBLE_CLICK
         })
     }
 
@@ -267,6 +270,9 @@ impl Explorer {
         self.entries = entries;
         self.hidden = hidden;
         self.filter.clear();
+        // Whatever moved us, it was not the click the guard is watching for —
+        // arriving here by ← or → must not discard the next click.
+        self.last_navigating_click = None;
         self.refocus(keep);
         Ok(())
     }
@@ -1303,11 +1309,25 @@ mod tests {
             explorer.is_double_click(4, 7),
             "same cell, immediately after"
         );
-        // Nor a press that drifted a cell — a mouse rarely lands twice on
-        // exactly the same one.
-        assert!(explorer.is_double_click(5, 8));
-        // Somewhere else is a deliberate click, however fast.
+        // Nor one that drifted a column — a row is one target all across its
+        // width, and a mouse rarely lands twice on exactly the same cell.
+        assert!(explorer.is_double_click(5, 7));
+        // But a row over is a different entry, which the user could see they
+        // were pointing at.
+        assert!(!explorer.is_double_click(4, 8));
+        // And somewhere else entirely is deliberate, however fast.
         assert!(!explorer.is_double_click(20, 14));
+
+        // Re-listing by any other means — ←, →, a refresh — is not the click
+        // the guard watches for, so it must not discard the next one. Erring
+        // this way only ever acts on a click; it never swallows one wrongly.
+        explorer.note_navigating_click(4, 7);
+        explorer.descend().unwrap();
+        assert!(!explorer.is_double_click(4, 7));
+
+        explorer.note_navigating_click(4, 7);
+        explorer.reload(None).unwrap();
+        assert!(!explorer.is_double_click(4, 7));
 
         // A click that only selected a file changed nothing under the pointer,
         // so it arms nothing and the next click is free to act.
