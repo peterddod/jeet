@@ -503,73 +503,26 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 area,
             );
         }
-        Overlay::Help => {
-            let rows = [
-                (
-                    "a-z, 0-9, …",
-                    "type to filter this level (live, no key needed)",
-                ),
-                ("⇥", "complete the filter, as far as the matches agree"),
-                ("/ or \\", "enter the folder the filter names"),
-                ("⌫ / ctrl-u", "delete a character / clear the filter"),
-                ("", ""),
-                ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
-                ("→", "expand: enter the highlighted folder"),
-                ("←", "back: leave the folder (stops at the root)"),
-                ("⏎", "folder: enter · file: open in your editor"),
-                ("click", "a row to enter or select it, a path crumb to jump"),
-                ("Home / End", "jump to the top / bottom"),
-                ("", ""),
-                ("ctrl-a", "start a coding agent at the worktree root"),
-                ("ctrl-s", "previous agent sessions for this worktree"),
-                ("ctrl-w", "worktrees: switch, create, rename or delete"),
-                ("", "  in the panel: r refresh, esc close"),
-                ("ctrl-d", "toggle hidden dotfiles"),
-                ("ctrl-r", "refresh the listing and counters"),
-                ("ctrl-q", "quit, leaving the shell in this directory"),
-                ("F1 / ctrl-g", "this list"),
-                ("esc", "clear the filter, or quit without moving the shell"),
-            ];
-            let body: Vec<Line> = rows
-                .iter()
-                .map(|(key, description)| {
-                    // A spacer has to be an empty line, not a padded one: the
-                    // wrapper turns a whitespace-only line into two, and the
-                    // rows that fall off the bottom are the ones at the end.
-                    if key.is_empty() && description.is_empty() {
-                        return Line::from("");
-                    }
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{key:<width$}", width = KEY_WIDTH),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(*description),
-                    ])
-                })
-                .collect();
-            // Sized to the table rather than to a share of the frame: a key
-            // list that clips its own descriptions explains nothing.
-            let widest = rows
-                .iter()
-                .map(|(_, description)| KEY_WIDTH + description.width())
-                .max()
-                .unwrap_or(0);
-            let area = fitted_rect(widest, rows.len(), frame.area());
+        Overlay::Help { scroll } => {
+            let (area, max_scroll) = help_geometry(frame.area());
             frame.render_widget(Clear, area);
+            let title = if max_scroll > 0 {
+                " keys · ↑↓ scroll · esc close "
+            } else {
+                " keys · esc close "
+            };
             frame.render_widget(
-                Paragraph::new(body)
+                Paragraph::new(help_body())
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(" keys · esc close ")
+                            .title(title)
                             .title_style(Style::default().fg(Color::Green)),
                     )
                     // Narrower than the table still shows every description,
                     // wrapped, rather than half of each.
-                    .wrap(Wrap { trim: false }),
+                    .wrap(Wrap { trim: false })
+                    .scroll(((*scroll).min(max_scroll), 0)),
                 area,
             );
         }
@@ -602,6 +555,86 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             );
         }
     }
+}
+
+/// The key list, as it is both rendered and measured.
+const HELP: [(&str, &str); 22] = [
+    (
+        "a-z, 0-9, …",
+        "type to filter this level (live, no key needed)",
+    ),
+    ("⇥", "complete the filter, as far as the matches agree"),
+    ("/ or \\", "enter the folder the filter names"),
+    ("⌫ / ctrl-u", "delete a character / clear the filter"),
+    ("", ""),
+    ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
+    ("→", "expand: enter the highlighted folder"),
+    ("←", "back: leave the folder (stops at the root)"),
+    ("⏎", "folder: enter · file: open in your editor"),
+    ("click", "a row to enter or select it, a path crumb to jump"),
+    ("Home / End", "jump to the top / bottom"),
+    ("", ""),
+    ("ctrl-a", "start a coding agent at the worktree root"),
+    ("ctrl-s", "previous agent sessions for this worktree"),
+    ("ctrl-w", "worktrees: switch, create, rename or delete"),
+    ("", "  in the panel: r refresh, esc close"),
+    ("ctrl-d", "toggle hidden dotfiles"),
+    ("ctrl-r", "refresh the listing and counters"),
+    ("ctrl-q", "quit, leaving the shell in this directory"),
+    ("F1 / ctrl-g", "this list"),
+    ("esc", "clear the filter, or quit without moving the shell"),
+    ("", ""),
+];
+
+fn help_body() -> Vec<Line<'static>> {
+    HELP.iter()
+        .map(|(key, description)| {
+            // A spacer has to be an empty line, not a padded one: the wrapper
+            // turns a whitespace-only line into two, and the rows that fall
+            // off the bottom are the ones at the end.
+            if key.is_empty() && description.is_empty() {
+                return Line::from("");
+            }
+            Line::from(vec![
+                Span::styled(
+                    format!("{key:<width$}", width = KEY_WIDTH),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(*description),
+            ])
+        })
+        .collect()
+}
+
+/// Where the help panel goes, and how far it can scroll there.
+///
+/// Sized to the table rather than to a share of the frame: a key list that
+/// clips its own descriptions explains nothing. When even that will not fit
+/// the rows wrap, which makes the list longer than the box — hence the scroll,
+/// so a small terminal loses nothing, only shows it a screen at a time.
+pub fn help_geometry(frame: Rect) -> (Rect, u16) {
+    let widest = HELP
+        .iter()
+        .map(|(_, description)| KEY_WIDTH + description.width())
+        .max()
+        .unwrap_or(0);
+    let area = fitted_rect(widest, HELP.len(), frame);
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let lines: usize = HELP
+        .iter()
+        .map(|(key, description)| {
+            let row = if key.is_empty() && description.is_empty() {
+                0
+            } else {
+                KEY_WIDTH + description.width()
+            };
+            row.div_ceil(inner_width).max(1)
+        })
+        .sum();
+    (area, lines.saturating_sub(inner_height) as u16)
 }
 
 /// Truncate from the left, keeping the tail — right for paths.
@@ -719,6 +752,57 @@ mod tests {
         // Widening the terminal never shows fewer hints.
         let widths: Vec<usize> = (30..=130).map(|w| hints(w).width()).collect();
         assert!(widths.windows(2).all(|w| w[0] <= w[1]), "{widths:?}");
+    }
+
+    /// A terminal too small for the table wraps the rows past the bottom of
+    /// the panel; every one of them still has to be reachable.
+    #[test]
+    fn the_help_panel_can_always_reach_its_last_row() {
+        for (w, h) in [
+            (200u16, 60u16),
+            (100, 40),
+            (80, 24),
+            (60, 24),
+            (40, 20),
+            (30, 10),
+        ] {
+            let frame = Rect::new(0, 0, w, h);
+            let (area, max_scroll) = help_geometry(frame);
+            assert!(area.width <= w && area.height <= h, "{w}x{h}: {area:?}");
+
+            let inner_width = area.width.saturating_sub(2).max(1) as usize;
+            let lines: usize = HELP
+                .iter()
+                .map(|(key, description)| {
+                    if key.is_empty() && description.is_empty() {
+                        1
+                    } else {
+                        (KEY_WIDTH + description.width())
+                            .div_ceil(inner_width)
+                            .max(1)
+                    }
+                })
+                .sum();
+            let shown = area.height.saturating_sub(2) as usize + max_scroll as usize;
+            assert!(
+                shown >= lines,
+                "{w}x{h}: {shown} lines reachable of {lines}"
+            );
+        }
+    }
+
+    /// Where there is room for the table, it is not scrollable and not clipped.
+    #[test]
+    fn the_help_panel_fits_a_normal_terminal_outright() {
+        let (area, max_scroll) = help_geometry(Rect::new(0, 0, 80, 30));
+        assert_eq!(max_scroll, 0);
+        let widest = HELP
+            .iter()
+            .map(|(_, d)| KEY_WIDTH + d.width())
+            .max()
+            .unwrap();
+        assert!(area.width as usize >= widest + 2, "{area:?} clips {widest}");
+        assert!(area.height as usize >= HELP.len() + 2, "{area:?}");
     }
 
     #[test]

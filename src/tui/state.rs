@@ -70,7 +70,10 @@ pub enum Overlay {
         /// Index into [`Explorer::worktree_rows`] the action applies to.
         index: usize,
     },
-    Help,
+    Help {
+        /// First line of the key list shown, for terminals too small for it.
+        scroll: u16,
+    },
     Message {
         title: String,
         lines: Vec<String>,
@@ -205,15 +208,22 @@ impl Explorer {
     }
 
     /// Whether this press is the tail of a double-click on the same cell, and
-    /// so should be swallowed rather than acted on. Records the press either
-    /// way, so a triple-click cannot slip a third action through.
+    /// so should be swallowed rather than acted on.
+    ///
+    /// The window stays anchored on the press we acted on, never on the ones
+    /// we discarded — otherwise a sustained series of clicks in one place,
+    /// each inside the window of the last, would act exactly once however long
+    /// it went on.
     pub fn is_double_click(&mut self, column: u16, row: u16) -> bool {
         let now = Instant::now();
-        let repeat = self
+        if self
             .last_click
-            .is_some_and(|(at, c, r)| (c, r) == (column, row) && now - at < DOUBLE_CLICK);
+            .is_some_and(|(at, c, r)| (c, r) == (column, row) && now - at < DOUBLE_CLICK)
+        {
+            return true;
+        }
         self.last_click = Some((now, column, row));
-        repeat
+        false
     }
 
     /// List `dir` and move there, leaving state untouched if it cannot be read.
@@ -386,21 +396,22 @@ impl Explorer {
     pub fn breadcrumb_target(&self, offset: usize) -> Option<PathBuf> {
         // Outside the worktree the breadcrumb is an absolute path whose
         // segments are not ours to walk back up.
-        if !self.cwd.starts_with(&self.root) {
+        let rest = self.cwd.strip_prefix(&self.root).ok()?;
+        if offset >= self.breadcrumb().width() {
             return None;
         }
-        let crumb = self.breadcrumb();
-        if offset >= crumb.width() {
-            return None;
-        }
+        // The path is rebuilt from `cwd`'s own components, never from the
+        // rendered string: `display()` is lossy, so a directory whose name is
+        // not valid UTF-8 would come back full of U+FFFD and fail to open.
+        // The rendered text only ever decides how wide each segment looks.
         let mut dir = self.root.clone();
         let mut cursor = 0usize;
-        for segment in crumb.split('/').skip(1).filter(|s| !s.is_empty()) {
+        for component in rest.components() {
             if offset <= cursor {
                 return Some(dir);
             }
-            dir.push(segment);
-            cursor += "/".width() + segment.width();
+            cursor += "/".width() + component.as_os_str().to_string_lossy().width();
+            dir.push(component.as_os_str());
         }
         Some(dir)
     }
@@ -902,10 +913,17 @@ mod tests {
         // A different cell is a deliberate click, however fast.
         assert!(!explorer.is_double_click(4, 8));
 
-        // The window is anchored on the click we acted on, so clicking on and
-        // on in one place keeps working rather than going dead after the first.
-        std::thread::sleep(DOUBLE_CLICK + Duration::from_millis(50));
-        assert!(!explorer.is_double_click(4, 8));
+        let mut acted = 0;
+        for _ in 0..4 {
+            std::thread::sleep(DOUBLE_CLICK / 2);
+            if !explorer.is_double_click(9, 9) {
+                acted += 1;
+            }
+        }
+        // Anchored on the acted press, every other one of these clears the
+        // window. Anchored on every press — the bug — only the first ever
+        // would, however long the clicking went on.
+        assert!(acted >= 2, "only {acted} of 4 clicks acted");
     }
 
     /// If the re-listing fails the flag must go back: left flipped, it silently
@@ -1011,6 +1029,30 @@ mod tests {
         }
         // Past the end of the path there is nothing to click.
         assert_eq!(explorer.breadcrumb_target(4), None);
+    }
+
+    /// `display()` is lossy, so rebuilding a crumb's path from the rendered
+    /// text would hand `show` a name full of U+FFFD that does not exist.
+    #[test]
+    #[cfg(unix)]
+    fn crumbs_survive_a_directory_name_that_is_not_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = TempDir::new().unwrap();
+        let odd = dir.path().join(OsString::from_vec(b"od\xffd".to_vec()));
+        let nested = odd.join("tui");
+        std::fs::create_dir_all(&nested).unwrap();
+        let mut explorer = explorer_at(dir.path());
+        explorer.show(nested.clone(), None).unwrap();
+
+        // Clicking the replacement-charactered crumb still opens the real one.
+        let target = explorer.breadcrumb_target(2).unwrap();
+        assert_eq!(target, odd);
+        assert!(
+            explorer.show(target, None).is_ok(),
+            "rebuilt a path that does not exist"
+        );
     }
 
     #[test]

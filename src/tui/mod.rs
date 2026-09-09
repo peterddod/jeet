@@ -29,6 +29,7 @@ use ratatui::crossterm::style::Print;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::agent::{self, AgentSpec};
@@ -264,8 +265,8 @@ fn handle_browse_key(
         // F1 alone would do, except macOS gives it to the media keys by
         // default and some terminals keep it for their own menu. ctrl-g is
         // "get help" in nano, and it always arrives.
-        KeyCode::F(1) => explorer.overlay = Some(Overlay::Help),
-        KeyCode::Char('g') if ctrl => explorer.overlay = Some(Overlay::Help),
+        KeyCode::F(1) => explorer.overlay = Some(Overlay::Help { scroll: 0 }),
+        KeyCode::Char('g') if ctrl => explorer.overlay = Some(Overlay::Help { scroll: 0 }),
 
         // Filter editing.
         KeyCode::Tab => match explorer.complete() {
@@ -435,10 +436,20 @@ fn handle_overlay_key(
         return Ok(());
     }
     match overlay {
-        Overlay::Help => {
-            if !matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-                explorer.overlay = Some(overlay);
-            }
+        Overlay::Help { scroll } => {
+            // On a terminal too small for the whole list, the rows wrap past
+            // the bottom of the panel; scrolling is how the rest is reached.
+            let size = terminal.size()?;
+            let max = ui::help_geometry(Rect::new(0, 0, size.width, size.height)).1;
+            let moved = match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Ok(()),
+                KeyCode::Up => scroll.saturating_sub(1),
+                KeyCode::Down => (scroll + 1).min(max),
+                KeyCode::PageUp | KeyCode::Home => 0,
+                KeyCode::PageDown | KeyCode::End => max,
+                _ => scroll,
+            };
+            explorer.overlay = Some(Overlay::Help { scroll: moved });
         }
         Overlay::Message { from_panel, .. } => {
             if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
