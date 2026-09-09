@@ -109,6 +109,10 @@ pub struct Explorer {
     pub matches: Vec<usize>,
     /// Cursor position within [`Explorer::matches`], not `entries`.
     pub selected: usize,
+    /// Whether the user has put the cursor where it is, rather than the filter
+    /// having dropped it on the top match. `/` asks, because a row someone
+    /// chose is a row they meant.
+    chosen: bool,
     pub show_hidden: bool,
     pub overlay: Option<Overlay>,
     /// Worktrees of this repo, refreshed whenever the overlay is opened.
@@ -160,6 +164,7 @@ impl Explorer {
             filter: String::new(),
             matches: Vec::new(),
             selected: 0,
+            chosen: false,
             show_hidden: false,
             overlay: None,
             worktree_rows: Vec::new(),
@@ -188,8 +193,10 @@ impl Explorer {
         // with it cleared but the rows still filtered shows a subset of the
         // directory with nothing on screen to say why.
         let filter = std::mem::take(&mut self.filter);
+        let chosen = self.chosen;
         let listed = self.show(cwd, keep);
         self.filter = filter;
+        self.chosen = chosen;
         self.refocus(keep);
         listed
     }
@@ -245,6 +252,7 @@ impl Explorer {
         self.cwd = dir;
         self.entries = entries;
         self.filter.clear();
+        self.chosen = false;
         self.refocus(keep);
         Ok(())
     }
@@ -275,6 +283,9 @@ impl Explorer {
     /// ⇥ would complete is always the highlighted one.
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
+        // Editing the filter re-sorts the matches and drops the cursor back on
+        // the top one, so whatever row was chosen before is not chosen now.
+        self.chosen = false;
         self.refocus(None);
     }
 
@@ -344,14 +355,17 @@ impl Explorer {
         let len = self.matches.len() as isize;
         let next = self.selected as isize + delta;
         self.selected = next.clamp(0, len - 1) as usize;
+        self.chosen = true;
     }
 
     pub fn select_first(&mut self) {
         self.selected = 0;
+        self.chosen = true;
     }
 
     pub fn select_last(&mut self) {
         self.selected = self.matches.len().saturating_sub(1);
+        self.chosen = true;
     }
 
     /// Put the cursor on a visible row, ignoring one that is not there.
@@ -360,6 +374,7 @@ impl Explorer {
             return false;
         }
         self.selected = index;
+        self.chosen = true;
         true
     }
 
@@ -399,18 +414,18 @@ impl Explorer {
     /// The folder `/` would enter: the one the filter names outright, or the
     /// only thing it matches at all.
     ///
-    /// Moving the cursor off the top match settles it: with `src/` and
-    /// `src-old/` both matching `src`, arrowing onto `src-old` and pressing
-    /// `/` goes there, because ⏎, → and a click all act on the highlighted
-    /// row too. Left at the top, the filter alone decides, so a single letter
-    /// does not walk into whichever folder happens to sort first.
+    /// Putting the cursor somewhere settles it: with `src/` and `src-old/`
+    /// both matching `src`, arrowing onto either and pressing `/` goes there,
+    /// because ⏎, → and a click all act on the highlighted row too. Until the
+    /// cursor is chosen the filter alone decides, so a single letter does not
+    /// walk into whichever folder happens to sort first.
     fn typed_dir(&self) -> Option<usize> {
         if self.filter.is_empty() {
             return None;
         }
         let needle = self.filter.to_lowercase();
         let index = match self.matches.get(self.selected).copied() {
-            Some(highlighted) if self.selected > 0 => highlighted,
+            Some(highlighted) if self.chosen => highlighted,
             _ => self
                 .matches
                 .iter()
@@ -1048,13 +1063,30 @@ mod tests {
         );
         assert_eq!(explorer.cwd, dir.path().join("src-old"));
 
-        // Left at the top match, the filter alone decides — a single letter
-        // must not walk into whichever folder happens to sort first.
+        // Arrowing back onto the top row still counts as choosing it: it is
+        // the row ⏎ and → would act on, whichever index it sits at.
+        let mut explorer = explorer_at(dir.path());
+        explorer.set_filter("s".into());
+        explorer.move_cursor(1);
+        explorer.move_cursor(-1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "src");
+        assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+
+        // Untouched, the filter alone decides — a single letter must not walk
+        // into whichever folder happens to sort first.
         let mut explorer = explorer_at(dir.path());
         explorer.set_filter("s".into());
         assert_eq!(explorer.descend_typed().unwrap(), None);
         explorer.set_filter("src".into());
         assert_eq!(explorer.descend_typed().unwrap().as_deref(), Some("src"));
+
+        // And typing again voids an earlier choice: the matches re-sort and
+        // the cursor goes back to the top, so nothing has been chosen since.
+        let mut explorer = explorer_at(dir.path());
+        explorer.set_filter("s".into());
+        explorer.move_cursor(1);
+        explorer.push_filter('r');
+        assert_eq!(explorer.descend_typed().unwrap(), None);
     }
 
     /// With nothing typed, ⇥ fills in what every name shares and no more —

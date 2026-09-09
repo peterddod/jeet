@@ -214,7 +214,9 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16
         Line::from(vec![
             Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                truncate_start(&explorer.filter, room.max(1)),
+                // Not `.max(1)`: a column the budget just ruled out is a
+                // column the cursor block loses.
+                truncate_start(&explorer.filter, room),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -313,16 +315,7 @@ fn draw_listing(
 
     let title = match (entries.is_empty(), filter.is_empty()) {
         (true, true) => " empty directory ".to_string(),
-        // Bounded like everything else drawn from a name the user typed: the
-        // title sits in the block's top border, and an overrun eats it. The
-        // budget is the border run — the pane less its two corners — less the
-        // fixed text the filter is quoted inside.
-        (true, false) => {
-            let room = (area.width as usize)
-                .saturating_sub(2)
-                .saturating_sub(NO_MATCH_TITLE.chars().count());
-            format!(" nothing matches \"{}\" ", truncate_start(filter, room))
-        }
+        (true, false) => no_match_title(filter, area.width),
         (false, true) => format!(" {} items ", entries.len()),
         (false, false) => format!(" {} of {total} items ", entries.len()),
     };
@@ -341,6 +334,22 @@ fn draw_listing(
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, list_state);
+}
+
+/// The title for a filter that matched nothing, cut to the block's border run
+/// — the pane less its two corners. The title is drawn *into* that border, so
+/// an overrun eats it rather than being clipped harmlessly.
+fn no_match_title(filter: &str, pane: u16) -> String {
+    let run = (pane as usize).saturating_sub(2);
+    let fixed = NO_MATCH_TITLE.chars().count();
+    if run <= fixed {
+        // No room to quote anything into: say the short version, cut to fit.
+        return truncate(" nothing matches ", run);
+    }
+    format!(
+        " nothing matches \"{}\" ",
+        truncate_start(filter, run - fixed)
+    )
 }
 
 fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
@@ -1011,33 +1020,52 @@ mod tests {
         }
     }
 
-    /// The listing title sits in the block's own top border, so a filter long
-    /// enough to overrun it eats the border rather than being clipped.
+    /// The listing title sits in the block's own top border, so a title wider
+    /// than the run between its corners eats the border rather than clipping.
     #[test]
     fn the_no_match_title_stays_inside_its_border() {
+        for pane in 0u16..120 {
+            let run = (pane as usize).saturating_sub(2);
+            for filter in ["x", &"Q".repeat(200), "日本語のディレクトリ", "❤️❤️"]
+            {
+                let title = no_match_title(filter, pane);
+                assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+            }
+        }
+        // With room, it says the whole thing.
+        assert_eq!(no_match_title("zz", 40), " nothing matches \"zz\" ");
+    }
+
+    /// The header's filter line does not wrap, so what it draws has to fit the
+    /// header's interior — cursor block included, that being the point of it.
+    #[test]
+    fn the_filter_line_stays_inside_the_header() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        for width in [20u16, 40, 60, 100] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
-            let mut list_state = ListState::default();
+        for width in 10u16..80 {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
             terminal
                 .draw(|frame| {
-                    draw_listing(
-                        frame,
-                        frame.area(),
-                        &[],
-                        1,
-                        &"Q".repeat(120),
-                        0,
-                        &mut list_state,
+                    let block = Block::default().borders(Borders::ALL);
+                    let area = frame.area();
+                    frame.render_widget(
+                        Paragraph::new(vec![Line::from(vec![
+                            Span::raw("filter   "),
+                            Span::raw(truncate_start(
+                                &"Q".repeat(200),
+                                (area.width as usize).saturating_sub(2 + LABEL_WIDTH as usize + 1),
+                            )),
+                            Span::raw("█"),
+                        ])])
+                        .block(block),
+                        area,
                     );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
-            let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
-            assert!(top.starts_with('┌'), "{width}: {top}");
-            assert!(top.ends_with('┐'), "{width}: {top}");
+            let right = buffer[(width - 1, 1)].symbol().to_string();
+            assert_eq!(right, "│", "width {width}: border overwritten");
         }
     }
 
