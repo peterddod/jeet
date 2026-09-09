@@ -72,7 +72,15 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     // to draw leaves nothing to click, and the row it would have been on is a
     // border or a listing row — clicking either must not navigate.
     explorer.list_area = chunks[1];
-    explorer.breadcrumb_origin = path_row.map(|y| (chunks[0].x + 1 + LABEL_WIDTH, y));
+    explorer.breadcrumb_area = path_row.map(|y| Rect {
+        x: chunks[0].x + 1 + LABEL_WIDTH,
+        y,
+        // Only as far as the header's interior reaches: a long path is clipped
+        // at the border, and the border cell is not a path segment however
+        // much breadcrumb there would have been under it.
+        width: chunks[0].width.saturating_sub(2 + LABEL_WIDTH),
+        height: 1,
+    });
     {
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
@@ -694,7 +702,9 @@ fn split_word(word: &str, width: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut chunk = String::new();
     for c in word.chars() {
-        if chunk.width() + c.width().unwrap_or(0) > width {
+        // Never an empty chunk: a single glyph wider than the whole line has
+        // to overflow it rather than be preceded by a blank one.
+        if !chunk.is_empty() && chunk.width() + c.width().unwrap_or(0) > width {
             chunks.push(std::mem::take(&mut chunk));
         }
         chunk.push(c);

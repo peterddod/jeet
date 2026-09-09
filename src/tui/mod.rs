@@ -437,11 +437,11 @@ fn descendant_of(dir: &Path, inside: &Path) -> Option<PathBuf> {
 
 /// The ancestor directory a click on the header's path line points at.
 fn clicked_breadcrumb(explorer: &Explorer, column: u16, row: u16) -> Option<PathBuf> {
-    let (x, y) = explorer.breadcrumb_origin?;
-    if row != y || column < x {
+    let area = explorer.breadcrumb_area?;
+    if row != area.y || column < area.x || column >= area.x + area.width {
         return None;
     }
-    explorer.breadcrumb_target((column - x) as usize)
+    explorer.breadcrumb_target((column - area.x) as usize)
 }
 
 fn handle_overlay_key(

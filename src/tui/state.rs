@@ -127,9 +127,9 @@ pub struct Explorer {
     /// Where the listing was drawn last frame, so a click can be mapped back
     /// to the row under it. Set by the renderer, read by the mouse handler.
     pub list_area: Rect,
-    /// Screen cell the breadcrumb's leading `/` was drawn at, same deal, or
-    /// none when the terminal was too short to draw the path line at all.
-    pub breadcrumb_origin: Option<(u16, u16)>,
+    /// The cells the breadcrumb was drawn into, same deal, or none when the
+    /// terminal was too short to draw the path line at all.
+    pub breadcrumb_area: Option<Rect>,
     /// When and where the last click landed, so the second press of a
     /// double-click can be told from a deliberate one.
     last_click: Option<(Instant, u16, u16)>,
@@ -170,7 +170,7 @@ impl Explorer {
             should_quit: false,
             exit: Exit::Stay,
             list_area: Rect::default(),
-            breadcrumb_origin: None,
+            breadcrumb_area: None,
             last_click: None,
         };
         explorer.reload(None)?;
