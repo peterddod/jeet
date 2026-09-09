@@ -21,10 +21,11 @@ use anyhow::{Context, Result};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::style::Print;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -42,6 +43,15 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// Said when a key needs a highlighted row and the filter has left none.
 const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
+
+/// Ask the terminal for button and wheel reports, in SGR encoding.
+///
+/// Not crossterm's `EnableMouseCapture`: that also turns on `?1003h`,
+/// any-motion tracking, and then every wipe of the pointer across the window
+/// wakes the event loop and redraws the whole listing for nothing. `?1002h`
+/// reports presses, releases and drags, which is all we act on.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l";
 
 /// Run the explorer, returning where the shell should end up.
 pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
@@ -76,7 +86,7 @@ fn init_terminal() -> Result<Tui> {
     install_safety_net();
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, Print(MOUSE_ON)).context("enter alternate screen")?;
     Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")
 }
 
@@ -117,19 +127,14 @@ fn install_safety_net() {
 /// Best-effort teardown for paths that cannot return a `Result`.
 fn emergency_restore() {
     let _ = disable_raw_mode();
-    let _ = execute!(
-        io::stdout(),
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        Show
-    );
+    let _ = execute!(io::stdout(), Print(MOUSE_OFF), LeaveAlternateScreen, Show);
 }
 
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode().context("disable raw mode")?;
     execute!(
         terminal.backend_mut(),
-        DisableMouseCapture,
+        Print(MOUSE_OFF),
         LeaveAlternateScreen
     )
     .context("leave alternate screen")?;
@@ -145,7 +150,7 @@ fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture
+        Print(MOUSE_ON)
     )
     .context("enter alternate screen")?;
     terminal.clear().context("clear terminal")?;
@@ -240,9 +245,8 @@ fn handle_browse_key(
         }
         KeyCode::Char('d') if ctrl => {
             let keep = explorer.selected_entry().map(|e| e.path.clone());
-            explorer.show_hidden = !explorer.show_hidden;
-            explorer.reload(keep.as_deref())?;
-            explorer.set_status(if explorer.show_hidden {
+            let shown = explorer.toggle_hidden(keep.as_deref())?;
+            explorer.set_status(if shown {
                 "showing hidden files"
             } else {
                 "hiding hidden files"
@@ -343,6 +347,13 @@ fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
         MouseEventKind::ScrollUp => explorer.move_cursor(-1),
         MouseEventKind::ScrollDown => explorer.move_cursor(1),
         MouseEventKind::Down(MouseButton::Left) => {
+            // A double-click is two presses. Without this the first enters the
+            // folder and the second enters whatever the child listing put back
+            // under the pointer — which, directories sorting first, is usually
+            // another folder.
+            if explorer.is_double_click(mouse.column, mouse.row) {
+                return Ok(());
+            }
             if let Some(dir) = clicked_breadcrumb(explorer, mouse.column, mouse.row) {
                 if !crate::resolve::same_path(&dir, &explorer.cwd) {
                     explorer.show(dir, None)?;
@@ -397,6 +408,18 @@ fn handle_overlay_key(
     overlay: Overlay,
     key: KeyEvent,
 ) -> Result<()> {
+    // The browse-mode shortcuts are all ctrl-modified, and none of them mean
+    // anything in a panel. Letting them through makes ctrl-d ask to delete a
+    // worktree and ctrl-e create one. The prompts are the exception: they take
+    // typed input, and ctrl-u clears it.
+    let typing = matches!(
+        overlay,
+        Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. }
+    );
+    if !typing && key.modifiers.contains(KeyModifiers::CONTROL) {
+        explorer.overlay = Some(overlay);
+        return Ok(());
+    }
     match overlay {
         Overlay::Help => {
             if !matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {

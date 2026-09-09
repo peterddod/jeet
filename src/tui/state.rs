@@ -4,6 +4,7 @@
 //! renders what these types describe.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::layout::Rect;
@@ -125,7 +126,13 @@ pub struct Explorer {
     pub list_area: Rect,
     /// Screen cell the breadcrumb's leading `/` was drawn at, same deal.
     pub breadcrumb_origin: (u16, u16),
+    /// When and where the last click landed, so the second press of a
+    /// double-click can be told from a deliberate one.
+    last_click: Option<(Instant, u16, u16)>,
 }
+
+/// Two presses on the same cell inside this window are one double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 impl Explorer {
     pub fn new(
@@ -160,6 +167,7 @@ impl Explorer {
             exit: Exit::Stay,
             list_area: Rect::default(),
             breadcrumb_origin: (0, 0),
+            last_click: None,
         };
         explorer.reload(None)?;
         Ok(explorer)
@@ -180,6 +188,32 @@ impl Explorer {
         self.filter = filter;
         self.refocus(keep);
         listed
+    }
+
+    /// Show or hide dotfiles, putting the flag back if the re-listing fails.
+    ///
+    /// A flag that disagrees with what is on screen is worse than the error:
+    /// the next unrelated refresh silently changes the listing. Returns
+    /// whether hidden files are now shown.
+    pub fn toggle_hidden(&mut self, keep: Option<&Path>) -> Result<bool> {
+        self.show_hidden = !self.show_hidden;
+        if let Err(e) = self.reload(keep) {
+            self.show_hidden = !self.show_hidden;
+            return Err(e);
+        }
+        Ok(self.show_hidden)
+    }
+
+    /// Whether this press is the tail of a double-click on the same cell, and
+    /// so should be swallowed rather than acted on. Records the press either
+    /// way, so a triple-click cannot slip a third action through.
+    pub fn is_double_click(&mut self, column: u16, row: u16) -> bool {
+        let now = Instant::now();
+        let repeat = self
+            .last_click
+            .is_some_and(|(at, c, r)| (c, r) == (column, row) && now - at < DOUBLE_CLICK);
+        self.last_click = Some((now, column, row));
+        repeat
     }
 
     /// List `dir` and move there, leaving state untouched if it cannot be read.
@@ -481,6 +515,10 @@ fn starts_with_ignore_case(haystack: &str, prefix: &str) -> bool {
 
 /// Longest prefix every name shares, compared without case but returned with
 /// the casing of the first name — so ⇥ types what is actually on disk.
+///
+/// Case folding is Unicode, matching what the filter itself does; ASCII-only
+/// folding would call two names that differ only in an accented letter's case
+/// wholly different and complete straight to the top one.
 fn common_prefix(names: &[&str]) -> String {
     let Some(first) = names.first() else {
         return String::new();
@@ -490,7 +528,7 @@ fn common_prefix(names: &[&str]) -> String {
         let shared = first
             .chars()
             .zip(name.chars())
-            .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+            .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
             .count();
         len = len.min(shared);
     }
@@ -849,6 +887,56 @@ mod tests {
 
     /// A refresh that fails must not leave the filter box empty while the
     /// listing is still filtered — the rows would lie about what is on screen.
+    /// A double-click is two presses: the first enters the folder, and the
+    /// second must not enter whatever the child listing slid under the cursor.
+    #[test]
+    fn the_second_press_of_a_double_click_is_swallowed() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+
+        assert!(!explorer.is_double_click(4, 7));
+        assert!(
+            explorer.is_double_click(4, 7),
+            "same cell, immediately after"
+        );
+        // A triple-click gets no third action either.
+        assert!(explorer.is_double_click(4, 7));
+        // A different cell is a deliberate click, however fast.
+        assert!(!explorer.is_double_click(4, 8));
+    }
+
+    /// If the re-listing fails the flag must go back: left flipped, it silently
+    /// changes what the next unrelated refresh shows.
+    #[test]
+    fn a_failed_hidden_toggle_does_not_move_the_flag() {
+        let dir = fixture();
+        let gone = dir.path().join("src");
+        let mut explorer = explorer_at(&gone);
+        assert!(!explorer.show_hidden);
+
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert!(explorer.toggle_hidden(None).is_err());
+        assert!(!explorer.show_hidden);
+    }
+
+    #[test]
+    fn toggling_hidden_files_relists() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        assert_eq!(explorer.visible_len(), 3);
+        assert!(explorer.toggle_hidden(None).unwrap());
+        assert_eq!(explorer.visible_len(), 4);
+        assert!(!explorer.toggle_hidden(None).unwrap());
+        assert_eq!(explorer.visible_len(), 3);
+    }
+
+    /// Case folding follows the filter's, which is Unicode: two names that
+    /// differ only in an accented letter's case still share a prefix.
+    #[test]
+    fn completion_folds_case_beyond_ascii() {
+        assert_eq!(completion(&["Éclair", "éclipse"], "é"), Some("Écl".into()));
+    }
+
     #[test]
     fn a_failed_reload_keeps_the_filter_it_was_showing() {
         let dir = fixture();

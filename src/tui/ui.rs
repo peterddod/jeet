@@ -5,11 +5,27 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use super::state::{human_size, Explorer, Overlay};
 use crate::worktrees::WorktreeStatus;
 
-const HINTS: &str = "type to filter  ⇥ complete  / enter  ↑↓ move  ⏎ open  ^w worktrees  ^s sessions  ^a agent  ^d hidden  F1 help  ^q quit";
+/// The hint line, widest first. A one-row paragraph does not wrap, so a hint
+/// that does not fit is not shortened, it is cut off — and what falls off the
+/// end is `F1 help` and `^q quit`, the two that replaced keys people knew.
+const HINTS: [&str; 3] = [
+    "type to filter  ⇥ complete  / enter  ↑↓ move  ⏎ open  ^w worktrees  ^s sessions  ^a agent  ^d hidden  F1 help  ^q quit",
+    "type to filter  ⇥ complete  / enter  ^w worktrees  F1 help  ^q quit",
+    "type to filter  F1 help  ^q quit",
+];
+
+/// The widest hint line that fits, or the shortest if none of them do.
+fn hints(width: u16) -> &'static str {
+    HINTS
+        .iter()
+        .find(|hint| hint.width() <= width as usize)
+        .unwrap_or(&HINTS[HINTS.len() - 1])
+}
 
 /// Column the header's value column starts at: one for the border, plus the
 /// width of the widest label. Clicks on the breadcrumb are measured from here.
@@ -63,7 +79,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     frame.render_widget(status, chunks[2]);
 
     let hints = Paragraph::new(Line::from(Span::styled(
-        HINTS,
+        hints(chunks[3].width),
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(hints, chunks[3]);
@@ -630,6 +646,24 @@ mod tests {
         };
         assert_eq!(status_span(&unknown).content, "unknown");
         assert_eq!(status_span(&WorktreeStatus::default()).content, "clean");
+    }
+
+    /// The hint row does not wrap, so what does not fit is lost — and the two
+    /// that would go first are the ones that replaced keys people knew.
+    #[test]
+    fn hints_shrink_to_fit_the_terminal() {
+        assert_eq!(hints(200), HINTS[0]);
+        assert_eq!(hints(80), HINTS[1]);
+        assert_eq!(hints(40), HINTS[2]);
+        assert_eq!(hints(10), HINTS[2]);
+        for width in [200u16, 80, 40] {
+            let hint = hints(width);
+            assert!(hint.width() <= width as usize);
+            assert!(
+                hint.contains("F1 help") && hint.contains("^q quit"),
+                "{hint}"
+            );
+        }
     }
 
     #[test]
