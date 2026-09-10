@@ -319,13 +319,21 @@ jeet complete branches acme/widget
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
 
+## What's new in v0.4
+
+- The explorer filters as you type, completes with `⇥`, walks into a folder on
+  `/`, and follows the mouse.
+- **Its commands moved onto `ctrl`** to leave the letters free for typing:
+  `ctrl-w` worktrees, `ctrl-s` sessions, `ctrl-a` agent, `ctrl-d` dotfiles,
+  `ctrl-r` refresh, `ctrl-q` quit, `F1`/`ctrl-g` help. The vim-style
+  `j`/`k`/`h`/`l` aliases are gone; the arrow keys they aliased still work.
+- While the explorer is up it takes the mouse, so your terminal's own
+  click-drag text selection is off for as long as it runs. Shift-drag selects
+  as usual.
+
 ## What's new in v0.3
 
 - `jeet` with no arguments opens the file explorer (`jeet explore`).
-- The explorer filters as you type, completes with `⇥`, walks into a folder on
-  `/`, and follows the mouse. Its commands moved onto `ctrl` to leave the
-  letters for typing: `ctrl-w` worktrees, `ctrl-s` sessions, `ctrl-a` agent,
-  `ctrl-d` dotfiles, `ctrl-r` refresh, `ctrl-q` quit, `F1`/`ctrl-g` help.
 - `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
   publishes the branch to `origin`, no name gives you a detached checkout.
 - `jeet worktree rename [old] <new>` renames a worktree's branch, and turns a
