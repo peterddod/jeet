@@ -8,7 +8,7 @@ Global git repository index and worktree manager.
 
 `jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
 
-Run `jeet` with no arguments inside a repo and you get a file explorer: one level of the tree at a time, your current worktree pinned to the top, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
+Run `jeet` with no arguments inside a repo and you get a file explorer: one level of the tree at a time, your current worktree pinned to the top, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
 
 Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
 
@@ -96,32 +96,81 @@ jeet          # inside any repo, trunk or worktree (also `jeet explore`)
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
 │worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
 │path     /src                                                  │
+│filter   co█  1 of 2                                           │
 └───────────────────────────────────────────────────────────────┘
-┌ 2 items ──────────────────────────────────────────────────────┐
+┌ 1 of 2 items ─────────────────────────────────────────────────┐
 │▸ commands/                                                    │
-│  main.rs                                                 13B  │
 └───────────────────────────────────────────────────────────────┘
 ```
 
+### Type to find things
+
+The filter is live the moment the window opens — no key to press first. Type
+and the level narrows to what matches, case-insensitively: the name you spelled
+out in full first, then names that *start* with what you typed, then names that
+merely contain it.
+
 | key | action |
 |-----|--------|
-| `↑` / `↓` (or `k` / `j`) | move within the current level |
-| `→` / `l` | expand: step into the highlighted folder |
-| `←` / `h` | back: leave the folder (never above the worktree root) |
+| any letter, digit or symbol | filter this level |
+| `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
+| `/` or `\` | step into the highlighted folder, and start a fresh filter |
+| | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
+| `⌫` | delete a character |
+| `ctrl-u` | clear the filter |
+| `esc` | clear the filter — or, with nothing typed, quit |
+
+`⇥` fills in like a shell: with one match it completes the name outright, with
+several it stops where they stop agreeing. Press it again and it takes the
+highlighted row rather than sitting there — so arrowing down first completes
+towards that row, and the cursor stays on it. With nothing typed it only fills
+in what every name shares, as a shell does. `/` then walks in, so `sr⇥/` gets
+you into `src/` without leaving the keyboard, exactly as typing a path does.
+
+`/` steps into the highlighted folder — the same row `⏎` and `→` act on, and
+the one you can see. Typing a folder's name out in full puts it there: an exact
+match sorts to the top whatever else the filter caught.
+
+### Moving around
+
+| key | action |
+|-----|--------|
+| `↑` / `↓` | move within the current level |
+| `→` | expand: step into the highlighted folder |
+| `←` | back: leave the folder (never above the worktree root) |
 | `⏎` | folder: step in · file: open it in your editor |
-| `c` | start a coding agent from the worktree root |
-| `s` | previous agent sessions for this worktree (⏎ resumes one) |
-| `w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete |
-| `.` | toggle hidden files |
-| `g` / `G`, `Home` / `End` | jump to the top / bottom |
+| click | a folder to step into it, a file to select it, a path crumb to jump up |
+| scroll | move the cursor |
+| shift-drag | select text (see below) |
+| `Home` / `End` | jump to the top / bottom |
 | `PageUp` / `PageDown` | move ten rows |
-| `r` | refresh the listing and the counters |
-| `q` | quit, leaving your shell in the directory you were browsing |
+
+While the explorer is up it has the mouse, which means your terminal's own
+click-drag text selection is off for as long as it runs. Hold **shift** while
+dragging to select as you normally would — every terminal that reports mouse
+events supports that escape hatch. jeet gives the mouse back whenever it steps
+aside for an editor or an agent, and on the way out however it leaves.
+
+### Everything else
+
+Because a bare letter belongs to the filter, the commands carry a `ctrl`:
+
+| key | action |
+|-----|--------|
+| `ctrl-a` | start a coding agent from the worktree root |
+| `ctrl-s` | previous agent sessions for this worktree (⏎ resumes one) |
+| `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete |
+| `ctrl-d` | toggle hidden dotfiles |
+| `ctrl-r` | refresh the listing and the counters |
+| `ctrl-q` | quit, leaving your shell in the directory you were browsing |
 | `esc` | quit without moving your shell (unless it moved out from under you) |
+| `F1` or `ctrl-g` | the key list, in jeet |
 
 In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
 name field in the new/rename prompts. Deleting asks first: `y` removes, and
-`f` forces past git's refusal when the worktree still holds work.
+`f` forces past git's refusal when the worktree still holds work. The panels
+are keyboard-driven, so single letters still work inside them, and the key
+that opened one closes it again.
 
 Anything slow — reading a repo's worktrees, or creating and renaming, which
 push to `origin` — runs in the background with a progress indicator, so the
@@ -132,7 +181,7 @@ Leaving your shell in the right directory needs the shell wrapper
 
 The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
 agent defaults to `claude`. Both are configurable (see below). Session listing
-knows Claude Code's transcript store — other agents still launch with `c`, they
+knows Claude Code's transcript store — other agents still launch with `ctrl-a`, they
 just have no session history to show.
 
 ## Worktrees
@@ -217,7 +266,7 @@ in scope may be discarded.
 
 Removal itself is not forced: git independently re-checks for modified,
 untracked and submodule content at removal time, and jeet reports the refusal
-rather than overriding it. `d` in the explorer's worktree panel does the same,
+rather than overriding it. `d` in the explorer's worktree panel (`ctrl-w`) does the same,
 showing the counters before it asks; `y` removes and `f` forces.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
@@ -273,6 +322,10 @@ jeet complete branches acme/widget
 ## What's new in v0.3
 
 - `jeet` with no arguments opens the file explorer (`jeet explore`).
+- The explorer filters as you type, completes with `⇥`, walks into a folder on
+  `/`, and follows the mouse. Its commands moved onto `ctrl` to leave the
+  letters for typing: `ctrl-w` worktrees, `ctrl-s` sessions, `ctrl-a` agent,
+  `ctrl-d` dotfiles, `ctrl-r` refresh, `ctrl-q` quit, `F1`/`ctrl-g` help.
 - `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
   publishes the branch to `origin`, no name gives you a detached checkout.
 - `jeet worktree rename [old] <new>` renames a worktree's branch, and turns a
@@ -297,7 +350,7 @@ Two optional keys are not written by default; add them yourself to override:
 
 ```toml
 editor = "vim"       # opened by ⏎ in the explorer; defaults to $VISUAL/$EDITOR
-agent = "claude"     # launched by `c`; may include arguments
+agent = "claude"     # launched by `ctrl-a`; may include arguments
 ```
 
 Both accept arguments (`editor = "code --wait"`) and are overridden by

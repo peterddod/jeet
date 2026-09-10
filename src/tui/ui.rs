@@ -5,35 +5,113 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{human_size, Explorer, Overlay};
 use crate::worktrees::WorktreeStatus;
 
-const HINTS: &str =
-    "↑↓ move  → open  ← back  ⏎ edit  w worktrees  s sessions  c agent  . hidden  ? help  q quit";
+/// The hint row, as segments. It is one non-wrapping line, so what does not
+/// fit is not shortened but cut off — and the two that would go first are the
+/// ones that replaced keys people knew. So the head and the tail always stay,
+/// and the middle is dropped from the right until the rest fits.
+const HINT_HEAD: &str = "type to filter";
+const HINT_MIDDLE: [&str; 8] = [
+    "⇥ complete",
+    "/ enter",
+    "↑↓ move",
+    "⏎ open",
+    "^w worktrees",
+    "^s sessions",
+    "^a agent",
+    "^d hidden",
+];
+const HINT_TAIL: [&str; 2] = ["F1 help", "^q quit"];
+
+/// The most hints that fit `width`. Below the width of even the head and the
+/// tail it keeps giving up ground, down to the way out on its own: a hint row
+/// clipped mid-word tells the user nothing, and `q` no longer quits.
+fn hints(width: u16) -> String {
+    let width = width as usize;
+    let with_middle = |keep: usize| {
+        std::iter::once(HINT_HEAD)
+            .chain(HINT_MIDDLE[..keep].iter().copied())
+            .chain(HINT_TAIL)
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    let last = HINT_TAIL[HINT_TAIL.len() - 1];
+    (0..=HINT_MIDDLE.len())
+        .rev()
+        .map(with_middle)
+        .chain([HINT_TAIL.join("  "), last.to_string()])
+        .find(|line| line.width() <= width)
+        // Narrower than even that: say as much of it as there is room for
+        // rather than let the terminal cut it off wherever it lands.
+        .unwrap_or_else(|| truncate(last, width))
+}
+
+/// Column the header's value column starts at: one for the border, plus the
+/// width of the widest label. Clicks on the breadcrumb are measured from here.
+const LABEL_WIDTH: u16 = 9;
+
+/// Width of the key column in the help table.
+const KEY_WIDTH: usize = 13;
+
+/// The listing title's fixed text, around the filter that matched nothing.
+const NO_MATCH_TITLE: &str = " nothing matches \"\" ";
 
 pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(3),
             Constraint::Length(2),
             Constraint::Length(1),
         ])
         .split(frame.area());
 
-    draw_header(frame, chunks[0], explorer);
+    let path_row = draw_header(frame, chunks[0], explorer);
+    // Remember where things landed so a click next frame can be mapped back to
+    // the row or the path segment under it. A path line the header had no room
+    // to draw leaves nothing to click, and the row it would have been on is a
+    // border or a listing row — clicking either must not navigate.
+    explorer.list_area = chunks[1];
+    explorer.breadcrumb_area = path_row.map(|y| Rect {
+        x: chunks[0].x + 1 + LABEL_WIDTH,
+        y,
+        // Only as far as the header's interior reaches: a long path is clipped
+        // at the border, and the border cell is not a path segment however
+        // much breadcrumb there would have been under it.
+        width: chunks[0].width.saturating_sub(2 + LABEL_WIDTH),
+        height: 1,
+    });
     {
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
         let Explorer {
             entries,
+            hidden,
+            matches,
             selected,
+            filter,
             list,
             ..
         } = &mut *explorer;
-        draw_listing(frame, chunks[1], entries, *selected, list);
+        let rows: Vec<&super::state::FsEntry> =
+            matches.iter().filter_map(|&i| entries.get(i)).collect();
+        draw_listing(
+            frame,
+            chunks[1],
+            Listing {
+                rows: &rows,
+                total: entries.len(),
+                hidden: *hidden,
+                filter,
+                selected: *selected,
+            },
+            list,
+        );
     }
 
     let status = Paragraph::new(Line::from(Span::styled(
@@ -44,7 +122,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     frame.render_widget(status, chunks[2]);
 
     let hints = Paragraph::new(Line::from(Span::styled(
-        HINTS,
+        hints(chunks[3].width),
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(hints, chunks[3]);
@@ -75,7 +153,9 @@ fn draw_working(frame: &mut Frame, working: &str) {
     );
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
+/// Draw the header, returning the screen row the breadcrumb landed on — or
+/// none when the terminal was too short to keep the path line.
+fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16> {
     let worktree_line = Line::from(vec![
         Span::styled("worktree ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -107,6 +187,49 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
         Span::styled(explorer.breadcrumb(), Style::default().fg(Color::Cyan)),
     ]);
 
+    // The filter always has a line of its own, cursor and all: it is live from
+    // the moment the explorer opens, and nothing else says so.
+    let filter_line = if explorer.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                " type to narrow this level down",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        // The line does not wrap, so a long filter — ⇥ completing a long name
+        // gets you one easily — would otherwise push its own tail, the cursor
+        // and the counter off the border, and ⌫ would look inert because the
+        // characters going away were never on screen. Keep the tail: it is the
+        // end being typed at.
+        let counter = format!("  {} of {}", explorer.visible_len(), explorer.entries.len());
+        let interior = area.width.saturating_sub(2) as usize;
+        let fixed = LABEL_WIDTH as usize + 1; // label, plus the cursor block
+        let mut room = interior.saturating_sub(fixed + counter.width());
+        // Too tight for both: the filter is what the user is looking at.
+        let counter = if room < 8 {
+            room = interior.saturating_sub(fixed);
+            String::new()
+        } else {
+            counter
+        };
+        Line::from(vec![
+            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                // Not `.max(1)`: a column the budget just ruled out is a
+                // column the cursor block loses.
+                truncate_start(&explorer.filter, room),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(counter, Style::default().fg(Color::DarkGray)),
+        ])
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
@@ -117,10 +240,22 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) {
         ))
         .title_alignment(Alignment::Left);
 
-    frame.render_widget(
-        Paragraph::new(vec![worktree_line, path_line]).block(block),
-        area,
-    );
+    // ratatui shrinks a `Length` constraint on a short terminal, so the header
+    // does not always get its three rows. Give them up from the top: the
+    // worktree summary is a standing fact and the path is repeated in the rows
+    // below, but the filter is live and being typed into — a filter you cannot
+    // see, narrowing a listing you can, is the one that misleads.
+    const PATH: usize = 1;
+    let mut rows = vec![worktree_line, path_line, filter_line];
+    let mut dropped = 0usize;
+    while rows.len() > area.height.saturating_sub(2) as usize {
+        rows.remove(0);
+        dropped += 1;
+    }
+    let path_row = (dropped <= PATH).then(|| area.y + 1 + (PATH - dropped) as u16);
+
+    frame.render_widget(Paragraph::new(rows).block(block), area);
+    path_row
 }
 
 pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
@@ -144,13 +279,26 @@ pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
     }
 }
 
-fn draw_listing(
-    frame: &mut Frame,
-    area: Rect,
-    entries: &[super::state::FsEntry],
+/// What the file list needs in order to draw itself, gathered up rather than
+/// spread across half a dozen positional arguments.
+struct Listing<'a> {
+    rows: &'a [&'a super::state::FsEntry],
+    /// Everything in the directory, so a filtered listing can say "3 of 9".
+    total: usize,
+    /// Dotfiles left out, so an empty-looking pane can say which kind it is.
+    hidden: usize,
+    filter: &'a str,
     selected: usize,
-    list_state: &mut ListState,
-) {
+}
+
+fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mut ListState) {
+    let Listing {
+        rows: entries,
+        total,
+        hidden,
+        filter,
+        selected,
+    } = listing;
     let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = entries
         .iter()
@@ -166,7 +314,10 @@ fn draw_listing(
             } else {
                 human_size(entry.size)
             };
-            let used = marker.chars().count() + name.chars().count() + size.chars().count();
+            // Display width, not character count: a CJK name is two columns
+            // per character and padding it by count pushes the size off the
+            // right edge of the pane.
+            let used = marker.width() + name.width() + size.width();
             let pad = width.saturating_sub(used).max(1);
             ListItem::new(Line::from(vec![
                 Span::styled(marker, style),
@@ -177,11 +328,7 @@ fn draw_listing(
         })
         .collect();
 
-    let title = if entries.is_empty() {
-        " empty directory ".to_string()
-    } else {
-        format!(" {} items ", entries.len())
-    };
+    let title = listing_title(entries.len(), total, hidden, filter, area.width);
 
     list_state.select(if entries.is_empty() {
         None
@@ -197,6 +344,36 @@ fn draw_listing(
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, list_state);
+}
+
+/// The listing block's title, cut to its border run — the pane less its two
+/// corners. A title is drawn *into* that border, so an overrun eats it rather
+/// than being clipped harmlessly.
+fn listing_title(shown: usize, total: usize, hidden: usize, filter: &str, pane: u16) -> String {
+    let run = (pane as usize).saturating_sub(2);
+    // An empty directory is empty whatever was typed at it — the same thing
+    // the status line says for the same state — and one holding only dotfiles
+    // is not empty, it is hiding what it holds.
+    let title = if total == 0 && hidden > 0 {
+        format!(" {hidden} hidden · ctrl-d shows them ")
+    } else if total == 0 {
+        " empty directory ".to_string()
+    } else if shown == 0 {
+        let fixed = NO_MATCH_TITLE.chars().count();
+        if run <= fixed {
+            // No room to quote anything into: the short version, cut to fit.
+            return truncate(" nothing matches ", run);
+        }
+        format!(
+            " nothing matches \"{}\" ",
+            truncate_start(filter, run - fixed)
+        )
+    } else if filter.is_empty() {
+        format!(" {shown} items ")
+    } else {
+        format!(" {shown} of {total} items ")
+    };
+    truncate(&title, run)
 }
 
 fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
@@ -418,45 +595,23 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 area,
             );
         }
-        Overlay::Help => {
-            let area = centered_rect(64, 70, frame.area());
+        Overlay::Help { scroll } => {
+            let (area, max_scroll) = help_geometry(frame.area());
             frame.render_widget(Clear, area);
-            let rows = [
-                ("↑ / k, ↓ / j", "move up and down this level"),
-                ("→ / l", "expand: enter the highlighted folder"),
-                ("← / h", "back: leave the folder (stops at the root)"),
-                ("⏎", "folder: enter · file: open in your editor"),
-                ("c", "start a coding agent at the worktree root"),
-                ("s", "previous agent sessions for this worktree"),
-                ("w", "worktrees: switch, create, rename or delete"),
-                ("", "  in the panel: r refresh, esc close"),
-                (".", "toggle hidden files"),
-                ("g / G", "jump to the top / bottom"),
-                ("r", "refresh the listing and counters"),
-                ("q", "quit, leaving the shell in this directory"),
-                ("esc", "quit without moving the shell"),
-            ];
-            let body: Vec<Line> = rows
-                .iter()
-                .map(|(key, description)| {
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{key:<14}"),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(*description),
-                    ])
-                })
-                .collect();
+            let title = if max_scroll > 0 {
+                " keys · ↑↓ scroll · esc close "
+            } else {
+                " keys · esc close "
+            };
             frame.render_widget(
-                Paragraph::new(body).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" keys · esc close ")
-                        .title_style(Style::default().fg(Color::Green)),
-                ),
+                Paragraph::new(help_body(area.width.saturating_sub(2)))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .title_style(Style::default().fg(Color::Green)),
+                    )
+                    .scroll(((*scroll).min(max_scroll), 0)),
                 area,
             );
         }
@@ -491,22 +646,224 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
     }
 }
 
-/// Truncate from the left, keeping the tail — right for paths.
+/// The key list, as it is both rendered and measured.
+const HELP: [(&str, &str); 23] = [
+    (
+        "a-z, 0-9, …",
+        "type to filter this level (live, no key needed)",
+    ),
+    ("⇥", "complete the filter, as far as the matches agree"),
+    ("/ or \\", "enter the highlighted folder, filtering afresh"),
+    ("⌫ / ctrl-u", "delete a character / clear the filter"),
+    ("", ""),
+    ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
+    ("→", "expand: enter the highlighted folder"),
+    ("←", "back: leave the folder (stops at the root)"),
+    ("⏎", "folder: enter · file: open in your editor"),
+    ("click", "a row to enter or select it, a path crumb to jump"),
+    ("shift-drag", "select text — jeet has the mouse otherwise"),
+    ("Home / End", "jump to the top / bottom"),
+    ("", ""),
+    ("ctrl-a", "start a coding agent at the worktree root"),
+    ("ctrl-s", "previous agent sessions for this worktree"),
+    ("ctrl-w", "worktrees: switch, create, rename or delete"),
+    ("", "  in the panel: r refresh, esc close"),
+    ("ctrl-d", "toggle hidden dotfiles"),
+    ("ctrl-r", "refresh the listing and counters"),
+    ("ctrl-q", "quit, leaving the shell in this directory"),
+    ("F1 / ctrl-g", "this list"),
+    ("esc", "clear the filter, or quit without moving the shell"),
+    ("", ""),
+];
+
+/// The key list laid out for a panel `width` columns wide inside its border.
+///
+/// The wrapping is ours rather than `Wrap`'s so that the number of lines is
+/// known exactly: the panel scrolls, and a scroll limit computed from a
+/// different idea of where the lines break leaves the last rows unreachable.
+/// It also lets a continuation line hang under the description rather than
+/// restarting in the key column.
+pub fn help_body(width: u16) -> Vec<Line<'static>> {
+    let width = (width as usize).max(1);
+    // Below this there is no room for a description beside its key, so the key
+    // takes a line of its own and the description follows, indented.
+    let two_column = width >= KEY_WIDTH + 16;
+    // Never so far in that there is no room left to indent anything onto.
+    let indent = if two_column { KEY_WIDTH } else { 2 }.min(width.saturating_sub(1));
+    let mut lines = Vec::new();
+    for (key, description) in HELP {
+        if key.is_empty() && description.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        let key_span = || {
+            Span::styled(
+                format!("{key:<width$}", width = KEY_WIDTH),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        let mut rest = wrap_columns(description, width.saturating_sub(indent).max(1));
+        if !two_column {
+            // No padding to a column that is not there: the key takes its own
+            // line, wrapped to the panel rather than clipped by it.
+            for part in wrap_columns(key, width) {
+                lines.push(Line::from(Span::styled(
+                    part,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+        } else {
+            let first = if rest.is_empty() {
+                String::new()
+            } else {
+                rest.remove(0)
+            };
+            lines.push(Line::from(vec![key_span(), Span::raw(first)]));
+        }
+        for line in rest {
+            lines.push(Line::from(format!("{}{line}", " ".repeat(indent))));
+        }
+    }
+    lines
+}
+
+/// Greedy word wrap that keeps a description's own leading indent, which is
+/// what marks a row as a continuation of the one above rather than a command
+/// of its own.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    let body = text.trim_start_matches(' ');
+    let indent = (text.len() - body.len()).min(width.saturating_sub(1));
+    let mut lines = wrap_words(body, width.saturating_sub(indent).max(1));
+    if indent > 0 {
+        if let Some(first) = lines.first_mut() {
+            first.insert_str(0, &" ".repeat(indent));
+        }
+    }
+    lines
+}
+
+/// Greedy word wrap, breaking a word that is wider than the line itself.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        for piece in split_word(word, width) {
+            let sep = usize::from(!current.is_empty());
+            if !current.is_empty() && current.width() + sep + piece.width() > width {
+                lines.push(std::mem::take(&mut current));
+            } else if sep == 1 {
+                current.push(' ');
+            }
+            current.push_str(&piece);
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A word split into chunks no wider than `width`, so one long token cannot
+/// push a line past the panel.
+fn split_word(word: &str, width: usize) -> Vec<String> {
+    if word.width() <= width {
+        return vec![word.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    for c in word.chars() {
+        // Never an empty chunk: a single glyph wider than the whole line has
+        // to overflow it rather than be preceded by a blank one.
+        if !chunk.is_empty() && chunk.width() + c.width().unwrap_or(0) > width {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// Where the help panel goes, and how far it can scroll there.
+///
+/// Sized to the table rather than to a share of the frame: a key list that
+/// clips its own descriptions explains nothing. When even that will not fit
+/// the rows wrap, which makes the list longer than the box — hence the scroll,
+/// so a small terminal loses nothing, only shows it a screen at a time.
+pub fn help_geometry(frame: Rect) -> (Rect, u16) {
+    let widest = HELP
+        .iter()
+        .map(|(_, description)| KEY_WIDTH + description.width())
+        .max()
+        .unwrap_or(0);
+    let area = fitted_rect(widest, HELP.len(), frame);
+    // Counted from the very lines that will be drawn, so the limit cannot
+    // disagree with them and strand the last row.
+    let lines = help_body(area.width.saturating_sub(2)).len();
+    let inner_height = area.height.saturating_sub(2) as usize;
+    (area, lines.saturating_sub(inner_height) as u16)
+}
+
+/// Truncate from the left, keeping the tail — right for paths, and for a
+/// filter box, where the tail is the end being typed at.
+///
+/// Measured in display columns: a budget in columns spent by character count
+/// lets a CJK name run twice as wide as the space it was given.
 pub fn truncate_start(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let tail: String = text.chars().skip(count - width.saturating_sub(1)).collect();
+    if width == 0 {
+        return String::new();
+    }
+    // Measured on the string being built, never as a sum of per-character
+    // widths: an emoji presentation sequence is one column wider than its
+    // parts add up to, and the difference is what runs off the end of the box.
+    let mut tail = String::new();
+    for c in text.chars().rev() {
+        tail.insert(0, c);
+        if tail.width() > width - 1 {
+            tail.remove(0);
+            break;
+        }
+    }
     format!("…{tail}")
 }
 
+/// Truncate from the right, in display columns.
 pub fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    if width == 0 {
+        return String::new();
+    }
+    let mut head = String::new();
+    for c in text.chars() {
+        head.push(c);
+        if head.width() > width - 1 {
+            head.pop();
+            break;
+        }
+    }
     format!("{head}…")
+}
+
+/// A centered box sized to its content (plus borders), clamped to the frame.
+fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
+    let width = (cols as u16).saturating_add(2).min(area.width);
+    let height = (lines as u16).saturating_add(2).min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// A centered box `lines` rows tall (plus borders), clamped to the frame.
@@ -572,9 +929,267 @@ mod tests {
         assert_eq!(status_span(&WorktreeStatus::default()).content, "clean");
     }
 
+    /// The hint row does not wrap, so what does not fit is lost — and the two
+    /// that would go first are the ones that replaced keys people knew.
+    #[test]
+    fn hints_shrink_to_fit_the_terminal() {
+        // No width overflows, however narrow — not even one too small for the
+        // last hint standing.
+        for width in 1u16..=200 {
+            let hint = hints(width);
+            assert!(hint.width() <= width as usize, "{width}: {hint:?}");
+        }
+        // And every width with room for it keeps the way out: `q` does not
+        // quit any more, so `^q quit` is the last thing to go.
+        for width in 7u16..=200 {
+            assert!(hints(width).contains("^q quit"), "{width}");
+        }
+        for width in [200u16, 118, 100, 90, 80, 70, 40, 32] {
+            let hint = hints(width);
+            assert!(hint.starts_with(HINT_HEAD), "{width}: {hint}");
+            assert!(hint.contains("F1 help"), "{width}: {hint}");
+        }
+        // Room for everything means everything is shown.
+        let full = hints(200);
+        assert!(HINT_MIDDLE.iter().all(|h| full.contains(h)), "{full}");
+        // Widening the terminal never shows fewer hints.
+        let widths: Vec<usize> = (30..=130).map(|w| hints(w).width()).collect();
+        assert!(widths.windows(2).all(|w| w[0] <= w[1]), "{widths:?}");
+    }
+
+    /// Render the help panel at `scroll` and give back what is on screen.
+    fn render_help(width: u16, height: u16, scroll: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let (area, max_scroll) = help_geometry(frame.area());
+                frame.render_widget(
+                    Paragraph::new(help_body(area.width.saturating_sub(2)))
+                        .block(Block::default().borders(Borders::ALL))
+                        .scroll((scroll.min(max_scroll), 0)),
+                    area,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The panel scrolls because a small terminal wraps its rows past the
+    /// bottom. Scrolling all the way must actually reach the last one — a
+    /// limit computed from a different idea of where lines break would not.
+    #[test]
+    fn scrolling_the_help_panel_reaches_its_last_row() {
+        let last = HELP.last().map(|(k, _)| *k).unwrap();
+        assert!(last.is_empty(), "the table ends with a spacer");
+        let (key, description) = HELP[HELP.len() - 2];
+        assert_eq!(key, "esc");
+
+        // A word that appears in this row and nowhere else, so finding it on
+        // screen really does mean the last row is on screen.
+        let tail = "moving";
+        assert!(description.contains(tail));
+        assert_eq!(
+            HELP.iter().filter(|(_, d)| d.contains(tail)).count(),
+            1,
+            "{tail} is no longer unique to the last row"
+        );
+        for width in [20u16, 22, 27, 28, 40, 60, 80, 120] {
+            for height in [10u16, 16, 24, 40] {
+                let (_, max_scroll) = help_geometry(Rect::new(0, 0, width, height));
+                let screen = render_help(width, height, max_scroll);
+                assert!(
+                    screen.contains(key) && screen.contains(tail),
+                    "{width}x{height}: last row unreachable at scroll {max_scroll}\n{screen}"
+                );
+                // And the test is not vacuous: where there is enough scrolling
+                // to push a content row off — one notch may only be taking up
+                // the table's trailing blank — the last row is genuinely
+                // off-screen until the scrolling is done.
+                if max_scroll > 1 {
+                    assert!(
+                        !render_help(width, height, 0).contains(tail),
+                        "{width}x{height}: nothing was actually scrolled"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The row under `ctrl-w` is indented to read as its continuation; wrapping
+    /// must not flatten it into a command of its own.
+    #[test]
+    fn a_continuation_row_keeps_its_indent() {
+        let (key, description) = HELP
+            .iter()
+            .find(|(_, d)| d.starts_with("  in the panel"))
+            .unwrap();
+        assert!(key.is_empty(), "the continuation row has no key of its own");
+        for width in [40u16, 60, 80, 120] {
+            let line = help_body(width)
+                .into_iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains("in the panel")))
+                .unwrap_or_else(|| panic!("width {width}: row missing"));
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let indent = text.len() - text.trim_start().len();
+            let expected = KEY_WIDTH + (description.len() - description.trim_start().len());
+            assert_eq!(indent, expected, "width {width}: {text:?}");
+        }
+    }
+
+    /// A title is drawn into the block's own top border, so one wider than the
+    /// run between its corners eats the border rather than clipping.
+    #[test]
+    fn the_listing_title_stays_inside_its_border() {
+        for pane in 0u16..120 {
+            let run = (pane as usize).saturating_sub(2);
+            for filter in ["", "x", &"Q".repeat(200), "日本語のディレクトリ", "❤️❤️"]
+            {
+                for (shown, total) in [(0, 0), (0, 9), (3, 9), (9, 9), (999_999, 999_999)] {
+                    for hidden in [0, 7, 999_999] {
+                        let title = listing_title(shown, total, hidden, filter, pane);
+                        assert!(title.width() <= run, "pane {pane}: {title:?} in {run}");
+                    }
+                }
+            }
+        }
+        // With room, each case says its whole piece — and an empty directory
+        // is empty whatever was typed at it.
+        assert_eq!(listing_title(0, 0, 0, "x", 40), " empty directory ");
+        assert_eq!(
+            listing_title(0, 0, 3, "", 40),
+            " 3 hidden · ctrl-d shows them ",
+            "a directory holding only dotfiles is not empty"
+        );
+        assert_eq!(listing_title(0, 9, 0, "zz", 40), " nothing matches \"zz\" ");
+        assert_eq!(listing_title(9, 9, 0, "", 40), " 9 items ");
+        assert_eq!(listing_title(3, 9, 0, "z", 40), " 3 of 9 items ");
+    }
+
+    /// The header's filter line does not wrap, so what it draws has to fit the
+    /// header's interior — cursor block included, that being the point of it.
+    #[test]
+    fn the_filter_line_stays_inside_the_header() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for width in 10u16..80 {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let block = Block::default().borders(Borders::ALL);
+                    let area = frame.area();
+                    frame.render_widget(
+                        Paragraph::new(vec![Line::from(vec![
+                            Span::raw("filter   "),
+                            Span::raw(truncate_start(
+                                &"Q".repeat(200),
+                                (area.width as usize).saturating_sub(2 + LABEL_WIDTH as usize + 1),
+                            )),
+                            Span::raw("█"),
+                        ])])
+                        .block(block),
+                        area,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let right = buffer[(width - 1, 1)].symbol().to_string();
+            assert_eq!(right, "│", "width {width}: border overwritten");
+        }
+    }
+
+    /// Wrapping never puts more on a line than the panel has room for.
+    #[test]
+    fn the_help_panel_never_overflows_its_width() {
+        for width in 1u16..100 {
+            for line in help_body(width) {
+                let drawn: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                assert!(drawn <= width as usize, "width {width}: {drawn} columns");
+            }
+        }
+    }
+
+    /// A terminal too small for the table wraps the rows past the bottom of
+    /// the panel; every one of them still has to be reachable.
+    #[test]
+    fn the_help_panel_can_always_reach_its_last_row() {
+        for (w, h) in [
+            (200u16, 60u16),
+            (100, 40),
+            (80, 24),
+            (60, 24),
+            (40, 20),
+            (30, 10),
+        ] {
+            let frame = Rect::new(0, 0, w, h);
+            let (area, max_scroll) = help_geometry(frame);
+            assert!(area.width <= w && area.height <= h, "{w}x{h}: {area:?}");
+
+            let lines = help_body(area.width.saturating_sub(2)).len();
+            let shown = area.height.saturating_sub(2) as usize + max_scroll as usize;
+            assert!(
+                shown >= lines,
+                "{w}x{h}: {shown} lines reachable of {lines}"
+            );
+        }
+    }
+
+    /// Where there is room for the table, it is not scrollable and not clipped.
+    #[test]
+    fn the_help_panel_fits_a_normal_terminal_outright() {
+        let (area, max_scroll) = help_geometry(Rect::new(0, 0, 80, 30));
+        assert_eq!(max_scroll, 0);
+        let widest = HELP
+            .iter()
+            .map(|(_, d)| KEY_WIDTH + d.width())
+            .max()
+            .unwrap();
+        assert!(area.width as usize >= widest + 2, "{area:?} clips {widest}");
+        assert!(area.height as usize >= HELP.len() + 2, "{area:?}");
+    }
+
     #[test]
     fn truncates_paths_from_the_left() {
         assert_eq!(truncate_start("/a/b", 10), "/a/b");
         assert_eq!(truncate_start("/very/long/path/file", 10), "…path/file");
+    }
+
+    /// The budget is screen columns, and a wide character costs two of them —
+    /// spending it by character count runs the text off its own box.
+    #[test]
+    fn truncation_is_measured_in_columns() {
+        for width in 0usize..12 {
+            // Including sequences whose width is not the sum of their parts:
+            // an emoji presentation selector widens the character before it.
+            for text in [
+                "日本語のディレクトリ",
+                "plain-ascii-name",
+                "mixed日本ab",
+                "❤️❤️❤️",
+                "a❤️b日c",
+            ] {
+                assert!(truncate(text, width).width() <= width, "{text} {width}");
+                assert!(
+                    truncate_start(text, width).width() <= width,
+                    "{text} {width}"
+                );
+            }
+        }
+        // A wide name is cut where it fits, not where the count says.
+        assert_eq!(truncate("日本語", 4), "日…");
+        assert_eq!(truncate_start("日本語", 4), "…語");
+        // And one that already fits is left alone.
+        assert_eq!(truncate("日本語", 6), "日本語");
     }
 }
