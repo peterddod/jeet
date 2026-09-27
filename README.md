@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.5.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.6.0
 ```
 
 ## Quick start
@@ -409,6 +409,15 @@ jeet complete branches acme/widget
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.6
+
+- `jeet prs [repo]` lists a repository's open pull requests — size, review
+  status, and which ones want your review, are checked out, or have been
+  reviewed in the background.
+- `ctrl-o` in the explorer shows the same list; `⏎` checks a PR out and
+  switches to it (without starting the review command).
+- `jeet review --repo` checks a PR out from outside its repository.
 
 ## What's new in v0.5
 
