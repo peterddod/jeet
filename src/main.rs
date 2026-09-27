@@ -84,13 +84,18 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::explore::run(&app)?;
         }
+        Commands::Prs { repo } => {
+            let app = context::App::open()?;
+            commands::prs::run(&app, repo.as_deref())?;
+        }
         Commands::Review {
             pr,
+            repo,
             no_command,
             rerun,
         } => {
             let app = context::App::open()?;
-            commands::review::run(&app, &pr, !no_command, rerun)?;
+            commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun)?;
         }
         Commands::ReviewJob { state } => review::run_job(&state)?,
         Commands::Sessions => {

@@ -342,6 +342,7 @@ fn handle_browse_key(
             view_diff(app, terminal, explorer, &target)?;
         }
         KeyCode::Char('p') if ctrl => open_pr_panel(app, terminal, explorer, false),
+        KeyCode::Char('o') if ctrl => open_repo_prs(app, terminal, explorer, None),
         KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
         KeyCode::Char('s') if ctrl => open_sessions(explorer),
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
@@ -558,6 +559,7 @@ fn handle_overlay_key(
         (Overlay::Worktrees { .. }, KeyCode::Char('w')) => ctrl,
         (Overlay::Sessions { .. }, KeyCode::Char('s')) => ctrl,
         (Overlay::PullRequest { .. }, KeyCode::Char('p')) => ctrl,
+        (Overlay::RepoPrs { .. }, KeyCode::Char('o')) => ctrl,
         (Overlay::Help { .. }, KeyCode::Char('g')) => ctrl,
         (Overlay::Help { .. }, KeyCode::F(1)) => true,
         _ => false,
@@ -842,6 +844,46 @@ fn handle_overlay_key(
                     pending_error,
                 })
             }
+        },
+        Overlay::RepoPrs { rows, mut selected } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {}
+            KeyCode::Up | KeyCode::Char('k') => {
+                selected = selected.saturating_sub(1);
+                explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                selected = (selected + 1).min(rows.len().saturating_sub(1));
+                explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+            }
+            KeyCode::PageUp | KeyCode::Home => {
+                explorer.overlay = Some(Overlay::RepoPrs { rows, selected: 0 });
+            }
+            KeyCode::PageDown | KeyCode::End => {
+                let selected = rows.len().saturating_sub(1);
+                explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+            }
+            KeyCode::Enter | KeyCode::Right => match rows.get(selected).map(|r| r.pr.number) {
+                Some(number) => check_out_pr(app, terminal, explorer, number, rows, selected)?,
+                None => explorer.overlay = Some(Overlay::RepoPrs { rows, selected }),
+            },
+            KeyCode::Char('o') => {
+                if let Some(number) = rows.get(selected).map(|r| r.pr.number) {
+                    let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                    let opened = with_progress(terminal, explorer, "opening the browser", || {
+                        github::open_in_browser(&trunk, number)
+                    })?;
+                    match opened {
+                        Ok(()) => explorer.set_status(format!("opened #{number} in the browser")),
+                        Err(e) => explorer.set_status(format!("could not open #{number}: {e:#}")),
+                    }
+                }
+                explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+            }
+            KeyCode::Char('r') => {
+                let keep = rows.get(selected).map(|r| r.pr.number);
+                open_repo_prs(app, terminal, explorer, keep);
+            }
+            _ => explorer.overlay = Some(Overlay::RepoPrs { rows, selected }),
         },
         Overlay::ReviewBody {
             verdict,
@@ -1367,7 +1409,7 @@ fn open_pr_panel(app: &App, terminal: &mut Tui, explorer: &mut Explorer, refetch
                         None => "a detached worktree has no pull request".into(),
                     },
                     String::new(),
-                    "`jeet review <number>` checks one out to review".into(),
+                    "ctrl-o lists the repository's open pull requests".into(),
                 ],
                 from_panel: false,
             });
@@ -1381,6 +1423,82 @@ fn open_pr_panel(app: &App, terminal: &mut Tui, explorer: &mut Explorer, refetch
             });
         }
     }
+}
+
+/// ctrl-o: the repository's open PRs, with the cursor on `keep` if it is
+/// still open, else on this worktree's own PR, else at the top.
+fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: Option<u64>) {
+    let repo = explorer.repo.clone();
+    let rows = with_progress(terminal, explorer, "reading pull requests", || {
+        crate::commands::prs::rows(app, &repo)
+    })
+    .and_then(|inner| inner);
+    match rows {
+        Ok(rows) if rows.is_empty() => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "pull requests".into(),
+                lines: vec![format!("{} has no open pull requests", explorer.repo.id)],
+                from_panel: false,
+            });
+        }
+        Ok(rows) => {
+            let current = match &explorer.pr {
+                PrLookup::Found(pr) => Some(pr.number),
+                _ => None,
+            };
+            let selected = keep
+                .or(current)
+                .and_then(|n| rows.iter().position(|r| r.pr.number == n))
+                .unwrap_or(0);
+            explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+        }
+        Err(e) => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "pull requests".into(),
+                lines: vec![format!("{e:#}")],
+                from_panel: false,
+            });
+        }
+    }
+}
+
+/// ⏎ in the PR list: check the PR out — or find the worktree that already
+/// has it — and browse it. Deliberately not `jeet review`: no review command
+/// starts from here, this is only a way in.
+fn check_out_pr(
+    app: &App,
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    number: u64,
+    rows: Vec<crate::commands::prs::PrRow>,
+    selected: usize,
+) -> Result<()> {
+    let repo = explorer.repo.clone();
+    let outcome = with_progress(
+        terminal,
+        explorer,
+        &format!("checking out #{number}"),
+        || {
+            let pr = github::pr_view(std::path::Path::new(&repo.trunk_path), number)?;
+            worktrees::checkout_pr(app, &repo, &pr)
+        },
+    )?;
+    match outcome {
+        Ok(checked_out) => {
+            switch_worktree(app, explorer, &checked_out.path)?;
+            let mut status = format!("checked out #{number}");
+            if !checked_out.warnings.is_empty() {
+                status.push_str(&format!(" — {}", checked_out.warnings.join("; ")));
+            }
+            explorer.set_status(status);
+        }
+        Err(e) => {
+            // Back to the list, so the next PR is one keystroke away.
+            explorer.set_status(format!("could not check out #{number}: {e:#}"));
+            explorer.overlay = Some(Overlay::RepoPrs { rows, selected });
+        }
+    }
+    Ok(())
 }
 
 fn open_pr_in_browser(terminal: &mut Tui, explorer: &mut Explorer) {

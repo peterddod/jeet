@@ -17,13 +17,14 @@ use crate::worktrees::WorktreeStatus;
 /// ones that replaced keys people knew. So the head and the tail always stay,
 /// and the middle is dropped from the right until the rest fits.
 const HINT_HEAD: &str = "type to filter";
-const HINT_MIDDLE: [&str; 10] = [
+const HINT_MIDDLE: [&str; 11] = [
     "⇥ complete",
     "/ enter",
     "↑↓ move",
     "⏎ open",
     "^f diff",
     "^p PR",
+    "^o PRs",
     "^w worktrees",
     "^s sessions",
     "^a agent",
@@ -854,6 +855,118 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 area,
             );
         }
+        Overlay::RepoPrs { rows, selected } => {
+            let area = centered_rect(90, 75, frame.area());
+            frame.render_widget(Clear, area);
+            let current = match &explorer.pr {
+                PrLookup::Found(pr) => Some(pr.number),
+                _ => None,
+            };
+            let number_width = rows
+                .iter()
+                .map(|row| row.pr.number.to_string().len() + 1)
+                .max()
+                .unwrap_or(0);
+            let author_width = rows
+                .iter()
+                .map(|row| row.pr.author.login.width())
+                .max()
+                .unwrap_or(0)
+                .min(16);
+            // The title takes what the fixed columns and the notes leave, but
+            // never so little it stops saying what the PR is; past that the
+            // notes are what gets clipped, at the edge where it shows.
+            const STATUS_WIDTH: usize = 18;
+            let fixed = 2 + number_width + 1 + author_width + 2 + 6 + 7 + STATUS_WIDTH;
+            let notes_width = rows
+                .iter()
+                .map(|row| row.notes().join(" · ").width())
+                .max()
+                .unwrap_or(0);
+            let interior = area.width.saturating_sub(2) as usize;
+            let title_width = interior.saturating_sub(fixed + notes_width).clamp(24, 60);
+            let items: Vec<ListItem> = rows
+                .iter()
+                .map(|row| {
+                    let pr = &row.pr;
+                    let marker = if current == Some(pr.number) {
+                        "● "
+                    } else {
+                        "  "
+                    };
+                    let status_color = match pr.status() {
+                        "approved" => Color::Green,
+                        "changes requested" => Color::Red,
+                        "draft" => Color::DarkGray,
+                        _ => Color::Blue,
+                    };
+                    let notes = row.notes().join(" · ");
+                    ListItem::new(Line::from(vec![
+                        Span::styled(marker, Style::default().fg(Color::Green)),
+                        Span::styled(
+                            format!("{:>number_width$} ", format!("#{}", pr.number)),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(crate::commands::prs::pad(
+                            &truncate(&pr.title, title_width),
+                            title_width,
+                        )),
+                        Span::styled(
+                            format!(
+                                " {} ",
+                                crate::commands::prs::pad(
+                                    &truncate(&pr.author.login, author_width),
+                                    author_width
+                                )
+                            ),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                        Span::styled(
+                            format!("{:>6}", format!("+{}", pr.additions)),
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::styled(
+                            format!(" {:<6}", format!("-{}", pr.deletions)),
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::styled(
+                            format!("{:<STATUS_WIDTH$}", pr.status()),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            notes,
+                            Style::default().fg(if row.requested {
+                                Color::Yellow
+                            } else {
+                                Color::DarkGray
+                            }),
+                        ),
+                    ]))
+                })
+                .collect();
+            let mut state = ListState::default();
+            state.select(if rows.is_empty() {
+                None
+            } else {
+                Some((*selected).min(rows.len() - 1))
+            });
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(
+                            " {} open pull requests · ⏎ check out and switch  o browser  r refresh ",
+                            rows.len()
+                        ))
+                        .title_style(Style::default().fg(Color::Green)),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                );
+            frame.render_stateful_widget(list, area, &mut state);
+        }
         Overlay::ReviewBody {
             verdict,
             input,
@@ -951,7 +1064,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
 }
 
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 25] = [
+const HELP: [(&str, &str); 26] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -980,6 +1093,7 @@ const HELP: [(&str, &str); 25] = [
         "ctrl-p",
         "pull request: open it, approve, comment, request changes",
     ),
+    ("ctrl-o", "the repo's open pull requests: ⏎ checks one out"),
     ("ctrl-d", "toggle hidden dotfiles"),
     ("ctrl-r", "refresh the listing and counters"),
     ("ctrl-q", "quit, leaving the shell in this directory"),

@@ -86,7 +86,10 @@ jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on e
 jeet sessions                            # previous agent sessions for this worktree
 
 # Reviewing pull requests — from anywhere inside the repo
+jeet prs                                 # the open PRs, and which you have checked out
 jeet review 123                          # or #123, or the PR's URL
+jeet prs acme/widget                     # or name the repo, from anywhere
+jeet review 123 --repo acme/widget
 ```
 
 ## The explorer
@@ -165,6 +168,7 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete, `o` open its PR |
 | `ctrl-f` | diff the highlighted file or folder against the default branch |
 | `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
+| `ctrl-o` | the repository's open pull requests: `⏎` checks one out and switches to it, `o` opens it in the browser |
 | `ctrl-d` | toggle hidden dotfiles |
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
@@ -211,6 +215,11 @@ submits. If you have a **pending review** on the PR — an agent's inline
 comments waiting to be submitted — the verdict submits that review, comments
 and all, rather than posting a second one.
 
+`ctrl-o` lists every open PR in the repository — the same list as
+`jeet prs` — and `⏎` checks the highlighted one out (or finds the worktree
+that already has it) and switches the explorer there. It is a way in, not
+`jeet review`: no review command is started.
+
 PR support goes through the [GitHub CLI](https://cli.github.com): install
 `gh` and `gh auth login`, and the lookups happen in the background so the
 explorer never waits on the network.
@@ -218,9 +227,23 @@ explorer never waits on the network.
 ## Reviewing
 
 ```bash
+jeet prs                    # open PRs in the repo you are in
+jeet prs acme/widget        # or in any indexed repo
 jeet review 123             # or #123, or https://github.com/acme/widget/pull/123
+jeet review 123 --repo acme/widget
 jeet review 123 --no-command
 jeet review 123 --rerun
+```
+
+`jeet prs` lists the open PRs with their size and review status, and marks the
+ones asking for your review, the ones you already have checked out, and how
+any background review of them went:
+
+```text
+github.com/acme/widget: 3 open pull requests
+  #128  Cache the index between runs    ada      +212 -40  needs review       your review requested
+  #127  Fix the flaky clone test        grace      +3 -1   approved           checked out · review finished 2h ago
+  #121  Rework the config loader        linus    +901 -377 draft
 ```
 
 From anywhere inside a repository, `jeet review` checks the PR out into its own

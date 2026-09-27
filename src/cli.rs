@@ -40,10 +40,20 @@ pub enum Commands {
     /// List previous coding-agent sessions for the current worktree
     Sessions,
 
+    /// List a repository's open pull requests
+    Prs {
+        /// Repository to list; defaults to the one containing the current directory
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
+    },
+
     /// Check a pull request out into its own worktree and open the explorer there
     Review {
         /// PR number, with or without a leading #, or the PR's URL
         pr: String,
+        /// Repository the PR belongs to; defaults to the one containing the current directory
+        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
         /// Do not start the `[review] command` from config.toml
         #[arg(long)]
         no_command: bool,

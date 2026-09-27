@@ -171,6 +171,11 @@ pub enum Overlay {
         /// Why the pending review could not be read, if it could not.
         pending_error: Option<String>,
     },
+    /// The repository's open PRs, to check one out and switch to it.
+    RepoPrs {
+        rows: Vec<crate::commands::prs::PrRow>,
+        selected: usize,
+    },
     /// The summary comment that goes with a verdict.
     ReviewBody {
         verdict: Verdict,
