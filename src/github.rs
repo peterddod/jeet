@@ -205,6 +205,89 @@ pub fn open_prs_by_branch(repo_dir: &Path) -> Result<Vec<(String, u64)>> {
         .collect())
 }
 
+/// A PR as `jeet prs` lists it: enough to decide which one to review.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedPr {
+    pub number: u64,
+    pub title: String,
+    pub author: Login,
+    #[serde(default)]
+    pub additions: usize,
+    #[serde(default)]
+    pub deletions: usize,
+    #[serde(default)]
+    pub is_draft: bool,
+    #[serde(default)]
+    pub review_decision: String,
+    pub head_ref_name: String,
+    #[serde(default)]
+    pub is_cross_repository: bool,
+    #[serde(default)]
+    pub review_requests: Vec<Login>,
+}
+
+/// A GitHub account, or a team — `gh` gives both a `login`, and a team's
+/// is never the user's, so they need no telling apart here.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Login {
+    #[serde(default)]
+    pub login: String,
+}
+
+impl ListedPr {
+    /// Same rule as [`PullRequest::local_branch`], so a listed PR can be
+    /// matched to the worktree `jeet review` would have put it in.
+    pub fn local_branch(&self) -> String {
+        if self.is_cross_repository {
+            format!("pr/{}", self.number)
+        } else {
+            self.head_ref_name.clone()
+        }
+    }
+
+    /// Where review stands: draft, or GitHub's decision, or nothing yet.
+    pub fn status(&self) -> &'static str {
+        if self.is_draft {
+            return "draft";
+        }
+        match self.review_decision.as_str() {
+            "APPROVED" => "approved",
+            "CHANGES_REQUESTED" => "changes requested",
+            _ => "needs review",
+        }
+    }
+
+    pub fn requests(&self, login: &str) -> bool {
+        !login.is_empty() && self.review_requests.iter().any(|r| r.login == login)
+    }
+}
+
+/// Open PRs, newest first.
+pub fn open_prs(repo_dir: &Path, limit: usize) -> Result<Vec<ListedPr>> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "number,title,author,additions,deletions,isDraft,reviewDecision,headRefName,isCrossRepository,reviewRequests",
+        ],
+    )?;
+    serde_json::from_str(&text).context("parse gh pr list output")
+}
+
+/// The signed-in user's login.
+pub fn current_user(repo_dir: &Path) -> Result<String> {
+    Ok(gh_ok(repo_dir, &["api", "user", "--jq", ".login"])?
+        .trim()
+        .to_string())
+}
+
 /// Check `number` out on `branch` in the worktree at `dir`.
 ///
 /// `gh pr checkout` rather than a hand-rolled fetch: it knows where a fork's
@@ -367,6 +450,19 @@ mod tests {
         assert_eq!(fork_pr_number("pr/42"), Some(42));
         assert_eq!(fork_pr_number("pr/fix"), None);
         assert_eq!(fork_pr_number("feature"), None);
+    }
+
+    #[test]
+    fn parses_gh_pr_list_output() {
+        let json = r#"[{"additions":9,"author":{"id":"x","is_bot":false,"login":"ada","name":"Ada"},"deletions":2,"headRefName":"main","isCrossRepository":true,"isDraft":false,"number":14,"reviewDecision":"CHANGES_REQUESTED","reviewRequests":[{"__typename":"User","login":"me"},{"__typename":"Team","name":"core"}],"title":"T"}]"#;
+        let prs: Vec<ListedPr> = serde_json::from_str(json).unwrap();
+        let pr = &prs[0];
+        assert_eq!(pr.author.login, "ada");
+        assert_eq!(pr.status(), "changes requested");
+        assert_eq!(pr.local_branch(), "pr/14");
+        assert!(pr.requests("me"));
+        assert!(!pr.requests("ada"));
+        assert!(!pr.requests(""), "a team request is nobody's login");
     }
 
     #[test]

@@ -11,9 +11,15 @@ use crate::github;
 use crate::review;
 use crate::worktrees;
 
-pub fn run(app: &App, pr: &str, start_command: bool, rerun: bool) -> Result<()> {
+pub fn run(
+    app: &App,
+    pr: &str,
+    repo_filter: Option<&str>,
+    start_command: bool,
+    rerun: bool,
+) -> Result<()> {
     let number = github::parse_pr_number(pr)?;
-    let repo = repo_from_filter_or_cwd(app, None)?;
+    let repo = repo_from_filter_or_cwd(app, repo_filter)?;
     let trunk = std::path::Path::new(&repo.trunk_path);
 
     eprintln!("jeet: looking up #{number}");
