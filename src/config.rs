@@ -15,6 +15,40 @@ pub struct Config {
     /// Coding agent launched with ctrl-a in the explorer (default: `claude`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+
+    /// What `jeet review` does besides checking the PR out.
+    #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
+    pub review: ReviewConfig,
+}
+
+/// `[review]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    /// Shell command run in the background from the new worktree, e.g.
+    /// `claude -p "/review-pr {pr}"`. `{pr}` and `{url}` are substituted; the
+    /// PR's branch, base and title arrive as environment variables instead,
+    /// because a branch name from a fork is not safe to paste into a shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Desktop notification when the command finishes (default: on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+impl ReviewConfig {
+    fn is_empty(&self) -> bool {
+        self.command.is_none() && self.notify.is_none()
+    }
+
+    /// The configured command, if it says anything.
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref().filter(|c| !c.trim().is_empty())
+    }
+
+    pub fn notify(&self) -> bool {
+        self.notify.unwrap_or(true)
+    }
 }
 
 fn default_scan_roots() -> Vec<String> {
@@ -27,6 +61,7 @@ impl Default for Config {
             scan_roots: default_scan_roots(),
             editor: None,
             agent: None,
+            review: ReviewConfig::default(),
         }
     }
 }
@@ -190,5 +225,17 @@ mod tests {
         // serialising again must not invent keys
         let out = toml::to_string_pretty(&config).unwrap();
         assert!(!out.contains("editor"), "{out}");
+        assert!(!out.contains("review"), "{out}");
+    }
+
+    #[test]
+    fn reads_the_review_section() {
+        let text =
+            "scan_roots = []\n[review]\ncommand = \"claude -p '/review {pr}'\"\nnotify = false\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.review.command(), Some("claude -p '/review {pr}'"));
+        assert!(!config.review.notify());
+        assert!(Config::default().review.command().is_none());
+        assert!(Config::default().review.notify());
     }
 }

@@ -15,7 +15,7 @@ pub mod ui;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ratatui::backend::CrosstermBackend;
@@ -35,10 +35,12 @@ use ratatui::Terminal;
 use crate::agent::{self, AgentSpec};
 use crate::context::App;
 use crate::db::RepoRecord;
+use crate::github::{self, Verdict};
 use crate::resolve::RepoContext;
+use crate::review::{self, JobState};
 use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
 
-use state::{Exit, Explorer, Overlay, PendingAction, Step, WorktreeRow};
+use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -104,6 +106,8 @@ pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
         "{} · type to filter · F1 for keys",
         explorer.repo.trunk_path.clone()
     ));
+    refresh_diffs(&mut explorer);
+    start_pr_lookup(&mut explorer);
 
     // Keep git's own output off the alternate screen.
     crate::git::set_capture_output(true);
@@ -120,7 +124,12 @@ fn init_terminal() -> Result<Tui> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, Print(MOUSE_ON)).context("enter alternate screen")?;
-    Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")?;
+    // `jeet review` talks on stderr right up to this point, and a terminal
+    // that does not blank its alternate screen would leave that showing
+    // through every cell the first frame leaves empty.
+    terminal.clear().context("clear terminal")?;
+    Ok(terminal)
 }
 
 /// Put the terminal back however we leave: panic, or a signal from outside.
@@ -232,14 +241,34 @@ fn with_progress<T: Send>(
     outcome
 }
 
+/// How often a running review is checked on, so the header notices it end.
+const JOB_CHECK: Duration = Duration::from_secs(3);
+
 fn event_loop(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
+    let mut last_job_check = Instant::now();
     while !explorer.should_quit {
         terminal.draw(|frame| ui::draw(frame, explorer))?;
+        // Block on input unless something in the background may change what
+        // is on screen: the PR lookup, or a review that is still running.
+        let job_running = explorer
+            .review_job
+            .as_ref()
+            .is_some_and(|job| job.state() == JobState::Running);
+        if (explorer.pr_updates.is_some() || job_running)
+            && !event::poll(Duration::from_millis(200))?
+        {
+            take_pr_update(app, explorer);
+            if job_running && last_job_check.elapsed() >= JOB_CHECK {
+                last_job_check = Instant::now();
+                load_review_job(app, explorer);
+            }
+            continue;
+        }
         let outcome = match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 handle_key(app, terminal, explorer, key)
             }
-            Event::Mouse(mouse) => handle_mouse(explorer, mouse),
+            Event::Mouse(mouse) => handle_mouse(terminal, explorer, mouse),
             _ => continue,
         };
         if let Err(e) = outcome {
@@ -300,8 +329,19 @@ fn handle_browse_key(
             let keep = explorer.selected_entry().map(|e| e.path.clone());
             explorer.reload(keep.as_deref())?;
             refresh_root_status(app, explorer);
+            start_pr_lookup(explorer);
             explorer.set_status("refreshed");
         }
+        KeyCode::Char('f') if ctrl => {
+            // The highlighted row, or the folder being listed when the filter
+            // has left nothing highlighted.
+            let target = explorer
+                .selected_entry()
+                .map(|e| e.path.clone())
+                .unwrap_or_else(|| explorer.cwd.clone());
+            view_diff(app, terminal, explorer, &target)?;
+        }
+        KeyCode::Char('p') if ctrl => open_pr_panel(app, terminal, explorer, false),
         KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
         KeyCode::Char('s') if ctrl => open_sessions(explorer),
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
@@ -414,8 +454,14 @@ fn enter_selected(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Res
 ///
 /// Overlays are keyboard-driven, so a click that lands on one is swallowed
 /// rather than acting on the list hidden behind it.
-fn handle_mouse(explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
+fn handle_mouse(terminal: &mut Tui, explorer: &mut Explorer, mouse: MouseEvent) -> Result<()> {
     if explorer.overlay.is_some() || explorer.working.is_some() {
+        return Ok(());
+    }
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        && clicked_pr(explorer, mouse.column, mouse.row)
+    {
+        open_pr_in_browser(terminal, explorer);
         return Ok(());
     }
     match mouse.kind {
@@ -483,6 +529,12 @@ fn descendant_of(dir: &Path, inside: &Path) -> Option<PathBuf> {
     Some(dir.join(first.as_os_str()))
 }
 
+fn clicked_pr(explorer: &Explorer, column: u16, row: u16) -> bool {
+    explorer
+        .pr_area
+        .is_some_and(|area| row == area.y && column >= area.x && column < area.x + area.width)
+}
+
 /// The ancestor directory a click on the header's path line points at.
 fn clicked_breadcrumb(explorer: &Explorer, column: u16, row: u16) -> Option<PathBuf> {
     let area = explorer.breadcrumb_area?;
@@ -505,6 +557,7 @@ fn handle_overlay_key(
     let toggled_shut = match (&overlay, key.code) {
         (Overlay::Worktrees { .. }, KeyCode::Char('w')) => ctrl,
         (Overlay::Sessions { .. }, KeyCode::Char('s')) => ctrl,
+        (Overlay::PullRequest { .. }, KeyCode::Char('p')) => ctrl,
         (Overlay::Help { .. }, KeyCode::Char('g')) => ctrl,
         (Overlay::Help { .. }, KeyCode::F(1)) => true,
         _ => false,
@@ -518,7 +571,7 @@ fn handle_overlay_key(
     // The prompts are the exception: they take typed input, and ctrl-u clears.
     let typing = matches!(
         overlay,
-        Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. }
+        Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. } | Overlay::ReviewBody { .. }
     );
     if !typing && ctrl {
         explorer.overlay = Some(overlay);
@@ -647,6 +700,27 @@ fn handle_overlay_key(
                 None => explorer.overlay = Some(Overlay::Worktrees { selected }),
             },
             KeyCode::Char('r') => open_worktrees(app, terminal, explorer),
+            KeyCode::Char('o') => {
+                match explorer.worktree_rows.get(selected).and_then(|row| row.pr) {
+                    Some(number) => {
+                        let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                        let opened =
+                            with_progress(terminal, explorer, "opening the browser", || {
+                                github::open_in_browser(&trunk, number)
+                            })?;
+                        match opened {
+                            Ok(()) => {
+                                explorer.set_status(format!("opened #{number} in the browser"))
+                            }
+                            Err(e) => {
+                                explorer.set_status(format!("could not open #{number}: {e:#}"))
+                            }
+                        }
+                    }
+                    None => explorer.set_status("no open pull request from this worktree's branch"),
+                }
+                explorer.overlay = Some(Overlay::Worktrees { selected });
+            }
             _ => explorer.overlay = Some(Overlay::Worktrees { selected }),
         },
         Overlay::Sessions {
@@ -723,6 +797,87 @@ fn handle_overlay_key(
             }
             _ => explorer.overlay = Some(Overlay::NewWorktree { input }),
         },
+        Overlay::PullRequest {
+            pending,
+            pending_error,
+        } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {}
+            KeyCode::Char(c @ ('a' | 'c' | 'x')) => {
+                let verdict = match c {
+                    'a' => Verdict::Approve,
+                    'c' => Verdict::Comment,
+                    _ => Verdict::RequestChanges,
+                };
+                explorer.overlay = Some(Overlay::ReviewBody {
+                    verdict,
+                    input: String::new(),
+                    pending,
+                });
+            }
+            KeyCode::Char('o') => {
+                open_pr_in_browser(terminal, explorer);
+                explorer.overlay = Some(Overlay::PullRequest {
+                    pending,
+                    pending_error,
+                });
+            }
+            KeyCode::Char('d') => {
+                let root = explorer.root.clone();
+                view_diff(app, terminal, explorer, &root)?;
+            }
+            KeyCode::Char('v') => {
+                match explorer.review_job.as_ref().map(|job| job.log.clone()) {
+                    Some(log) => open_editor(app, terminal, explorer, &log)?,
+                    None => explorer.set_status("no review has been run for this pull request"),
+                }
+                explorer.overlay = Some(Overlay::PullRequest {
+                    pending,
+                    pending_error,
+                });
+            }
+            KeyCode::Char('r') => open_pr_panel(app, terminal, explorer, true),
+            _ => {
+                explorer.overlay = Some(Overlay::PullRequest {
+                    pending,
+                    pending_error,
+                })
+            }
+        },
+        Overlay::ReviewBody {
+            verdict,
+            mut input,
+            pending,
+        } => {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Esc => {
+                    explorer.overlay = Some(Overlay::PullRequest {
+                        pending,
+                        pending_error: None,
+                    });
+                    return Ok(());
+                }
+                // A newline: ctrl-j is a line feed in every terminal; alt-⏎
+                // where the terminal reports it.
+                KeyCode::Char('j') if ctrl => input.push('\n'),
+                KeyCode::Enter if alt => input.push('\n'),
+                KeyCode::Enter => {
+                    return submit_review(terminal, explorer, verdict, input, pending);
+                }
+                KeyCode::Char('u') if ctrl => input.clear(),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) if !ctrl && !alt => input.push(c),
+                _ => {}
+            }
+            explorer.overlay = Some(Overlay::ReviewBody {
+                verdict,
+                input,
+                pending,
+            });
+        }
         Overlay::Confirm {
             title,
             lines,
@@ -831,7 +986,11 @@ fn collect_rows(app: &App, repo: &RepoRecord, current_root: &Path) -> Result<Vec
         .map(|chunk| chunk.to_vec())
         .collect();
 
-    let rows = std::thread::scope(|scope| {
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let (mut rows, prs) = std::thread::scope(|scope| {
+        // One request for the whole repository, alongside the git work; a
+        // machine without `gh` just has no PR column.
+        let prs = scope.spawn(|| github::open_prs_by_branch(&trunk).unwrap_or_default());
         let handles: Vec<_> = lanes
             .into_iter()
             .map(|lane| {
@@ -841,18 +1000,27 @@ fn collect_rows(app: &App, repo: &RepoRecord, current_root: &Path) -> Result<Vec
                         .map(|entry| WorktreeRow {
                             status: worktrees::status_against(&entry, &base),
                             current: crate::resolve::same_path(&entry.path, current_root),
+                            pr: None,
                             entry,
                         })
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        handles
+        let rows = handles
             .into_iter()
             .filter_map(|h| h.join().ok())
             .flatten()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (rows, prs.join().unwrap_or_default())
     });
+    for row in &mut rows {
+        row.pr = row.entry.branch.as_ref().and_then(|branch| {
+            prs.iter()
+                .find(|(head, _)| head == branch)
+                .map(|(_, number)| *number)
+        });
+    }
     Ok(rows)
 }
 
@@ -1055,6 +1223,8 @@ fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()
     explorer.root_kind = kind;
     explorer.root_status = status;
     explorer.overlay = None;
+    refresh_diffs(explorer);
+    start_pr_lookup(explorer);
     Ok(())
 }
 
@@ -1063,6 +1233,295 @@ fn refresh_root_status(app: &App, explorer: &mut Explorer) {
     explorer.root_label = label;
     explorer.root_kind = kind;
     explorer.root_status = status;
+    refresh_diffs(explorer);
+}
+
+/// Per-file line counts against the merge base with the default branch —
+/// the same base, and the same working-tree-inclusive diff, as the header's
+/// counter, so the listing adds up to what the header says.
+fn refresh_diffs(explorer: &mut Explorer) {
+    let base = worktrees::comparison_base(&explorer.repo);
+    let merge_base = crate::git::merge_base(&explorer.root, &base);
+    let files = merge_base
+        .as_deref()
+        .and_then(|sha| crate::git::numstat_by_file(&explorer.root, sha))
+        .unwrap_or_default();
+    explorer.diffs = DiffMap::new(files, merge_base);
+}
+
+/// Look the worktree's PR up on a background thread; the event loop picks
+/// the answer up when it lands, so opening the explorer never waits on it.
+fn start_pr_lookup(explorer: &mut Explorer) {
+    let root = explorer.root.clone();
+    let default_branch = explorer.repo.default_branch.clone();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let lookup = match crate::git::head_branch(&root) {
+            // The default branch is where PRs go, not where they come from.
+            Some(branch) if branch != default_branch => {
+                match github::pr_for_branch(&root, &branch) {
+                    Ok(Some(pr)) => PrLookup::Found(Box::new(pr)),
+                    Ok(None) => PrLookup::Missing,
+                    Err(e) => PrLookup::Failed(format!("{e:#}")),
+                }
+            }
+            _ => PrLookup::Missing,
+        };
+        let _ = tx.send((root, lookup));
+    });
+    explorer.pr = PrLookup::Loading;
+    explorer.pr_updates = Some(rx);
+}
+
+fn take_pr_update(app: &App, explorer: &mut Explorer) {
+    let Some(updates) = &explorer.pr_updates else {
+        return;
+    };
+    match updates.try_recv() {
+        Ok((root, lookup)) => {
+            explorer.pr_updates = None;
+            // Answering for a worktree we have since switched away from.
+            if root == explorer.root {
+                explorer.pr = lookup;
+                load_review_job(app, explorer);
+            }
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            explorer.pr_updates = None;
+            explorer.pr = PrLookup::Failed("the pull request lookup stopped".into());
+        }
+    }
+}
+
+fn load_review_job(app: &App, explorer: &mut Explorer) {
+    explorer.review_job = match &explorer.pr {
+        PrLookup::Found(pr) => review::load(app, &explorer.repo, pr.number),
+        _ => None,
+    };
+}
+
+/// ctrl-p: the PR panel, reading the user's pending review on the way in.
+/// `refetch` also re-reads the PR itself, for `r` inside the panel.
+fn open_pr_panel(app: &App, terminal: &mut Tui, explorer: &mut Explorer, refetch: bool) {
+    let branch = crate::git::head_branch(&explorer.root);
+    let pr = match (&explorer.pr, refetch) {
+        (PrLookup::Found(pr), false) => Some((**pr).clone()),
+        (PrLookup::Loading, false) => {
+            explorer.set_status("still looking up the pull request…");
+            return;
+        }
+        (PrLookup::Failed(why), false) => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "pull request".into(),
+                lines: vec!["could not look the pull request up:".into(), why.clone()],
+                from_panel: false,
+            });
+            return;
+        }
+        _ => None,
+    };
+    let root = explorer.root.clone();
+    let fetched = with_progress(terminal, explorer, "reading the pull request", || {
+        let pr = match pr {
+            Some(pr) => Ok(Some(pr)),
+            None => match &branch {
+                Some(branch) => github::pr_for_branch(&root, branch),
+                None => Ok(None),
+            },
+        };
+        let pending = match &pr {
+            Ok(Some(pr)) => Some(github::pending_review(&root, pr.number)),
+            _ => None,
+        };
+        (pr, pending)
+    });
+    let (pr, pending) = match fetched {
+        Ok(fetched) => fetched,
+        Err(e) => {
+            explorer.set_status(format!("error: {e}"));
+            return;
+        }
+    };
+    match pr {
+        Ok(Some(pr)) => {
+            explorer.pr = PrLookup::Found(Box::new(pr));
+            load_review_job(app, explorer);
+            let (pending, pending_error) = match pending {
+                Some(Ok(pending)) => (pending, None),
+                Some(Err(e)) => (None, Some(format!("{e:#}"))),
+                None => (None, None),
+            };
+            explorer.overlay = Some(Overlay::PullRequest {
+                pending,
+                pending_error,
+            });
+        }
+        Ok(None) => {
+            explorer.pr = PrLookup::Missing;
+            explorer.overlay = Some(Overlay::Message {
+                title: "pull request".into(),
+                lines: vec![
+                    match branch {
+                        Some(branch) => format!("no pull request from {branch}"),
+                        None => "a detached worktree has no pull request".into(),
+                    },
+                    String::new(),
+                    "`jeet review <number>` checks one out to review".into(),
+                ],
+                from_panel: false,
+            });
+        }
+        Err(e) => {
+            explorer.pr = PrLookup::Failed(format!("{e:#}"));
+            explorer.overlay = Some(Overlay::Message {
+                title: "pull request".into(),
+                lines: vec![format!("{e:#}")],
+                from_panel: false,
+            });
+        }
+    }
+}
+
+fn open_pr_in_browser(terminal: &mut Tui, explorer: &mut Explorer) {
+    let PrLookup::Found(pr) = &explorer.pr else {
+        return;
+    };
+    let number = pr.number;
+    let root = explorer.root.clone();
+    let opened = with_progress(terminal, explorer, "opening the browser", || {
+        github::open_in_browser(&root, number)
+    });
+    match opened {
+        Ok(Ok(())) => explorer.set_status(format!("opened #{number} in the browser")),
+        Ok(Err(e)) | Err(e) => explorer.set_status(format!("could not open #{number}: {e:#}")),
+    }
+}
+
+/// Post the review. On failure the text typed stays where it was, so a
+/// rejected approval (your own PR, say) does not cost the comment with it.
+fn submit_review(
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    verdict: Verdict,
+    input: String,
+    pending: Option<github::PendingReview>,
+) -> Result<()> {
+    let PrLookup::Found(pr) = &explorer.pr else {
+        return Ok(());
+    };
+    let number = pr.number;
+    let body = input.trim().to_string();
+    // GitHub refuses a comment or a change request that says nothing; better
+    // to say so here than after the round trip.
+    if body.is_empty() && verdict != Verdict::Approve && pending.is_none() {
+        explorer.set_status(format!("{} needs a comment to go with it", verdict.label()));
+        explorer.overlay = Some(Overlay::ReviewBody {
+            verdict,
+            input,
+            pending,
+        });
+        return Ok(());
+    }
+    let root = explorer.root.clone();
+    let submitting = pending.clone();
+    let outcome = with_progress(
+        terminal,
+        explorer,
+        &format!("submitting: {} #{number}", verdict.label()),
+        move || github::submit_review(&root, number, verdict, &body, submitting.as_ref()),
+    )?;
+    match outcome {
+        Ok(()) => {
+            explorer.set_status(match verdict {
+                Verdict::Approve => format!("approved #{number}"),
+                Verdict::Comment => format!("commented on #{number}"),
+                Verdict::RequestChanges => format!("requested changes on #{number}"),
+            });
+            start_pr_lookup(explorer);
+        }
+        Err(e) => {
+            explorer.set_status(format!("not submitted: {e:#}"));
+            explorer.overlay = Some(Overlay::ReviewBody {
+                verdict,
+                input,
+                pending,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// ctrl-f: step through the diff of a file or folder against the merge base,
+/// in whatever `git difftool` is set up to use.
+fn view_diff(app: &App, terminal: &mut Tui, explorer: &mut Explorer, path: &Path) -> Result<()> {
+    let Some(base) = explorer.diffs.merge_base.clone() else {
+        explorer.set_status(format!(
+            "no common history with {} to diff against",
+            explorer.repo.default_branch
+        ));
+        return Ok(());
+    };
+    let root = explorer.root.clone();
+    let rel = path.strip_prefix(&root).unwrap_or(path).to_path_buf();
+    let whole = rel.as_os_str().is_empty();
+    let changed = if whole {
+        !explorer.diffs.is_empty()
+    } else {
+        explorer.diffs.get(&root, path).is_some()
+    };
+    let shown = if whole {
+        "this worktree".to_string()
+    } else {
+        rel.display().to_string()
+    };
+    if !changed {
+        explorer.set_status(format!(
+            "no changes in {shown} against {}",
+            explorer.repo.default_branch
+        ));
+        return Ok(());
+    }
+
+    let mut argv: Vec<String> = ["git", "difftool", "--no-prompt", "--trust-exit-code"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    // With no diff.tool configured git guesses, and on a Mac with Xcode its
+    // first guess is a GUI. Default to the terminal diff of the user's editor.
+    if crate::git::configured_diff_tool(&root).is_none() {
+        argv.push(format!("--tool={}", default_diff_tool(app)));
+    }
+    argv.push(base);
+    argv.push("--".into());
+    argv.push(if whole {
+        ".".into()
+    } else {
+        rel.to_string_lossy().to_string()
+    });
+    let outcome = suspended(terminal, || agent::run_in(&argv, &root, &[]))?;
+    match outcome {
+        Ok(0) => explorer.set_status(format!("closed the diff of {shown}")),
+        // `--trust-exit-code`: `:cq` in vimdiff stops the rest of the files.
+        Ok(_) => explorer.set_status(format!("stopped the diff of {shown}")),
+        Err(e) => explorer.set_status(format!("could not run git difftool: {e}")),
+    }
+    Ok(())
+}
+
+/// `nvimdiff` for a neovim user, `vimdiff` for everyone else.
+fn default_diff_tool(app: &App) -> &'static str {
+    let editor = agent::editor_argv(&app.config).unwrap_or_default();
+    let program = editor
+        .first()
+        .and_then(|p| Path::new(p).file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if program == "nvim" {
+        "nvimdiff"
+    } else {
+        "vimdiff"
+    }
 }
 
 /// Branch label, worktree kind and counters for the worktree at `root`.
@@ -1095,6 +1554,7 @@ fn open_editor(app: &App, terminal: &mut Tui, explorer: &mut Explorer, file: &Pa
     }
     let keep = explorer.selected_entry().map(|e| e.path.clone());
     explorer.reload(keep.as_deref())?;
+    refresh_diffs(explorer);
     Ok(())
 }
 

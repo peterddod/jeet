@@ -84,6 +84,9 @@ jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on e
 
 # Coding agents
 jeet sessions                            # previous agent sessions for this worktree
+
+# Reviewing pull requests — from anywhere inside the repo
+jeet review 123                          # or #123, or the PR's URL
 ```
 
 ## The explorer
@@ -159,7 +162,9 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 |-----|--------|
 | `ctrl-a` | start a coding agent from the worktree root |
 | `ctrl-s` | previous agent sessions for this worktree (⏎ resumes one) |
-| `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete |
+| `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete, `o` open its PR |
+| `ctrl-f` | diff the highlighted file or folder against the default branch |
+| `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
 | `ctrl-d` | toggle hidden dotfiles |
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
@@ -183,6 +188,69 @@ The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
 agent defaults to `claude`. Both are configurable (see below). Session listing
 knows Claude Code's transcript store — other agents still launch with `ctrl-a`, they
 just have no session history to show.
+
+### Diffs
+
+Every changed file shows its `+added -removed` line counts beside its size,
+and every folder shows the sum of everything changed beneath it — measured
+from the merge base with the default branch, uncommitted edits included, the
+same diff the header counts. `ctrl-f` opens that diff for the highlighted file
+or folder (or the whole worktree, with `d` in the PR panel) in `git difftool`,
+one file at a time: `:qa` moves to the next, `:cq` stops. It uses your
+`diff.tool` from git config, and `vimdiff` (`nvimdiff` for a neovim editor)
+when there isn't one — `git config --global diff.tool nvimdiff`, `difftastic`
+or anything else git supports all work.
+
+### Pull requests
+
+When the worktree's branch has a pull request, its number and status sit in
+the header's top border; click it to open the PR in your browser. `ctrl-p`
+opens a panel with the details, and lets you approve (`a`), comment (`c`) or
+request changes (`x`) with a summary comment — `ctrl-j` for a new line, `⏎`
+submits. If you have a **pending review** on the PR — an agent's inline
+comments waiting to be submitted — the verdict submits that review, comments
+and all, rather than posting a second one.
+
+PR support goes through the [GitHub CLI](https://cli.github.com): install
+`gh` and `gh auth login`, and the lookups happen in the background so the
+explorer never waits on the network.
+
+## Reviewing
+
+```bash
+jeet review 123             # or #123, or https://github.com/acme/widget/pull/123
+jeet review 123 --no-command
+jeet review 123 --rerun
+```
+
+From anywhere inside a repository, `jeet review` checks the PR out into its own
+worktree (reusing the one that already has its branch, and bringing it up to
+date if it is clean), `cd`s you there, and opens the explorer on it. A PR
+from a fork is checked out as `pr/<number>`, so it can never land on a branch
+of yours with the same name.
+
+Give it a command in `config.toml` and it also starts that in the background
+from the new worktree — say, Claude Code with your own review command:
+
+```toml
+[review]
+command = "claude -p '/review-pr {pr}' --permission-mode acceptEdits"
+notify = true   # desktop notification when it finishes (the default)
+```
+
+The command runs detached from your terminal, so quitting the explorer or
+closing the window does not stop it. When it finishes you get a notification,
+the header's `review running` turns to `review ready`, and `v` in the PR panel
+opens its output. A Claude Code review also leaves a session behind, so
+`ctrl-s` can resume the conversation with it. Running `jeet review` again for
+the same commit does not start a second review; new commits do (and
+`--rerun` forces one).
+
+`{pr}` and `{url}` are substituted into the command. The PR's branch, base and
+title are not — whoever opened the PR chose those, and pasted into a shell they
+would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
+`$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
+`$JEET_REVIEW_LOG`. Jobs and their logs live under `~/.jeet/reviews`.
 
 ## Worktrees
 
@@ -363,6 +431,9 @@ agent = "claude"     # launched by `ctrl-a`; may include arguments
 
 Both accept arguments (`editor = "code --wait"`) and are overridden by
 `JEET_EDITOR` / `JEET_AGENT`.
+
+A `[review]` section sets what `jeet review` runs in the background — see
+[Reviewing](#reviewing).
 
 Override the home directory for testing:
 

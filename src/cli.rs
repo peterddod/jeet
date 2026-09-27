@@ -40,6 +40,22 @@ pub enum Commands {
     /// List previous coding-agent sessions for the current worktree
     Sessions,
 
+    /// Check a pull request out into its own worktree and open the explorer there
+    Review {
+        /// PR number, with or without a leading #, or the PR's URL
+        pr: String,
+        /// Do not start the `[review] command` from config.toml
+        #[arg(long)]
+        no_command: bool,
+        /// Start the review command even if it already reviewed this commit
+        #[arg(long, conflicts_with = "no_command")]
+        rerun: bool,
+    },
+
+    /// Run a background review job (started by `jeet review`)
+    #[command(hide = true)]
+    ReviewJob { state: std::path::PathBuf },
+
     /// Worktree operations - with no subcommand, create a worktree here
     Worktree(WorktreeArgs),
 

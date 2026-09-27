@@ -564,6 +564,60 @@ fn parse_numstat(text: &str) -> (usize, usize, usize) {
     (files, insertions, deletions)
 }
 
+/// One file's line counts in a diff; `None` for a binary file, which git
+/// reports as `-` rather than a number.
+pub type FileDiff = (String, Option<(usize, usize)>);
+
+/// Per-file `(path, counts)` between `merge_base` and the working tree, paths
+/// relative to the worktree root.
+///
+/// `-z` so a path git would otherwise quote (spaces, non-ASCII) comes back
+/// exactly as it is on disk, and `--no-renames` so every entry is one path: a
+/// rename shows up as the old file deleted and the new one added, which is
+/// what the listing can put a number beside anyway.
+pub fn numstat_by_file(path: &Path, merge_base: &str) -> Option<Vec<FileDiff>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            merge_base,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_numstat_z(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_numstat_z(text: &str) -> Vec<FileDiff> {
+    text.split('\0')
+        .filter_map(|record| {
+            let mut parts = record.splitn(3, '\t');
+            let (added, deleted, file) = (parts.next()?, parts.next()?, parts.next()?);
+            let counts = match (added.parse(), deleted.parse()) {
+                (Ok(a), Ok(d)) => Some((a, d)),
+                _ => None,
+            };
+            Some((file.to_string(), counts))
+        })
+        .collect()
+}
+
+/// The diff tool `git difftool` would use, if the user has configured one.
+pub fn configured_diff_tool(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "config", "diff.tool"])
+        .output()
+        .ok()?;
+    let tool = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !tool.is_empty()).then_some(tool)
+}
+
 pub fn remote_exists(repo_path: &Path, remote: &str) -> bool {
     Command::new("git")
         .args([
@@ -614,6 +668,20 @@ mod tests {
     fn parses_numstat_totals() {
         let text = "10\t2\tsrc/a.rs\n0\t7\tsrc/b.rs\n-\t-\tbin\n";
         assert_eq!(parse_numstat(text), (3, 10, 9));
+    }
+
+    #[test]
+    fn parses_numstat_per_file() {
+        let text = "10\t2\tsrc/a.rs\x000\t7\tdir with space/b.rs\x00-\t-\tlogo.png\x00";
+        assert_eq!(
+            parse_numstat_z(text),
+            vec![
+                ("src/a.rs".to_string(), Some((10, 2))),
+                ("dir with space/b.rs".to_string(), Some((0, 7))),
+                ("logo.png".to_string(), None),
+            ]
+        );
+        assert!(parse_numstat_z("").is_empty());
     }
 
     #[test]

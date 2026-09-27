@@ -8,9 +8,11 @@ mod config;
 mod context;
 mod db;
 mod git;
+mod github;
 mod paths;
 mod remote;
 mod resolve;
+mod review;
 mod tui;
 mod worktrees;
 
@@ -82,6 +84,15 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::explore::run(&app)?;
         }
+        Commands::Review {
+            pr,
+            no_command,
+            rerun,
+        } => {
+            let app = context::App::open()?;
+            commands::review::run(&app, &pr, !no_command, rerun)?;
+        }
+        Commands::ReviewJob { state } => review::run_job(&state)?,
         Commands::Sessions => {
             let app = context::App::open()?;
             commands::sessions::run(&app)?;

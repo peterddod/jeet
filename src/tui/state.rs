@@ -3,7 +3,9 @@
 //! Everything in here is pure enough to unit test — the terminal only ever
 //! renders what these types describe.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -13,6 +15,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::agent::{AgentSession, AgentSpec};
 use crate::db::RepoRecord;
+use crate::github::{PendingReview, PullRequest, Verdict};
+use crate::review::Job;
 use crate::worktrees::{WorktreeEntry, WorktreeStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,87 @@ pub struct WorktreeRow {
     pub entry: WorktreeEntry,
     pub status: WorktreeStatus,
     pub current: bool,
+    /// The open pull request from this worktree's branch, if any.
+    pub pr: Option<u64>,
+}
+
+/// Lines added and removed in one file, or summed over a folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffCount {
+    pub added: usize,
+    pub deleted: usize,
+    /// Changed binary files, which have no line counts to add up.
+    pub binary: usize,
+}
+
+impl DiffCount {
+    fn add(&mut self, other: DiffCount) {
+        self.added += other.added;
+        self.deleted += other.deleted;
+        self.binary += other.binary;
+    }
+}
+
+/// How each changed file, and each folder above one, differs from the
+/// comparison base — keyed by path relative to the worktree root.
+#[derive(Debug, Clone, Default)]
+pub struct DiffMap {
+    counts: HashMap<PathBuf, DiffCount>,
+    /// The commit the counts are measured from, so the diff viewer shows
+    /// exactly the diff the numbers describe. None when there is no diff to
+    /// show: no base to measure from, or git could not say.
+    pub merge_base: Option<String>,
+}
+
+impl DiffMap {
+    /// Fold per-file counts up into every folder that contains them.
+    pub fn new(files: Vec<crate::git::FileDiff>, merge_base: Option<String>) -> Self {
+        let mut counts: HashMap<PathBuf, DiffCount> = HashMap::new();
+        for (file, lines) in files {
+            let count = match lines {
+                Some((added, deleted)) => DiffCount {
+                    added,
+                    deleted,
+                    binary: 0,
+                },
+                None => DiffCount {
+                    binary: 1,
+                    ..DiffCount::default()
+                },
+            };
+            let path = PathBuf::from(file);
+            for ancestor in path.ancestors() {
+                if ancestor.as_os_str().is_empty() {
+                    break;
+                }
+                counts.entry(ancestor.to_path_buf()).or_default().add(count);
+            }
+        }
+        Self { counts, merge_base }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// The change under `path`, which is inside `root`. None for anything the
+    /// diff does not touch.
+    pub fn get(&self, root: &Path, path: &Path) -> Option<DiffCount> {
+        let rel = path.strip_prefix(root).ok()?;
+        self.counts.get(rel).copied()
+    }
+}
+
+/// What is known about the pull request for the worktree being browsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrLookup {
+    /// Being looked up in the background.
+    Loading,
+    /// The branch has no PR, or there is no branch to have one.
+    Missing,
+    /// `gh` is not installed, not signed in, or the remote is not GitHub.
+    Failed(String),
+    Found(Box<PullRequest>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +164,19 @@ pub enum Overlay {
         lines: Vec<String>,
         /// Return to the worktree panel when dismissed, rather than the browser.
         from_panel: bool,
+    },
+    /// The pull request for the worktree being browsed, in [`Explorer::pr`].
+    PullRequest {
+        /// The user's unsubmitted review, which a verdict will submit.
+        pending: Option<PendingReview>,
+        /// Why the pending review could not be read, if it could not.
+        pending_error: Option<String>,
+    },
+    /// The summary comment that goes with a verdict.
+    ReviewBody {
+        verdict: Verdict,
+        input: String,
+        pending: Option<PendingReview>,
     },
 }
 
@@ -148,6 +246,16 @@ pub struct Explorer {
     /// When and where the last click that *moved* us landed, so the second
     /// press of a double-click can be told from a deliberate one.
     last_navigating_click: Option<(Instant, u16, u16)>,
+    /// Line counts against the comparison base, for the listing.
+    pub diffs: DiffMap,
+    pub pr: PrLookup,
+    /// The background PR lookup, answering for the root it was started for —
+    /// a switch while it runs makes its answer stale, not wrong.
+    pub pr_updates: Option<Receiver<(PathBuf, PrLookup)>>,
+    /// Where the PR number was drawn in the header, so a click can open it.
+    pub pr_area: Option<Rect>,
+    /// The `jeet review` job for this worktree's PR, if one was started.
+    pub review_job: Option<Job>,
 }
 
 /// Two presses on the same cell inside this window are one double-click.
@@ -188,6 +296,11 @@ impl Explorer {
             list_area: Rect::default(),
             breadcrumb_area: None,
             last_navigating_click: None,
+            diffs: DiffMap::default(),
+            pr: PrLookup::Missing,
+            pr_updates: None,
+            pr_area: None,
+            review_job: None,
         };
         explorer.reload(None)?;
         Ok(explorer)
@@ -753,6 +866,34 @@ mod tests {
         assert_eq!(human_size(12), "12B");
         assert_eq!(human_size(2048), "2.0K");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0M");
+    }
+
+    #[test]
+    fn folders_sum_everything_beneath_them() {
+        let diffs = DiffMap::new(
+            vec![
+                ("src/a.rs".into(), Some((10, 2))),
+                ("src/tui/b.rs".into(), Some((3, 4))),
+                ("src/logo.png".into(), None),
+                ("README.md".into(), Some((1, 0))),
+            ],
+            Some("abc".into()),
+        );
+        let root = Path::new("/wt");
+        let get = |p: &str| diffs.get(root, &root.join(p));
+        assert_eq!(
+            get("src"),
+            Some(DiffCount {
+                added: 13,
+                deleted: 6,
+                binary: 1
+            })
+        );
+        assert_eq!(get("src/tui").map(|d| (d.added, d.deleted)), Some((3, 4)));
+        assert_eq!(get("src/a.rs").map(|d| (d.added, d.deleted)), Some((10, 2)));
+        assert_eq!(get("README.md").map(|d| d.added), Some(1));
+        assert_eq!(get("docs"), None, "untouched paths have no count");
+        assert_eq!(diffs.get(root, Path::new("/elsewhere/src")), None);
     }
 
     fn explorer_at(root: &Path) -> Explorer {

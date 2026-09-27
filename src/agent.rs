@@ -78,14 +78,18 @@ pub struct AgentSession {
 
 impl AgentSession {
     pub fn age(&self) -> String {
-        let now = crate::worktrees::now_secs();
-        let delta = (now - self.modified).max(0);
-        match delta {
-            d if d < 60 => "just now".to_string(),
-            d if d < 3600 => format!("{}m ago", d / 60),
-            d if d < 86_400 => format!("{}h ago", d / 3600),
-            d => format!("{}d ago", d / 86_400),
-        }
+        age_label(self.modified)
+    }
+}
+
+/// `just now`, `5m ago`, `3h ago`… for a unix timestamp.
+pub fn age_label(at: i64) -> String {
+    let delta = (crate::worktrees::now_secs() - at).max(0);
+    match delta {
+        d if d < 60 => "just now".to_string(),
+        d if d < 3600 => format!("{}m ago", d / 60),
+        d if d < 86_400 => format!("{}h ago", d / 3600),
+        d => format!("{}d ago", d / 86_400),
     }
 }
 
