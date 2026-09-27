@@ -208,7 +208,22 @@ pub fn start(
     };
     write(&path, &job)?;
 
-    let out = File::create(&log).with_context(|| format!("create {}", log.display()))?;
+    // Once the runner is launched it is the only writer of the state file:
+    // two writers is how a quick-failing command's exit status got papered
+    // over with a stale copy. So launching records nothing — except when it
+    // fails, which would otherwise leave a job that reads as running forever,
+    // refusing every later `jeet review`, `--rerun` included.
+    if let Err(e) = launch(&path, &log, worktree) {
+        job.finished_at = Some(now_secs());
+        job.exit_code = Some(127);
+        let _ = write(&path, &job);
+        return Err(e);
+    }
+    Ok(job)
+}
+
+fn launch(state: &Path, log: &Path, worktree: &Path) -> Result<()> {
+    let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     // `nohup` so closing the terminal does not take the review with it — the
     // ignored SIGHUP survives into everything the command runs — and a process
@@ -216,7 +231,7 @@ pub fn start(
     let mut cmd = Command::new("nohup");
     cmd.arg(exe)
         .arg("review-job")
-        .arg(&path)
+        .arg(state)
         .current_dir(worktree)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
@@ -226,23 +241,18 @@ pub fn start(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let child = cmd.spawn().context("start the review command")?;
-
-    // The runner may already have finished and written its ending; only fill
-    // in the pid, never overwrite what it recorded.
-    job = read(&path).unwrap_or(job);
-    if job.exit_code.is_none() {
-        job.pid = Some(child.id());
-        write(&path, &job)?;
-    }
-    Ok(job)
+    cmd.spawn().context("start the review command")?;
+    Ok(())
 }
 
 /// `jeet review-job <state>`: run a job's command and record how it ended.
 ///
 /// Its stdout and stderr are already the job's log.
 pub fn run_job(path: &Path) -> Result<()> {
-    let job = read(path)?;
+    let mut job = read(path)?;
+    // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
+    job.pid = Some(std::process::id());
+    write(path, &job)?;
     println!("$ {}", job.command);
     let code = match Command::new("sh")
         .arg("-c")
@@ -259,8 +269,6 @@ pub fn run_job(path: &Path) -> Result<()> {
         }
     };
 
-    // Re-read rather than reuse: `jeet review` adds the pid after we started.
-    let mut job = read(path).unwrap_or(job);
     job.finished_at = Some(now_secs());
     job.exit_code = Some(code);
     write(path, &job)?;
@@ -377,6 +385,11 @@ mod tests {
         run_job(&path).unwrap();
         let done = read(&path).unwrap();
         assert_eq!(done.state(), JobState::Finished(3));
+        assert_eq!(
+            done.pid,
+            Some(std::process::id()),
+            "the runner records itself"
+        );
         assert!(done.finished_at.is_some());
     }
 }

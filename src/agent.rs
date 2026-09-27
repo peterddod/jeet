@@ -84,7 +84,7 @@ impl AgentSession {
 
 /// `just now`, `5m ago`, `3h ago`… for a unix timestamp.
 pub fn age_label(at: i64) -> String {
-    let delta = (crate::worktrees::now_secs() - at).max(0);
+    let delta = crate::worktrees::now_secs().saturating_sub(at).max(0);
     match delta {
         d if d < 60 => "just now".to_string(),
         d if d < 3600 => format!("{}m ago", d / 60),

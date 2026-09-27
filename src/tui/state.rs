@@ -90,8 +90,7 @@ impl DiffMap {
                     ..DiffCount::default()
                 },
             };
-            let path = PathBuf::from(file);
-            for ancestor in path.ancestors() {
+            for ancestor in file.ancestors() {
                 if ancestor.as_os_str().is_empty() {
                     break;
                 }
