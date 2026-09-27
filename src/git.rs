@@ -564,6 +564,73 @@ fn parse_numstat(text: &str) -> (usize, usize, usize) {
     (files, insertions, deletions)
 }
 
+/// One file's line counts in a diff; `None` for a binary file, which git
+/// reports as `-` rather than a number.
+pub type FileDiff = (PathBuf, Option<(usize, usize)>);
+
+/// Per-file `(path, counts)` between `merge_base` and the working tree, paths
+/// relative to the worktree root.
+///
+/// `-z` so a path git would otherwise quote (spaces, non-ASCII) comes back
+/// exactly as it is on disk, and `--no-renames` so every entry is one path: a
+/// rename shows up as the old file deleted and the new one added, which is
+/// what the listing can put a number beside anyway.
+pub fn numstat_by_file(path: &Path, merge_base: &str) -> Option<Vec<FileDiff>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            merge_base,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_numstat_z(&output.stdout))
+}
+
+/// Parsed as bytes, not text: a filename that is not valid UTF-8 would come
+/// back from a lossy decode full of U+FFFD, match nothing on disk, and its
+/// changes would silently vanish from the listing.
+fn parse_numstat_z(bytes: &[u8]) -> Vec<FileDiff> {
+    bytes
+        .split(|&b| b == 0)
+        .filter_map(|record| {
+            let mut parts = record.splitn(3, |&b| b == b'\t');
+            let (added, deleted, file) = (parts.next()?, parts.next()?, parts.next()?);
+            let number = |field: &[u8]| std::str::from_utf8(field).ok()?.parse().ok();
+            let counts = number(added).zip(number(deleted));
+            Some((path_from_bytes(file), counts))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The diff tool `git difftool` would use, if the user has configured one.
+pub fn configured_diff_tool(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "config", "diff.tool"])
+        .output()
+        .ok()?;
+    let tool = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !tool.is_empty()).then_some(tool)
+}
+
 pub fn remote_exists(repo_path: &Path, remote: &str) -> bool {
     Command::new("git")
         .args([
@@ -614,6 +681,30 @@ mod tests {
     fn parses_numstat_totals() {
         let text = "10\t2\tsrc/a.rs\n0\t7\tsrc/b.rs\n-\t-\tbin\n";
         assert_eq!(parse_numstat(text), (3, 10, 9));
+    }
+
+    #[test]
+    fn parses_numstat_per_file() {
+        let text = b"10\t2\tsrc/a.rs\x000\t7\tdir with space/b.rs\x00-\t-\tlogo.png\x00";
+        assert_eq!(
+            parse_numstat_z(text),
+            vec![
+                (PathBuf::from("src/a.rs"), Some((10, 2))),
+                (PathBuf::from("dir with space/b.rs"), Some((0, 7))),
+                (PathBuf::from("logo.png"), None),
+            ]
+        );
+        assert!(parse_numstat_z(b"").is_empty());
+    }
+
+    /// A name that is not UTF-8 comes back byte for byte, so it still matches
+    /// the file the explorer lists.
+    #[cfg(unix)]
+    #[test]
+    fn numstat_paths_keep_their_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let parsed = parse_numstat_z(b"1\t0\tsrc/caf\xe9.rs\x00");
+        assert_eq!(parsed[0].0.as_os_str().as_bytes(), b"src/caf\xe9.rs");
     }
 
     #[test]

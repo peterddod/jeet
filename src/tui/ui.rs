@@ -7,7 +7,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{human_size, Explorer, Overlay};
+use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PrLookup};
+use crate::github::PullRequest;
+use crate::review::JobState;
 use crate::worktrees::WorktreeStatus;
 
 /// The hint row, as segments. It is one non-wrapping line, so what does not
@@ -15,11 +17,13 @@ use crate::worktrees::WorktreeStatus;
 /// ones that replaced keys people knew. So the head and the tail always stay,
 /// and the middle is dropped from the right until the rest fits.
 const HINT_HEAD: &str = "type to filter";
-const HINT_MIDDLE: [&str; 8] = [
+const HINT_MIDDLE: [&str; 10] = [
     "⇥ complete",
     "/ enter",
     "↑↓ move",
     "⏎ open",
+    "^f diff",
+    "^p PR",
     "^w worktrees",
     "^s sessions",
     "^a agent",
@@ -71,7 +75,8 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         ])
         .split(frame.area());
 
-    let path_row = draw_header(frame, chunks[0], explorer);
+    let (path_row, pr_area) = draw_header(frame, chunks[0], explorer);
+    explorer.pr_area = pr_area;
     // Remember where things landed so a click next frame can be mapped back to
     // the row or the path segment under it. A path line the header had no room
     // to draw leaves nothing to click, and the row it would have been on is a
@@ -96,6 +101,8 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
             selected,
             filter,
             list,
+            diffs,
+            root,
             ..
         } = &mut *explorer;
         let rows: Vec<&super::state::FsEntry> =
@@ -109,6 +116,8 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
                 hidden: *hidden,
                 filter,
                 selected: *selected,
+                diffs,
+                root,
             },
             list,
         );
@@ -154,9 +163,10 @@ fn draw_working(frame: &mut Frame, working: &str) {
 }
 
 /// Draw the header, returning the screen row the breadcrumb landed on — or
-/// none when the terminal was too short to keep the path line.
-fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16> {
-    let worktree_line = Line::from(vec![
+/// none when the terminal was too short to keep the path line — and the cells
+/// the PR number was drawn into, when there is one on screen to click.
+fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u16>, Option<Rect>) {
+    let worktree_spans = vec![
         Span::styled("worktree ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             explorer.root_label.clone(),
@@ -180,7 +190,8 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16
             format!(" vs {}", explorer.repo.default_branch),
             Style::default().fg(Color::DarkGray),
         ),
-    ]);
+    ];
+    let worktree_line = Line::from(worktree_spans);
 
     let path_line = Line::from(vec![
         Span::styled("path     ", Style::default().fg(Color::DarkGray)),
@@ -230,15 +241,37 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16
         ])
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            format!(" jeet · {} ", explorer.repo.id),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_alignment(Alignment::Left);
+    let heading = format!(" jeet · {} ", explorer.repo.id);
+    let mut block = Block::default().borders(Borders::ALL).title(Span::styled(
+        heading.clone(),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    ));
+    // The PR goes in the top border, right-aligned, rather than at the end of
+    // the worktree line: that line is the first thing a long branch name
+    // pushes off the edge. Only when both titles fit whole — a PR number
+    // clipped by the repository name is a click target that lies.
+    let mut pr_area = None;
+    let mut pr_title = pr_spans(explorer);
+    if !pr_title.is_empty() {
+        pr_title.insert(0, Span::raw(" "));
+        pr_title.push(Span::raw(" "));
+        let title = Line::from(pr_title);
+        let width = title.width();
+        let border_run = area.width.saturating_sub(2) as usize;
+        if heading.width() + 1 + width <= border_run {
+            let number = title.spans[1].content.width();
+            pr_area = Some(Rect {
+                // Right-aligned inside the top-right corner, past its space.
+                x: area.x + 1 + (border_run - width) as u16 + 1,
+                y: area.y,
+                width: number as u16,
+                height: 1,
+            });
+            block = block.title_top(title.right_aligned());
+        }
+    }
 
     // ratatui shrinks a `Length` constraint on a short terminal, so the header
     // does not always get its three rows. Give them up from the top: the
@@ -255,7 +288,56 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> Option<u16
     let path_row = (dropped <= PATH).then(|| area.y + 1 + (PATH - dropped) as u16);
 
     frame.render_widget(Paragraph::new(rows).block(block), area);
-    path_row
+    (path_row, pr_area)
+}
+
+/// `#123 approved · review running`, or nothing when there is no PR to show.
+/// The first span is the number, which is what a click opens.
+fn pr_spans(explorer: &Explorer) -> Vec<Span<'static>> {
+    let pr = match &explorer.pr {
+        PrLookup::Found(pr) => pr,
+        // Nothing at all while looking or when there is none: a placeholder
+        // that then vanishes is flicker on every launch.
+        _ => return Vec::new(),
+    };
+    let mut spans = vec![Span::styled(
+        format!("#{}", pr.number),
+        Style::default()
+            .fg(pr_color(pr))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )];
+    let state = match (pr.state_label(), pr.decision_label()) {
+        ("open", Some(decision)) => decision.to_string(),
+        ("open", None) => String::new(),
+        (state, _) => state.to_string(),
+    };
+    if !state.is_empty() {
+        spans.push(Span::styled(
+            format!(" {state}"),
+            Style::default().fg(pr_color(pr)),
+        ));
+    }
+    if let Some(job) = &explorer.review_job {
+        let (text, color) = match job.state() {
+            JobState::Running => ("review running", Color::Yellow),
+            JobState::Finished(0) => ("review ready", Color::Green),
+            JobState::Finished(_) => ("review failed", Color::Red),
+            JobState::Lost => ("review stopped", Color::Red),
+        };
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    spans
+}
+
+fn pr_color(pr: &PullRequest) -> Color {
+    match (pr.state_label(), pr.review_decision.as_str()) {
+        ("merged", _) => Color::Magenta,
+        ("closed", _) | ("draft", _) => Color::DarkGray,
+        (_, "APPROVED") => Color::Green,
+        (_, "CHANGES_REQUESTED") => Color::Red,
+        _ => Color::Blue,
+    }
 }
 
 pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
@@ -289,6 +371,46 @@ struct Listing<'a> {
     hidden: usize,
     filter: &'a str,
     selected: usize,
+    diffs: &'a DiffMap,
+    root: &'a std::path::Path,
+}
+
+/// `+12 -3`, as the listing shows it: only the halves that are not zero, and
+/// `bin` for a change that is all binary files.
+pub fn diff_label(count: DiffCount) -> String {
+    let mut parts = Vec::new();
+    if count.added > 0 {
+        parts.push(format!("+{}", count.added));
+    }
+    if count.deleted > 0 {
+        parts.push(format!("-{}", count.deleted));
+    }
+    if parts.is_empty() {
+        // A mode change or an empty file is a change with no lines in it.
+        parts.push(if count.binary > 0 { "bin" } else { "±0" }.to_string());
+    }
+    parts.join(" ")
+}
+
+/// The diff label as coloured spans, right-aligned in `width` columns.
+fn diff_spans(count: Option<DiffCount>, width: usize) -> Vec<Span<'static>> {
+    let Some(count) = count else {
+        return vec![Span::raw(" ".repeat(width))];
+    };
+    let label = diff_label(count);
+    let mut spans = vec![Span::raw(" ".repeat(width.saturating_sub(label.width())))];
+    for (i, part) in label.split(' ').enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let color = match part.chars().next() {
+            Some('+') => Color::Green,
+            Some('-') => Color::Red,
+            _ => Color::DarkGray,
+        };
+        spans.push(Span::styled(part.to_string(), Style::default().fg(color)));
+    }
+    spans
 }
 
 fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mut ListState) {
@@ -298,11 +420,32 @@ fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mu
         hidden,
         filter,
         selected,
+        diffs,
+        root,
     } = listing;
     let width = area.width.saturating_sub(4) as usize;
+    // Sizes and diffs both line up in columns, so each is as wide as its widest
+    // entry on screen; a directory with no changes has no diff column at all.
+    let counts: Vec<Option<DiffCount>> = entries
+        .iter()
+        .map(|entry| diffs.get(root, &entry.path))
+        .collect();
+    let diff_width = counts
+        .iter()
+        .flatten()
+        .map(|c| diff_label(*c).width())
+        .max()
+        .unwrap_or(0);
+    let size_width = entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| human_size(e.size).width())
+        .max()
+        .unwrap_or(0);
     let items: Vec<ListItem> = entries
         .iter()
-        .map(|entry| {
+        .zip(counts)
+        .map(|(entry, count)| {
             let (marker, style) = if entry.is_dir {
                 ("▸ ", Style::default().fg(Color::Cyan))
             } else {
@@ -317,14 +460,23 @@ fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mu
             // Display width, not character count: a CJK name is two columns
             // per character and padding it by count pushes the size off the
             // right edge of the pane.
-            let used = marker.width() + name.width() + size.width();
+            let diff_col = if diff_width > 0 { diff_width + 2 } else { 0 };
+            let used = marker.width() + name.width() + diff_col + size_width;
             let pad = width.saturating_sub(used).max(1);
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(marker, style),
                 Span::styled(name, style),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(size, Style::default().fg(Color::DarkGray)),
-            ]))
+            ];
+            if diff_width > 0 {
+                spans.extend(diff_spans(count, diff_width));
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(
+                format!("{size:>size_width$}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -403,6 +555,12 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                             Style::default().fg(Color::DarkGray),
                         ),
                     ];
+                    if let Some(number) = row.pr {
+                        spans.push(Span::styled(
+                            format!("  #{number}"),
+                            Style::default().fg(Color::Blue),
+                        ));
+                    }
                     if row.entry.missing {
                         spans.push(Span::styled(
                             "  MISSING",
@@ -423,7 +581,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" worktrees · ⏎ switch  n new  e detached  m rename  d delete ")
+                        .title(" worktrees · ⏎ switch  n new  e detached  m rename  d delete  o open PR ")
                         .title_style(Style::default().fg(Color::Green)),
                 )
                 .highlight_style(
@@ -615,6 +773,152 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 area,
             );
         }
+        Overlay::PullRequest {
+            pending,
+            pending_error,
+        } => {
+            let PrLookup::Found(pr) = &explorer.pr else {
+                return;
+            };
+            let dim = Style::default().fg(Color::DarkGray);
+            let label = |text: &str| Span::styled(format!("{text:<9}"), dim);
+            let mut body = vec![
+                Line::from(Span::styled(
+                    pr.title.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    label("state"),
+                    Span::styled(
+                        match pr.decision_label() {
+                            Some(decision) if pr.state == "OPEN" => {
+                                format!("{} · {decision}", pr.state_label())
+                            }
+                            _ => pr.state_label().to_string(),
+                        },
+                        Style::default().fg(pr_color(pr)),
+                    ),
+                ]),
+                Line::from(vec![
+                    label("branch"),
+                    Span::raw(format!("{} → {}", pr.head_ref_name, pr.base_ref_name)),
+                ]),
+                Line::from(vec![label("url"), Span::styled(pr.url.clone(), dim)]),
+                Line::from(vec![
+                    label("pending"),
+                    match (pending, pending_error) {
+                        (Some(review), _) => Span::styled(
+                            format!(
+                                "your unsubmitted review, {} inline comment{} — a verdict submits it",
+                                review.comments,
+                                if review.comments == 1 { "" } else { "s" }
+                            ),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        (None, Some(why)) => {
+                            Span::styled(format!("could not check: {why}"), Style::default().fg(Color::Red))
+                        }
+                        (None, None) => Span::styled("no unsubmitted review", dim),
+                    },
+                ]),
+            ];
+            if let Some(job) = &explorer.review_job {
+                body.push(Line::from(vec![label("review"), Span::raw(job.describe())]));
+            }
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "a approve · c comment · x request changes",
+                Style::default().fg(Color::Yellow),
+            )));
+            let view = if explorer.review_job.is_some() {
+                " · v review output"
+            } else {
+                ""
+            };
+            body.push(Line::from(Span::styled(
+                format!("o open in browser · d view diff{view} · r refresh · esc close"),
+                dim,
+            )));
+            let area = content_rect(76, body.len() + 1, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" pull request #{} ", pr.number))
+                            .title_style(Style::default().fg(Color::Green)),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        Overlay::ReviewBody {
+            verdict,
+            input,
+            pending,
+        } => {
+            let number = match &explorer.pr {
+                PrLookup::Found(pr) => pr.number,
+                _ => return,
+            };
+            let dim = Style::default().fg(Color::DarkGray);
+            let what = match pending {
+                Some(review) => format!(
+                    "submits your pending review and its {} inline comment{}",
+                    review.comments,
+                    if review.comments == 1 { "" } else { "s" }
+                ),
+                None => "posts a new review".to_string(),
+            };
+            let mut body = vec![Line::from(Span::styled(what, dim)), Line::from("")];
+            let typed: Vec<&str> = input.split('\n').collect();
+            let last = typed.len() - 1;
+            for (i, line) in typed.iter().enumerate() {
+                let mut spans = vec![Span::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if i == last {
+                    spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+                }
+                body.push(Line::from(spans));
+            }
+            if input.is_empty() {
+                body.push(Line::from(Span::styled(
+                    match verdict {
+                        crate::github::Verdict::Approve => "(optional) summary comment",
+                        _ => "summary comment",
+                    },
+                    dim,
+                )));
+            }
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "⏎ submit to GitHub · ctrl-j new line · ctrl-u clear · esc back",
+                dim,
+            )));
+            let area = content_rect(70, body.len() + 2, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" {} #{number} ", verdict.label()))
+                            .title_style(Style::default().fg(match verdict {
+                                crate::github::Verdict::Approve => Color::Green,
+                                crate::github::Verdict::Comment => Color::Blue,
+                                crate::github::Verdict::RequestChanges => Color::Red,
+                            })),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
         Overlay::Message {
             title,
             lines,
@@ -647,7 +951,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
 }
 
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 23] = [
+const HELP: [(&str, &str); 25] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -668,6 +972,14 @@ const HELP: [(&str, &str); 23] = [
     ("ctrl-s", "previous agent sessions for this worktree"),
     ("ctrl-w", "worktrees: switch, create, rename or delete"),
     ("", "  in the panel: r refresh, esc close"),
+    (
+        "ctrl-f",
+        "diff the highlighted file or folder against the base",
+    ),
+    (
+        "ctrl-p",
+        "pull request: open it, approve, comment, request changes",
+    ),
     ("ctrl-d", "toggle hidden dotfiles"),
     ("ctrl-r", "refresh the listing and counters"),
     ("ctrl-q", "quit, leaving the shell in this directory"),
@@ -1157,6 +1469,79 @@ mod tests {
             .unwrap();
         assert!(area.width as usize >= widest + 2, "{area:?} clips {widest}");
         assert!(area.height as usize >= HELP.len() + 2, "{area:?}");
+    }
+
+    /// The PR number is clickable exactly where it was drawn, and not at all
+    /// when there is no room to draw it whole.
+    #[test]
+    fn the_pr_click_target_is_where_the_number_is() {
+        use super::super::state::{Explorer, PrLookup};
+        use crate::github::PullRequest;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = crate::db::RepoRecord {
+            id: "github.com/acme/widget".into(),
+            trunk_path: dir.path().to_string_lossy().to_string(),
+            remote_url: String::new(),
+            default_branch: "main".into(),
+            managed: true,
+        };
+        let mut explorer = Explorer::new(
+            repo,
+            dir.path().to_path_buf(),
+            "feature".into(),
+            "worktree".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        explorer.pr = PrLookup::Found(Box::new(PullRequest {
+            number: 1234,
+            title: "t".into(),
+            url: "u".into(),
+            state: "OPEN".into(),
+            is_draft: false,
+            review_decision: "APPROVED".into(),
+            head_ref_name: "feature".into(),
+            head_ref_oid: String::new(),
+            base_ref_name: "main".into(),
+            is_cross_repository: false,
+        }));
+        for width in [120u16, 80, 60, 50, 30] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut explorer)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let top: String = (0..width)
+                .map(|x| buffer[(x, 0)].symbol().to_string())
+                .collect();
+            match explorer.pr_area {
+                Some(area) => {
+                    let drawn: String = (area.x..area.x + area.width)
+                        .map(|x| buffer[(x, area.y)].symbol().to_string())
+                        .collect();
+                    assert_eq!(drawn, "#1234", "width {width}: {top}");
+                    assert!(top.contains("approved"), "{top}");
+                }
+                None => assert!(!top.contains("#1234"), "width {width}: {top}"),
+            }
+        }
+        assert!(explorer.pr_area.is_none(), "30 columns has no room for it");
+    }
+
+    #[test]
+    fn diff_labels_leave_out_the_zero_half() {
+        let count = |added, deleted, binary| DiffCount {
+            added,
+            deleted,
+            binary,
+        };
+        assert_eq!(diff_label(count(12, 3, 0)), "+12 -3");
+        assert_eq!(diff_label(count(12, 0, 0)), "+12");
+        assert_eq!(diff_label(count(0, 3, 1)), "-3");
+        assert_eq!(diff_label(count(0, 0, 2)), "bin");
+        assert_eq!(diff_label(count(0, 0, 0)), "±0");
     }
 
     #[test]

@@ -343,6 +343,66 @@ pub fn create_detached(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Check a pull request out into a worktree of its own, reusing the one that
+/// already has its branch.
+///
+/// A reused worktree is brought up to date with the PR only when it is clean
+/// — it may be the user's own branch with work in it, and a review is not a
+/// reason to touch that.
+pub fn checkout_pr(
+    app: &App,
+    repo: &RepoRecord,
+    pr: &crate::github::PullRequest,
+) -> Result<Outcome> {
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let branch = pr.local_branch();
+
+    if let Some(existing) = list(app, repo)?
+        .into_iter()
+        .find(|e| e.branch.as_deref() == Some(branch.as_str()) && !e.missing)
+    {
+        let mut warnings = Vec::new();
+        match git::status_counts(&existing.path) {
+            Ok((0, _)) => {
+                if let Err(e) = crate::github::checkout(&existing.path, pr.number, &branch) {
+                    warnings.push(format!("could not update {branch} from the PR: {e}"));
+                }
+            }
+            _ => warnings.push(format!(
+                "{branch} has uncommitted changes, so it was not updated from the PR"
+            )),
+        }
+        return Ok(Outcome {
+            path: existing.path,
+            warnings,
+        });
+    }
+
+    let identity = remote::identity_from_id(&repo.id)?;
+    let dest = paths::worktree_path(&app.worktrees_root(), &identity, &branch);
+    if dest.exists() {
+        bail!(
+            "{} already exists but is not a worktree for {branch}",
+            dest.display()
+        );
+    }
+    // Detached first, then `gh pr checkout` inside it: gh knows where a fork's
+    // branch lives and how to track it, and git will not put one branch in two
+    // worktrees, so the branch cannot be created before the worktree exists.
+    let start = resolve_start_point(&trunk, &repo.default_branch)?;
+    git::worktree_add_detached(&trunk, &dest, &start).context("create worktree for the PR")?;
+    if let Err(e) = crate::github::checkout(&dest, pr.number, &branch) {
+        let _ = git::worktree_remove(&trunk, &dest, true);
+        prune_empty_parents(&dest, &[app.worktrees_root()]);
+        return Err(e.context(format!("check out #{} on {branch}", pr.number)));
+    }
+    register(app, repo, &branch, &dest)?;
+    Ok(Outcome {
+        path: dest,
+        warnings: Vec::new(),
+    })
+}
+
 /// Confirm `dest` is a worktree of `trunk` with `branch` checked out.
 fn verify_worktree(trunk: &Path, dest: &Path, branch: &str) -> Result<()> {
     let dest_common = git::git_common_dir(dest).context("not a git worktree")?;
