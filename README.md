@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.3.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.5.0
 ```
 
 ## Quick start
@@ -386,6 +386,18 @@ jeet complete branches acme/widget
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.5
+
+- `jeet review <pr>` checks a pull request out into its own worktree, opens
+  the explorer there, and can start a review command (Claude Code, say) in the
+  background with a desktop notification when it finishes. See
+  [Reviewing](#reviewing).
+- The explorer shows `+added -removed` for every changed file and folder
+  against the default branch, and `ctrl-f` opens the diff in `git difftool`.
+- The worktree's pull request shows in the header (click to open it), and
+  `ctrl-p` approves, comments or requests changes — submitting your pending
+  review, inline comments and all, if you have one. Needs the `gh` CLI.
 
 ## What's new in v0.4
 
