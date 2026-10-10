@@ -85,6 +85,14 @@ pub enum Commands {
         command: TaskCommands,
     },
 
+    /// Record a Claude Code hook event for a task's status (run by the agent)
+    #[command(hide = true)]
+    TaskHook {
+        /// The hook event, e.g. Stop; the hook's JSON arrives on stdin
+        #[arg(default_value = "")]
+        event: String,
+    },
+
     /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
@@ -157,10 +165,14 @@ pub enum TaskCommands {
         archived: bool,
     },
 
-    /// Start the coding agent in a task (prints its directory when not interactive)
+    /// Attach to the task's agent in tmux, starting it if needed (prints the
+    /// task directory instead of attaching when not interactive)
     Open {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
+        /// Resume this agent session instead of the task's latest one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
 
     /// Remove a task's worktrees to free the disk, keeping what restores them

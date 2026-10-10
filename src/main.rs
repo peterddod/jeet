@@ -13,8 +13,11 @@ mod paths;
 mod remote;
 mod resolve;
 mod review;
+mod runtime;
+mod status;
 mod store;
 mod tasks;
+mod tmux;
 mod tui;
 mod worktrees;
 
@@ -112,6 +115,11 @@ fn main() -> Result<()> {
             let app = context::App::open()?;
             commands::sessions::run(&app)?;
         }
+        // Run by Claude on every tool call: quick, silent on stdout, and
+        // never a failure, whatever goes wrong.
+        Commands::TaskHook { event } => {
+            let _ = std::panic::catch_unwind(|| status::run_hook(&event));
+        }
         Commands::Task { command } => {
             let app = context::App::open()?;
             match command {
@@ -124,7 +132,9 @@ fn main() -> Result<()> {
                     commands::task::new(&app, &name, project.as_deref(), &repos, branch.as_deref())?
                 }
                 TaskCommands::Ls { archived } => commands::task::ls(&app, archived)?,
-                TaskCommands::Open { name } => commands::task::open(&app, &name)?,
+                TaskCommands::Open { name, session } => {
+                    commands::task::open(&app, &name, session.as_deref())?
+                }
                 TaskCommands::Archive { name } => commands::task::archive(&app, &name)?,
                 TaskCommands::Unarchive { name } => commands::task::unarchive(&app, &name)?,
                 TaskCommands::Delete { name, force } => commands::task::delete(&app, &name, force)?,

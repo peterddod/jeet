@@ -72,7 +72,8 @@ jeet                                     # open the file explorer there
 # Tasks — a workspace directory per piece of work, worktrees added on demand
 jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fix-login
 jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
-jeet task ls [--archived]
+jeet task ls [--archived]                # with what each task's agent is doing
+jeet task open fix-login                 # the task's agent, in tmux (started if need be)
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
@@ -341,6 +342,30 @@ jeet worktree rm api -f     # removes it anyway
 
 A branch the task created is deleted with its worktree only when its commits are
 on origin or on the default branch; otherwise it is kept, and jeet says so.
+
+### The agent
+
+```bash
+jeet task open fix-login                 # attach to the task's agent, starting it if needed
+jeet task open fix-login --session <id>  # resume that session instead of the latest
+```
+
+Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
+task directory, so it keeps working when you detach (`C-b d`) or close the
+terminal. tmux is required (`brew install tmux`, `apt install tmux`); without
+it `jeet task open` says so. Opening a task attaches to its session, starting
+the agent first if it is not running: Claude Code resumes the task's latest
+session, or starts a new one. Without a terminal, `open` leaves the agent
+running detached and prints the task directory.
+
+jeet starts Claude Code with hooks (passed with `--settings`; nothing is
+written into the task or a repository) that record what the agent is doing in
+`.jeet/status/<session>.json`, and with permission to run `jeet worktree` and
+`jeet ls` without asking. `jeet task ls` shows it: `running – <tool>`,
+`needs input – <question>`, `idle 5m`, or `not running` once the tmux session
+is gone. Tasks are listed most recently active first, counting the agent's
+activity. Another agent (`agent = "aider"`) runs in tmux the same way, with no
+status. Archiving or deleting a task ends its tmux session.
 
 ### Archiving and deleting
 
