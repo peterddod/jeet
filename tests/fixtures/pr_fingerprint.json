@@ -1,0 +1,17 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "headRefOid": "5f13c0ffee",
+        "updatedAt": "2026-10-09T08:00:00Z",
+        "comments": { "totalCount": 3 },
+        "reviewThreads": {
+          "nodes": [
+            { "comments": { "totalCount": 2 } },
+            { "comments": { "totalCount": 1 } }
+          ]
+        }
+      }
+    }
+  }
+}
