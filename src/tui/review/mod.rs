@@ -538,10 +538,17 @@ impl Viewer {
     }
 
     /// A comment, reply, edit, delete or reaction has been answered.
-    fn done(&mut self, job: Job, result: Result<(), String>) -> Option<Job> {
+    fn done(&mut self, job: Job, result: Result<Option<PendingReview>, String>) -> Option<Job> {
         self.busy = None;
         match result {
-            Ok(()) => {
+            Ok(joined) => {
+                // An inline comment may have just started the pending review.
+                // Know it now, not when the refresh lands — which may be after
+                // a verdict is typed, or never if the refresh fails — so the
+                // verdict submits it rather than trying to start another.
+                if let (Some(pending), Load::Ready(review)) = (joined, &mut self.load) {
+                    review.pending = Some(pending);
+                }
                 self.status = job.done_label();
                 self.refresh_quietly()
             }
@@ -640,6 +647,14 @@ impl Viewer {
     /// Check the draft can go, and hand it over to be submitted if so.
     fn submit(&mut self, draft: Draft) -> Option<Job> {
         let pending = self.review().and_then(|r| r.pending.clone());
+        // Without a pending review on screen, a refresh on its way may yet
+        // bring one — after a change of ours, say — and a verdict sent
+        // without it would try to start a second review GitHub refuses.
+        if pending.is_none() && self.refreshing {
+            self.status = "refreshing — submit again once it is done".into();
+            self.draft = Some(draft);
+            return None;
+        }
         if super::needs_body(draft.verdict, &draft.input, pending.is_some()) {
             self.status = format!("{} needs a comment to go with it", draft.verdict.label());
             self.draft = Some(draft);
@@ -1492,7 +1507,7 @@ mod tests {
     fn a_change_that_went_through_refetches_the_review() {
         let mut viewer = loaded_viewer(None);
         viewer.busy = Some("deleting…".into());
-        let next = viewer.done(Job::Delete { comment: 1002 }, Ok(()));
+        let next = viewer.done(Job::Delete { comment: 1002 }, Ok(None));
         assert_eq!(next, Some(Job::Load));
         assert!(viewer.refreshing);
         assert_eq!(viewer.status, "comment deleted");
@@ -1503,7 +1518,7 @@ mod tests {
                     comment: 1001,
                     reaction: Reaction::Eyes
                 },
-                Ok(())
+                Ok(None)
             ),
             Some(Job::Load)
         );
@@ -1514,6 +1529,106 @@ mod tests {
             input: "ok".into(),
         };
         assert_eq!(viewer.submitted(draft, Ok(())), Some(Job::Load));
+    }
+
+    /// A comment on the line under the cursor, as `c` would send it.
+    fn inline_comment() -> Job {
+        Job::Send(Compose {
+            target: Target::Line {
+                path: "src/lib.rs".into(),
+                line: 12,
+                side: github::DiffSide::Right,
+            },
+            text: "nit".into(),
+        })
+    }
+
+    #[test]
+    fn a_verdict_after_an_inline_comment_submits_the_review_it_started() {
+        // No pending review yet: the comment starts one.
+        let mut viewer = loaded_viewer(None);
+        let started = PendingReview {
+            id: 8,
+            node_id: "PRR_new".into(),
+            comments: 1,
+        };
+        viewer.busy = Some("adding your comment…".into());
+        let next = viewer.done(inline_comment(), Ok(Some(started.clone())));
+        assert_eq!(next, Some(Job::Load));
+        assert!(viewer.refreshing);
+        // Approved before the refresh is back: it submits that review,
+        // rather than starting a second one GitHub would refuse.
+        viewer.handle_key(key(KeyCode::Char('A')));
+        let approve = viewer.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            approve,
+            Some(Job::Submit {
+                draft: Draft {
+                    verdict: Verdict::Approve,
+                    input: String::new()
+                },
+                pending: Some(started.clone())
+            })
+        );
+
+        // And a refresh that fails does not lose it.
+        let mut viewer = loaded_viewer(None);
+        viewer.done(inline_comment(), Ok(Some(started.clone())));
+        viewer.loaded(
+            Err("HTTP 502".into()),
+            Err("HTTP 502".into()),
+            Err("HTTP 502".into()),
+            Err("HTTP 502".into()),
+        );
+        assert_eq!(viewer.status, "could not refresh: HTTP 502");
+        // Comment with nothing to add is fine: the review has a comment.
+        viewer.handle_key(key(KeyCode::Char('C')));
+        let comment = viewer.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            comment,
+            Some(Job::Submit {
+                draft: Draft {
+                    verdict: Verdict::Comment,
+                    input: String::new()
+                },
+                pending: Some(started)
+            })
+        );
+    }
+
+    #[test]
+    fn a_verdict_waits_for_a_refresh_that_may_bring_a_pending_review() {
+        let mut viewer = loaded_viewer(None);
+        // The comment went in, but which review it joined is not known yet.
+        viewer.done(inline_comment(), Ok(None));
+        assert!(viewer.refreshing);
+        viewer.handle_key(key(KeyCode::Char('C')));
+        assert_eq!(viewer.handle_key(key(KeyCode::Enter)), None);
+        assert_eq!(viewer.status, "refreshing — submit again once it is done");
+        assert!(viewer.busy.is_none());
+        assert!(viewer.draft.is_some(), "the draft stays to send again");
+        // The refresh brings the pending review; the verdict now submits it.
+        let pending = PendingReview {
+            id: 8,
+            node_id: "PRR_new".into(),
+            comments: 1,
+        };
+        viewer.loaded(
+            Ok(include_str!("../../../tests/fixtures/pr.diff").to_string()),
+            Ok(threads()),
+            Ok(Some(pending.clone())),
+            Ok(print()),
+        );
+        assert_eq!(
+            viewer.handle_key(key(KeyCode::Enter)),
+            Some(Job::Submit {
+                draft: Draft {
+                    verdict: Verdict::Comment,
+                    input: String::new()
+                },
+                pending: Some(pending)
+            })
+        );
     }
 
     #[test]

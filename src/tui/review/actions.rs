@@ -166,10 +166,11 @@ pub enum Msg {
         draft: Draft,
         result: Result<(), String>,
     },
-    /// A comment sent, edited, deleted or reacted to.
+    /// A comment sent, edited, deleted or reacted to. Success carries the
+    /// pending review an inline comment went into, when it says.
     Done {
         job: Job,
-        result: Result<(), String>,
+        result: Result<Option<PendingReview>, String>,
     },
 }
 
@@ -230,8 +231,10 @@ pub fn run(dir: &Path, number: u64, job: Job) -> Msg {
                 Target::Line { path, line, side } => {
                     github::add_inline_comment(dir, number, path, *line, *side, body)
                 }
-                Target::Reply { to, .. } => github::reply(dir, number, *to, body),
-                Target::Edit { comment, .. } => github::edit_comment(dir, *comment, body),
+                Target::Reply { to, .. } => github::reply(dir, number, *to, body).map(|_| None),
+                Target::Edit { comment, .. } => {
+                    github::edit_comment(dir, *comment, body).map(|_| None)
+                }
             };
             Msg::Done {
                 result: worded(result),
@@ -239,11 +242,11 @@ pub fn run(dir: &Path, number: u64, job: Job) -> Msg {
             }
         }
         Job::Delete { comment } => Msg::Done {
-            result: worded(github::delete_comment(dir, comment)),
+            result: worded(github::delete_comment(dir, comment).map(|_| None)),
             job,
         },
         Job::React { comment, reaction } => Msg::Done {
-            result: worded(github::react(dir, comment, reaction)),
+            result: worded(github::react(dir, comment, reaction).map(|_| None)),
             job,
         },
     }
@@ -480,6 +483,7 @@ mod tests {
       case "$arg" in
         */reviews/7/comments\?per_page=100) echo '[[{},{}]]'; exit 0 ;;
         */reviews\?per_page=100) cat "$here/reviews.json"; exit 0 ;;
+        */pulls/42/reviews) echo '{"id":8,"node_id":"PRR_new","state":"PENDING"}'; exit 0 ;;
         query=query*) cat "$here/fingerprint.json"; exit 0 ;;
       esac
     done
@@ -535,7 +539,7 @@ mod tests {
             }
         }
 
-        fn done(msg: Msg) -> Result<(), String> {
+        fn done(msg: Msg) -> Result<Option<PendingReview>, String> {
             match msg {
                 Msg::Done { result, .. } => result,
                 other => panic!("not a change: {other:?}"),
@@ -558,7 +562,15 @@ mod tests {
                 },
                 text: format!("  {body}\n"),
             });
-            assert_eq!(done(gh.run(job)), Ok(()));
+            // The review it joined comes back, one comment fuller.
+            assert_eq!(
+                done(gh.run(job)),
+                Ok(Some(PendingReview {
+                    id: 7,
+                    node_id: "PRR_x".into(),
+                    comments: 3,
+                }))
+            );
             let calls = gh.calls();
             let add = calls.last().unwrap();
             assert_eq!(&add[..2], ["api", "graphql"]);
@@ -581,7 +593,15 @@ mod tests {
                 },
                 text: "why?".into(),
             });
-            assert_eq!(done(gh.run(job)), Ok(()));
+            // The review it started comes back, for a verdict to submit.
+            assert_eq!(
+                done(gh.run(job)),
+                Ok(Some(PendingReview {
+                    id: 8,
+                    node_id: "PRR_new".into(),
+                    comments: 1,
+                }))
+            );
             let calls = gh.calls();
             let create = calls.last().unwrap();
             assert!(has(create, "POST"), "{create:?}");
@@ -604,7 +624,7 @@ mod tests {
                 },
                 text: "Fixed.".into(),
             });
-            assert_eq!(done(gh.run(reply)), Ok(()));
+            assert_eq!(done(gh.run(reply)), Ok(None));
             let edit = Job::Send(Compose {
                 target: Target::Edit {
                     comment: 1002,
@@ -612,13 +632,13 @@ mod tests {
                 },
                 text: "Good catch — fixed in 5f13c0f.".into(),
             });
-            assert_eq!(done(gh.run(edit)), Ok(()));
-            assert_eq!(done(gh.run(Job::Delete { comment: 1002 })), Ok(()));
+            assert_eq!(done(gh.run(edit)), Ok(None));
+            assert_eq!(done(gh.run(Job::Delete { comment: 1002 })), Ok(None));
             let react = Job::React {
                 comment: 1001,
                 reaction: Reaction::ThumbsUp,
             };
-            assert_eq!(done(gh.run(react)), Ok(()));
+            assert_eq!(done(gh.run(react)), Ok(None));
 
             let calls = gh.calls();
             assert_eq!(calls.len(), 4);

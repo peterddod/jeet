@@ -859,6 +859,11 @@ const ADD_THREAD_MUTATION: &str = "mutation($review: ID!, $path: String!, $line:
 /// GitHub allows one pending review per user per PR, so the comment joins
 /// the one there is — an agent's, say — and only starts a new one when there
 /// is none. Either way nothing is published until a verdict submits it.
+///
+/// Returns the pending review the comment went into, so a verdict typed
+/// straight after submits that review rather than trying to start another.
+/// None only when GitHub's reply to a new review did not say which it was:
+/// the comment is in, so that is no reason to report a failure.
 pub fn add_inline_comment(
     repo_dir: &Path,
     number: u64,
@@ -866,7 +871,7 @@ pub fn add_inline_comment(
     line: u32,
     side: DiffSide,
     body: &str,
-) -> Result<()> {
+) -> Result<Option<PendingReview>> {
     match pending_review(repo_dir, number)? {
         Some(review) => gh_ok(
             repo_dir,
@@ -887,7 +892,12 @@ pub fn add_inline_comment(
                 &format!("body={body}"),
             ],
         )
-        .map(|_| ()),
+        .map(|_| {
+            Some(PendingReview {
+                comments: review.comments + 1,
+                ..review
+            })
+        }),
         // A review created without an event stays pending.
         None => gh_ok(
             repo_dir,
@@ -906,8 +916,23 @@ pub fn add_inline_comment(
                 &format!("comments[][body]={body}"),
             ],
         )
-        .map(|_| ()),
+        .map(|text| {
+            let created: NewReview = serde_json::from_str(&text).ok()?;
+            Some(PendingReview {
+                id: created.id,
+                node_id: created.node_id,
+                comments: 1,
+            })
+        }),
     }
+}
+
+/// GitHub's reply to creating a review: the parts a later verdict needs.
+#[derive(Deserialize)]
+struct NewReview {
+    id: u64,
+    #[serde(default)]
+    node_id: String,
 }
 
 /// Seconds since the epoch for an RFC 3339 UTC timestamp, as GitHub writes
