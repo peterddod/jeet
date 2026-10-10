@@ -708,7 +708,11 @@ mod tests {
             .any(|r| r.contains("delete") || r.contains("archive")));
         assert!(!rules.contains(&"jeet worktree".to_string()));
         assert!(rules.contains(&"jeet todo".to_string()));
+        assert!(!rules.iter().any(|r| r.starts_with("jeet pr ")));
         assert_eq!(allowed_commands(&[]).len(), READ_ONLY.len() + OWN.len());
+        // Merging is pre-approved only once allowed.
+        let rules = allowed_commands(&["pr.merge".into()]);
+        assert!(rules.contains(&"jeet pr merge".to_string()));
     }
 
     #[test]
