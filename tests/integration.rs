@@ -7,6 +7,9 @@ fn jeet_bin() -> Command {
     // jeet shells out to git, so the developer's global config would otherwise
     // reach in — commit.gpgsign alone fails most of this suite.
     hermetic_git(&mut cmd);
+    // A background store sync would outlive the test and race its temp dirs;
+    // the tests that want one turn it back on.
+    cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
     cmd
 }
 
@@ -1097,4 +1100,393 @@ fn dry_run_previews_the_same_policy_it_would_apply() {
 
     // ...and an interactive preview reports the interactive policy.
     assert_eq!(verdict(&["worktree", "clean", "--dry-run"]), "remove");
+}
+
+// ---------------------------------------------------------------------------
+// store sync
+// ---------------------------------------------------------------------------
+
+/// A store with real clones whose origins are local bare repos: git rewrites
+/// `https://github.com/` to a directory, so jeet sees GitHub URLs and the
+/// tests never leave the machine.
+struct StoreLab {
+    home: TempDir,
+    origins: TempDir,
+    seeds: TempDir,
+}
+
+impl StoreLab {
+    fn new() -> Self {
+        Self {
+            home: TempDir::new().unwrap(),
+            origins: TempDir::new().unwrap(),
+            seeds: TempDir::new().unwrap(),
+        }
+    }
+
+    /// Point `cmd` at this lab: its home, and its stand-in for GitHub.
+    fn wire<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        let base = format!(
+            "file://{}/",
+            self.origins.path().canonicalize().unwrap().display()
+        );
+        cmd.env("JEET_HOME", self.home.path())
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", format!("url.{base}.insteadOf"))
+            .env("GIT_CONFIG_VALUE_0", "https://github.com/")
+    }
+
+    fn jeet(&self, args: &[&str]) -> std::process::Output {
+        let mut cmd = jeet_bin();
+        self.wire(&mut cmd).args(args).output().unwrap()
+    }
+
+    /// A GitHub-looking origin with one commit on main.
+    fn origin(&self, name: &str) {
+        let bare = self.origins.path().join("acme").join(format!("{name}.git"));
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&["init", "--bare", "-q", "-b", "main"], &bare);
+        let seed = self.seed(name);
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&["init", "-q", "-b", "main"], &seed);
+        git(&["remote", "add", "origin", &bare.to_string_lossy()], &seed);
+        self.commit(name, "init");
+    }
+
+    /// `jeet clone` of `name`, with background syncing set to `interval`.
+    fn clone_with_interval(&self, name: &str, interval: &str) -> std::process::Output {
+        let mut cmd = jeet_bin();
+        let url = format!("https://github.com/acme/{name}.git");
+        self.wire(&mut cmd)
+            .env("JEET_SYNC_INTERVAL_SECS", interval)
+            .args(["clone", &url])
+            .output()
+            .unwrap()
+    }
+
+    /// A new origin, cloned into the store. Returns the store trunk.
+    fn clone_repo(&self, name: &str) -> std::path::PathBuf {
+        self.origin(name);
+        let output = self.clone_with_interval(name, "0");
+        assert!(
+            output.status.success(),
+            "clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.home().join("store/github.com/acme").join(name)
+    }
+
+    fn home(&self) -> std::path::PathBuf {
+        self.home.path().canonicalize().unwrap()
+    }
+
+    fn seed(&self, name: &str) -> std::path::PathBuf {
+        self.seeds.path().join(name)
+    }
+
+    /// Land a commit on origin's main, as if someone else had pushed it.
+    fn commit(&self, name: &str, message: &str) -> String {
+        let seed = self.seed(name);
+        git(&["commit", "-q", "--allow-empty", "-m", message], &seed);
+        git(&["push", "-q", "origin", "main"], &seed);
+        rev(&seed, "HEAD")
+    }
+}
+
+fn rev(dir: &std::path::Path, rev: &str) -> String {
+    let mut cmd = Command::new("git");
+    hermetic_git(&mut cmd);
+    let output = cmd
+        .args(["rev-parse", rev])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "rev-parse {rev} failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn sync_fast_forwards_a_clean_trunk() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let pushed = lab.commit("widget", "upstream work");
+    assert_ne!(rev(&trunk, "HEAD"), pushed);
+
+    let output = lab.jeet(&["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "sync failed: {stderr}");
+    assert!(output.stdout.is_empty(), "sync wrote to stdout");
+    assert!(stderr.contains("fast-forwarded"), "{stderr}");
+    assert_eq!(rev(&trunk, "HEAD"), pushed);
+
+    // Nothing new: says so, and moves nothing.
+    let output = lab.jeet(&["sync", "--repo", "widget"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("up to date"));
+    assert_eq!(rev(&trunk, "HEAD"), pushed);
+}
+
+#[test]
+fn sync_of_one_repo_leaves_the_others() {
+    let lab = StoreLab::new();
+    let widget = lab.clone_repo("widget");
+    let gadget = lab.clone_repo("gadget");
+    let widget_new = lab.commit("widget", "w");
+    let gadget_before = rev(&gadget, "HEAD");
+    lab.commit("gadget", "g");
+
+    let output = lab.jeet(&["sync", "--repo", "acme/widget"]);
+    assert!(output.status.success());
+    assert_eq!(rev(&widget, "HEAD"), widget_new);
+    assert_eq!(rev(&gadget, "HEAD"), gadget_before);
+}
+
+#[test]
+fn sync_fetches_but_never_moves_a_trunk_holding_work() {
+    let lab = StoreLab::new();
+    let dirty = lab.clone_repo("dirty");
+    let elsewhere = lab.clone_repo("elsewhere");
+    let dirty_head = rev(&dirty, "HEAD");
+    std::fs::write(dirty.join("wip.txt"), "unsaved").unwrap();
+    git(&["checkout", "-q", "-b", "stray"], &elsewhere);
+    let elsewhere_head = rev(&elsewhere, "HEAD");
+    let dirty_new = lab.commit("dirty", "d");
+    let elsewhere_new = lab.commit("elsewhere", "e");
+
+    let output = lab.jeet(&["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("uncommitted changes"), "{stderr}");
+    assert!(stderr.contains("on stray, not main"), "{stderr}");
+
+    // Fetched...
+    assert_eq!(rev(&dirty, "origin/main"), dirty_new);
+    assert_eq!(rev(&elsewhere, "origin/main"), elsewhere_new);
+    // ...but left exactly where the user had them.
+    assert_eq!(rev(&dirty, "HEAD"), dirty_head);
+    assert_eq!(
+        std::fs::read_to_string(dirty.join("wip.txt")).unwrap(),
+        "unsaved"
+    );
+    assert_eq!(rev(&elsewhere, "HEAD"), elsewhere_head);
+}
+
+#[test]
+fn sync_reports_a_repo_it_cannot_fetch() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let gone = lab.clone_repo("gone");
+    std::fs::remove_dir_all(lab.origins.path().join("acme/gone.git")).unwrap();
+    let pushed = lab.commit("widget", "w");
+
+    let output = lab.jeet(&["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a failed fetch must fail the sync"
+    );
+    assert!(stderr.contains("acme/gone: sync failed"), "{stderr}");
+    assert!(stderr.contains("1 of 2"), "{stderr}");
+    // One bad repo does not stop the rest.
+    let widget = gone.parent().unwrap().join("widget");
+    assert_eq!(rev(&widget, "HEAD"), pushed);
+}
+
+#[test]
+fn sync_with_an_empty_store_is_fine() {
+    let lab = StoreLab::new();
+    let output = lab.jeet(&["sync"]);
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+/// Wait for a background sync to have run and let go of its lock.
+fn wait_for_background_sync(home: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let log = home.join(".sync.log");
+    loop {
+        let finished = std::fs::read_to_string(&log)
+            .map(|l| l.contains("store sync finished"))
+            .unwrap_or(false);
+        if finished && !home.join(".sync.lock").exists() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background sync never finished; log: {:?}",
+            std::fs::read_to_string(&log)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_network_command_starts_a_background_sync_once_per_interval() {
+    let lab = StoreLab::new();
+    let widget = lab.clone_repo("widget");
+    let pushed = lab.commit("widget", "upstream work");
+    let home = lab.home();
+
+    // Cloning is a network command: with syncing on it kicks a sync off, and
+    // that brings the other trunk up to date without anyone waiting for it.
+    lab.origin("gadget");
+    let output = lab.clone_with_interval("gadget", "300");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("cloned"),
+        "the trigger must not write to stdout"
+    );
+    wait_for_background_sync(&home);
+    assert_eq!(rev(&widget, "HEAD"), pushed);
+    let last = std::fs::read_to_string(home.join(".last-sync")).unwrap();
+
+    // Inside the interval, another network command starts nothing.
+    std::fs::remove_file(home.join(".sync.log")).unwrap();
+    lab.origin("gizmo");
+    let output = lab.clone_with_interval("gizmo", "300");
+    assert!(output.status.success());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        !home.join(".sync.log").exists(),
+        "a second sync was started"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".last-sync")).unwrap(),
+        last
+    );
+}
+
+#[test]
+fn store_sync_steps_aside_for_a_running_sync() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let before = rev(&trunk, "HEAD");
+    lab.commit("widget", "w");
+    let home = lab.home();
+    // Held by a live process: this test's own.
+    std::fs::write(home.join(".sync.lock"), format!("{}\n", std::process::id())).unwrap();
+
+    let output = lab.jeet(&["store-sync"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("another sync is running"));
+    assert_eq!(rev(&trunk, "HEAD"), before);
+    assert!(
+        home.join(".sync.lock").exists(),
+        "someone else's lock was removed"
+    );
+
+    // Once that holder is gone the lock is fair game.
+    std::fs::write(home.join(".sync.lock"), "4294967294\n").unwrap();
+    let output = lab.jeet(&["store-sync"]);
+    assert!(output.status.success());
+    assert_ne!(rev(&trunk, "HEAD"), before);
+    assert!(!home.join(".sync.lock").exists());
+}
+
+#[test]
+fn sync_of_one_repo_waits_for_another_fetch_of_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let before = rev(&trunk, "HEAD");
+    let pushed = lab.commit("widget", "w");
+    let home = lab.home();
+    // Someone — a live process, this test's own — is fetching widget.
+    let lock = home.join(".sync-locks/github.com_acme_widget.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
+
+    let mut cmd = jeet_bin();
+    let mut child = lab
+        .wire(&mut cmd)
+        .args(["sync", "--repo", "widget"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "fetched while another fetch of the repo held its lock"
+    );
+    assert_eq!(rev(&trunk, "HEAD"), before);
+
+    std::fs::remove_file(&lock).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(rev(&trunk, "HEAD"), pushed);
+    assert!(!lock.exists(), "the sync left its repo lock behind");
+}
+
+/// A stand-in `gh` for `jeet review`: `pr view` answers with a same-repo PR
+/// on `feat-x`, and `pr checkout` notes what it found around it — whether a
+/// store sync had been started yet, and which repo fetch locks were held —
+/// before checking the branch out.
+fn fake_gh(dir: &std::path::Path, report: &std::path::Path) {
+    let script = format!(
+        r#"#!/bin/sh
+case "$1 $2" in
+"pr view")
+  echo '{{"number":42,"title":"Feature X","url":"https://github.com/acme/widget/pull/42","state":"OPEN","isDraft":false,"reviewDecision":"","headRefName":"feat-x","headRefOid":"","baseRefName":"main","isCrossRepository":false}}'
+  ;;
+"pr checkout")
+  {{
+    if [ -e "$JEET_HOME/.last-sync" ]; then echo "sync started"; else echo "no sync"; fi
+    ls "$JEET_HOME/.sync-locks"
+  }} > "{}"
+  git checkout -q -b "$5"
+  ;;
+*)
+  echo "fake gh: unexpected $*" >&2
+  exit 1
+  ;;
+esac
+"#,
+        report.display()
+    );
+    let gh = dir.join("gh");
+    std::fs::write(&gh, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn review_checks_out_before_starting_a_store_sync() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let home = lab.home();
+    let bin = TempDir::new().unwrap();
+    let report = bin.path().join("report");
+    fake_gh(bin.path(), &report);
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // A sync is due — none has ever run — so review will start one.
+    let mut cmd = jeet_bin();
+    let output = lab
+        .wire(&mut cmd)
+        .env("PATH", path)
+        .env("JEET_SYNC_INTERVAL_SECS", "300")
+        .args(["review", "42", "--no-command"])
+        .current_dir(&trunk)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "review failed: {stderr}");
+
+    let seen = std::fs::read_to_string(&report).unwrap();
+    assert!(
+        seen.starts_with("no sync"),
+        "a store sync was started before gh fetched the PR: {seen}"
+    );
+    assert!(
+        seen.contains("github.com_acme_widget.lock"),
+        "gh fetched without holding the repo's fetch lock: {seen}"
+    );
+    // The sync still happens, just after.
+    wait_for_background_sync(&home);
+    assert!(!home
+        .join(".sync-locks/github.com_acme_widget.lock")
+        .exists());
 }

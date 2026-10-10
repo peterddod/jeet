@@ -349,6 +349,10 @@ pub fn create_detached(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
 /// A reused worktree is brought up to date with the PR only when it is clean
 /// — it may be the user's own branch with work in it, and a review is not a
 /// reason to touch that.
+///
+/// `gh pr checkout` fetches into the trunk's repository, so it holds the
+/// repo's fetch lock: a store sync fetching the same repo at the same moment
+/// would otherwise fight it for ref locks, and the checkout would fail.
 pub fn checkout_pr(
     app: &App,
     repo: &RepoRecord,
@@ -356,6 +360,7 @@ pub fn checkout_pr(
 ) -> Result<Outcome> {
     let trunk = PathBuf::from(&repo.trunk_path);
     let branch = pr.local_branch();
+    let _fetch = crate::store::lock_repo(&app.home, &repo.id)?;
 
     if let Some(existing) = list(app, repo)?
         .into_iter()

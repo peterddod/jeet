@@ -51,6 +51,10 @@ eval "$(jeet init-shell)"
 # Clone into the canonical store
 jeet clone https://github.com/acme/widget.git
 
+# Fetch every indexed repo now (this also happens on its own; see below)
+jeet sync
+jeet sync --repo acme/widget
+
 # Register an existing local checkout
 jeet adopt ~/Projects/exceed
 
@@ -479,6 +483,22 @@ Both accept arguments (`editor = "code --wait"`) and are overridden by
 A `[review]` section sets what `jeet review` runs in the background — see
 [Reviewing](#reviewing).
 
+### Keeping the store fetched
+
+Commands that go to the network anyway (`jeet clone`, `jeet prs`,
+`jeet review`) and the explorer on launch start a background fetch of every
+indexed repo, at most once every five minutes. A trunk in the store that is
+clean and on its default branch is fast-forwarded to origin; one with local
+changes or another branch checked out is fetched but left alone, and repos
+outside the store are only ever fetched. Its output goes to
+`~/.jeet/.sync.log`. `jeet sync` does the same in the foreground.
+
+```toml
+sync_interval_secs = 300   # 0 turns background syncing off
+```
+
+`JEET_SYNC_INTERVAL_SECS` overrides it.
+
 Override the home directory for testing:
 
 ```bash
@@ -491,6 +511,7 @@ export JEET_HOME=/tmp/jeet-test
 ~/.jeet/
   config.toml
   index.db
+  .last-sync, .sync.lock, .sync.log  # background store sync
   store/
     github.com/acme/widget/          # trunk (default branch)
   worktrees/

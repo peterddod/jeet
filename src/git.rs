@@ -33,13 +33,7 @@ where
         // captured, so a credential prompt would be invisible and would block
         // on a stdin the TUI is already reading. Fail fast with a message the
         // user can actually see instead.
-        cmd.env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_ASKPASS", "")
-            .stdin(Stdio::null());
-        let output = cmd.output().with_context(|| format!("spawn {what}"))?;
-        if !output.status.success() {
-            bail!("{what} failed: {}", first_error_line(&output.stderr));
-        }
+        run_captured(&mut cmd, what)?;
     } else {
         // git progress goes to stderr; keeping its stdout out of ours means
         // `jeet worktree` can still print a path callers can consume.
@@ -50,6 +44,19 @@ where
         if !status.success() {
             bail!("{what} failed with status {status}");
         }
+    }
+    Ok(())
+}
+
+/// Run a git command with no way to prompt and its output captured, failing
+/// with git's own diagnostic.
+fn run_captured(cmd: &mut Command, what: &str) -> Result<()> {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .stdin(Stdio::null());
+    let output = cmd.output().with_context(|| format!("spawn {what}"))?;
+    if !output.status.success() {
+        bail!("{what} failed: {}", first_error_line(&output.stderr));
     }
     Ok(())
 }
@@ -130,6 +137,73 @@ pub fn fetch(repo_path: &Path, remote: &str, branch: &str) -> Result<()> {
         ["-C", &repo_path.to_string_lossy(), "fetch", remote, branch],
         "git fetch",
     )
+}
+
+/// `git fetch origin --prune`, unattended: it may run in the background, or
+/// on several repos at once, where a prompt could neither be seen nor answered.
+///
+/// ssh asks for passphrases and host keys on the terminal itself, past
+/// `GIT_TERMINAL_PROMPT`, so it is put in batch mode too — unless the user
+/// already chose how git runs ssh, which is theirs to keep.
+pub fn fetch_prune(repo_path: &Path) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_path);
+    let ssh_chosen = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || config_value(repo_path, "core.sshCommand").is_some();
+    if !ssh_chosen {
+        cmd.args(["-c", "core.sshCommand=ssh -o BatchMode=yes"]);
+    }
+    cmd.args(["fetch", "--quiet", "--prune", "origin"]);
+    run_captured(&mut cmd, "git fetch")
+}
+
+/// Fast-forward the checked-out branch to `rev`, refusing anything else.
+pub fn merge_ff_only(repo_path: &Path, rev: &str) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo_path)
+        .args(["merge", "--ff-only", "--quiet", rev]);
+    run_captured(&mut cmd, "git merge --ff-only")
+}
+
+/// The commit `rev` names, in full.
+pub fn rev_parse(repo_path: &Path, rev: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+        .output()
+        .ok()?;
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !sha.is_empty()).then_some(sha)
+}
+
+/// Whether `ancestor` is reachable from `descendant`.
+pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn config_value(repo_path: &Path, key: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["config", "--get", key])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !value.is_empty()).then_some(value)
 }
 
 pub fn ref_exists(repo_path: &Path, ref_name: &str) -> Result<bool> {

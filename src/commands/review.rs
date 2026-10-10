@@ -27,6 +27,10 @@ pub fn run(
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
     let checkout = worktrees::checkout_pr(app, &repo, &pr)?;
+    // Only now: a sync started before the checkout would be fetching this
+    // repo just as `gh pr checkout` does. checkout_pr waits out one already
+    // running, but there is no need to start one in its way.
+    crate::store::maybe_sync_background(app);
     for warning in &checkout.warnings {
         eprintln!("jeet: {warning}");
     }

@@ -303,6 +303,10 @@ fn handle_key(app: &App, terminal: &mut Tui, explorer: &mut Explorer, key: KeyEv
     }
 }
 
+// Several arms act and then report only if something happened. Folding that
+// `if` into the arm's guard, as clippy suggests, would let a key that did
+// nothing fall through to the arms below — ctrl-u would type a `u`.
+#[allow(clippy::collapsible_match)]
 fn handle_browse_key(
     app: &App,
     terminal: &mut Tui,
