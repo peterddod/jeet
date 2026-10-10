@@ -1860,14 +1860,14 @@ fn a_task_from_a_project_gets_a_copy_of_its_files() {
     let home = lab.home();
     let project = home.join("projects/web");
     std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
-    std::fs::write(project.join("CLAUDE.md"), "be careful\n").unwrap();
+    std::fs::write(project.join("AGENTS.md"), "be careful\n").unwrap();
     std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy it\n").unwrap();
 
     let output = lab.jeet_at(&["task", "new", "Launch", "--project", "web"], &home, &[]);
     succeeded(&output);
     let task = path_from(&output);
     assert_eq!(
-        std::fs::read_to_string(task.join("CLAUDE.md")).unwrap(),
+        std::fs::read_to_string(task.join("AGENTS.md")).unwrap(),
         "be careful\n"
     );
     assert_eq!(
@@ -1876,9 +1876,9 @@ fn a_task_from_a_project_gets_a_copy_of_its_files() {
     );
     assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
     // A snapshot: editing the project later leaves the task alone.
-    std::fs::write(project.join("CLAUDE.md"), "changed\n").unwrap();
+    std::fs::write(project.join("AGENTS.md"), "changed\n").unwrap();
     assert_eq!(
-        std::fs::read_to_string(task.join("CLAUDE.md")).unwrap(),
+        std::fs::read_to_string(task.join("AGENTS.md")).unwrap(),
         "be careful\n"
     );
 
@@ -1887,6 +1887,52 @@ fn a_task_from_a_project_gets_a_copy_of_its_files() {
         assert!(!output.status.success(), "{bad} was accepted");
     }
     assert!(!home.join("tasks/bad").exists());
+}
+
+#[test]
+fn a_project_from_before_agents_md_is_moved_to_it_when_a_task_is_made() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let project = home.join("projects/web");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("CLAUDE.md"), "be careful\n").unwrap();
+
+    let output = lab.jeet_at(&["projects", "ls"], &home, &[]);
+    assert!(
+        stdout_of(&output).contains("CLAUDE.md"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    let output = lab.jeet_at(&["task", "new", "Launch", "--project", "web"], &home, &[]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("moved the project's CLAUDE.md to AGENTS.md"),
+        "{}",
+        stderr_of(&output)
+    );
+    let read = |path: &std::path::Path| std::fs::read_to_string(path).unwrap();
+    assert_eq!(read(&project.join("AGENTS.md")), "be careful\n");
+    assert_eq!(read(&project.join("CLAUDE.md")), "@AGENTS.md\n");
+    let task = path_from(&output);
+    assert_eq!(read(&task.join("AGENTS.md")), "be careful\n");
+    assert_eq!(read(&task.join("CLAUDE.md")), "@AGENTS.md\n");
+
+    let output = lab.jeet_at(&["projects", "ls"], &home, &[]);
+    assert!(
+        stdout_of(&output).contains("AGENTS.md"),
+        "{}",
+        stdout_of(&output)
+    );
+    // Once only: the next task has nothing to move.
+    let output = lab.jeet_at(&["task", "new", "Again", "--project", "web"], &home, &[]);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("moved"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(read(&project.join("AGENTS.md")), "be careful\n");
 }
 
 /// A stand-in `$EDITOR`: a script that writes `text` to the file it is
@@ -1937,7 +1983,13 @@ fn projects_are_made_listed_edited_and_removed() {
     succeeded(&output);
     let dir = path_from(&output);
     assert_eq!(dir, home.join("projects/web"));
-    assert!(dir.join("CLAUDE.md").is_file());
+    assert!(std::fs::read_to_string(dir.join("AGENTS.md"))
+        .unwrap()
+        .starts_with("# web\n"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
     assert!(dir.join("skills").is_dir());
     let toml = std::fs::read_to_string(dir.join("project.toml")).unwrap();
     assert!(
@@ -1957,7 +2009,7 @@ fn projects_are_made_listed_edited_and_removed() {
         let listing = stdout_of(&output);
         let row = listing.lines().find(|l| l.starts_with("web ")).unwrap();
         assert!(row.contains("widget, acme/gadget"), "{listing}");
-        assert!(row.contains("CLAUDE.md"), "{listing}");
+        assert!(row.contains("AGENTS.md"), "{listing}");
     }
 
     // An edit that parses is accepted…
@@ -2068,6 +2120,7 @@ fn a_task_from_a_project_starts_with_its_repositories() {
         ),
         "feat-l"
     );
+    assert!(task.join("AGENTS.md").is_file());
     assert!(task.join("CLAUDE.md").is_file());
     assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
     let output = lab.jeet_at(&["worktree", "ls"], &task, &[]);
@@ -2122,7 +2175,7 @@ fn resync_updates_what_the_task_left_alone() {
     let project = home.join("projects/web");
     std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
     std::fs::create_dir_all(project.join("skills/old")).unwrap();
-    std::fs::write(project.join("CLAUDE.md"), "v1\n").unwrap();
+    std::fs::write(project.join("AGENTS.md"), "v1\n").unwrap();
     std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy v1\n").unwrap();
     std::fs::write(project.join("skills/old/SKILL.md"), "old\n").unwrap();
 
@@ -2130,9 +2183,9 @@ fn resync_updates_what_the_task_left_alone() {
     succeeded(&output);
     let task = path_from(&output);
 
-    // The agent makes CLAUDE.md its own; the project moves on.
-    std::fs::write(task.join("CLAUDE.md"), "the task's notes\n").unwrap();
-    std::fs::write(project.join("CLAUDE.md"), "v2\n").unwrap();
+    // The agent makes AGENTS.md its own; the project moves on.
+    std::fs::write(task.join("AGENTS.md"), "the task's notes\n").unwrap();
+    std::fs::write(project.join("AGENTS.md"), "v2\n").unwrap();
     std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy v2\n").unwrap();
     std::fs::create_dir_all(project.join("skills/review")).unwrap();
     std::fs::write(project.join("skills/review/SKILL.md"), "review\n").unwrap();
@@ -2144,20 +2197,20 @@ fn resync_updates_what_the_task_left_alone() {
     succeeded(&output);
     assert!(output.stdout.is_empty(), "{}", stdout_of(&output));
     let read = |rel: &str| std::fs::read_to_string(task.join(rel)).unwrap();
-    assert_eq!(read("CLAUDE.md"), "the task's notes\n");
+    assert_eq!(read("AGENTS.md"), "the task's notes\n");
     assert_eq!(read(".claude/skills/deploy/SKILL.md"), "deploy v2\n");
     assert_eq!(read(".claude/skills/review/SKILL.md"), "review\n");
     assert!(!task.join(".claude/skills/old").exists());
     assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
     assert!(
-        stderr_of(&output).contains("CLAUDE.md: changed in the task"),
+        stderr_of(&output).contains("AGENTS.md: changed in the task"),
         "{}",
         stderr_of(&output)
     );
 
     let output = lab.jeet_at(&["task", "resync", "launch", "--force"], &home, &[]);
     succeeded(&output);
-    assert_eq!(read("CLAUDE.md"), "v2\n");
+    assert_eq!(read("AGENTS.md"), "v2\n");
 
     // Only a task made from a project has anything to resync from.
     lab.new_task("Plain");
@@ -4806,6 +4859,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         stderr_of(&output)
     );
     for file in [
+        "AGENTS.md",
         "CLAUDE.md",
         ".claude/skills/jeet-assistant/SKILL.md",
         "notes/worklog.md",
@@ -4856,10 +4910,10 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
 
     // Again: that session is running, so nothing new starts. The user's
     // edits to the home survive.
-    std::fs::write(home.join("CLAUDE.md"), "mine\n").unwrap();
+    std::fs::write(home.join("AGENTS.md"), "mine\n").unwrap();
     succeeded(&lab.jeet_at(&["chat"], &lab.home(), &env));
     assert_eq!(
-        std::fs::read_to_string(home.join("CLAUDE.md")).unwrap(),
+        std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
         "mine\n"
     );
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
@@ -4958,6 +5012,25 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     );
 }
 
+#[test]
+fn an_assistant_home_from_before_agents_md_keeps_the_users_role() {
+    let lab = StoreLab::new();
+    let home = lab.home().join("assistant");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("CLAUDE.md"), "my own role\n").unwrap();
+    // Fails for want of tmux, but sets the home up first.
+    let output = lab.jeet_at(&["chat"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+        "my own role\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("CLAUDE.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn chat_needs_tmux_and_claude() {
@@ -4970,7 +5043,11 @@ fn chat_needs_tmux_and_claude() {
         stderr_of(&output)
     );
     // The home is set up regardless.
-    assert!(lab.home().join("assistant/CLAUDE.md").is_file());
+    assert!(lab.home().join("assistant/AGENTS.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(lab.home().join("assistant/CLAUDE.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
 
     let scratch = TempDir::new().unwrap();
     let tmux = stub_window_tmux(scratch.path());

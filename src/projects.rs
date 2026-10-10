@@ -3,14 +3,19 @@
 //! A project is a directory under `$JEET_HOME/projects/<name>`:
 //! - `project.toml`: the repositories every task made from it starts with a
 //!   worktree of, and extra arguments for the coding agent in those tasks.
-//! - `CLAUDE.md`: instructions for the agent.
+//! - `AGENTS.md`: instructions for the agent, and a `CLAUDE.md` importing
+//!   them for Claude Code (see [`crate::instructions`]).
 //! - `skills/`: Claude Code skills, one directory each.
 //!
-//! A task gets a *copy* of the project's CLAUDE.md and skills — a snapshot,
-//! so editing the project leaves tasks already started alone. What was copied
-//! is recorded in the task's `.jeet/project-files`, with a hash of each file,
-//! so a later [`resync`] can tell a file the task changed (kept) from one it
-//! did not (brought up to date).
+//! A task gets a *copy* of the project's instruction files and skills — a
+//! snapshot, so editing the project leaves tasks already started alone. What
+//! was copied is recorded in the task's `.jeet/project-files`, with a hash of
+//! each file, so a later [`resync`] can tell a file the task changed (kept)
+//! from one it did not (brought up to date).
+//!
+//! A project from before AGENTS.md has only a `CLAUDE.md`; copying from it
+//! first moves that to `AGENTS.md` ([`instructions::migrate`]). Should that
+//! fail, its `CLAUDE.md` is copied as it is.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,10 +25,12 @@ use serde::Deserialize;
 
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
+use crate::instructions::{self, AGENTS_MD, CLAUDE_MD, CLAUDE_SHIM};
 use crate::tasks;
 
 pub const PROJECT_FILE: &str = "project.toml";
-const CLAUDE_MD: &str = "CLAUDE.md";
+/// The instruction files a task gets, as the project has them.
+const INSTRUCTION_FILES: [&str; 2] = [AGENTS_MD, CLAUDE_MD];
 const SKILLS_DIR: &str = "skills";
 
 /// Where a project's skills land in a task.
@@ -60,8 +67,12 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn has_claude_md(&self) -> bool {
-        self.dir.join(CLAUDE_MD).is_file()
+    /// The file holding the agent's instructions: AGENTS.md, or a CLAUDE.md
+    /// not yet moved to it.
+    pub fn instructions_file(&self) -> Option<&'static str> {
+        INSTRUCTION_FILES
+            .into_iter()
+            .find(|name| self.dir.join(name).is_file())
     }
 
     /// Names of the project's skills: the directories under `skills/`.
@@ -79,11 +90,11 @@ impl Project {
         names
     }
 
-    /// `CLAUDE.md, 2 skills` — what a task made from it gets copied.
+    /// `AGENTS.md, 2 skills` — what a task made from it gets copied.
     pub fn contents_summary(&self) -> String {
         let mut parts = Vec::new();
-        if self.has_claude_md() {
-            parts.push(CLAUDE_MD.to_string());
+        if let Some(name) = self.instructions_file() {
+            parts.push(name.to_string());
         }
         match self.skills().len() {
             0 => {}
@@ -185,8 +196,8 @@ pub fn list(app: &App) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Make a project: `project.toml` listing `repos`, a starter CLAUDE.md and an
-/// empty `skills/`. Returns its directory.
+/// Make a project: `project.toml` listing `repos`, a starter AGENTS.md, the
+/// CLAUDE.md importing it, and an empty `skills/`. Returns its directory.
 pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
     check_new_name(name)?;
     if repos.iter().any(|r| r.trim().is_empty()) {
@@ -206,8 +217,9 @@ pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
     let written = std::fs::write(dir.join(PROJECT_FILE), template(repos))
         .context("write project.toml")
         .and_then(|_| {
-            std::fs::write(dir.join(CLAUDE_MD), starter_claude_md(name)).context("write CLAUDE.md")
+            std::fs::write(dir.join(AGENTS_MD), starter_agents_md(name)).context("write AGENTS.md")
         })
+        .and_then(|_| std::fs::write(dir.join(CLAUDE_MD), CLAUDE_SHIM).context("write CLAUDE.md"))
         .and_then(|_| std::fs::create_dir(dir.join(SKILLS_DIR)).context("create skills/"));
     if let Err(e) = written {
         let _ = std::fs::remove_dir_all(&dir);
@@ -235,11 +247,12 @@ fn template(repos: &[String]) -> String {
     )
 }
 
-fn starter_claude_md(name: &str) -> String {
+fn starter_agents_md(name: &str) -> String {
     format!(
         "# {name}\n\n\
          Instructions for the coding agent in every task made from the {name} project.\n\
-         jeet copies this file, and the skills next to it, into each new task.\n"
+         jeet copies this file, and the skills next to it, into each new task.\n\
+         CLAUDE.md only imports this file, for Claude Code.\n"
     )
 }
 
@@ -293,17 +306,26 @@ pub struct FileSync {
     pub kept: Vec<String>,
     /// In the project, but never copied; each with the reason.
     pub skipped: Vec<String>,
+    /// What happened to the project itself: a CLAUDE.md moved to AGENTS.md.
+    pub migrated: Vec<String>,
 }
 
 impl FileSync {
-    /// Lines worth telling the user: what was kept back and why.
+    /// Lines worth telling the user: a move to AGENTS.md, and what was kept
+    /// back and why.
     pub fn notes(&self) -> Vec<String> {
-        self.kept.iter().chain(&self.skipped).cloned().collect()
+        self.migrated
+            .iter()
+            .chain(&self.kept)
+            .chain(&self.skipped)
+            .cloned()
+            .collect()
     }
 }
 
-/// Copy the project's CLAUDE.md and skills into a task directory, recording
-/// what was copied.
+/// Copy the project's instruction files and skills into a task directory,
+/// recording what was copied. A project with only a CLAUDE.md has it moved
+/// to AGENTS.md first.
 ///
 /// A file the task has changed since it was last copied is kept as the task
 /// has it, unless `force`. Likewise a file the project no longer has is
@@ -311,6 +333,15 @@ impl FileSync {
 /// record — the task made it, or predates the record — counts as changed.
 pub fn copy_files(project: &Project, task_dir: &Path, force: bool) -> Result<FileSync> {
     let mut sync = FileSync::default();
+    match instructions::migrate(&project.dir) {
+        Ok(true) => sync.migrated.push(format!(
+            "moved the project's {CLAUDE_MD} to {AGENTS_MD}; its {CLAUDE_MD} now imports it"
+        )),
+        Ok(false) => {}
+        Err(e) => sync.migrated.push(format!(
+            "could not move the project's {CLAUDE_MD} to {AGENTS_MD} ({e:#}); copied it as it is"
+        )),
+    }
     let wanted = project_files(&project.dir, &mut sync.skipped)?;
     let before = read_manifest(task_dir);
     let mut after: BTreeMap<String, u64> = BTreeMap::new();
@@ -413,13 +444,15 @@ pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
 /// skill named like the built-in one.
 fn project_files(project: &Path, skipped: &mut Vec<String>) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    let claude_md = project.join(CLAUDE_MD);
-    match std::fs::symlink_metadata(&claude_md) {
-        Ok(meta) if meta.is_file() => {
-            out.insert(CLAUDE_MD.to_string(), claude_md);
+    for name in INSTRUCTION_FILES {
+        let path = project.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                out.insert(name.to_string(), path);
+            }
+            Ok(_) => skipped.push(format!("{name}: not a plain file; not copied")),
+            Err(_) => {}
         }
-        Ok(_) => skipped.push(format!("{CLAUDE_MD}: not a plain file; not copied")),
-        Err(_) => {}
     }
 
     let skills = project.join(SKILLS_DIR);
@@ -483,7 +516,7 @@ fn manifest_path(rel: &Path) -> Option<String> {
 fn is_project_path(rel: &str) -> bool {
     let plain = manifest_path(Path::new(rel)).as_deref() == Some(rel);
     plain
-        && (rel == CLAUDE_MD
+        && (INSTRUCTION_FILES.contains(&rel)
             || rel
                 .strip_prefix(TASK_SKILLS)
                 .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/')))
@@ -629,7 +662,8 @@ mod tests {
     #[test]
     fn manifests_round_trip_and_ignore_entries_outside_the_task_files() {
         let mut entries = BTreeMap::new();
-        entries.insert("CLAUDE.md".to_string(), 1);
+        entries.insert("AGENTS.md".to_string(), 1);
+        entries.insert("CLAUDE.md".to_string(), 2);
         entries.insert(".claude/skills/deploy/SKILL.md".to_string(), u64::MAX);
         assert_eq!(parse_manifest(&render_manifest(&entries)), entries);
 
@@ -652,10 +686,11 @@ mod tests {
     }
 
     #[test]
-    fn copying_takes_claude_md_and_skills_but_not_the_reserved_skill() {
+    fn copying_takes_the_instructions_and_skills_but_not_the_reserved_skill() {
         let project = tempfile::tempdir().unwrap();
         let task = tempfile::tempdir().unwrap();
-        write(&project.path().join("CLAUDE.md"), "rules\n");
+        write(&project.path().join("AGENTS.md"), "rules\n");
+        write(&project.path().join("CLAUDE.md"), CLAUDE_SHIM);
         write(&project.path().join("skills/deploy/SKILL.md"), "deploy\n");
         write(
             &project.path().join("skills/deploy/ref/notes.md"),
@@ -670,6 +705,7 @@ mod tests {
             [
                 ".claude/skills/deploy/SKILL.md",
                 ".claude/skills/deploy/ref/notes.md",
+                "AGENTS.md",
                 "CLAUDE.md"
             ]
         );
@@ -677,7 +713,8 @@ mod tests {
         assert_eq!(sync.skipped.len(), 1, "{:?}", sync.skipped);
         assert!(!task.path().join(".claude/skills/jeet").exists());
         assert!(!task.path().join("project.toml").exists());
-        assert_eq!(read(&task.path().join("CLAUDE.md")), "rules\n");
+        assert_eq!(read(&task.path().join("AGENTS.md")), "rules\n");
+        assert_eq!(read(&task.path().join("CLAUDE.md")), CLAUDE_SHIM);
 
         // Nothing changed: nothing to do.
         let again = copy_files(&project_at(project.path()), task.path(), false).unwrap();
@@ -696,7 +733,7 @@ mod tests {
         let task = tempfile::tempdir().unwrap();
         let p = project.path();
         let t = task.path();
-        write(&p.join("CLAUDE.md"), "v1\n");
+        write(&p.join("AGENTS.md"), "v1\n");
         write(&p.join("skills/a/SKILL.md"), "a1\n");
         write(&p.join("skills/b/SKILL.md"), "b1\n");
         write(&p.join("skills/gone/SKILL.md"), "g1\n");
@@ -704,10 +741,10 @@ mod tests {
         copy_files(&project_at(p), t, false).unwrap();
 
         // The task edits some copies…
-        write(&t.join("CLAUDE.md"), "the task's own\n");
+        write(&t.join("AGENTS.md"), "the task's own\n");
         write(&t.join(".claude/skills/edited-gone/SKILL.md"), "mine\n");
         // …and the project moves on.
-        write(&p.join("CLAUDE.md"), "v2\n");
+        write(&p.join("AGENTS.md"), "v2\n");
         write(&p.join("skills/a/SKILL.md"), "a2\n");
         write(&p.join("skills/new/SKILL.md"), "n1\n");
         std::fs::remove_dir_all(p.join("skills/gone")).unwrap();
@@ -720,7 +757,7 @@ mod tests {
         );
         assert_eq!(sync.removed, [".claude/skills/gone/SKILL.md"]);
         assert_eq!(sync.kept.len(), 2, "{:?}", sync.kept);
-        assert_eq!(read(&t.join("CLAUDE.md")), "the task's own\n");
+        assert_eq!(read(&t.join("AGENTS.md")), "the task's own\n");
         assert_eq!(read(&t.join(".claude/skills/a/SKILL.md")), "a2\n");
         assert_eq!(read(&t.join(".claude/skills/b/SKILL.md")), "b1\n");
         assert!(!t.join(".claude/skills/gone").exists());
@@ -731,10 +768,10 @@ mod tests {
 
         // Still the task's on the next resync, until it is forced.
         let sync = copy_files(&project_at(p), t, false).unwrap();
-        assert!(sync.kept.iter().any(|k| k.starts_with("CLAUDE.md")));
+        assert!(sync.kept.iter().any(|k| k.starts_with("AGENTS.md")));
         let sync = copy_files(&project_at(p), t, true).unwrap();
-        assert_eq!(sync.written, ["CLAUDE.md"]);
-        assert_eq!(read(&t.join("CLAUDE.md")), "v2\n");
+        assert_eq!(sync.written, ["AGENTS.md"]);
+        assert_eq!(read(&t.join("AGENTS.md")), "v2\n");
         // edited-gone was dropped from the record when kept: the task owns it.
         assert!(t.join(".claude/skills/edited-gone/SKILL.md").exists());
     }
@@ -743,13 +780,13 @@ mod tests {
     fn a_file_the_task_had_before_any_record_is_never_overwritten() {
         let project = tempfile::tempdir().unwrap();
         let task = tempfile::tempdir().unwrap();
-        write(&project.path().join("CLAUDE.md"), "project\n");
-        write(&task.path().join("CLAUDE.md"), "already here\n");
+        write(&project.path().join("AGENTS.md"), "project\n");
+        write(&task.path().join("AGENTS.md"), "already here\n");
 
         let sync = copy_files(&project_at(project.path()), task.path(), false).unwrap();
         assert!(sync.written.is_empty());
         assert_eq!(sync.kept.len(), 1);
-        assert_eq!(read(&task.path().join("CLAUDE.md")), "already here\n");
+        assert_eq!(read(&task.path().join("AGENTS.md")), "already here\n");
     }
 
     #[cfg(unix)]
@@ -778,11 +815,84 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = project_at(dir.path());
         assert_eq!(project.contents_summary(), "-");
+        // A project from before AGENTS.md, until it is moved.
         write(&dir.path().join("CLAUDE.md"), "x");
         write(&dir.path().join("skills/a/SKILL.md"), "x");
         assert_eq!(project.contents_summary(), "CLAUDE.md, 1 skill");
+        write(&dir.path().join("AGENTS.md"), "x");
         write(&dir.path().join("skills/b/SKILL.md"), "x");
         assert_eq!(project.skills(), ["a", "b"]);
-        assert_eq!(project.contents_summary(), "CLAUDE.md, 2 skills");
+        assert_eq!(project.contents_summary(), "AGENTS.md, 2 skills");
+    }
+
+    #[test]
+    fn a_project_with_only_claude_md_is_moved_to_agents_md_and_its_tasks_follow() {
+        let project = tempfile::tempdir().unwrap();
+        let p = project.path();
+        write(&p.join("CLAUDE.md"), "v1\n");
+        // Tasks copied from it before AGENTS.md: one untouched, one edited.
+        let tasks = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        for task in &tasks {
+            write(&task.path().join("CLAUDE.md"), "v1\n");
+            let mut record = BTreeMap::new();
+            record.insert("CLAUDE.md".to_string(), fnv1a(b"v1\n"));
+            write_manifest(task.path(), &record).unwrap();
+        }
+        let (untouched, edited) = (tasks[0].path(), tasks[1].path());
+        write(&edited.join("CLAUDE.md"), "the task's own\n");
+
+        let sync = copy_files(&project_at(p), untouched, false).unwrap();
+        assert_eq!(read(&p.join("AGENTS.md")), "v1\n");
+        assert_eq!(read(&p.join("CLAUDE.md")), CLAUDE_SHIM);
+        assert_eq!(sync.migrated.len(), 1, "{:?}", sync.migrated);
+        assert!(sync.notes().iter().any(|n| n.contains("moved")));
+        assert_eq!(sync.written, ["AGENTS.md", "CLAUDE.md"]);
+        assert_eq!(read(&untouched.join("AGENTS.md")), "v1\n");
+        assert_eq!(read(&untouched.join("CLAUDE.md")), CLAUDE_SHIM);
+
+        // Moved once: the next task finds nothing to move, and keeps its edit.
+        let sync = copy_files(&project_at(p), edited, false).unwrap();
+        assert!(sync.migrated.is_empty());
+        assert_eq!(sync.written, ["AGENTS.md"]);
+        assert_eq!(read(&edited.join("CLAUDE.md")), "the task's own\n");
+        assert!(sync.kept.iter().any(|k| k.starts_with("CLAUDE.md")));
+    }
+
+    #[test]
+    fn a_project_with_both_files_keeps_both_as_they_are() {
+        let project = tempfile::tempdir().unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let p = project.path();
+        write(&p.join("AGENTS.md"), "everyone\n");
+        write(&p.join("CLAUDE.md"), "@AGENTS.md\n\nclaude only\n");
+        let sync = copy_files(&project_at(p), task.path(), false).unwrap();
+        assert!(sync.migrated.is_empty());
+        assert_eq!(read(&p.join("CLAUDE.md")), "@AGENTS.md\n\nclaude only\n");
+        assert_eq!(
+            read(&task.path().join("CLAUDE.md")),
+            "@AGENTS.md\n\nclaude only\n"
+        );
+        assert_eq!(read(&task.path().join("AGENTS.md")), "everyone\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_md_that_cannot_be_moved_is_copied_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let p = project.path();
+        write(&p.join("CLAUDE.md"), "rules\n");
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let sync = copy_files(&project_at(p), task.path(), false);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sync = sync.unwrap();
+        if p.join("AGENTS.md").exists() {
+            return; // Run as root: permissions do not stop it.
+        }
+        assert!(sync.migrated[0].starts_with("could not move"), "{sync:?}");
+        assert_eq!(read(&p.join("CLAUDE.md")), "rules\n");
+        assert_eq!(sync.written, ["CLAUDE.md"]);
+        assert_eq!(read(&task.path().join("CLAUDE.md")), "rules\n");
     }
 }

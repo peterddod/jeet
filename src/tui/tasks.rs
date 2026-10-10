@@ -454,7 +454,7 @@ pub struct WorktreeLine {
 pub struct ProjectLine {
     pub name: String,
     pub tasks: usize,
-    /// `CLAUDE.md, 2 skills`, or why the project cannot be read.
+    /// `AGENTS.md, 2 skills`, or why the project cannot be read.
     pub contents: String,
     pub repos: String,
 }
