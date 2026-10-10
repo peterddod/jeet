@@ -2503,9 +2503,23 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         [
             "set-option",
             "-t",
-            "=jeet-fix-login",
+            "=jeet-fix-login:",
             "status-right",
-            " C-b d → jeet "
+            " Ctrl-Q → back to jeet (keeps running) "
+        ]
+    );
+    // Ctrl-Q detaches from jeet's sessions and is passed on in any other.
+    assert_eq!(
+        calls_of(&tmux, "bind-key")[0],
+        [
+            "bind-key",
+            "-n",
+            "C-q",
+            "if-shell",
+            "-F",
+            "#{m:jeet-*,#{session_name}}",
+            "detach-client",
+            "send-keys C-q"
         ]
     );
 

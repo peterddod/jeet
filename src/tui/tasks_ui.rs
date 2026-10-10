@@ -23,7 +23,10 @@ use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
 pub const HELP: [(&str, &str); 28] = [
-    ("⏎", "open the task's agent in tmux (C-b d comes back here)"),
+    (
+        "⏎",
+        "open the task's agent in tmux (Ctrl-Q comes back here, leaving it running)",
+    ),
     ("e", "explore the task: its canvas or one of its worktrees"),
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),
     (
@@ -45,7 +48,7 @@ pub const HELP: [(&str, &str); 28] = [
     ("", ""),
     (
         "c",
-        "talk to the assistant: its latest session (C-b d comes back)",
+        "talk to the assistant: its latest session (Ctrl-Q comes back)",
     ),
     (
         "C",

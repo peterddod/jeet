@@ -33,7 +33,7 @@ const HOOK_TIMEOUT_SECS: u64 = 10;
 
 /// The task's tmux session.
 pub fn session_name(task: &TaskRecord) -> String {
-    format!("jeet-{}", task.slug)
+    format!("{}{}", crate::tmux::SESSION_PREFIX, task.slug)
 }
 
 /// The outcome of [`ensure_running`].
