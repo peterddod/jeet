@@ -16,7 +16,7 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::config::AssistantConfig;
 use crate::context::App;
-use crate::db::tasks::{TaskRecord, TaskSessionRecord};
+use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::permissions;
 use crate::projects;
 use crate::status::{self, Activity, HOOK_EVENTS};
@@ -54,6 +54,9 @@ pub fn ensure_running(
     session: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<Running> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant's sessions are opened with `jeet chat`");
+    }
     tmux::require()?;
     let name = session_name(task);
     let mut warnings = Vec::new();
@@ -200,7 +203,7 @@ fn pick_session(
 
 /// The task's most recently active session, by what the index recorded and
 /// what its hooks reported since.
-fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String> {
+pub fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String> {
     known
         .iter()
         .max_by_key(|s| {
@@ -240,7 +243,6 @@ pub fn settings_json<S: AsRef<str>>(exe: &Path, allow: &[S]) -> String {
 /// The `--settings` JSON for the assistant: jeet's hooks, and permission to
 /// run the read-only jeet commands and those of each capability
 /// `[assistant] allow` lists, so allowed actions do not prompt.
-#[allow(dead_code)] // for launching the assistant's own session
 pub fn assistant_settings_json(exe: &Path, settings: &AssistantConfig) -> String {
     settings_json(exe, &permissions::bash_allow(&settings.allow))
 }

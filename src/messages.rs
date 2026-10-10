@@ -197,6 +197,11 @@ pub trait Agent {
     /// Start it with `prompt` as its first; false when it turned out to be
     /// running already, and nothing was started.
     fn start(&self, prompt: &str) -> Result<bool>;
+    /// What its hooks last said, from the task in `task_dir`: the task's
+    /// latest status, unless it is one of several sessions there.
+    fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
+        status::current_status(task_dir)
+    }
 }
 
 /// What became of a message.
@@ -235,7 +240,7 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     // Held until it is delivered: the Stop hook cannot take the queue and go
     // idle between the status being read and the message being queued.
     let inbox = Inbox::lock(task_dir)?;
-    let activity = status::activity(status::current_status(task_dir).as_ref(), agent.alive());
+    let activity = status::activity(agent.status(task_dir).as_ref(), agent.alive());
     let route = route(&activity, agent.has_hooks());
     if route == Route::Queue {
         inbox.push(&message)?;

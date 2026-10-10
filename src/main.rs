@@ -1,4 +1,5 @@
 mod agent;
+mod assistant;
 mod cd;
 mod cli;
 
@@ -23,6 +24,7 @@ mod status;
 mod store;
 mod tasks;
 mod tmux;
+mod todo;
 mod tui;
 mod worktrees;
 
@@ -30,7 +32,9 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
-use cli::{Cli, Commands, ProjectCommands, TaskCommands, WorktreeArgs, WorktreeCommands};
+use cli::{
+    Cli, Commands, ProjectCommands, TaskCommands, TodoCommands, WorktreeArgs, WorktreeCommands,
+};
 
 fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
@@ -87,6 +91,26 @@ fn run(command: Option<Commands>) -> Result<()> {
         Commands::Tasks => {
             let app = context::App::open()?;
             commands::tasks::run(&app)?;
+        }
+        Commands::Chat { new, pick } => {
+            let app = context::App::open()?;
+            commands::chat::run(&app, new, pick)?;
+        }
+        Commands::Todo { command } => {
+            let app = context::App::open()?;
+            match command.unwrap_or(TodoCommands::Ls { json: false }) {
+                TodoCommands::Ls { json } => commands::todo::ls(&app, json)?,
+                TodoCommands::Add {
+                    text,
+                    priority,
+                    tasks,
+                    json,
+                } => commands::todo::add(&app, &text, priority, &tasks, json)?,
+                TodoCommands::Done { ids, undo, json } => {
+                    commands::todo::done(&app, &ids, undo, json)?
+                }
+                TodoCommands::Rm { ids, json } => commands::todo::rm(&app, &ids, json)?,
+            }
         }
         Commands::Explore => {
             let app = context::App::open()?;

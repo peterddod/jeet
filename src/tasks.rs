@@ -73,8 +73,17 @@ worktrees inside this directory.
   `jeet worktree add` over running `git worktree add` yourself.
 "#;
 
+/// A task's directory; the assistant's is its home, outside `tasks/`.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
-    app.tasks_root().join(&task.slug)
+    match task.kind {
+        TaskKind::Assistant => crate::config::assistant_dir(&app.home),
+        TaskKind::Work | TaskKind::Review => app.tasks_root().join(&task.slug),
+    }
+}
+
+/// The file marking `dir` as the directory of the task whose id it holds.
+pub fn marker_path(dir: &Path) -> PathBuf {
+    dir.join(MARKER_DIR).join(MARKER_FILE)
 }
 
 pub fn worktree_dir(app: &App, task: &TaskRecord, dir_name: &str) -> PathBuf {
@@ -110,7 +119,12 @@ fn unique_slug(app: &App, base: &str) -> Result<String> {
     let mut n = 1;
     loop {
         let candidate = numbered(base, n);
-        if app.db.get_task_by_slug(&candidate)?.is_none() && !root.join(&candidate).exists() {
+        // Kept for the assistant, whose tmux session is `jeet-assistant`.
+        let reserved = candidate == crate::assistant::SLUG;
+        if !reserved
+            && app.db.get_task_by_slug(&candidate)?.is_none()
+            && !root.join(&candidate).exists()
+        {
             return Ok(candidate);
         }
         n += 1;
@@ -224,10 +238,7 @@ fn make_task(
 /// The marker, the project's files and the jeet skill. Returns notes on
 /// project files that were not copied.
 fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
-    let marker = dir.join(MARKER_DIR);
-    std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
-    std::fs::write(marker.join(MARKER_FILE), format!("{}\n", task.id))
-        .context("write the task marker")?;
+    write_marker(dir, &task.id)?;
     let notes = match project {
         Some(project) => projects::copy_files(project, dir, false)?
             .notes()
@@ -239,6 +250,13 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
     // Last, so nothing of the project's can shadow it.
     install_skill(dir)?;
     Ok(notes)
+}
+
+/// Mark `dir` as task `id`'s directory.
+pub fn write_marker(dir: &Path, id: &str) -> Result<()> {
+    let marker = dir.join(MARKER_DIR);
+    std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
+    std::fs::write(marker.join(MARKER_FILE), format!("{id}\n")).context("write the task marker")
 }
 
 /// Write the built-in jeet skill into a task directory.
@@ -262,10 +280,12 @@ pub fn find_exact(app: &App, key: &str) -> Result<TaskRecord> {
 
 fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     let key = key.trim();
-    if let Some(task) = app.db.get_task_by_slug(key)? {
+    // The assistant is no task to open, archive or delete by name.
+    let listed = |task: &TaskRecord| task.kind != TaskKind::Assistant;
+    if let Some(task) = app.db.get_task_by_slug(key)?.filter(listed) {
         return Ok(task);
     }
-    if let Some(task) = app.db.get_task(key)? {
+    if let Some(task) = app.db.get_task(key)?.filter(listed) {
         return Ok(task);
     }
     let tasks = app.db.list_tasks(None)?;
@@ -310,12 +330,21 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
         .filter(|v| !v.trim().is_empty())
     {
         let id = id.trim();
-        return app.db.get_task(id)?.ok_or_else(|| {
-            anyhow::anyhow!("${TASK_ID_ENV} is {id}, which is no task jeet knows; was it deleted?")
-        });
+        return match app.db.get_task(id)? {
+            Some(task) if task.kind == TaskKind::Assistant => bail!(
+                "the assistant's home is no task to work in; pick one with --task <name> \
+                 (`jeet task ls` lists them)"
+            ),
+            Some(task) => Ok(task),
+            None => bail!("${TASK_ID_ENV} is {id}, which is no task jeet knows; was it deleted?"),
+        };
     }
     let cwd = std::env::current_dir().context("get cwd")?;
     match task_at(app, &cwd)? {
+        Some(task) if task.kind == TaskKind::Assistant => bail!(
+            "the assistant's home is no task to work in; pick one with --task <name> \
+             (`jeet task ls` lists them)"
+        ),
         Some(task) => Ok(task),
         None => bail!(
             "not inside a task: run this from a task's directory, or pick one with --task <name> \
@@ -391,6 +420,9 @@ pub fn add_worktree(
     branch: Option<&str>,
     name: Option<&str>,
 ) -> Result<AddedWorktree> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant keeps no worktrees; add them to a task with --task <name>");
+    }
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
@@ -1122,6 +1154,9 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant cannot be archived");
+    }
     runtime::refuse_inside_session(task, "archive")?;
     let mut warnings = Vec::new();
     // The agent goes first, and is gone before anything is saved: it works
@@ -1591,6 +1626,10 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// The rows go last, so a failure part-way leaves a task that can be deleted
 /// again.
 pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    // Its directory is the assistant's home: its notes, its todo list.
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant cannot be deleted");
+    }
     if task.slug.is_empty() || task.slug.starts_with('.') || task.slug.contains(['/', '\\']) {
         bail!(
             "refusing to delete a task whose directory name is {:?}",

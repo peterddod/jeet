@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod clone;
 pub mod completions;
 pub mod exec;
@@ -14,4 +15,5 @@ pub mod shell;
 pub mod sync;
 pub mod task;
 pub mod tasks;
+pub mod todo;
 pub mod worktree;

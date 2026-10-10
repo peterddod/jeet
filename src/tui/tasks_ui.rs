@@ -339,7 +339,7 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
     ];
     let name = match row.task.kind {
         TaskKind::Review => format!("{} (review)", row.task.name),
-        TaskKind::Work => row.task.name.clone(),
+        TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
     spans.push(Span::styled(
         cell(&name, columns.name),

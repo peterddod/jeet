@@ -8,6 +8,7 @@ use std::io::{IsTerminal, Write};
 use anyhow::{bail, Result};
 
 use crate::agent::{self, AgentSpec};
+use crate::assistant;
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
@@ -74,8 +75,12 @@ pub fn new(
 }
 
 /// Get a message to the task's agent, however it is doing; see
-/// [`messages`].
+/// [`messages`]. `assistant` is the assistant, whose message goes to the
+/// session [`assistant::target`] picks.
 pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
+    if name.trim() == assistant::SLUG {
+        return send_to_assistant(app, message);
+    }
     let task = tasks::find(app, name)?;
     if task.state == TaskState::Archived {
         bail!(
@@ -98,6 +103,23 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             "jeet: started {}'s agent with the message in tmux session {}",
             task.name,
             runtime::session_name(&task)
+        ),
+    }
+    Ok(())
+}
+
+fn send_to_assistant(app: &App, message: &str) -> Result<()> {
+    let (delivered, session) = assistant::send(app, message)?;
+    let session = session.map(|name| printable(&name)).unwrap_or_default();
+    match delivered {
+        Delivered::Typed => eprintln!("jeet: sent to the assistant's session {session}"),
+        Delivered::Queued => eprintln!(
+            "jeet: the assistant is busy or waiting on you, so the message is queued; it gets \
+             it when it finishes or sits idle"
+        ),
+        Delivered::Started => eprintln!(
+            "jeet: started a session of the assistant's with the message in tmux session {}",
+            assistant::TMUX_SESSION
         ),
     }
     Ok(())

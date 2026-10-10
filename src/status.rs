@@ -10,11 +10,12 @@
 //! must never print to stdout — Claude would read it as hook output — and
 //! always exits 0: a broken status line must never get in the agent's way.
 //!
-//! The one exception: a Stop hook that finds messages queued for the agent
-//! by `jeet task send` prints Claude's `block` decision with them, so the
-//! agent carries on with them instead of stopping. A turn the user
-//! interrupts ends with no Stop, so Claude's `idle_prompt` notification types
-//! anything still queued into the agent's pane instead.
+//! The exceptions: a Stop hook that finds messages queued for the agent by
+//! `jeet task send` prints Claude's `block` decision with them, so the agent
+//! carries on with them instead of stopping. A turn the user interrupts ends
+//! with no Stop, so Claude's `idle_prompt` notification types anything still
+//! queued into the agent's pane instead. And the assistant's SessionStart
+//! prints the summary of the user's work it starts every session with.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -22,8 +23,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::assistant;
 use crate::context::App;
-use crate::db::tasks::TaskSessionRecord;
+use crate::db::tasks::{TaskKind, TaskSessionRecord};
 use crate::messages;
 use crate::tasks;
 use crate::worktrees::now_secs;
@@ -208,6 +210,16 @@ fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
             None => App::open()?,
         };
         record_session(&app, &task_id, session_id, input.source.as_deref(), now)?;
+        if let Some(task) = app.db.get_task(&task_id)? {
+            if task.kind == TaskKind::Assistant {
+                // Claude adds this to the conversation; a summary that
+                // cannot be made costs the session its context, not its start.
+                match assistant::session_context(&app, &task, now) {
+                    Ok(context) => println!("{}", assistant::session_start_output(&context)),
+                    Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
+                }
+            }
+        }
         // A compaction can happen mid-prompt; the session carries on in
         // whatever state it was in.
         if input.source.as_deref() == Some("compact")
@@ -295,24 +307,42 @@ fn idle_prompt(
     let Some(task) = app.db.get_task(task_id)? else {
         return Ok(());
     };
-    messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(&app, &task)).map(|_| ())
+    let Some(session_id) = input.session_id.as_deref() else {
+        return Ok(());
+    };
+    match task.kind {
+        // Typed into the window of the session that sat idle.
+        TaskKind::Assistant => messages::hand_over_queue(
+            &inbox,
+            &assistant::SessionAgent::for_session(&app, &task, session_id),
+        ),
+        TaskKind::Work | TaskKind::Review => {
+            messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(&app, &task))
+        }
+    }
+    .map(|_| ())
 }
 
 /// The task the hook ran for: found by walking up from the session's
-/// directory, which needs no index, else by `$JEET_TASK_ID`.
+/// directory, which needs no index, else by `$JEET_TASK_ID`. The assistant
+/// goes by `$JEET_TASK_ID` first: it may well `cd` into a task's directory,
+/// and its sessions must not report as that task's.
 fn locate_task(input: &HookInput, app: &mut Option<App>) -> Result<Option<(PathBuf, String)>> {
+    let env_id = std::env::var(tasks::TASK_ID_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     let cwd = match input.cwd.as_deref().filter(|c| !c.is_empty()) {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().context("get cwd")?,
     };
-    if let Some(found) = tasks::find_task_root(&cwd) {
-        return Ok(Some(found));
+    let by_env_first = env_id.is_some() && crate::permissions::assistant_mode();
+    if !by_env_first {
+        if let Some(found) = tasks::find_task_root(&cwd) {
+            return Ok(Some(found));
+        }
     }
-    let Some(id) = std::env::var(tasks::TASK_ID_ENV)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    else {
+    let Some(id) = env_id else {
         return Ok(None);
     };
     let opened = App::open()?;
@@ -338,16 +368,21 @@ fn record_session(
         return Ok(());
     };
     let known = app.db.list_task_sessions(task_id)?;
-    let seen = known.iter().any(|s| s.session_id == session_id);
-    let parent_id = match (seen, source) {
-        (true, _) | (false, Some("startup") | None) => None,
-        (false, Some(_)) => known.first().map(|s| s.session_id.clone()),
+    let seen = known.iter().find(|s| s.session_id == session_id);
+    let parent = match (seen, source) {
+        (Some(_), _) | (None, Some("startup") | None) => None,
+        (None, Some(_)) => known.first(),
     };
+    // A session keeps its name, and one cleared or forked from another
+    // takes that one's: the assistant's sessions are named, not after it.
+    let name = seen
+        .or(parent)
+        .map_or_else(|| task.name.clone(), |s| s.name.clone());
     app.db.upsert_task_session(&TaskSessionRecord {
         session_id: session_id.to_string(),
         task_id: task_id.to_string(),
-        parent_id,
-        name: task.name.clone(),
+        parent_id: parent.map(|s| s.session_id.clone()),
+        name,
         created_at: now,
         last_activity: now,
     })?;
