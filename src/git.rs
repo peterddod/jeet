@@ -184,6 +184,19 @@ pub fn rev_parse(repo_path: &Path, rev: &str) -> Option<String> {
     (output.status.success() && !sha.is_empty()).then_some(sha)
 }
 
+/// The tree `rev` names, in full.
+pub fn tree_of(repo_path: &Path, rev: &str) -> Option<String> {
+    let spec = format!("{rev}^{{tree}}");
+    git_output(
+        repo_path,
+        &["rev-parse", "--verify", "--quiet", &spec],
+        &[],
+        None,
+    )
+    .ok()
+    .filter(|oid| !oid.is_empty())
+}
+
 /// Whether `ancestor` is reachable from `descendant`.
 pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> bool {
     Command::new("git")

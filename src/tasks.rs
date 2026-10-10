@@ -9,7 +9,9 @@
 //! Archiving frees the disk but keeps what is needed to bring every worktree
 //! back as it was: its HEAD, held by `refs/jeet/head/<task-id>/<dir>` so it
 //! survives gc, and its uncommitted changes, saved as a stash-shaped commit
-//! under `refs/jeet/stash/<task-id>/<dir>`. The task directory itself stays,
+//! under `refs/jeet/stash/<task-id>/<dir>`. Whatever unarchive cannot put
+//! back is moved to `refs/jeet/kept/<task-id>/…`, which nothing reuses, and
+//! stays there until the task is deleted. The task directory itself stays,
 //! so the agent's sessions, which Claude keys by working directory, still
 //! resolve when the task comes back.
 
@@ -630,17 +632,106 @@ fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
     }
 }
 
-/// `refs/jeet/<kind>/<task-id>/<dir>`, with anything a ref name may not hold
-/// in `dir` replaced.
+/// `refs/jeet/<kind>/<task-id>/<dir>`, with `dir` escaped into one ref
+/// component by [`ref_component`], so no two worktrees share a ref.
 fn jeet_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
-    let dir: String = dir_name
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '/' => c,
-            _ => '-',
-        })
-        .collect();
-    format!("refs/jeet/{kind}/{task_id}/{dir}")
+    format!("refs/jeet/{kind}/{task_id}/{}", ref_component(dir_name))
+}
+
+/// `name` as a single ref component, one-to-one: ASCII letters, digits and
+/// `-` stand for themselves, and every other byte becomes `_XX` (hex). So
+/// `docs.site` and `docs-site` stay apart, a `/` cannot nest one worktree's
+/// refs under another's, and no name can make an invalid ref.
+fn ref_component(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' => out.push(char::from(b)),
+            _ => out.push_str(&format!("_{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Set `oid` aside under `refs/jeet/kept/<task-id>/<dir>/<kind>-<n>`: names
+/// neither archive nor unarchive ever reuse, for work jeet could not put
+/// back. It stays until the user deals with it or deletes the task, and
+/// [`losses`] lists it until then.
+fn keep(trunk: &Path, task_id: &str, dir_name: &str, kind: &str, oid: &str) -> Result<String> {
+    let base = jeet_ref("kept", task_id, dir_name);
+    let mut n = 1;
+    loop {
+        let name = format!("{base}/{kind}-{n}");
+        if !git::ref_exists(trunk, &name)? {
+            git::update_ref(trunk, &name, oid).with_context(|| format!("create {name}"))?;
+            return Ok(name);
+        }
+        if git::rev_parse(trunk, &name).as_deref() == Some(oid) {
+            return Ok(name);
+        }
+        n += 1;
+    }
+}
+
+/// Every ref set aside by [`keep`] for `task`, in any repository: a worktree
+/// may have been removed from the task since, taking its row with it.
+fn kept_refs(app: &App, task: &TaskRecord) -> Result<Vec<(PathBuf, String)>> {
+    let mut out = Vec::new();
+    for repo in app.db.list_repos(None)? {
+        let trunk = PathBuf::from(&repo.trunk_path);
+        if !trunk.is_dir() {
+            continue;
+        }
+        let Ok(names) = git::refs_under(&trunk, &format!("refs/jeet/kept/{}/", task.id)) else {
+            continue;
+        };
+        for name in names {
+            out.push((trunk.clone(), name));
+        }
+    }
+    Ok(out)
+}
+
+/// Whether two snapshots hold the same files: tracked and untracked alike.
+/// What they were taken on top of does not matter; the content does.
+fn same_changes(trunk: &Path, a: &str, b: &str) -> bool {
+    let trees = |c: &str| {
+        (
+            git::tree_of(trunk, c),
+            git::tree_of(trunk, &format!("{c}^3")),
+        )
+    };
+    let first = trees(a);
+    first.0.is_some() && first == trees(b)
+}
+
+/// Before archive reuses a worktree's `refs/jeet/{head,stash}` names, set
+/// aside whatever they hold that the worktree does not: left by an unarchive
+/// that stopped part-way, they may be the only copy of someone's work. A
+/// pinned HEAD the live one contains, or a snapshot of exactly what is in
+/// the worktree now (an earlier archive attempt's), is not worth keeping.
+fn set_aside_leftovers(
+    trunk: &Path,
+    task_id: &str,
+    dir_name: &str,
+    head: &str,
+    snapshot: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut kept = Vec::new();
+    if let Some(old) = git::rev_parse(trunk, &jeet_ref("head", task_id, dir_name)) {
+        if old != head
+            && !git::is_ancestor(trunk, &old, head)
+            && unreachable(trunk, &old) != Some(0)
+        {
+            kept.push(keep(trunk, task_id, dir_name, "head", &old)?);
+        }
+    }
+    if let Some(old) = git::rev_parse(trunk, &jeet_ref("stash", task_id, dir_name)) {
+        if !snapshot.is_some_and(|new| same_changes(trunk, &old, new)) {
+            kept.push(keep(trunk, task_id, dir_name, "stash", &old)?);
+        }
+    }
+    Ok(kept)
 }
 
 /// Remove a worktree from a task.
@@ -886,6 +977,13 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         let snapshot = git::snapshot_changes(&path)
             .with_context(|| format!("{what}: save its uncommitted changes"))?;
 
+        let kept = set_aside_leftovers(&trunk, &task.id, what, &head, snapshot.as_deref())
+            .with_context(|| format!("{what}: keep what an earlier unarchive left"))?;
+        for name in kept {
+            warnings.push(format!(
+                "{what}: work an earlier unarchive could not put back is kept at {name}"
+            ));
+        }
         let head_ref = jeet_ref("head", &task.id, what);
         git::update_ref(&trunk, &head_ref, &head).with_context(|| format!("{what}: pin HEAD"))?;
         let stash_ref = jeet_ref("stash", &task.id, what);
@@ -896,7 +994,8 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                 Some(stash_ref)
             }
             None => {
-                // Left by an earlier attempt, and stale now there is nothing.
+                // Left by an earlier attempt, and stale now there is nothing;
+                // anything else it held was set aside above.
                 let _ = git::delete_ref(&trunk, &stash_ref);
                 None
             }
@@ -966,10 +1065,18 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                 if tip.as_deref() != Some(head.as_str())
                     && !tip.is_some_and(|tip| git::is_ancestor(&trunk, &head, &tip))
                 {
-                    keep_head_ref = true;
+                    // Under a name of its own: the next archive reuses
+                    // head_ref, and the task is active again either way.
+                    let kept = match keep(&trunk, &task.id, &what, "head", &head) {
+                        Ok(kept) => kept,
+                        Err(_) => {
+                            keep_head_ref = true;
+                            head_ref.clone()
+                        }
+                    };
                     warnings.push(format!(
                         "{what}: {branch} moved while the task was archived; \
-                         the commit it was on is kept at {head_ref}"
+                         the commit it was on is kept at {kept}"
                     ));
                 }
             }
@@ -993,10 +1100,24 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                     let _ = git::delete_ref(&trunk, &stash);
                     row.stash_ref = None;
                 }
-                Err(e) => warnings.push(format!(
-                    "{what}: could not reapply its uncommitted changes ({e:#}); \
-                     they are kept at {stash}"
-                )),
+                Err(e) => {
+                    // Moved under a name of its own, as archive reuses this one.
+                    let kept = git::rev_parse(&trunk, &stash)
+                        .and_then(|oid| keep(&trunk, &task.id, &what, "stash", &oid).ok());
+                    let at = match kept {
+                        Some(kept) => {
+                            let _ = git::delete_ref(&trunk, &stash);
+                            row.stash_ref = None;
+                            kept
+                        }
+                        None => stash,
+                    };
+                    warnings.push(format!(
+                        "{what}: could not reapply its uncommitted changes ({e:#}); \
+                         they are kept at {at}: `git stash apply {at}` in the worktree \
+                         retries, and `git update-ref -d {at}` drops them"
+                    ));
+                }
             }
         }
         if !keep_head_ref {
@@ -1011,11 +1132,12 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
-/// What deleting `task` would destroy, one line per worktree problem:
-/// uncommitted changes (live, or saved at archive time), and commits that
-/// would be left on no branch, tag or remote — a detached HEAD's, or those of
-/// a branch the task made, since delete removes it. A branch the task did not
-/// make keeps its commits, so it is not listed.
+/// What deleting `task` would destroy, one line per problem: uncommitted
+/// changes (live, or saved at archive time), and commits that would be left
+/// on no branch, tag or remote — a detached HEAD's, those of a branch the
+/// task made (delete removes it), a HEAD pinned at archive that the branch
+/// has since moved away from, and anything set aside under `refs/jeet/kept`.
+/// A branch the task did not make keeps its commits, so it is not listed.
 pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.state == TaskState::Active {
         let _ = reconcile(app);
@@ -1031,10 +1153,9 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         };
         let trunk = PathBuf::from(&repo.trunk_path);
         let path = worktree_dir(app, task, &row.dir_name);
+        let live = path.exists();
 
-        // The commits at risk are a detached HEAD's, or those of a branch the
-        // task made — which delete removes, so it cannot protect them itself.
-        let (dir, rev, own_branch) = if path.exists() {
+        if live {
             match git::status_counts(&path) {
                 Ok((0, _)) => {}
                 Ok((dirty, _)) => {
@@ -1042,40 +1163,98 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                 }
                 Err(e) => out.push(format!("{what}: could not read its status ({e})")),
             }
+        }
+        // Saved at archive; on a live worktree, ones unarchive did not get to
+        // reapply.
+        let stash = row
+            .stash_ref
+            .clone()
+            .unwrap_or_else(|| jeet_ref("stash", &task.id, &row.dir_name));
+        if git::ref_exists(&trunk, &stash).unwrap_or(false) {
+            out.push(format!(
+                "{what}: uncommitted changes saved at archive ({stash})"
+            ));
+        }
+
+        // The commits at risk are a detached HEAD's, or those of a branch the
+        // task made — which delete removes, so it cannot protect them itself.
+        let at_risk = if live {
             match git::head_branch(&path) {
-                None => (path, "HEAD".to_string(), None),
+                None => Some((path.clone(), "HEAD".to_string(), None)),
                 Some(branch) if Some(&branch) == row.branch.as_ref() && row.created_branch => {
-                    (path, format!("refs/heads/{branch}"), Some(branch))
+                    Some((path.clone(), format!("refs/heads/{branch}"), Some(branch)))
                 }
-                Some(_) => continue,
+                Some(_) => None,
             }
         } else {
-            if let Some(stash) = &row.stash_ref {
-                out.push(format!(
-                    "{what}: uncommitted changes saved at archive ({stash})"
-                ));
-            }
             match (&row.branch, row.created_branch, &row.head_oid) {
-                (None, _, Some(head)) => (trunk, head.clone(), None),
+                (None, _, Some(head)) => Some((trunk.clone(), head.clone(), None)),
                 (Some(branch), true, _) if git::branch_exists(&trunk, branch).unwrap_or(false) => {
-                    (trunk, format!("refs/heads/{branch}"), Some(branch.clone()))
+                    Some((
+                        trunk.clone(),
+                        format!("refs/heads/{branch}"),
+                        Some(branch.clone()),
+                    ))
                 }
-                _ => continue,
+                _ => None,
             }
         };
-        let mut exclude = vec!["--remotes".to_string(), "--tags".to_string()];
-        if let Some(branch) = own_branch {
-            exclude.push(format!("--exclude={branch}"));
+        let mut counted = Vec::new();
+        if let Some((dir, rev, own_branch)) = at_risk {
+            let mut exclude = vec!["--remotes".to_string(), "--tags".to_string()];
+            if let Some(branch) = own_branch {
+                exclude.push(format!("--exclude={branch}"));
+            }
+            exclude.push("--branches".to_string());
+            let exclude: Vec<&str> = exclude.iter().map(String::as_str).collect();
+            match git::count_commits_not_in(&dir, &rev, &exclude) {
+                Some(0) => {}
+                Some(n) => out.push(format!(
+                    "{what}: {}",
+                    plural(n, "commit on no other branch or remote")
+                )),
+                None => out.push(format!("{what}: could not check for unpushed commits")),
+            }
+            counted.extend(git::rev_parse(&dir, &rev));
         }
-        exclude.push("--branches".to_string());
-        let exclude: Vec<&str> = exclude.iter().map(String::as_str).collect();
-        match git::count_commits_not_in(&dir, &rev, &exclude) {
+        if live {
+            counted.extend(git::rev_parse(&path, "HEAD"));
+        }
+
+        // HEAD as pinned at archive. Normally its branch or the commits just
+        // counted hold it, but not if the branch moved while the task was
+        // archived, or an unarchive stopped before releasing it.
+        let head_ref = jeet_ref("head", &task.id, &row.dir_name);
+        if git::ref_exists(&trunk, &head_ref).unwrap_or(false) {
+            let mut exclude = vec!["--remotes", "--tags", "--branches"];
+            exclude.extend(counted.iter().map(String::as_str));
+            match git::count_commits_not_in(&trunk, &head_ref, &exclude) {
+                Some(0) => {}
+                Some(n) => out.push(format!(
+                    "{what}: {} kept at {head_ref}",
+                    plural(n, "commit on no branch or remote")
+                )),
+                None => out.push(format!("{what}: could not check {head_ref}")),
+            }
+        }
+    }
+
+    // Work unarchive could not put back, whichever worktree it came from.
+    for (trunk, name) in kept_refs(app, task)? {
+        let kind = name.rsplit('/').next().unwrap_or_default();
+        if kind.starts_with("stash-") {
+            out.push(format!(
+                "{name}: uncommitted changes unarchive could not reapply"
+            ));
+            continue;
+        }
+        match unreachable(&trunk, &name) {
             Some(0) => {}
             Some(n) => out.push(format!(
-                "{what}: {}",
-                plural(n, "commit on no other branch or remote")
+                "{name}: {}",
+                plural(n, "commit on no branch or remote")
             )),
-            None => out.push(format!("{what}: could not check for unpushed commits")),
+            None => out.push(format!("{name}: could not check its commits")),
         }
     }
     Ok(out)
@@ -1137,6 +1316,9 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         }
         let _ = git::worktree_prune(trunk);
     }
+    for (trunk, name) in kept_refs(app, task)? {
+        git::delete_ref(&trunk, &name).with_context(|| format!("delete {name}"))?;
+    }
     if dir.exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
     }
@@ -1192,10 +1374,31 @@ mod tests {
     #[test]
     fn jeet_refs_are_valid_ref_names() {
         assert_eq!(jeet_ref("head", "t1", "api"), "refs/jeet/head/t1/api");
+        assert_eq!(jeet_ref("head", "t1", "api-2"), "refs/jeet/head/t1/api-2");
         assert_eq!(
             jeet_ref("stash", "t1", "sub/my dir.v2"),
-            "refs/jeet/stash/t1/sub/my-dir-v2"
+            "refs/jeet/stash/t1/sub_2Fmy_20dir_2Ev2"
         );
+        assert_eq!(ref_component(".x.lock"), "_2Ex_2Elock");
+    }
+
+    #[test]
+    fn jeet_refs_never_share_a_name() {
+        // Every pair here once mapped to one ref, or nested one under another.
+        let names = [
+            "docs.site",
+            "docs-site",
+            "docs_site",
+            "docs_2Esite",
+            "foo.js",
+            "foo-js",
+            "sub",
+            "sub/web",
+            "sub-web",
+        ];
+        let refs: BTreeSet<String> = names.iter().map(|n| ref_component(n)).collect();
+        assert_eq!(refs.len(), names.len(), "{refs:?}");
+        assert!(refs.iter().all(|r| !r.contains('/')), "{refs:?}");
     }
 
     #[test]

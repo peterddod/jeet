@@ -1167,6 +1167,159 @@ fn archive_and_unarchive_bring_back_every_kind_of_work() {
     assert!(stdout_of(&output).contains("round-trip"));
 }
 
+/// Work unarchive cannot put back — changes that no longer apply, a commit
+/// its branch moved away from — survives the next archive, gc and all, and
+/// delete lists it before removing it.
+#[test]
+fn work_unarchive_could_not_put_back_survives_the_next_archive() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let seed = lab.seed("widget");
+    std::fs::write(seed.join("tracked.txt"), "one\n").unwrap();
+    git(&["add", "-A"], &seed);
+    git(&["commit", "-qm", "tracked"], &seed);
+    git(&["push", "-q", "origin", "main"], &seed);
+
+    let task = lab.new_task("kept");
+    let id = task_id(&task);
+    // A commit only its branch holds; the branch is moved away from it below.
+    let moved = lab.add(&task, &["widget", "--branch", "feat-a"]);
+    std::fs::write(moved.join("a.txt"), "a\n").unwrap();
+    git(&["add", "-A"], &moved);
+    git(&["commit", "-qm", "only on feat-a"], &moved);
+    let lost_commit = rev(&moved, "HEAD");
+    // Uncommitted changes that will conflict with where its branch goes.
+    let dirty = lab.add(&task, &["widget", "--branch", "feat-b"]);
+    std::fs::write(dirty.join("tracked.txt"), "theirs\n").unwrap();
+    git(&["commit", "-qam", "theirs"], &dirty);
+    git(&["branch", "theirs"], &dirty);
+    git(&["reset", "-q", "--hard", "HEAD~1"], &dirty);
+    std::fs::write(dirty.join("tracked.txt"), "mine\n").unwrap();
+
+    succeeded(&lab.jeet_at(&["task", "archive", "kept"], &lab.home(), &[]));
+    git(&["branch", "-f", "feat-a", "origin/main"], &trunk);
+    git(&["branch", "-f", "feat-b", "theirs"], &trunk);
+
+    let output = lab.jeet_at(&["task", "unarchive", "kept"], &lab.home(), &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    let kept_head = format!("refs/jeet/kept/{id}/widget/head-1");
+    let kept_stash = format!("refs/jeet/kept/{id}/widget-2/stash-1");
+    assert!(stderr.contains(&kept_head), "{stderr}");
+    assert!(stderr.contains(&kept_stash), "{stderr}");
+
+    // The user reads the warnings, does nothing about them, tidies the
+    // conflicted worktree and archives again with a clean tree.
+    git(&["reset", "-q", "--hard"], &dirty);
+    succeeded(&lab.jeet_at(&["task", "archive", "kept"], &lab.home(), &[]));
+    git(&["gc", "-q", "--prune=now"], &trunk);
+    assert_eq!(rev(&trunk, &kept_head), lost_commit);
+    assert_eq!(
+        git_stdout(&["show", &format!("{kept_stash}:tracked.txt")], &trunk),
+        "mine"
+    );
+
+    // And they survive coming back again, too.
+    succeeded(&lab.jeet_at(&["task", "unarchive", "kept"], &lab.home(), &[]));
+    assert_eq!(rev(&trunk, &kept_head), lost_commit);
+
+    let output = lab.jeet_at(&["task", "delete", "kept"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains(&format!("{kept_head}: 1 commit on no branch")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("{kept_stash}: uncommitted changes")),
+        "{stderr}"
+    );
+    succeeded(&lab.jeet_at(&["task", "delete", "kept", "--force"], &lab.home(), &[]));
+    assert_eq!(git_stdout(&["for-each-ref", "refs/jeet/"], &trunk), "");
+}
+
+/// Refs left under the names archive reuses — by an unarchive that stopped
+/// part-way — are listed by delete and set aside, not overwritten, by archive.
+#[test]
+fn archive_sets_aside_refs_an_unfinished_unarchive_left() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let task = lab.new_task("leftover");
+    let id = task_id(&task);
+    let wt = lab.add(&task, &["widget", "--branch", "feat"]);
+
+    // A saved change and a pinned commit that this worktree no longer has.
+    std::fs::write(wt.join("saved.txt"), "saved\n").unwrap();
+    git(&["add", "-A"], &wt);
+    let saved = git_stdout(&["stash", "create"], &wt);
+    git(&["reset", "-q", "--hard"], &wt);
+    git(&["commit", "-q", "--allow-empty", "-m", "pinned"], &wt);
+    let pinned = rev(&wt, "HEAD");
+    git(&["reset", "-q", "--hard", "HEAD~1"], &wt);
+    let stash_ref = format!("refs/jeet/stash/{id}/widget");
+    let head_ref = format!("refs/jeet/head/{id}/widget");
+    git(&["update-ref", &stash_ref, &saved], &trunk);
+    git(&["update-ref", &head_ref, &pinned], &trunk);
+
+    let output = lab.jeet_at(&["task", "delete", "leftover"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains(&stash_ref), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "1 commit on no branch or remote kept at {head_ref}"
+        )),
+        "{stderr}"
+    );
+
+    let output = lab.jeet_at(&["task", "archive", "leftover"], &lab.home(), &[]);
+    succeeded(&output);
+    git(&["gc", "-q", "--prune=now"], &trunk);
+    let kept = format!("refs/jeet/kept/{id}/widget");
+    assert_eq!(rev(&trunk, &format!("{kept}/head-1")), pinned);
+    assert_eq!(
+        git_stdout(&["show", &format!("{kept}/stash-1:saved.txt")], &trunk),
+        "saved"
+    );
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains(&format!("{kept}/stash-1")), "{stderr}");
+}
+
+/// Worktree names that differ only in punctuation keep separate refs, so
+/// each comes back from an archive with its own changes.
+#[test]
+fn similar_worktree_names_keep_their_own_changes() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("names");
+    let dotted = lab.add(&task, &["widget", "--name", "docs.site"]);
+    let dashed = lab.add(&task, &["widget", "--name", "docs-site"]);
+    for wt in [&dotted, &dashed] {
+        std::fs::write(wt.join("mine.txt"), wt.display().to_string()).unwrap();
+        git(
+            &["commit", "-q", "--allow-empty", "-m", "detached work"],
+            wt,
+        );
+    }
+    let heads = [rev(&dotted, "HEAD"), rev(&dashed, "HEAD")];
+
+    succeeded(&lab.jeet_at(&["task", "archive", "names"], &lab.home(), &[]));
+    let output = lab.jeet_at(&["task", "unarchive", "names"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("could not"),
+        "{}",
+        stderr_of(&output)
+    );
+    for (wt, head) in [&dotted, &dashed].into_iter().zip(heads) {
+        assert_eq!(rev(wt, "HEAD"), head);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("mine.txt")).unwrap(),
+            wt.display().to_string()
+        );
+    }
+}
+
 /// `task delete` takes a task's exact name: with --force nothing asks, so a
 /// name that is only the start of another task's must not delete that one.
 #[test]
