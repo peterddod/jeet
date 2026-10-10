@@ -135,7 +135,9 @@ pub fn unarchive(app: &App, name: &str) -> Result<()> {
 /// Delete a task once the user has seen what would be lost and agreed — or
 /// passed --force. Without a terminal there is no agreeing, only --force.
 pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    // By exact name only: with --force nothing asks, so a stale name must not
+    // land on whichever task it happens to be a prefix of.
+    let task = tasks::find_exact(app, name)?;
     let dir = tasks::task_dir(app, &task);
     if standing_in(&dir) {
         bail!(

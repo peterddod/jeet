@@ -1167,6 +1167,28 @@ fn archive_and_unarchive_bring_back_every_kind_of_work() {
     assert!(stdout_of(&output).contains("round-trip"));
 }
 
+/// `task delete` takes a task's exact name: with --force nothing asks, so a
+/// name that is only the start of another task's must not delete that one.
+#[test]
+fn delete_never_guesses_which_task_is_meant() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("fix login");
+    let output = lab.jeet_at(&["task", "delete", "fix", "--force"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("did you mean fix-login"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(task.is_dir(), "a task was deleted by a prefix of its name");
+    // Elsewhere a unique prefix is still enough.
+    let output = lab.jeet_at(&["task", "path", "fix"], &lab.home(), &[]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), task);
+    succeeded(&lab.jeet_at(&["task", "delete", "Fix Login", "-f"], &lab.home(), &[]));
+    assert!(!task.exists());
+}
+
 #[test]
 fn delete_takes_everything_the_task_owns_and_nothing_else() {
     let lab = StoreLab::new();

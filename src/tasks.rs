@@ -263,6 +263,16 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// The task a user means by `key`: its slug, its id, its name (any case), or
 /// the start of exactly one slug.
 pub fn find(app: &App, key: &str) -> Result<TaskRecord> {
+    find_by(app, key, true)
+}
+
+/// Like [`find`], but never by a slug prefix: for deleting, where a name
+/// that no longer matches its task exactly must not pick another one.
+pub fn find_exact(app: &App, key: &str) -> Result<TaskRecord> {
+    find_by(app, key, false)
+}
+
+fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     let key = key.trim();
     if let Some(task) = app.db.get_task_by_slug(key)? {
         return Ok(task);
@@ -277,10 +287,18 @@ pub fn find(app: &App, key: &str) -> Result<TaskRecord> {
         .filter(|t| t.name.to_lowercase() == lower)
         .collect();
     if matches.is_empty() && !key.is_empty() {
-        matches = tasks
+        let prefixed: Vec<&TaskRecord> = tasks
             .iter()
             .filter(|t| t.slug.starts_with(&lower))
             .collect();
+        if !by_prefix && !prefixed.is_empty() {
+            let slugs: Vec<&str> = prefixed.iter().map(|t| t.slug.as_str()).collect();
+            bail!(
+                "no task is named exactly {key:?} (did you mean {}?)",
+                slugs.join(", ")
+            );
+        }
+        matches = prefixed;
     }
     match matches.as_slice() {
         [] => bail!("no task named {key:?}; `jeet task ls` lists them"),
