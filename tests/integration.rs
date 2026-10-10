@@ -1382,3 +1382,111 @@ fn store_sync_steps_aside_for_a_running_sync() {
     assert_ne!(rev(&trunk, "HEAD"), before);
     assert!(!home.join(".sync.lock").exists());
 }
+
+#[test]
+fn sync_of_one_repo_waits_for_another_fetch_of_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let before = rev(&trunk, "HEAD");
+    let pushed = lab.commit("widget", "w");
+    let home = lab.home();
+    // Someone — a live process, this test's own — is fetching widget.
+    let lock = home.join(".sync-locks/github.com_acme_widget.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
+
+    let mut cmd = jeet_bin();
+    let mut child = lab
+        .wire(&mut cmd)
+        .args(["sync", "--repo", "widget"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "fetched while another fetch of the repo held its lock"
+    );
+    assert_eq!(rev(&trunk, "HEAD"), before);
+
+    std::fs::remove_file(&lock).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(rev(&trunk, "HEAD"), pushed);
+    assert!(!lock.exists(), "the sync left its repo lock behind");
+}
+
+/// A stand-in `gh` for `jeet review`: `pr view` answers with a same-repo PR
+/// on `feat-x`, and `pr checkout` notes what it found around it — whether a
+/// store sync had been started yet, and which repo fetch locks were held —
+/// before checking the branch out.
+fn fake_gh(dir: &std::path::Path, report: &std::path::Path) {
+    let script = format!(
+        r#"#!/bin/sh
+case "$1 $2" in
+"pr view")
+  echo '{{"number":42,"title":"Feature X","url":"https://github.com/acme/widget/pull/42","state":"OPEN","isDraft":false,"reviewDecision":"","headRefName":"feat-x","headRefOid":"","baseRefName":"main","isCrossRepository":false}}'
+  ;;
+"pr checkout")
+  {{
+    if [ -e "$JEET_HOME/.last-sync" ]; then echo "sync started"; else echo "no sync"; fi
+    ls "$JEET_HOME/.sync-locks"
+  }} > "{}"
+  git checkout -q -b "$5"
+  ;;
+*)
+  echo "fake gh: unexpected $*" >&2
+  exit 1
+  ;;
+esac
+"#,
+        report.display()
+    );
+    let gh = dir.join("gh");
+    std::fs::write(&gh, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn review_checks_out_before_starting_a_store_sync() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let home = lab.home();
+    let bin = TempDir::new().unwrap();
+    let report = bin.path().join("report");
+    fake_gh(bin.path(), &report);
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // A sync is due — none has ever run — so review will start one.
+    let mut cmd = jeet_bin();
+    let output = lab
+        .wire(&mut cmd)
+        .env("PATH", path)
+        .env("JEET_SYNC_INTERVAL_SECS", "300")
+        .args(["review", "42", "--no-command"])
+        .current_dir(&trunk)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "review failed: {stderr}");
+
+    let seen = std::fs::read_to_string(&report).unwrap();
+    assert!(
+        seen.starts_with("no sync"),
+        "a store sync was started before gh fetched the PR: {seen}"
+    );
+    assert!(
+        seen.contains("github.com_acme_widget.lock"),
+        "gh fetched without holding the repo's fetch lock: {seen}"
+    );
+    // The sync still happens, just after.
+    wait_for_background_sync(&home);
+    assert!(!home
+        .join(".sync-locks/github.com_acme_widget.lock")
+        .exists());
+}

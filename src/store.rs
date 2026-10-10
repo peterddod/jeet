@@ -10,6 +10,11 @@
 //!
 //! Two files under `$JEET_HOME` coordinate it: `.last-sync` holds when the
 //! last sync started, and `.sync.lock` the pid of the one running now.
+//!
+//! A third kind, `.sync-locks/<repo>.lock`, serializes fetches of one repo.
+//! Two fetches into the same repository race for its ref locks and one of
+//! them fails, so anything that fetches a repo the store sync also fetches —
+//! checking a pull request out, say — takes [`lock_repo`] for the duration.
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -29,6 +34,7 @@ use crate::worktrees::now_secs;
 const LOCK_FILE: &str = ".sync.lock";
 const LAST_SYNC_FILE: &str = ".last-sync";
 const LOG_FILE: &str = ".sync.log";
+const REPO_LOCK_DIR: &str = ".sync-locks";
 
 /// Fetches are network-bound; a few at once is quicker without making a
 /// store of fifty repos open fifty connections.
@@ -42,7 +48,8 @@ const STALE_LOCK_SECS: u64 = 60 * 60;
 /// a sync creating the file and writing to it.
 const UNWRITTEN_LOCK_SECS: u64 = 60;
 
-/// How long `jeet sync` waits for a background sync to finish first.
+/// How long `jeet sync` waits for a background sync to finish first, and
+/// anything waits for another fetch of the same repo.
 const LOCK_WAIT: Duration = Duration::from_secs(120);
 
 /// What syncing one repo did, short of failing.
@@ -87,6 +94,7 @@ pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
     if !trunk.is_dir() {
         bail!("trunk is missing: {}", trunk.display());
     }
+    let _repo_lock = lock_repo(&app.home, &repo.id)?;
     git::fetch_prune(trunk)?;
     if !in_store(&app.store_root(), trunk) {
         return Ok(Outcome::Fetched);
@@ -199,6 +207,19 @@ fn lock_path(home: &Path) -> PathBuf {
     home.join(LOCK_FILE)
 }
 
+/// One repo's fetch lock. The id is flattened to a single file name; two ids
+/// that flatten alike only share a lock, which costs a wait, never a clash.
+fn repo_lock_path(home: &Path, repo_id: &str) -> PathBuf {
+    let name: String = repo_id
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect();
+    home.join(REPO_LOCK_DIR).join(format!("{name}.lock"))
+}
+
 pub fn last_sync(home: &Path) -> Option<i64> {
     std::fs::read_to_string(last_sync_path(home))
         .ok()?
@@ -230,15 +251,18 @@ impl Drop for SyncLock {
 /// Who holds the lock, if anyone still does. A lock whose process is gone,
 /// or that is older than any sync could be, is abandoned and counts as free.
 pub fn lock_holder(home: &Path) -> Option<u32> {
-    let path = lock_path(home);
-    let age = std::fs::metadata(&path)
+    holder_at(&lock_path(home))
+}
+
+fn holder_at(path: &Path) -> Option<u32> {
+    let age = std::fs::metadata(path)
         .ok()?
         .modified()
         .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .unwrap_or_default()
         .as_secs();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     holder_from(&text, age, process_alive)
 }
 
@@ -259,21 +283,26 @@ fn holder_from(text: &str, age_secs: u64, alive: impl Fn(u32) -> bool) -> Option
 
 /// Take the sync lock, or `None` if a live sync holds it.
 pub fn try_lock(home: &Path) -> Result<Option<SyncLock>> {
-    let path = lock_path(home);
+    try_lock_at(&lock_path(home))
+}
+
+fn try_lock_at(path: &Path) -> Result<Option<SyncLock>> {
     // Twice at most: once as found, once more after clearing an abandoned lock.
     for _ in 0..2 {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(mut file) => {
-                let lock = SyncLock { path: path.clone() };
+                let lock = SyncLock {
+                    path: path.to_path_buf(),
+                };
                 writeln!(file, "{}", std::process::id())
                     .with_context(|| format!("write {}", path.display()))?;
                 return Ok(Some(lock));
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                if lock_holder(home).is_some() {
+                if holder_at(path).is_some() {
                     return Ok(None);
                 }
-                match std::fs::remove_file(&path) {
+                match std::fs::remove_file(path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
                     Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
@@ -283,6 +312,31 @@ pub fn try_lock(home: &Path) -> Result<Option<SyncLock>> {
         }
     }
     Ok(None)
+}
+
+/// Take `repo_id`'s fetch lock, waiting for whoever is fetching it now.
+///
+/// Silent while it waits — the explorer calls this behind its own progress
+/// line, where stderr would land on the screen — and it waits for one repo's
+/// fetch, which is short.
+pub fn lock_repo(home: &Path, repo_id: &str) -> Result<SyncLock> {
+    let path = repo_lock_path(home, repo_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let started = Instant::now();
+    loop {
+        if let Some(lock) = try_lock_at(&path)? {
+            return Ok(lock);
+        }
+        if started.elapsed() >= LOCK_WAIT {
+            bail!(
+                "{repo_id} is still being fetched; remove {} if it is not",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Take the lock, waiting a while for a running sync to finish first.
@@ -442,6 +496,47 @@ mod tests {
         let lock = try_lock(home.path()).unwrap();
         assert!(lock.is_some());
         assert_eq!(lock_holder(home.path()), Some(std::process::id()));
+    }
+
+    #[test]
+    fn repo_locks_are_per_repo_and_exclusive() {
+        let home = tempfile::tempdir().unwrap();
+        let widget = lock_repo(home.path(), "github.com/acme/widget").unwrap();
+        let path = repo_lock_path(home.path(), "github.com/acme/widget");
+        assert_eq!(
+            path.file_name().unwrap(),
+            "github.com_acme_widget.lock",
+            "one flat file under the lock dir"
+        );
+        assert_eq!(holder_at(&path), Some(std::process::id()));
+        assert!(try_lock_at(&path).unwrap().is_none(), "held");
+        // Another repo, and the store lock, are not held up by it.
+        let _gadget = lock_repo(home.path(), "github.com/acme/gadget").unwrap();
+        assert!(try_lock(home.path()).unwrap().is_some());
+        drop(widget);
+        assert!(!path.exists());
+        assert!(lock_repo(home.path(), "github.com/acme/widget").is_ok());
+    }
+
+    #[test]
+    fn a_repo_lock_waits_for_its_holder() {
+        let home = tempfile::tempdir().unwrap();
+        let held = lock_repo(home.path(), "acme/widget").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = home.path().to_path_buf();
+        let waiter = std::thread::spawn(move || {
+            let lock = lock_repo(&dir, "acme/widget").unwrap();
+            tx.send(()).unwrap();
+            drop(lock);
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
+            "took a lock that was held"
+        );
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("never took the lock once it was free");
+        waiter.join().unwrap();
     }
 
     #[test]

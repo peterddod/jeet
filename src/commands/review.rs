@@ -21,13 +21,16 @@ pub fn run(
     let number = github::parse_pr_number(pr)?;
     let repo = repo_from_filter_or_cwd(app, repo_filter)?;
     let trunk = std::path::Path::new(&repo.trunk_path);
-    crate::store::maybe_sync_background(app);
 
     eprintln!("jeet: looking up #{number}");
     let pr = github::pr_view(trunk, number)?;
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
     let checkout = worktrees::checkout_pr(app, &repo, &pr)?;
+    // Only now: a sync started before the checkout would be fetching this
+    // repo just as `gh pr checkout` does. checkout_pr waits out one already
+    // running, but there is no need to start one in its way.
+    crate::store::maybe_sync_background(app);
     for warning in &checkout.warnings {
         eprintln!("jeet: {warning}");
     }

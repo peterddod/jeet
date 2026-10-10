@@ -7,8 +7,8 @@ use crate::resolve;
 use crate::store;
 
 pub fn run(app: &App, repo: Option<&str>) -> Result<()> {
-    // One repo skips the store lock: it is a single fetch, and git's own ref
-    // locks already keep it from tangling with a background sync of the same.
+    // One repo skips the store lock: it is a single fetch, and sync_repo takes
+    // that repo's fetch lock, which a background sync of it holds too.
     if let Some(filter) = repo {
         let repo = resolve::resolve_repo_filter(&app.db, filter)?;
         let result = store::sync_repo(app, &repo);
