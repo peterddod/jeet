@@ -88,7 +88,7 @@ impl Job {
 }
 
 #[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
+pub fn process_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
@@ -99,7 +99,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
+pub fn process_alive(_pid: u32) -> bool {
     true
 }
 
@@ -122,6 +122,18 @@ pub fn load(app: &App, repo: &RepoRecord, pr: u64) -> Option<Job> {
     let mut job = read(&state_file(app, repo, pr).ok()?).ok()?;
     job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
     Some(job)
+}
+
+/// The worktree of every review job ever recorded, under any repository.
+pub fn recorded_worktrees(app: &App) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(app.home.join("reviews"))
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| read(e.path()).ok())
+        .map(|job| job.worktree)
+        .collect()
 }
 
 fn read(path: &Path) -> Result<Job> {
@@ -278,37 +290,19 @@ pub fn run_job(path: &Path) -> Result<()> {
             0 => format!("Review of #{} is ready", job.pr),
             _ => format!("Review of #{} failed (status {code})", job.pr),
         };
-        notify(&message, &job.title);
+        let url = job
+            .env
+            .iter()
+            .find(|(key, _)| key == "JEET_PR_URL")
+            .map(|(_, url)| url.as_str());
+        crate::notify::notify(&crate::notify::Notification {
+            title: "jeet",
+            subtitle: Some(&job.title),
+            body: &message,
+            url,
+        });
     }
     Ok(())
-}
-
-/// Best-effort desktop notification.
-fn notify(message: &str, subtitle: &str) {
-    // Arguments rather than an interpolated script: the subtitle is a PR
-    // title, and quoting it into AppleScript is its own injection.
-    let _ = if cfg!(target_os = "macos") {
-        Command::new("osascript")
-            .args([
-                "-e",
-                "on run argv",
-                "-e",
-                "display notification (item 1 of argv) with title \"jeet\" subtitle (item 2 of argv) sound name \"Glass\"",
-                "-e",
-                "end run",
-                message,
-                subtitle,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    } else {
-        Command::new("notify-send")
-            .args(["jeet", &format!("{message}\n{subtitle}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    };
 }
 
 #[cfg(test)]

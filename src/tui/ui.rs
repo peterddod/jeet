@@ -7,8 +7,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PrLookup};
-use crate::github::PullRequest;
+use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PendingAction, PrLookup};
+use crate::github::{PendingReview, PullRequest, Verdict};
 use crate::review::JobState;
 use crate::worktrees::WorktreeStatus;
 
@@ -17,8 +17,9 @@ use crate::worktrees::WorktreeStatus;
 /// ones that replaced keys people knew. So the head and the tail always stay,
 /// and the middle is dropped from the right until the rest fits.
 const HINT_HEAD: &str = "type to filter";
-const HINT_MIDDLE: [&str; 11] = [
+const HINT_MIDDLE: [&str; 12] = [
     "⇥ complete",
+    ": command",
     "/ enter",
     "↑↓ move",
     "⏎ open",
@@ -93,6 +94,9 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         height: 1,
     });
     {
+        // What the rows were matched against, which in a command line is the
+        // operand being typed rather than the whole line.
+        let needle = explorer.needle();
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
         let Explorer {
@@ -100,7 +104,6 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
             hidden,
             matches,
             selected,
-            filter,
             list,
             diffs,
             root,
@@ -115,7 +118,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
                 rows: &rows,
                 total: entries.len(),
                 hidden: *hidden,
-                filter,
+                filter: &needle,
                 selected: *selected,
                 diffs,
                 root,
@@ -147,7 +150,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
 
 /// A small banner shown while a background job runs, so a slow push or a big
 /// worktree scan never looks like a hang.
-fn draw_working(frame: &mut Frame, working: &str) {
+pub(super) fn draw_working(frame: &mut Frame, working: &str) {
     let area = content_rect(44, 1, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -188,7 +191,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!(" vs {}", explorer.repo.default_branch),
+            match &explorer.repo {
+                Some(repo) => format!(" vs {}", repo.default_branch),
+                None => String::new(),
+            },
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -199,6 +205,12 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         Span::styled(explorer.breadcrumb(), Style::default().fg(Color::Cyan)),
     ]);
 
+    // A `:` turns the filter into a command line, and the label says so: the
+    // same keys now build a command, and ⏎ runs it rather than opening a row.
+    let (label, typed) = match explorer.command_line() {
+        Some(line) => ("cmd ›    ", line),
+        None => ("filter   ", explorer.filter.as_str()),
+    };
     // The filter always has a line of its own, cursor and all: it is live from
     // the moment the explorer opens, and nothing else says so.
     let filter_line = if explorer.filter.is_empty() {
@@ -207,6 +219,15 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
             Span::styled("█", Style::default().fg(Color::Yellow)),
             Span::styled(
                 " type to narrow this level down",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else if typed.is_empty() {
+        Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Magenta)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" {}", super::command::USAGE),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -227,12 +248,17 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         } else {
             counter
         };
+        let label_color = if explorer.in_command_mode() {
+            Color::Magenta
+        } else {
+            Color::DarkGray
+        };
         Line::from(vec![
-            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(label, Style::default().fg(label_color)),
             Span::styled(
                 // Not `.max(1)`: a column the budget just ruled out is a
                 // column the cursor block loses.
-                truncate_start(&explorer.filter, room),
+                truncate_start(typed, room),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -242,7 +268,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         ])
     };
 
-    let heading = format!(" jeet · {} ", explorer.repo.id);
+    let heading = match &explorer.repo {
+        Some(repo) => format!(" jeet · {} ", repo.id),
+        None => format!(" jeet · task {} ", explorer.root_label),
+    };
     let mut block = Block::default().borders(Borders::ALL).title(Span::styled(
         heading.clone(),
         Style::default()
@@ -582,7 +611,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" worktrees · ⏎ switch  n new  e detached  m rename  d delete  o open PR ")
+                        .title(" worktrees · ⏎ switch  o open PR  r refresh ")
                         .title_style(Style::default().fg(Color::Green)),
                 )
                 .highlight_style(
@@ -592,7 +621,11 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 );
             frame.render_stateful_widget(list, area, &mut state);
         }
-        Overlay::Sessions { sessions, selected } => {
+        Overlay::Sessions {
+            task,
+            sessions,
+            selected,
+        } => {
             let area = centered_rect(85, 70, frame.area());
             frame.render_widget(Clear, area);
             let items: Vec<ListItem> = sessions
@@ -600,14 +633,15 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .map(|session| {
                     ListItem::new(Line::from(vec![
                         Span::styled(
-                            format!("{:<10}", session.age()),
+                            format!("{:<10}", crate::agent::age_label(session.last)),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::styled(
-                            format!("{:<9}", format!("{} msgs", session.entries)),
-                            Style::default().fg(Color::DarkGray),
+                            format!("{:<10}", session.state),
+                            Style::default().fg(Color::Cyan),
                         ),
-                        Span::raw(truncate(&session.summary, 60)),
+                        Span::raw(format!("{}  ", truncate(&session.name, 30))),
+                        Span::styled(session.id.clone(), Style::default().fg(Color::DarkGray)),
                     ]))
                 })
                 .collect();
@@ -617,10 +651,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             } else {
                 Some((*selected).min(sessions.len() - 1))
             });
-            let title = format!(
-                " {} sessions · ⏎ resume  esc close ",
-                explorer.agent.display()
-            );
+            let title = format!(" {} · sessions · ⏎ resume  esc close ", task.name);
             let list = List::new(items)
                 .block(
                     Block::default()
@@ -635,99 +666,10 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 );
             frame.render_stateful_widget(list, area, &mut state);
         }
-        Overlay::RenameWorktree { index, input } => {
-            let area = centered_rect(64, 30, frame.area());
-            frame.render_widget(Clear, area);
-            let current = explorer
-                .worktree_rows
-                .get(*index)
-                .map(|row| row.entry.display_name())
-                .unwrap_or_default();
-            let detached = explorer
-                .worktree_rows
-                .get(*index)
-                .map(|row| row.entry.branch.is_none())
-                .unwrap_or(false);
-            let explain = if detached {
-                "⏎ creates this branch at the scratchpad's HEAD and keeps your work"
-            } else {
-                "⏎ renames the branch and moves the worktree to match"
-            };
-            let body = vec![
-                Line::from(vec![
-                    Span::styled("renaming ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(current, Style::default().fg(Color::Magenta)),
-                ]),
-                Line::from(vec![
-                    Span::styled("to       ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        input.clone(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("█", Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(explain, Style::default().fg(Color::DarkGray))),
-                Line::from(Span::styled(
-                    "ctrl-u clear · esc cancel",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-            frame.render_widget(
-                Paragraph::new(body)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" rename worktree ")
-                            .title_style(Style::default().fg(Color::Green)),
-                    )
-                    .wrap(Wrap { trim: true }),
-                area,
-            );
-        }
-        Overlay::NewWorktree { input } => {
-            let area = centered_rect(60, 25, frame.area());
-            frame.render_widget(Clear, area);
-            let body = vec![
-                Line::from(vec![
-                    Span::styled("branch ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        input.clone(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("█", Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "⏎ create and publish to origin · empty name creates a detached checkout",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled(
-                    "esc cancel",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-            frame.render_widget(
-                Paragraph::new(body)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" new worktree ")
-                            .title_style(Style::default().fg(Color::Green)),
-                    )
-                    .wrap(Wrap { trim: true }),
-                area,
-            );
-        }
         Overlay::Confirm {
             title,
             lines,
-            index: _,
-            action: _,
+            action,
         } => {
             // Sized to its content: a destructive prompt that silently clips
             // its own warnings (or its y/n line) is worse than no prompt.
@@ -738,8 +680,11 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .map(|l| Line::from(Span::raw(l.clone())))
                 .collect();
             body.push(Line::from(""));
+            let keys = match action {
+                PendingAction::Command(_) => "y remove · n cancel",
+            };
             body.push(Line::from(Span::styled(
-                "y remove · f force (discard the above) · n cancel",
+                keys,
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(
@@ -838,7 +783,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 ""
             };
             body.push(Line::from(Span::styled(
-                format!("o open in browser · d view diff{view} · r refresh · esc close"),
+                format!("o open in browser · d review the diff{view} · r refresh · esc close"),
                 dim,
             )));
             let area = content_rect(76, body.len() + 1, frame.area());
@@ -972,65 +917,9 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             input,
             pending,
         } => {
-            let number = match &explorer.pr {
-                PrLookup::Found(pr) => pr.number,
-                _ => return,
-            };
-            let dim = Style::default().fg(Color::DarkGray);
-            let what = match pending {
-                Some(review) => format!(
-                    "submits your pending review and its {} inline comment{}",
-                    review.comments,
-                    if review.comments == 1 { "" } else { "s" }
-                ),
-                None => "posts a new review".to_string(),
-            };
-            let mut body = vec![Line::from(Span::styled(what, dim)), Line::from("")];
-            let typed: Vec<&str> = input.split('\n').collect();
-            let last = typed.len() - 1;
-            for (i, line) in typed.iter().enumerate() {
-                let mut spans = vec![Span::styled(
-                    line.to_string(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if i == last {
-                    spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
-                }
-                body.push(Line::from(spans));
+            if let PrLookup::Found(pr) = &explorer.pr {
+                draw_review_body(frame, pr.number, *verdict, input, pending.as_ref());
             }
-            if input.is_empty() {
-                body.push(Line::from(Span::styled(
-                    match verdict {
-                        crate::github::Verdict::Approve => "(optional) summary comment",
-                        _ => "summary comment",
-                    },
-                    dim,
-                )));
-            }
-            body.push(Line::from(""));
-            body.push(Line::from(Span::styled(
-                "⏎ submit to GitHub · ctrl-j new line · ctrl-u clear · esc back",
-                dim,
-            )));
-            let area = content_rect(70, body.len() + 2, frame.area());
-            frame.render_widget(Clear, area);
-            frame.render_widget(
-                Paragraph::new(body)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(format!(" {} #{number} ", verdict.label()))
-                            .title_style(Style::default().fg(match verdict {
-                                crate::github::Verdict::Approve => Color::Green,
-                                crate::github::Verdict::Comment => Color::Blue,
-                                crate::github::Verdict::RequestChanges => Color::Red,
-                            })),
-                    )
-                    .wrap(Wrap { trim: false }),
-                area,
-            );
         }
         Overlay::Message {
             title,
@@ -1063,8 +952,74 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
     }
 }
 
+/// The summary that goes with a verdict, being typed — over the explorer's
+/// PR panel or over the review viewer, which share it.
+pub(super) fn draw_review_body(
+    frame: &mut Frame,
+    number: u64,
+    verdict: Verdict,
+    input: &str,
+    pending: Option<&PendingReview>,
+) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let what = match pending {
+        Some(review) => format!(
+            "submits your pending review and its {} inline comment{}",
+            review.comments,
+            if review.comments == 1 { "" } else { "s" }
+        ),
+        None => "posts a new review".to_string(),
+    };
+    let mut body = vec![Line::from(Span::styled(what, dim)), Line::from("")];
+    let typed: Vec<&str> = input.split('\n').collect();
+    let last = typed.len() - 1;
+    for (i, line) in typed.iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if i == last {
+            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+        }
+        body.push(Line::from(spans));
+    }
+    if input.is_empty() {
+        body.push(Line::from(Span::styled(
+            match verdict {
+                Verdict::Approve => "(optional) summary comment",
+                _ => "summary comment",
+            },
+            dim,
+        )));
+    }
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        "⏎ submit to GitHub · ctrl-j new line · ctrl-u clear · esc back",
+        dim,
+    )));
+    let area = content_rect(70, body.len() + 2, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} #{number} ", verdict.label()))
+                    .title_style(Style::default().fg(match verdict {
+                        Verdict::Approve => Color::Green,
+                        Verdict::Comment => Color::Blue,
+                        Verdict::RequestChanges => Color::Red,
+                    })),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 26] = [
+const HELP: [(&str, &str); 27] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -1072,6 +1027,7 @@ const HELP: [(&str, &str); 26] = [
     ("⇥", "complete the filter, as far as the matches agree"),
     ("/ or \\", "enter the highlighted folder, filtering afresh"),
     ("⌫ / ctrl-u", "delete a character / clear the filter"),
+    (":", "command: mv, cp [-r], mkdir [-p], rm [-r], touch"),
     ("", ""),
     ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
     ("→", "expand: enter the highlighted folder"),
@@ -1081,10 +1037,10 @@ const HELP: [(&str, &str); 26] = [
     ("shift-drag", "select text — jeet has the mouse otherwise"),
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
-    ("ctrl-a", "start a coding agent at the worktree root"),
-    ("ctrl-s", "previous agent sessions for this worktree"),
-    ("ctrl-w", "worktrees: switch, create, rename or delete"),
-    ("", "  in the panel: r refresh, esc close"),
+    ("ctrl-a", "this task's agent, in tmux: started if need be"),
+    ("ctrl-s", "this task's agent sessions: ⏎ resumes one"),
+    ("ctrl-w", "worktrees of this repository: switch to one"),
+    ("", "  in the panel: o open its PR, r refresh, esc close"),
     (
         "ctrl-f",
         "diff the highlighted file or folder against the base",
@@ -1093,7 +1049,10 @@ const HELP: [(&str, &str); 26] = [
         "ctrl-p",
         "pull request: open it, approve, comment, request changes",
     ),
-    ("ctrl-o", "the repo's open pull requests: ⏎ checks one out"),
+    (
+        "ctrl-o",
+        "the repo's open pull requests: ⏎ checks one out in a task",
+    ),
     ("ctrl-d", "toggle hidden dotfiles"),
     ("ctrl-r", "refresh the listing and counters"),
     ("ctrl-q", "quit, leaving the shell in this directory"),
@@ -1173,7 +1132,7 @@ fn wrap_columns(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap, breaking a word that is wider than the line itself.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split(' ') {
@@ -1281,7 +1240,7 @@ pub fn truncate(text: &str, width: usize) -> String {
 }
 
 /// A centered box sized to its content (plus borders), clamped to the frame.
-fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
+pub(super) fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
     let width = (cols as u16).saturating_add(2).min(area.width);
     let height = (lines as u16).saturating_add(2).min(area.height);
     Rect {
@@ -1293,7 +1252,7 @@ fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
 }
 
 /// A centered box `lines` rows tall (plus borders), clamped to the frame.
-fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
+pub(super) fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
     let wanted = (lines as u16).saturating_add(2);
     let height = wanted.min(area.height);
     let top = area.height.saturating_sub(height) / 2;
@@ -1315,7 +1274,7 @@ fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1599,10 +1558,9 @@ mod tests {
             trunk_path: dir.path().to_string_lossy().to_string(),
             remote_url: String::new(),
             default_branch: "main".into(),
-            managed: true,
         };
         let mut explorer = Explorer::new(
-            repo,
+            Some(repo),
             dir.path().to_path_buf(),
             "feature".into(),
             "worktree".into(),
@@ -1642,6 +1600,99 @@ mod tests {
             }
         }
         assert!(explorer.pr_area.is_none(), "30 columns has no room for it");
+    }
+
+    /// A task's canvas is headed by its task, with no branch to compare.
+    #[test]
+    fn a_canvas_is_headed_by_its_task() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        let mut explorer = Explorer::new(
+            None,
+            dir.path().to_path_buf(),
+            "Fix login".into(),
+            "task canvas".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut explorer)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("jeet · task Fix login"), "{screen}");
+        assert!(screen.contains("[task canvas]"), "{screen}");
+        assert!(!screen.contains(" vs "), "{screen}");
+        assert!(screen.contains("notes/"), "{screen}");
+    }
+
+    /// A command line is labelled as one, shown without its colon, and the
+    /// listing title talks about the operand rather than the whole line.
+    #[test]
+    fn a_command_line_is_labelled_as_one() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "x").unwrap();
+        let repo = crate::db::RepoRecord {
+            id: "github.com/acme/widget".into(),
+            trunk_path: dir.path().to_string_lossy().to_string(),
+            remote_url: String::new(),
+            default_branch: "main".into(),
+        };
+        let mut explorer = Explorer::new(
+            Some(repo),
+            dir.path().to_path_buf(),
+            "feature".into(),
+            "worktree".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        let render = |explorer: &mut Explorer| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, explorer)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..20)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        explorer.set_filter(":".into());
+        let screen = render(&mut explorer);
+        assert!(screen[3].contains("cmd ›"), "{}", screen[3]);
+        assert!(
+            screen[3].contains("mkdir"),
+            "the usage is shown: {}",
+            screen[3]
+        );
+
+        explorer.set_filter(":mv zz".into());
+        let screen = render(&mut explorer);
+        assert!(screen[3].contains("cmd ›    mv zz█"), "{}", screen[3]);
+        assert!(
+            screen
+                .iter()
+                .any(|row| row.contains("nothing matches \"zz\"")),
+            "{screen:#?}"
+        );
     }
 
     #[test]

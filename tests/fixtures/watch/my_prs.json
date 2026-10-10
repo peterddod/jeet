@@ -1,0 +1,49 @@
+{
+  "data": {
+    "viewer": {
+      "pullRequests": {
+        "nodes": [
+          {
+            "number": 42,
+            "title": "Add rate limiting",
+            "url": "https://github.com/acme/api/pull/42",
+            "headRefName": "rate-limit",
+            "repository": {
+              "nameWithOwner": "acme/api"
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "oid": "1111111111111111111111111111111111111111",
+                    "statusCheckRollup": {
+                      "state": "FAILURE"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 3,
+            "title": "Docs",
+            "url": "https://github.com/me/jeet/pull/3",
+            "repository": {
+              "nameWithOwner": "me/jeet"
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "oid": "2222222222222222222222222222222222222222",
+                    "statusCheckRollup": null
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

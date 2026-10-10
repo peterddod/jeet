@@ -16,6 +16,46 @@ pub fn all_branch_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn task_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    let Ok(tasks) = app.db.list_tasks(None) else {
+        return Vec::new();
+    };
+    tasks
+        .into_iter()
+        .map(|t| CompletionCandidate::new(t.slug))
+        .collect()
+}
+
+pub fn project_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    crate::projects::list(&app)
+        .unwrap_or_default()
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
+/// Worktree names of the task the completing shell is in.
+pub fn task_worktree_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    let Ok(task) = crate::tasks::current(&app, None) else {
+        return Vec::new();
+    };
+    let Ok(rows) = app.db.list_task_worktrees(&task.id) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .map(|r| CompletionCandidate::new(r.dir_name))
+        .collect()
+}
+
 pub fn repo_filters() -> Vec<String> {
     let mut out = Vec::new();
     let Ok(app) = App::open() else {
@@ -61,12 +101,12 @@ pub fn branch_names(filter: Option<&str>) -> Vec<String> {
         return out;
     };
 
+    // The default branch, and every branch a task has a worktree on: read
+    // from the index, so a tab press never waits on git.
     for repo in repos {
         out.push(repo.default_branch.clone());
-        if let Ok(wts) = app.db.list_worktrees(&repo.id) {
-            for wt in wts {
-                out.push(wt.branch);
-            }
+        if let Ok(rows) = app.db.task_worktrees_of_repo(&repo.id) {
+            out.extend(rows.into_iter().filter_map(|row| row.branch));
         }
     }
 

@@ -61,25 +61,51 @@ impl AgentSpec {
         }
     }
 
+    /// Arguments that start a new session with a known id and display name,
+    /// so jeet can record the session before the agent is even running.
+    pub fn new_session_args(&self, session_id: &str, name: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec![
+                "--session-id".to_string(),
+                session_id.to_string(),
+                "-n".to_string(),
+                name.to_string(),
+            ]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
+    /// Arguments that layer a settings JSON (hooks, permissions) over the
+    /// user's own, without writing anything to disk.
+    pub fn settings_args(&self, json: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec!["--settings".to_string(), json.to_string()]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
+    /// Arguments that give an interactive session its first prompt, after
+    /// every other argument. `--` first, so a prompt that starts with a dash
+    /// is a prompt, not a flag.
+    pub fn prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec!["--".to_string(), prompt.to_string()]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
     pub fn supports_sessions(&self) -> bool {
         self.kind == AgentKind::ClaudeCode
     }
 }
 
-/// A previously recorded agent session for a worktree.
+/// A Claude Code session recorded for a directory, found by its transcript.
 #[derive(Debug, Clone)]
 pub struct AgentSession {
     pub id: String,
     /// Unix seconds of the last write.
     pub modified: i64,
     pub summary: String,
-    pub entries: usize,
-}
-
-impl AgentSession {
-    pub fn age(&self) -> String {
-        age_label(self.modified)
-    }
 }
 
 /// `just now`, `5m ago`, `3h ago`… for a unix timestamp.
@@ -135,22 +161,70 @@ pub fn claude_project_slug(root: &Path) -> String {
         .collect()
 }
 
-/// Sessions recorded for `root`, most recently used first.
-pub fn sessions_for(spec: &AgentSpec, root: &Path) -> Result<Vec<AgentSession>> {
-    match spec.kind {
-        AgentKind::ClaudeCode => claude_sessions(root),
-        AgentKind::Unknown(ref name) => {
-            bail!("jeet does not know where `{name}` stores its sessions")
-        }
+/// Where Claude Code keeps the transcripts of sessions started in `root`.
+fn claude_session_dir(root: &Path) -> Option<PathBuf> {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Some(claude_projects_dir()?.join(claude_project_slug(&canonical)))
+}
+
+/// Copy the transcripts of the Claude Code sessions started in `from` to
+/// where Claude looks for those started in `to`, so they can be resumed
+/// there. Returns the sessions copied; one already at `to` is left alone and
+/// not counted. `to` must exist: Claude names the store by its real path.
+pub fn copy_claude_sessions(from: &Path, to: &Path) -> Result<Vec<AgentSession>> {
+    let sessions = claude_sessions(from)?;
+    if sessions.is_empty() {
+        return Ok(Vec::new());
     }
+    let (Some(source), Some(dest)) = (claude_session_dir(from), claude_session_dir(to)) else {
+        bail!("could not locate the Claude Code config directory");
+    };
+    std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
+    let mut copied = Vec::new();
+    for session in sessions {
+        let name = format!("{}.jsonl", session.id);
+        let target = dest.join(&name);
+        if target.exists() {
+            continue;
+        }
+        std::fs::copy(source.join(&name), &target)
+            .with_context(|| format!("copy session {}", session.id))?;
+        copied.push(session);
+    }
+    Ok(copied)
+}
+
+/// Whether Claude Code has a transcript of session `id` started in `root`,
+/// i.e. whether `--resume id` there would find anything.
+pub fn claude_has_transcript(root: &Path, id: &str) -> bool {
+    claude_session_dir(root).is_some_and(|dir| dir.join(format!("{id}.jsonl")).is_file())
+}
+
+/// When any Claude Code session in `root` last wrote to its transcript.
+/// Only directory metadata is read, so it is cheap however long they are.
+pub fn claude_latest_activity(root: &Path) -> Option<i64> {
+    let dir = claude_session_dir(root)?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| mtime_secs(&e.metadata().ok()?))
+        .max()
+}
+
+/// A file's modification time in unix seconds.
+pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
 }
 
 fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
-    let Some(projects) = claude_projects_dir() else {
+    let Some(dir) = claude_session_dir(root) else {
         bail!("could not locate the Claude Code config directory");
     };
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let dir = projects.join(claude_project_slug(&canonical));
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -168,17 +242,13 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
         };
         let modified = entry
             .metadata()
-            .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .and_then(|m| mtime_secs(&m))
             .unwrap_or(0);
-        let (summary, entries) = summarise_session(&path);
         sessions.push(AgentSession {
             id,
             modified,
-            summary,
-            entries,
+            summary: summarise_session(&path),
         });
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
@@ -186,31 +256,18 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
 }
 
 /// Best-effort first prompt (or recorded summary) plus the transcript length.
-fn summarise_session(path: &Path) -> (String, usize) {
-    // Transcripts run to many megabytes and the overlay summarises every
-    // session in the project, so read them a line at a time rather than
-    // holding the sum of all of them in memory at once.
+fn summarise_session(path: &Path) -> String {
+    // Transcripts run to many megabytes, so read them a line at a time, and
+    // only as far as the first prompt.
     let Ok(file) = std::fs::File::open(path) else {
-        return ("(unreadable transcript)".to_string(), 0);
+        return "(unreadable transcript)".to_string();
     };
-    let mut summary = None;
-    let mut count = 0;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        count += 1;
-        if summary.is_some() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-            summary = extract_summary(&value);
-        }
-    }
-    (
-        summary.unwrap_or_else(|| "(no prompt recorded)".to_string()),
-        count,
-    )
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .find_map(|line| extract_summary(&serde_json::from_str(&line).ok()?))
+        .unwrap_or_else(|| "(no prompt recorded)".to_string())
 }
 
 fn extract_summary(value: &serde_json::Value) -> Option<String> {
@@ -285,6 +342,19 @@ mod tests {
     }
 
     #[test]
+    fn claude_sessions_get_an_id_a_name_and_settings() {
+        let spec = AgentSpec::from_command("claude").unwrap();
+        assert_eq!(
+            spec.new_session_args("abc", "Fix the login").unwrap(),
+            ["--session-id", "abc", "-n", "Fix the login"]
+        );
+        assert_eq!(
+            spec.settings_args(r#"{"hooks":{}}"#).unwrap(),
+            ["--settings", r#"{"hooks":{}}"#]
+        );
+    }
+
+    #[test]
     fn detects_claude_by_path_not_just_name() {
         let spec = AgentSpec::from_command("/opt/bin/claude").unwrap();
         assert_eq!(spec.kind, AgentKind::ClaudeCode);
@@ -295,7 +365,15 @@ mod tests {
         let spec = AgentSpec::from_command("aider").unwrap();
         assert!(!spec.supports_sessions());
         assert!(spec.resume_args("x").is_none());
-        assert!(sessions_for(&spec, Path::new("/tmp")).is_err());
+        assert!(spec.new_session_args("x", "task").is_none());
+        assert!(spec.settings_args("{}").is_none());
+        assert!(spec.prompt_args("go").is_none());
+    }
+
+    #[test]
+    fn a_first_prompt_comes_after_the_options() {
+        let spec = AgentSpec::from_command("claude").unwrap();
+        assert_eq!(spec.prompt_args("--help me").unwrap(), ["--", "--help me"]);
     }
 
     #[test]

@@ -1,0 +1,112 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc29yOjI=" },
+            "nodes": [
+              {
+                "id": "PRRT_kwDOAAABc84AAAAB",
+                "path": "src/lib.rs",
+                "line": 12,
+                "originalLine": 11,
+                "diffSide": "RIGHT",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "PRRC_kwDOAAABc84AAAAC",
+                      "databaseId": 1001,
+                      "author": { "login": "ada" },
+                      "body": "Should this be `u64`?\nIt overflows past 4GB.",
+                      "createdAt": "2026-10-08T12:00:00Z",
+                      "viewerCanUpdate": false,
+                      "viewerCanDelete": false,
+                      "reactionGroups": [
+                        { "content": "THUMBS_UP", "viewerHasReacted": true, "users": { "totalCount": 2 } },
+                        { "content": "EYES", "viewerHasReacted": false, "users": { "totalCount": 0 } }
+                      ]
+                    },
+                    {
+                      "id": "PRRC_kwDOAAABc84AAAAD",
+                      "databaseId": 1002,
+                      "author": { "login": "me" },
+                      "body": "Good catch, fixed.",
+                      "createdAt": "2026-10-08T13:30:00.123Z",
+                      "viewerCanUpdate": true,
+                      "viewerCanDelete": true,
+                      "reactionGroups": []
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "PRRT_kwDOAAABc84AAAAE",
+                "path": "src/old.rs",
+                "line": 3,
+                "originalLine": 3,
+                "diffSide": "LEFT",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "PRRC_kwDOAAABc84AAAAF",
+                      "databaseId": 1003,
+                      "author": null,
+                      "body": "Why remove this?",
+                      "createdAt": "2026-10-07T09:15:00Z",
+                      "viewerCanUpdate": false,
+                      "viewerCanDelete": false,
+                      "reactionGroups": [
+                        { "content": "HEART", "viewerHasReacted": false, "users": { "totalCount": 1 } }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "pageInfo": { "hasNextPage": false, "endCursor": "Y3Vyc29yOjM=" },
+            "nodes": [
+              {
+                "id": "PRRT_kwDOAAABc84AAAAG",
+                "path": "src/lib.rs",
+                "line": null,
+                "originalLine": 40,
+                "diffSide": "RIGHT",
+                "isResolved": false,
+                "isOutdated": true,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "PRRC_kwDOAAABc84AAAAH",
+                      "databaseId": 1004,
+                      "author": { "login": "grace" },
+                      "body": "This went away in the last push.",
+                      "createdAt": "2026-10-06T00:00:00Z",
+                      "viewerCanUpdate": false,
+                      "viewerCanDelete": false,
+                      "reactionGroups": []
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

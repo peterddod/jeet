@@ -1,0 +1,836 @@
+//! tmux: where task agents run.
+//!
+//! Every task's agent lives in a detached tmux session named `jeet-<slug>`,
+//! so it keeps working after the terminal that started it has gone, and can
+//! be attached to again from anywhere. The assistant, which may have several
+//! sessions going at once, has a window for each in one tmux session; see
+//! [`new_window`].
+//!
+//! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
+//! tests, which point it at a stub so they never reach a real server.
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+
+pub const BINARY_ENV: &str = "JEET_TMUX";
+
+/// Set by jeet's launchd job and systemd unit. A tmux server keeps the
+/// environment of whoever started it, and hands it to every pane it makes
+/// from then on, the user's own included; a job runs with almost none of the
+/// user's. So a process with this set never starts a server, only sessions
+/// on one already running.
+pub const BACKGROUND_ENV: &str = "JEET_BACKGROUND";
+
+pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not found; install it \
+     (`brew install tmux` on macOS, `sudo apt install tmux` on Debian and Ubuntu)";
+
+fn binary() -> String {
+    std::env::var(BINARY_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "tmux".to_string())
+}
+
+/// A tmux command that cannot read the terminal and says nothing on it.
+fn quiet() -> Command {
+    let mut cmd = Command::new(binary());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
+/// An exact-match session target. A bare name is matched as a prefix, so
+/// `jeet-api` would otherwise find `jeet-api-2` once `jeet-api` is gone.
+fn target(name: &str) -> String {
+    format!("={name}")
+}
+
+/// Whether tmux can be run at all.
+pub fn available() -> bool {
+    quiet()
+        .arg("-V")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Fail with an install hint when tmux is missing.
+pub fn require() -> Result<()> {
+    if !available() {
+        bail!(INSTALL_HINT);
+    }
+    Ok(())
+}
+
+/// Whether this process runs as a background job: see [`BACKGROUND_ENV`].
+fn in_background() -> bool {
+    std::env::var_os(BACKGROUND_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// Whether a tmux server is running, for a new session to join.
+fn server_running() -> bool {
+    quiet()
+        .arg("list-sessions")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether a new tmux session may be started here: always, but in a
+/// background job only on a server that is already running.
+pub fn may_start_session() -> bool {
+    !in_background() || server_running()
+}
+
+/// Fail rather than start a server from a background job.
+fn refuse_new_server(name: &str) -> Result<()> {
+    if !may_start_session() {
+        bail!(
+            "not starting tmux session {name} from a background job: no tmux server is \
+             running, and one started here would have the job's environment, not yours"
+        );
+    }
+    Ok(())
+}
+
+pub fn has_session(name: &str) -> bool {
+    quiet()
+        .args(["has-session", "-t", &target(name)])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Start `argv` in a new detached session `name`, in `cwd`, with `env` set
+/// in it. `argv` is run directly, never through a shell.
+pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<()> {
+    if argv.is_empty() {
+        bail!("nothing to run in tmux session {name}");
+    }
+    refuse_new_server(name)?;
+    let mut cmd = Command::new(binary());
+    cmd.args(["new-session", "-d", "-s", name, "-c"]).arg(cwd);
+    for (key, value) in env {
+        cmd.arg("-e").arg(format!("{key}={value}"));
+    }
+    cmd.arg("--").args(argv);
+    // A server this starts keeps a copy of our environment for every pane it
+    // ever makes: the shell wrapper's cd file, this task's id and the
+    // assistant's restrictions must not leak into other sessions that way.
+    cmd.env_remove(crate::cd::CD_FILE_ENV)
+        .env_remove(crate::tasks::TASK_ID_ENV)
+        .env_remove(crate::permissions::ASSISTANT_ENV)
+        .env_remove(BACKGROUND_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    let output = cmd.output().context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not start session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    set_detach_hint(name);
+    Ok(())
+}
+
+/// Type `text` into the active pane of session `name`, then press Enter.
+///
+/// `-l` sends the text as it is, never as key names, and `--` keeps text
+/// that starts with a dash from being read as a flag. The caller removes
+/// control characters: sent literally, they would still drive the pane.
+pub fn send_text(name: &str, text: &str) -> Result<()> {
+    type_into(&format!("{}:", target(name)), text)
+}
+
+/// [`send_text`] for the window with tmux id `window` (`@3`).
+pub fn send_text_to_window(window: &str, text: &str) -> Result<()> {
+    type_into(window, text)
+}
+
+fn type_into(pane: &str, text: &str) -> Result<()> {
+    send_keys(&["-t", pane, "-l", "--", &literal_arg(text)])?;
+    // A moment between the text and the Enter, or a pane reading the two as
+    // one paste may take the Enter as part of the text.
+    std::thread::sleep(Duration::from_millis(100));
+    send_keys(&["-t", pane, "Enter"])
+}
+
+/// The window option a window made by [`new_window`] is keyed by.
+const KEY_OPTION: &str = "@jeet_key";
+
+/// One window of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    /// tmux's id for it, e.g. `@3`: unique on the server, and a target as
+    /// it is.
+    pub id: String,
+    /// Whether its program is still running.
+    pub alive: bool,
+    /// What [`new_window`] keyed it by, if it made it.
+    pub key: Option<String>,
+}
+
+/// The windows of session `name`: none when it is not running.
+pub fn windows(name: &str) -> Vec<Window> {
+    let Ok(output) = Command::new(binary())
+        .args([
+            "list-windows",
+            "-t",
+            &target(name),
+            "-F",
+            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}"),
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_windows(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_windows(listing: &str) -> Vec<Window> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let id = fields.next()?.trim();
+            if !id.starts_with('@') {
+                return None;
+            }
+            let alive = fields.next()?.trim() == "0";
+            let key = fields
+                .next()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_string);
+            Some(Window {
+                id: id.to_string(),
+                alive,
+                key,
+            })
+        })
+        .collect()
+}
+
+/// Start `argv` in a new window of session `name`, making the session if it
+/// is not running, and key the window by `key` so [`windows`] can tell it
+/// apart. `title` is what tmux shows for it. Returns the window's id.
+/// `argv` is run directly, never through a shell; the session's environment
+/// is kept clean the way [`new_session`]'s is.
+pub fn new_window(
+    name: &str,
+    key: &str,
+    title: &str,
+    cwd: &Path,
+    env: &[(&str, &str)],
+    argv: &[String],
+) -> Result<String> {
+    if argv.is_empty() {
+        bail!("nothing to run in tmux session {name}");
+    }
+    let mut creating = !has_session(name);
+    if creating {
+        refuse_new_server(name)?;
+    }
+    let mut attempts = 0;
+    let output = loop {
+        attempts += 1;
+        let mut cmd = Command::new(binary());
+        match creating {
+            true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
+            false => cmd.args([
+                "new-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-t",
+                &format!("{}:", target(name)),
+            ]),
+        };
+        // tmux expands formats in a window name, and `#(…)` in one runs a
+        // shell command: the name is the user's, so it goes in literally.
+        cmd.args(["-n", &format_literal(title), "-c"]).arg(cwd);
+        for (key, value) in env {
+            cmd.arg("-e").arg(format!("{key}={value}"));
+        }
+        cmd.arg("--").args(argv);
+        cmd.env_remove(crate::cd::CD_FILE_ENV)
+            .env_remove(crate::tasks::TASK_ID_ENV)
+            .env_remove(crate::permissions::ASSISTANT_ENV)
+            .env_remove(BACKGROUND_ENV)
+            .stdin(Stdio::null());
+        let output = cmd.output().context("run tmux")?;
+        // Another jeet made the session between the look and the start:
+        // a window in it does as well.
+        if !output.status.success() && creating && attempts == 1 && has_session(name) {
+            creating = false;
+            continue;
+        }
+        break output;
+    };
+    if !output.status.success() {
+        bail!(
+            "tmux could not start a window in session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !id.starts_with('@') {
+        bail!("tmux started a window in session {name} but did not say which ({id:?})");
+    }
+    if !set_window_key(&id, key) {
+        let _ = kill_window(&id);
+        bail!("tmux could not label its new window in session {name}");
+    }
+    if creating {
+        set_detach_hint(name);
+    }
+    Ok(id)
+}
+
+/// Key window `id` by `key`, as [`new_window`] does: for a window whose
+/// program has gone on to something else to be known by.
+pub fn set_window_key(id: &str, key: &str) -> bool {
+    quiet()
+        .args(["set-option", "-w", "-t", id, KEY_OPTION, key])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The window this process runs in, by `$TMUX_PANE`, when it is one of
+/// session `name`'s: its id and what it is keyed by.
+pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
+    std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
+    // The pane this process runs in, never whichever the client last used.
+    let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
+    let output = Command::new(binary())
+        .args(["display-message", "-p", "-t", &pane])
+        .arg(format!(
+            "#{{session_name}}\t#{{window_id}}\t#{{{KEY_OPTION}}}"
+        ))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_current_window(&String::from_utf8_lossy(&output.stdout), name)
+}
+
+fn parse_current_window(line: &str, name: &str) -> Option<(String, Option<String>)> {
+    let mut fields = line.trim_end_matches(['\n', '\r']).split('\t');
+    if fields.next()? != name {
+        return None;
+    }
+    let id = fields.next()?.trim();
+    if !id.starts_with('@') {
+        return None;
+    }
+    let key = fields
+        .next()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
+    Some((id.to_string(), key))
+}
+
+/// Make window `id` the one its session shows.
+pub fn select_window(id: &str) -> Result<()> {
+    let output = Command::new(binary())
+        .args(["select-window", "-t", id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not switch to window {id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// End window `id` and what runs in it, the way [`kill`] ends a session; a
+/// window that is already gone is fine.
+pub fn kill_window(id: &str) -> Result<()> {
+    let pids = process_tree(&pane_pids(&["-t", id]));
+    let output = Command::new(binary())
+        .args(["kill-window", "-t", id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() && window_exists(id) {
+        bail!(
+            "tmux could not end window {id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    end_processes(&pids, EXIT_GRACE)
+        .with_context(|| format!("end what was running in tmux window {id}"))
+}
+
+fn window_exists(id: &str) -> bool {
+    quiet()
+        .args(["list-panes", "-t", id])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether the program in window `id` is still running.
+pub fn window_alive(id: &str) -> bool {
+    let Ok(output) = Command::new(binary())
+        .args(["list-panes", "-t", id, "-F", "#{pane_dead}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && any_pane_alive(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn send_keys(args: &[&str]) -> Result<()> {
+    let output = Command::new(binary())
+        .arg("send-keys")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not type into the agent's pane: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// tmux reads an argument that ends in `;` as the end of its command, and
+/// drops the `;`; one ending in `\;` keeps a literal `;`. So the last
+/// `;` is escaped, and the text arrives whole.
+fn literal_arg(text: &str) -> String {
+    match text.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => text.to_string(),
+    }
+}
+
+/// Show how to get back to jeet in the session's status line. Cosmetic, so
+/// failures are ignored.
+fn set_detach_hint(name: &str) {
+    let prefix = Command::new(binary())
+        .args(["show-options", "-gv", "prefix"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty() && p != "None")
+        .unwrap_or_else(|| "C-b".to_string());
+    let _ = quiet()
+        .args(["set-option", "-t", &target(name), "status-right"])
+        .arg(detach_hint(&prefix))
+        .status();
+}
+
+fn detach_hint(prefix: &str) -> String {
+    // `#` starts a format in status-right; a prefix key could be `#`.
+    format!(" {} d → jeet ", format_literal(prefix))
+}
+
+/// `text` as tmux shows it where it expands formats: `#` starts one, and
+/// `#(…)` runs a shell command, so each is doubled to stand for itself.
+fn format_literal(text: &str) -> String {
+    text.replace('#', "##")
+}
+
+/// Attach the terminal to session `name` until the user detaches, returning
+/// tmux's exit code. Inside tmux already, the client switches to it instead
+/// of nesting a second tmux.
+pub fn attach(name: &str) -> Result<i32> {
+    let inside = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    let verb = if inside {
+        "switch-client"
+    } else {
+        "attach-session"
+    };
+    let status = Command::new(binary())
+        .args([verb, "-t", &target(name)])
+        .status()
+        .context("run tmux")?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// End session `name` and everything running in it; a session that is
+/// already gone is fine.
+///
+/// `kill-session` only hangs up on the panes and returns at once, while
+/// what ran in them may still be shutting down: finishing a tool call,
+/// running an exit hook, writing files. So this returns only once every
+/// process the panes were running, their children included, has exited.
+/// Whatever is still running after [`EXIT_GRACE`] is killed outright.
+pub fn kill(name: &str) -> Result<()> {
+    if !has_session(name) {
+        return Ok(());
+    }
+    // Taken before the kill: once the panes are gone, tmux no longer knows
+    // which processes were theirs.
+    let pids = process_tree(&live_pane_pids(name));
+    let output = Command::new(binary())
+        .args(["kill-session", "-t", &target(name)])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    // It may have ended on its own between the check and the kill.
+    if !output.status.success() && has_session(name) {
+        bail!(
+            "tmux could not end session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    end_processes(&pids, EXIT_GRACE)
+        .with_context(|| format!("end what was running in tmux session {name}"))
+}
+
+/// How long the processes of a killed session get to exit by themselves:
+/// longer than Claude gives its exit hook.
+pub const EXIT_GRACE: Duration = Duration::from_secs(15);
+
+/// How long a process gets to go once it has been sent SIGKILL.
+const KILL_WAIT: Duration = Duration::from_secs(3);
+
+/// The pids of the programs still running in session `name`'s panes. A dead
+/// pane's pid is left out: that process is gone and the pid may be reused.
+fn live_pane_pids(name: &str) -> Vec<u32> {
+    pane_pids(&["-s", "-t", &target(name)])
+}
+
+/// The pids of the live panes `list-panes` with `args` lists.
+fn pane_pids(args: &[&str]) -> Vec<u32> {
+    let Ok(output) = Command::new(binary())
+        .arg("list-panes")
+        .args(args)
+        .args(["-F", "#{pane_dead} #{pane_pid}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_live_pane_pids(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_live_pane_pids(listing: &str) -> Vec<u32> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (dead, pid) = line.trim().split_once(' ')?;
+            match dead {
+                "0" => pid.trim().parse().ok(),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// One process in a `ps` listing.
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    /// Exited, waiting only for its parent to reap it.
+    zombie: bool,
+}
+
+/// Every process running now, or nothing when `ps` cannot be run.
+fn processes() -> Vec<Proc> {
+    let Ok(output) = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid=", "-o", "stat="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_processes(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_processes(listing: &str) -> Vec<Proc> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let zombie = fields.next().is_some_and(|stat| stat.starts_with('Z'));
+            Some(Proc { pid, ppid, zombie })
+        })
+        .collect()
+}
+
+/// `roots` and all their descendants that are running now. This process is
+/// never among them: waiting for itself would never end.
+fn process_tree(roots: &[u32]) -> Vec<u32> {
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    descendants(&processes(), roots, std::process::id())
+}
+
+fn descendants(procs: &[Proc], roots: &[u32], me: u32) -> Vec<u32> {
+    let running = |pid: u32| procs.iter().any(|p| p.pid == pid && !p.zombie);
+    let mut tree: Vec<u32> = roots.iter().copied().filter(|&p| running(p)).collect();
+    let mut i = 0;
+    while i < tree.len() {
+        let parent = tree[i];
+        for p in procs {
+            if p.ppid == parent && !p.zombie && !tree.contains(&p.pid) {
+                tree.push(p.pid);
+            }
+        }
+        i += 1;
+    }
+    tree.retain(|&p| p != me);
+    tree
+}
+
+/// Those of `pids` still running.
+fn still_running(pids: &[u32]) -> Vec<u32> {
+    let procs = processes();
+    pids.iter()
+        .copied()
+        .filter(|&pid| procs.iter().any(|p| p.pid == pid && !p.zombie))
+        .collect()
+}
+
+/// Wait up to `limit` for every one of `pids` to exit; those still running
+/// after it.
+fn wait_for_exit(pids: &[u32], limit: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + limit;
+    loop {
+        let left = still_running(pids);
+        if left.is_empty() || Instant::now() >= deadline {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Let `pids` exit within `grace`, then kill whatever has not.
+fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let left = wait_for_exit(pids, grace);
+    if left.is_empty() {
+        return Ok(());
+    }
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .args(left.iter().map(u32::to_string))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let left = wait_for_exit(&left, KILL_WAIT);
+    if !left.is_empty() {
+        let list: Vec<String> = left.iter().map(u32::to_string).collect();
+        bail!("process {} would not exit", list.join(", "));
+    }
+    Ok(())
+}
+
+/// The name of the tmux session this process runs in, if it runs in one.
+pub fn current_session() -> Option<String> {
+    std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
+    let mut cmd = Command::new(binary());
+    cmd.args(["display-message", "-p"]);
+    // The pane this process runs in, not whichever the client last used.
+    if let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()) {
+        cmd.args(["-t", &pane]);
+    }
+    let output = cmd
+        .arg("#{session_name}")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether anything is still running in session `name`: false when the
+/// session is gone or every pane in it has exited.
+pub fn pane_alive(name: &str) -> bool {
+    let Ok(output) = Command::new(binary())
+        .args([
+            "list-panes",
+            "-s",
+            "-t",
+            &target(name),
+            "-F",
+            "#{pane_dead}",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && any_pane_alive(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `#{pane_dead}` is `1` for a pane whose program has exited, `0` otherwise.
+fn any_pane_alive(listing: &str) -> bool {
+    listing.lines().any(|l| l.trim() == "0")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets_match_exactly() {
+        assert_eq!(target("jeet-api"), "=jeet-api");
+    }
+
+    #[test]
+    fn a_trailing_semicolon_is_typed_not_parsed() {
+        assert_eq!(literal_arg("do it"), "do it");
+        assert_eq!(literal_arg("do it;"), r"do it\;");
+        assert_eq!(literal_arg(";"), r"\;");
+        // Escaped already: tmux unescapes once, so it stays as typed.
+        assert_eq!(literal_arg(r"a\;"), r"a\\;");
+        assert_eq!(literal_arg("a; b"), "a; b");
+    }
+
+    #[test]
+    fn windows_are_read_with_their_keys() {
+        let listing = "@1\t0\tabc\n@2\t1\t\n@3\t0\n%junk\t0\tx\n";
+        assert_eq!(
+            parse_windows(listing),
+            [
+                Window {
+                    id: "@1".into(),
+                    alive: true,
+                    key: Some("abc".into()),
+                },
+                Window {
+                    id: "@2".into(),
+                    alive: false,
+                    key: None,
+                },
+                Window {
+                    id: "@3".into(),
+                    alive: true,
+                    key: None,
+                },
+            ]
+        );
+        assert!(parse_windows("").is_empty());
+    }
+
+    #[test]
+    fn hint_escapes_format_characters() {
+        assert_eq!(detach_hint("C-b"), " C-b d → jeet ");
+        assert_eq!(detach_hint("#"), " ## d → jeet ");
+    }
+
+    #[test]
+    fn window_names_cannot_run_formats() {
+        assert_eq!(format_literal("plan the week"), "plan the week");
+        assert_eq!(
+            format_literal("#(touch /tmp/pwned) #{pane_pid} ##"),
+            "##(touch /tmp/pwned) ##{pane_pid} ####"
+        );
+    }
+
+    #[test]
+    fn the_current_window_is_one_of_the_session() {
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\tabc\n", "jeet-assistant"),
+            Some(("@4".into(), Some("abc".into())))
+        );
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\t\n", "jeet-assistant"),
+            Some(("@4".into(), None))
+        );
+        // Another session's window, or nothing sensible.
+        assert!(parse_current_window("jeet-api\t@4\tabc\n", "jeet-assistant").is_none());
+        assert!(parse_current_window("jeet-assistant\t%4\tabc", "jeet-assistant").is_none());
+        assert!(parse_current_window("", "jeet-assistant").is_none());
+    }
+
+    #[test]
+    fn a_session_is_alive_while_any_pane_is() {
+        assert!(any_pane_alive("1\n0\n"));
+        assert!(!any_pane_alive("1\n1\n"));
+        assert!(!any_pane_alive(""));
+    }
+
+    #[test]
+    fn only_live_panes_have_their_pids_taken() {
+        assert_eq!(parse_live_pane_pids("0 42\n1 43\n0 44\n"), [42, 44]);
+        assert!(parse_live_pane_pids("0\n0 \nnonsense\n").is_empty());
+    }
+
+    #[test]
+    fn a_process_tree_takes_in_every_descendant_but_zombies_and_jeet() {
+        let procs = parse_processes(
+            "    1     0 Ss\n   10     1 S\n   11    10 S+\n   12    11 R\n   \
+             13    10 Z\n   14     1 S\n   15    12 S\n   99    11 S\n",
+        );
+        let mut tree = descendants(&procs, &[10], 99);
+        tree.sort();
+        assert_eq!(tree, [10, 11, 12, 15]);
+        assert!(descendants(&procs, &[13], 99).is_empty());
+        assert!(descendants(&procs, &[77], 99).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ending_processes_waits_for_them_to_exit() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.4"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let started = Instant::now();
+        end_processes(&[pid], Duration::from_secs(10)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        // Exited by itself, not killed.
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ending_processes_kills_what_outlives_the_grace() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let started = Instant::now();
+        end_processes(&[child.id()], Duration::from_millis(200)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!child.wait().unwrap().success());
+    }
+}

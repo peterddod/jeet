@@ -84,6 +84,7 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
             }
         }
     };
+    crate::store::maybe_sync_background(app);
     let rows = rows(app, &repo)?;
     if rows.is_empty() {
         println!("{}: no open pull requests", repo.id);

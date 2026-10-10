@@ -1,85 +1,92 @@
-use std::io::{IsTerminal, Write};
+//! `jeet worktree …`: the worktrees of one task.
+//!
+//! The task is the one named with `--task`, else `$JEET_TASK_ID` (set in a
+//! task's agent session), else the task whose directory holds the current
+//! directory. `add` and `path` print the worktree's path and nothing else on
+//! stdout, so an agent can `cd "$(jeet worktree add api)"`.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
 use crate::cd;
+use crate::commands::task::standing_in;
 use crate::context::App;
-use crate::db::RepoRecord;
-use crate::resolve;
-use crate::worktrees::{self, CleanOptions, WorktreeKind};
+use crate::db::tasks::TaskState;
+use crate::git;
+use crate::tasks;
+use crate::worktrees::{self, WorktreeEntry, WorktreeKind};
 
-/// `jeet worktree [name]` — create a worktree from anywhere inside a repo.
-///
-/// With a name, a branch of that name is created and published to `origin`.
-/// Without one, a detached checkout of the default branch is created under the
-/// ephemeral root, the same shape `jeet exec --ephemeral` uses.
-pub fn create(app: &App, name: Option<&str>, repo_filter: Option<&str>, push: bool) -> Result<()> {
-    let repo = repo_from_filter_or_cwd(app, repo_filter)?;
-
-    let dest = match name {
-        Some(branch) => {
-            let branch = branch.trim();
-            if branch.is_empty() {
-                bail!("branch name cannot be empty");
-            }
-            let created = worktrees::create_named(app, &repo, branch, push)?;
-            for warning in &created.warnings {
-                eprintln!("jeet: {warning}");
-            }
-            eprintln!("jeet: worktree {branch} -> {}", created.path.display());
-            created.path
-        }
-        None => {
-            let dest = worktrees::create_detached(app, &repo)?;
-            eprintln!(
-                "jeet: detached worktree on {} -> {}",
-                repo.default_branch,
-                dest.display()
-            );
-            eprintln!("jeet: remove it later with `jeet worktree clean`");
-            dest
-        }
-    };
-
-    println!("{}", dest.display());
-    cd::request(&dest)?;
-    Ok(())
-}
-
-pub fn add(app: &App, filter: &str, branch: &str, push: bool) -> Result<()> {
-    let repo = resolve::resolve_repo_filter(&app.db, filter)?;
-    let created = worktrees::create_named(app, &repo, branch, push)?;
-    for warning in &created.warnings {
+pub fn add(
+    app: &App,
+    task: Option<&str>,
+    repo: &str,
+    branch: Option<&str>,
+    name: Option<&str>,
+) -> Result<()> {
+    let task = tasks::current(app, task)?;
+    let added = tasks::add_worktree(app, &task, repo, branch, name)?;
+    for warning in &added.warnings {
         eprintln!("jeet: {warning}");
     }
-    println!("worktree {} -> {}", branch, created.path.display());
-    Ok(())
+    let on = match &added.record.branch {
+        Some(branch) => format!("on {branch}"),
+        None => "detached".to_string(),
+    };
+    eprintln!(
+        "jeet: {} ({}, {on}) -> {}",
+        added.record.dir_name,
+        added.record.repo_id,
+        added.path.display()
+    );
+    println!("{}", added.path.display());
+    cd::request(&added.path)
 }
 
-pub fn ls_cmd(app: &App, filter: Option<&str>) -> Result<()> {
-    let repos = match filter {
-        Some(f) => vec![resolve::resolve_repo_filter(&app.db, f)?],
-        None => app.db.list_repos(None)?,
-    };
+pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
+    let task = tasks::current(app, task)?;
+    if task.state == TaskState::Active {
+        if let Err(e) = tasks::reconcile(app) {
+            eprintln!("jeet: warning: could not reconcile worktrees: {e:#}");
+        }
+    }
+    let rows = app.db.list_task_worktrees(&task.id)?;
+    if rows.is_empty() {
+        eprintln!(
+            "jeet: task {} has no worktrees; `jeet worktree add <repo>` adds one",
+            task.name
+        );
+        return Ok(());
+    }
 
-    for repo in repos {
-        println!("{}:", repo.id);
-        let entries = match worktrees::list(app, &repo) {
-            Ok(entries) => entries,
-            Err(e) => {
-                println!("  (unavailable: {e})");
-                continue;
-            }
-        };
-        // Resolved once per repository: it costs a git subprocess and cannot
-        // differ between worktrees.
-        let base = worktrees::comparison_base(&repo);
-        for entry in entries {
+    // Resolved once per repository: it costs a git subprocess and cannot
+    // differ between worktrees of the same one.
+    let mut bases: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let path = tasks::worktree_dir(app, &task, &row.dir_name);
+        let short = |oid: &str| oid.get(..7).unwrap_or(oid).to_string();
+        let (checkout, notes) = if path.exists() {
+            let entry = WorktreeEntry {
+                path: path.clone(),
+                branch: git::head_branch(&path),
+                kind: WorktreeKind::Task,
+                last_used: 0,
+                missing: false,
+            };
+            let base = match bases.get(&row.repo_id) {
+                Some(base) => base.clone(),
+                None => {
+                    let base = match app.db.get_repo(&row.repo_id)? {
+                        Some(repo) => worktrees::comparison_base(&repo),
+                        None => "HEAD".to_string(),
+                    };
+                    bases.insert(row.repo_id.clone(), base.clone());
+                    base
+                }
+            };
             let status = worktrees::status_against(&entry, &base);
-            let mut notes = vec![format!("[{}]", entry.kind.label())];
-            if entry.missing {
-                notes.push("MISSING".to_string());
-            }
+            let mut notes = Vec::new();
             if status.dirty > 0 {
                 notes.push(format!("{} uncommitted", status.dirty));
             }
@@ -87,212 +94,62 @@ pub fn ls_cmd(app: &App, filter: Option<&str>) -> Result<()> {
                 notes.push(format!("+{}/-{} commits", status.ahead, status.behind));
             }
             notes.push(status.diff_summary());
-            println!(
-                "  {:<28} {} {}",
-                entry.display_name(),
-                entry.path.display(),
-                notes.join(" ")
-            );
-        }
+            (entry.display_name(), notes.join(" "))
+        } else {
+            let checkout = match (&row.branch, &row.head_oid) {
+                (Some(branch), _) => branch.clone(),
+                (None, Some(head)) => format!("detached @ {}", short(head)),
+                (None, None) => "detached".to_string(),
+            };
+            let note = match (&row.head_oid, &row.stash_ref) {
+                (Some(_), Some(_)) => "archived, with uncommitted changes saved",
+                (Some(_), None) => "archived",
+                _ => "missing",
+            };
+            (checkout, note.to_string())
+        };
+        println!(
+            "{:<16} {:<32} {:<24} {}",
+            row.dir_name, row.repo_id, checkout, notes
+        );
     }
     Ok(())
 }
 
-pub fn remove(app: &App, filter: &str, branch: &str, force: bool) -> Result<()> {
-    let repo = resolve::resolve_repo_filter(&app.db, filter)?;
-    let entries = worktrees::list(app, &repo)?;
-    let entry = entries
-        .iter()
-        .find(|e| e.branch.as_deref() == Some(branch) && e.kind != WorktreeKind::Trunk)
-        .ok_or_else(|| anyhow::anyhow!("no worktree for branch {branch} on {}", repo.id))?;
-
-    worktrees::remove(app, &repo, entry, force)
-        .map_err(|e| anyhow::anyhow!("{e:#}\nre-run with --force to remove it anyway"))?;
-    println!("removed worktree {branch} from {}", repo.id);
-    Ok(())
-}
-
-/// `jeet worktree rename [old] <new>` — rename a worktree's branch.
-///
-/// With one name, the worktree you are standing in is renamed; with two, the
-/// first picks the worktree. Detached scratchpads get a branch created at their
-/// current HEAD, so you can start one before you know what it is.
-pub fn rename(
-    app: &App,
-    name: &str,
-    new_name: Option<&str>,
-    repo_filter: Option<&str>,
-    push: bool,
-) -> Result<()> {
-    let repo = repo_from_filter_or_cwd(app, repo_filter)?;
-    let entries = worktrees::list(app, &repo)?;
-
-    let (entry, target) = match new_name {
-        // Two names: the first picks the worktree to rename.
-        Some(new_name) => {
-            let entry = entries
-                .iter()
-                .find(|e| e.branch.as_deref() == Some(name) && e.kind != WorktreeKind::Trunk)
-                .ok_or_else(|| anyhow::anyhow!("no worktree for branch {name} on {}", repo.id))?;
-            (entry, new_name)
-        }
-        // One name: rename wherever we are standing.
-        None => {
-            let cwd = std::env::current_dir()?;
-            let root = resolve::resolve_context(app, &cwd)?.root;
-            let entry = entries
-                .iter()
-                .find(|e| resolve::same_path(&e.path, &root))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "could not tell which worktree {} belongs to; name it explicitly: jeet worktree rename <old> {name}",
-                        root.display()
-                    )
-                })?;
-            (entry, name)
-        }
-    };
-
-    let was = entry.display_name();
-    // If we are standing inside the worktree being moved, our directory is
-    // about to go stale — follow it, keeping the sub-path we were browsing.
-    let follow = std::env::current_dir().ok().and_then(|cwd| {
-        cwd.strip_prefix(&entry.path)
-            .map(|rest| rest.to_path_buf())
-            .ok()
-    });
-
-    let renamed = worktrees::rename(app, &repo, entry, target, push)?;
-    for warning in &renamed.warnings {
+pub fn rm(app: &App, task: Option<&str>, name: &str, force: bool) -> Result<()> {
+    let task = tasks::current(app, task)?;
+    let path = tasks::worktree_dir(app, &task, name);
+    // Removing the directory a shell sits in leaves it nowhere.
+    if path.exists() && standing_in(&path) {
+        bail!("you are inside {}; cd out of it first", path.display());
+    }
+    let warnings = tasks::remove_worktree(app, &task, name, force)?;
+    for warning in &warnings {
         eprintln!("jeet: {warning}");
     }
-    eprintln!("jeet: {was} -> {target} at {}", renamed.path.display());
-
-    println!("{}", renamed.path.display());
-    if let Some(rest) = follow {
-        let landing = renamed.path.join(rest);
-        cd::request(if landing.is_dir() {
-            &landing
-        } else {
-            &renamed.path
-        })?;
-    }
+    eprintln!("jeet: removed {name} from task {}", task.name);
     Ok(())
 }
 
-/// `jeet worktree clean` — drop worktrees that hold no work, reporting the rest.
-pub fn clean(
-    app: &App,
-    filter: Option<&str>,
-    all: bool,
-    force: bool,
-    dry_run: bool,
-    assume_yes: bool,
-) -> Result<()> {
-    let repos = match filter {
-        Some(f) => vec![resolve::resolve_repo_filter(&app.db, f)?],
-        None => vec![repo_from_filter_or_cwd(app, None)?],
-    };
-    let opts = CleanOptions {
-        all,
-        force,
-        // --yes does not pause for a human to read the report, so it must not
-        // discard anything on its own judgement. This tracks --yes even under
-        // --dry-run: a preview that reports a different verdict than the run it
-        // previews is worse than no preview.
-        unattended: assume_yes,
-    };
-
-    let here = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| resolve::resolve_context(app, &cwd).ok())
-        .map(|ctx| ctx.root);
-
-    for repo in repos {
-        let mut candidates = worktrees::clean_candidates(app, &repo, opts)?;
-        // Removing the directory the shell is sitting in leaves the user
-        // nowhere; the explorer already refuses this, so the CLI should too.
-        if let Some(here) = &here {
-            for candidate in &mut candidates {
-                if resolve::same_path(&candidate.entry.path, here) {
-                    candidate.removable = false;
-                    candidate.reason = "you are standing in it".to_string();
-                }
-            }
-        }
-        if candidates.is_empty() {
-            println!("{}: no worktrees besides the trunk", repo.id);
-            continue;
-        }
-
-        println!("{}:", repo.id);
-        for candidate in &candidates {
-            let marker = if candidate.removable {
-                "[remove]"
-            } else {
-                "[keep]  "
-            };
-            println!(
-                "  {marker} {:<24} {:<11} {:<16} {}",
-                candidate.entry.display_name(),
-                candidate.entry.kind.label(),
-                candidate.status.diff_summary(),
-                candidate.reason
-            );
-        }
-
-        let removable: Vec<_> = candidates.iter().filter(|c| c.removable).collect();
-        if removable.is_empty() {
-            println!("  nothing to clean");
-            continue;
-        }
-        if dry_run {
-            println!(
-                "  dry run: {} worktree(s) would be removed",
-                removable.len()
-            );
-            continue;
-        }
-        if !assume_yes && !confirm(&format!("  remove {} worktree(s)?", removable.len()))? {
-            println!("  skipped");
-            continue;
-        }
-
-        for candidate in removable {
-            // Not an unconditional force: without it git independently re-checks
-            // for modified, untracked and submodule content at removal time,
-            // which catches anything written since we classified this worktree.
-            match worktrees::remove(app, &repo, &candidate.entry, force) {
-                Ok(()) => println!("  removed {}", candidate.entry.path.display()),
-                Err(e) => eprintln!(
-                    "  kept {}: {e:#} (--force to remove anyway)",
-                    candidate.entry.path.display()
-                ),
-            }
-        }
+pub fn path(app: &App, task: Option<&str>, name: &str) -> Result<()> {
+    let task = tasks::current(app, task)?;
+    if app.db.get_task_worktree(&task.id, name)?.is_none() {
+        bail!(
+            "task {} has no worktree named {name}; `jeet worktree ls` lists them",
+            task.name
+        );
     }
+    let path: PathBuf = tasks::worktree_dir(app, &task, name);
+    if !path.is_dir() {
+        bail!(
+            "{name} is not on disk{}",
+            match task.state {
+                TaskState::Archived =>
+                    format!("; `jeet task unarchive {}` brings it back", task.slug),
+                TaskState::Active => String::new(),
+            }
+        );
+    }
+    println!("{}", path.display());
     Ok(())
-}
-
-fn confirm(prompt: &str) -> Result<bool> {
-    if !std::io::stdin().is_terminal() {
-        bail!("refusing to remove worktrees without a terminal; pass --yes or --dry-run");
-    }
-    print!("{prompt} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
-}
-
-/// Resolve the repository from an explicit filter, else from the current directory.
-pub fn repo_from_filter_or_cwd(app: &App, filter: Option<&str>) -> Result<RepoRecord> {
-    if let Some(filter) = filter {
-        return resolve::resolve_repo_filter(&app.db, filter);
-    }
-    let cwd = std::env::current_dir()?;
-    match resolve::resolve_context(app, &cwd) {
-        Ok(ctx) => Ok(ctx.repo),
-        Err(e) => bail!("{e}\nrun from inside a repository or pass --repo <filter>"),
-    }
 }

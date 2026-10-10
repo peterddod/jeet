@@ -6,41 +6,9 @@ pub fn trunk_path(store_root: &Path, id: &RepoIdentity) -> PathBuf {
     store_root.join(&id.host).join(&id.owner).join(&id.repo)
 }
 
-pub fn worktree_path(worktrees_root: &Path, id: &RepoIdentity, branch: &str) -> PathBuf {
-    worktrees_root
-        .join(&id.host)
-        .join(&id.owner)
-        .join(&id.repo)
-        .join(branch_slug(branch))
-}
-
-pub fn ephemeral_path(ephemeral_root: &Path, id: &RepoIdentity, session_id: &str) -> PathBuf {
-    ephemeral_root
-        .join(&id.host)
-        .join(&id.owner)
-        .join(&id.repo)
-        .join(session_id)
-}
-
-pub fn branch_slug(branch: &str) -> String {
-    branch
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ' ' | ':' | '@' | '{' | '}' | '^' | '%' | '`' | '"' | '\'' | '<' | '>'
-            | '~' | '?' | '*' | '[' | ']' | '|' => '-',
-            _ => c,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slug_replaces_slashes() {
-        assert_eq!(branch_slug("feat/my-feature"), "feat-my-feature");
-    }
 
     #[test]
     fn trunk_path_layout() {

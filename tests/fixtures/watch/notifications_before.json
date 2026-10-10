@@ -1,0 +1,77 @@
+[
+  {
+    "id": "99",
+    "unread": true,
+    "reason": "comment",
+    "updated_at": "2026-10-10T11:00:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Old news",
+      "url": "https://api.github.com/repos/acme/api/issues/3",
+      "latest_comment_url": "https://api.github.com/repos/acme/api/issues/3",
+      "type": "Issue"
+    },
+    "repository": {
+      "id": 1,
+      "name": "api",
+      "full_name": "acme/api",
+      "private": false,
+      "owner": {
+        "login": "acme"
+      },
+      "html_url": "https://github.com/acme/api"
+    },
+    "url": "https://api.github.com/notifications/threads/99",
+    "subscription_url": "https://api.github.com/notifications/threads/99/subscription"
+  },
+  {
+    "id": "100",
+    "unread": true,
+    "reason": "review_requested",
+    "updated_at": "2026-10-10T12:00:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Add rate limiting",
+      "url": "https://api.github.com/repos/acme/api/pulls/42",
+      "latest_comment_url": "https://api.github.com/repos/acme/api/pulls/42",
+      "type": "PullRequest"
+    },
+    "repository": {
+      "id": 1,
+      "name": "api",
+      "full_name": "acme/api",
+      "private": false,
+      "owner": {
+        "login": "acme"
+      },
+      "html_url": "https://github.com/acme/api"
+    },
+    "url": "https://api.github.com/notifications/threads/100",
+    "subscription_url": "https://api.github.com/notifications/threads/100/subscription"
+  },
+  {
+    "id": "101",
+    "unread": true,
+    "reason": "comment",
+    "updated_at": "2026-10-10T11:30:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Flaky test",
+      "url": "https://api.github.com/repos/acme/api/issues/5",
+      "latest_comment_url": "https://api.github.com/repos/acme/api/issues/5",
+      "type": "Issue"
+    },
+    "repository": {
+      "id": 1,
+      "name": "api",
+      "full_name": "acme/api",
+      "private": false,
+      "owner": {
+        "login": "acme"
+      },
+      "html_url": "https://github.com/acme/api"
+    },
+    "url": "https://api.github.com/notifications/threads/101",
+    "subscription_url": "https://api.github.com/notifications/threads/101/subscription"
+  }
+]

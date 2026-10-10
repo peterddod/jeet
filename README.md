@@ -6,9 +6,9 @@
 
 Global git repository index and worktree manager.
 
-`jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
+`jeet` keeps a canonical store of repository trunks, organises work into **tasks** — a directory per piece of work, with as many git worktrees inside it as the work needs — and maintains a SQLite index so you can list, find, and jump into repos quickly. The only checkouts on disk are the store's trunks and the tasks' worktrees.
 
-Run `jeet` with no arguments inside a repo and you get a file explorer: one level of the tree at a time, your current worktree pinned to the top, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
+Run `jeet` with no arguments and you get your tasks: one row per piece of work, with what its coding agent is doing, the worktrees it holds and when anything last happened in it, and one keystroke to attach to the agent, browse the task, or archive it. `jeet explore` inside a repo gives you a file explorer: one level of the tree at a time, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
 
 Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
 
@@ -51,39 +51,56 @@ eval "$(jeet init-shell)"
 # Clone into the canonical store
 jeet clone https://github.com/acme/widget.git
 
-# Register an existing local checkout
-jeet adopt ~/Projects/exceed
+# Fetch every indexed repo now (this also happens on its own; see below)
+jeet sync
+jeet sync --repo acme/widget
 
-# Scan configured roots (see config)
-jeet scan
+# Bring repositories and work from outside jeet into the store and tasks
+jeet import                              # scans scan_roots (see config)
+jeet import ~/Projects/exceed            # or just these
 
-# List indexed repos
+# List the store's repos
 jeet ls
 jeet ls acme
 
-# Explore (this is the main event)
-jeet cd acme/widget                      # jump to the trunk
-jeet                                     # open the file explorer there
+# The tasks list (this is the main event)
+jeet                                     # or `jeet tasks`
 
-# Worktrees — from anywhere inside a repo or worktree
-jeet worktree feature-x                  # branch feature-x, published to origin
-jeet worktree                            # detached checkout of the default branch
-jeet worktree rename login-page          # name a scratchpad once you know what it is
-jeet worktree ls acme/widget             # with dirty + diff counters
-jeet worktree clean                      # drop worktrees holding no work
-jeet worktree add acme/widget feature-x  # explicit form; does not push
-jeet worktree remove acme/widget feature-x [--force]
+# Explore
+jeet cd acme/widget                      # jump to the trunk
+jeet explore                             # open the file explorer there
+
+# Tasks — a workspace directory per piece of work, worktrees added on demand
+jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fix-login
+jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
+jeet task ls [--archived]                # with what each task's agent is doing
+jeet task open fix-login                 # the task's agent, in tmux (started if need be)
+jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
+jeet task send fix-login "add tests too" # message the task's agent
+jeet task archive fix-login              # free the disk, keep the work
+jeet task unarchive fix-login
+jeet task delete fix-login [--force]
+jeet task prs fix-login                  # the PRs that came out of the task
+
+# The assistant — one organiser for everything, in tmux
+jeet chat                                # resume its latest session (set up on first run)
+jeet chat --new "plan the week"          # a fresh session beside the others
+jeet chat --pick                         # choose, rename, end or mark one primary
+jeet todo add "ship the fix" -p 1 --task fix-login
+jeet todo                                # its todo list; done, rm, --json
+jeet watch install                       # poll GitHub in the background (launchd)
+
+# Worktrees — of the task you are in (or --task <name>)
+jeet worktree add api                    # detached at origin's default branch; prints the path
+jeet worktree add api --branch feat-x    # existing branch, origin's, or a new one
+jeet worktree ls                         # with dirty + diff counters
+jeet worktree rm api [--force]
+jeet worktree path api
 
 # Navigation
-jeet path acme/widget                    # print path (scripting)
+jeet path acme/widget                    # print the trunk's path (scripting)
 jeet cd acme/widget                      # native cd (requires init-shell)
-jeet checkout feature-x                  # cd into that branch's worktree, creating it if needed
-jeet exec acme/widget                    # subshell in trunk
-jeet exec acme/widget --branch feature-x # subshell in worktree
-jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on exit)
-
-# Coding agents
-jeet sessions                            # previous agent sessions for this worktree
+jeet exec acme/widget                    # subshell in the trunk
 
 # Reviewing pull requests — from anywhere inside the repo
 jeet prs                                 # the open PRs, and which you have checked out
@@ -95,12 +112,14 @@ jeet review 123 --repo acme/widget
 ## The explorer
 
 ```bash
-jeet          # inside any repo, trunk or worktree (also `jeet explore`)
+jeet explore  # inside a store repo, trunk or task worktree — or a task's directory
 ```
+
+From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 
 ```text
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
-│worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
+│worktree feature-x  [task]  1 uncommitted  +2/-0 in 1 file     │
 │path     /src                                                  │
 │filter   co█  1 of 2                                           │
 └───────────────────────────────────────────────────────────────┘
@@ -163,35 +182,36 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 
 | key | action |
 |-----|--------|
-| `ctrl-a` | start a coding agent from the worktree root |
-| `ctrl-s` | previous agent sessions for this worktree (⏎ resumes one) |
-| `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete, `o` open its PR |
+| `ctrl-a` | the task's coding agent, in its tmux session — started if it is not running |
+| `ctrl-s` | the task's agent sessions (`⏎` resumes one) |
+| `ctrl-w` | the repository's worktrees: `⏎` switches to one, `o` opens its PR |
 | `ctrl-f` | diff the highlighted file or folder against the default branch |
 | `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
-| `ctrl-o` | the repository's open pull requests: `⏎` checks one out and switches to it, `o` opens it in the browser |
+| `ctrl-o` | the repository's open pull requests: `⏎` checks one out in a task and switches to it, `o` opens it in the browser |
 | `ctrl-d` | toggle hidden dotfiles |
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
 | `esc` | quit without moving your shell (unless it moved out from under you) |
 | `F1` or `ctrl-g` | the key list, in jeet |
 
-In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
-name field in the new/rename prompts. Deleting asks first: `y` removes, and
-`f` forces past git's refusal when the worktree still holds work. The panels
-are keyboard-driven, so single letters still work inside them, and the key
-that opened one closes it again.
+In the worktree panel: `r` refreshes and `esc` closes. Worktrees are added to
+and removed from tasks — `jeet worktree`, or `w` in the tasks list — not here.
+The panels are keyboard-driven, so single letters still work inside them, and
+the key that opened one closes it again.
 
-Anything slow — reading a repo's worktrees, or creating and renaming, which
-push to `origin` — runs in the background with a progress indicator, so the
-explorer keeps drawing instead of freezing on the network.
+Anything slow — reading a repo's worktrees, or looking up pull requests —
+runs in the background with a progress indicator, so the explorer keeps
+drawing instead of freezing on the network.
 
 Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
 
 The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
-agent defaults to `claude`. Both are configurable (see below). Session listing
-knows Claude Code's transcript store — other agents still launch with `ctrl-a`, they
-just have no session history to show.
+agent defaults to `claude`. Both are configurable (see below). `ctrl-a` and
+`ctrl-s` act on the task you are browsing in — its agent runs in the task's
+tmux session, exactly as `⏎` in the tasks list runs it — so outside a task
+(a store trunk, say) they only say so. Sessions are Claude Code's; other agents
+still run with `ctrl-a`, they just have no sessions to show.
 
 ### Diffs
 
@@ -216,9 +236,10 @@ comments waiting to be submitted — the verdict submits that review, comments
 and all, rather than posting a second one.
 
 `ctrl-o` lists every open PR in the repository — the same list as
-`jeet prs` — and `⏎` checks the highlighted one out (or finds the worktree
-that already has it) and switches the explorer there. It is a way in, not
-`jeet review`: no review command is started.
+`jeet prs` — and `⏎` switches the explorer to it in a task: the task whose
+worktree has the PR's branch already, or else the PR's review task, which it
+makes just as `jeet review` would. It is a way in, not `jeet review`: no
+review command is started.
 
 PR support goes through the [GitHub CLI](https://cli.github.com): install
 `gh` and `gh auth login`, and the lookups happen in the background so the
@@ -246,11 +267,33 @@ github.com/acme/widget: 3 open pull requests
   #121  Rework the config loader        linus    +901 -377 draft
 ```
 
-From anywhere inside a repository, `jeet review` checks the PR out into its own
-worktree (reusing the one that already has its branch, and bringing it up to
-date if it is clean), `cd`s you there, and opens the explorer on it. A PR
-from a fork is checked out as `pr/<number>`, so it can never land on a branch
-of yours with the same name.
+From anywhere inside a repository, `jeet review` finds or makes the PR's
+**review task**, `review-<repo>-<number>`, checks the PR out in it (or, when
+the task already has it, brings that checkout up to date if it is clean, and
+brings an archived task back), opens it in the review viewer, and `cd`s you
+into the worktree when you leave. The review task is a task like any other: it
+shows in the tasks list, where `v` opens the viewer again, and archiving or
+deleting it frees the disk. A PR from a fork is checked out as `pr/<number>`,
+so it can never land on a branch of yours with the same name; and when the
+PR's branch is checked out already — in your own task, say — the review is
+checked out detached at the PR's head instead.
+
+The review viewer shows the PR's diff one file to a page, in GitHub's dark
+colours (or the nearest 256-colour match when `COLORTERM` is not `truecolor`),
+with each review thread boxed under the line it is about. Code is
+syntax-highlighted in the same theme, over the added and removed backgrounds;
+a file shows plain for the moment it takes to work its colours out. `←`/`→`
+turn the page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
+or request changes — submitting your pending review if you have one — and
+`Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
+
+On a line of code, `c` writes an inline comment, which joins your pending
+review (starting one if need be) until a verdict submits it. On a comment, `R`
+replies to its thread, `+` picks a reaction, and — on your own comments only —
+`e` edits it and `d` deletes it, after asking. The viewer checks the PR every
+30 seconds; when someone else has pushed or commented, the header shows
+`⟳ updates – r`, and `r` fetches it all again with the cursor kept on the line
+it was on.
 
 Give it a command in `config.toml` and it also starts that in the background
 from the new worktree — say, Claude Code with your own review command:
@@ -264,8 +307,8 @@ notify = true   # desktop notification when it finishes (the default)
 The command runs detached from your terminal, so quitting the explorer or
 closing the window does not stop it. When it finishes you get a notification,
 the header's `review running` turns to `review ready`, and `v` in the PR panel
-opens its output. A Claude Code review also leaves a session behind, so
-`ctrl-s` can resume the conversation with it. Running `jeet review` again for
+opens its output. A Claude Code review also leaves a session behind, which
+`claude --resume` in the review task's worktree picks up. Running `jeet review` again for
 the same commit does not start a second review; new commits do (and
 `--rerun` forces one).
 
@@ -275,100 +318,375 @@ would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
 `$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
 `$JEET_REVIEW_LOG`. Jobs and their logs live under `~/.jeet/reviews`.
 
-## Worktrees
+## Tasks
+
+A task is a directory under `~/.jeet/tasks/<slug>`: a blank canvas for one
+piece of work, with any number of git worktrees inside it, added and removed as
+the work needs them — several repositories, or several checkouts of one.
 
 ```bash
-jeet worktree feature-x     # create the branch, worktree it, push it to origin
-jeet worktree               # detached checkout of the default branch
-jeet worktree feature-x --no-push
-jeet worktree feature-x --repo acme/widget
+cd "$(jeet task new "Fix login")"   # prints the task directory (and cds there with the wrapper)
+jeet worktree add api               # -> ~/.jeet/tasks/fix-login/api, detached at origin/main
+jeet worktree add web --branch fix-login
+jeet worktree add api               # a second checkout: api-2
+jeet worktree ls
 ```
 
-Scratchpad first, name it later:
+`jeet worktree` works on the task you are in — anywhere below its directory,
+including inside one of its worktrees — or on the one in `$JEET_TASK_ID`, or on
+`--task <name>`. Outside a task it says so rather than guessing. `add` and
+`path` print the worktree's path and nothing else, so a script or a coding
+agent can `cd "$(jeet worktree add api)"`.
+
+`add` fetches the repository first, so a worktree starts from what origin has
+now; offline, it starts from the last fetch and says so. The repository can be
+a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
+is cloned into the store. Without `--branch` the worktree is detached at the
+default branch. With it, an existing local branch is checked out, a branch that
+exists only on origin is tracked, and anything else is created from the default
+branch. A branch already checked out elsewhere is refused, naming the task that
+has it.
+
+Every task gets a jeet skill (`.claude/skills/jeet/SKILL.md`) that tells a
+coding agent how to do all of this itself. A worktree made with plain
+`git worktree add` inside a task directory is adopted into the task the next
+time jeet looks, and one whose directory was deleted is forgotten.
 
 ```bash
-jeet worktree               # detached: poke at something
-# ...an hour of hacking...
-jeet worktree rename login-page
+jeet worktree rm api        # refuses while it has uncommitted or unpushed work
+jeet worktree rm api -f     # removes it anyway
 ```
 
-Both forms work from **anywhere** inside a repo or one of its worktrees, not
-just the root, and both drop you into the new worktree when the shell wrapper is
-installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live under
-`~/.jeet/ephemeral`. `jeet worktree clean` collects both — see below for exactly
-what it will and will not delete.
+A branch the task created is deleted with its worktree only when its commits are
+on origin or on the default branch; otherwise it is kept, and jeet says so.
 
-### Renaming
+### The tasks list
 
 ```bash
-jeet worktree rename login-page          # rename the worktree you are in
-jeet worktree rename old-name new-name   # or name the one to rename
-jeet worktree rename login-page --no-push
+jeet          # or `jeet tasks`
 ```
-
-Like `jeet worktree <name>`, renaming **publishes the new branch to `origin`**
-unless you pass `--no-push`. Renaming onto a name that already exists on the
-remote is refused rather than pushed over.
-
-Renaming a **detached** worktree creates that branch at its current HEAD and
-moves it out of the ephemeral root, so a throwaway scratchpad becomes a real
-branch once you know what it is. Nothing in the working tree is touched —
-uncommitted and untracked files come along — and `clean` stops treating it as
-disposable.
-
-Renaming a **named** worktree renames its branch and moves the directory to
-match. If the old branch was already published, jeet says so rather than
-deleting anything on the remote for you:
 
 ```text
-jeet: origin/old-name still exists; delete it with `git push origin --delete old-name`
+┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
+│ active 3   archived 1    / filter  ⇥ switch                               │
+└───────────────────────────────────────────────────────────────────────────┘
+ ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
+┌ 3 active tasks ───────────────────────────────────────────────────────────┐
+│● running – Edit        Fix login          2 wt: api, web    1.2G  just now│
+│◆ needs input – Bash    api-v2             1 wt: api         640M    5m ago│
+│○ idle 1h               notes              empty              12K    1h ago│
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-If your shell was inside the worktree, it follows the move — right down to the
-subdirectory you were standing in. Worktrees jeet did not create keep their
-directory where you put it; only the branch is renamed.
+Every task, most recently active first: what its agent is doing, its name, the
+worktrees it holds (as of the last look at the disk, since the agent adds them
+as it goes), its size and when anything last happened in it. Statuses refresh
+every two seconds and sizes are measured in the background, so the list never
+waits on either. `⇥` switches to the archived tasks and back; `/` filters by
+name the way the explorer does.
 
-### Cleaning up
+The [assistant](#the-assistant) is pinned above the list: how many sessions it
+has, what each running one is doing (`*` marks the primary one), how many
+messages and events are queued for it, and how many todo items are open. It is
+read from its files on a thread of its own, like the statuses.
+
+| Key | |
+|---|---|
+| `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `C-b d` comes back here |
+| `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
+| `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
+| `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
+| `a` | archive the task (asks first if its agent is running) — or, in the archived view, bring it back |
+| `D` | delete the task, after listing any work that would be lost |
+| `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
+| `S` | copy the task's project files in again |
+| `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser |
+| `v` | on a review task, its pull request in the review viewer |
+| `c` | talk to the assistant: attach to its most recently active session, starting one if need be |
+| `C` | the assistant's sessions: `⏎` attach, `n` new, `R` rename, `x` end, `*` primary |
+| `t` | the todo list: `space` ticks an item off (or back), `⏎` goes to the task it links, `a` adds one |
+| `i` | the assistant's inbox and activity, newest first: what is queued for it, what `jeet watch` saw on GitHub and what it did, from `actions.log`. `⏎` opens an event's page |
+| `o` | sort by todo priority: tasks the open items link first, by their best item; again for latest activity |
+| `r` | refresh, re-reading the worktrees on disk |
+| `?` | every key |
+| `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
+
+Launching the list also starts a background fetch of the store, when one is
+due. `jeet projects` on a terminal opens it with the projects panel up.
+
+### Pull request history
+
+A task remembers the pull requests that came out of it. When the tasks list
+opens (and on `r`, and on `p` for the one task), each worktree is looked up on
+GitHub in the background through `gh`: PRs from its branch, open or not; for a
+detached checkout with commits of its own, the PRs that hold its HEAD; for a
+review task, the PR it reviews. What comes back is kept, so the history
+outlives the branches — a merged PR still shows long after its worktree is
+gone.
 
 ```bash
-jeet worktree ls acme/widget    # every worktree with its counters
-jeet worktree clean --dry-run   # what would go, and why the rest stays
-jeet worktree clean --yes
-jeet worktree clean --all --force
+jeet task prs              # the current task's PRs, after asking GitHub for news
+jeet task prs fix-login    # another task's
+jeet task prs --offline    # only what is recorded
 ```
 
-`clean` removes worktrees that hold nothing you would miss, and reports the ones
-it keeps with the reason. What counts as something to lose:
+```text
+STATE     ADDED REMOVED PR      TITLE                                            URL
+merged     +212     -40 #128    Cache the index between runs                     https://github.com/acme/widget/pull/128
+open         +3      -1 #131    Fix the flaky clone test                         https://github.com/acme/widget/pull/131
+```
 
-- **uncommitted changes** or **commits not on the default branch** — kept unless
-  `--force`.
-- **anything jeet could not assess** (a git error, a default branch that no
-  longer resolves) — kept, because "I could not tell" must never read as "safe
-  to delete".
-- **ignored files** (`.env`, local databases, build output) — git deletes these
-  without complaint, so jeet counts them separately. They are named in the
-  report so an interactive run can decide, and an unattended `--yes` run keeps
-  the worktree rather than destroying them silently. `--force` discards them.
+Without `gh` there is nothing to ask, and the history is what was recorded.
 
-Scope is separate from all of that. By default `clean` only touches worktrees
-jeet created; **`--all` also deletes worktrees you made yourself, wherever you
-put them**. `--force` never widens scope — it only decides whether work already
-in scope may be discarded.
+### The agent
 
-Removal itself is not forced: git independently re-checks for modified,
-untracked and submodule content at removal time, and jeet reports the refusal
-rather than overriding it. `d` in the explorer's worktree panel (`ctrl-w`) does the same,
-showing the counters before it asks; `y` removes and `f` forces.
+```bash
+jeet task open fix-login                 # attach to the task's agent, starting it if needed
+jeet task open fix-login --session <id>  # resume that session instead of the latest
+```
+
+Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
+task directory, so it keeps working when you detach (`C-b d`) or close the
+terminal. tmux is required (`brew install tmux`, `apt install tmux`); without
+it `jeet task open` says so. Opening a task attaches to its session, starting
+the agent first if it is not running: Claude Code resumes the task's latest
+session, or starts a new one. Without a terminal, `open` leaves the agent
+running detached and prints the task directory.
+
+jeet starts Claude Code with hooks (passed with `--settings`; nothing is
+written into the task or a repository) that record what the agent is doing in
+`.jeet/status/<session>.json`, and with permission to run `jeet worktree` and
+`jeet ls` without asking. `jeet task ls` shows it: `running – <tool>`,
+`needs input – <question>`, `idle 5m`, or `not running` once the tmux session
+is gone. Tasks are listed most recently active first, counting the agent's
+activity. Another agent (`agent = "aider"`) runs in tmux the same way, with no
+status. Archiving or deleting a task ends its tmux session.
+
+### Messaging an agent
+
+```bash
+jeet task send fix-login "also add tests"
+jeet task new fix-x --repo api --prompt "Fix X; add a test for it"
+```
+
+`jeet task send` gets a message to the task's agent however it is doing. An
+idle agent has it typed in (`tmux send-keys -l`) and submitted. A busy one, or
+one waiting on you, has it queued in `.jeet/inbox.jsonl`; when the agent
+finishes, its Stop hook hands the queue over and it carries straight on. A
+turn you interrupt with Esc has no Stop, so the queue is also typed in once
+Claude reports it has sat idle at its prompt (after about a minute). A message
+is never typed into a permission prompt, or into the dialogs Claude shows
+before its first hook runs, which it would answer. An agent that is not
+running is started with the message as its first prompt. `jeet task new
+--prompt` starts the new task's agent on a brief the same way.
+
+A message holds at most 8,000 bytes, which keeps what is typed in under
+tmux's limit on a command; queued messages that do not fit with it wait for
+the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
+as a shell command, a slash command or a memory, is sent as `Message: …`.
+
+### Archiving and deleting
+
+```bash
+jeet task archive fix-login          # -f: without asking about ignored files
+jeet task unarchive fix-login
+jeet task delete fix-login           # -f: without asking about what is lost
+```
+
+**Archive** frees the disk and keeps the work: each worktree's uncommitted
+changes — staged, unstaged and untracked — are saved under
+`refs/jeet/stash/<task-id>/<dir>`, its HEAD is pinned under
+`refs/jeet/head/<task-id>/<dir>` so not even a commit on a detached HEAD is lost
+to gc, and only then is the worktree removed. Files git ignores (build output,
+`.env`, local config) are not kept: removing the worktree deletes them. So
+archive names them first and asks — the tasks list in its confirm, the CLI on
+the terminal — and without a terminal it needs `--force`. The task directory itself
+stays, so an agent's sessions still find it. **Unarchive** puts every worktree
+back on its branch (or detached at its commit) with its changes reapplied, then
+drops the refs.
+
+**Delete** removes everything the task owns: its worktrees, the branches it
+created (never ones that existed before), its `refs/jeet` refs and its
+directory, with everything else on its canvas. It first lists what would be
+lost — uncommitted changes, commits that would be left on no branch or remote,
+and any git checkout on the canvas that is none of the task's worktrees (a
+clone made there, or a worktree of a repository outside the store) — and asks;
+without a terminal it needs `--force`.
+
+## The assistant
+
+```bash
+jeet chat                          # resume its most recently active session
+jeet chat --new [name]             # start a fresh one
+jeet chat --pick                   # ⏎ attach  n new  R rename  x end  * primary
+jeet task send assistant "…"       # message it, as you would a task's agent
+```
+
+The assistant is one Claude Code organiser for all your work: it keeps a
+running worklog and your todo list, and sets up, steers and tidies away tasks
+through the jeet CLI, within the permissions you give it (below). Its home is
+`~/.jeet/assistant`, set up by the first `jeet chat`: a `CLAUDE.md` on its
+role, a `jeet-assistant` skill with the commands it uses, `notes/worklog.md`
+and `todo.md`. They are written only when missing, so your edits and its own
+survive.
+
+One home, any number of sessions. Continuity lives in those files rather than
+in any one conversation, so a fresh session or a `/clear` loses nothing that
+matters, and two can run at once — one planning your week, one triaging
+reviews. Each runs in a window of its own in the tmux session
+`jeet-assistant`, with the same hooks and status as a task's agent, and with
+`JEET_ASSISTANT=1`. Every session starts with a summary of the active tasks,
+their open pull requests and your own that `jeet watch` follows, with their
+checks, the GitHub events the watcher saw in the last week, such as review
+requests (all fenced as data written by others), the todo list and any
+messages queued for it.
+
+Messages for the assistant go to the session you marked primary (`*` in the
+picker) while it runs, else to the most recently active running one, by the
+same idle/busy/not-running rules as a task's agent; with none running, a
+session called `events <date>` starts with them. One queued for a busy session
+waits for that session, not whichever finishes first. Any task's agent can
+send one, so each reaches the assistant fenced as untrusted, with who jeet
+thinks sent it (`task <slug>`, or `the command line`), and the assistant is
+told to read it as a request to weigh, never as your instructions. To tell it
+something as yourself, talk to it in its window.
+
+A `/clear`, a fork or a resume inside a session's window carries on in a new
+session, which follows on from the one before it in that window, keeps its
+name and its queued messages, and is the one `jeet chat` finds there.
+
+The assistant is not a task: it is not listed, opened, archived or deleted
+like one, and no task can be called `assistant`. The tasks list pins it above
+the tasks instead, where `c` talks to it, `C` picks a session, `t` opens the
+todo list and `i` its inbox and activity.
+
+### Todo
+
+```bash
+jeet todo add "fix the cookie" -p 1 --task fix-login   # in priority order
+jeet todo ls [--json]                                  # numbered; also plain `jeet todo`
+jeet todo done cookie [--undo]                         # by its text, or a part only it has
+jeet todo rm 3                                         # or by number
+```
+
+`~/.jeet/assistant/todo.md` is the list: markdown, one checkbox per item, most
+important first, with an optional `!p1`/`!p2`… priority and `@task-slug` links.
+Everything else in it is kept as written. `jeet todo` changes it under a lock
+and writes it whole, so the assistant's sessions never lose each other's
+edits. An item is best named by its text: a number is where it was when
+listed, and an item added above it since moves it down. The assistant needs
+no permission for its own list.
+
+### Watching GitHub
+
+```bash
+jeet watch --once        # poll now: what launchd and the tasks list run
+jeet watch install       # every `interval_secs`, with launchd (macOS)
+jeet watch uninstall
+jeet watch status        # installed? last poll, what it follows
+```
+
+`jeet watch --once` asks GitHub, through `gh`, for your unread notifications
+(with `If-Modified-Since`, so a poll with nothing new costs nothing), the
+checks on your open pull requests, and the items of the GitHub Projects you
+name. What is new since the last poll becomes an event: `review_requested`,
+`mention`, `comment`, `assigned`, `ci_failed`, `ci_passed`, `pr_merged`,
+`pr_closed` or `project_item_changed`. The first poll of each only notes what
+is there, so turning the watcher on is not a flood.
+
+Rules decide where each event goes; the first that matches wins, and an event
+none matches is a desktop notification:
+
+```toml
+[watch]
+repos = ["acme/*", "me/jeet"]                 # only these (default: all)
+projects = [{ owner = "acme", number = 3 }]   # needs `gh auth refresh -s read:project`
+interval_secs = 120
+
+[[assistant.rules]]
+on = ["review_requested"]
+repos = ["acme/*"]
+action = "assistant"   # hand it to the assistant, which acts within its permissions
+
+[[assistant.rules]]
+on = ["ci_failed"]
+action = "task"        # tell the task whose PR it is (by its PR history); else the assistant
+
+[[assistant.rules]]
+on = ["mention"]
+action = "notify"      # just a notification
+```
+
+`on` and `repos` may be left out to match anything. Events for the assistant
+go to its sessions by the rules above (primary, else most recent, else a new
+`events <date>` session), several to a message; an event for a task goes to
+its agent the way `jeet task send` would send it. Either way the event is
+fenced as `<github-event untrusted="true">`, since titles and comments are
+written by other people: data to weigh, never instructions. One that cannot be
+delivered is notified instead. Each event, and where it went, is appended to
+`~/.jeet/watch-events.jsonl`.
+
+`jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,
+which runs `jeet watch --once` every `interval_secs` with the `PATH` you
+installed it from, logging to `~/.jeet/watch.log`, and loads it with
+`launchctl bootstrap`. Elsewhere it installs nothing, and prints a systemd user
+service and timer to set up instead. The job never starts a tmux server: one
+started there would hand launchd's bare environment to every pane it ever
+made, yours included. While no tmux server is running, an event for an agent
+waits in its inbox until the agent next runs, and is notified now. With a
+`[watch]` section, the tasks list also polls while it is open. Installing or removing the watcher takes the
+assistant the `watch.install` capability; polling takes none.
+
+## Importing
+
+```bash
+jeet import                          # scan_roots, jeet's old directories, every indexed trunk
+jeet import ~/Projects/api ~/src     # just these
+jeet import --yes                    # everything found, one task each, no questions
+jeet import --remove-originals       # and remove each original once its task has a copy
+```
+
+`jeet import` is the way in for work that lives outside jeet. It looks for git
+checkouts and lists what it would do:
+
+```text
+jeet: into the store, cloned from origin:
+  github.com/acme/api                      git@github.com:acme/api.git
+jeet: to import, one task each unless grouped:
+  1  github.com/acme/api   feat/login · 2 unpushed commits, 3 uncommitted changes · copied from ~/Projects/api
+  2  github.com/acme/api   parked · 1 unpushed commit · copied from (branch)
+  3  github.com/acme/web   old-feature · moved from ~/.jeet/worktrees/github.com/acme/web/old-feature
+Import which? ⏎ all, one task each · `1+3` puts 1 and 3 in one task, `1+3=name` names it · …
+```
+
+- **A repository outside the store** is cloned into it from its origin. Each
+  of its branches and checkouts with work in it — commits origin does not
+  have, or uncommitted changes — becomes a task whose worktree holds the same
+  work: the branch is fetched across from the original, and uncommitted
+  changes (staged, unstaged and untracked; not ignored files) are reapplied on
+  top. Work on the default branch comes across detached at the same commit,
+  since the store's trunk has that branch. Branches with nothing origin lacks
+  are left out: `jeet worktree add <repo> --branch <name>` gets those.
+- **A worktree of a store trunk outside any task** — what `jeet checkout` and
+  `jeet exec --ephemeral` made before tasks — is jeet's own, so it is moved
+  into a task as it is with `git worktree move`.
+- **Claude Code sessions** started in a checkout are copied to its task, so
+  `jeet task open` can resume them.
+
+The originals are only read. `--remove-originals` removes, after asking (or
+with `--yes`), each linked worktree and parked branch whose task holds an
+exact copy and that has not changed since. A worktree holding ignored files
+stays, since those were not copied, and a repository's main working tree is
+never removed. Running import
+again skips work already in a task. Everything it says goes to stderr.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
-
-Ephemeral sessions warn on uncommitted changes when you exit, then remove the worktree anyway.
 
 ## Tab completion
 
 ### Homebrew and apt
 
-`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters and `--branch` values come from your index (not directory listing).
+`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters, task and worktree names, and `--branch` values come from your index (not directory listing).
 
 - **bash (Linux):** requires the `bash-completion` package (recommended by the `.deb`).
 - **bash (macOS):** install Homebrew `bash-completion@2` and load it in your profile.
@@ -401,6 +719,23 @@ jeet complete repos
 jeet complete branches acme/widget
 ```
 
+## Moving to tasks
+
+Every checkout now belongs to a task, and the commands that made or registered
+checkouts anywhere else are gone. Run `jeet import` once: it brings repositories
+you registered with `adopt` or `scan` into the store, and moves what `checkout`
+and `exec --ephemeral` left under `~/.jeet/worktrees` and `~/.jeet/ephemeral`
+into tasks.
+
+| before | now |
+|--------|-----|
+| `jeet adopt <path>`, `jeet scan` | `jeet import [path]` |
+| `jeet checkout <branch>` | `jeet worktree add <repo> --branch <branch>` in a task |
+| `jeet exec <repo> --branch <b>`, `jeet path <repo> --branch <b>` | `jeet worktree path <name>` |
+| `jeet exec <repo> --ephemeral` | `jeet task new <name> --repo <repo>`, then `jeet task delete` |
+| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer, inside a task |
+| `jeet worktree clean`, `jeet worktree rename` | `jeet worktree rm`, `jeet task delete` |
+
 ## Migration from v0.1.x
 
 | v0.1.x | v0.2.0 |
@@ -421,8 +756,8 @@ jeet complete branches acme/widget
 
 ## What's new in v0.5
 
-- `jeet review <pr>` checks a pull request out into its own worktree, opens
-  the explorer there, and can start a review command (Claude Code, say) in the
+- `jeet review <pr>` checks a pull request out into its own review task, opens
+  the review viewer there, and can start a review command (Claude Code, say) in the
   background with a desktop notification when it finishes. See
   [Reviewing](#reviewing).
 - The explorer shows `+added -removed` for every changed file and folder
@@ -463,7 +798,7 @@ jeet complete branches acme/widget
 On first run, `jeet` creates `~/.jeet/config.toml`:
 
 ```toml
-scan_roots = ["~/Projects", "~/code"]
+scan_roots = ["~/Projects", "~/code"]   # where `jeet import` looks by default
 ```
 
 Two optional keys are not written by default; add them yourself to override:
@@ -479,6 +814,54 @@ Both accept arguments (`editor = "code --wait"`) and are overridden by
 A `[review]` section sets what `jeet review` runs in the background — see
 [Reviewing](#reviewing).
 
+### Notifications
+
+`jeet notify "<title>" [--body B] [--url U]` raises a desktop notification:
+through `terminal-notifier` on macOS when it is installed (a click opens
+`--url`), else Notification Center via `osascript`, and `notify-send`
+elsewhere. Review jobs use it to say they are done. `JEET_NOTIFY_CMD` runs a
+command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
+`JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
+
+### The assistant's permissions
+
+jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
+do what `[assistant] allow` lists; anything else fails with a message saying
+what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet prs`, …),
+`jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
+`jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
+
+```toml
+[assistant]
+allow = ["task.create", "task.send", "task.archive", "review.start", "worktree.add", "project.read"]
+notify = true   # a notification for each action it takes
+```
+
+The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
+`task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
+`review.start`, `project.read`, `project.create`, `project.delete`,
+`repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
+`pr.comment` and `pr.review`. Nothing is allowed until listed. The assistant's Claude settings
+pre-approve exactly the matching `jeet` commands, so allowed actions do not
+prompt. Every action it takes, and every one refused, is appended to
+`~/.jeet/assistant/actions.log`.
+
+### Keeping the store fetched
+
+Commands that go to the network anyway (`jeet clone`, `jeet prs`,
+`jeet review`), and the tasks list and the explorer on launch, start a background fetch of every
+indexed repo, at most once every five minutes. A trunk in the store that is
+clean and on its default branch is fast-forwarded to origin; one with local
+changes or another branch checked out is fetched but left alone, and repos
+outside the store are only ever fetched. Its output goes to
+`~/.jeet/.sync.log`. `jeet sync` does the same in the foreground.
+
+```toml
+sync_interval_secs = 300   # 0 turns background syncing off
+```
+
+`JEET_SYNC_INTERVAL_SECS` overrides it.
+
 Override the home directory for testing:
 
 ```bash
@@ -491,19 +874,31 @@ export JEET_HOME=/tmp/jeet-test
 ~/.jeet/
   config.toml
   index.db
+  .last-sync, .sync.lock, .sync.log  # background store sync
+  watch.json, watch.log              # `jeet watch`: what it has seen, what it said
+  watch-events.jsonl                 # recent GitHub events and where each went
   store/
     github.com/acme/widget/          # trunk (default branch)
-  worktrees/
-    github.com/acme/widget/feature-x/
-  ephemeral/
-    github.com/acme/widget/<uuid>/    # detached checkouts (exec --ephemeral, jeet worktree)
+  tasks/
+    fix-login/                       # a task: the agent's working directory
+      .jeet/task-id                  # marks it, so jeet finds the task from below
+      .jeet/inbox.jsonl              # messages queued for its busy agent
+      .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
+      widget/  widget-2/             # its worktrees, added on demand
+  projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
+  assistant/                         # the assistant's home (`jeet chat`)
+    CLAUDE.md                        # its role; yours to edit
+    .claude/skills/jeet-assistant/   # the jeet commands it uses
+    notes/worklog.md                 # its running memory
+    todo.md                          # the todo list (`jeet todo`)
+    actions.log                      # what it did, one JSON object per line
+    .jeet/                           # its status files and inbox, as a task's
 ```
 
+Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `jeet import`
+moves anything left there into tasks.
+
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.
-
-## Branch slugs
-
-Branch names are converted to filesystem-safe slugs (`feat/foo` → `feat-foo`).
 
 ## Packaging
 

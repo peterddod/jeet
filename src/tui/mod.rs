@@ -1,48 +1,50 @@
 //! The `jeet` file explorer.
 //!
-//! Running `jeet` with no arguments inside a repository opens this: a single
+//! `jeet explore`, or `e` in the tasks list, opens this: a single
 //! level of the tree at a time, arrow keys or the mouse to move through it,
 //! and shortcuts for the things you actually came to do — switch worktree,
-//! edit a file, or hand the worktree to a coding agent.
+//! edit a file, or open the task's coding agent.
 //!
 //! Typing filters the level you are on from the moment the window opens, so
 //! every command that is not navigation carries a ctrl: a bare letter belongs
-//! to the filter, not to a shortcut.
+//! to the filter, not to a shortcut. A filter that starts with `:` is a
+//! command line instead — `:mv`, `:cp`, `:mkdir`, `:rm`, `:touch` — run with
+//! ⏎ against the folder being listed; see [`command`].
 
+mod assistant_info;
+pub mod chat;
+pub mod command;
+pub mod review;
 pub mod state;
+pub mod tasks;
+mod tasks_ui;
+pub mod term;
 pub mod ui;
 
-use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::cursor::Show;
+use anyhow::Result;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::crossterm::execute;
-use ratatui::crossterm::style::Print;
-use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 use crate::agent::{self, AgentSpec};
 use crate::context::App;
+use crate::db::tasks::{TaskRecord, TaskState};
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
-use crate::resolve::RepoContext;
-use crate::review::{self, JobState};
-use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
+use crate::review::{self as review_job, JobState};
+use crate::runtime;
+use crate::tmux;
+use crate::worktrees::{self, WorktreeStatus};
 
 use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
-
-type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub use term::Tui;
+use term::{init_terminal, restore_terminal, suspended};
 
 /// Said when a key needs a highlighted row and the filter has left none.
 const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
@@ -60,6 +62,10 @@ fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
         (true, _) => "nothing here but hidden files — ctrl-d shows them",
     }
 }
+
+/// Said when a repository key is pressed on a task's canvas.
+const NOT_A_REPOSITORY: &str =
+    "the task canvas is not a repository — open one of its worktrees for that";
 
 /// Said when the highlighted row is a file and the key wanted a folder.
 const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
@@ -79,164 +85,81 @@ fn report_step(explorer: &mut Explorer, step: Step) {
     }
 }
 
-/// Ask the terminal for button and wheel reports, in SGR encoding.
-///
-/// Not crossterm's `EnableMouseCapture`: that also turns on `?1003h`,
-/// any-motion tracking, and then every wipe of the pointer across the window
-/// wakes the event loop and redraws the whole listing for nothing. `?1002h`
-/// reports presses, releases and drags, which is all we act on.
-const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
-const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l";
+/// Run the explorer on a terminal of its own, returning where the shell
+/// should end up. `repo` is None for a task's canvas, which is no repository.
+pub fn run(app: &App, repo: Option<&RepoRecord>, root: &Path, start_dir: &Path) -> Result<Exit> {
+    // Keep git's own output off the alternate screen.
+    crate::git::set_capture_output(true);
+    let mut terminal = init_terminal()?;
+    let result = explore(&mut terminal, app, repo, root, start_dir, None);
+    restore_terminal(&mut terminal)?;
+    crate::git::set_capture_output(false);
+    result
+}
 
-/// Run the explorer, returning where the shell should end up.
-pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
+/// Run the explorer on a terminal that is already up — the tasks list's —
+/// returning how it was left. With `back`, esc on an empty filter leaves it
+/// with [`Exit::Back`] for that screen rather than quitting jeet.
+pub fn explore(
+    terminal: &mut Tui,
+    app: &App,
+    repo: Option<&RepoRecord>,
+    root: &Path,
+    start_dir: &Path,
+    back: Option<&str>,
+) -> Result<Exit> {
     let spec = AgentSpec::from_config(&app.config)?;
-    let (label, kind, status) = describe_root(app, &ctx.repo, &ctx.root);
+    let (label, kind, status) = describe_root(app, repo, root);
 
     let mut explorer = Explorer::new(
-        ctx.repo.clone(),
-        ctx.root.clone(),
+        repo.cloned(),
+        root.to_path_buf(),
         label,
         kind,
         status,
         start_dir.to_path_buf(),
         spec,
     )?;
-    explorer.set_status(format!(
-        "{} · type to filter · F1 for keys",
-        explorer.repo.trunk_path.clone()
-    ));
+    explorer.back = back.map(str::to_string);
+    if explorer.back.is_some() {
+        // The shell is wherever jeet was started, not where this screen
+        // opened the explorer: ctrl-q has to move it even from here.
+        if let Ok(cwd) = std::env::current_dir() {
+            explorer.origin = cwd;
+        }
+    }
+    let place = match &explorer.repo {
+        Some(repo) => repo.trunk_path.clone(),
+        None => format!("task {}", explorer.root_label),
+    };
+    let way_back = match &explorer.back {
+        Some(screen) => format!(" · esc back to {screen}"),
+        None => String::new(),
+    };
+    explorer.set_status(format!("{place} · type to filter · F1 for keys{way_back}"));
     refresh_diffs(&mut explorer);
     start_pr_lookup(&mut explorer);
 
-    // Keep git's own output off the alternate screen.
-    crate::git::set_capture_output(true);
-    let mut terminal = init_terminal()?;
-    let result = event_loop(app, &mut terminal, &mut explorer);
-    restore_terminal(&mut terminal)?;
-    crate::git::set_capture_output(false);
-    result?;
+    event_loop(app, terminal, &mut explorer)?;
     Ok(explorer.exit.clone())
 }
 
-fn init_terminal() -> Result<Tui> {
-    install_safety_net();
-    enable_raw_mode().context("enable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Print(MOUSE_ON)).context("enter alternate screen")?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")?;
-    // `jeet review` talks on stderr right up to this point, and a terminal
-    // that does not blank its alternate screen would leave that showing
-    // through every cell the first frame leaves empty.
-    terminal.clear().context("clear terminal")?;
-    Ok(terminal)
-}
-
-/// Put the terminal back however we leave: panic, or a signal from outside.
-///
-/// Raw mode swallows ctrl-c (we handle it as a key), so the only way a signal
-/// arrives is from elsewhere — `pkill`, an IDE tearing the session down, the
-/// window closing. Without this the user is left with no echo, no line editing
-/// and the alternate screen still up, recoverable only with `reset`.
-fn install_safety_net() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            emergency_restore();
-            previous(info);
-        }));
-
-        #[cfg(unix)]
-        for signal in [
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGHUP,
-            signal_hook::consts::SIGQUIT,
-        ] {
-            // SAFETY: the handler only restores terminal modes and re-raises;
-            // leaving the terminal wedged is the worse outcome by far.
-            unsafe {
-                let _ = signal_hook::low_level::register(signal, move || {
-                    emergency_restore();
-                    let _ = signal_hook::low_level::emulate_default_handler(signal);
-                });
-            }
-        }
-    });
-}
-
-/// Best-effort teardown for paths that cannot return a `Result`.
-fn emergency_restore() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Print(MOUSE_OFF), LeaveAlternateScreen, Show);
-}
-
-fn restore_terminal(terminal: &mut Tui) -> Result<()> {
-    disable_raw_mode().context("disable raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        Print(MOUSE_OFF),
-        LeaveAlternateScreen
-    )
-    .context("leave alternate screen")?;
-    terminal.show_cursor().context("show cursor")?;
-    Ok(())
-}
-
-/// Drop out of the alternate screen, run `f`, then restore the explorer.
-fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
-    restore_terminal(terminal)?;
-    let out = f();
-    enable_raw_mode().context("enable raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        Print(MOUSE_ON)
-    )
-    .context("enter alternate screen")?;
-    terminal.clear().context("clear terminal")?;
-    Ok(out)
-}
-
-/// Run `job` on a background thread while the UI keeps drawing.
-///
-/// git is slow and the network is slower — a `git push` on worktree creation
-/// froze the whole explorer for as long as the remote took, with nothing on
-/// screen to say why. Keystrokes that arrive meanwhile are dropped rather than
-/// queued, so they cannot fire against a screen the user never saw.
+/// [`term::with_progress`], drawing the explorer under the spinner.
 fn with_progress<T: Send>(
     terminal: &mut Tui,
     explorer: &mut Explorer,
     label: &str,
     job: impl FnOnce() -> T + Send,
 ) -> Result<T> {
-    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-    let (tx, rx) = mpsc::channel();
-
-    let outcome = std::thread::scope(|scope| -> Result<T> {
-        scope.spawn(move || {
-            let _ = tx.send(job());
-        });
-        let mut tick = 0usize;
-        loop {
-            match rx.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    anyhow::bail!("background task failed")
-                }
-            }
-            explorer.working = Some(format!(" {} {label} ", FRAMES[tick % FRAMES.len()]));
-            terminal.draw(|frame| ui::draw(frame, explorer))?;
-            tick += 1;
-            while event::poll(Duration::from_millis(0))? {
-                let _ = event::read();
-            }
-            std::thread::sleep(Duration::from_millis(80));
-        }
-    });
-
+    let outcome = term::with_progress(
+        terminal,
+        label,
+        |frame, working| {
+            explorer.working = Some(working.to_string());
+            ui::draw(frame, explorer);
+        },
+        job,
+    );
     explorer.working = None;
     outcome
 }
@@ -300,6 +223,10 @@ fn handle_key(app: &App, terminal: &mut Tui, explorer: &mut Explorer, key: KeyEv
     }
 }
 
+// Several arms act and then report only if something happened. Folding that
+// `if` into the arm's guard, as clippy suggests, would let a key that did
+// nothing fall through to the arms below — ctrl-u would type a `u`.
+#[allow(clippy::collapsible_match)]
 fn handle_browse_key(
     app: &App,
     terminal: &mut Tui,
@@ -311,11 +238,7 @@ fn handle_browse_key(
         // Commands first: with the filter live, every one of them needs a ctrl
         // to keep the letter itself available for typing. ctrl-q and ctrl-c
         // are handled before this, so they work from inside a panel too.
-        KeyCode::Char('u') if ctrl => {
-            if explorer.clear_filter() {
-                explorer.set_status("");
-            }
-        }
+        KeyCode::Char('u') if ctrl && explorer.clear_filter() => explorer.set_status(""),
         KeyCode::Char('d') if ctrl => {
             let keep = explorer.selected_entry().map(|e| e.path.clone());
             let shown = explorer.toggle_hidden(keep.as_deref())?;
@@ -332,6 +255,11 @@ fn handle_browse_key(
             start_pr_lookup(explorer);
             explorer.set_status("refreshed");
         }
+        // A task's canvas is no repository: nothing to diff, no PR, no
+        // worktrees of its own.
+        KeyCode::Char('f' | 'p' | 'o' | 'w') if ctrl && explorer.repo.is_none() => {
+            explorer.set_status(NOT_A_REPOSITORY);
+        }
         KeyCode::Char('f') if ctrl => {
             // The highlighted row, or the folder being listed when the filter
             // has left nothing highlighted.
@@ -343,8 +271,8 @@ fn handle_browse_key(
         }
         KeyCode::Char('p') if ctrl => open_pr_panel(app, terminal, explorer, false),
         KeyCode::Char('o') if ctrl => open_repo_prs(app, terminal, explorer, None),
-        KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
-        KeyCode::Char('s') if ctrl => open_sessions(explorer),
+        KeyCode::Char('a') if ctrl => open_agent(app, terminal, explorer, None)?,
+        KeyCode::Char('s') if ctrl => open_sessions(app, terminal, explorer),
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
         // F1 alone would do, except macOS gives it to the media keys by
         // default and some terminals keep it for their own menu. ctrl-g is
@@ -365,12 +293,13 @@ fn handle_browse_key(
             };
             explorer.set_status(said);
         }
-        KeyCode::Backspace => {
-            // Nothing to delete: leave whatever the status line was saying
-            // rather than blanking an error the user has not read yet.
-            if explorer.pop_filter() {
-                explorer.set_status("");
-            }
+        // Nothing to delete: leave whatever the status line was saying rather
+        // than blanking an error the user has not read yet.
+        KeyCode::Backspace if explorer.pop_filter() => explorer.set_status(""),
+        // In a command line both separators are just part of a path operand.
+        KeyCode::Char(c @ ('/' | '\\')) if !ctrl && explorer.in_command_mode() => {
+            explorer.push_filter(c);
+            explorer.set_status("");
         }
         // A path separator means "go in", the way it does while typing a path.
         // `/` cannot appear in a Unix filename, so it always navigates.
@@ -400,7 +329,7 @@ fn handle_browse_key(
             if explorer.clear_filter() {
                 explorer.set_status("");
             } else {
-                explorer.quit_in_place();
+                explorer.leave();
             }
         }
 
@@ -411,15 +340,17 @@ fn handle_browse_key(
         KeyCode::PageDown => explorer.move_cursor(10),
         KeyCode::Home => explorer.select_first(),
         KeyCode::End => explorer.select_last(),
+        // Moving would throw the command line away with the filter, and
+        // change what its relative paths mean besides.
+        KeyCode::Right | KeyCode::Left if explorer.in_command_mode() => {
+            explorer.set_status("⏎ runs the command · esc drops it");
+        }
         KeyCode::Right => {
             let step = explorer.descend_typed()?;
             report_step(explorer, step);
         }
-        KeyCode::Left => {
-            if explorer.ascend()? {
-                explorer.set_status("");
-            }
-        }
+        KeyCode::Left if explorer.ascend()? => explorer.set_status(""),
+        KeyCode::Enter if explorer.in_command_mode() => run_command(app, terminal, explorer)?,
         KeyCode::Enter => enter_selected(app, terminal, explorer)?,
 
         // Anything else printable is filter input.
@@ -429,10 +360,82 @@ fn handle_browse_key(
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             explorer.push_filter(c);
-            explorer.set_status("");
+            // A lone `:` has just turned the filter into a command line; say
+            // what it takes, since nothing else on screen does.
+            if explorer.filter == ":" {
+                explorer.set_status(command::USAGE);
+            } else {
+                explorer.set_status("");
+            }
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// ⏎ on a `:` command line: parse it, resolve it against the folder being
+/// listed, and run it — except `rm`, which always asks first.
+///
+/// A command that fails to parse, resolve or run stays in the filter, so a
+/// typo is one ⌫ away rather than a whole line away.
+fn run_command(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
+    let line = explorer.command_line().unwrap_or_default().to_string();
+    let command = command::parse(&line)?.resolve(&explorer.cwd, &explorer.root)?;
+    if let command::Command::Remove { path, .. } = &command {
+        let what = if path.is_symlink() {
+            "a symlink — whatever it points to stays"
+        } else if path.is_dir() {
+            "a folder, and everything inside it"
+        } else {
+            "a file"
+        };
+        explorer.overlay = Some(Overlay::Confirm {
+            title: "remove".into(),
+            lines: vec![command::relative(path, &explorer.root), what.to_string()],
+            action: PendingAction::Command(command),
+        });
+        return Ok(());
+    }
+    execute_command(app, terminal, explorer, command)
+}
+
+/// Run a resolved command off the draw path, then show its result: the
+/// filter cleared, the listing and the diff counters re-read, and the cursor
+/// on whatever the command made.
+fn execute_command(
+    app: &App,
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    command: command::Command,
+) -> Result<()> {
+    let summary = command.summary(&explorer.root);
+    let job = command.clone();
+    let ran = with_progress(terminal, explorer, "working", move || job.run()).and_then(|r| r);
+
+    // Re-read whatever happened: a `cp -r` that failed halfway has still
+    // changed the folder. The command may also have taken the folder being
+    // listed with it — `rm -r` or `mv` of it or of one above — so climb to
+    // one that is still there, never past the root it could not touch.
+    let mut dir = explorer.cwd.clone();
+    while !dir.is_dir() && dir != explorer.root && dir.pop() {}
+    if ran.is_ok() {
+        explorer.filter.clear();
+    }
+    if dir == explorer.cwd {
+        // The cursor goes on what the command made, or on the row here that
+        // leads to it when it made something further down.
+        let keep = ran
+            .as_ref()
+            .ok()
+            .and_then(|_| command.landed())
+            .and_then(|path| descendant_of(&explorer.cwd, path));
+        explorer.reload(keep.as_deref())?;
+    } else {
+        explorer.show(dir, None)?;
+    }
+    refresh_root_status(app, explorer);
+    ran?;
+    explorer.set_status(summary);
     Ok(())
 }
 
@@ -569,12 +572,9 @@ fn handle_overlay_key(
     }
 
     // Otherwise the browse-mode shortcuts mean nothing in a panel, and letting
-    // them through makes ctrl-d ask to delete a worktree and ctrl-e create one.
-    // The prompts are the exception: they take typed input, and ctrl-u clears.
-    let typing = matches!(
-        overlay,
-        Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. } | Overlay::ReviewBody { .. }
-    );
+    // them through would act on the listing hidden behind it. The review
+    // body is the exception: it takes typed input, and ctrl-u clears.
+    let typing = matches!(overlay, Overlay::ReviewBody { .. });
     if !typing && ctrl {
         explorer.overlay = Some(overlay);
         return Ok(());
@@ -649,63 +649,11 @@ fn handle_overlay_key(
                     None => explorer.overlay = Some(Overlay::Worktrees { selected }),
                 }
             }
-            KeyCode::Char('n') => {
-                explorer.overlay = Some(Overlay::NewWorktree {
-                    input: String::new(),
-                })
-            }
-            KeyCode::Char('e') => {
-                create_worktree(app, terminal, explorer, None)?;
-            }
-            KeyCode::Char('m') => match explorer.worktree_rows.get(selected) {
-                Some(row) if row.entry.kind == WorktreeKind::Trunk => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot rename".into(),
-                        lines: vec!["the trunk checkout keeps the default branch".into()],
-                        from_panel: true,
-                    });
-                }
-                Some(row) => {
-                    explorer.overlay = Some(Overlay::RenameWorktree {
-                        index: selected,
-                        input: row.entry.branch.clone().unwrap_or_default(),
-                    });
-                }
-                None => explorer.overlay = Some(Overlay::Worktrees { selected }),
-            },
-            KeyCode::Char('d') => match explorer.worktree_rows.get(selected) {
-                Some(row) if row.entry.kind == WorktreeKind::Trunk => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot delete".into(),
-                        lines: vec!["the trunk checkout is not removable".into()],
-                        from_panel: true,
-                    });
-                }
-                Some(row) if row.current => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot delete".into(),
-                        lines: vec![
-                            "this is the worktree you are browsing".into(),
-                            "switch somewhere else first (⏎ on another row)".into(),
-                        ],
-                        from_panel: true,
-                    });
-                }
-                Some(row) => {
-                    explorer.overlay = Some(Overlay::Confirm {
-                        title: "delete worktree".into(),
-                        lines: delete_summary(row),
-                        action: PendingAction::RemoveWorktree,
-                        index: selected,
-                    });
-                }
-                None => explorer.overlay = Some(Overlay::Worktrees { selected }),
-            },
             KeyCode::Char('r') => open_worktrees(app, terminal, explorer),
             KeyCode::Char('o') => {
                 match explorer.worktree_rows.get(selected).and_then(|row| row.pr) {
                     Some(number) => {
-                        let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                        let trunk = explorer.trunk();
                         let opened =
                             with_progress(terminal, explorer, "opening the browser", || {
                                 github::open_in_browser(&trunk, number)
@@ -726,78 +674,38 @@ fn handle_overlay_key(
             _ => explorer.overlay = Some(Overlay::Worktrees { selected }),
         },
         Overlay::Sessions {
+            task,
             sessions,
             mut selected,
         } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {}
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = selected.saturating_sub(1);
-                explorer.overlay = Some(Overlay::Sessions { sessions, selected });
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                });
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 selected = (selected + 1).min(sessions.len().saturating_sub(1));
-                explorer.overlay = Some(Overlay::Sessions { sessions, selected });
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                });
             }
             KeyCode::Enter => match sessions.get(selected) {
-                Some(session) => {
-                    let args = explorer.agent.resume_args(&session.id).unwrap_or_default();
-                    launch_agent(app, terminal, explorer, &args)?;
-                }
+                Some(session) => open_agent(app, terminal, explorer, Some(session.id.clone()))?,
                 None => explorer.set_status("no session selected"),
             },
-            _ => explorer.overlay = Some(Overlay::Sessions { sessions, selected }),
-        },
-        Overlay::RenameWorktree { index, mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, terminal, explorer),
-            KeyCode::Enter => {
-                rename_worktree(app, terminal, explorer, index, input.trim().to_string())?
+            _ => {
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                })
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.clear();
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            KeyCode::Backspace => {
-                input.pop();
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                input.push(c);
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            _ => explorer.overlay = Some(Overlay::RenameWorktree { index, input }),
-        },
-        Overlay::NewWorktree { mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, terminal, explorer),
-            KeyCode::Enter => {
-                let name = input.trim().to_string();
-                create_worktree(
-                    app,
-                    terminal,
-                    explorer,
-                    Some(name).filter(|n| !n.is_empty()),
-                )?;
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.clear();
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            KeyCode::Backspace => {
-                input.pop();
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                input.push(c);
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            _ => explorer.overlay = Some(Overlay::NewWorktree { input }),
         },
         Overlay::PullRequest {
             pending,
@@ -823,10 +731,7 @@ fn handle_overlay_key(
                     pending_error,
                 });
             }
-            KeyCode::Char('d') => {
-                let root = explorer.root.clone();
-                view_diff(app, terminal, explorer, &root)?;
-            }
+            KeyCode::Char('d') => open_review_viewer(terminal, explorer, pending, pending_error)?,
             KeyCode::Char('v') => {
                 match explorer.review_job.as_ref().map(|job| job.log.clone()) {
                     Some(log) => open_editor(app, terminal, explorer, &log)?,
@@ -868,7 +773,7 @@ fn handle_overlay_key(
             },
             KeyCode::Char('o') => {
                 if let Some(number) = rows.get(selected).map(|r| r.pr.number) {
-                    let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                    let trunk = explorer.trunk();
                     let opened = with_progress(terminal, explorer, "opening the browser", || {
                         github::open_in_browser(&trunk, number)
                     })?;
@@ -889,62 +794,39 @@ fn handle_overlay_key(
             verdict,
             mut input,
             pending,
-        } => {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt = key.modifiers.contains(KeyModifiers::ALT);
-            match key.code {
-                KeyCode::Esc => {
-                    explorer.overlay = Some(Overlay::PullRequest {
-                        pending,
-                        pending_error: None,
-                    });
-                    return Ok(());
-                }
-                // A newline: ctrl-j is a line feed in every terminal; alt-⏎
-                // where the terminal reports it.
-                KeyCode::Char('j') if ctrl => input.push('\n'),
-                KeyCode::Enter if alt => input.push('\n'),
-                KeyCode::Enter => {
-                    return submit_review(terminal, explorer, verdict, input, pending);
-                }
-                KeyCode::Char('u') if ctrl => input.clear(),
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char(c) if !ctrl && !alt => input.push(c),
-                _ => {}
+        } => match edit_review_body(&mut input, key) {
+            BodyKey::Cancel => {
+                explorer.overlay = Some(Overlay::PullRequest {
+                    pending,
+                    pending_error: None,
+                });
             }
-            explorer.overlay = Some(Overlay::ReviewBody {
-                verdict,
-                input,
-                pending,
-            });
-        }
+            BodyKey::Submit => return submit_review(terminal, explorer, verdict, input, pending),
+            BodyKey::Typing => {
+                explorer.overlay = Some(Overlay::ReviewBody {
+                    verdict,
+                    input,
+                    pending,
+                });
+            }
+        },
         Overlay::Confirm {
             title,
             lines,
             action,
-            index,
-        } => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match action {
-                PendingAction::RemoveWorktree => {
-                    remove_worktree(app, terminal, explorer, index, false)?
-                }
-            },
-            KeyCode::Char('f') | KeyCode::Char('F') => match action {
-                PendingAction::RemoveWorktree => {
-                    remove_worktree(app, terminal, explorer, index, true)?
-                }
-            },
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                open_worktrees(app, terminal, explorer);
+        } => match (key.code, action) {
+            (KeyCode::Char('y' | 'Y'), PendingAction::Command(command)) => {
+                execute_command(app, terminal, explorer, command)?
             }
-            _ => {
+            // The command stays in the filter, to fix or to esc away.
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, PendingAction::Command(_)) => {
+                explorer.set_status("nothing removed — esc drops the command");
+            }
+            (_, action) => {
                 explorer.overlay = Some(Overlay::Confirm {
                     title,
                     lines,
                     action,
-                    index,
                 })
             }
         },
@@ -952,45 +834,11 @@ fn handle_overlay_key(
     Ok(())
 }
 
-fn delete_summary(row: &WorktreeRow) -> Vec<String> {
-    let mut lines = vec![
-        format!("{} ({})", row.entry.display_name(), row.entry.kind.label()),
-        ui::truncate_start(&row.entry.path.display().to_string(), 58),
-        String::new(),
-    ];
-    if row.status.dirty > 0 {
-        lines.push(format!(
-            "⚠ {} uncommitted change{} will be discarded",
-            row.status.dirty,
-            if row.status.dirty == 1 { "" } else { "s" }
-        ));
-    }
-    if row.status.ahead > 0 {
-        lines.push(format!(
-            "⚠ {} commit{} not on the default branch",
-            row.status.ahead,
-            if row.status.ahead == 1 { "" } else { "s" }
-        ));
-    }
-    if let Some(why) = &row.status.unknown {
-        lines.push(format!("⚠ could not assess this worktree: {why}"));
-    }
-    if row.status.ignored > 0 {
-        lines.push(format!(
-            "⚠ {} ignored file{} (.env, build output) will be deleted",
-            row.status.ignored,
-            if row.status.ignored == 1 { "" } else { "s" }
-        ));
-    }
-    if !row.status.has_anything_to_lose() {
-        lines.push("nothing to lose — clean and fully merged".to_string());
-    }
-    lines.push(format!("diff: {}", row.status.diff_summary()));
-    lines
-}
-
 fn open_worktrees(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return;
+    };
     let root = explorer.root.clone();
     let rows = with_progress(terminal, explorer, "reading worktrees", || {
         collect_rows(app, &repo, &root)
@@ -1066,7 +914,45 @@ fn collect_rows(app: &App, repo: &RepoRecord, current_root: &Path) -> Result<Vec
     Ok(rows)
 }
 
-fn open_sessions(explorer: &mut Explorer) {
+/// The task the explorer is browsing in, for the keys that act on its agent.
+/// Anywhere else there is none to act on — agents run in tasks — and the
+/// reason is put up in a panel instead.
+fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
+    let (title, lines) = match crate::tasks::task_at(app, &explorer.root) {
+        Ok(Some(task)) if task.state == TaskState::Archived => (
+            "task archived",
+            vec![
+                format!("task {} is archived", task.name),
+                format!("`jeet task unarchive {}` brings it back", task.slug),
+            ],
+        ),
+        Ok(Some(task)) => return Some(task),
+        Ok(None) => (
+            "agents run in tasks",
+            vec![
+                "this is in no task:".into(),
+                explorer.root.display().to_string(),
+                String::new(),
+                "a task's agent runs in tmux, in the task's directory,".into(),
+                "with its worktrees around it. n in the tasks list".into(),
+                "(`jeet`) or `jeet task new <name> --repo <repo>` makes one".into(),
+            ],
+        ),
+        Err(e) => ("agent", vec![format!("{e:#}")]),
+    };
+    explorer.overlay = Some(Overlay::Message {
+        title: title.into(),
+        lines,
+        from_panel: false,
+    });
+    None
+}
+
+/// ctrl-s: the sessions of this task's agent, ⏎ to resume one.
+fn open_sessions(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
+    let Some(task) = task_here(app, explorer) else {
+        return;
+    };
     if !explorer.agent.supports_sessions() {
         explorer.overlay = Some(Overlay::Message {
             title: "sessions".into(),
@@ -1078,21 +964,26 @@ fn open_sessions(explorer: &mut Explorer) {
         });
         return;
     }
-    match agent::sessions_for(&explorer.agent, &explorer.root) {
+    let dir = crate::tasks::task_dir(app, &task);
+    let sessions = with_progress(terminal, explorer, "reading sessions", || {
+        tasks::session_choices(app, &task, &dir)
+    })
+    .and_then(|inner| inner);
+    match sessions {
         Ok(sessions) if sessions.is_empty() => {
             explorer.overlay = Some(Overlay::Message {
                 title: "sessions".into(),
                 lines: vec![
-                    format!("no {} sessions recorded for", explorer.agent.display()),
-                    explorer.root.display().to_string(),
+                    format!("task {} has no agent sessions yet", task.name),
                     String::new(),
-                    "press ctrl-a to start one".into(),
+                    "press ctrl-a to start its agent".into(),
                 ],
                 from_panel: false,
             });
         }
         Ok(sessions) => {
             explorer.overlay = Some(Overlay::Sessions {
+                task,
                 sessions,
                 selected: 0,
             })
@@ -1107,151 +998,6 @@ fn open_sessions(explorer: &mut Explorer) {
     }
 }
 
-fn create_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    name: Option<String>,
-) -> Result<()> {
-    let repo = explorer.repo.clone();
-    let label = match &name {
-        Some(branch) => format!("creating {branch} and publishing it"),
-        None => "creating a detached worktree".to_string(),
-    };
-    let branch = name.clone();
-    let result = with_progress(terminal, explorer, &label, move || match &branch {
-        Some(branch) => worktrees::create_named(app, &repo, branch, true),
-        None => worktrees::create_detached(app, &repo).map(|path| worktrees::Outcome {
-            path,
-            warnings: Vec::new(),
-        }),
-    })?;
-    match result {
-        Ok(created) => {
-            switch_worktree(app, explorer, &created.path)?;
-            let what = match name {
-                Some(branch) => format!("created worktree {branch}"),
-                None => "created detached worktree".to_string(),
-            };
-            if created.warnings.is_empty() {
-                explorer.set_status(what);
-            } else {
-                explorer.set_status(format!("{what} — {}", created.warnings.join("; ")));
-            }
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "could not create worktree".into(),
-                lines: vec![format!("{e:#}")],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Rename the worktree at `index`, following it if it is the one we are in.
-fn rename_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    index: usize,
-    new_name: String,
-) -> Result<()> {
-    let Some(row) = explorer.worktree_rows.get(index).cloned() else {
-        return Ok(());
-    };
-    let was = row.entry.display_name();
-    let following = crate::resolve::same_path(&row.entry.path, &explorer.root);
-    let sub_path = explorer
-        .cwd
-        .strip_prefix(&row.entry.path)
-        .map(|rest| rest.to_path_buf())
-        .ok();
-
-    let repo = explorer.repo.clone();
-    let entry = row.entry.clone();
-    let target = new_name.clone();
-    let outcome = with_progress(
-        terminal,
-        explorer,
-        &format!("renaming to {new_name} and publishing it"),
-        move || worktrees::rename(app, &repo, &entry, &target, true),
-    )?;
-    match outcome {
-        Ok(renamed) => {
-            if following {
-                switch_worktree(app, explorer, &renamed.path)?;
-                // Stay in the directory we were browsing, under its new home.
-                if let Some(rest) = sub_path.filter(|p| !p.as_os_str().is_empty()) {
-                    let landing = renamed.path.join(rest);
-                    if landing.is_dir() {
-                        explorer.cwd = landing;
-                        explorer.reload(None)?;
-                    }
-                }
-            }
-            open_worktrees(app, terminal, explorer);
-            let mut status = format!("renamed {was} to {new_name}");
-            if !renamed.warnings.is_empty() {
-                status.push_str(&format!(" — {}", renamed.warnings.join("; ")));
-            }
-            explorer.set_status(status);
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "could not rename".into(),
-                lines: vec![format!("{e:#}")],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Remove the worktree at `index`. Without `force`, git independently
-/// re-checks for modified, untracked and submodule content at removal time —
-/// which catches anything written since the dialog's status was sampled.
-fn remove_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    index: usize,
-    force: bool,
-) -> Result<()> {
-    let Some(row) = explorer.worktree_rows.get(index).cloned() else {
-        open_worktrees(app, terminal, explorer);
-        return Ok(());
-    };
-    let repo = explorer.repo.clone();
-    let entry = row.entry.clone();
-    let outcome = with_progress(
-        terminal,
-        explorer,
-        &format!("removing {}", row.entry.display_name()),
-        move || worktrees::remove(app, &repo, &entry, force),
-    )?;
-    match outcome {
-        Ok(()) => {
-            open_worktrees(app, terminal, explorer);
-            explorer.set_status(format!("removed {}", row.entry.display_name()));
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "not removed".into(),
-                lines: vec![
-                    row.entry.display_name(),
-                    format!("{e:#}"),
-                    String::new(),
-                    "press d again and then f to remove it anyway".into(),
-                ],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Move the explorer to another worktree, leaving it where it was if the new
 /// root cannot be listed (it may have been removed since the panel was built).
 fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()> {
@@ -1259,7 +1005,7 @@ fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()
     // touching anything if the new root cannot be read, and it is the only
     // thing that keeps the filter and the visible rows in step with `entries`.
     explorer.show(path.to_path_buf(), None)?;
-    let (label, kind, status) = describe_root(app, &explorer.repo, path);
+    let (label, kind, status) = describe_root(app, explorer.repo.as_ref(), path);
     explorer.root = path.to_path_buf();
     explorer.root_label = label;
     explorer.root_kind = kind;
@@ -1271,7 +1017,7 @@ fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()
 }
 
 fn refresh_root_status(app: &App, explorer: &mut Explorer) {
-    let (label, kind, status) = describe_root(app, &explorer.repo, &explorer.root.clone());
+    let (label, kind, status) = describe_root(app, explorer.repo.as_ref(), &explorer.root.clone());
     explorer.root_label = label;
     explorer.root_kind = kind;
     explorer.root_status = status;
@@ -1282,7 +1028,11 @@ fn refresh_root_status(app: &App, explorer: &mut Explorer) {
 /// the same base, and the same working-tree-inclusive diff, as the header's
 /// counter, so the listing adds up to what the header says.
 fn refresh_diffs(explorer: &mut Explorer) {
-    let base = worktrees::comparison_base(&explorer.repo);
+    let Some(repo) = &explorer.repo else {
+        explorer.diffs = DiffMap::default();
+        return;
+    };
+    let base = worktrees::comparison_base(repo);
     let merge_base = crate::git::merge_base(&explorer.root, &base);
     let files = merge_base
         .as_deref()
@@ -1294,8 +1044,13 @@ fn refresh_diffs(explorer: &mut Explorer) {
 /// Look the worktree's PR up on a background thread; the event loop picks
 /// the answer up when it lands, so opening the explorer never waits on it.
 fn start_pr_lookup(explorer: &mut Explorer) {
+    let Some(repo) = &explorer.repo else {
+        explorer.pr = PrLookup::Missing;
+        explorer.pr_updates = None;
+        return;
+    };
     let root = explorer.root.clone();
-    let default_branch = explorer.repo.default_branch.clone();
+    let default_branch = repo.default_branch.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let lookup = match crate::git::head_branch(&root) {
@@ -1337,8 +1092,8 @@ fn take_pr_update(app: &App, explorer: &mut Explorer) {
 }
 
 fn load_review_job(app: &App, explorer: &mut Explorer) {
-    explorer.review_job = match &explorer.pr {
-        PrLookup::Found(pr) => review::load(app, &explorer.repo, pr.number),
+    explorer.review_job = match (&explorer.pr, &explorer.repo) {
+        (PrLookup::Found(pr), Some(repo)) => review_job::load(app, repo, pr.number),
         _ => None,
     };
 }
@@ -1428,7 +1183,10 @@ fn open_pr_panel(app: &App, terminal: &mut Tui, explorer: &mut Explorer, refetch
 /// ctrl-o: the repository's open PRs, with the cursor on `keep` if it is
 /// still open, else on this worktree's own PR, else at the top.
 fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: Option<u64>) {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return;
+    };
     let rows = with_progress(terminal, explorer, "reading pull requests", || {
         crate::commands::prs::rows(app, &repo)
     })
@@ -1437,7 +1195,7 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
         Ok(rows) if rows.is_empty() => {
             explorer.overlay = Some(Overlay::Message {
                 title: "pull requests".into(),
-                lines: vec![format!("{} has no open pull requests", explorer.repo.id)],
+                lines: vec![format!("{} has no open pull requests", repo.id)],
                 from_panel: false,
             });
         }
@@ -1462,9 +1220,10 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
     }
 }
 
-/// ⏎ in the PR list: check the PR out — or find the worktree that already
-/// has it — and browse it. Deliberately not `jeet review`: no review command
-/// starts from here, this is only a way in.
+/// ⏎ in the PR list: browse the PR in a task — the one whose worktree has
+/// its branch already, else its review task, made if need be — and record
+/// it in that task's PR history. Deliberately not `jeet review`: no review
+/// command starts from here, this is only a way in.
 fn check_out_pr(
     app: &App,
     terminal: &mut Tui,
@@ -1473,22 +1232,35 @@ fn check_out_pr(
     rows: Vec<crate::commands::prs::PrRow>,
     selected: usize,
 ) -> Result<()> {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        return Ok(());
+    };
     let outcome = with_progress(
         terminal,
         explorer,
         &format!("checking out #{number}"),
-        || {
-            let pr = github::pr_view(std::path::Path::new(&repo.trunk_path), number)?;
-            worktrees::checkout_pr(app, &repo, &pr)
+        || -> Result<_> {
+            let found = github::pr_history(std::path::Path::new(&repo.trunk_path), number)?;
+            let mut checkout = crate::tasks::browse_pr(app, &repo, &found.pr)?;
+            let record = crate::pr_history::to_record(&checkout.task.id, &repo.id, found);
+            if let Err(e) = app.db.upsert_task_pr(&record) {
+                checkout
+                    .warnings
+                    .push(format!("could not record #{number} in the task: {e:#}"));
+            }
+            Ok(checkout)
         },
     )?;
     match outcome {
-        Ok(checked_out) => {
-            switch_worktree(app, explorer, &checked_out.path)?;
-            let mut status = format!("checked out #{number}");
-            if !checked_out.warnings.is_empty() {
-                status.push_str(&format!(" — {}", checked_out.warnings.join("; ")));
+        Ok(checkout) => {
+            switch_worktree(app, explorer, &checkout.path)?;
+            let task = &checkout.task.name;
+            let mut status = match checkout.created {
+                true => format!("checked out #{number} in new task {task}"),
+                false => format!("checked out #{number} in task {task}"),
+            };
+            if !checkout.warnings.is_empty() {
+                status.push_str(&format!(" — {}", checkout.warnings.join("; ")));
             }
             explorer.set_status(status);
         }
@@ -1530,9 +1302,7 @@ fn submit_review(
     };
     let number = pr.number;
     let body = input.trim().to_string();
-    // GitHub refuses a comment or a change request that says nothing; better
-    // to say so here than after the round trip.
-    if body.is_empty() && verdict != Verdict::Approve && pending.is_none() {
+    if needs_body(verdict, &body, pending.is_some()) {
         explorer.set_status(format!("{} needs a comment to go with it", verdict.label()));
         explorer.overlay = Some(Overlay::ReviewBody {
             verdict,
@@ -1551,11 +1321,7 @@ fn submit_review(
     )?;
     match outcome {
         Ok(()) => {
-            explorer.set_status(match verdict {
-                Verdict::Approve => format!("approved #{number}"),
-                Verdict::Comment => format!("commented on #{number}"),
-                Verdict::RequestChanges => format!("requested changes on #{number}"),
-            });
+            explorer.set_status(submitted_label(verdict, number));
             start_pr_lookup(explorer);
         }
         Err(e) => {
@@ -1570,13 +1336,95 @@ fn submit_review(
     Ok(())
 }
 
+/// What a key did to a review summary being typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyKey {
+    Typing,
+    Cancel,
+    Submit,
+}
+
+/// Edit a review summary: the one text box both the PR panel and the review
+/// viewer type verdicts into.
+fn edit_review_body(input: &mut String, key: KeyEvent) -> BodyKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Esc => return BodyKey::Cancel,
+        // A newline: ctrl-j is a line feed in every terminal; alt-⏎ where the
+        // terminal reports it.
+        KeyCode::Char('j') if ctrl => input.push('\n'),
+        KeyCode::Enter if alt => input.push('\n'),
+        KeyCode::Enter => return BodyKey::Submit,
+        KeyCode::Char('u') if ctrl => input.clear(),
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        KeyCode::Char(c) if !ctrl && !alt => input.push(c),
+        _ => {}
+    }
+    BodyKey::Typing
+}
+
+/// GitHub refuses a comment or a change request that says nothing — unless
+/// it submits a pending review, whose inline comments say it. Better to say
+/// so before the round trip than after.
+fn needs_body(verdict: Verdict, body: &str, pending: bool) -> bool {
+    body.trim().is_empty() && verdict != Verdict::Approve && !pending
+}
+
+fn submitted_label(verdict: Verdict, number: u64) -> String {
+    match verdict {
+        Verdict::Approve => format!("approved #{number}"),
+        Verdict::Comment => format!("commented on #{number}"),
+        Verdict::RequestChanges => format!("requested changes on #{number}"),
+    }
+}
+
+/// `d` in the PR panel: the PR in the review viewer. Esc comes back to the
+/// panel; a verdict submitted from the viewer closes it, since the pending
+/// review it was showing has gone out.
+fn open_review_viewer(
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    pending: Option<github::PendingReview>,
+    pending_error: Option<String>,
+) -> Result<()> {
+    let PrLookup::Found(pr) = &explorer.pr else {
+        return Ok(());
+    };
+    let pr = (**pr).clone();
+    let root = explorer.root.clone();
+    let outcome = review::view(terminal, &root, &pr)?;
+    match outcome.submitted {
+        Some(verdict) => {
+            explorer.set_status(submitted_label(verdict, pr.number));
+            start_pr_lookup(explorer);
+        }
+        None => {
+            explorer.overlay = Some(Overlay::PullRequest {
+                pending,
+                pending_error,
+            })
+        }
+    }
+    if outcome.exit == review::Exit::Quit {
+        explorer.quit_in_place();
+    }
+    Ok(())
+}
+
 /// ctrl-f: step through the diff of a file or folder against the merge base,
 /// in whatever `git difftool` is set up to use.
 fn view_diff(app: &App, terminal: &mut Tui, explorer: &mut Explorer, path: &Path) -> Result<()> {
+    let Some(default_branch) = explorer.repo.as_ref().map(|r| r.default_branch.clone()) else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return Ok(());
+    };
     let Some(base) = explorer.diffs.merge_base.clone() else {
         explorer.set_status(format!(
             "no common history with {} to diff against",
-            explorer.repo.default_branch
+            default_branch
         ));
         return Ok(());
     };
@@ -1594,10 +1442,7 @@ fn view_diff(app: &App, terminal: &mut Tui, explorer: &mut Explorer, path: &Path
         rel.display().to_string()
     };
     if !changed {
-        explorer.set_status(format!(
-            "no changes in {shown} against {}",
-            explorer.repo.default_branch
-        ));
+        explorer.set_status(format!("no changes in {shown} against {}", default_branch));
         return Ok(());
     }
 
@@ -1643,7 +1488,24 @@ fn default_diff_tool(app: &App) -> &'static str {
 }
 
 /// Branch label, worktree kind and counters for the worktree at `root`.
-fn describe_root(app: &App, repo: &RepoRecord, root: &Path) -> (String, String, WorktreeStatus) {
+fn describe_root(
+    app: &App,
+    repo: Option<&RepoRecord>,
+    root: &Path,
+) -> (String, String, WorktreeStatus) {
+    let Some(repo) = repo else {
+        // A task's canvas: named for its task, with no branch or counters.
+        let name = crate::tasks::task_at(app, root)
+            .ok()
+            .flatten()
+            .map(|task| task.name)
+            .unwrap_or_else(|| {
+                root.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string())
+            });
+        return (name, "task canvas".to_string(), WorktreeStatus::default());
+    };
     let entries = worktrees::list(app, repo).unwrap_or_default();
     if let Some(entry) = entries
         .iter()
@@ -1676,24 +1538,47 @@ fn open_editor(app: &App, terminal: &mut Tui, explorer: &mut Explorer, file: &Pa
     Ok(())
 }
 
-/// Launch the coding agent from the worktree root, so it sees the whole tree.
-fn launch_agent(
+/// ctrl-a, or ⏎ on a session: attach to the agent of the task being
+/// browsed, in its tmux session, starting it first if need be — resuming
+/// `session` when given, else the task's latest — exactly as ⏎ in the tasks
+/// list does. Detaching comes back here.
+fn open_agent(
     app: &App,
     terminal: &mut Tui,
     explorer: &mut Explorer,
-    extra: &[String],
+    session: Option<String>,
 ) -> Result<()> {
-    let argv = explorer.agent.argv.clone();
-    let root = explorer.root.clone();
-    let extra = extra.to_vec();
-    let outcome = suspended(terminal, || agent::run_in(&argv, &root, &extra))?;
-    match outcome {
-        Ok(0) => explorer.set_status(format!("{} exited", explorer.agent.display())),
-        Ok(code) => explorer.set_status(format!(
-            "{} exited with status {code}",
-            explorer.agent.display()
-        )),
-        Err(e) => explorer.set_status(format!("could not start agent: {e}")),
+    let Some(task) = task_here(app, explorer) else {
+        return Ok(());
+    };
+    let running = with_progress(
+        terminal,
+        explorer,
+        &format!("starting {}'s agent", task.name),
+        || runtime::ensure_running(app, &task, session.as_deref(), None),
+    )?;
+    let running = match running {
+        Ok(running) => running,
+        Err(e) => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "could not start the agent".into(),
+                lines: vec![format!("{e:#}")],
+                from_panel: false,
+            });
+            return Ok(());
+        }
+    };
+    let attached = suspended(terminal, || tmux::attach(&running.tmux_session))?;
+    let _ = app.db.touch_task(&task.id, crate::worktrees::now_secs());
+    match attached {
+        Ok(_) => {
+            let mut status = format!("back from {}'s agent", task.name);
+            if !running.warnings.is_empty() {
+                status.push_str(&format!(" — {}", running.warnings.join("; ")));
+            }
+            explorer.set_status(status);
+        }
+        Err(e) => explorer.set_status(format!("could not attach: {e:#}")),
     }
     refresh_root_status(app, explorer);
     let keep = explorer.selected_entry().map(|e| e.path.clone());
@@ -1708,10 +1593,10 @@ fn display_relative(explorer: &Explorer, path: &Path) -> String {
 }
 
 /// Directory the explorer should start listing, given where the user ran jeet.
-pub fn start_dir(ctx: &RepoContext, cwd: &Path) -> PathBuf {
-    if cwd.starts_with(&ctx.root) {
+pub fn start_dir(root: &Path, cwd: &Path) -> PathBuf {
+    if cwd.starts_with(root) {
         cwd.to_path_buf()
     } else {
-        ctx.root.clone()
+        root.to_path_buf()
     }
 }
