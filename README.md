@@ -107,6 +107,7 @@ jeet prs                                 # the open PRs, and which you have chec
 jeet review 123                          # or #123, or the PR's URL
 jeet prs acme/widget                     # or name the repo, from anywhere
 jeet review 123 --repo acme/widget
+jeet pr merge 123                        # merge it, once it is ready (see Merging)
 ```
 
 ## The explorer
@@ -317,6 +318,33 @@ title are not — whoever opened the PR chose those, and pasted into a shell the
 would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
 `$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
 `$JEET_REVIEW_LOG`. Jobs and their logs live under `~/.jeet/reviews`.
+
+### Merging
+
+```bash
+jeet pr merge 123                   # or #123, or the PR's URL
+jeet pr merge 123 --repo acme/widget
+jeet pr merge 123 --method squash   # merge, squash or rebase
+jeet pr merge 123 --keep-branch
+```
+
+`jeet pr merge` merges only a PR that is open, not a draft, free of
+conflicts, with every check passed (none pending or failed), no changes
+requested or approving review missing, and that GitHub does not block or
+want brought up to date. Anything else is refused, saying why; it never
+uses admin rights, auto-merge or a merge queue to get round a rule. The
+merge is of the commit it checked, so a push in between makes it fail.
+
+The method is `--method`, else `[merge] method` in config.toml when the
+repository allows it, else the repository's default. The PR's branch is
+then deleted on GitHub (not locally: a task may have it checked out), unless
+`--keep-branch` or the repository deletes merged branches itself. Tasks
+holding the PR record it as merged in their PR history.
+
+```toml
+[merge]
+method = "squash"
+```
 
 ## Tasks
 
@@ -965,7 +993,8 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
-`pr.comment` and `pr.review`. Nothing is allowed until listed. The assistant's Claude settings
+`pr.comment`, `pr.review` and `pr.merge` (`jeet pr merge`). Nothing is
+allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, so allowed actions do not
 prompt. Every action it takes, and every one refused, is appended to
 `~/.jeet/assistant/actions.log`.

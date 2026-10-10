@@ -22,7 +22,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    Commands, ProjectCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    Commands, PrCommands, ProjectCommands, TaskCommands, WatchCommands, WorktreeArgs,
+    WorktreeCommands,
 };
 use crate::config;
 use crate::notify::{self, Notification};
@@ -75,6 +76,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     cap("pr.comment", "comment on pull requests", &[]),
     cap("pr.review", "submit pull request reviews", &[]),
+    cap("pr.merge", "merge pull requests", &["jeet pr merge"]),
     cap("project.read", "list projects", &["jeet projects ls"]),
     cap("project.create", "make projects", &["jeet projects new"]),
     cap("project.delete", "delete projects", &["jeet projects rm"]),
@@ -215,14 +217,15 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
                 None => "fetched the store".into(),
             },
         ),
-        Commands::Review { pr, repo, .. } => {
-            let pr = match pr.trim_start_matches('#').parse::<u64>() {
-                Ok(number) => format!("#{number}"),
-                Err(_) => pr.clone(),
-            };
-            let repo = repo.as_ref().map(|r| format!(" of {r}")).unwrap_or_default();
-            needs("review.start", format!("checked out {pr}{repo} for review"))
-        }
+        Commands::Review { pr, repo, .. } => needs(
+            "review.start",
+            format!("checked out {} for review", pr_label(pr, repo.as_deref())),
+        ),
+        Commands::Pr { command } => match command {
+            PrCommands::Merge { pr, repo, .. } => {
+                needs("pr.merge", format!("merged {}", pr_label(pr, repo.as_deref())))
+            }
+        },
         Commands::Task { command } => task_gate(command),
         Commands::Projects { command } => match command {
             None if terminal => Gate::Interactive,
@@ -303,6 +306,16 @@ fn task_gate(command: &TaskCommands) -> Gate {
             format!("copied project files into task {name} again"),
         ),
     }
+}
+
+/// `#42 of acme/api`: a PR as the user typed it, for the log.
+fn pr_label(pr: &str, repo: Option<&str>) -> String {
+    let pr = match pr.trim_start_matches('#').parse::<u64>() {
+        Ok(number) => format!("#{number}"),
+        Err(_) => pr.to_string(),
+    };
+    let repo = repo.map(|r| format!(" of {r}")).unwrap_or_default();
+    format!("{pr}{repo}")
 }
 
 /// The first non-blank line of `text`, cut to `max` characters.
@@ -573,6 +586,18 @@ mod tests {
                 "checked out #42 of acme/api for review",
             ),
             (
+                &[
+                    "pr", "merge", "42", "--repo", "acme/api", "--method", "squash",
+                ],
+                "pr.merge",
+                "merged #42 of acme/api",
+            ),
+            (
+                &["pr", "merge", "https://github.com/acme/api/pull/7"],
+                "pr.merge",
+                "merged https://github.com/acme/api/pull/7",
+            ),
+            (
                 &["clone", "https://x/y.git"],
                 "repo.clone",
                 "cloned https://x/y.git",
@@ -695,7 +720,7 @@ mod tests {
                 match c.name {
                     "task.send" => args.extend(["x", "hi"]),
                     "worktree.add" | "worktree.rm" | "repo.clone" => args.push("x"),
-                    "review.start" => args.push("1"),
+                    "review.start" | "pr.merge" => args.push("1"),
                     "project.read" | "repo.sync" | "repo.import" | "shell.install"
                     | "watch.install" => {}
                     _ => args.push("x"),

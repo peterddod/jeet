@@ -37,8 +37,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, ProjectCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs,
-    WorktreeCommands,
+    Cli, Commands, PrCommands, ProjectCommands, TaskCommands, TodoCommands, WatchCommands,
+    WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -142,6 +142,17 @@ fn run(command: Option<Commands>) -> Result<()> {
         } => {
             let app = context::App::open()?;
             commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun)?;
+        }
+        Commands::Pr { command } => {
+            let app = context::App::open()?;
+            match command {
+                PrCommands::Merge {
+                    pr,
+                    repo,
+                    method,
+                    keep_branch,
+                } => commands::pr::merge(&app, &pr, repo.as_deref(), method, keep_branch)?,
+            }
         }
         Commands::ReviewJob { state } => review::run_job(&state)?,
         Commands::Sync { repo } => {

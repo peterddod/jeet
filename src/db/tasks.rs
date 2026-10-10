@@ -532,6 +532,16 @@ impl Database {
         Ok(())
     }
 
+    /// The tasks whose history records PR `number` of `repo_id`.
+    pub fn tasks_with_pr(&self, repo_id: &str, number: u64) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM task_prs WHERE repo_id = ?1 AND number = ?2 ORDER BY task_id",
+        )?;
+        let rows = stmt.query_map(params![repo_id, number as i64], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// A task's PR history, most recently updated first.
     pub fn list_task_prs(&self, task_id: &str) -> Result<Vec<TaskPrRecord>> {
         let conn = self.conn();
@@ -825,6 +835,16 @@ mod tests {
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0], merged);
         assert_eq!(prs[1].number, 2);
+
+        assert_eq!(db.tasks_with_pr("github.com/acme/api", 1).unwrap(), ["t"]);
+        assert!(db
+            .tasks_with_pr("github.com/acme/web", 1)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .tasks_with_pr("github.com/acme/api", 3)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
