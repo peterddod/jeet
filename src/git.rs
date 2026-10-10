@@ -434,6 +434,12 @@ pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
     ))
 }
 
+/// The checkout's own git directory: for a linked worktree, the one under
+/// the repository's `worktrees/` that is its alone.
+pub fn git_dir(path: &Path) -> Result<PathBuf> {
+    git_output(path, &["rev-parse", "--absolute-git-dir"], &[], None).map(PathBuf::from)
+}
+
 /// The checked-out branch, or `None` when HEAD is detached.
 pub fn head_branch(path: &Path) -> Option<String> {
     let output = Command::new("git")

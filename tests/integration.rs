@@ -3546,3 +3546,147 @@ fn import_moves_a_repository_registered_before_tasks_into_the_store() {
         rev(&old, "wip")
     );
 }
+
+/// Uncommitted work on the default branch is not "already imported" because
+/// some task happens to be at the same commit: the task lacks the changes.
+/// Once a task holds them, it is.
+#[test]
+fn import_does_not_take_dirty_work_for_a_task_at_the_same_commit() {
+    let lab = StoreLab::new();
+    lab.clone_repo("api");
+    let scratch = lab.new_task("scratch");
+    let detached = lab.add(&scratch, &["api"]);
+    let outside = TempDir::new().unwrap();
+    let api = lab.outside_clone("api", outside.path());
+    assert_eq!(rev(&detached, "HEAD"), rev(&api, "HEAD"));
+    write(&api.join("wip.txt"), "wip\n");
+    write(&api.join("more.txt"), "more\n");
+
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(!stderr.contains("already in task"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["api", "scratch"]);
+    let copy = lab.home().join("tasks/api/api");
+    assert_eq!(read(&copy.join("wip.txt")), "wip\n");
+    assert_eq!(read(&copy.join("more.txt")), "more\n");
+
+    // Now a task has exactly that work.
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("already in task api"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["api", "scratch"]);
+}
+
+/// A branch a task holds, with new work in the original the task lacks, is
+/// not passed over: the work comes across detached.
+#[test]
+fn import_brings_new_work_on_a_branch_a_task_holds_across_detached() {
+    let lab = StoreLab::new();
+    lab.origin("lib");
+    let outside = TempDir::new().unwrap();
+    let lib = lab.outside_clone("lib", outside.path());
+    git(&["checkout", "-q", "-b", "feat"], &lib);
+    git(&["commit", "-q", "--allow-empty", "-m", "feat"], &lib);
+    succeeded(&lab.import(&[lib.to_str().unwrap(), "--yes"], &[]));
+    assert_eq!(lab.task_slugs(), ["feat"]);
+
+    write(&lib.join("later.txt"), "later\n");
+    let output = lab.import(&[lib.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("lacks work"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["feat", "feat-2"]);
+    let copy = lab.home().join("tasks/feat-2/lib");
+    assert!(is_detached(&copy));
+    assert_eq!(rev(&copy, "HEAD"), rev(&lib, "HEAD"));
+    assert_eq!(read(&copy.join("later.txt")), "later\n");
+    // The first task's worktree is as it was.
+    assert!(!lab.home().join("tasks/feat/lib/later.txt").exists());
+}
+
+/// `jeet import <PATH>` moves a store trunk's worktrees under PATH, and no
+/// others: one elsewhere on disk stays where the user put it.
+#[test]
+fn import_with_a_path_moves_only_the_worktrees_under_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("web");
+    let outside = TempDir::new().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let here = base.join("scratch/web-a");
+    let elsewhere = base.join("other/web-b");
+    for (path, branch) in [(&here, "a"), (&elsewhere, "b")] {
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                &path.to_string_lossy(),
+            ],
+            &trunk,
+        );
+    }
+
+    let scratch = base.join("scratch");
+    let output = lab.import(&[scratch.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    assert_eq!(lab.task_slugs(), ["a"]);
+    assert!(!here.exists());
+    assert!(lab.home().join("tasks/a/web").is_dir());
+    assert!(elsewhere.is_dir(), "a worktree outside the path was moved");
+    let listed = git_stdout(&["worktree", "list"], &trunk);
+    assert!(
+        listed.contains(&elsewhere.display().to_string()),
+        "{listed}"
+    );
+}
+
+/// A pull request's checkout — a review job's, or one the explorer made —
+/// is not the user's work, and moving it would pull a review job's worktree
+/// out from under it. Import leaves it.
+#[test]
+fn import_leaves_pull_request_checkouts_alone() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("web");
+    let home = lab.home();
+    let review = home.join("worktrees/github.com/acme/web/pr-42");
+    let explored = home.join("worktrees/github.com/acme/web/pr-7");
+    for path in [&review, &explored] {
+        git(
+            &["worktree", "add", "-q", "--detach", &path.to_string_lossy()],
+            &trunk,
+        );
+    }
+    // A review job ran in pr-42.
+    let jobs = home.join("reviews/github.com/acme/web");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let job = serde_json::json!({
+        "pr": 42,
+        "title": "Add a thing",
+        "head": rev(&review, "HEAD"),
+        "worktree": review,
+        "command": "true",
+        "env": [],
+        "notify": false,
+        "log": jobs.join("42.log"),
+        "started_at": 0,
+        "finished_at": 1,
+        "exit_code": 0,
+    });
+    write(&jobs.join("42.json"), &job.to_string());
+    // The explorer checked out pr-7, and marked it so.
+    let admin = git_stdout(&["rev-parse", "--absolute-git-dir"], &explored);
+    write(&std::path::Path::new(&admin).join("jeet-pr"), "7\n");
+
+    let output = lab.import(&["--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("pull request"), "{stderr}");
+    assert!(stderr.contains("nothing to import"), "{stderr}");
+    assert!(lab.task_slugs().is_empty());
+    assert!(review.is_dir());
+    assert!(explored.is_dir());
+}

@@ -294,6 +294,8 @@ pub fn checkout_pr(
     // worktrees, so the branch cannot be created before the worktree exists.
     let start = resolve_start_point(&trunk, &repo.default_branch)?;
     git::worktree_add_detached(&trunk, &dest, &start).context("create worktree for the PR")?;
+    // Best effort: unmarked, it only looks like a worktree from before tasks.
+    let _ = mark_pr_checkout(&dest, pr.number);
     if let Err(e) = crate::github::checkout(&dest, pr.number, &branch) {
         let _ = git::worktree_remove(&trunk, &dest, true);
         prune_empty_parents(&dest, &[app.worktrees_root()]);
@@ -303,6 +305,24 @@ pub fn checkout_pr(
         path: dest,
         warnings: Vec::new(),
     })
+}
+
+/// The file marking a worktree [`checkout_pr`] made. It lives in the
+/// worktree's own git directory, so it moves with the worktree and goes when
+/// git removes it.
+const PR_MARKER: &str = "jeet-pr";
+
+fn mark_pr_checkout(path: &Path, number: u64) -> Result<()> {
+    let marker = git::git_dir(path)?.join(PR_MARKER);
+    std::fs::write(&marker, format!("{number}\n"))
+        .with_context(|| format!("write {}", marker.display()))
+}
+
+/// Whether the worktree at `path` is a pull request's, made by
+/// [`checkout_pr`]: `jeet review`'s, or the explorer's. Not a worktree of the
+/// user's own, so `jeet import` leaves it alone.
+pub fn is_pr_checkout(path: &Path) -> bool {
+    git::git_dir(path).is_ok_and(|dir| dir.join(PR_MARKER).is_file())
 }
 
 /// Delete now-empty directories left behind under a jeet-managed root.
@@ -319,5 +339,62 @@ pub fn prune_empty_parents(path: &Path, roots: &[PathBuf]) {
             Ok(()) => current = parent,
             Err(_) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pr_checkout_is_told_apart_from_other_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let trunk = root.join("trunk");
+        std::fs::create_dir(&trunk).unwrap();
+        git(&trunk, &["init", "-q", "-b", "main"]);
+        git(&trunk, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let pr = root.join("pr-42");
+        let mine = root.join("mine");
+        for wt in [&pr, &mine] {
+            git(
+                &trunk,
+                &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+            );
+        }
+        mark_pr_checkout(&pr, 42).unwrap();
+        assert!(is_pr_checkout(&pr));
+        assert!(!is_pr_checkout(&mine));
+        assert!(!is_pr_checkout(&trunk));
+        // The mark goes where the worktree goes.
+        let moved = root.join("moved");
+        git(
+            &trunk,
+            &[
+                "worktree",
+                "move",
+                pr.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        assert!(is_pr_checkout(&moved));
     }
 }

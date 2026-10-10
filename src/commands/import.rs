@@ -14,11 +14,19 @@
 //!   read, and stays as it was unless `--remove-originals` is given;
 //! - a worktree of a store trunk that sits outside any task — one jeet made
 //!   before tasks, or one made by hand — is jeet's own, so it is moved into a
-//!   task with `git worktree move`, work and all.
+//!   task with `git worktree move`, work and all. With paths given, only the
+//!   worktrees under them are; and a pull request's checkout, which
+//!   `jeet review` and the explorer make, never is.
+//!
+//! Work a task already has is not offered again. A checkout counts as in a
+//! task only when the task's worktree has its commit and exactly its
+//! uncommitted changes; a branch a task has, but without all the work on it,
+//! comes across detached.
 //!
 //! Claude Code sessions started in a checkout are copied to the task, so they
 //! can be resumed there. Everything said goes to stderr.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
@@ -36,6 +44,7 @@ use crate::db::RepoRecord;
 use crate::git;
 use crate::remote;
 use crate::resolve::same_path;
+use crate::review;
 use crate::store;
 use crate::tasks::{self, NewTask};
 use crate::worktrees::{self, now_secs};
@@ -254,7 +263,18 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
         by_common.entry(common).or_insert(checkout);
     }
 
-    let tasks_root = canonical(&app.tasks_root());
+    // Paths given are where to import from: a store trunk's worktrees
+    // elsewhere stay where they are.
+    let within: Option<Vec<PathBuf>> =
+        explicit.then(|| roots.iter().map(|r| canonical(r)).collect());
+    let stores = StoreScope {
+        tasks_root: canonical(&app.tasks_root()),
+        within,
+        reviews: review::recorded_worktrees(app)
+            .iter()
+            .map(|p| canonical(p))
+            .collect(),
+    };
     let mut plan = Plan::default();
     for (common, checkout) in by_common {
         let entries = match git::worktree_list(&checkout) {
@@ -266,7 +286,7 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
             }
         };
         match store_trunks.get(&common) {
-            Some(record) => plan_store_repo(&mut plan, record, &common, &entries, &tasks_root),
+            Some(record) => plan_store_repo(&mut plan, record, &common, &entries, &stores),
             None => {
                 if let Err(e) = plan_external_repo(app, &mut plan, &common, &checkout, &entries) {
                     plan.notes
@@ -278,20 +298,61 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
     Ok(plan)
 }
 
-/// A store trunk's worktrees outside any task are moved into tasks.
+/// Which of a store trunk's worktrees import may move into tasks.
+struct StoreScope {
+    /// Those in tasks already are not.
+    tasks_root: PathBuf,
+    /// When paths were given, only those under one of them.
+    within: Option<Vec<PathBuf>>,
+    /// Worktrees review jobs run in, or ran in: moved, a job would lose its
+    /// worktree.
+    reviews: Vec<PathBuf>,
+}
+
+impl StoreScope {
+    fn takes(&self, path: &Path) -> bool {
+        if path.starts_with(&self.tasks_root) {
+            return false;
+        }
+        let at = canonical(path);
+        match &self.within {
+            Some(roots) => roots.iter().any(|r| at.starts_with(r)),
+            None => true,
+        }
+    }
+
+    /// A pull request's checkout, which is not the user's work to move.
+    fn is_pr(&self, path: &Path) -> bool {
+        let at = canonical(path);
+        self.reviews.contains(&at) || worktrees::is_pr_checkout(path)
+    }
+}
+
+/// A store trunk's worktrees outside any task are moved into tasks — those in
+/// scope, and not a pull request's checkout.
 fn plan_store_repo(
     plan: &mut Plan,
     record: &RepoRecord,
     common: &Path,
     entries: &[git::GitWorktreeEntry],
-    tasks_root: &Path,
+    scope: &StoreScope,
 ) {
     let trunk = Path::new(&record.trunk_path);
-    let strays: Vec<&git::GitWorktreeEntry> = entries
+    let mut strays: Vec<&git::GitWorktreeEntry> = entries
         .iter()
         .filter(|e| !e.bare && e.path.exists())
-        .filter(|e| !same_path(&e.path, trunk) && !e.path.starts_with(tasks_root))
+        .filter(|e| !same_path(&e.path, trunk) && scope.takes(&e.path))
         .collect();
+    strays.retain(|e| {
+        let pr = scope.is_pr(&e.path);
+        if pr {
+            plan.notes.push(format!(
+                "left {}: a pull request's checkout, from `jeet review` or the explorer",
+                e.path.display()
+            ));
+        }
+        !pr
+    });
     if strays.is_empty() {
         return;
     }
@@ -337,8 +398,9 @@ fn plan_external_repo(
     };
     // What the store's tasks already hold of it, so a second import does
     // not offer the same work again.
-    let imported = match &store_record {
-        Some(record) => in_tasks(app, Path::new(&record.trunk_path)),
+    let trunk = store_record.as_ref().map(|r| PathBuf::from(&r.trunk_path));
+    let imported = match &trunk {
+        Some(trunk) => in_tasks(app, trunk),
         None => Vec::new(),
     };
 
@@ -379,18 +441,33 @@ fn plan_external_repo(
         // trunk has that branch), so it is known by its commit and named
         // after its checkout.
         let named = entry.branch.as_deref().filter(|b| *b != default_branch);
-        if let Some(task) = already_imported(&imported, named, &entry.head) {
-            plan.notes.push(format!(
-                "{} is already in task {task}",
-                entry.branch.as_deref().unwrap_or(&entry.head)
-            ));
-            continue;
+        let theirs = OnceCell::new();
+        let holds = |copy: &TaskCopy| match &trunk {
+            Some(trunk) => holds_work(trunk, copy, &entry.head, Some(&entry.path), dirty, &theirs),
+            None => false,
+        };
+        let what = entry.branch.as_deref().unwrap_or(&entry.head);
+        let mut branch = entry.branch.clone();
+        match already_imported(&imported, named, &entry.head, holds) {
+            Seen::Imported(task) => {
+                plan.notes.push(format!("{what} is already in task {task}"));
+                continue;
+            }
+            Seen::BranchTaken(task) => {
+                plan.notes.push(format!(
+                    "{what} is in task {task}, which lacks work {} has; that comes across \
+                     detached",
+                    entry.path.display()
+                ));
+                branch = None;
+            }
+            Seen::New => {}
         }
         items.push(Item {
             repo,
             name: suggest_name(named, Some(&entry.path), &id),
             action: Action::Copy {
-                branch: entry.branch.clone(),
+                branch,
                 head: entry.head.clone(),
                 checkout: Some(entry.path.clone()),
                 // The first entry is the main working tree.
@@ -415,16 +492,31 @@ fn plan_external_repo(
         let Some(head) = git::rev_parse(checkout, &name) else {
             continue;
         };
-        if let Some(task) = already_imported(&imported, Some(&branch), &head) {
-            plan.notes
-                .push(format!("{branch} is already in task {task}"));
-            continue;
+        let holds = |copy: &TaskCopy| match &trunk {
+            Some(trunk) => holds_work(trunk, copy, &head, None, 0, &OnceCell::new()),
+            None => false,
+        };
+        let mut bring = Some(branch.clone());
+        match already_imported(&imported, Some(&branch), &head, holds) {
+            Seen::Imported(task) => {
+                plan.notes
+                    .push(format!("{branch} is already in task {task}"));
+                continue;
+            }
+            Seen::BranchTaken(task) => {
+                plan.notes.push(format!(
+                    "{branch} is in task {task}, which lacks commits the original has; they \
+                     come across detached"
+                ));
+                bring = None;
+            }
+            Seen::New => {}
         }
         items.push(Item {
             repo,
             name: suggest_name(Some(&branch), None, &id),
             action: Action::Copy {
-                branch: Some(branch),
+                branch: bring,
                 head,
                 checkout: None,
                 linked: false,
@@ -450,8 +542,16 @@ fn has_work(dirty: usize, unpushed: Option<usize>) -> bool {
     dirty > 0 || unpushed != Some(0)
 }
 
-/// `(branch, head, task slug)` for each worktree a task has of this trunk.
-fn in_tasks(app: &App, trunk: &Path) -> Vec<(Option<String>, String, String)> {
+/// A worktree a task has of a store trunk.
+struct TaskCopy {
+    branch: Option<String>,
+    head: String,
+    path: PathBuf,
+    slug: String,
+}
+
+/// Each worktree a task has of this trunk.
+fn in_tasks(app: &App, trunk: &Path) -> Vec<TaskCopy> {
     let root = canonical(&app.tasks_root());
     let Ok(entries) = git::worktree_list(trunk) else {
         return Vec::new();
@@ -461,25 +561,98 @@ fn in_tasks(app: &App, trunk: &Path) -> Vec<(Option<String>, String, String)> {
         .filter_map(|e| {
             let rel = e.path.strip_prefix(&root).ok()?;
             let slug = rel.components().next()?.as_os_str().to_string_lossy();
-            Some((e.branch.clone(), e.head.clone(), slug.to_string()))
+            Some(TaskCopy {
+                slug: slug.to_string(),
+                branch: e.branch,
+                head: e.head,
+                path: e.path,
+            })
         })
         .collect()
 }
 
-/// The task already holding this branch — or, for detached work, this
-/// commit — if one does.
+/// Whether a task already has some work.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen<'a> {
+    /// Not in any task.
+    New,
+    /// This task holds it all.
+    Imported(&'a str),
+    /// This task has the branch, but not all the work on it: the work can
+    /// only come across detached.
+    BranchTaken(&'a str),
+}
+
+/// Whether a task already has this work: a worktree on the branch — or, for
+/// detached work, at the commit — for which `holds` says it has everything
+/// the original does.
 fn already_imported<'a>(
-    imported: &'a [(Option<String>, String, String)],
+    imported: &'a [TaskCopy],
     branch: Option<&str>,
     head: &str,
-) -> Option<&'a str> {
-    imported
-        .iter()
-        .find(|(b, h, _)| match branch {
-            Some(branch) => b.as_deref() == Some(branch),
-            None => h == head,
-        })
-        .map(|(_, _, slug)| slug.as_str())
+    holds: impl Fn(&TaskCopy) -> bool,
+) -> Seen<'a> {
+    let mut taken = None;
+    let candidates = imported.iter().filter(|c| match branch {
+        Some(branch) => c.branch.as_deref() == Some(branch),
+        None => c.head == head,
+    });
+    for copy in candidates {
+        if holds(copy) {
+            return Seen::Imported(&copy.slug);
+        }
+        taken.get_or_insert(copy.slug.as_str());
+    }
+    match (branch, taken) {
+        (Some(_), Some(slug)) => Seen::BranchTaken(slug),
+        _ => Seen::New,
+    }
+}
+
+/// Whether the task worktree `copy` (of `trunk`) has everything an original
+/// at `head` has: its commit, and — when the original has `dirty` changes —
+/// exactly those changes, uncommitted on that commit. Clean, the task may
+/// have built on the commit since. `original` is the original's checkout;
+/// without one only commits are compared.
+fn holds_work(
+    trunk: &Path,
+    copy: &TaskCopy,
+    head: &str,
+    original: Option<&Path>,
+    dirty: usize,
+    theirs: &OnceCell<Option<Changes>>,
+) -> bool {
+    let original = match original {
+        Some(path) if dirty > 0 => path,
+        _ => return copy.head == head || git::is_ancestor(trunk, head, &copy.head),
+    };
+    if copy.head != head {
+        return false;
+    }
+    let theirs = theirs.get_or_init(|| snapshot_trees(original));
+    match (theirs, snapshot_trees(&copy.path)) {
+        (Some(theirs), Some(ours)) => *theirs == ours,
+        _ => false,
+    }
+}
+
+/// The trees of a stash-shaped commit: its working tree and its untracked
+/// files. Content-addressed, so comparable across repositories.
+type Changes = (Option<String>, Option<String>);
+
+fn changes_of(repo: &Path, snapshot: &str) -> Changes {
+    (
+        git::tree_of(repo, snapshot),
+        git::tree_of(repo, &format!("{snapshot}^3")),
+    )
+}
+
+/// The trees of the uncommitted changes in the checkout at `path`, or `None`
+/// when it has none or they cannot be read.
+fn snapshot_trees(path: &Path) -> Option<Changes> {
+    let snapshot = git::snapshot_changes(path).ok()??;
+    let changes = changes_of(path, &snapshot);
+    changes.0.is_some().then_some(changes)
 }
 
 /// Directories under `roots` holding a `.git`: checkouts. A checkout is not
@@ -1083,9 +1256,8 @@ fn fill(
 /// Whether two stash-shaped commits hold the same files, tracked and
 /// untracked.
 fn same_changes(repo: &Path, a: &str, b: &str) -> bool {
-    let trees = |c: &str| (git::tree_of(repo, c), git::tree_of(repo, &format!("{c}^3")));
-    let first = trees(a);
-    first.0.is_some() && first == trees(b)
+    let first = changes_of(repo, a);
+    first.0.is_some() && first == changes_of(repo, b)
 }
 
 /// Move a store trunk's worktree into the task, work and all.
@@ -1246,21 +1418,130 @@ mod tests {
 
     #[test]
     fn work_already_in_a_task_is_recognised_by_branch_or_commit() {
+        let copy = |branch: Option<&str>, head: &str, slug: &str| TaskCopy {
+            branch: branch.map(str::to_string),
+            head: head.to_string(),
+            path: PathBuf::from(format!("/tasks/{slug}/api")),
+            slug: slug.to_string(),
+        };
         let imported = vec![
-            (
-                Some("feat".to_string()),
-                "aaa".to_string(),
-                "feat".to_string(),
-            ),
-            (None, "bbb".to_string(), "scratch".to_string()),
+            copy(Some("feat"), "aaa", "feat"),
+            copy(None, "bbb", "scratch"),
+            copy(None, "bbb", "other"),
         ];
+        let all = |_: &TaskCopy| true;
         assert_eq!(
-            already_imported(&imported, Some("feat"), "zzz"),
-            Some("feat")
+            already_imported(&imported, Some("feat"), "zzz", all),
+            Seen::Imported("feat")
         );
-        assert_eq!(already_imported(&imported, Some("other"), "aaa"), None);
-        assert_eq!(already_imported(&imported, None, "bbb"), Some("scratch"));
-        assert_eq!(already_imported(&imported, None, "ccc"), None);
+        assert_eq!(
+            already_imported(&imported, Some("other"), "aaa", all),
+            Seen::New
+        );
+        assert_eq!(
+            already_imported(&imported, None, "bbb", all),
+            Seen::Imported("scratch")
+        );
+        assert_eq!(already_imported(&imported, None, "ccc", all), Seen::New);
+    }
+
+    #[test]
+    fn work_a_task_lacks_is_not_already_imported() {
+        let copy = |branch: Option<&str>, head: &str, slug: &str| TaskCopy {
+            branch: branch.map(str::to_string),
+            head: head.to_string(),
+            path: PathBuf::from(format!("/tasks/{slug}/api")),
+            slug: slug.to_string(),
+        };
+        let imported = vec![
+            copy(Some("feat"), "aaa", "feat"),
+            copy(None, "bbb", "scratch"),
+            copy(None, "bbb", "later"),
+        ];
+        // Dirty work on the default branch, at a commit a task is at, but
+        // without the changes: it is new.
+        assert_eq!(
+            already_imported(&imported, None, "bbb", |_| false),
+            Seen::New
+        );
+        // Any task at that commit holding the changes will do.
+        assert_eq!(
+            already_imported(&imported, None, "bbb", |c| c.slug == "later"),
+            Seen::Imported("later")
+        );
+        // A branch a task has, with work the task lacks: the branch is taken.
+        assert_eq!(
+            already_imported(&imported, Some("feat"), "aaa", |_| false),
+            Seen::BranchTaken("feat")
+        );
+    }
+
+    #[test]
+    fn a_task_holds_work_only_with_the_same_commit_and_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let trunk = root.join("trunk");
+        std::fs::create_dir(&trunk).unwrap();
+        git(&trunk, &["init", "-q", "-b", "main"]);
+        std::fs::write(trunk.join("a.txt"), "a\n").unwrap();
+        git(&trunk, &["add", "a.txt"]);
+        git(&trunk, &["commit", "-q", "-m", "init"]);
+        let head = git::rev_parse(&trunk, "HEAD").unwrap();
+        let original = root.join("original");
+        let task = root.join("task");
+        for wt in [&original, &task] {
+            git(
+                &trunk,
+                &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+            );
+        }
+        let copy = TaskCopy {
+            branch: None,
+            head: head.clone(),
+            path: task.clone(),
+            slug: "task".into(),
+        };
+        let holds = |dirty| {
+            holds_work(
+                &trunk,
+                &copy,
+                &head,
+                Some(&original),
+                dirty,
+                &OnceCell::new(),
+            )
+        };
+
+        // Clean and at the same commit: held.
+        assert!(holds(0));
+        // The original has changes the task does not.
+        std::fs::write(original.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(original.join("new.txt"), "new\n").unwrap();
+        assert!(!holds(2));
+        // Some of them, but not all.
+        std::fs::write(task.join("a.txt"), "changed\n").unwrap();
+        assert!(!holds(2));
+        // Exactly them.
+        std::fs::write(task.join("new.txt"), "new\n").unwrap();
+        assert!(holds(2));
     }
 
     #[test]
