@@ -163,29 +163,7 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         None => None,
     };
 
-    let now = now_secs();
-    let task = TaskRecord {
-        id: Uuid::new_v4().to_string(),
-        slug: unique_slug(app, &slugify(name))?,
-        name: name.to_string(),
-        project: spec.project.map(str::to_string),
-        kind: TaskKind::Work,
-        state: TaskState::Active,
-        created_at: now,
-        last_activity: now,
-    };
-    let dir = task_dir(app, &task);
-    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
-    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let mut warnings = match scaffold(&dir, &task, project.as_ref())
-        .and_then(|notes| app.db.insert_task(&task).map(|_| notes))
-    {
-        Ok(notes) => notes,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
-        }
-    };
+    let (task, mut warnings) = make_task(app, name, project.as_ref(), TaskKind::Work)?;
 
     let preset = project
         .iter()
@@ -209,6 +187,38 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         }
     }
     Ok(Created { task, warnings })
+}
+
+/// A task with no worktrees yet: its row, its directory, marker and skill,
+/// and the project's files. Returns notes on project files not copied.
+fn make_task(
+    app: &App,
+    name: &str,
+    project: Option<&Project>,
+    kind: TaskKind,
+) -> Result<(TaskRecord, Vec<String>)> {
+    let now = now_secs();
+    let task = TaskRecord {
+        id: Uuid::new_v4().to_string(),
+        slug: unique_slug(app, &slugify(name))?,
+        name: name.to_string(),
+        project: project.map(|p| p.name.clone()),
+        kind,
+        state: TaskState::Active,
+        created_at: now,
+        last_activity: now,
+    };
+    let dir = task_dir(app, &task);
+    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
+    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    match scaffold(&dir, &task, project).and_then(|notes| app.db.insert_task(&task).map(|_| notes))
+    {
+        Ok(notes) => Ok((task, notes)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e)
+        }
+    }
 }
 
 /// The marker, the project's files and the jeet skill. Returns notes on
@@ -482,6 +492,147 @@ pub fn add_worktree(
         path: dest,
         warnings,
     })
+}
+
+/// `review-<repo>-<n>`: what `jeet review` calls the task for a PR.
+pub fn review_task_name(repo: &RepoRecord, number: u64) -> String {
+    format!("review-{}-{number}", repo_short_name(repo))
+}
+
+/// A PR's review task, ready to review in.
+pub struct ReviewCheckout {
+    pub task: TaskRecord,
+    /// The worktree with the PR checked out.
+    pub path: PathBuf,
+    /// The task was made just now.
+    pub created: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Find or make the review task for `pr` and check the PR out in it.
+///
+/// The task is found by the PR it reviews, not by name, so renaming nothing
+/// and a second repository with the same short name cannot cross wires. An
+/// archived one is brought back; one whose checkout is there already is
+/// brought up to date with the PR when clean. A task made here for a PR
+/// that cannot be checked out is undone — it holds nothing yet.
+pub fn review_task(
+    app: &App,
+    repo: &RepoRecord,
+    pr: &crate::github::PullRequest,
+) -> Result<ReviewCheckout> {
+    let mut warnings = Vec::new();
+    let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
+        Some(task) => (task, false),
+        None => {
+            let name = review_task_name(repo, pr.number);
+            let (task, notes) = make_task(app, &name, None, TaskKind::Review)?;
+            warnings.extend(notes);
+            (task, true)
+        }
+    };
+    if task.state == TaskState::Archived {
+        warnings.extend(unarchive(app, &task)?);
+        task.state = TaskState::Active;
+    }
+
+    match review_worktree(app, &task, repo, pr) {
+        Ok((path, more)) => {
+            warnings.extend(more);
+            let _ = app.db.touch_task(&task.id, now_secs());
+            Ok(ReviewCheckout {
+                task,
+                path,
+                created,
+                warnings,
+            })
+        }
+        Err(e) if created => Err(match delete(app, &task) {
+            Ok(_) => e,
+            Err(undo) => e.context(format!(
+                "and the half-made task could not be removed ({undo:#}); \
+                 `jeet task delete {} --force` cleans it up",
+                task.slug
+            )),
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// The review task's checkout of `pr`: the one it has, refreshed, or a new
+/// one. The PR's branch is used unless another worktree has it — the
+/// author's own task, say — and then the checkout is detached at the PR's
+/// head instead, which reviews the same code without taking the branch.
+fn review_worktree(
+    app: &App,
+    task: &TaskRecord,
+    repo: &RepoRecord,
+    pr: &crate::github::PullRequest,
+) -> Result<(PathBuf, Vec<String>)> {
+    let dir = task_dir(app, task);
+    let trunk = PathBuf::from(&repo.trunk_path);
+    if !trunk.is_dir() {
+        bail!("trunk is missing: {}", trunk.display());
+    }
+    // `gh pr checkout` fetches into the trunk: keep a store sync out of its way.
+    let _fetch = store::lock_repo(&app.home, &repo.id)?;
+
+    let rows = app.db.list_task_worktrees(&task.id)?;
+    let existing = rows
+        .iter()
+        .find(|r| r.repo_id == repo.id && r.pr_number == Some(pr.number));
+    if let Some(row) = existing {
+        let path = dir.join(&row.dir_name);
+        if path.is_dir() {
+            let warnings = worktrees::refresh_pr_worktree(&path, pr, row.branch.as_deref());
+            return Ok((path, warnings));
+        }
+        // Gone from under jeet: forget it and check the PR out afresh.
+        app.db.delete_task_worktree(&task.id, &row.dir_name)?;
+    }
+
+    let mut warnings = Vec::new();
+    let branch = pr.local_branch();
+    let use_branch = match branch_holder(app, &trunk, &branch)? {
+        Some(holder) => {
+            warnings.push(format!(
+                "{branch} is checked out {holder}, so the review is detached at the PR's head"
+            ));
+            None
+        }
+        None => Some(branch.as_str()),
+    };
+    let existed = git::branch_exists(&trunk, &branch)?;
+    let taken: Vec<String> = rows
+        .iter()
+        .filter(|r| !matches!(existing, Some(gone) if gone.id == r.id))
+        .map(|r| r.dir_name.clone())
+        .collect();
+    let dir_name = pick_dir_name(&dir, &taken, &repo_short_name(repo));
+    let dest = dir.join(&dir_name);
+    worktrees::add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, use_branch)?;
+
+    let created_branch = use_branch.is_some() && !existed;
+    let record = TaskWorktreeRecord {
+        id: 0,
+        task_id: task.id.clone(),
+        repo_id: repo.id.clone(),
+        dir_name,
+        branch: use_branch.map(str::to_string),
+        created_branch,
+        head_oid: None,
+        stash_ref: None,
+        pr_number: Some(pr.number),
+        created_at: now_secs(),
+    };
+    if let Err(e) = app.db.insert_task_worktree(&record) {
+        let _ = git::worktree_remove(&trunk, &dest, true);
+        if created_branch {
+            let _ = git::delete_local_branch(&trunk, &branch);
+        }
+        return Err(e.context("record the worktree"));
+    }
+    Ok((dest, warnings))
 }
 
 /// Check `branch` out at `dest`, returning whether this made the branch.

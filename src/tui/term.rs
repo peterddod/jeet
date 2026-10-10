@@ -7,20 +7,25 @@
 //! screen opened from another one hands the same terminal on rather than
 //! tearing it down and putting it up again.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::cursor::Show;
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event;
-use ratatui::crossterm::execute;
-use ratatui::crossterm::style::Print;
+use ratatui::crossterm::style::{
+    Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use ratatui::crossterm::{execute, queue};
+use ratatui::style::Modifier;
 use ratatui::{Frame, Terminal};
+use unicode_width::UnicodeWidthStr;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -152,4 +157,171 @@ pub fn with_progress<T: Send>(
             std::thread::sleep(Duration::from_millis(80));
         }
     })
+}
+
+/// `width` columns from (`x`, `y`) that link to `url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub url: String,
+}
+
+/// `url`, if it is fit to put in an OSC 8 sequence: a web address with
+/// nothing in it that could end the sequence early and start another.
+pub fn link_target(url: &str) -> Option<&str> {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    (web && url.chars().all(|c| c.is_ascii_graphic())).then_some(url)
+}
+
+/// Make `links` clickable in what was just drawn, as OSC 8 hyperlinks.
+pub fn paint_links(terminal: &mut Tui, buffer: &Buffer, links: &[Link]) -> Result<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let out = terminal.backend_mut();
+    write_links(out, buffer, links).context("draw links")?;
+    out.flush().context("draw links")
+}
+
+/// Write each link's cells again, exactly as `buffer` has them, between the
+/// sequences that open and close the link.
+///
+/// Not through the buffer: ratatui measures a cell by its symbol, and a
+/// symbol carrying an escape sequence measures as wide as the URL, which
+/// throws out everything after it on the line. Written over the top instead,
+/// the buffer never knows, and as the cells have not changed it leaves them
+/// be until something else is drawn there.
+pub fn write_links(out: &mut impl Write, buffer: &Buffer, links: &[Link]) -> io::Result<()> {
+    for link in links {
+        let Some(url) = link_target(&link.url) else {
+            continue;
+        };
+        queue!(
+            out,
+            MoveTo(link.x, link.y),
+            Print(format!("\x1b]8;;{url}\x1b\\"))
+        )?;
+        let mut covered = 0;
+        for x in link.x..link.x.saturating_add(link.width) {
+            let Some(cell) = buffer.cell((x, link.y)) else {
+                break;
+            };
+            // The columns a wide character spans hold blanks the terminal
+            // fills in itself; writing them would push the line along.
+            if covered > 0 {
+                covered -= 1;
+                continue;
+            }
+            covered = cell.symbol().width().saturating_sub(1);
+            queue!(
+                out,
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(cell.fg.into()),
+                SetBackgroundColor(cell.bg.into())
+            )?;
+            for attribute in attributes(cell.modifier) {
+                queue!(out, SetAttribute(attribute))?;
+            }
+            queue!(out, Print(cell.symbol()))?;
+        }
+        queue!(
+            out,
+            Print("\x1b]8;;\x1b\\"),
+            SetAttribute(Attribute::Reset),
+            ResetColor
+        )?;
+    }
+    Ok(())
+}
+
+/// The terminal attributes that draw `modifier`.
+fn attributes(modifier: Modifier) -> Vec<Attribute> {
+    [
+        (Modifier::BOLD, Attribute::Bold),
+        (Modifier::DIM, Attribute::Dim),
+        (Modifier::ITALIC, Attribute::Italic),
+        (Modifier::UNDERLINED, Attribute::Underlined),
+        (Modifier::SLOW_BLINK, Attribute::SlowBlink),
+        (Modifier::RAPID_BLINK, Attribute::RapidBlink),
+        (Modifier::REVERSED, Attribute::Reverse),
+        (Modifier::HIDDEN, Attribute::Hidden),
+        (Modifier::CROSSED_OUT, Attribute::CrossedOut),
+    ]
+    .into_iter()
+    .filter(|(m, _)| modifier.contains(*m))
+    .map(|(_, a)| a)
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Style};
+
+    #[test]
+    fn only_plain_web_addresses_become_links() {
+        let url = "https://github.com/acme/api/pull/7";
+        assert_eq!(link_target(url), Some(url));
+        assert!(link_target("http://ghe.local/a/b/pull/1").is_some());
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://x/\x1b]8;;https://evil\x1b\\",
+            "https://x/\x07",
+            "https://x/a b",
+            "https://x/ü",
+            "",
+        ] {
+            assert_eq!(link_target(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_rewrites_its_cells_as_drawn_inside_osc_8() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 2));
+        buffer.set_string(2, 1, "a界b", Style::default().fg(Color::Red));
+        let link = Link {
+            x: 2,
+            y: 1,
+            width: 4,
+            url: "https://github.com/acme/api/pull/7".into(),
+        };
+        let mut out = Vec::new();
+        write_links(&mut out, &buffer, std::slice::from_ref(&link)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with("\x1b[2;3H\x1b]8;;https://github.com/acme/api/pull/7\x1b\\"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("\x1b]8;;\x1b\\"),
+            "the link is closed: {text:?}"
+        );
+        // Each character once, and not the blank under the wide one: no
+        // escape sequence here has a space in it, so any space is that blank.
+        assert_eq!(text.matches('界').count(), 1, "{text:?}");
+        assert!(!text.contains(' '), "{text:?}");
+        assert!(text.contains('a') && text.contains('b'), "{text:?}");
+
+        // Nothing at all for a URL that could break out of the sequence.
+        let mut out = Vec::new();
+        let evil = Link {
+            url: "https://x/\x1b[2J".into(),
+            ..link
+        };
+        write_links(&mut out, &buffer, &[evil]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn modifiers_map_to_attributes() {
+        assert_eq!(
+            attributes(Modifier::BOLD | Modifier::REVERSED),
+            [Attribute::Bold, Attribute::Reverse]
+        );
+        assert!(attributes(Modifier::empty()).is_empty());
+    }
 }

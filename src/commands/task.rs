@@ -11,6 +11,7 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
+use crate::pr_history;
 use crate::projects;
 use crate::runtime;
 use crate::tasks::{self, NewTask};
@@ -217,6 +218,45 @@ pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
         eprintln!("jeet: task {} already has its project's files", task.name);
     }
     Ok(())
+}
+
+/// The task's PR history, after asking GitHub for news of it — unless
+/// `offline`, or there is no `gh`, when it is what was last recorded.
+pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
+    let task = tasks::current(app, name)?;
+    if !offline {
+        let found = pr_history::refresh(app, &task)?;
+        for error in &found.errors {
+            eprintln!("jeet: warning: {error}");
+        }
+    }
+    let prs = app.db.list_task_prs(&task.id)?;
+    if prs.is_empty() {
+        eprintln!("jeet: no pull requests recorded for task {}", task.name);
+        return Ok(());
+    }
+    println!(
+        "{:<7} {:>7} {:>7} {:<7} {:<48} URL",
+        "STATE", "ADDED", "REMOVED", "PR", "TITLE"
+    );
+    for pr in prs {
+        println!(
+            "{:<7} {:>7} {:>7} {:<7} {:<48} {}",
+            pr_history::state_label(&pr),
+            format!("+{}", pr.additions),
+            format!("-{}", pr.deletions),
+            format!("#{}", pr.number),
+            crate::tui::ui::truncate(&printable(&pr.title), 48),
+            printable(&pr.url),
+        );
+    }
+    Ok(())
+}
+
+/// `text` with control characters dropped: a PR title is whatever its author
+/// typed, and an escape sequence in it would be played on the terminal.
+pub fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 pub fn path(app: &App, name: &str) -> Result<()> {
