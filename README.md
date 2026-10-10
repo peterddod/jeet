@@ -8,7 +8,7 @@ Global git repository index and worktree manager.
 
 `jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
 
-Run `jeet` with no arguments inside a repo and you get a file explorer: one level of the tree at a time, your current worktree pinned to the top, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
+Run `jeet` with no arguments and you get your tasks: one row per piece of work, with what its coding agent is doing, the worktrees it holds and when anything last happened in it, and one keystroke to attach to the agent, browse the task, or archive it. `jeet explore` inside a repo gives you a file explorer: one level of the tree at a time, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
 
 Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
 
@@ -65,9 +65,12 @@ jeet scan
 jeet ls
 jeet ls acme
 
-# Explore (this is the main event)
+# The tasks list (this is the main event)
+jeet                                     # or `jeet tasks`
+
+# Explore
 jeet cd acme/widget                      # jump to the trunk
-jeet                                     # open the file explorer there
+jeet explore                             # open the file explorer there
 
 # Tasks — a workspace directory per piece of work, worktrees added on demand
 jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fix-login
@@ -106,8 +109,10 @@ jeet review 123 --repo acme/widget
 ## The explorer
 
 ```bash
-jeet          # inside any repo, trunk or worktree (also `jeet explore`)
+jeet explore  # inside any repo, trunk or worktree — or a task's directory
 ```
+
+From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 
 ```text
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
@@ -343,6 +348,48 @@ jeet worktree rm api -f     # removes it anyway
 A branch the task created is deleted with its worktree only when its commits are
 on origin or on the default branch; otherwise it is kept, and jeet says so.
 
+### The tasks list
+
+```bash
+jeet          # or `jeet tasks`
+```
+
+```text
+┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
+│ active 3   archived 1    / filter  ⇥ switch                               │
+└───────────────────────────────────────────────────────────────────────────┘
+┌ 3 active tasks ───────────────────────────────────────────────────────────┐
+│● running – Edit        Fix login          2 wt: api, web    1.2G  just now│
+│◆ needs input – Bash    api-v2             1 wt: api         640M    5m ago│
+│○ idle 1h               notes              empty              12K    1h ago│
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+Every task, most recently active first: what its agent is doing, its name, the
+worktrees it holds (as of the last look at the disk, since the agent adds them
+as it goes), its size and when anything last happened in it. Statuses refresh
+every two seconds and sizes are measured in the background, so the list never
+waits on either. `⇥` switches to the archived tasks and back; `/` filters by
+name the way the explorer does.
+
+| Key | |
+|---|---|
+| `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `C-b d` comes back here |
+| `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
+| `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
+| `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
+| `a` | archive the task (asks first if its agent is running) — or, in the archived view, bring it back |
+| `D` | delete the task, after listing any work that would be lost |
+| `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
+| `S` | copy the task's project files in again |
+| `p` | the pull requests recorded for the task |
+| `r` | refresh, re-reading the worktrees on disk |
+| `?` | every key |
+| `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
+
+Launching the list also starts a background fetch of the store, when one is
+due. `jeet projects` on a terminal opens it with the projects panel up.
+
 ### The agent
 
 ```bash
@@ -513,7 +560,7 @@ A `[review]` section sets what `jeet review` runs in the background — see
 ### Keeping the store fetched
 
 Commands that go to the network anyway (`jeet clone`, `jeet prs`,
-`jeet review`) and the explorer on launch start a background fetch of every
+`jeet review`), and the tasks list and the explorer on launch, start a background fetch of every
 indexed repo, at most once every five minutes. A trunk in the store that is
 clean and on its default branch is fast-forwarded to origin; one with local
 changes or another branch checked out is fetched but left alone, and repos
