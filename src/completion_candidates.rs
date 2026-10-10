@@ -29,6 +29,17 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn project_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    crate::projects::list(&app)
+        .unwrap_or_default()
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
 /// Worktree names of the task the completing shell is in.
 pub fn task_worktree_candidates() -> Vec<CompletionCandidate> {
     let Ok(app) = App::open() else {

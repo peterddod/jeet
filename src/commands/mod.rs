@@ -7,6 +7,7 @@ pub mod explore;
 pub mod install_shell;
 pub mod ls;
 pub mod path;
+pub mod projects;
 pub mod prs;
 pub mod review;
 pub mod scan;

@@ -2,7 +2,8 @@ use clap::{Args, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completion_candidates::{
-    all_branch_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
+    all_branch_candidates, project_candidates, repo_filter_candidates, task_candidates,
+    task_worktree_candidates,
 };
 
 #[derive(Parser)]
@@ -85,6 +86,12 @@ pub enum Commands {
         command: TaskCommands,
     },
 
+    /// Projects: repositories, CLAUDE.md and skills a task can start from
+    Projects {
+        #[command(subcommand)]
+        command: Option<ProjectCommands>,
+    },
+
     /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
@@ -139,8 +146,9 @@ pub enum TaskCommands {
     /// Start a task and print its directory; with no --repo it is an empty canvas
     New {
         name: String,
-        /// Project template to copy CLAUDE.md and skills from
-        #[arg(long)]
+        /// Project to start from: copies its CLAUDE.md and skills, and adds a
+        /// worktree of each of its repositories
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
         project: Option<String>,
         /// Repository to add a worktree of straight away (repeatable)
         #[arg(long = "repo", value_name = "REPO", add = ArgValueCandidates::new(repo_filter_candidates))]
@@ -188,6 +196,45 @@ pub enum TaskCommands {
     Path {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
+    },
+
+    /// Copy the task's project files (CLAUDE.md, skills) in again
+    Resync {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Replace copies the task has changed, too
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectCommands {
+    /// List projects (the default)
+    Ls,
+
+    /// Make a project and print its directory
+    New {
+        name: String,
+        /// Repository every task from it starts with a worktree of (repeatable)
+        #[arg(long = "repo", value_name = "REPO", add = ArgValueCandidates::new(repo_filter_candidates))]
+        repos: Vec<String>,
+    },
+
+    /// Edit a project's project.toml in your editor
+    Edit {
+        #[arg(add = ArgValueCandidates::new(project_candidates))]
+        name: String,
+    },
+
+    /// Delete a project; tasks made from it keep their copies of its files
+    #[command(alias = "remove")]
+    Rm {
+        #[arg(add = ArgValueCandidates::new(project_candidates))]
+        name: String,
+        /// Do not ask
+        #[arg(short, long)]
+        force: bool,
     },
 }
 

@@ -10,6 +10,7 @@ mod db;
 mod git;
 mod github;
 mod paths;
+mod projects;
 mod remote;
 mod resolve;
 mod review;
@@ -22,7 +23,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
-use cli::{Cli, Commands, TaskCommands, WorktreeArgs, WorktreeCommands};
+use cli::{Cli, Commands, ProjectCommands, TaskCommands, WorktreeArgs, WorktreeCommands};
 
 fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
@@ -129,6 +130,18 @@ fn main() -> Result<()> {
                 TaskCommands::Unarchive { name } => commands::task::unarchive(&app, &name)?,
                 TaskCommands::Delete { name, force } => commands::task::delete(&app, &name, force)?,
                 TaskCommands::Path { name } => commands::task::path(&app, &name)?,
+                TaskCommands::Resync { name, force } => commands::task::resync(&app, &name, force)?,
+            }
+        }
+        Commands::Projects { command } => {
+            let app = context::App::open()?;
+            match command.unwrap_or(ProjectCommands::Ls) {
+                ProjectCommands::Ls => commands::projects::ls(&app)?,
+                ProjectCommands::New { name, repos } => {
+                    commands::projects::new(&app, &name, &repos)?
+                }
+                ProjectCommands::Edit { name } => commands::projects::edit(&app, &name)?,
+                ProjectCommands::Rm { name, force } => commands::projects::rm(&app, &name, force)?,
             }
         }
         Commands::Worktree(WorktreeArgs { command, task }) => {
