@@ -167,6 +167,16 @@ pub fn store_root(home: &Path) -> PathBuf {
     home.join("store")
 }
 
+/// Where task workspaces live, one directory per task.
+pub fn tasks_root(home: &Path) -> PathBuf {
+    home.join("tasks")
+}
+
+/// Project templates a task can be started from.
+pub fn projects_root(home: &Path) -> PathBuf {
+    home.join("projects")
+}
+
 pub fn worktrees_root(home: &Path) -> PathBuf {
     home.join("worktrees")
 }

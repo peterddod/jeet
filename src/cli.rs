@@ -1,7 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::completion_candidates::{all_branch_candidates, repo_filter_candidates};
+use crate::completion_candidates::{
+    all_branch_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
+};
 
 #[derive(Parser)]
 #[command(
@@ -77,7 +79,13 @@ pub enum Commands {
     #[command(hide = true)]
     StoreSync,
 
-    /// Worktree operations - with no subcommand, create a worktree here
+    /// Tasks: a workspace directory with any number of worktrees in it
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+
+    /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
     /// Checkout a branch to navigate its workspace - cd into the workspace at that location
@@ -126,81 +134,105 @@ pub enum Commands {
     Complete { what: String },
 }
 
-/// `jeet worktree [name]` plus the explicit sub-operations.
+#[derive(Subcommand)]
+pub enum TaskCommands {
+    /// Start a task and print its directory; with no --repo it is an empty canvas
+    New {
+        name: String,
+        /// Project template to copy CLAUDE.md and skills from
+        #[arg(long)]
+        project: Option<String>,
+        /// Repository to add a worktree of straight away (repeatable)
+        #[arg(long = "repo", value_name = "REPO", add = ArgValueCandidates::new(repo_filter_candidates))]
+        repos: Vec<String>,
+        /// Branch for the worktree of the single --repo
+        #[arg(long, requires = "repos")]
+        branch: Option<String>,
+    },
+
+    /// List tasks, most recently active first
+    Ls {
+        /// List archived tasks instead of active ones
+        #[arg(long)]
+        archived: bool,
+    },
+
+    /// Start the coding agent in a task (prints its directory when not interactive)
+    Open {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+
+    /// Remove a task's worktrees to free the disk, keeping what restores them
+    Archive {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+
+    /// Bring an archived task's worktrees back
+    Unarchive {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+
+    /// Delete a task and everything it owns
+    Delete {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Do not ask, even when work would be lost
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Print a task's directory
+    Path {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+}
+
+/// `jeet worktree <op>`, scoped to one task.
 #[derive(Args)]
-#[command(args_conflicts_with_subcommands = true)]
 pub struct WorktreeArgs {
     #[command(subcommand)]
-    pub command: Option<WorktreeCommands>,
+    pub command: WorktreeCommands,
 
-    /// Branch to create and publish to origin; omit for a detached checkout
-    #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
-    pub name: Option<String>,
-
-    /// Repository to act on; defaults to the one containing the current directory
-    #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
-    pub repo: Option<String>,
-
-    /// Create the branch locally without pushing it to origin
-    #[arg(long)]
-    pub no_push: bool,
+    /// Task to act on; defaults to $JEET_TASK_ID, then the task you are in
+    #[arg(long, global = true, add = ArgValueCandidates::new(task_candidates))]
+    pub task: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
-    /// Add a new branch as worktree - similar to worktree.add()
+    /// Add a worktree of a repository to the task and print its path
     Add {
-        filter: String, // Repo path/namne like "."
-        branch: String, // Branch name "feature-X"
-        /// Also publish the branch to origin
-        #[arg(long)]
-        push: bool,
-    },
-
-    /// Rename a worktree's branch, or name a detached scratchpad
-    Rename {
-        /// New name, or the existing worktree when a second name follows
-        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
-        name: String,
-        /// New name, when the first argument picked the worktree to rename
-        new_name: Option<String>,
-        /// Repository to act on; defaults to the one containing the current directory
-        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
-        repo: Option<String>,
-        /// Rename locally without publishing the branch to origin
-        #[arg(long)]
-        no_push: bool,
-    },
-
-    /// Remove worktrees that hold no uncommitted or unmerged work
-    Clean {
+        /// Repository: a name like `api`, `owner/repo`, an id, or a clone URL
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: Option<String>,
-        /// Also consider worktrees jeet did not create
+        repo: String,
+        /// Check this branch out (created from the default branch if it is new)
+        #[arg(short, long, add = ArgValueCandidates::new(all_branch_candidates))]
+        branch: Option<String>,
+        /// Directory name inside the task (default: the repository name)
         #[arg(long)]
-        all: bool,
-        /// Remove worktrees even when they still hold work
-        #[arg(long)]
-        force: bool,
-        /// Report what would be removed without touching anything
-        #[arg(long)]
-        dry_run: bool,
-        /// Do not prompt for confirmation
-        #[arg(short = 'y', long = "yes")]
-        assume_yes: bool,
+        name: Option<String>,
     },
 
-    /// List all worktrees showing detached branches
-    Ls {
-        filter: Option<String>, // Repo filter to list just those worktrees
-    },
+    /// List the task's worktrees
+    Ls,
 
-    /// Remove a detached workspace for a branch (disconnect it)  
-    Remove {
-        filter: String, // Repo path like "."
-        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
-        branch: String, // Branch name "main-branch"
+    /// Remove a worktree from the task
+    #[command(alias = "remove")]
+    Rm {
+        #[arg(add = ArgValueCandidates::new(task_worktree_candidates))]
+        name: String,
+        /// Remove it even if it holds uncommitted or unpushed work
         #[arg(short, long)]
-        force: bool, // Delete workspace contents?
+        force: bool,
+    },
+
+    /// Print a worktree's path
+    Path {
+        #[arg(add = ArgValueCandidates::new(task_worktree_candidates))]
+        name: String,
     },
 }

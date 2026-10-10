@@ -29,6 +29,14 @@ impl App {
         config::store_root(&self.home)
     }
 
+    pub fn tasks_root(&self) -> PathBuf {
+        config::tasks_root(&self.home)
+    }
+
+    pub fn projects_root(&self) -> PathBuf {
+        config::projects_root(&self.home)
+    }
+
     pub fn worktrees_root(&self) -> PathBuf {
         config::worktrees_root(&self.home)
     }

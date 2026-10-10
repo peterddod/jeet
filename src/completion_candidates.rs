@@ -16,6 +16,35 @@ pub fn all_branch_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn task_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    let Ok(tasks) = app.db.list_tasks(None) else {
+        return Vec::new();
+    };
+    tasks
+        .into_iter()
+        .map(|t| CompletionCandidate::new(t.slug))
+        .collect()
+}
+
+/// Worktree names of the task the completing shell is in.
+pub fn task_worktree_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    let Ok(task) = crate::tasks::current(&app, None) else {
+        return Vec::new();
+    };
+    let Ok(rows) = app.db.list_task_worktrees(&task.id) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .map(|r| CompletionCandidate::new(r.dir_name))
+        .collect()
+}
+
 pub fn repo_filters() -> Vec<String> {
     let mut out = Vec::new();
     let Ok(app) = App::open() else {

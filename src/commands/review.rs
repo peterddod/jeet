@@ -6,9 +6,9 @@ use std::io::{self, IsTerminal};
 use anyhow::Result;
 
 use crate::cd;
-use crate::commands::worktree::repo_from_filter_or_cwd;
 use crate::context::App;
 use crate::github;
+use crate::resolve::repo_from_filter_or_cwd;
 use crate::review;
 use crate::worktrees;
 

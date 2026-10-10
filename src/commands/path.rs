@@ -12,7 +12,7 @@ pub fn resolve_target(app: &App, filter: &str, branch: Option<&str>) -> Result<P
             return Ok(PathBuf::from(wt.path));
         }
         bail!(
-            "no worktree for branch {branch} on {}; create one with: jeet worktree add {filter} {branch}",
+            "no worktree for branch {branch} on {}; add one to a task with: jeet worktree add {filter} --branch {branch}",
             repo.id
         );
     }
