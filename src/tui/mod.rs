@@ -7,8 +7,11 @@
 //!
 //! Typing filters the level you are on from the moment the window opens, so
 //! every command that is not navigation carries a ctrl: a bare letter belongs
-//! to the filter, not to a shortcut.
+//! to the filter, not to a shortcut. A filter that starts with `:` is a
+//! command line instead — `:mv`, `:cp`, `:mkdir`, `:rm`, `:touch` — run with
+//! ⏎ against the folder being listed; see [`command`].
 
+pub mod command;
 pub mod state;
 pub mod ui;
 
@@ -311,11 +314,7 @@ fn handle_browse_key(
         // Commands first: with the filter live, every one of them needs a ctrl
         // to keep the letter itself available for typing. ctrl-q and ctrl-c
         // are handled before this, so they work from inside a panel too.
-        KeyCode::Char('u') if ctrl => {
-            if explorer.clear_filter() {
-                explorer.set_status("");
-            }
-        }
+        KeyCode::Char('u') if ctrl && explorer.clear_filter() => explorer.set_status(""),
         KeyCode::Char('d') if ctrl => {
             let keep = explorer.selected_entry().map(|e| e.path.clone());
             let shown = explorer.toggle_hidden(keep.as_deref())?;
@@ -365,12 +364,13 @@ fn handle_browse_key(
             };
             explorer.set_status(said);
         }
-        KeyCode::Backspace => {
-            // Nothing to delete: leave whatever the status line was saying
-            // rather than blanking an error the user has not read yet.
-            if explorer.pop_filter() {
-                explorer.set_status("");
-            }
+        // Nothing to delete: leave whatever the status line was saying rather
+        // than blanking an error the user has not read yet.
+        KeyCode::Backspace if explorer.pop_filter() => explorer.set_status(""),
+        // In a command line both separators are just part of a path operand.
+        KeyCode::Char(c @ ('/' | '\\')) if !ctrl && explorer.in_command_mode() => {
+            explorer.push_filter(c);
+            explorer.set_status("");
         }
         // A path separator means "go in", the way it does while typing a path.
         // `/` cannot appear in a Unix filename, so it always navigates.
@@ -411,15 +411,17 @@ fn handle_browse_key(
         KeyCode::PageDown => explorer.move_cursor(10),
         KeyCode::Home => explorer.select_first(),
         KeyCode::End => explorer.select_last(),
+        // Moving would throw the command line away with the filter, and
+        // change what its relative paths mean besides.
+        KeyCode::Right | KeyCode::Left if explorer.in_command_mode() => {
+            explorer.set_status("⏎ runs the command · esc drops it");
+        }
         KeyCode::Right => {
             let step = explorer.descend_typed()?;
             report_step(explorer, step);
         }
-        KeyCode::Left => {
-            if explorer.ascend()? {
-                explorer.set_status("");
-            }
-        }
+        KeyCode::Left if explorer.ascend()? => explorer.set_status(""),
+        KeyCode::Enter if explorer.in_command_mode() => run_command(app, terminal, explorer)?,
         KeyCode::Enter => enter_selected(app, terminal, explorer)?,
 
         // Anything else printable is filter input.
@@ -429,10 +431,82 @@ fn handle_browse_key(
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             explorer.push_filter(c);
-            explorer.set_status("");
+            // A lone `:` has just turned the filter into a command line; say
+            // what it takes, since nothing else on screen does.
+            if explorer.filter == ":" {
+                explorer.set_status(command::USAGE);
+            } else {
+                explorer.set_status("");
+            }
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// ⏎ on a `:` command line: parse it, resolve it against the folder being
+/// listed, and run it — except `rm`, which always asks first.
+///
+/// A command that fails to parse, resolve or run stays in the filter, so a
+/// typo is one ⌫ away rather than a whole line away.
+fn run_command(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
+    let line = explorer.command_line().unwrap_or_default().to_string();
+    let command = command::parse(&line)?.resolve(&explorer.cwd, &explorer.root)?;
+    if let command::Command::Remove { path, .. } = &command {
+        let what = if path.is_symlink() {
+            "a symlink — whatever it points to stays"
+        } else if path.is_dir() {
+            "a folder, and everything inside it"
+        } else {
+            "a file"
+        };
+        explorer.overlay = Some(Overlay::Confirm {
+            title: "remove".into(),
+            lines: vec![command::relative(path, &explorer.root), what.to_string()],
+            action: PendingAction::Command(command),
+        });
+        return Ok(());
+    }
+    execute_command(app, terminal, explorer, command)
+}
+
+/// Run a resolved command off the draw path, then show its result: the
+/// filter cleared, the listing and the diff counters re-read, and the cursor
+/// on whatever the command made.
+fn execute_command(
+    app: &App,
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    command: command::Command,
+) -> Result<()> {
+    let summary = command.summary(&explorer.root);
+    let job = command.clone();
+    let ran = with_progress(terminal, explorer, "working", move || job.run()).and_then(|r| r);
+
+    // Re-read whatever happened: a `cp -r` that failed halfway has still
+    // changed the folder. The command may also have taken the folder being
+    // listed with it — `rm -r` or `mv` of it or of one above — so climb to
+    // one that is still there, never past the root it could not touch.
+    let mut dir = explorer.cwd.clone();
+    while !dir.is_dir() && dir != explorer.root && dir.pop() {}
+    if ran.is_ok() {
+        explorer.filter.clear();
+    }
+    if dir == explorer.cwd {
+        // The cursor goes on what the command made, or on the row here that
+        // leads to it when it made something further down.
+        let keep = ran
+            .as_ref()
+            .ok()
+            .and_then(|_| command.landed())
+            .and_then(|path| descendant_of(&explorer.cwd, path));
+        explorer.reload(keep.as_deref())?;
+    } else {
+        explorer.show(dir, None)?;
+    }
+    refresh_root_status(app, explorer);
+    ran?;
+    explorer.set_status(summary);
     Ok(())
 }
 
@@ -695,8 +769,7 @@ fn handle_overlay_key(
                     explorer.overlay = Some(Overlay::Confirm {
                         title: "delete worktree".into(),
                         lines: delete_summary(row),
-                        action: PendingAction::RemoveWorktree,
-                        index: selected,
+                        action: PendingAction::RemoveWorktree(selected),
                     });
                 }
                 None => explorer.overlay = Some(Overlay::Worktrees { selected }),
@@ -924,27 +997,28 @@ fn handle_overlay_key(
             title,
             lines,
             action,
-            index,
-        } => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match action {
-                PendingAction::RemoveWorktree => {
-                    remove_worktree(app, terminal, explorer, index, false)?
-                }
-            },
-            KeyCode::Char('f') | KeyCode::Char('F') => match action {
-                PendingAction::RemoveWorktree => {
-                    remove_worktree(app, terminal, explorer, index, true)?
-                }
-            },
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+        } => match (key.code, action) {
+            (KeyCode::Char('y' | 'Y'), PendingAction::RemoveWorktree(index)) => {
+                remove_worktree(app, terminal, explorer, index, false)?
+            }
+            (KeyCode::Char('f' | 'F'), PendingAction::RemoveWorktree(index)) => {
+                remove_worktree(app, terminal, explorer, index, true)?
+            }
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, PendingAction::RemoveWorktree(_)) => {
                 open_worktrees(app, terminal, explorer);
             }
-            _ => {
+            (KeyCode::Char('y' | 'Y'), PendingAction::Command(command)) => {
+                execute_command(app, terminal, explorer, command)?
+            }
+            // The command stays in the filter, to fix or to esc away.
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, PendingAction::Command(_)) => {
+                explorer.set_status("nothing removed — esc drops the command");
+            }
+            (_, action) => {
                 explorer.overlay = Some(Overlay::Confirm {
                     title,
                     lines,
                     action,
-                    index,
                 })
             }
         },

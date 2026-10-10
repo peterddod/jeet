@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PrLookup};
+use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PendingAction, PrLookup};
 use crate::github::PullRequest;
 use crate::review::JobState;
 use crate::worktrees::WorktreeStatus;
@@ -17,8 +17,9 @@ use crate::worktrees::WorktreeStatus;
 /// ones that replaced keys people knew. So the head and the tail always stay,
 /// and the middle is dropped from the right until the rest fits.
 const HINT_HEAD: &str = "type to filter";
-const HINT_MIDDLE: [&str; 11] = [
+const HINT_MIDDLE: [&str; 12] = [
     "⇥ complete",
+    ": command",
     "/ enter",
     "↑↓ move",
     "⏎ open",
@@ -93,6 +94,9 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         height: 1,
     });
     {
+        // What the rows were matched against, which in a command line is the
+        // operand being typed rather than the whole line.
+        let needle = explorer.needle();
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
         let Explorer {
@@ -100,7 +104,6 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
             hidden,
             matches,
             selected,
-            filter,
             list,
             diffs,
             root,
@@ -115,7 +118,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
                 rows: &rows,
                 total: entries.len(),
                 hidden: *hidden,
-                filter,
+                filter: &needle,
                 selected: *selected,
                 diffs,
                 root,
@@ -199,6 +202,12 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         Span::styled(explorer.breadcrumb(), Style::default().fg(Color::Cyan)),
     ]);
 
+    // A `:` turns the filter into a command line, and the label says so: the
+    // same keys now build a command, and ⏎ runs it rather than opening a row.
+    let (label, typed) = match explorer.command_line() {
+        Some(line) => ("cmd ›    ", line),
+        None => ("filter   ", explorer.filter.as_str()),
+    };
     // The filter always has a line of its own, cursor and all: it is live from
     // the moment the explorer opens, and nothing else says so.
     let filter_line = if explorer.filter.is_empty() {
@@ -207,6 +216,15 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
             Span::styled("█", Style::default().fg(Color::Yellow)),
             Span::styled(
                 " type to narrow this level down",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else if typed.is_empty() {
+        Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Magenta)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" {}", super::command::USAGE),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -227,12 +245,17 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         } else {
             counter
         };
+        let label_color = if explorer.in_command_mode() {
+            Color::Magenta
+        } else {
+            Color::DarkGray
+        };
         Line::from(vec![
-            Span::styled("filter   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(label, Style::default().fg(label_color)),
             Span::styled(
                 // Not `.max(1)`: a column the budget just ruled out is a
                 // column the cursor block loses.
-                truncate_start(&explorer.filter, room),
+                truncate_start(typed, room),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -726,8 +749,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
         Overlay::Confirm {
             title,
             lines,
-            index: _,
-            action: _,
+            action,
         } => {
             // Sized to its content: a destructive prompt that silently clips
             // its own warnings (or its y/n line) is worse than no prompt.
@@ -738,8 +760,14 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .map(|l| Line::from(Span::raw(l.clone())))
                 .collect();
             body.push(Line::from(""));
+            let keys = match action {
+                PendingAction::RemoveWorktree(_) => {
+                    "y remove · f force (discard the above) · n cancel"
+                }
+                PendingAction::Command(_) => "y remove · n cancel",
+            };
             body.push(Line::from(Span::styled(
-                "y remove · f force (discard the above) · n cancel",
+                keys,
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(
@@ -1064,7 +1092,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
 }
 
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 26] = [
+const HELP: [(&str, &str); 27] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -1072,6 +1100,7 @@ const HELP: [(&str, &str); 26] = [
     ("⇥", "complete the filter, as far as the matches agree"),
     ("/ or \\", "enter the highlighted folder, filtering afresh"),
     ("⌫ / ctrl-u", "delete a character / clear the filter"),
+    (":", "command: mv, cp [-r], mkdir [-p], rm [-r], touch"),
     ("", ""),
     ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
     ("→", "expand: enter the highlighted folder"),
@@ -1642,6 +1671,65 @@ mod tests {
             }
         }
         assert!(explorer.pr_area.is_none(), "30 columns has no room for it");
+    }
+
+    /// A command line is labelled as one, shown without its colon, and the
+    /// listing title talks about the operand rather than the whole line.
+    #[test]
+    fn a_command_line_is_labelled_as_one() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "x").unwrap();
+        let repo = crate::db::RepoRecord {
+            id: "github.com/acme/widget".into(),
+            trunk_path: dir.path().to_string_lossy().to_string(),
+            remote_url: String::new(),
+            default_branch: "main".into(),
+            managed: true,
+        };
+        let mut explorer = Explorer::new(
+            repo,
+            dir.path().to_path_buf(),
+            "feature".into(),
+            "worktree".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        let render = |explorer: &mut Explorer| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, explorer)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..20)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        explorer.set_filter(":".into());
+        let screen = render(&mut explorer);
+        assert!(screen[3].contains("cmd ›"), "{}", screen[3]);
+        assert!(
+            screen[3].contains("mkdir"),
+            "the usage is shown: {}",
+            screen[3]
+        );
+
+        explorer.set_filter(":mv zz".into());
+        let screen = render(&mut explorer);
+        assert!(screen[3].contains("cmd ›    mv zz█"), "{}", screen[3]);
+        assert!(
+            screen
+                .iter()
+                .any(|row| row.contains("nothing matches \"zz\"")),
+            "{screen:#?}"
+        );
     }
 
     #[test]
