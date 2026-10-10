@@ -13,6 +13,8 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::split_command;
 
@@ -23,6 +25,9 @@ const TITLE_MAX: usize = 120;
 
 /// Longest body passed on.
 const BODY_MAX: usize = 500;
+
+/// How long a notifier is waited for before it is left running.
+const NOTIFIER_WAIT: Duration = Duration::from_secs(2);
 
 /// One notification. `url` is opened when it is clicked, where the notifier
 /// can do that.
@@ -35,7 +40,10 @@ pub struct Notification<'a> {
 }
 
 /// Raise `n`, best effort: a notification that cannot be shown is not worth
-/// failing anything over.
+/// failing anything over. The notifier gets [`NOTIFIER_WAIT`] to finish and is
+/// then left to itself: `terminal-notifier` blocks until Notification Center
+/// grants it permission, which may be never, and the action being reported
+/// must not hang on that.
 pub fn notify(n: &Notification) {
     let Some(run) = invocation(n, os(), override_command().as_deref(), on_path) else {
         return;
@@ -43,13 +51,25 @@ pub fn notify(n: &Notification) {
     let Some((program, args)) = run.argv.split_first() else {
         return;
     };
-    let _ = Command::new(program)
+    let child = Command::new(program)
         .args(args)
         .envs(run.env)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn();
+    let Ok(mut child) = child else {
+        return;
+    };
+    let deadline = Instant::now() + NOTIFIER_WAIT;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            _ => return,
+        }
+    }
+    // Still running: reap it whenever it does finish, if this process lasts.
+    thread::spawn(move || child.wait());
 }
 
 /// Whether `url` may be opened from a notification: a web page, nothing

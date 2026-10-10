@@ -4471,6 +4471,18 @@ fn notify_reports_through_the_notifier() {
 
 #[cfg(unix)]
 #[test]
+fn a_notifier_that_never_finishes_does_not_hold_jeet_up() {
+    // terminal-notifier waits for Notification Center's permission, maybe
+    // forever.
+    let lab = StoreLab::new();
+    let env = [("JEET_NOTIFY_CMD", "sleep 30")];
+    let started = std::time::Instant::now();
+    succeeded(&lab.jeet_at(&["notify", "stuck"], &lab.home(), &env));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[cfg(unix)]
+#[test]
 fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     let lab = StoreLab::new();
     let task = lab.new_task("fix-x");
