@@ -370,6 +370,7 @@ jeet          # or `jeet tasks`
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
 │ active 3   archived 1    / filter  ⇥ switch                               │
 └───────────────────────────────────────────────────────────────────────────┘
+ ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
 ┌ 3 active tasks ───────────────────────────────────────────────────────────┐
 │● running – Edit        Fix login          2 wt: api, web    1.2G  just now│
 │◆ needs input – Bash    api-v2             1 wt: api         640M    5m ago│
@@ -384,6 +385,11 @@ every two seconds and sizes are measured in the background, so the list never
 waits on either. `⇥` switches to the archived tasks and back; `/` filters by
 name the way the explorer does.
 
+The [assistant](#the-assistant) is pinned above the list: how many sessions it
+has, what each running one is doing (`*` marks the primary one), how many
+messages and events are queued for it, and how many todo items are open. It is
+read from its files on a thread of its own, like the statuses.
+
 | Key | |
 |---|---|
 | `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `C-b d` comes back here |
@@ -396,6 +402,11 @@ name the way the explorer does.
 | `S` | copy the task's project files in again |
 | `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser |
 | `v` | on a review task, its pull request in the review viewer |
+| `c` | talk to the assistant: attach to its most recently active session, starting one if need be |
+| `C` | the assistant's sessions: `⏎` attach, `n` new, `R` rename, `x` end, `*` primary |
+| `t` | the todo list: `space` ticks an item off (or back), `⏎` goes to the task it links, `a` adds one |
+| `i` | the assistant's inbox and activity, newest first: what is queued for it, what `jeet watch` saw on GitHub and what it did, from `actions.log`. `⏎` opens an event's page |
+| `o` | sort by todo priority: tasks the open items link first, by their best item; again for latest activity |
 | `r` | refresh, re-reading the worktrees on disk |
 | `?` | every key |
 | `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
@@ -543,7 +554,9 @@ session, which follows on from the one before it in that window, keeps its
 name and its queued messages, and is the one `jeet chat` finds there.
 
 The assistant is not a task: it is not listed, opened, archived or deleted
-like one, and no task can be called `assistant`.
+like one, and no task can be called `assistant`. The tasks list pins it above
+the tasks instead, where `c` talks to it, `C` picks a session, `t` opens the
+todo list and `i` its inbox and activity.
 
 ### Todo
 
