@@ -829,6 +829,12 @@ pub fn stash_apply(wt_path: &Path, rev: &str, index: bool) -> Result<()> {
     run_captured(&mut cmd, "git stash apply")
 }
 
+// Snapshots are jeet's own bookkeeping commits, so they carry a fixed
+// identity: `git stash create` and `commit-tree` refuse to run at all where
+// no user.name/user.email is configured (CI runners, fresh machines).
+const IDENT_NAME: &str = "user.name=jeet";
+const IDENT_EMAIL: &str = "user.email=jeet@localhost";
+
 /// Save every uncommitted change in the worktree at `wt_path` — staged,
 /// unstaged and untracked (but not ignored) files — as one commit, returning
 /// it, or `None` if there is nothing to save.
@@ -861,7 +867,12 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
     }
     // Tracked changes, as a stash commit with HEAD and index parents; empty
     // when there are none, untracked files notwithstanding.
-    let tracked = git_output(wt_path, &["stash", "create"], &[], None)?;
+    let tracked = git_output(
+        wt_path,
+        &["-c", IDENT_NAME, "-c", IDENT_EMAIL, "stash", "create"],
+        &[],
+        None,
+    )?;
     let tracked = (!tracked.is_empty()).then_some(tracked);
     if untracked.is_empty() {
         return Ok(tracked);
@@ -877,6 +888,10 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
             let index = git_output(
                 wt_path,
                 &[
+                    "-c",
+                    IDENT_NAME,
+                    "-c",
+                    IDENT_EMAIL,
                     "commit-tree",
                     "--no-gpg-sign",
                     "HEAD^{tree}",
@@ -924,6 +939,10 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
     let untracked_commit = git_output(
         wt_path,
         &[
+            "-c",
+            IDENT_NAME,
+            "-c",
+            IDENT_EMAIL,
             "commit-tree",
             "--no-gpg-sign",
             &untracked_tree,
@@ -936,6 +955,10 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
     let snapshot = git_output(
         wt_path,
         &[
+            "-c",
+            IDENT_NAME,
+            "-c",
+            IDENT_EMAIL,
             "commit-tree",
             "--no-gpg-sign",
             &tree,
