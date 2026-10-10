@@ -2185,10 +2185,14 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# The tasks list calls tmux from more than one thread: number the calls
+# under a lock, or two can take the same number and one record is lost.
+until mkdir "$here/lock" 2>/dev/null; do :; done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
+rmdir "$here/lock"
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
@@ -4471,6 +4475,18 @@ fn notify_reports_through_the_notifier() {
 
 #[cfg(unix)]
 #[test]
+fn a_notifier_that_never_finishes_does_not_hold_jeet_up() {
+    // terminal-notifier waits for Notification Center's permission, maybe
+    // forever.
+    let lab = StoreLab::new();
+    let env = [("JEET_NOTIFY_CMD", "sleep 30")];
+    let started = std::time::Instant::now();
+    succeeded(&lab.jeet_at(&["notify", "stuck"], &lab.home(), &env));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[cfg(unix)]
+#[test]
 fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     let lab = StoreLab::new();
     let task = lab.new_task("fix-x");
@@ -4666,10 +4682,14 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# The tasks list calls tmux from more than one thread: number the calls
+# under a lock, or two can take the same number and one record is lost.
+until mkdir "$here/lock" 2>/dev/null; do :; done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
+rmdir "$here/lock"
 target=""
 prev=""
 for a in "$@"; do
