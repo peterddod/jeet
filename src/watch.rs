@@ -135,7 +135,7 @@ impl EventKind {
 
 impl Event {
     /// `acme/api #42`, or as much of it as there is.
-    fn place(&self) -> String {
+    pub fn place(&self) -> String {
         match (self.repo.is_empty(), self.number) {
             (false, Some(n)) => format!("{} #{n}", self.repo),
             (false, None) => self.repo.clone(),

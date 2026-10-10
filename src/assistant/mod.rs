@@ -177,20 +177,32 @@ pub fn sessions(app: &App, task: &TaskRecord) -> Result<Vec<Session>> {
         true => tmux::windows(TMUX_SESSION),
         false => Vec::new(),
     };
-    let mut out: Vec<Session> = app
-        .db
-        .list_task_sessions(&task.id)?
+    let records = app.db.list_task_sessions(&task.id)?;
+    Ok(sessions_at(&dir, records, primary.as_deref(), &windows))
+}
+
+/// The sessions `records` holds, in the assistant's home `dir`, given the
+/// tmux `windows` they may be running in: most recently active first. Reads
+/// their status files, but neither the index nor tmux, so it can run where
+/// neither is to hand.
+pub fn sessions_at(
+    dir: &Path,
+    records: Vec<TaskSessionRecord>,
+    primary: Option<&str>,
+    windows: &[tmux::Window],
+) -> Vec<Session> {
+    let mut out: Vec<Session> = records
         .into_iter()
         .map(|s| {
             let window = windows
                 .iter()
                 .find(|w| w.alive && w.key.as_deref() == Some(s.session_id.as_str()))
                 .map(|w| w.id.clone());
-            let reported = status::read_status(&dir, &s.session_id);
+            let reported = status::read_status(dir, &s.session_id);
             Session {
                 last: s.last_activity.max(reported.as_ref().map_or(0, |st| st.at)),
                 activity: status::activity(reported.as_ref(), window.is_some()),
-                primary: primary.as_deref() == Some(s.session_id.as_str()),
+                primary: primary == Some(s.session_id.as_str()),
                 id: s.session_id,
                 name: s.name,
                 window,
@@ -198,7 +210,7 @@ pub fn sessions(app: &App, task: &TaskRecord) -> Result<Vec<Session>> {
         })
         .collect();
     out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.id.cmp(&b.id)));
-    Ok(out)
+    out
 }
 
 /// Which session `jeet chat` opens.

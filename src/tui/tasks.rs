@@ -15,6 +15,12 @@
 //! keys are learned; `/` opens the filter, which then takes typed characters
 //! and narrows the list exactly as the explorer's does.
 //!
+//! The assistant is pinned above the list: its sessions and what each is
+//! doing, what is queued for it and its open todo items, read on a
+//! background thread of its own ([`assistant_info`]). `c` talks to it, `C`
+//! picks one of its sessions, `t` opens its todo list, `i` its inbox and
+//! activity, and `o` sorts the tasks by the todo items that link them.
+//!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
 //! tested; [`run`] carries the actions out.
@@ -32,10 +38,14 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
+use super::assistant_info::{self, Info as AssistantInfo};
+use super::chat::{self as session_picker, Pick, Step};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
 use crate::agent::{self, AgentSpec};
+use crate::assistant::{self, Open};
+use crate::commands::task::printable;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskPrRecord, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::git;
@@ -46,6 +56,7 @@ use crate::runtime;
 use crate::status::{self, Activity};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
+use crate::todo::ItemView;
 use crate::watch;
 use crate::worktrees::{self, now_secs, WorktreeEntry, WorktreeKind, WorktreeStatus};
 
@@ -146,6 +157,8 @@ pub enum Update {
     },
     /// A task's PRs, as GitHub has them now.
     Prs(pr_history::Found),
+    /// The assistant, as its files have it now.
+    Assistant(Box<AssistantInfo>),
 }
 
 /// A list to choose from, narrowed by typing — one repository for a new
@@ -438,6 +451,28 @@ pub enum Panel {
         /// Why the last lookup came back empty-handed, if it did.
         note: Option<String>,
     },
+    /// `C`: the assistant's sessions.
+    Assistant(session_picker::Picker),
+    /// `t`: the assistant's todo list, as last read.
+    Todo {
+        selected: usize,
+        /// The new item being typed, after `a`.
+        adding: Option<String>,
+    },
+    /// `i`: what is queued for the assistant, the GitHub events jeet saw and
+    /// what the assistant did, newest first.
+    Inbox {
+        selected: usize,
+    },
+}
+
+/// Which of the assistant's sessions to attach to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSession {
+    /// The most recently active, or a new one if it has none.
+    Latest,
+    New,
+    Session(String),
 }
 
 /// What a key asks for that needs more than the state: the index, git,
@@ -523,6 +558,35 @@ pub enum Action {
         force: bool,
     },
     Refresh,
+    /// `c`, and ⏎ or `n` in its sessions: attach to one of the assistant's
+    /// sessions, starting it first if need be.
+    Chat(ChatSession),
+    /// `C`: the assistant's sessions.
+    AssistantSessions,
+    RenameSession {
+        id: String,
+        name: String,
+    },
+    EndSession {
+        id: String,
+    },
+    /// `*`: make it the session events go to first, or no longer.
+    TogglePrimary {
+        id: String,
+    },
+    /// space in the todo panel: item `id`, which says `text`, done or not.
+    TodoDone {
+        id: usize,
+        text: String,
+        done: bool,
+    },
+    TodoAdd {
+        text: String,
+    },
+    /// ⏎ in the inbox: the page an event is about.
+    OpenUrl {
+        url: String,
+    },
 }
 
 /// What the remove-worktree prompt needs from the panel line it came from.
@@ -554,6 +618,10 @@ pub struct TasksUi {
     pub exit: Option<Exit>,
     /// The PR links on screen last frame, made clickable after it is drawn.
     pub links: Vec<term::Link>,
+    /// The assistant, once its thread first reports.
+    pub assistant: Option<AssistantInfo>,
+    /// `o`: tasks the todo list links first, by its priorities.
+    pub by_priority: bool,
 }
 
 impl Default for TasksUi {
@@ -578,6 +646,8 @@ impl TasksUi {
             list_area: Rect::default(),
             exit: None,
             links: Vec::new(),
+            assistant: None,
+            by_priority: false,
         };
         ui.set_rows(rows);
         ui
@@ -610,7 +680,21 @@ impl TasksUi {
 
     fn resort(&mut self, keep: Option<&str>) {
         sort_rows(&mut self.rows);
+        if self.by_priority {
+            let items = self.assistant.as_ref().map_or(&[][..], |a| &a.todo[..]);
+            sort_by_todo(&mut self.rows, items);
+        }
         self.refresh_visible(keep);
+    }
+
+    /// The assistant's todo list, as last read.
+    pub fn todo(&self) -> &[ItemView] {
+        self.assistant.as_ref().map_or(&[], |a| a.todo.as_slice())
+    }
+
+    /// What the inbox panel lists, newest first.
+    pub fn feed(&self) -> &[assistant_info::FeedEntry] {
+        self.assistant.as_ref().map_or(&[], |a| a.feed.as_slice())
     }
 
     /// Recompute what is on screen from the view and the filter, leaving
@@ -696,6 +780,70 @@ impl TasksUi {
             // Recorded by the screen, which has the index; the panel is
             // updated from what it then reads back.
             Update::Prs(_) => {}
+            Update::Assistant(info) => {
+                let todo_changed = self.todo() != info.todo.as_slice();
+                // An open panel stays on the line it was on as lines come
+                // and go above it.
+                match &mut self.panel {
+                    Some(Panel::Todo { selected, .. }) => {
+                        let old = self.assistant.as_ref().map_or(&[][..], |a| &a.todo[..]);
+                        *selected = follow(old, &info.todo, *selected, |a, b| a.text == b.text);
+                    }
+                    Some(Panel::Inbox { selected }) => {
+                        let old = self.assistant.as_ref().map_or(&[][..], |a| &a.feed[..]);
+                        *selected = follow(old, &info.feed, *selected, |a, b| a == b);
+                    }
+                    _ => {}
+                }
+                self.assistant = Some(*info);
+                if todo_changed && self.by_priority {
+                    self.resort(keep.as_deref());
+                }
+            }
+        }
+    }
+
+    /// `item` is how the todo list has it now, after the screen changed it:
+    /// show it so before the assistant's thread next reads the list.
+    pub fn todo_changed(&mut self, item: &ItemView) {
+        let Some(info) = &mut self.assistant else {
+            return;
+        };
+        let Some(slot) = info.todo.get_mut(item.id.wrapping_sub(1)) else {
+            return;
+        };
+        if slot.text == item.text {
+            *slot = item.clone();
+            if self.by_priority {
+                let keep = self.selected_id().map(str::to_string);
+                self.resort(keep.as_deref());
+            }
+        }
+    }
+
+    /// Put the cursor on the task a todo item links, the first of them that
+    /// is a task, saying why not when none is.
+    fn jump_to_task(&mut self, item: &ItemView) -> bool {
+        let Some(first) = item.tasks.first() else {
+            self.set_status("the item links no task — an @task-slug in its text links one");
+            return false;
+        };
+        let found = item.tasks.iter().find_map(|slug| {
+            self.rows
+                .iter()
+                .find(|row| &row.task.slug == slug)
+                .map(|row| (row.task.id.clone(), row.task.name.clone()))
+        });
+        match found {
+            Some((id, name)) => {
+                self.select(&id);
+                self.set_status(format!("{name}, from the todo list"));
+                true
+            }
+            None => {
+                self.set_status(format!("there is no task {first}"));
+                false
+            }
         }
     }
 
@@ -880,6 +1028,28 @@ impl TasksUi {
                 None
             }
             KeyCode::Char('r') => Some(Action::Refresh),
+            KeyCode::Char('c') => Some(Action::Chat(ChatSession::Latest)),
+            KeyCode::Char('C') => Some(Action::AssistantSessions),
+            KeyCode::Char('t') => {
+                self.panel = Some(Panel::Todo {
+                    selected: 0,
+                    adding: None,
+                });
+                None
+            }
+            KeyCode::Char('i') => {
+                self.panel = Some(Panel::Inbox { selected: 0 });
+                None
+            }
+            KeyCode::Char('o') => {
+                self.by_priority = !self.by_priority;
+                self.resort(id.as_deref());
+                self.set_status(match self.by_priority {
+                    true => "by todo priority: the tasks its open items link first · o undoes",
+                    false => "by latest activity",
+                });
+                None
+            }
             KeyCode::Char('n') => Some(Action::NewTaskForm { project: None }),
             KeyCode::Char('P') => Some(Action::Projects),
             KeyCode::Enter => match self.selected_row() {
@@ -1273,6 +1443,111 @@ impl TasksUi {
                 });
                 action
             }
+            Panel::Assistant(mut picker) => {
+                let action = match picker.on_key(key) {
+                    Step::Stay => None,
+                    Step::Done(Pick::Quit) => return None,
+                    Step::Done(Pick::New) => Some(Action::Chat(ChatSession::New)),
+                    Step::Done(Pick::Session(id)) => Some(Action::Chat(ChatSession::Session(id))),
+                    Step::Rename { id, name } => Some(Action::RenameSession { id, name }),
+                    Step::End { id } => Some(Action::EndSession { id }),
+                    Step::Primary { id } => Some(Action::TogglePrimary { id }),
+                };
+                // Left up for the screen to bring up to date.
+                self.panel = Some(Panel::Assistant(picker));
+                action
+            }
+            Panel::Todo {
+                mut selected,
+                adding: Some(mut input),
+            } => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.panel = Some(Panel::Todo {
+                            selected,
+                            adding: None,
+                        });
+                        return None;
+                    }
+                    KeyCode::Enter if input.trim().is_empty() => {
+                        self.set_status("a todo item needs some text")
+                    }
+                    KeyCode::Enter => {
+                        self.panel = Some(Panel::Todo {
+                            selected,
+                            adding: None,
+                        });
+                        return Some(Action::TodoAdd { text: input });
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char('u') if ctrl => input.clear(),
+                    KeyCode::Up | KeyCode::Down => {
+                        selected = list_move(key.code, selected, self.todo().len())
+                    }
+                    _ => {
+                        if let Some(c) = typed(&key) {
+                            input.push(c);
+                        }
+                    }
+                }
+                self.panel = Some(Panel::Todo {
+                    selected,
+                    adding: Some(input),
+                });
+                None
+            }
+            Panel::Todo {
+                mut selected,
+                adding: None,
+            } => {
+                let item = self.todo().get(selected).cloned();
+                let mut adding = None;
+                let action = match (key.code, item) {
+                    (KeyCode::Esc | KeyCode::Char('q' | 't'), _) => return None,
+                    (KeyCode::Char('a'), _) => {
+                        adding = Some(String::new());
+                        None
+                    }
+                    (KeyCode::Char(' '), Some(item)) => Some(Action::TodoDone {
+                        id: item.id,
+                        done: !item.done,
+                        text: item.text,
+                    }),
+                    (KeyCode::Enter, Some(item)) => {
+                        if self.jump_to_task(&item) {
+                            return None;
+                        }
+                        None
+                    }
+                    (code, _) => {
+                        selected = list_move(code, selected, self.todo().len());
+                        None
+                    }
+                };
+                self.panel = Some(Panel::Todo { selected, adding });
+                action
+            }
+            Panel::Inbox { mut selected } => {
+                let entry = self.feed().get(selected).cloned();
+                let action = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q' | 'i') => return None,
+                    KeyCode::Enter | KeyCode::Char('o') => match entry.and_then(|e| e.url) {
+                        Some(url) => Some(Action::OpenUrl { url }),
+                        None => {
+                            self.set_status("nothing to open: only GitHub events link to a page");
+                            None
+                        }
+                    },
+                    code => {
+                        selected = list_move(code, selected, self.feed().len());
+                        None
+                    }
+                };
+                self.panel = Some(Panel::Inbox { selected });
+                action
+            }
         }
     }
 
@@ -1310,6 +1585,27 @@ pub fn sort_rows(rows: &mut [TaskRow]) {
             .then_with(|| a.task.name.to_lowercase().cmp(&b.task.name.to_lowercase()))
             .then_with(|| a.task.id.cmp(&b.task.id))
     });
+}
+
+/// Tasks the open todo items link first, by the best item that links each;
+/// the rest after them. Stable, so each keeps the order it had otherwise.
+pub fn sort_by_todo(rows: &mut [TaskRow], items: &[ItemView]) {
+    let ranks = assistant_info::todo_ranks(items);
+    rows.sort_by_key(|row| {
+        ranks
+            .get(&row.task.slug)
+            .copied()
+            .unwrap_or((u16::MAX, usize::MAX))
+    });
+}
+
+/// Where the cursor at `selected` in `old` goes in `new`: to the same line
+/// if it is still there, else where it was, within the list.
+fn follow<T>(old: &[T], new: &[T], selected: usize, same: impl Fn(&T, &T) -> bool) -> usize {
+    old.get(selected)
+        .and_then(|was| new.iter().position(|line| same(was, line)))
+        .unwrap_or(selected)
+        .min(new.len().saturating_sub(1))
 }
 
 /// `cursor` moved by `delta` within a list of `len`, clamped to it.
@@ -1465,6 +1761,7 @@ struct Background {
     probes: Sender<Vec<Probe>>,
     sizes: Sender<Vec<(String, PathBuf)>>,
     prs: Sender<Vec<pr_history::Job>>,
+    assistant: Sender<assistant_info::Probe>,
     updates: Receiver<Update>,
 }
 
@@ -1474,17 +1771,27 @@ impl Background {
         let (probes, probe_rx) = mpsc::channel();
         let (sizes, size_rx) = mpsc::channel();
         let (prs, pr_rx) = mpsc::channel();
+        let (assistant, assistant_rx) = mpsc::channel();
         let status_tx = tx.clone();
         let size_tx = tx.clone();
+        let assistant_tx = tx.clone();
         std::thread::spawn(move || poll_statuses(probe_rx, status_tx));
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
+        std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx));
         std::thread::spawn(move || find_prs(pr_rx, tx));
         Background {
             probes,
             sizes,
             prs,
+            assistant,
             updates,
         }
+    }
+
+    /// Have the assistant's thread look at it now, with its sessions as the
+    /// index has them.
+    fn look_at_assistant(&self, probe: assistant_info::Probe) {
+        let _ = self.assistant.send(probe);
     }
 
     /// Have the PR thread look these tasks' PRs up, before any it has yet
@@ -1552,6 +1859,30 @@ pub fn probe_status(probe: &Probe, tmux_ok: bool) -> Update {
             .active
             .then(|| runtime::activity_at(&probe.dir, &probe.session, tmux_ok)),
         last_activity: runtime::last_activity_at(&probe.dir, probe.touched),
+    }
+}
+
+/// Look at the assistant now and every [`POLL_EVERY`], and again at once
+/// whenever a new probe arrives.
+fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>) {
+    let tmux_ok = tmux::available();
+    let mut current: Option<assistant_info::Probe> = None;
+    loop {
+        if let Some(probe) = &current {
+            let windows = match tmux_ok {
+                true => tmux::windows(assistant::TMUX_SESSION),
+                false => Vec::new(),
+            };
+            let info = assistant_info::gather(probe, &windows);
+            if tx.send(Update::Assistant(Box::new(info))).is_err() {
+                return;
+            }
+        }
+        match probes.recv_timeout(POLL_EVERY) {
+            Ok(probe) => current = Some(probe),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 
@@ -1821,6 +2152,18 @@ impl Screen<'_> {
             }
             Err(e) => self.ui.set_status(format!("could not read tasks: {e:#}")),
         }
+        self.look_at_assistant();
+    }
+
+    /// Have the assistant looked at again, with its sessions as the index
+    /// has them now.
+    fn look_at_assistant(&mut self) {
+        match assistant_info::probe(self.app) {
+            Ok(probe) => self.bg.look_at_assistant(probe),
+            Err(e) => self
+                .ui
+                .set_status(format!("could not read the assistant: {e:#}")),
+        }
     }
 
     /// Read the tasks again, quietly: the background threads hear of it
@@ -1830,6 +2173,8 @@ impl Screen<'_> {
         if self.set_rows(rows) {
             self.bg.watch(&self.ui.rows);
         }
+        // New sessions are recorded in the index as they start.
+        self.bg.look_at_assistant(assistant_info::probe(self.app)?);
         Ok(())
     }
 
@@ -2206,6 +2551,159 @@ impl Screen<'_> {
                 self.ui.set_status(format!("deleted project {name}"));
             }
             Action::Resync { task_id, force } => self.resync(&task_id, force)?,
+            Action::Chat(which) => self.chat(which)?,
+            Action::AssistantSessions => {
+                let sessions = self.assistant_sessions()?;
+                self.ui.panel = Some(Panel::Assistant(session_picker::Picker::new(sessions)));
+            }
+            Action::RenameSession { id, name } => {
+                let said = match assistant::session_name(&name) {
+                    Ok(name) => {
+                        app.db.rename_task_session(&id, &name)?;
+                        format!("renamed to {}", printable(&name))
+                    }
+                    Err(e) => format!("{e:#}"),
+                };
+                self.reload_sessions(said)?;
+            }
+            Action::TogglePrimary { id } => {
+                let Some(task) = app.db.get_assistant_task()? else {
+                    return Ok(());
+                };
+                let was = self
+                    .shown_session(&id)
+                    .is_some_and(|session| session.primary);
+                app.db
+                    .set_primary_session(&task.id, (!was).then_some(id.as_str()))?;
+                let said = match was {
+                    true => "no primary session: events go to the latest running one",
+                    false => "primary: events go to this session while it runs",
+                };
+                self.reload_sessions(said.to_string())?;
+            }
+            Action::EndSession { id } => {
+                let Some(session) = self.shown_session(&id) else {
+                    return Ok(());
+                };
+                let name = printable(&session.name);
+                let said = match session.running() {
+                    false => format!("{name} is not running"),
+                    // Ending waits for the agent to exit, which takes a while.
+                    true => match self
+                        .progress(&format!("ending {name}"), || assistant::end(&session))
+                        .and_then(|inner| inner)
+                    {
+                        Ok(()) => format!("ended {name}"),
+                        Err(e) => format!("could not end it: {e:#}"),
+                    },
+                };
+                self.reload_sessions(said)?;
+            }
+            Action::TodoDone { id, text, done } => {
+                let dir = assistant::home_dir(&app.home);
+                let changed = self
+                    .progress("updating the todo list", || {
+                        assistant_info::set_todo_done(&dir, id, &text, done)
+                    })
+                    .and_then(|inner| inner);
+                self.look_at_assistant();
+                match changed {
+                    Ok(item) => {
+                        self.ui.todo_changed(&item);
+                        let what = if item.done { "done" } else { "not done" };
+                        self.ui
+                            .set_status(format!("{what}: {}", printable(&item.title)));
+                    }
+                    Err(e) => self
+                        .ui
+                        .set_status(format!("could not change the todo list: {e:#}")),
+                }
+            }
+            Action::TodoAdd { text } => {
+                let dir = assistant::home_dir(&app.home);
+                let added = self
+                    .progress("adding to the todo list", || {
+                        assistant_info::add_todo(&dir, &text)
+                    })
+                    .and_then(|inner| inner);
+                self.look_at_assistant();
+                match added {
+                    Ok(item) => self
+                        .ui
+                        .set_status(format!("added: {}", printable(&item.text))),
+                    Err(e) => self.ui.set_status(format!("could not add it: {e:#}")),
+                }
+            }
+            Action::OpenUrl { url } => {
+                let opened = self
+                    .progress("opening the browser", || assistant_info::open_url(&url))
+                    .and_then(|inner| inner);
+                match opened {
+                    Ok(()) => self.ui.set_status("opened it in the browser"),
+                    Err(e) => self.ui.set_status(format!("could not open it: {e:#}")),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `c`: attach to one of the assistant's sessions, starting it — and
+    /// setting up the assistant's home, the first time — if need be.
+    fn chat(&mut self, which: ChatSession) -> Result<()> {
+        let app = self.app;
+        let opened = self
+            .progress("opening the assistant", || {
+                let task = assistant::ensure(app)?;
+                let how = match &which {
+                    ChatSession::Latest => Open::Latest,
+                    ChatSession::New => Open::New {
+                        name: None,
+                        prompt: None,
+                    },
+                    ChatSession::Session(id) => Open::Session(id),
+                };
+                assistant::open(app, &task, how)
+            })
+            .and_then(|inner| inner)?;
+        self.ui.panel = None;
+        let attached = term::suspended(self.terminal, || assistant::attach(&opened.window))?;
+        self.refresh(false);
+        let name = printable(&opened.name);
+        match attached {
+            Ok(_) => self
+                .ui
+                .set_status(format!("back from the assistant ({name})")),
+            Err(e) => self.ui.set_status(format!("could not attach: {e:#}")),
+        }
+        Ok(())
+    }
+
+    /// The assistant's sessions, setting its home up the first time. Runs
+    /// tmux, so off the draw path.
+    fn assistant_sessions(&mut self) -> Result<Vec<assistant::Session>> {
+        let app = self.app;
+        self.progress("reading the assistant's sessions", || {
+            let task = assistant::ensure(app)?;
+            assistant::sessions(app, &task)
+        })
+        .and_then(|inner| inner)
+    }
+
+    /// Session `id`, as the sessions panel shows it.
+    fn shown_session(&self, id: &str) -> Option<assistant::Session> {
+        match &self.ui.panel {
+            Some(Panel::Assistant(picker)) => picker.sessions.iter().find(|s| s.id == id).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Bring the sessions panel up to date, saying `said`.
+    fn reload_sessions(&mut self, said: String) -> Result<()> {
+        let sessions = self.assistant_sessions()?;
+        self.look_at_assistant();
+        if let Some(Panel::Assistant(picker)) = &mut self.ui.panel {
+            picker.reload(sessions);
+            picker.status = said;
         }
         Ok(())
     }
@@ -3360,6 +3858,291 @@ mod tests {
                 assert!(found.prs.is_empty());
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    fn assistant_session(id: &str, primary: bool, running: bool) -> assistant::Session {
+        assistant::Session {
+            id: id.into(),
+            name: format!("{id} name"),
+            primary,
+            last: 1,
+            activity: match running {
+                true => Activity::Idle { since: 1 },
+                false => Activity::NotRunning,
+            },
+            window: running.then(|| "@1".to_string()),
+        }
+    }
+
+    fn feed_entry(at: i64, text: &str, url: Option<&str>) -> assistant_info::FeedEntry {
+        assistant_info::FeedEntry {
+            at,
+            kind: assistant_info::FeedKind::Event,
+            what: "review requested".into(),
+            text: text.into(),
+            place: "acme/api #1 → the assistant".into(),
+            url: url.map(str::to_string),
+        }
+    }
+
+    /// The sample tasks, with the assistant's todo list saying `todo`.
+    fn with_todo(todo: &str) -> TasksUi {
+        let mut ui = sample();
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            todo: crate::todo::parse(todo).views(),
+            ..AssistantInfo::default()
+        })));
+        ui
+    }
+
+    #[test]
+    fn c_talks_to_the_assistant_and_capital_c_picks_a_session() {
+        let mut ui = sample();
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('c')),
+            Some(Action::Chat(ChatSession::Latest))
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('C')),
+            Some(Action::AssistantSessions)
+        );
+        // Neither needs a task: the assistant is not one.
+        let mut empty = TasksUi::default();
+        assert_eq!(
+            press(&mut empty, KeyCode::Char('c')),
+            Some(Action::Chat(ChatSession::Latest))
+        );
+    }
+
+    #[test]
+    fn the_sessions_panel_asks_for_what_its_keys_do() {
+        let mut ui = sample();
+        ui.panel = Some(Panel::Assistant(session_picker::Picker::new(vec![
+            assistant_session("a", false, true),
+            assistant_session("b", true, false),
+        ])));
+        assert_eq!(press(&mut ui, KeyCode::Down), None);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('*')),
+            Some(Action::TogglePrimary { id: "b".into() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('x')),
+            Some(Action::EndSession { id: "b".into() })
+        );
+        assert!(
+            matches!(&ui.panel, Some(Panel::Assistant(p)) if p.selected == 1),
+            "left up for the screen to bring up to date"
+        );
+        press(&mut ui, KeyCode::Char('R'));
+        type_text(&mut ui, " x");
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::RenameSession {
+                id: "b".into(),
+                name: "b name x".into()
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Chat(ChatSession::Session("b".into())))
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::Chat(ChatSession::New))
+        );
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
+    }
+
+    #[test]
+    fn the_todo_panel_ticks_off_adds_and_goes_to_tasks() {
+        let mut ui =
+            with_todo("# Todo\n- [ ] !p1 fix it @fix-login\n- [x] done @gone\n- [ ] no link\n");
+        press(&mut ui, KeyCode::Char('t'));
+        assert!(matches!(ui.panel, Some(Panel::Todo { selected: 0, .. })));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char(' ')),
+            Some(Action::TodoDone {
+                id: 1,
+                text: "!p1 fix it @fix-login".into(),
+                done: true
+            })
+        );
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char(' ')),
+            Some(Action::TodoDone {
+                id: 2,
+                text: "done @gone".into(),
+                done: false
+            })
+        );
+        // A link to no task, then no link: the panel stays and says why.
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert!(ui.panel.is_some());
+        assert!(
+            ui.status_line.contains("no task gone"),
+            "{}",
+            ui.status_line
+        );
+        press(&mut ui, KeyCode::Char('j'));
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert!(
+            ui.status_line.contains("links no task"),
+            "{}",
+            ui.status_line
+        );
+
+        // `a` takes a line of text, letters and all.
+        press(&mut ui, KeyCode::Char('a'));
+        type_text(&mut ui, "!p2 tqa");
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::TodoAdd {
+                text: "!p2 tqa".into()
+            })
+        );
+        assert!(matches!(ui.panel, Some(Panel::Todo { adding: None, .. })));
+        press(&mut ui, KeyCode::Char('a'));
+        assert_eq!(press(&mut ui, KeyCode::Enter), None, "blank adds nothing");
+        press(&mut ui, KeyCode::Esc);
+        assert!(matches!(ui.panel, Some(Panel::Todo { adding: None, .. })));
+
+        // ⏎ on a linked item closes the panel on its task.
+        press(&mut ui, KeyCode::Home);
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.panel.is_none());
+        assert_eq!(ui.selected_id(), Some("a"));
+    }
+
+    #[test]
+    fn going_to_a_task_finds_it_in_the_archived_view_and_past_the_filter() {
+        let mut ui = with_todo("- [ ] look again @old-spike\n");
+        ui.filter = "api".into();
+        ui.refresh_visible(None);
+        press(&mut ui, KeyCode::Char('t'));
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.view, View::Archived);
+        assert_eq!(ui.selected_id(), Some("c"));
+    }
+
+    #[test]
+    fn o_puts_the_tasks_the_todo_list_links_first() {
+        let mut ui = with_todo(
+            "- [ ] whenever @docs\n- [ ] !p1 first @fix-login\n- [x] !p1 finished @api-cleanup\n",
+        );
+        assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+        press(&mut ui, KeyCode::Down); // docs
+        press(&mut ui, KeyCode::Char('o'));
+        assert!(ui.by_priority);
+        assert_eq!(shown(&ui), ["fix login", "docs", "api cleanup"]);
+        assert_eq!(ui.selected_id(), Some("d"), "the cursor stays on its task");
+        // The list changes: so does the order.
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            todo: crate::todo::parse("- [ ] !p1 now @api-cleanup\n").views(),
+            ..AssistantInfo::default()
+        })));
+        assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+        press(&mut ui, KeyCode::Char('o'));
+        assert!(!ui.by_priority);
+        assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+    }
+
+    #[test]
+    fn a_ticked_off_item_shows_before_the_list_is_read_again() {
+        let mut ui = with_todo("- [ ] one\n- [ ] two\n");
+        let item = crate::todo::parse("- [ ] one\n- [x] two\n").views()[1].clone();
+        ui.todo_changed(&item);
+        assert!(ui.todo()[1].done);
+        // Not the item the list has there: left for the next read.
+        let other = crate::todo::parse("- [x] three\n").views()[0].clone();
+        ui.todo_changed(&other);
+        assert_eq!(ui.todo()[0].text, "one");
+    }
+
+    #[test]
+    fn open_panels_keep_their_line_as_the_assistant_changes() {
+        let mut ui = with_todo("- [ ] a\n- [ ] b\n");
+        ui.panel = Some(Panel::Todo {
+            selected: 1,
+            adding: None,
+        });
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            todo: crate::todo::parse("- [ ] new\n- [ ] a\n- [ ] b\n").views(),
+            ..AssistantInfo::default()
+        })));
+        assert!(matches!(ui.panel, Some(Panel::Todo { selected: 2, .. })));
+        ui.apply(Update::Assistant(Box::default()));
+        assert!(matches!(ui.panel, Some(Panel::Todo { selected: 0, .. })));
+
+        let feed = vec![feed_entry(5, "x", None), feed_entry(4, "y", None)];
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            feed: feed.clone(),
+            ..AssistantInfo::default()
+        })));
+        ui.panel = Some(Panel::Inbox { selected: 1 });
+        let mut newer = vec![feed_entry(9, "z", None)];
+        newer.extend(feed);
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            feed: newer,
+            ..AssistantInfo::default()
+        })));
+        assert!(matches!(ui.panel, Some(Panel::Inbox { selected: 2 })));
+    }
+
+    #[test]
+    fn the_inbox_opens_the_links_events_have() {
+        let mut ui = sample();
+        ui.apply(Update::Assistant(Box::new(AssistantInfo {
+            feed: vec![
+                feed_entry(9, "with a link", Some("https://github.com/acme/api/pull/1")),
+                feed_entry(5, "without", None),
+            ],
+            ..AssistantInfo::default()
+        })));
+        press(&mut ui, KeyCode::Char('i'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::OpenUrl {
+                url: "https://github.com/acme/api/pull/1".into()
+            })
+        );
+        assert!(ui.panel.is_some(), "still open, for the next one");
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert!(ui.status_line.contains("nothing to open"));
+        assert_eq!(press(&mut ui, KeyCode::Char('i')), None);
+        assert!(ui.panel.is_none());
+        // An empty inbox opens, and asks for nothing.
+        let mut ui = sample();
+        press(&mut ui, KeyCode::Char('i'));
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+    }
+
+    #[test]
+    fn the_assistant_thread_reports_what_its_probe_finds() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("assistant");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("todo.md"), "- [ ] !p1 one\n").unwrap();
+        let bg = Background::start();
+        bg.look_at_assistant(assistant_info::Probe {
+            home: home.path().to_path_buf(),
+            dir,
+            records: Vec::new(),
+            primary: None,
+        });
+        loop {
+            match bg.updates.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Update::Assistant(info) => {
+                    assert_eq!(info.todo.len(), 1);
+                    assert_eq!(info.todo[0].priority, Some(1));
+                    break;
+                }
+                _ => continue,
+            }
         }
     }
 

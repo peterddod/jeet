@@ -206,7 +206,7 @@ fn pick(terminal: &mut Tui, app: &App, task: &TaskRecord, mut picker: Picker) ->
     }
 }
 
-const KEYS: &str = "⏎ attach  n new  R rename  x end  * primary  q quit";
+pub(crate) const KEYS: &str = "⏎ attach  n new  R rename  x end  * primary  q quit";
 
 fn draw(frame: &mut Frame, picker: &Picker, working: Option<&str>) {
     let area = frame.area();
@@ -258,7 +258,7 @@ fn draw(frame: &mut Frame, picker: &Picker, working: Option<&str>) {
     frame.render_widget(Paragraph::new(footer), rows[1]);
 }
 
-fn session_line(s: &Session) -> ListItem<'static> {
+pub(crate) fn session_line(s: &Session) -> ListItem<'static> {
     let color = match s.running() {
         true => Color::Cyan,
         false => Color::DarkGray,
