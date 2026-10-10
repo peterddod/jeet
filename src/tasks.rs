@@ -587,8 +587,10 @@ fn review_worktree(
             let warnings = worktrees::refresh_pr_worktree(&path, pr, row.branch.as_deref());
             return Ok((path, warnings));
         }
-        // Gone from under jeet: forget it and check the PR out afresh.
+        // Gone from under jeet: forget it, and have git forget it too, or
+        // its branch would still count as checked out there.
         app.db.delete_task_worktree(&task.id, &row.dir_name)?;
+        let _ = git::worktree_prune(&trunk);
     }
 
     let mut warnings = Vec::new();
@@ -612,7 +614,10 @@ fn review_worktree(
     let dest = dir.join(&dir_name);
     worktrees::add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, use_branch)?;
 
-    let created_branch = use_branch.is_some() && !existed;
+    // A branch made for a checkout that vanished is still the task's own.
+    let made_before = existing
+        .is_some_and(|gone| gone.created_branch && gone.branch.as_deref() == Some(branch.as_str()));
+    let created_branch = use_branch.is_some() && (!existed || made_before);
     let record = TaskWorktreeRecord {
         id: 0,
         task_id: task.id.clone(),

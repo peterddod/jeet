@@ -3319,6 +3319,17 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
     );
     assert!(!lab.home().join("tasks/review-widget-7-2").exists());
 
+    // Its checkout deleted behind jeet's back, the next review makes it
+    // again, on the branch.
+    std::fs::remove_dir_all(&worktree).unwrap();
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
+        "wide-store"
+    );
+
     // Archived, it is brought back rather than made again.
     succeeded(&lab.jeet_at(&["task", "archive", "review-widget-7"], &lab.home(), &[]));
     assert!(!worktree.exists());
