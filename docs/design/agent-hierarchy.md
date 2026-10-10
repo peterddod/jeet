@@ -195,6 +195,9 @@ jeet agent new backend \
   --budget 6h,400turns \
   --max-children 4
 
+# The user can do the same at a terminal; the agent is parented to the assistant
+jeet agent new frontend --goal "Migrate web to the new design system" --budget 4h
+
 # The agent delegates a worker under itself (the parent defaults to the caller)
 jeet task new fix-token-refresh --repo api \
   --prompt "Fix token refresh races; add a test" \
@@ -210,9 +213,13 @@ jeet agent tree --json
 jeet agent show backend          # brief, grant, effective allow, budget, children, open reports
 ```
 
-- `--parent` defaults to the caller: the node whose `JEET_TASK_ID` jeet sees,
-  or none for the user at a terminal. A parent outside the caller's subtree is
-  refused.
+- `--parent` defaults to the caller: the node whose `JEET_TASK_ID` jeet sees.
+  A parent outside the caller's subtree is refused.
+- **The user** may make a manager directly: `jeet agent new` at a terminal,
+  outside any agent, is parented to the assistant (or to any `--parent` the
+  user names). Its grant is still capped by the assistant's effective list,
+  so the tree has one root and one place to narrow everything. `jeet task new`
+  at a terminal stays top level, as today, unless the user passes `--parent`.
 - `--allow` defaults to **none** beyond the free commands. A capability the
   parent's effective list lacks is refused with the missing name, not dropped
   silently.
@@ -333,6 +340,10 @@ Agents below the root lose `jeet notify`. For them it becomes a report.
   `archive`, `delete`, `agent stop`, …) is refused unless the target is a
   strict descendant of the caller. The only way to address anything else is
   `jeet report`, which only goes to the parent.
+- **No sideways messages.** Siblings, cousins and other subtrees cannot
+  message each other: `jeet task send` to any node that is not a descendant is
+  refused. Anything two siblings need to share goes up to their common parent
+  in a report, and the parent decides what to send down.
 - **Workers with a parent are gated too.** Top-level tasks the user made stay
   ungated, as today. A parented worker's default grant is `worktree.add`
   plus `report`.
@@ -433,6 +444,10 @@ writes outside the node's own directory, and no `tmux`, `sqlite3` or edits to
 them. The `auto_trust` scope from #23 must exclude manager homes, as it
 already excludes the assistant's, unless the user opts in.
 
+**Decision:** this cooperative model is accepted for phase 1. There the only
+manager is the assistant, and it already runs under it. The model must be
+reviewed again before phase 2 ships (see the gate in §8).
+
 ## 6. Agents pane (TUI)
 
 A third view in the tasks list (`⇥` cycles active → agents → archived; or
@@ -509,6 +524,14 @@ it is acceptable only as a worker until then.
   `tasks.rs` (teach `jeet report`), and `tui/tasks_ui.rs` (a `↳ assistant`
   marker and the last report in the row).
 
+**Gate before phase 2 ships: review the identity model (5.7).** Phase 1 accepts
+the cooperative model. Phase 2 lets agents below the root hold real
+capabilities, so before it ships, decide whether the cooperative model is
+still enough. The alternative is to require harness enforcement (deny rules,
+or sandboxing that keeps a node out of `tmux`, `index.db`, `config.toml` and
+other nodes' homes) for any harness that runs a manager below the root.
+Record the outcome in this doc.
+
 **Phase 2: agents as managers.**
 - `kind = 'agent'`, `jeet agent new|ls|show|grant`, `task_grants`, effective
   allow-lists, depth/fan-out/`max_live`, time and turn budgets, pause/stop,
@@ -577,10 +600,12 @@ the assistant hears when a task finishes or gets stuck, without polling
    cannot report usage?
 7. **Where the pane lives:** a third `⇥` view (proposed), its own `A`
    screen, or replacing the tasks list as the home screen once phase 3 lands.
-8. **Can the user make an agent directly** (`jeet agent new` at a terminal,
-   parented to the assistant), or only through the assistant?
-9. **Should managers be allowed to talk sideways** (sibling to sibling)?
-   Proposed no: everything goes through the common parent.
-10. **The weak identity in 5.7.** Is the cooperative model acceptable for
-    now, or should phase 2 wait for harness sandboxing / deny rules to
-    exist first?
+
+### Decided
+
+- **The user may make managers directly.** `jeet agent new` at a terminal
+  makes one parented to the assistant (§3).
+- **No sideways messaging.** Siblings never message each other; everything
+  goes through the common parent (5.1).
+- **The cooperative identity model is accepted for phase 1.** It must be
+  reviewed again before phase 2 ships, which is a gate in §8 (5.7).
