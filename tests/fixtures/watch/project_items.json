@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "content": {
+        "body": "Logins fail after an hour.",
+        "number": 12,
+        "repository": "acme/api",
+        "title": "Fix the login",
+        "type": "Issue",
+        "url": "https://github.com/acme/api/issues/12"
+      },
+      "id": "PVTI_lADOAAAAAA4AAAAAAAAAAA",
+      "labels": [
+        "bug"
+      ],
+      "repository": "https://github.com/acme/api",
+      "status": "In Progress",
+      "title": "Fix the login"
+    },
+    {
+      "content": {
+        "body": "",
+        "title": "Plan Q4",
+        "type": "DraftIssue"
+      },
+      "id": "PVTI_lADOAAAAAA4AAAAAAAAAAB",
+      "status": "Todo",
+      "title": "Plan Q4"
+    }
+  ],
+  "totalCount": 2
+}

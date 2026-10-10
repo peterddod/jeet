@@ -142,6 +142,18 @@ pub enum Commands {
         filter: String,
     },
 
+    /// Poll GitHub — notifications, your pull requests' checks, the projects
+    /// in `[watch]` — and send what is new where `[[assistant.rules]]` say
+    /// (with neither --once nor a subcommand: its status)
+    #[command(args_conflicts_with_subcommands = true)]
+    Watch {
+        /// Poll once and exit: what launchd and the tasks list run
+        #[arg(long)]
+        once: bool,
+        #[command(subcommand)]
+        command: Option<WatchCommands>,
+    },
+
     /// Raise a desktop notification (Notification Center on macOS)
     Notify {
         title: String,
@@ -313,6 +325,20 @@ pub enum TodoCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WatchCommands {
+    /// Poll every `[watch] interval_secs` in the background: a launchd job
+    /// on macOS; elsewhere, print a systemd user timer to set up
+    Install,
+
+    /// Stop polling in the background
+    Uninstall,
+
+    /// Say whether the watcher is installed, when it last polled and what
+    /// it follows
+    Status,
 }
 
 #[derive(Subcommand)]

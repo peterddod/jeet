@@ -1027,6 +1027,281 @@ struct NewReview {
     node_id: String,
 }
 
+// ---------------------------------------------------------------------------
+// What `jeet watch` asks GitHub
+// ---------------------------------------------------------------------------
+
+/// One notification thread, as `GET /notifications` lists it. Everything in
+/// it but the ids is written by someone else.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Notification {
+    pub id: String,
+    #[serde(default)]
+    pub reason: String,
+    /// GitHub's timestamp of the thread's latest activity; it changes with
+    /// every new comment, review or state change.
+    #[serde(default)]
+    pub updated_at: String,
+    pub subject: NotificationSubject,
+    pub repository: NotificationRepo,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct NotificationSubject {
+    #[serde(default)]
+    pub title: String,
+    /// The API address of what it is about, e.g. `…/repos/o/r/pulls/42`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// `PullRequest`, `Issue`, `CheckSuite`, `Release`, …
+    #[serde(default, rename = "type")]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct NotificationRepo {
+    pub full_name: String,
+    #[serde(default)]
+    pub html_url: String,
+}
+
+/// What asking for the notifications found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notifications {
+    /// Nothing has changed since the `If-Modified-Since` given.
+    NotModified,
+    /// The unread notifications, and the `Last-Modified` to ask with next.
+    Changed {
+        last_modified: Option<String>,
+        threads: Vec<Notification>,
+    },
+}
+
+const NOTIFICATIONS_PER_PAGE: usize = 50;
+
+/// Pages of notifications read at most, so a flood cannot keep a poll
+/// going.
+const NOTIFICATIONS_MAX_PAGES: usize = 10;
+
+/// The user's unread notifications, unless nothing has changed since
+/// `if_modified_since` (a `Last-Modified` GitHub gave before), which costs
+/// nothing against the rate limit.
+///
+/// Paged here rather than with `--paginate`, whose pages would arrive with
+/// their headers in between: the status and `Last-Modified` of the first
+/// page are what count.
+pub fn notifications(dir: &Path, if_modified_since: Option<&str>) -> Result<Notifications> {
+    let mut threads = Vec::new();
+    let mut last_modified = None;
+    for page in 1..=NOTIFICATIONS_MAX_PAGES {
+        let endpoint = format!("notifications?per_page={NOTIFICATIONS_PER_PAGE}&page={page}");
+        let mut args = vec!["api", "--include", endpoint.as_str()];
+        let header;
+        if let Some(since) = if_modified_since.filter(|s| page == 1 && header_value_ok(s)) {
+            header = format!("If-Modified-Since: {since}");
+            args.extend(["-H", header.as_str()]);
+        }
+        let output = gh(dir, &args)?;
+        // gh fails on a 304, having printed it: the status line decides.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(response) = parse_included(&stdout) else {
+            bail!("{}", gh_error(&output));
+        };
+        match response.status {
+            304 if page == 1 => return Ok(Notifications::NotModified),
+            200 => {}
+            status => bail!("GitHub answered {status}: {}", gh_error(&output)),
+        }
+        if page == 1 {
+            last_modified = response
+                .header("last-modified")
+                .filter(|v| header_value_ok(v))
+                .map(str::to_string);
+        }
+        let found = parse_notifications(response.body)?;
+        let full = found.len() >= NOTIFICATIONS_PER_PAGE;
+        threads.extend(found);
+        if !full {
+            break;
+        }
+    }
+    Ok(Notifications::Changed {
+        last_modified,
+        threads,
+    })
+}
+
+/// A header value safe to send back: printable ASCII on one line.
+fn header_value_ok(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii() && !c.is_ascii_control())
+}
+
+/// Threads from a notifications page; one GitHub wrote in a shape jeet does
+/// not know is skipped rather than failing the rest.
+pub fn parse_notifications(body: &str) -> Result<Vec<Notification>> {
+    let values: Vec<serde_json::Value> =
+        serde_json::from_str(body).context("parse GitHub notifications")?;
+    Ok(values
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
+}
+
+/// An HTTP response as `gh api --include` prints it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Included<'a> {
+    pub status: u16,
+    headers: Vec<(String, String)>,
+    pub body: &'a str,
+}
+
+impl Included<'_> {
+    /// The first header called `name`, which must be lower case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The status line, headers and body of `gh api --include` output; none
+/// when it does not start with a status line.
+pub fn parse_included(text: &str) -> Option<Included<'_>> {
+    let text = text.trim_start();
+    let (head, body) = match (text.find("\r\n\r\n"), text.find("\n\n")) {
+        (Some(crlf), Some(lf)) if lf < crlf => (&text[..lf], &text[lf + 2..]),
+        (Some(crlf), _) => (&text[..crlf], &text[crlf + 4..]),
+        (None, Some(lf)) => (&text[..lf], &text[lf + 2..]),
+        (None, None) => (text, ""),
+    };
+    let mut lines = head.lines();
+    let status_line = lines.next()?;
+    if !status_line.starts_with("HTTP/") {
+        return None;
+    }
+    let status = status_line.split_whitespace().nth(1)?.parse().ok()?;
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    Some(Included {
+        status,
+        headers,
+        body,
+    })
+}
+
+/// One of the user's open pull requests and how its checks stand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MyPr {
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// The head commit.
+    pub sha: String,
+    /// GitHub's rollup of the head commit's checks and statuses: `SUCCESS`,
+    /// `FAILURE`, `ERROR`, `PENDING` or `EXPECTED`; none without any.
+    pub checks: Option<String>,
+}
+
+/// The user's open PRs, most recently updated first, with their checks, in
+/// one query.
+const MY_PRS_QUERY: &str = "query { viewer { pullRequests(states: OPEN, first: 50, \
+    orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { number title url \
+    repository { nameWithOwner } commits(last: 1) { nodes { commit { oid \
+    statusCheckRollup { state } } } } } } } }";
+
+pub fn my_open_prs(dir: &Path) -> Result<Vec<MyPr>> {
+    let query = format!("query={MY_PRS_QUERY}");
+    let text = gh_ok(dir, &["api", "graphql", "-f", &query])?;
+    parse_my_prs(&text)
+}
+
+pub fn parse_my_prs(text: &str) -> Result<Vec<MyPr>> {
+    let value: serde_json::Value = serde_json::from_str(text).context("parse gh api output")?;
+    let nodes = value["data"]["viewer"]["pullRequests"]["nodes"]
+        .as_array()
+        .context("GitHub sent no pull requests")?;
+    Ok(nodes
+        .iter()
+        .filter_map(|pr| {
+            let commit = &pr["commits"]["nodes"][0]["commit"];
+            Some(MyPr {
+                repo: pr["repository"]["nameWithOwner"].as_str()?.to_string(),
+                number: pr["number"].as_u64()?,
+                title: pr["title"].as_str().unwrap_or_default().to_string(),
+                url: pr["url"].as_str().unwrap_or_default().to_string(),
+                sha: commit["oid"].as_str().unwrap_or_default().to_string(),
+                checks: commit["statusCheckRollup"]["state"]
+                    .as_str()
+                    .map(str::to_string),
+            })
+        })
+        .collect())
+}
+
+/// Where a pull request stands, to tell a merge from a close.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PullState {
+    /// `open` or `closed`.
+    pub state: String,
+    #[serde(default)]
+    pub merged: bool,
+    #[serde(default)]
+    pub merged_by: Option<Login>,
+}
+
+/// Pull request `number` of `repo` (`owner/name`).
+pub fn pull_state(dir: &Path, repo: &str, number: u64) -> Result<PullState> {
+    if !valid_repo_name(repo) {
+        bail!("{repo:?} is not a GitHub repository name");
+    }
+    let endpoint = format!("repos/{repo}/pulls/{number}");
+    let text = gh_ok(dir, &["api", &endpoint])?;
+    serde_json::from_str(&text).context("parse gh api output")
+}
+
+/// `owner/name`, each part only what GitHub allows in one: it goes into an
+/// API path.
+pub fn valid_repo_name(repo: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with('.')
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    match repo.split_once('/') {
+        Some((owner, name)) => part(owner) && part(name),
+        None => false,
+    }
+}
+
+/// The items of GitHub Project `number` of `owner`, as `gh project
+/// item-list` describes them. Needs a token with the `read:project` scope.
+pub fn project_items(dir: &Path, owner: &str, number: u64) -> Result<Vec<serde_json::Value>> {
+    let owner = format!("--owner={owner}");
+    let number = number.to_string();
+    let text = gh_ok(
+        dir,
+        &[
+            "project",
+            "item-list",
+            &number,
+            &owner,
+            "--format",
+            "json",
+            "--limit",
+            "500",
+        ],
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).context("parse gh project output")?;
+    Ok(value["items"].as_array().cloned().unwrap_or_default())
+}
+
 /// Seconds since the epoch for an RFC 3339 UTC timestamp, as GitHub writes
 /// them (`2026-10-08T12:34:56Z`, fractional seconds allowed). None for
 /// anything else rather than a wrong answer.
@@ -1234,5 +1509,82 @@ mod tests {
         assert_eq!(parse_timestamp("2026-10-08"), None);
         assert_eq!(parse_timestamp("2026-13-08T00:00:00Z"), None);
         assert_eq!(parse_timestamp("2026-10-08T12:34:56+02:00"), None);
+    }
+
+    fn watch_fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/watch")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn included_responses_give_their_status_headers_and_body() {
+        let body = watch_fixture("notifications.json");
+        let text = format!(
+            "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\nLast-Modified: Sat, 10 Oct \
+             2026 12:05:00 GMT\r\nX-Poll-Interval: 60\r\n\r\n{body}"
+        );
+        let response = parse_included(&text).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("last-modified"),
+            Some("Sat, 10 Oct 2026 12:05:00 GMT")
+        );
+        let threads = parse_notifications(response.body).unwrap();
+        assert_eq!(threads.len(), 6);
+        assert_eq!(threads[0].id, "100");
+        assert_eq!(threads[0].subject.kind, "PullRequest");
+        assert_eq!(threads[0].repository.full_name, "acme/api");
+        assert_eq!(threads[4].subject.url, None);
+
+        // A 304 has no body; gh fails, having printed it.
+        let response =
+            parse_included("HTTP/2.0 304 Not Modified\r\nX-Poll-Interval: 60\r\n\r\n").unwrap();
+        assert_eq!(response.status, 304);
+        assert_eq!(response.body, "");
+        assert!(parse_included("gh: HTTP 401").is_none());
+        assert!(parse_included("").is_none());
+        // A thread in a shape jeet does not know is skipped.
+        let threads = parse_notifications(
+            r#"[{"id":"1"},{"id":"2","subject":{},"repository":{"full_name":"a/b"}}]"#,
+        )
+        .unwrap();
+        assert_eq!(threads.len(), 1);
+        // Nothing but a header value goes back to GitHub as one.
+        assert!(header_value_ok("Sat, 10 Oct 2026 12:05:00 GMT"));
+        assert!(!header_value_ok("x\r\nAuthorization: y"));
+        assert!(!header_value_ok(""));
+    }
+
+    #[test]
+    fn my_prs_come_with_their_checks() {
+        let prs = parse_my_prs(&watch_fixture("my_prs.json")).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].repo, "acme/api");
+        assert_eq!(prs[0].number, 42);
+        assert_eq!(prs[0].checks.as_deref(), Some("FAILURE"));
+        assert_eq!(prs[0].sha, "1111111111111111111111111111111111111111");
+        assert_eq!(prs[1].checks, None);
+        assert!(parse_my_prs(r#"{"errors":[{"message":"x"}]}"#).is_err());
+    }
+
+    #[test]
+    fn only_github_repo_names_go_into_api_paths() {
+        assert!(valid_repo_name("acme/api"));
+        assert!(valid_repo_name("a-b/c_d.e"));
+        for bad in [
+            "acme",
+            "acme/../x",
+            "../api",
+            "acme/api/pulls",
+            "a/b?x=1",
+            "/api",
+            "acme/",
+        ] {
+            assert!(!valid_repo_name(bad), "{bad}");
+        }
     }
 }
