@@ -1,6 +1,6 @@
 # Hierarchical agents
 
-Status: **draft, for review**. Nothing here is implemented.
+Status: **draft, for review; all open questions decided**. Nothing here is implemented.
 Designed against `main` at v0.7.2, plus the open PRs #21 (projects form), #22
 (AGENTS.md) and #23 (`Harness` trait, neutral hook events, trust watcher,
 `starting` / `needs input` states).
@@ -8,17 +8,18 @@ Designed against `main` at v0.7.2, plus the open PRs #21 (projects form), #22
 ## Summary
 
 Today the assistant manages a flat list of tasks. This RFC lets it hand a
-whole area of work to an **agent**: a manager like the assistant, with its own
-home, worklog, todo list, inbox and allow-list, that in turn creates and
-steers its own tasks and agents and reports back to whoever made it. The
+whole area of work to a **manager** (an "agent" in the UI): a node like the
+assistant, with its own home, worklog, todo list, inbox and allow-list, that
+in turn creates and steers its own tasks and managers and reports back to
+whoever made it. The
 assistant becomes the root of a tree. An **agents pane** shows the tree with
 status rolled up, so one glance says where the user is needed.
 
 The key rules:
 
-- **One concept.** An agent is a task whose role is *manage*, not a new kind
+- **One concept.** A manager is a task whose role is *manage*, not a new kind
   of thing. Everything tasks already have (tmux session, status hooks,
-  inbox, `task send`, archive) works for agents unchanged.
+  inbox, `task send`, archive) works for managers unchanged.
 - **Authority flows down, information flows up.** A child's allow-list is
   always a subset of its parent's, checked by jeet at every call. Reports go
   up as fenced, untrusted messages. Only jeet, on the root's behalf, talks to
@@ -44,10 +45,16 @@ A node in the tree is a **task row**. Its `kind` gives its role:
 | kind | role | holds worktrees | has children | manager files |
 |---|---|---|---|---|
 | `work`, `review` | **worker** (as today) | yes | no | no |
-| `agent` (new) | **manager** | no | yes | yes |
-| `assistant` | **root manager** | no | yes | yes |
+| `manager` (new) | **manager** | read-only only | yes | yes |
+| `assistant` | **root manager** | read-only only | yes | yes |
 
-An agent is "the assistant, but made by a parent, with a brief, a budget and a
+**Naming (decided):** the code and the data model say *manager* (`kind =
+'manager'`, `src/manager/`, `jeet manager …`, `[managers]`, `manager.*`
+capabilities), because "agent" already means a task's coding agent
+(`agent.rs`, `AgentSpec`, `agent = "claude"`). UI text may say *agent* where
+that is unambiguous: the **agents pane**, "needs you" rows.
+
+A manager is "the assistant, but made by a parent, with a brief, a budget and a
 narrower allow-list". The code that is assistant-specific today (`ensure_files`,
 `session_context`, `fence_message`, multi-session windows, `actions.log`)
 becomes manager code, and the assistant is the one manager with no parent and
@@ -59,19 +66,27 @@ Why one concept rather than two:
   tasks list are all keyed on task rows. A second table would duplicate or
   abstract all of it.
 - #23's trust watcher already scopes by "a task directory under
-  `~/.jeet/tasks`", which agent homes satisfy (but see 5.7).
+  `~/.jeet/tasks`", which manager homes satisfy (but see 5.7).
 - The assistant is already a task row; this generalises what is there.
 
-Managers hold no worktrees (`jeet worktree add` is refused for `kind =
-'agent'`). Managers manage and workers work, so code lives in exactly one
-place and a manager's context stays small. (Open question Q2.)
+**Managers hold read-only worktrees only (decided).** A manager may check a
+repository out to read it while planning, but never to change it. Workers do
+the changing, so code is changed in exactly one place and a manager's context
+stays small. For a manager, `jeet worktree add`:
+- always detaches at the default branch, and refuses `--branch`;
+- records the worktree as read-only, so the harness gets deny rules for
+  writes under it (#32) and jeet refuses to commit or push from it
+  (`git.push` never applies there).
+
+Before #32 lands, read-only is cooperative, like the rest of phase 1
+(5.7).
 
 ### Layout
 
-An agent's home is a task directory, so every task path keeps working:
+A manager's home is a task directory, so every task path keeps working:
 
 ```
-~/.jeet/tasks/backend/            # kind = 'agent'
+~/.jeet/tasks/backend/            # kind = 'manager'
   .jeet/task-id
   .jeet/inbox.jsonl               # queued messages and reports, as today
   .jeet/status/<session>.json     # hooks, as today
@@ -80,7 +95,8 @@ An agent's home is a task directory, so every task path keeps working:
   notes/worklog.md
   todo.md                         # `jeet todo` works on the caller's own list
   actions.log
-  .claude/skills/jeet-agent/SKILL.md
+  .claude/skills/jeet-manager/SKILL.md
+  api/                            # optional read-only worktree, detached
 ```
 
 ## 2. Tree
@@ -91,14 +107,14 @@ An agent's home is a task directory, so every task path keeps working:
 `tasks` is rebuilt, as v3 did.
 
 ```sql
--- v4: hierarchy. A task may have a parent; 'agent' is a manager kind.
+-- v4: hierarchy. A task may have a parent; 'manager' is a new kind.
 CREATE TABLE tasks_v4 (
     id TEXT PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     project TEXT,
     kind TEXT NOT NULL DEFAULT 'work'
-        CHECK (kind IN ('work', 'review', 'assistant', 'agent')),
+        CHECK (kind IN ('work', 'review', 'assistant', 'manager')),
     state TEXT NOT NULL DEFAULT 'active'
         CHECK (state IN ('active', 'archived')),
     parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,  -- NULL: top level
@@ -114,7 +130,7 @@ ALTER TABLE tasks_v4 RENAME TO tasks;
 CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
 CREATE INDEX tasks_parent ON tasks(parent_id);
 
--- What the parent asked for. One row per delegated task or agent.
+-- What the parent asked for. One row per delegated task or manager.
 CREATE TABLE task_briefs (
     task_id    TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
     goal       TEXT NOT NULL,
@@ -133,18 +149,19 @@ CREATE TABLE task_grants (
 );
 
 -- Limits and what has been used of them. NULL: no limit of its own
--- (the parent's still applies).
+-- (the parent's still applies). No cost columns until a harness can report
+-- usage (#26); they are added by a later migration then.
 CREATE TABLE task_budgets (
-    task_id      TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-    max_secs     INTEGER,   -- wall clock while running
-    max_turns    INTEGER,   -- counted from Stopped events
-    max_cost_mc  INTEGER,   -- milli-cents; only where the harness reports usage
-    used_secs    INTEGER NOT NULL DEFAULT 0,
-    used_turns   INTEGER NOT NULL DEFAULT 0,
-    used_cost_mc INTEGER NOT NULL DEFAULT 0
+    task_id    TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    max_secs   INTEGER,   -- wall clock while running
+    max_turns  INTEGER,   -- counted from Stopped events
+    used_secs  INTEGER NOT NULL DEFAULT 0,
+    used_turns INTEGER NOT NULL DEFAULT 0
 );
 
 -- Everything a child said to its parent, and questions on their way up.
+-- worktree read-only-ness lives on task_worktrees:
+--   ALTER TABLE task_worktrees ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE task_reports (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, -- who it is about
@@ -173,7 +190,7 @@ it to survive a hand-over that empties the inbox.
 |---|---|
 | create | none; it makes its own |
 | **pause** | the whole subtree pauses (5.4) |
-| **stop** | every agent in the subtree is ended; rows and work kept |
+| **stop** | every coding agent in the subtree is ended; rows and work kept |
 | **archive** | refused while it has active children, unless `--recursive`. With it, jeet lists everything the subtree would lose (the existing per-task archive check, for each worker), asks once, then archives leaves first |
 | **unarchive** | only itself; `--recursive` brings the subtree back. A child cannot be unarchived under an archived parent |
 | **delete** | refused while it has children (active or archived), unless `--recursive` (same listing, leaves first) or `--reparent` (children move to the grandparent, keeping grants ∩ the new parent's) |
@@ -187,7 +204,7 @@ is unchanged.
 
 ```bash
 # The assistant makes a manager for an area of work
-jeet agent new backend \
+jeet manager new backend \
   --goal "Ship the v2 auth API" \
   --done "PRs open for api#120 and web#88, CI green, summary in worklog" \
   --brief-file /tmp/backend-brief.md \
@@ -195,27 +212,27 @@ jeet agent new backend \
   --budget 6h,400turns \
   --max-children 4
 
-# The user can do the same at a terminal; the agent is parented to the assistant
-jeet agent new frontend --goal "Migrate web to the new design system" --budget 4h
+# The user can do the same at a terminal; the manager is parented to the assistant
+jeet manager new frontend --goal "Migrate web to the new design system" --budget 4h
 
-# The agent delegates a worker under itself (the parent defaults to the caller)
+# The manager delegates a worker under itself (the parent defaults to the caller)
 jeet task new fix-token-refresh --repo api \
   --prompt "Fix token refresh races; add a test" \
   --done "PR open against api main with a passing test" \
   --budget 2h
 
 # Or places it lower in its own subtree
-jeet task new api-docs --parent backend/docs-agent --prompt "…"
+jeet task new api-docs --parent backend/docs --prompt "…"
 
 # Read the tree
-jeet agent ls                    # the caller's subtree (the whole tree for the user)
-jeet agent tree --json
-jeet agent show backend          # brief, grant, effective allow, budget, children, open reports
+jeet manager ls                  # the caller's subtree (the whole tree for the user)
+jeet manager tree --json
+jeet manager show backend         # brief, grant, effective allow, budget, children, open reports
 ```
 
 - `--parent` defaults to the caller: the node whose `JEET_TASK_ID` jeet sees.
   A parent outside the caller's subtree is refused.
-- **The user** may make a manager directly: `jeet agent new` at a terminal,
+- **The user** may make a manager directly: `jeet manager new` at a terminal,
   outside any agent, is parented to the assistant (or to any `--parent` the
   user names). Its grant is still capped by the assistant's effective list,
   so the tree has one root and one place to narrow everything. `jeet task new`
@@ -223,8 +240,9 @@ jeet agent show backend          # brief, grant, effective allow, budget, childr
 - `--allow` defaults to **none** beyond the free commands. A capability the
   parent's effective list lacks is refused with the missing name, not dropped
   silently.
-- `--budget` takes `<n>h`, `<n>m`, `<n>turns` and `$<n>`. A child's budget is
-  capped at what remains of its parent's.
+- `--budget` takes `<n>h`, `<n>m` and `<n>turns`, defaulting to
+  `[managers] default_budget` (4h). A child's budget is capped at what remains
+  of its parent's. There are no cost budgets until #26 (5.3).
 - `jeet task new --prompt` keeps working as today. `--goal`/`--done` add a
   brief row for any parented task.
 
@@ -234,7 +252,7 @@ At every session start (the `SessionStarted` → additional-context path that
 the assistant uses today, via #23), the child gets a block jeet writes:
 
 ```
-<jeet-brief from="agent backend" path="assistant/backend">
+<jeet-brief from="manager backend" path="assistant/backend">
 Goal: Fix token refresh races; add a test
 Done when: PR open against api main with a passing test
 Budget: 2h wall clock (0h40 used), no turn limit
@@ -290,7 +308,7 @@ change:
 | Child event | Parent gets |
 |---|---|
 | `Stopped`, after a turn with no report since the last hand-over | nothing (avoids chatter); it counts one turn toward the budget |
-| `Idle` for longer than `[agents] idle_report_mins` (10), with no `done` | `status: idle 10m, last report: …` |
+| `Idle` for longer than `[managers] idle_report_mins` (10), with no `done` | `status: idle 10m, last report: …` |
 | `NeedsInput` (a permission prompt, or #23's `trust folder`) | `status: waiting on a prompt only the user can answer`, which also rolls up as **needs you** (no agent may type into a prompt; `messages.rs` already refuses to) |
 | `Ended` without `done` | `status: ended without reporting done` |
 | budget at 80% / 100% | `status: budget …` (5.3) |
@@ -303,7 +321,7 @@ root's behalf:
 1. A child sends `jeet report question`. Its parent answers it if the
    question is within the parent's own brief:
    `jeet report answer 42 "drop it"`. jeet delivers the answer to the asker
-   as `<jeet-answer to="42" from="agent backend">`.
+   as `<jeet-answer to="42" from="manager backend">`.
 2. Otherwise the parent escalates: `jeet report escalate 42 [--note "…"]`.
    `to_id` moves to the grandparent, and the original row keeps its origin.
    The root's only escalation is to the user: `jeet report escalate 42` at the
@@ -315,17 +333,20 @@ root's behalf:
    it"` at a terminal, outside any agent. That answer goes **straight to the
    asker**, fenced as `<jeet-answer from="user">`. It is the one message an
    agent may treat as the user's, because jeet only stamps it when the
-   command ran at a terminal with no `JEET_TASK_ID`. Each manager on the path
-   gets a one-line notice that it was answered.
+   command ran at a terminal with no `JEET_TASK_ID`. **Each manager on the
+   path gets a copy (decided)**, `<jeet-answer to="42" from="user"
+   copy="true">`, so it can update its own plan. A copy is for information:
+   the asker acts on the answer, and a manager that disagrees reports up to
+   the user rather than countermanding it.
 
-Agents below the root lose `jeet notify`. For them it becomes a report.
+Managers and workers below the root lose `jeet notify`. For them it becomes a report.
 
 ## 5. Permissions and safety
 
 ### 5.1 Allow-lists
 
 - **The caller's identity** comes from `JEET_TASK_ID`, which jeet sets in each
-  agent's tmux environment. The root also keeps `JEET_ASSISTANT=1` for
+  node's tmux environment. The root also keeps `JEET_ASSISTANT=1` for
   compatibility. `permissions::authorize` changes from "is assistant mode on"
   to "which node is calling".
 - **The effective allow-list** of a node is
@@ -333,36 +354,48 @@ Agents below the root lose `jeet notify`. For them it becomes a report.
   It is computed on every check, so removing a capability from a parent (or
   from config.toml) removes it from the whole subtree at once. There is no
   copy to drift.
-- Granting checks the subset at creation and at `jeet agent grant`.
+- Granting checks the subset at creation and at `jeet manager grant`.
   Escalating privilege is impossible by construction: no command writes a
   grant outside `effective(caller)`.
 - **Scope.** Every mutating command that names a task (`task send`,
-  `archive`, `delete`, `agent stop`, …) is refused unless the target is a
+  `archive`, `delete`, `manager stop`, …) is refused unless the target is a
   strict descendant of the caller. The only way to address anything else is
   `jeet report`, which only goes to the parent.
 - **No sideways messages.** Siblings, cousins and other subtrees cannot
   message each other: `jeet task send` to any node that is not a descendant is
   refused. Anything two siblings need to share goes up to their common parent
   in a report, and the parent decides what to send down.
-- **Workers with a parent are gated too.** Top-level tasks the user made stay
-  ungated, as today. A parented worker's default grant is `worktree.add`
-  plus `report`.
-- **New capabilities:** `agent.create`, `agent.stop`, `agent.grant`, and
-  `git.push` and `pr.merge` (below). `bash_allow` emits each node's
-  harness rules from its effective list.
+- **Workers with a parent are gated too (decided).** Top-level tasks the user
+  made stay ungated, as today. A parented worker's default grant is
+  `worktree.add` plus `report`, from phase 1.
+- **Held capabilities.** `pr.merge`, `pr.comment`, `pr.review` and
+  `task.delete` are never part of a default grant. They stay with the root
+  unless a parent that holds one names it in `--allow` (or `jeet manager
+  grant`) for a child. jeet logs each such grant to the granter's
+  `actions.log` and notifies the user.
+- **New capabilities:** `manager.create`, `manager.stop`, `manager.grant` and
+  `git.push`. `pr.merge` comes from #25 (below). `bash_allow` emits each
+  node's harness rules from its effective list.
 
 ### 5.2 Depth, fan-out, concurrency
 
+Defaults (decided):
+
 ```toml
-[agents]
-max_depth = 3            # assistant = 0; agents at 1-2, workers down to 3
-max_children = 6         # per manager; also --max-children per agent, ≤ this
-max_live = 8             # running agents in the whole tree, managers and workers
+[managers]
+max_depth = 3            # assistant = 0; managers at 1-2, workers down to 3
+max_children = 6         # per manager; also --max-children per manager, ≤ this
+max_live = 8             # running coding agents in the whole tree, managers and workers
 idle_report_mins = 10
-default_budget = "4h"
-grantable = ["task.create", "task.send", "task.archive", "worktree.add",
-             "review.start", "agent.create", "git.push"]   # what may ever go below the root
+default_budget = "4h"    # wall clock; no cost budgets until #26
+worker_default = ["worktree.add"]   # a parented worker's grant without --allow (`report` is always free)
+manager_default = []                # a manager's grant without --allow
+held = ["pr.merge", "pr.comment", "pr.review", "task.delete"]
+                         # never in a default; passed down only when named, with a notification
 ```
+
+A `held` capability in `worker_default` or `manager_default` is a config
+error.
 
 `max_live` is checked when jeet starts an agent (`task new --prompt`,
 `task open`, a message to a stopped agent). Over the limit, the start is
@@ -374,22 +407,23 @@ is told `status: queued, 8/8 live`. It starts when a slot frees.
 - **Time:** wall-clock seconds while the agent's pane is alive and not paused,
   from status files.
 - **Turns:** one per `Stopped` event.
-- **Cost:** only where the harness reports usage (a new optional `usage()` on
-  the #23 trait, #26). Otherwise it shows as `n/a`, and a cost budget is refused at
-  creation, not silently ignored.
+- **Cost: none for now (decided).** No harness reports usage yet. Cost
+  budgets wait for #26 (a `usage()` on the #23 trait). Until then jeet does
+  not accept or show them.
 
 A child's spend counts toward every ancestor. At 80% the node and its parent
 get a `status` report. At 100% jeet **pauses** the node's subtree and reports
-`blocked: budget`. The parent can `jeet agent budget fix-x +1h` within its
-own remaining budget, or stop it.
+`blocked: budget`. The parent can `jeet manager budget fix-x +1h` within its
+own remaining budget, or stop it. (`jeet manager budget` works on any
+descendant, workers included.)
 
 ### 5.4 Stopping a runaway subtree
 
 ```bash
-jeet agent pause backend      # subtree: interrupt each running turn, set run_state = 'paused'
-jeet agent resume backend
-jeet agent stop backend       # subtree: end every tmux session, run_state = 'stopped'
-jeet agent stop --all         # the user's panic button: everything below the root
+jeet manager pause backend    # subtree: interrupt each running turn, set run_state = 'paused'
+jeet manager resume backend
+jeet manager stop backend     # subtree: end every tmux session, run_state = 'stopped'
+jeet manager stop --all       # the user's panic button: everything below the root
 ```
 
 `paused` means: `messages::deliver` queues instead of typing, nothing is
@@ -411,11 +445,11 @@ power.
   fooled can at most report. A manager that was fooled can at most do what
   its effective list allows, and only to its subtree.
 - `jeet watch` keeps routing only to the root and to the task a PR belongs to.
-  A rule may target an agent (`action = "agent:backend"`, phase 4), and the
-  event lands fenced in that agent's inbox like any other.
-- Dangerous actions are kept out of reach by default: `pr.comment`,
-  `pr.review`, `pr.merge` and `task.delete` are not in the default
-  `grantable`, so they are root-only unless the user opts in.
+  A rule may target a manager (`action = "manager:backend"`, phase 4), and
+  the event lands fenced in that manager's inbox like any other.
+- Dangerous actions are kept out of reach by default: the `held`
+  capabilities stay at the root unless a parent grants one by name, and the
+  user hears about every such grant (5.1).
 
 ### 5.6 Merge, push, comment
 
@@ -428,8 +462,12 @@ They are gated by the harness permission rules jeet writes for each node
 | push own task branch | workers with `git.push` (needed to open PRs) |
 | `git push --force`, push to a default branch | denied to every agent |
 | `gh pr create` | workers with `git.push` |
-| `gh pr comment` / `review` | root only, with `pr.comment` / `pr.review` |
-| `gh pr merge` | **the user only** in phases 1-3; `pr.merge` is reserved |
+| `gh pr comment` / `review` | the holder of `pr.comment` / `pr.review` (the root by default) |
+| merge | only through `jeet pr merge` (#25), by the holder of `pr.merge`: the root by default, or a node a parent granted it to by name. `gh pr merge` and the merge API are denied to every node |
+
+`jeet pr merge` refuses a PR that is a draft, conflicted, failing or pending
+checks, or awaiting changes or review, and merges only the head it checked
+(#25). So the capability is the only control that needs the hierarchy.
 
 This needs a *deny* rule list from the harness, not just allow rules (§7, #32).
 
@@ -450,8 +488,10 @@ reviewed again before phase 2 ships (see the gate in §8, tracked in #33).
 
 ## 6. Agents pane (TUI)
 
-A third view in the tasks list (`⇥` cycles active → agents → archived; or
-`A`). The assistant row moves from pinned to the tree's root.
+**A third tab view in the tasks list (decided):** `⇥` cycles active → agents
+→ archived. In the agents view, the assistant row moves from pinned to the
+tree's root. The tab is called *agents*, which is the UI text that decision 1
+allows.
 
 ```text
 ┌ jeet · agents ──────────────────────────────────────────────────────────────┐
@@ -472,7 +512,7 @@ status files and `task_reports` in the existing two-second refresh thread.
 
 | Key | |
 |---|---|
-| `⏎` | attach to the node's agent (the assistant picks a session, as `C`) |
+| `⏎` | attach to the node's coding agent (the assistant picks a session, as `C`) |
 | `→` / `←` | expand / collapse |
 | `l` | the worklog (`notes/worklog.md`), read-only, scrollable |
 | `i` | the node's inbox and reports, newest first; `⏎` opens a linked PR |
@@ -480,12 +520,12 @@ status files and `task_reports` in the existing two-second refresh thread.
 | `b` | brief, grant, effective allow-list, budget |
 | `p` / `P` | pause / resume the subtree |
 | `x` | stop the subtree (asks first, listing what is running) |
-| `n` | new task or agent under this node (#21's form, plus parent, goal, done, budget, allow) |
+| `n` | new task or manager under this node (#21's form, plus parent, goal, done, budget, allow) |
 
 ## 7. Harness neutrality
 
 Managers run on any harness that implements the #23 trait. A harness that
-lacks a **required** item refuses `jeet agent new --harness <id>` with the
+lacks a **required** item refuses `jeet manager new --harness <id>` with the
 missing piece named. Workers keep #23's degrade-don't-fail rule.
 
 | Need | #23 trait today | Required for a manager? |
@@ -495,9 +535,9 @@ missing piece named. Workers keep #23's degrade-don't-fail rule.
 | add context at session start | yes | no: falls back to `BRIEF.md` + `AGENTS.md` telling it to read it |
 | continue-turn output (to hand the inbox over at Stop) | yes | yes (else reports wait for the idle typing path) |
 | allow rules from capabilities | yes (command prefixes) | yes (else every action prompts the user, which is not autonomous) |
-| **deny rules** | no, **new** (#32) | yes for children (5.6) |
+| **deny rules** | no, **new** (#32) | yes for children (5.6) and read-only worktrees (§1) |
 | **interrupt** a running turn | no, **new** (#32) | yes (pause) |
-| **usage** (tokens/cost) | no, **new** (#26), optional | no (cost budgets only) |
+| **usage** (tokens/cost) | no, **new** (#26), optional | no; cost budgets wait for it |
 | instructions file | yes (`instructions_file`, #22) | yes (manager role template) |
 
 Goose (per #23's survey; #28) would qualify once it can write hook files (#27). Its lack
@@ -507,8 +547,8 @@ it is acceptable only as a worker until then.
 ## 8. Phasing
 
 **Phase 1: parent link and reporting up. The assistant is the only manager.** (#31)
-- `tasks.parent_id` (v4 migration, without `agent` kind or the other tables
-  except `task_reports` and `task_briefs`). A task the assistant makes gets
+- `tasks.parent_id` (v4 migration, without the `manager` kind or the other
+  tables except `task_reports` and `task_briefs`). A task the assistant makes gets
   `parent_id = assistant`.
 - `jeet report progress|done|blocked|question`, and the automatic `status`
   reports from #23 events.
@@ -525,37 +565,43 @@ it is acceptable only as a worker until then.
   marker and the last report in the row).
 
 **Gate before phase 2 ships: review the identity model (5.7, #33).** Phase 1 accepts
-the cooperative model. Phase 2 lets agents below the root hold real
+the cooperative model. Phase 2 lets managers below the root hold real
 capabilities, so before it ships, decide whether the cooperative model is
 still enough. The alternative is to require harness enforcement (deny rules,
 or sandboxing that keeps a node out of `tmux`, `index.db`, `config.toml` and
 other nodes' homes) for any harness that runs a manager below the root.
 Record the outcome in this doc.
 
-**Phase 2: agents as managers.** (#34; needs #32 and #33)
-- `kind = 'agent'`, `jeet agent new|ls|show|grant`, `task_grants`, effective
-  allow-lists, depth/fan-out/`max_live`, time and turn budgets, pause/stop,
-  and recursive archive/delete.
+**Phase 2: managers.** (#34; needs #32 and #33)
+- `kind = 'manager'`, `jeet manager new|ls|show|grant|budget|pause|resume|stop`,
+  `task_grants`, effective allow-lists, held capabilities, depth/fan-out/
+  `max_live`, time and turn budgets, read-only worktrees, and recursive
+  archive/delete.
 - Generalise `assistant/` into `manager/`: `ensure_files` with a manager
   template, `session_context`, multi-session windows. The assistant becomes
   `manager::root()`.
 - Touch points: new `src/manager/` (from `assistant/mod.rs`),
-  `permissions.rs`, `config.rs` (`[agents]`), `tasks.rs`
-  (archive/delete/unarchive cascade), `harness/` (`interrupt`, deny rules),
+  `permissions.rs`, `config.rs` (`[managers]`), `tasks.rs`
+  (archive/delete/unarchive cascade), `worktrees.rs` and `db/tasks.rs`
+  (`read_only`), `harness/` (`interrupt`, deny rules),
   `startup.rs` (#23 trust scope excludes manager homes), `cli.rs`.
 
 **Phase 3: the agents pane.** (#35)
-- The tree view, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
+- The agents tab, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
   parent fields.
 - Touch points: `tui/tasks.rs`, `tui/tasks_ui.rs`, `tui/state.rs`, a new
-  `tui/agents.rs`, and #21's form (`tui/tasks.rs` new-task form).
+  `tui/managers.rs`, and #21's form (`tui/tasks.rs` new-task form).
 
-**Phase 4: escalation to the user and the rest.** (#36; cost budgets need #26)
-- `needs_user`, `jeet report answer|escalate`, answers from the user, cost
-  budgets via `Harness::usage`, `jeet watch` rules targeting agents, and
-  `--reparent`.
-- Touch points: `commands/` (report), `notify.rs`, `watch.rs` (routing),
-  `harness/` (`usage`), and the TUI answer flow.
+**Phase 4: escalation to the user and the rest.** (#36)
+- `needs_user`, `jeet report answer|escalate`, answers from the user (with
+  copies to each manager on the path), `jeet watch` rules targeting
+  managers, and `--reparent`.
+- Touch points: `commands/` (report), `notify.rs`, `watch.rs` (routing), and
+  the TUI answer flow.
+
+**Later: cost budgets**, once #26 gives a harness `usage()`. They need a
+migration for the cost columns, `$<n>` in `--budget`, and a cost column in the
+pane.
 
 Each phase is useful on its own. Phase 1 alone fixes the commonest pain:
 the assistant hears when a task finishes or gets stuck, without polling
@@ -563,7 +609,7 @@ the assistant hears when a task finishes or gets stuck, without polling
 
 ## 9. Alternatives considered
 
-- **Two concepts (an `agents` table beside `tasks`).** Cleaner names, but it
+- **Two concepts (a `managers` table beside `tasks`).** Cleaner names, but it
   doubles status, inbox, tmux, archive and TUI code, and the assistant is
   already a task row. Rejected.
 - **The harness's own subagents (e.g. Claude Code's Task tool).** Free and
@@ -581,31 +627,29 @@ the assistant hears when a task finishes or gets stuck, without polling
 - **Copying the parent's allow-list into the child at creation.** It goes
   stale when the user narrows the root. Intersection at check time does not.
 
-## 10. Open questions for the user
+## 10. Decisions
 
-1. **Name.** "Agent" collides with "the task's coding agent" used throughout
-   the README and code (`agent.rs`, `AgentSpec`, `agent = "claude"`).
-   Alternatives: *manager*, *lead*, *team*. This doc says agent; the code
-   could say manager.
-2. **Managers hold no worktrees.** Is that too strict? Some areas need one
-   repo read for planning. Allowing read-only (detached) worktrees is cheap.
-3. **Are parented workers gated?** This changes behaviour for tasks the
-   assistant makes today (they are ungated). Phase 1 proposes yes.
-4. **Who may merge?** Proposed: only the user until phase 4, then `pr.merge`
-   grantable but outside the default `grantable`.
-5. **Does the user answer the asker directly (proposed), or does the answer
-   go back down the chain** so each manager sees and can amend it?
-6. **Defaults** for `max_depth` (3), `max_children` (6), `max_live` (8) and
-   the budget (4h). And are cost budgets wanted at all, given most harnesses
-   cannot report usage?
-7. **Where the pane lives:** a third `⇥` view (proposed), its own `A`
-   screen, or replacing the tasks list as the home screen once phase 3 lands.
+None of the questions this RFC raised are still open. The user decided
+(2026-10-11):
 
-### Decided
-
-- **The user may make managers directly.** `jeet agent new` at a terminal
-  makes one parented to the assistant (§3).
-- **No sideways messaging.** Siblings never message each other; everything
-  goes through the common parent (5.1).
-- **The cooperative identity model is accepted for phase 1.** It must be
-  reviewed again before phase 2 ships, which is a gate in §8 (5.7).
+1. **Name.** The code and data model say *manager*; UI text may say *agent*
+   where that is unambiguous (§1).
+2. **Worktrees.** Managers may hold read-only, detached worktrees for
+   planning, but no writable ones (§1).
+3. **Gating.** Parented workers are gated, with `worktree.add` + `report` by
+   default from phase 1 (5.1).
+4. **Merge.** `pr.merge` comes from #25 (`jeet pr merge`). The root holds it
+   by default, and a parent may grant it down only by naming it. It is never
+   in a default grant (5.1, 5.6).
+5. **Answers.** The user's answers go straight to the asker and are copied
+   to each manager on the path (§4).
+6. **Defaults.** `max_depth` 3, `max_children` 6, `max_live` 8, a 4h time
+   budget. No cost budgets until a harness can report usage (#26) (5.2,
+   5.3).
+7. **Pane.** The agents pane is a third tab view (§6).
+8. **The user may make managers directly.** `jeet manager new` at a
+   terminal makes one parented to the assistant (§3).
+9. **No sideways messaging.** Siblings never message each other; everything
+   goes through the common parent (5.1).
+10. **The cooperative identity model is accepted for phase 1.** It must be
+    reviewed again before phase 2 ships, which is a gate in §8 (5.7, #33).
