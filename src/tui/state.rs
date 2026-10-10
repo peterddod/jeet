@@ -124,9 +124,12 @@ pub enum PrLookup {
     Found(Box<PullRequest>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
-    RemoveWorktree,
+    /// Index into [`Explorer::worktree_rows`] of the worktree to remove.
+    RemoveWorktree(usize),
+    /// A typed `:rm`, resolved and waiting for a yes.
+    Command(super::command::Command),
 }
 
 #[derive(Debug, Clone)]
@@ -151,8 +154,6 @@ pub enum Overlay {
         title: String,
         lines: Vec<String>,
         action: PendingAction,
-        /// Index into [`Explorer::worktree_rows`] the action applies to.
-        index: usize,
     },
     Help {
         /// First line of the key list shown, for terminals too small for it.
@@ -397,7 +398,7 @@ impl Explorer {
     /// Recompute the visible rows for the current filter, keeping the cursor on
     /// `keep` when that entry survived and dropping it to the top otherwise.
     fn refocus(&mut self, keep: Option<&Path>) {
-        self.matches = filter_matches(&self.entries, &self.filter);
+        self.matches = filter_matches(&self.entries, &self.needle());
         self.selected = keep
             .and_then(|path| {
                 self.matches
@@ -405,6 +406,27 @@ impl Explorer {
                     .position(|&i| self.entries[i].path == path)
             })
             .unwrap_or(0);
+    }
+
+    /// Whether the filter is a command line rather than a filter: it starts
+    /// with `:`. Typing `mv` without one still just filters.
+    pub fn in_command_mode(&self) -> bool {
+        self.filter.starts_with(':')
+    }
+
+    /// The command line, without its `:`, when the filter is one.
+    pub fn command_line(&self) -> Option<&str> {
+        self.filter.strip_prefix(':')
+    }
+
+    /// What the listing is matched against: the filter itself, or — while a
+    /// command is typed — the operand being typed, so the rows still show
+    /// what ⇥ would complete it to.
+    pub fn needle(&self) -> String {
+        match self.command_line() {
+            Some(line) => super::command::needle(line),
+            None => self.filter.clone(),
+        }
     }
 
     /// The rows on screen, in the order they are drawn.
@@ -478,11 +500,54 @@ impl Explorer {
     ///
     /// Returns false when there is nothing left to add.
     pub fn complete(&mut self) -> bool {
+        if self.in_command_mode() {
+            return self.complete_command();
+        }
+        let Some(completed) = self.completed_name(&self.filter) else {
+            return false;
+        };
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        self.filter = completed;
+        self.refocus(keep.as_deref());
+        true
+    }
+
+    /// ⇥ while a command is typed: the verb from the verbs, and an operand
+    /// from the names in this folder, exactly as the plain filter completes.
+    ///
+    /// Only a bare name: an operand reaching into another folder has nothing
+    /// in this listing to complete against.
+    fn complete_command(&mut self) -> bool {
+        let Some(line) = self.command_line() else {
+            return false;
+        };
+        let tail = super::command::tail(line);
+        let word = if tail.index == 0 {
+            super::command::complete_verb(&tail.text)
+        } else if tail.text.starts_with('-') || tail.text.contains('/') {
+            None
+        } else {
+            self.completed_name(&tail.text)
+                .map(|name| super::command::quoted(&name))
+        };
+        let Some(word) = word else {
+            return false;
+        };
+        let filter = format!(":{}{word}", &line[..tail.start]);
+        if filter == self.filter {
+            return false;
+        }
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        self.filter = filter;
+        self.refocus(keep.as_deref());
+        true
+    }
+
+    /// What ⇥ turns `typed` into, against the rows on screen.
+    fn completed_name(&self, typed: &str) -> Option<String> {
         let (completed, highlighted) = {
             let names: Vec<&str> = self.visible().map(|e| e.name.as_str()).collect();
-            let Some(completed) = completion(&names, self.selected, &self.filter) else {
-                return false;
-            };
+            let completed = completion(&names, self.selected, typed)?;
             let highlighted = names
                 .get(self.selected)
                 .or(names.first())
@@ -494,18 +559,10 @@ impl Explorer {
         // end of a word than inside one — so a prefix sliced out of one name
         // can fail to match the very names it was drawn from. A whole name
         // always matches itself, so fall back to the highlighted one.
-        let completed = if filter_matches(&self.entries, &completed).is_empty() {
-            match highlighted {
-                Some(name) if name != self.filter => name,
-                _ => return false,
-            }
-        } else {
-            completed
-        };
-        let keep = self.selected_entry().map(|e| e.path.clone());
-        self.filter = completed;
-        self.refocus(keep.as_deref());
-        true
+        if filter_matches(&self.entries, &completed).is_empty() {
+            return highlighted.filter(|name| name != typed);
+        }
+        Some(completed)
     }
 
     pub fn selected_entry(&self) -> Option<&FsEntry> {
@@ -1648,6 +1705,84 @@ mod tests {
         // The separator belongs to the segment it follows.
         assert_eq!(explorer.breadcrumb_target(4), Some(dir.path().join("src")));
         assert_eq!(explorer.breadcrumb_target(6), Some(nested));
+    }
+
+    /// Only a leading `:` makes a command line; `mv` on its own is a filter
+    /// like any other.
+    #[test]
+    fn a_colon_turns_the_filter_into_a_command_line() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter("mv".into());
+        assert!(!explorer.in_command_mode());
+        assert_eq!(explorer.visible_len(), 0, "`mv` filters, matching nothing");
+
+        explorer.set_filter(":mv".into());
+        assert!(explorer.in_command_mode());
+        assert_eq!(explorer.command_line(), Some("mv"));
+        // The verb is not a filter: the whole folder stays on screen.
+        assert_eq!(explorer.visible_len(), 3);
+
+        // The operand being typed narrows the rows, as the filter would.
+        explorer.set_filter(":mv RE".into());
+        let names: Vec<_> = explorer.visible().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["README.md"]);
+
+        // Backspacing the colon away is a filter again.
+        explorer.set_filter(":".into());
+        assert!(explorer.pop_filter());
+        assert!(!explorer.in_command_mode());
+    }
+
+    #[test]
+    fn tab_completes_the_verb_and_then_the_operand() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter(":to".into());
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, ":touch ");
+
+        explorer.set_filter(":mv al".into());
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, ":mv alpha.txt");
+        assert!(!explorer.complete(), "nothing more to add");
+
+        // The second operand completes on its own, leaving the first alone.
+        explorer.set_filter(":cp alpha.txt s".into());
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, ":cp alpha.txt src");
+    }
+
+    /// A completed name has to survive `split_command`, so one with a space
+    /// in it comes back quoted.
+    #[test]
+    fn tab_quotes_a_name_with_a_space() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("my notes.md"), "x").unwrap();
+        let mut explorer = explorer_at(dir.path());
+
+        explorer.set_filter(":rm my".into());
+        assert!(explorer.complete());
+        assert_eq!(explorer.filter, ":rm \"my notes.md\"");
+        assert_eq!(
+            crate::config::split_command(explorer.command_line().unwrap()),
+            vec!["rm", "my notes.md"]
+        );
+    }
+
+    /// Flags and paths into other folders have nothing in this listing to
+    /// complete against, and must not be rewritten into a name that is.
+    #[test]
+    fn tab_leaves_flags_and_nested_paths_alone() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        for line in [":rm -", ":mv src/ma", ":mv "] {
+            explorer.set_filter(line.into());
+            assert!(!explorer.complete(), "{line:?}");
+            assert_eq!(explorer.filter, line);
+        }
     }
 
     #[test]
