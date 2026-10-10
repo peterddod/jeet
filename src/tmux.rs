@@ -214,7 +214,9 @@ pub fn new_window(
                 &format!("{}:", target(name)),
             ]),
         };
-        cmd.args(["-n", title, "-c"]).arg(cwd);
+        // tmux expands formats in a window name, and `#(…)` in one runs a
+        // shell command: the name is the user's, so it goes in literally.
+        cmd.args(["-n", &format_literal(title), "-c"]).arg(cwd);
         for (key, value) in env {
             cmd.arg("-e").arg(format!("{key}={value}"));
         }
@@ -242,12 +244,7 @@ pub fn new_window(
     if !id.starts_with('@') {
         bail!("tmux started a window in session {name} but did not say which ({id:?})");
     }
-    let keyed = quiet()
-        .args(["set-option", "-w", "-t", &id, KEY_OPTION, key])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !keyed {
+    if !set_window_key(&id, key) {
         let _ = kill_window(&id);
         bail!("tmux could not label its new window in session {name}");
     }
@@ -255,6 +252,52 @@ pub fn new_window(
         set_detach_hint(name);
     }
     Ok(id)
+}
+
+/// Key window `id` by `key`, as [`new_window`] does: for a window whose
+/// program has gone on to something else to be known by.
+pub fn set_window_key(id: &str, key: &str) -> bool {
+    quiet()
+        .args(["set-option", "-w", "-t", id, KEY_OPTION, key])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The window this process runs in, by `$TMUX_PANE`, when it is one of
+/// session `name`'s: its id and what it is keyed by.
+pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
+    std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
+    // The pane this process runs in, never whichever the client last used.
+    let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
+    let output = Command::new(binary())
+        .args(["display-message", "-p", "-t", &pane])
+        .arg(format!(
+            "#{{session_name}}\t#{{window_id}}\t#{{{KEY_OPTION}}}"
+        ))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_current_window(&String::from_utf8_lossy(&output.stdout), name)
+}
+
+fn parse_current_window(line: &str, name: &str) -> Option<(String, Option<String>)> {
+    let mut fields = line.trim_end_matches(['\n', '\r']).split('\t');
+    if fields.next()? != name {
+        return None;
+    }
+    let id = fields.next()?.trim();
+    if !id.starts_with('@') {
+        return None;
+    }
+    let key = fields
+        .next()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
+    Some((id.to_string(), key))
 }
 
 /// Make window `id` the one its session shows.
@@ -363,7 +406,13 @@ fn set_detach_hint(name: &str) {
 
 fn detach_hint(prefix: &str) -> String {
     // `#` starts a format in status-right; a prefix key could be `#`.
-    format!(" {} d → jeet ", prefix.replace('#', "##"))
+    format!(" {} d → jeet ", format_literal(prefix))
+}
+
+/// `text` as tmux shows it where it expands formats: `#` starts one, and
+/// `#(…)` runs a shell command, so each is doubled to stand for itself.
+fn format_literal(text: &str) -> String {
+    text.replace('#', "##")
 }
 
 /// Attach the terminal to session `name` until the user detaches, returning
@@ -663,6 +712,31 @@ mod tests {
     fn hint_escapes_format_characters() {
         assert_eq!(detach_hint("C-b"), " C-b d → jeet ");
         assert_eq!(detach_hint("#"), " ## d → jeet ");
+    }
+
+    #[test]
+    fn window_names_cannot_run_formats() {
+        assert_eq!(format_literal("plan the week"), "plan the week");
+        assert_eq!(
+            format_literal("#(touch /tmp/pwned) #{pane_pid} ##"),
+            "##(touch /tmp/pwned) ##{pane_pid} ####"
+        );
+    }
+
+    #[test]
+    fn the_current_window_is_one_of_the_session() {
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\tabc\n", "jeet-assistant"),
+            Some(("@4".into(), Some("abc".into())))
+        );
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\t\n", "jeet-assistant"),
+            Some(("@4".into(), None))
+        );
+        // Another session's window, or nothing sensible.
+        assert!(parse_current_window("jeet-api\t@4\tabc\n", "jeet-assistant").is_none());
+        assert!(parse_current_window("jeet-assistant\t%4\tabc", "jeet-assistant").is_none());
+        assert!(parse_current_window("", "jeet-assistant").is_none());
     }
 
     #[test]

@@ -530,7 +530,16 @@ any messages queued for it.
 Messages for the assistant go to the session you marked primary (`*` in the
 picker) while it runs, else to the most recently active running one, by the
 same idle/busy/not-running rules as a task's agent; with none running, a
-session called `events <date>` starts with them.
+session called `events <date>` starts with them. One queued for a busy session
+waits for that session, not whichever finishes first. Any task's agent can
+send one, so each reaches the assistant fenced as untrusted, with who jeet
+thinks sent it (`task <slug>`, or `the command line`), and the assistant is
+told to read it as a request to weigh, never as your instructions. To tell it
+something as yourself, talk to it in its window.
+
+A `/clear`, a fork or a resume inside a session's window carries on in a new
+session, which follows on from the one before it in that window, keeps its
+name and its queued messages, and is the one `jeet chat` finds there.
 
 The assistant is not a task: it is not listed, opened, archived or deleted
 like one, and no task can be called `assistant`.

@@ -23,6 +23,10 @@
 //! Typed in, text starting with `!`, `/` or `#` would be a shell command, a
 //! slash command or a memory to Claude, not a message; it is marked as one.
 //!
+//! The assistant has several sessions sharing one inbox, so a message queued
+//! for one of them is addressed to it, and only that session takes it; see
+//! [`Agent::session`].
+//!
 //! tmux sits behind [`Agent`], so the routing is tested without it.
 
 use std::fs::{File, OpenOptions};
@@ -55,6 +59,16 @@ const MARKER: &str = "Message: ";
 pub struct Queued {
     pub at: i64,
     pub message: String,
+    /// The session it is for; none for whichever takes it first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+impl Queued {
+    /// Whether session `me` (none: a session not started yet) takes it.
+    pub fn is_for(&self, me: Option<&str>) -> bool {
+        self.to.is_none() || self.to.as_deref() == me
+    }
 }
 
 pub fn inbox_path(task_dir: &Path) -> PathBuf {
@@ -89,11 +103,18 @@ impl Inbox {
         })
     }
 
-    /// Add `message` to the end.
+    /// Add `message` to the end, for whichever session takes it first.
+    #[cfg(test)]
     pub fn push(&self, message: &str) -> Result<()> {
+        self.push_to(message, None)
+    }
+
+    /// Add `message` to the end, for session `to`.
+    pub fn push_to(&self, message: &str, to: Option<&str>) -> Result<()> {
         let mut line = serde_json::to_string(&Queued {
             at: now_secs(),
             message: message.to_string(),
+            to: to.map(str::to_string),
         })?;
         line.push('\n');
         OpenOptions::new()
@@ -140,10 +161,72 @@ impl Inbox {
     }
 
     /// Take everything waiting, oldest first, leaving it empty.
+    #[cfg(test)]
     pub fn take(&self) -> Result<Vec<Queued>> {
         let queued = self.read()?;
         self.replace(&[])?;
         Ok(queued)
+    }
+
+    /// The messages session `me` takes, oldest first.
+    pub fn read_for(&self, me: Option<&str>) -> Result<Vec<Queued>> {
+        Ok(self.read()?.into_iter().filter(|q| q.is_for(me)).collect())
+    }
+
+    /// Leave exactly `mine` waiting for session `me`, and what is for other
+    /// sessions as it was.
+    pub fn replace_for(&self, me: Option<&str>, mine: &[Queued]) -> Result<()> {
+        let mut kept: Vec<Queued> = self.read()?.into_iter().filter(|q| !q.is_for(me)).collect();
+        kept.extend_from_slice(mine);
+        kept.sort_by_key(|q| q.at);
+        self.replace(&kept)
+    }
+
+    /// Take what session `me` takes, oldest first, leaving the rest.
+    pub fn take_for(&self, me: Option<&str>) -> Result<Vec<Queued>> {
+        let mine = self.read_for(me)?;
+        if !mine.is_empty() {
+            self.replace_for(me, &[])?;
+        }
+        Ok(mine)
+    }
+
+    /// Readdress what is queued for session `from` to `to`, which carries
+    /// on its conversation.
+    pub fn readdress(&self, from: &str, to: &str) -> Result<()> {
+        let mut queued = self.read()?;
+        let mut changed = false;
+        for q in queued.iter_mut().filter(|q| q.to.as_deref() == Some(from)) {
+            q.to = Some(to.to_string());
+            changed = true;
+        }
+        match changed {
+            true => self.replace(&queued),
+            false => Ok(()),
+        }
+    }
+
+    /// Let whichever session takes them first have the messages for
+    /// sessions that are no longer running, or they would wait for good.
+    /// `running` lists the sessions that are, and is asked only when a
+    /// message is addressed to one.
+    pub fn release_orphans(&self, running: impl FnOnce() -> Vec<String>) -> Result<()> {
+        let mut queued = self.read()?;
+        if queued.iter().all(|q| q.to.is_none()) {
+            return Ok(());
+        }
+        let running = running();
+        let mut changed = false;
+        for q in &mut queued {
+            if q.to.as_ref().is_some_and(|to| !running.contains(to)) {
+                q.to = None;
+                changed = true;
+            }
+        }
+        match changed {
+            true => self.replace(&queued),
+            false => Ok(()),
+        }
     }
 }
 
@@ -202,6 +285,12 @@ pub trait Agent {
     fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
         status::current_status(task_dir)
     }
+    /// The session it is, when it is one of several sharing the task's
+    /// inbox: what is queued for it is addressed to it, and it takes only
+    /// that and what is for anyone.
+    fn session(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// What became of a message.
@@ -214,7 +303,7 @@ pub enum Delivered {
 
 /// `text` as a message: without control characters, not blank and not too
 /// long.
-fn checked(text: &str) -> Result<String> {
+pub fn checked(text: &str) -> Result<String> {
     let message = clean(text);
     if message.trim().is_empty() {
         bail!("there is no message to send");
@@ -242,21 +331,23 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     let inbox = Inbox::lock(task_dir)?;
     let activity = status::activity(agent.status(task_dir).as_ref(), agent.alive());
     let route = route(&activity, agent.has_hooks());
+    let me = agent.session();
     if route == Route::Queue {
-        inbox.push(&message)?;
+        inbox.push_to(&message, me)?;
         return Ok(Delivered::Queued);
     }
 
-    let earlier = inbox.read()?;
+    let earlier = inbox.read_for(me)?;
     let mut queue = earlier.clone();
     queue.push(Queued {
         at: now_secs(),
         message,
+        to: None,
     });
     let sent = hand_over(&inbox, agent, &queue, route);
     if sent.is_err() {
         // Not delivered, so not taken either.
-        if let Err(e) = inbox.replace(&earlier) {
+        if let Err(e) = inbox.replace_for(me, &earlier) {
             eprintln!("jeet: warning: could not put queued messages back: {e:#}");
         }
     }
@@ -266,12 +357,12 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
 /// Type the task's queue into its idle agent: for an agent that went idle
 /// with no Stop to hand the queue over. True when there was anything.
 pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
-    let queue = inbox.read()?;
+    let queue = inbox.read_for(agent.session())?;
     if queue.is_empty() {
         return Ok(false);
     }
     if let Err(e) = hand_over(inbox, agent, &queue, Route::Type) {
-        if let Err(e) = inbox.replace(&queue) {
+        if let Err(e) = inbox.replace_for(agent.session(), &queue) {
             eprintln!("jeet: warning: could not put queued messages back: {e:#}");
         }
         return Err(e);
@@ -289,7 +380,16 @@ fn hand_over(
     route: Route,
 ) -> Result<Delivered> {
     let n = fitting(queue);
-    inbox.replace(&queue[n..])?;
+    // What does not fit waits for this agent's next turn, not another's.
+    let me = agent.session();
+    let rest: Vec<Queued> = queue[n..]
+        .iter()
+        .map(|q| Queued {
+            to: me.map(str::to_string),
+            ..q.clone()
+        })
+        .collect();
+    inbox.replace_for(me, &rest)?;
     let text = joined(&queue[..n]);
     let sent = match route {
         Route::Start => match agent.start(&marked(&text))? {
@@ -606,16 +706,91 @@ mod tests {
             Queued {
                 at: 1,
                 message: "add tests".into(),
+                to: None,
             },
             Queued {
                 at: 2,
                 message: "and docs".into(),
+                to: None,
             },
         ];
         let value: serde_json::Value = serde_json::from_str(&stop_block(&queued)).unwrap();
         assert_eq!(value["decision"], "block");
         let reason = value["reason"].as_str().unwrap();
         assert!(reason.contains("add tests\n\n---\n\nand docs"), "{reason}");
+    }
+
+    /// One of several sessions sharing an inbox.
+    struct Session<'a>(&'a str, Fake);
+
+    impl Agent for Session<'_> {
+        fn alive(&self) -> bool {
+            self.1.alive()
+        }
+        fn has_hooks(&self) -> bool {
+            true
+        }
+        fn type_in(&self, text: &str) -> Result<()> {
+            self.1.type_in(text)
+        }
+        fn start(&self, prompt: &str) -> Result<bool> {
+            self.1.start(prompt)
+        }
+        fn session(&self) -> Option<&str> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn a_message_queued_for_one_session_is_taken_by_that_one_only() {
+        let task = task_in(Some(State::Running));
+        let busy = Session(
+            "p",
+            Fake {
+                alive: true,
+                ..Fake::default()
+            },
+        );
+        assert_eq!(
+            deliver(task.path(), &busy, "triage PR #7").unwrap(),
+            Delivered::Queued
+        );
+        let inbox = Inbox::lock(task.path()).unwrap();
+        inbox.push("for anyone").unwrap();
+        // Another session finishing first leaves p's message alone.
+        let taken = inbox.take_for(Some("q")).unwrap();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].message, "for anyone");
+        // Nor is it typed into q when q sits idle.
+        let idle = Session(
+            "q",
+            Fake {
+                alive: true,
+                ..Fake::default()
+            },
+        );
+        assert!(!hand_over_queue(&inbox, &idle).unwrap());
+        assert!(idle.1.typed.borrow().is_empty());
+        let taken = inbox.take_for(Some("p")).unwrap();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].message, "triage PR #7");
+        assert!(inbox.read().unwrap().is_empty());
+
+        // A cleared session's messages go on to the one that follows it,
+        // and an ended one's to whichever comes next.
+        inbox.push_to("one", Some("p")).unwrap();
+        inbox.push_to("two", Some("gone")).unwrap();
+        inbox.readdress("p", "p2").unwrap();
+        inbox
+            .release_orphans(|| vec!["p2".to_string(), "q".to_string()])
+            .unwrap();
+        let left = inbox.read().unwrap();
+        assert_eq!(left[0].to.as_deref(), Some("p2"));
+        assert_eq!(left[1].to, None);
+        // Nothing addressed: nobody is asked what is running.
+        inbox.take_for(Some("p2")).unwrap();
+        inbox.push("x").unwrap();
+        inbox.release_orphans(|| unreachable!()).unwrap();
     }
 
     #[test]

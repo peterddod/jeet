@@ -17,6 +17,7 @@ fn jeet_bin() -> Command {
     // is missing unless a test supplies one, and Claude's store is empty.
     cmd.env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
         .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude");
     // Nor pop up notifications, or be held to the assistant's permissions
     // because the suite runs inside its session.
@@ -4650,7 +4651,8 @@ fn task_new_with_a_prompt_starts_its_agent_on_it() {
 // ---------------------------------------------------------------------------
 
 /// A stub `tmux` that keeps windows: each is `win/<n>` beside it, holding
-/// `<pane_dead>\t<key>`. Calls are recorded as [`stub_tmux`] records them.
+/// `<pane_dead>\t<key>`, with the one pane `%<n>`. Calls are recorded as
+/// [`stub_tmux`] records them.
 #[cfg(unix)]
 fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-windows");
@@ -4698,6 +4700,10 @@ case "$1" in
       *) cut -f1 "$f" ;;
     esac ;;
   kill-window) rm -f "$here/win/${target#@}" ;;
+  display-message)
+    f="$here/win/${target#%}"
+    [ -e "$f" ] || exit 1
+    printf 'jeet-assistant\t@%s\t%s\n' "${target#%}" "$(cut -f2 "$f")" ;;
   show-options) echo C-b ;;
 esac
 "#,
@@ -4834,6 +4840,31 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     let sessions = assistant_sessions(&lab);
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[1].1, "plan the week");
+
+    // tmux expands formats in a window's name, and `#(…)` runs a command:
+    // a session's name goes in as it is.
+    succeeded(&lab.jeet_at(
+        &["chat", "--new", "#(touch pwned) #{pane_pid}"],
+        &lab.home(),
+        &env,
+    ));
+    let windows = calls_of(&tmux, "new-window");
+    assert_eq!(
+        value_after(&windows[1], "-n"),
+        "##(touch pwned) ##{pane_pid}"
+    );
+    let third = agent_argv(&windows[1])[2].clone();
+    // Kept as the user wrote it everywhere else.
+    let output = lab.jeet_at(&["chat", "--pick"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("#(touch pwned) #{pane_pid}"),
+        "{}",
+        stdout_of(&output)
+    );
+    std::fs::remove_file(tmux.parent().unwrap().join("win/3")).unwrap();
+    lab.index()
+        .execute("DELETE FROM task_sessions WHERE session_id = ?1", [&third])
+        .unwrap();
 
     // Listed without a terminal; marking one primary shows.
     let output = lab.jeet_at(&["chat", "--pick"], &lab.home(), &env);
@@ -4975,7 +5006,12 @@ fn the_assistant_starts_each_session_with_a_summary_of_the_work() {
         "{context}"
     );
     assert!(context.contains("- [ ] !p1 ship the fix"), "{context}");
-    assert!(context.contains("the build is red"), "{context}");
+    assert!(
+        context.contains(
+            "<jeet-message from=\"the command line\" untrusted=\"true\">\nthe build is red\n</jeet-message>"
+        ),
+        "{context}"
+    );
     // Handed over with the summary, so not again by a Stop.
     assert!(!home.join(".jeet/inbox.jsonl").exists());
     assert_eq!(status_file(&home, &session)["state"], "idle");
@@ -4983,18 +5019,98 @@ fn the_assistant_starts_each_session_with_a_summary_of_the_work() {
     let name = assistant_sessions(&lab)[0].1.clone();
     assert!(name.starts_with("chat "), "{name}");
 
-    // A cleared session follows on from it, and takes its name.
+    // A second session, busy, which a message is queued for.
+    succeeded(&lab.jeet_at(&["chat", "--new", "triage"], &lab.home(), &env));
+    let triage = assistant_sessions(&lab)[1].0.clone();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &triage, &home),
+        &[],
+    ));
+    lab.index()
+        .execute(
+            "UPDATE task_sessions SET is_primary = 1 WHERE session_id = ?1",
+            [&triage],
+        )
+        .unwrap();
+    succeeded(&lab.jeet_at(
+        &["task", "send", "assistant", "for triage"],
+        &lab.home(),
+        &env,
+    ));
+
+    // Cleared in its window, the second session's conversation goes on in
+    // a new one, which follows on from it — not from the first session,
+    // more recently active — takes its name and its messages, and is what
+    // the window is found by from now on.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", &session, &home), &[]));
     let cleared = "66666666-7777-4888-8999-000000000000";
+    let in_window = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("TMUX", "/tmp/tmux-1/default,1,0"),
+        ("TMUX_PANE", "%2"),
+    ];
     let output = lab.hook(
         "SessionStart",
         &hook_input("SessionStart-clear", cleared, &home),
-        &[],
+        &in_window,
     );
     succeeded(&output);
-    assert!(stdout_of(&output).contains("additionalContext"));
+    let context = stdout_of(&output);
+    assert!(context.contains("additionalContext"), "{context}");
+    assert!(context.contains("for triage"), "{context}");
+    let windows = tmux.parent().unwrap().join("win");
+    assert_eq!(
+        std::fs::read_to_string(windows.join("2")).unwrap(),
+        format!("0\t{cleared}")
+    );
+    let parent: Option<String> = lab
+        .index()
+        .query_row(
+            "SELECT parent_id FROM task_sessions WHERE session_id = ?1",
+            [cleared],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent.as_deref(), Some(triage.as_str()));
     let sessions = assistant_sessions(&lab);
-    assert_eq!(sessions[1].0, cleared);
-    assert_eq!(sessions[1].1, name);
+    assert_eq!(sessions[2].0, cleared);
+    assert_eq!(sessions[2].1, "triage");
+    // `jeet chat` finds the conversation where it runs, and starts no
+    // second Claude on it.
+    let started = calls_of(&tmux, "new-window").len();
+    succeeded(&lab.jeet_at(&["chat"], &lab.home(), &env));
+    assert_eq!(calls_of(&tmux, "new-window").len(), started);
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    let output = lab.jeet_at(&["chat", "--pick"], &lab.home(), &env);
+    let listing = stdout_of(&output);
+    let line = |id: &str| {
+        listing
+            .lines()
+            .find(|l| l.contains(id))
+            .unwrap()
+            .to_string()
+    };
+    assert!(!line(cleared).contains("not running"), "{listing}");
+
+    // Cleared outside any window of the assistant's, a session has nothing
+    // to say what it follows on from, so the most recent is not guessed.
+    let outside = "99999999-7777-4888-8999-000000000000";
+    succeeded(&lab.hook(
+        "SessionStart",
+        &hook_input("SessionStart-clear", outside, &home),
+        &[],
+    ));
+    let parent: Option<String> = lab
+        .index()
+        .query_row(
+            "SELECT parent_id FROM task_sessions WHERE session_id = ?1",
+            [outside],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent, None);
 
     // Wherever it has `cd`ed to, the assistant's hooks report as its own.
     let elsewhere = "77777777-7777-4888-8999-000000000000";
@@ -5045,7 +5161,11 @@ fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
     assert!(agent[4].starts_with("events "), "{agent:?}");
     assert_eq!(
         agent[agent.len() - 2..],
-        ["--", "review requested: acme/api #7"]
+        [
+            "--",
+            "<jeet-message from=\"the command line\" untrusted=\"true\">\n\
+             review requested: acme/api #7\n</jeet-message>"
+        ]
     );
     let events = assistant_sessions(&lab)[0].0.clone();
     let home = lab.home().join("assistant");
@@ -5058,8 +5178,21 @@ fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     hook_ok(&lab.hook("Stop", &hook_input("Stop", &planning, &home), &[]));
     succeeded(&lab.jeet_at(&["task", "send", "assistant", "first"], &lab.home(), &env));
+    let fenced = |from: &str, text: &str| {
+        format!("<jeet-message from=\"{from}\" untrusted=\"true\"> {text} </jeet-message>")
+    };
     let typed = calls_of(&tmux, "send-keys");
-    assert_eq!(typed[0], ["send-keys", "-t", "@2", "-l", "--", "first"]);
+    assert_eq!(
+        typed[0],
+        [
+            "send-keys",
+            "-t",
+            "@2",
+            "-l",
+            "--",
+            &fenced("the command line", "first")
+        ]
+    );
     assert_eq!(typed[1], ["send-keys", "-t", "@2", "Enter"]);
 
     // Marked primary, the events session gets them while it runs.
@@ -5069,9 +5202,26 @@ fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
             [&events],
         )
         .unwrap();
-    succeeded(&lab.jeet_at(&["task", "send", "assistant", "second"], &lab.home(), &env));
+    // Sent by a task's agent, it says so.
+    let task = lab.new_task("Fix login");
+    let task_env = [env[0], env[1], ("JEET_TASK_ID", &task_id(&task))];
+    succeeded(&lab.jeet_at(
+        &["task", "send", "assistant", "second"],
+        &lab.home(),
+        &task_env,
+    ));
     let typed = calls_of(&tmux, "send-keys");
-    assert_eq!(typed[2], ["send-keys", "-t", "@1", "-l", "--", "second"]);
+    assert_eq!(
+        typed[2],
+        [
+            "send-keys",
+            "-t",
+            "@1",
+            "-l",
+            "--",
+            &fenced("task fix-login", "second")
+        ]
+    );
 
     // Busy: queued for its Stop hook, which hands it over.
     hook_ok(&lab.hook(
@@ -5081,6 +5231,10 @@ fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
     ));
     succeeded(&lab.jeet_at(&["task", "send", "assistant", "third"], &lab.home(), &env));
     assert_eq!(calls_of(&tmux, "send-keys").len(), 4);
+    // Another session finishing first leaves it for the one it was sent to.
+    let output = lab.hook("Stop", &hook_input("Stop", &planning, &home), &[]);
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "");
     let output = lab.hook("Stop", &hook_input("Stop", &events, &home), &[]);
     let decision: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
     assert_eq!(decision["decision"], "block");
