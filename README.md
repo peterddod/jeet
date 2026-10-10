@@ -563,15 +563,17 @@ todo list and `i` its inbox and activity.
 ```bash
 jeet todo add "fix the cookie" -p 1 --task fix-login   # in priority order
 jeet todo ls [--json]                                  # numbered; also plain `jeet todo`
-jeet todo done 2 [--undo]
-jeet todo rm 3
+jeet todo done cookie [--undo]                         # by its text, or a part only it has
+jeet todo rm 3                                         # or by number
 ```
 
 `~/.jeet/assistant/todo.md` is the list: markdown, one checkbox per item, most
 important first, with an optional `!p1`/`!p2`… priority and `@task-slug` links.
 Everything else in it is kept as written. `jeet todo` changes it under a lock
 and writes it whole, so the assistant's sessions never lose each other's
-edits. The assistant needs no permission for its own list.
+edits. An item is best named by its text: a number is where it was when
+listed, and an item added above it since moves it down. The assistant needs
+no permission for its own list.
 
 ### Watching GitHub
 

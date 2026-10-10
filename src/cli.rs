@@ -304,10 +304,12 @@ pub enum TodoCommands {
         json: bool,
     },
 
-    /// Tick items off, by number
+    /// Tick items off, by text or number
     Done {
-        #[arg(required = true)]
-        ids: Vec<usize>,
+        /// The item's text, or enough of it to tell it apart; or its number
+        /// in `jeet todo ls`, which moves as items are added and removed
+        #[arg(required = true, value_name = "ITEM")]
+        items: Vec<String>,
         /// Put them back as not done
         #[arg(long)]
         undo: bool,
@@ -316,11 +318,13 @@ pub enum TodoCommands {
         json: bool,
     },
 
-    /// Remove items, by number
+    /// Remove items, by text or number
     #[command(alias = "remove")]
     Rm {
-        #[arg(required = true)]
-        ids: Vec<usize>,
+        /// The item's text, or enough of it to tell it apart; or its number
+        /// in `jeet todo ls`, which moves as items are added and removed
+        #[arg(required = true, value_name = "ITEM")]
+        items: Vec<String>,
         /// Print the removed items as JSON
         #[arg(long)]
         json: bool,

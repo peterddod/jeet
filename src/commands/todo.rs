@@ -47,17 +47,25 @@ pub fn add(
     report(&[added], "added", json)
 }
 
-pub fn done(app: &App, ids: &[usize], undo: bool, json: bool) -> Result<()> {
+/// Items are found under the list's lock, by text when the caller gives it:
+/// an item added since the caller looked moves the numbers of those below.
+pub fn done(app: &App, items: &[String], undo: bool, json: bool) -> Result<()> {
     let dir = assistant::home_dir(&app.home);
     assistant::ensure_files(&dir)?;
-    let changed = todo::update(&dir, assistant::TODO, |list| list.set_done(ids, !undo))?;
+    let changed = todo::update(&dir, assistant::TODO, |list| {
+        let ids = list.resolve(items)?;
+        list.set_done(&ids, !undo)
+    })?;
     report(&changed, if undo { "not done" } else { "done" }, json)
 }
 
-pub fn rm(app: &App, ids: &[usize], json: bool) -> Result<()> {
+pub fn rm(app: &App, items: &[String], json: bool) -> Result<()> {
     let dir = assistant::home_dir(&app.home);
     assistant::ensure_files(&dir)?;
-    let removed = todo::update(&dir, assistant::TODO, |list| list.remove(ids))?;
+    let removed = todo::update(&dir, assistant::TODO, |list| {
+        let ids = list.resolve(items)?;
+        list.remove(&ids)
+    })?;
     report(&removed, "removed", json)
 }
 

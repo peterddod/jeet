@@ -5310,7 +5310,23 @@ fn todo_keeps_the_list_in_the_assistants_home() {
     assert!(!lab.jeet(&["todo", "add", "x", "-p", "0"]).status.success());
     assert_eq!(std::fs::read_to_string(&todo).unwrap(), before);
 
-    succeeded(&lab.jeet(&["todo", "rm", "1"]));
+    // Named by its text, an item is found wherever an add has moved it.
+    succeeded(&lab.jeet(&["todo", "add", "urgent", "-p", "1"]));
+    let output = lab.jeet(&["todo", "done", "write the notes", "--json"]);
+    succeeded(&output);
+    let done: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+    assert_eq!(done[0]["id"], 3);
+    assert_eq!(done[0]["title"], "write the notes");
+    assert_eq!(done[0]["done"], true);
+    // A part no other item has will do; one that several have will not.
+    let output = lab.jeet(&["todo", "rm", "e"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("give more of the text"),
+        "{}",
+        stderr_of(&output)
+    );
+    succeeded(&lab.jeet(&["todo", "rm", "URGENT", "cookie"]));
     let items: serde_json::Value =
         serde_json::from_str(stdout_of(&lab.jeet(&["todo", "ls", "--json"])).trim()).unwrap();
     assert_eq!(items.as_array().unwrap().len(), 1);

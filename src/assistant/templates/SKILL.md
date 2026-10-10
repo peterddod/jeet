@@ -57,11 +57,14 @@ a task.
 - `jeet todo ls [--json]` lists the items, numbered.
 - `jeet todo add "<text>" [-p <1-9>] [--task <task>]…` adds one, in
   priority order.
-- `jeet todo done <n>… [--undo]` ticks items off, or puts them back.
-- `jeet todo rm <n>…` removes items.
+- `jeet todo done "<text>"… [--undo]` ticks items off, or puts them back.
+- `jeet todo rm "<text>"…` removes items.
 
-Numbers are positions in the list, so list again after a change before
-using them.
+Name items by their text: the whole of it, its title, or a part no other
+item has. A number from `jeet todo ls` works too, but it is only where the
+item was when you listed: the user adds items from the tasks list, and an
+item added above moves every number below it, so a number can tick off or
+remove the wrong item.
 
 ## Permissions
 

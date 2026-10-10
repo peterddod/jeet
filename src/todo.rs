@@ -234,6 +234,23 @@ impl TodoList {
         }
     }
 
+    /// The number of each item `targets` names, in order. A target is an
+    /// item's number, or its text: all of it, its title (without `!p1` or
+    /// `@slug`), or a part of it no other item has, in any case. A number
+    /// is where the item is now, and moves as items are added before it;
+    /// text names the item the caller saw, wherever it has got to, and
+    /// names none when it has gone.
+    pub fn resolve(&self, targets: &[String]) -> Result<Vec<usize>> {
+        let views = self.views();
+        targets
+            .iter()
+            .map(|target| match target.trim().parse::<usize>() {
+                Ok(id) => self.line_of(id).map(|_| id),
+                Err(_) => find_by_text(&views, target),
+            })
+            .collect()
+    }
+
     /// Add an item, in priority order: before the first open item of lower
     /// priority, or after the last item. Returns it.
     pub fn add(&mut self, text: &str) -> ItemView {
@@ -301,6 +318,45 @@ impl TodoList {
         }
         out.reverse();
         Ok(out)
+    }
+}
+
+/// `text` for comparing: its words, one space apart, in lower case.
+fn comparable(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The number of the item `text` names among `views`: the first whose whole
+/// text or title it is, else the one item with it in its text.
+fn find_by_text(views: &[ItemView], text: &str) -> Result<usize> {
+    let wanted = comparable(text);
+    if wanted.is_empty() {
+        bail!("name an item by its number or its text");
+    }
+    let whole = views
+        .iter()
+        .find(|v| comparable(&v.text) == wanted || comparable(&v.title) == wanted);
+    if let Some(item) = whole {
+        return Ok(item.id);
+    }
+    let partly: Vec<usize> = views
+        .iter()
+        .filter(|v| comparable(&v.text).contains(&wanted))
+        .map(|v| v.id)
+        .collect();
+    match partly.as_slice() {
+        [id] => Ok(*id),
+        [] => bail!("no item reads {text:?}; `jeet todo ls` shows what there is"),
+        ids => {
+            let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+            bail!(
+                "{text:?} is in items {}; give more of the text",
+                ids.join(", ")
+            )
+        }
     }
 }
 
@@ -513,6 +569,43 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("empty"));
+    }
+
+    #[test]
+    fn items_are_found_by_text_wherever_they_have_moved() {
+        let mut list = parse("- [ ] !p2 write the notes\n- [ ] Fix the login cookie @fix-login\n");
+        let names =
+            |targets: &[&str]| -> Vec<String> { targets.iter().map(|t| t.to_string()).collect() };
+        assert_eq!(
+            list.resolve(&names(&["fix the login cookie"])).unwrap(),
+            [2]
+        );
+        // Something added above it moves its number, not its text.
+        list.add("!p1 urgent");
+        assert_eq!(
+            list.resolve(&names(&["Fix the login cookie"])).unwrap(),
+            [3]
+        );
+        // The whole text, the title, a part only it has; numbers as before.
+        assert_eq!(
+            list.resolve(&names(&[
+                "!p2  write the NOTES",
+                "write the notes",
+                "cookie",
+                "1"
+            ]))
+            .unwrap(),
+            [2, 2, 3, 1]
+        );
+        let err = list.resolve(&names(&["the"])).unwrap_err().to_string();
+        assert!(err.contains("items 2, 3"), "{err}");
+        let err = list.resolve(&names(&["gone"])).unwrap_err().to_string();
+        assert!(err.contains("no item reads"), "{err}");
+        assert!(list.resolve(&names(&["  "])).is_err());
+        assert!(list.resolve(&names(&["7"])).is_err());
+        // An exact match wins over items that only contain it.
+        let list = parse("- [ ] notes\n- [ ] notes for the release\n");
+        assert_eq!(list.resolve(&names(&["notes"])).unwrap(), [1]);
     }
 
     #[test]

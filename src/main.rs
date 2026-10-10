@@ -117,10 +117,10 @@ fn run(command: Option<Commands>) -> Result<()> {
                     tasks,
                     json,
                 } => commands::todo::add(&app, &text, priority, &tasks, json)?,
-                TodoCommands::Done { ids, undo, json } => {
-                    commands::todo::done(&app, &ids, undo, json)?
+                TodoCommands::Done { items, undo, json } => {
+                    commands::todo::done(&app, &items, undo, json)?
                 }
-                TodoCommands::Rm { ids, json } => commands::todo::rm(&app, &ids, json)?,
+                TodoCommands::Rm { items, json } => commands::todo::rm(&app, &items, json)?,
             }
         }
         Commands::Explore => {
