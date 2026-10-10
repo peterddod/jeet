@@ -101,12 +101,12 @@ pub fn branch_names(filter: Option<&str>) -> Vec<String> {
         return out;
     };
 
+    // The default branch, and every branch a task has a worktree on: read
+    // from the index, so a tab press never waits on git.
     for repo in repos {
         out.push(repo.default_branch.clone());
-        if let Ok(wts) = app.db.list_worktrees(&repo.id) {
-            for wt in wts {
-                out.push(wt.branch);
-            }
+        if let Ok(rows) = app.db.task_worktrees_of_repo(&repo.id) {
+            out.extend(rows.into_iter().filter_map(|row| row.branch));
         }
     }
 

@@ -126,8 +126,6 @@ pub enum PrLookup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
-    /// Index into [`Explorer::worktree_rows`] of the worktree to remove.
-    RemoveWorktree(usize),
     /// A typed `:rm`, resolved and waiting for a yes.
     Command(super::command::Command),
 }
@@ -135,20 +133,10 @@ pub enum PendingAction {
 #[derive(Debug, Clone)]
 pub enum Overlay {
     /// Selection into [`Explorer::worktree_rows`].
-    Worktrees {
-        selected: usize,
-    },
+    Worktrees { selected: usize },
     Sessions {
         sessions: Vec<AgentSession>,
         selected: usize,
-    },
-    NewWorktree {
-        input: String,
-    },
-    /// Rename the worktree at this index into [`Explorer::worktree_rows`].
-    RenameWorktree {
-        index: usize,
-        input: String,
     },
     Confirm {
         title: String,
@@ -731,8 +719,9 @@ impl Explorer {
     }
 
     pub fn quit_in_place(&mut self) {
-        // A rename can move the directory the shell is sitting in out from
-        // under it; leaving it somewhere that no longer exists helps nobody.
+        // A `:mv`, or a worktree removed from elsewhere, can take the directory
+        // the shell is sitting in away; leaving it somewhere that no longer
+        // exists helps nobody.
         self.exit = if self.origin.is_dir() {
             Exit::Stay
         } else {
@@ -996,7 +985,6 @@ mod tests {
             trunk_path: root.to_string_lossy().to_string(),
             remote_url: "https://github.com/acme/widget.git".into(),
             default_branch: "main".into(),
-            managed: false,
         };
         let config = crate::config::Config {
             agent: Some("claude".into()),

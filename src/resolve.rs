@@ -2,29 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::db::tasks::TaskRecord;
 use crate::db::{Database, RepoRecord};
-
-/// Resolve a repository from an arbitrary path by detecting if it's inside a git repo
-/// and matching against indexed repos. Used to detect current repo from CWD.
-pub fn resolve_repo_from_path(db: &Database, dir: &str) -> Result<RepoRecord> {
-    let path = Path::new(dir);
-    let git_root = crate::git::git_toplevel(path)
-        .map_err(|e| anyhow::anyhow!("resolve repo at {}: {}", path.display(), e))?;
-
-    let repos = db.list_repos(None)?;
-    for repo in &repos {
-        if Path::new(&repo.trunk_path) == git_root {
-            return Ok(repo.clone());
-        }
-    }
-
-    bail!(
-        "Path is in a git repo but not indexed: {}. Run 'jeet adopt {}' to register it.",
-        path.display(),
-        git_root.display()
-    )
-}
 
 pub fn resolve_repo_filter(db: &Database, filter: &str) -> Result<RepoRecord> {
     if let Some(repo) = db.get_repo(filter)? {
@@ -69,47 +47,19 @@ pub struct RepoContext {
     pub repo: RepoRecord,
     /// Root of the worktree (or trunk) containing the directory.
     pub root: PathBuf,
-    /// Checked-out branch, or `None` when HEAD is detached.
-    pub branch: Option<String>,
-    pub is_trunk: bool,
-    /// The task whose directory holds this worktree, if any.
-    pub task: Option<TaskRecord>,
-}
-
-impl RepoContext {
-    pub fn label(&self) -> String {
-        let label = self.checkout_label();
-        match &self.task {
-            Some(task) => format!("{label} in task {}", task.name),
-            None => label,
-        }
-    }
-
-    fn checkout_label(&self) -> String {
-        match (&self.branch, self.is_trunk) {
-            (Some(b), true) => format!("{b} (trunk)"),
-            (Some(b), false) => b.clone(),
-            (None, _) => match crate::git::head_short_sha(&self.root) {
-                Some(sha) => format!("detached @ {sha}"),
-                None => "detached".to_string(),
-            },
-        }
-    }
 }
 
 /// Resolve the repository context for any directory inside a trunk or worktree.
 ///
-/// Unlike [`resolve_repo_from_path`], this works from nested directories and
-/// from linked worktrees, indexing the trunk on demand when it is not known yet.
-/// Inside a task directory it also finds the task, by walking up to the
-/// task's `.jeet/task-id`.
+/// Works from nested directories and from linked worktrees. A repository
+/// that is not in the index is refused, with the way to bring it in: jeet
+/// works on its store and its tasks, not on checkouts elsewhere.
 pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoContext> {
-    // A marker naming a task the index no longer has is a leftover, not a
-    // reason to stop browsing the repository.
-    let task = crate::tasks::task_at(app, dir).unwrap_or(None);
     let root = match crate::git::git_toplevel(dir) {
         Ok(root) => root,
-        Err(_) => match &task {
+        // A marker naming a task the index no longer has is a leftover: say
+        // what is true of the directory instead.
+        Err(_) => match crate::tasks::task_at(app, dir).unwrap_or(None) {
             Some(task) => bail!(
                 "{} is in task {}'s workspace, not in one of its worktrees; \
                  `jeet worktree ls` lists them",
@@ -121,24 +71,15 @@ pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoCont
     };
     let trunk = trunk_for(&root)?;
 
-    let repo = match find_repo_by_trunk(&app.db, &trunk)? {
-        Some(repo) => repo,
-        None => crate::commands::adopt::adopt_path(app, &trunk.to_string_lossy()).map_err(|e| {
-            anyhow::anyhow!(
-                "{} is not indexed and could not be adopted automatically: {e}",
-                trunk.display()
-            )
-        })?,
+    let Some(repo) = find_repo_by_trunk(&app.db, &trunk)? else {
+        bail!(
+            "{} is not in jeet's store; `jeet import {}` brings it and its work into tasks",
+            trunk.display(),
+            trunk.display()
+        );
     };
 
-    let is_trunk = same_path(&root, Path::new(&repo.trunk_path));
-    Ok(RepoContext {
-        branch: crate::git::head_branch(&root),
-        repo,
-        root,
-        is_trunk,
-        task,
-    })
+    Ok(RepoContext { repo, root })
 }
 
 /// Resolve the repository from an explicit filter, else from the current directory.

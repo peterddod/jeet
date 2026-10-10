@@ -174,6 +174,33 @@ fn claude_session_dir(root: &Path) -> Option<PathBuf> {
     Some(claude_projects_dir()?.join(claude_project_slug(&canonical)))
 }
 
+/// Copy the transcripts of the Claude Code sessions started in `from` to
+/// where Claude looks for those started in `to`, so they can be resumed
+/// there. Returns the sessions copied; one already at `to` is left alone and
+/// not counted. `to` must exist: Claude names the store by its real path.
+pub fn copy_claude_sessions(from: &Path, to: &Path) -> Result<Vec<AgentSession>> {
+    let sessions = claude_sessions(from)?;
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (Some(source), Some(dest)) = (claude_session_dir(from), claude_session_dir(to)) else {
+        bail!("could not locate the Claude Code config directory");
+    };
+    std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
+    let mut copied = Vec::new();
+    for session in sessions {
+        let name = format!("{}.jsonl", session.id);
+        let target = dest.join(&name);
+        if target.exists() {
+            continue;
+        }
+        std::fs::copy(source.join(&name), &target)
+            .with_context(|| format!("copy session {}", session.id))?;
+        copied.push(session);
+    }
+    Ok(copied)
+}
+
 /// Whether Claude Code has a transcript of session `id` started in `root`,
 /// i.e. whether `--resume id` there would find anything.
 pub fn claude_has_transcript(root: &Path, id: &str) -> bool {

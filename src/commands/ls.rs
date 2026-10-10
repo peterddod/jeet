@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::context::App;
@@ -8,15 +10,24 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
         println!("no repositories found");
         return Ok(());
     }
-    println!("{:<45} {:<8} TRUNK", "REPO ID", "MANAGED");
+    let store = app.store_root();
+    let mut outside = 0;
+    println!("{:<45} TRUNK", "REPO ID");
     println!("{}", "-".repeat(100));
     for repo in repos {
-        let wt_count = app.db.worktree_count(&repo.id)?;
-        let managed = if repo.managed { "yes" } else { "no" };
-        println!(
-            "{:<45} {:<8} {} ({} worktrees, default: {})",
-            repo.id, managed, repo.trunk_path, wt_count, repo.default_branch
-        );
+        let in_tasks = app.db.task_worktrees_of_repo(&repo.id)?.len();
+        let mut notes = vec![
+            format!("default: {}", repo.default_branch),
+            format!("{in_tasks} in tasks"),
+        ];
+        if !Path::new(&repo.trunk_path).starts_with(&store) {
+            notes.push("outside the store".to_string());
+            outside += 1;
+        }
+        println!("{:<45} {} ({})", repo.id, repo.trunk_path, notes.join(", "));
+    }
+    if outside > 0 {
+        eprintln!("jeet: `jeet import` moves repositories outside the store into it");
     }
     Ok(())
 }

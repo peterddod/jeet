@@ -35,7 +35,7 @@ use crate::context::App;
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
 use crate::review::{self as review_job, JobState};
-use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
+use crate::worktrees::{self, WorktreeStatus};
 
 use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
 pub use term::Tui;
@@ -567,12 +567,9 @@ fn handle_overlay_key(
     }
 
     // Otherwise the browse-mode shortcuts mean nothing in a panel, and letting
-    // them through makes ctrl-d ask to delete a worktree and ctrl-e create one.
-    // The prompts are the exception: they take typed input, and ctrl-u clears.
-    let typing = matches!(
-        overlay,
-        Overlay::NewWorktree { .. } | Overlay::RenameWorktree { .. } | Overlay::ReviewBody { .. }
-    );
+    // them through would act on the listing hidden behind it. The review
+    // body is the exception: it takes typed input, and ctrl-u clears.
+    let typing = matches!(overlay, Overlay::ReviewBody { .. });
     if !typing && ctrl {
         explorer.overlay = Some(overlay);
         return Ok(());
@@ -647,57 +644,6 @@ fn handle_overlay_key(
                     None => explorer.overlay = Some(Overlay::Worktrees { selected }),
                 }
             }
-            KeyCode::Char('n') => {
-                explorer.overlay = Some(Overlay::NewWorktree {
-                    input: String::new(),
-                })
-            }
-            KeyCode::Char('e') => {
-                create_worktree(app, terminal, explorer, None)?;
-            }
-            KeyCode::Char('m') => match explorer.worktree_rows.get(selected) {
-                Some(row) if row.entry.kind == WorktreeKind::Trunk => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot rename".into(),
-                        lines: vec!["the trunk checkout keeps the default branch".into()],
-                        from_panel: true,
-                    });
-                }
-                Some(row) => {
-                    explorer.overlay = Some(Overlay::RenameWorktree {
-                        index: selected,
-                        input: row.entry.branch.clone().unwrap_or_default(),
-                    });
-                }
-                None => explorer.overlay = Some(Overlay::Worktrees { selected }),
-            },
-            KeyCode::Char('d') => match explorer.worktree_rows.get(selected) {
-                Some(row) if row.entry.kind == WorktreeKind::Trunk => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot delete".into(),
-                        lines: vec!["the trunk checkout is not removable".into()],
-                        from_panel: true,
-                    });
-                }
-                Some(row) if row.current => {
-                    explorer.overlay = Some(Overlay::Message {
-                        title: "cannot delete".into(),
-                        lines: vec![
-                            "this is the worktree you are browsing".into(),
-                            "switch somewhere else first (⏎ on another row)".into(),
-                        ],
-                        from_panel: true,
-                    });
-                }
-                Some(row) => {
-                    explorer.overlay = Some(Overlay::Confirm {
-                        title: "delete worktree".into(),
-                        lines: delete_summary(row),
-                        action: PendingAction::RemoveWorktree(selected),
-                    });
-                }
-                None => explorer.overlay = Some(Overlay::Worktrees { selected }),
-            },
             KeyCode::Char('r') => open_worktrees(app, terminal, explorer),
             KeyCode::Char('o') => {
                 match explorer.worktree_rows.get(selected).and_then(|row| row.pr) {
@@ -743,58 +689,6 @@ fn handle_overlay_key(
                 None => explorer.set_status("no session selected"),
             },
             _ => explorer.overlay = Some(Overlay::Sessions { sessions, selected }),
-        },
-        Overlay::RenameWorktree { index, mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, terminal, explorer),
-            KeyCode::Enter => {
-                rename_worktree(app, terminal, explorer, index, input.trim().to_string())?
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.clear();
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            KeyCode::Backspace => {
-                input.pop();
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                input.push(c);
-                explorer.overlay = Some(Overlay::RenameWorktree { index, input });
-            }
-            _ => explorer.overlay = Some(Overlay::RenameWorktree { index, input }),
-        },
-        Overlay::NewWorktree { mut input } => match key.code {
-            KeyCode::Esc => open_worktrees(app, terminal, explorer),
-            KeyCode::Enter => {
-                let name = input.trim().to_string();
-                create_worktree(
-                    app,
-                    terminal,
-                    explorer,
-                    Some(name).filter(|n| !n.is_empty()),
-                )?;
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.clear();
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            KeyCode::Backspace => {
-                input.pop();
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                input.push(c);
-                explorer.overlay = Some(Overlay::NewWorktree { input });
-            }
-            _ => explorer.overlay = Some(Overlay::NewWorktree { input }),
         },
         Overlay::PullRequest {
             pending,
@@ -904,15 +798,6 @@ fn handle_overlay_key(
             lines,
             action,
         } => match (key.code, action) {
-            (KeyCode::Char('y' | 'Y'), PendingAction::RemoveWorktree(index)) => {
-                remove_worktree(app, terminal, explorer, index, false)?
-            }
-            (KeyCode::Char('f' | 'F'), PendingAction::RemoveWorktree(index)) => {
-                remove_worktree(app, terminal, explorer, index, true)?
-            }
-            (KeyCode::Char('n' | 'N') | KeyCode::Esc, PendingAction::RemoveWorktree(_)) => {
-                open_worktrees(app, terminal, explorer);
-            }
             (KeyCode::Char('y' | 'Y'), PendingAction::Command(command)) => {
                 execute_command(app, terminal, explorer, command)?
             }
@@ -930,43 +815,6 @@ fn handle_overlay_key(
         },
     }
     Ok(())
-}
-
-fn delete_summary(row: &WorktreeRow) -> Vec<String> {
-    let mut lines = vec![
-        format!("{} ({})", row.entry.display_name(), row.entry.kind.label()),
-        ui::truncate_start(&row.entry.path.display().to_string(), 58),
-        String::new(),
-    ];
-    if row.status.dirty > 0 {
-        lines.push(format!(
-            "⚠ {} uncommitted change{} will be discarded",
-            row.status.dirty,
-            if row.status.dirty == 1 { "" } else { "s" }
-        ));
-    }
-    if row.status.ahead > 0 {
-        lines.push(format!(
-            "⚠ {} commit{} not on the default branch",
-            row.status.ahead,
-            if row.status.ahead == 1 { "" } else { "s" }
-        ));
-    }
-    if let Some(why) = &row.status.unknown {
-        lines.push(format!("⚠ could not assess this worktree: {why}"));
-    }
-    if row.status.ignored > 0 {
-        lines.push(format!(
-            "⚠ {} ignored file{} (.env, build output) will be deleted",
-            row.status.ignored,
-            if row.status.ignored == 1 { "" } else { "s" }
-        ));
-    }
-    if !row.status.has_anything_to_lose() {
-        lines.push("nothing to lose — clean and fully merged".to_string());
-    }
-    lines.push(format!("diff: {}", row.status.diff_summary()));
-    lines
 }
 
 fn open_worktrees(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
@@ -1088,157 +936,6 @@ fn open_sessions(explorer: &mut Explorer) {
             })
         }
     }
-}
-
-fn create_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    name: Option<String>,
-) -> Result<()> {
-    let Some(repo) = explorer.repo.clone() else {
-        return Ok(());
-    };
-    let label = match &name {
-        Some(branch) => format!("creating {branch} and publishing it"),
-        None => "creating a detached worktree".to_string(),
-    };
-    let branch = name.clone();
-    let result = with_progress(terminal, explorer, &label, move || match &branch {
-        Some(branch) => worktrees::create_named(app, &repo, branch, true),
-        None => worktrees::create_detached(app, &repo).map(|path| worktrees::Outcome {
-            path,
-            warnings: Vec::new(),
-        }),
-    })?;
-    match result {
-        Ok(created) => {
-            switch_worktree(app, explorer, &created.path)?;
-            let what = match name {
-                Some(branch) => format!("created worktree {branch}"),
-                None => "created detached worktree".to_string(),
-            };
-            if created.warnings.is_empty() {
-                explorer.set_status(what);
-            } else {
-                explorer.set_status(format!("{what} — {}", created.warnings.join("; ")));
-            }
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "could not create worktree".into(),
-                lines: vec![format!("{e:#}")],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Rename the worktree at `index`, following it if it is the one we are in.
-fn rename_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    index: usize,
-    new_name: String,
-) -> Result<()> {
-    let Some(row) = explorer.worktree_rows.get(index).cloned() else {
-        return Ok(());
-    };
-    let Some(repo) = explorer.repo.clone() else {
-        return Ok(());
-    };
-    let was = row.entry.display_name();
-    let following = crate::resolve::same_path(&row.entry.path, &explorer.root);
-    let sub_path = explorer
-        .cwd
-        .strip_prefix(&row.entry.path)
-        .map(|rest| rest.to_path_buf())
-        .ok();
-
-    let entry = row.entry.clone();
-    let target = new_name.clone();
-    let outcome = with_progress(
-        terminal,
-        explorer,
-        &format!("renaming to {new_name} and publishing it"),
-        move || worktrees::rename(app, &repo, &entry, &target, true),
-    )?;
-    match outcome {
-        Ok(renamed) => {
-            if following {
-                switch_worktree(app, explorer, &renamed.path)?;
-                // Stay in the directory we were browsing, under its new home.
-                if let Some(rest) = sub_path.filter(|p| !p.as_os_str().is_empty()) {
-                    let landing = renamed.path.join(rest);
-                    if landing.is_dir() {
-                        explorer.cwd = landing;
-                        explorer.reload(None)?;
-                    }
-                }
-            }
-            open_worktrees(app, terminal, explorer);
-            let mut status = format!("renamed {was} to {new_name}");
-            if !renamed.warnings.is_empty() {
-                status.push_str(&format!(" — {}", renamed.warnings.join("; ")));
-            }
-            explorer.set_status(status);
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "could not rename".into(),
-                lines: vec![format!("{e:#}")],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Remove the worktree at `index`. Without `force`, git independently
-/// re-checks for modified, untracked and submodule content at removal time —
-/// which catches anything written since the dialog's status was sampled.
-fn remove_worktree(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    index: usize,
-    force: bool,
-) -> Result<()> {
-    let Some(row) = explorer.worktree_rows.get(index).cloned() else {
-        open_worktrees(app, terminal, explorer);
-        return Ok(());
-    };
-    let Some(repo) = explorer.repo.clone() else {
-        return Ok(());
-    };
-    let entry = row.entry.clone();
-    let outcome = with_progress(
-        terminal,
-        explorer,
-        &format!("removing {}", row.entry.display_name()),
-        move || worktrees::remove(app, &repo, &entry, force),
-    )?;
-    match outcome {
-        Ok(()) => {
-            open_worktrees(app, terminal, explorer);
-            explorer.set_status(format!("removed {}", row.entry.display_name()));
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "not removed".into(),
-                lines: vec![
-                    row.entry.display_name(),
-                    format!("{e:#}"),
-                    String::new(),
-                    "press d again and then f to remove it anyway".into(),
-                ],
-                from_panel: true,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// Move the explorer to another worktree, leaving it where it was if the new

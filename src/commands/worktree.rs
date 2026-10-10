@@ -70,7 +70,7 @@ pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
             let entry = WorktreeEntry {
                 path: path.clone(),
                 branch: git::head_branch(&path),
-                kind: WorktreeKind::Managed,
+                kind: WorktreeKind::Task,
                 last_used: 0,
                 missing: false,
             };

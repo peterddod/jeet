@@ -37,10 +37,12 @@ impl App {
         config::projects_root(&self.home)
     }
 
+    /// Legacy: see [`config::worktrees_root`].
     pub fn worktrees_root(&self) -> PathBuf {
         config::worktrees_root(&self.home)
     }
 
+    /// Legacy: see [`config::ephemeral_root`].
     pub fn ephemeral_root(&self) -> PathBuf {
         config::ephemeral_root(&self.home)
     }

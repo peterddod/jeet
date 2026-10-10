@@ -568,7 +568,7 @@ fn resolve_repo(app: &App, spec: &str) -> Result<RepoRecord> {
     }
 }
 
-fn repo_short_name(repo: &RepoRecord) -> String {
+pub fn repo_short_name(repo: &RepoRecord) -> String {
     repo.id.rsplit('/').next().unwrap_or(&repo.id).to_string()
 }
 
@@ -593,7 +593,7 @@ fn validate_dir_name(name: &str) -> Result<()> {
 
 /// `base`, then `base-2`, `base-3`… — the first name neither a worktree of
 /// the task nor anything else in its directory has.
-fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
+pub fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
     let base = match base.trim_start_matches('.') {
         "" => "repo",
         trimmed => trimmed,
@@ -633,7 +633,7 @@ fn ref_component(name: &str) -> String {
 /// neither archive nor unarchive ever reuse, for work jeet could not put
 /// back. It stays until the user deals with it or deletes the task, and
 /// [`losses`] lists it until then.
-fn keep(trunk: &Path, task_id: &str, dir_name: &str, kind: &str, oid: &str) -> Result<String> {
+pub fn keep(trunk: &Path, task_id: &str, dir_name: &str, kind: &str, oid: &str) -> Result<String> {
     let base = jeet_ref("kept", task_id, dir_name);
     let mut n = 1;
     loop {
