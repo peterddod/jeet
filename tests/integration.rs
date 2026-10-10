@@ -2844,3 +2844,335 @@ fn a_project_task_agent_gets_the_projects_arguments() {
     let dash = argv.iter().position(|a| a == "--").unwrap();
     assert_eq!(argv[dash + 1..], ["aider", "--yes", "--verbose"]);
 }
+
+// ---------------------------------------------------------------------------
+// the tasks list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_tasks_list_needs_a_terminal_and_prints_nothing() {
+    let lab = StoreLab::new();
+    for args in [vec![], vec!["tasks"]] {
+        let output = lab.jeet_at(&args, &lab.home(), &[]);
+        assert!(!output.status.success());
+        assert!(
+            stderr_of(&output).contains("interactive terminal"),
+            "{}",
+            stderr_of(&output)
+        );
+        assert_eq!(stdout_of(&output), "", "stdout stays clean");
+    }
+    // Off a terminal, `jeet projects` is still the list it always was.
+    let output = lab.jeet_at(&["projects"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(stderr_of(&output).contains("no projects"));
+}
+
+/// Whether `script` can give a command a terminal here.
+fn have_script() -> bool {
+    use std::process::Stdio;
+    Command::new("script")
+        .arg("-q")
+        .arg("/dev/null")
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// A jeet screen running in a terminal of its own, typed at through `script`.
+struct Pty {
+    child: std::process::Child,
+    keys: std::process::ChildStdin,
+    /// Everything the screen drew.
+    log: std::path::PathBuf,
+    _dir: TempDir,
+}
+
+impl Pty {
+    /// `jeet <args>` in `cwd`, with `env` on top of the hermetic defaults.
+    fn open(lab: &StoreLab, args: &str, cwd: &std::path::Path, env: &[(&str, &str)]) -> Pty {
+        use std::process::Stdio;
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("typescript");
+        let inner = format!(
+            "stty rows 40 cols 140 && exec '{}' {args}",
+            env!("CARGO_BIN_EXE_jeet")
+        );
+        let mut cmd = Command::new("script");
+        if cfg!(target_os = "linux") {
+            cmd.args(["-q", "-f", "-e", "-c", &inner]).arg(&log);
+        } else {
+            cmd.args(["-q", "-F"]).arg(&log).args(["sh", "-c", &inner]);
+        }
+        hermetic_git(&mut cmd);
+        lab.wire(&mut cmd);
+        cmd.current_dir(cwd)
+            .env("JEET_SYNC_INTERVAL_SECS", "0")
+            .env_remove("JEET_TASK_ID")
+            .env_remove("JEET_CD_FILE")
+            .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+            .env_remove("TMUX")
+            .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude")
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let keys = child.stdin.take().unwrap();
+        Pty {
+            child,
+            keys,
+            log,
+            _dir: dir,
+        }
+    }
+
+    fn type_keys(&mut self, text: &[u8]) {
+        use std::io::Write;
+        self.keys.write_all(text).unwrap();
+        self.keys.flush().unwrap();
+    }
+
+    /// Esc on its own: straight after it, a key would read as alt-key.
+    fn esc(&mut self) {
+        self.type_keys(b"\x1b");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+
+    fn screen(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(&self.log).unwrap_or_default()).to_string()
+    }
+
+    /// Wait for the screen to have drawn `text`, then a moment more for a
+    /// spinner drawn alongside it to finish.
+    fn wait_for_text(&self, text: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !self.screen().contains(text) {
+            if std::time::Instant::now() > deadline {
+                // What was drawn, without the escape sequences.
+                let mut plain = String::new();
+                let mut escaped = false;
+                for c in self.screen().chars() {
+                    match (escaped, c) {
+                        (false, '\x1b') => escaped = true,
+                        (false, c) => plain.push(c),
+                        (true, c) if c.is_ascii_alphabetic() => escaped = false,
+                        _ => {}
+                    }
+                }
+                let tail: String = plain.chars().rev().take(3000).collect();
+                let tail: String = tail.chars().rev().collect();
+                panic!("timed out waiting for the screen to show {text:?}; it drew:\n{tail}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+
+    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!("the screen did not close:\n{}", self.screen());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Whatever made it true may still be finishing on screen.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
+#[test]
+fn the_tasks_list_makes_archives_and_deletes_tasks() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let listed = |archived: bool| {
+        let mut args = vec!["task", "ls"];
+        if archived {
+            args.push("--archived");
+        }
+        stdout_of(&lab.jeet(&args))
+    };
+
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[]);
+    screen.wait_for_text("no tasks yet");
+
+    // A blank form makes an empty canvas under a made-up name.
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task");
+    screen.type_keys(b"\r");
+    wait_until("the empty task", || listed(false).contains("task-1"));
+    assert!(listed(false).contains("empty"), "{}", listed(false));
+
+    // One named, with a worktree of the repository picked from the store.
+    screen.type_keys(b"n");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    screen.type_keys(b"Widget work\t\twidg ");
+    screen.type_keys(b"\r");
+    wait_until("the task with a worktree", || {
+        listed(false).contains("widget-work")
+    });
+    assert!(listed(false).contains("1 wt: widget"), "{}", listed(false));
+    let task = lab.home().join("tasks/widget-work");
+    assert!(task.join("widget/.git").exists());
+
+    // Its worktrees panel, then the explorer straight on its only worktree,
+    // and esc back to the list.
+    screen.type_keys(b"w");
+    screen.wait_for_text("worktrees · ⏎ explore");
+    screen.esc();
+    screen.type_keys(b"e");
+    screen.wait_for_text("acme/widget · type to filter");
+    screen.esc();
+    // Back on the list, which carries on: `q` there quits.
+
+    // A project, from the projects panel.
+    screen.type_keys(b"P");
+    screen.wait_for_text("no projects yet");
+    screen.type_keys(b"n");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"webproj\r");
+    wait_until("the project", || {
+        stdout_of(&lab.jeet(&["projects", "ls"])).contains("webproj")
+    });
+    screen.esc();
+
+    // The new task is selected; archiving it frees its worktree.
+    screen.type_keys(b"a");
+    wait_until("the archive", || listed(true).contains("widget-work"));
+    assert!(!task.join("widget").exists());
+
+    // Over in the archived view, delete it, confirming.
+    screen.type_keys(b"\tD");
+    screen.wait_for_text("delete task Widget work");
+    screen.type_keys(b"y");
+    wait_until("the delete", || !listed(true).contains("widget-work"));
+    assert!(!task.exists());
+    assert!(
+        listed(false).contains("task-1"),
+        "the other task is untouched"
+    );
+
+    screen.type_keys(b"q");
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet tasks exited with {status}");
+}
+
+#[test]
+fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    // Two sessions the agent reported, a second apart.
+    let (older, newer) = (
+        "aaaaaaaa-1111-4111-8111-111111111111",
+        "bbbbbbbb-2222-4222-8222-222222222222",
+    );
+    for session in [older, newer] {
+        let output = lab.hook(
+            "SessionStart",
+            &hook_input("SessionStart", session, &task),
+            &[],
+        );
+        hook_ok(&output);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &env);
+    screen.wait_for_text("jeet · tasks");
+    // No agent is running, and there are two sessions: which one?
+    screen.type_keys(b"\r");
+    screen.wait_for_text("which session?");
+    assert!(
+        calls_of(&tmux, "new-session").is_empty(),
+        "nothing started yet"
+    );
+    // The newest is first; take the older one.
+    screen.type_keys(b"j\r");
+    wait_until("the attach", || {
+        !calls_of(&tmux, "attach-session").is_empty()
+    });
+
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let argv = &started[0];
+    let at = argv.iter().position(|a| a == "--session-id").unwrap();
+    assert_eq!(argv[at + 1], older, "{argv:?}");
+    let attached = calls_of(&tmux, "attach-session");
+    assert_eq!(
+        attached[0][1..],
+        ["-t".to_string(), "=jeet-fix-login".into()]
+    );
+
+    // The agent is running now: ⏎ attaches straight away, no picker.
+    screen.type_keys(b"\r");
+    wait_until("the second attach", || {
+        calls_of(&tmux, "attach-session").len() == 2
+    });
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+
+    screen.type_keys(b"q");
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet tasks exited with {status}");
+}
+
+#[test]
+fn explore_inside_a_task_directory_browses_its_canvas() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    std::fs::create_dir(task.join("notes")).unwrap();
+    let mut screen = Pty::open(&lab, "explore", &task.join("notes"), &[]);
+    screen.wait_for_text("jeet · task Fix login");
+    screen.esc();
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet explore exited with {status}");
+}

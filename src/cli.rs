@@ -13,7 +13,7 @@ use crate::completion_candidates::{
     about = "Global git repo index and worktree manager"
 )]
 pub struct Cli {
-    /// Omit the subcommand to open the file explorer for the repo you are in.
+    /// Omit the subcommand to open the tasks list.
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -80,6 +80,9 @@ pub enum Commands {
     #[command(hide = true)]
     StoreSync,
 
+    /// The tasks list: open, explore, archive and delete tasks (also plain `jeet`)
+    Tasks,
+
     /// Tasks: a workspace directory with any number of worktrees in it
     Task {
         #[command(subcommand)]
@@ -87,6 +90,7 @@ pub enum Commands {
     },
 
     /// Projects: repositories, CLAUDE.md and skills a task can start from
+    /// (with no subcommand: the projects panel on a terminal, else the list)
     Projects {
         #[command(subcommand)]
         command: Option<ProjectCommands>,
@@ -222,7 +226,7 @@ pub enum TaskCommands {
 
 #[derive(Subcommand)]
 pub enum ProjectCommands {
-    /// List projects (the default)
+    /// List projects
     Ls,
 
     /// Make a project and print its directory

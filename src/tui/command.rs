@@ -6,6 +6,12 @@
 //! the work is done with `std::fs`. A path that lands outside the worktree
 //! root — by `..`, by being absolute, or through a symlink — is refused before
 //! anything touches the disk.
+//!
+//! A git checkout below the root — a task's worktree on its canvas, a
+//! submodule, a nested clone — is git's to remove, move or copy, so `rm`,
+//! `mv` and `cp` refuse one, and anything holding one. Deleting a worktree's
+//! folder by hand would take its uncommitted work with it and leave git a
+//! dangling record; moving it would break the link to its trunk.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -148,6 +154,7 @@ impl Command {
                 not_the_root(&from, &root)?;
                 inside(&from, false)?;
                 exists(&from)?;
+                not_a_checkout(&from)?;
                 let to = destination(&from, lexical(&to)?, &real_root)?;
                 if to.starts_with(&from) {
                     bail!("cannot move a folder into itself");
@@ -162,6 +169,8 @@ impl Command {
                 let from = lexical(&from)?;
                 inside(&from, true)?;
                 exists(&from)?;
+                // `cp` follows the source at the top, so check where it leads.
+                not_a_checkout(&physical(&from)?)?;
                 if from.is_dir() && !recursive {
                     bail!("{} is a folder — use cp -r", name(&from));
                 }
@@ -188,6 +197,7 @@ impl Command {
                 not_the_root(&path, &root)?;
                 inside(&path, false)?;
                 exists(&path)?;
+                not_a_checkout(&path)?;
                 let metadata = fs::symlink_metadata(&path)?;
                 if metadata.is_dir() && !recursive {
                     bail!("{} is a folder — use rm -r", name(&path));
@@ -203,7 +213,19 @@ impl Command {
     }
 
     /// Do it. Only ever called on a resolved command.
+    ///
+    /// A folder about to be moved, copied or removed is first searched for a
+    /// git checkout further down. [`Command::resolve`] only looks at the
+    /// folder itself, since it runs on the draw path and a walk may not be
+    /// quick; this runs under the spinner.
     pub fn run(&self) -> Result<()> {
+        match self {
+            Command::Move { from: path, .. } | Command::Remove { path, .. } => {
+                no_checkout_inside(path)?
+            }
+            Command::Copy { from, .. } => no_checkout_inside(&fs::canonicalize(from)?)?,
+            Command::Mkdir { .. } | Command::Touch { .. } => {}
+        }
         match self {
             Command::Move { from, to } => fs::rename(from, to)
                 .with_context(|| format!("mv {} {}", from.display(), to.display())),
@@ -310,6 +332,59 @@ fn not_the_root(path: &Path, root: &Path) -> Result<()> {
         bail!("refused: that is the worktree root");
     }
     Ok(())
+}
+
+/// Where a git checkout goes instead, said with every refusal of one.
+const LEAVE_IT_TO_GIT: &str =
+    "leave it to git (a task's worktree: w in the tasks list, or jeet worktree rm)";
+
+/// Whether `path` is a folder with a `.git` of its own — a worktree, a clone
+/// or a submodule. A symlink is not: removing or moving it leaves its target
+/// alone.
+fn is_checkout(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+        && fs::symlink_metadata(path.join(".git")).is_ok()
+}
+
+fn not_a_checkout(path: &Path) -> Result<()> {
+    if is_checkout(path) {
+        bail!(
+            "refused: {} is a git checkout — {LEAVE_IT_TO_GIT}",
+            name(path)
+        );
+    }
+    Ok(())
+}
+
+/// Refused when the folder `path`, or any folder under it, is a git
+/// checkout. Symlinks are not followed: what they point to is not touched.
+fn no_checkout_inside(path: &Path) -> Result<()> {
+    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    let found = walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .find(|entry| in_git(Path::new(entry.file_name())));
+    let Some(checkout) = found.as_ref().and_then(|entry| entry.path().parent()) else {
+        return Ok(());
+    };
+    let shown = checkout
+        .strip_prefix(path.parent().unwrap_or(path))
+        .unwrap_or(checkout);
+    if checkout == path {
+        bail!(
+            "refused: {} is a git checkout — {LEAVE_IT_TO_GIT}",
+            name(path)
+        );
+    }
+    bail!(
+        "refused: {} holds a git checkout, {} — {LEAVE_IT_TO_GIT}",
+        name(path),
+        shown.display()
+    );
 }
 
 fn exists(path: &Path) -> Result<()> {
@@ -877,6 +952,97 @@ mod tests {
         assert!(!t.root.join("backup").exists());
         run("rm main.rs");
         assert!(!t.root.join("main.rs").exists());
+    }
+
+    /// A task's canvas: no `.git` at the root, a worktree in `api` (its
+    /// `.git` a file pointing into the trunk), and a nested clone further
+    /// down in `vendor`.
+    fn canvas() -> Tree {
+        let dir = TempDir::new().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let root = base.join("task");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("api/src")).unwrap();
+        fs::write(
+            root.join("api/.git"),
+            "gitdir: /store/api/.git/worktrees/api\n",
+        )
+        .unwrap();
+        fs::write(root.join("api/src/lib.rs"), "uncommitted").unwrap();
+        fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+        fs::write(root.join("vendor/lib/x.c"), "x").unwrap();
+        fs::write(root.join("notes.md"), "n").unwrap();
+        fs::create_dir(&outside).unwrap();
+        Tree {
+            _dir: dir,
+            root,
+            outside,
+        }
+    }
+
+    #[test]
+    fn a_worktree_on_the_canvas_is_left_to_git() {
+        let t = canvas();
+        let api = t.root.join("api");
+        for (line, cwd) in [
+            ("rm -r api", &t.root),
+            ("rm api", &t.root),
+            ("mv api other", &t.root),
+            ("mv api vendor", &t.root),
+            ("cp -r api copy", &t.root),
+            ("rm -r ./api/src/..", &t.root),
+            ("rm -r .", &api),
+            ("mv ../../api ../../x", &api.join("src")),
+        ] {
+            let why = refused(line, cwd, &t.root);
+            assert!(why.contains("git checkout"), "{line:?}: {why}");
+            assert!(why.contains("jeet worktree rm"), "{line:?}: {why}");
+        }
+        assert_eq!(
+            fs::read_to_string(api.join("src/lib.rs")).unwrap(),
+            "uncommitted"
+        );
+
+        // A link to it is only a link: removing it leaves the worktree be,
+        // but copying follows it, so that is refused too.
+        std::os::unix::fs::symlink(&api, t.root.join("link")).unwrap();
+        assert!(refused("cp -r link copy", &t.root, &t.root).contains("git checkout"));
+        resolve("rm link", &t.root, &t.root).unwrap().run().unwrap();
+        assert!(api.join(".git").is_file());
+
+        // Inside the worktree, files are anyone's.
+        for line in ["mv api/src/lib.rs api/src/main.rs", "rm -r api/src"] {
+            resolve(line, &t.root, &t.root).unwrap().run().unwrap();
+        }
+        assert!(!api.join("src").exists());
+        assert!(api.join(".git").is_file());
+    }
+
+    #[test]
+    fn a_folder_holding_a_checkout_is_refused_before_anything_is_touched() {
+        let t = canvas();
+        for line in ["rm -r vendor", "mv vendor elsewhere", "cp -r vendor copy"] {
+            // Resolving looks at the folder alone, so it lets these by; the
+            // walk under the spinner is what stops them.
+            let command = resolve(line, &t.root, &t.root).unwrap();
+            let why = command.run().unwrap_err().to_string();
+            assert!(
+                why.contains("holds a git checkout, vendor/lib"),
+                "{line:?}: {why}"
+            );
+        }
+        assert!(t.root.join("vendor/lib/x.c").is_file());
+        assert!(!t.root.join("elsewhere").exists());
+        assert!(!t.root.join("copy").exists());
+        assert!(t.outside.is_dir());
+
+        // Once the checkout itself is gone, the folder is just a folder.
+        fs::remove_dir_all(t.root.join("vendor/lib/.git")).unwrap();
+        resolve("rm -r vendor", &t.root, &t.root)
+            .unwrap()
+            .run()
+            .unwrap();
+        assert!(!t.root.join("vendor").exists());
     }
 
     #[test]

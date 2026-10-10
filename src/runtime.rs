@@ -246,19 +246,29 @@ pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
 /// What the task's agent is doing. Runs tmux and reads files, so it belongs
 /// on a background thread, not in a draw.
 pub fn activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
-    let dir = tasks::task_dir(app, task);
-    let alive = tmux_ok && tmux::pane_alive(&session_name(task));
-    status::activity(status::current_status(&dir).as_ref(), alive)
+    activity_at(&tasks::task_dir(app, task), &session_name(task), tmux_ok)
+}
+
+/// [`activity`] for the task in `dir` whose tmux session is `session`, for
+/// a thread that has no index to look the task up in.
+pub fn activity_at(dir: &Path, session: &str, tmux_ok: bool) -> Activity {
+    let alive = tmux_ok && tmux::pane_alive(session);
+    status::activity(status::current_status(dir).as_ref(), alive)
 }
 
 /// When anything last happened in the task: jeet touching it, a hook
 /// reporting, or a session writing its transcript.
 pub fn last_activity(app: &App, task: &TaskRecord) -> i64 {
-    let dir = tasks::task_dir(app, task);
+    last_activity_at(&tasks::task_dir(app, task), task.last_activity)
+}
+
+/// [`last_activity`] for the task in `dir` that jeet last touched at
+/// `touched`.
+pub fn last_activity_at(dir: &Path, touched: i64) -> i64 {
     [
-        Some(task.last_activity),
-        status::latest_status_mtime(&dir),
-        agent::claude_latest_activity(&dir),
+        Some(touched),
+        status::latest_status_mtime(dir),
+        agent::claude_latest_activity(dir),
     ]
     .into_iter()
     .flatten()

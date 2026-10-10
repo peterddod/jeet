@@ -191,7 +191,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!(" vs {}", explorer.repo.default_branch),
+            match &explorer.repo {
+                Some(repo) => format!(" vs {}", repo.default_branch),
+                None => String::new(),
+            },
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -265,7 +268,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         ])
     };
 
-    let heading = format!(" jeet · {} ", explorer.repo.id);
+    let heading = match &explorer.repo {
+        Some(repo) => format!(" jeet · {} ", repo.id),
+        None => format!(" jeet · task {} ", explorer.root_label),
+    };
     let mut block = Block::default().borders(Borders::ALL).title(Span::styled(
         heading.clone(),
         Style::default()
@@ -1320,7 +1326,7 @@ pub fn truncate(text: &str, width: usize) -> String {
 }
 
 /// A centered box sized to its content (plus borders), clamped to the frame.
-fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
+pub(super) fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
     let width = (cols as u16).saturating_add(2).min(area.width);
     let height = (lines as u16).saturating_add(2).min(area.height);
     Rect {
@@ -1332,7 +1338,7 @@ fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
 }
 
 /// A centered box `lines` rows tall (plus borders), clamped to the frame.
-fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
+pub(super) fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
     let wanted = (lines as u16).saturating_add(2);
     let height = wanted.min(area.height);
     let top = area.height.saturating_sub(height) / 2;
@@ -1354,7 +1360,7 @@ fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1641,7 +1647,7 @@ mod tests {
             managed: true,
         };
         let mut explorer = Explorer::new(
-            repo,
+            Some(repo),
             dir.path().to_path_buf(),
             "feature".into(),
             "worktree".into(),
@@ -1683,6 +1689,41 @@ mod tests {
         assert!(explorer.pr_area.is_none(), "30 columns has no room for it");
     }
 
+    /// A task's canvas is headed by its task, with no branch to compare.
+    #[test]
+    fn a_canvas_is_headed_by_its_task() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        let mut explorer = Explorer::new(
+            None,
+            dir.path().to_path_buf(),
+            "Fix login".into(),
+            "task canvas".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut explorer)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("jeet · task Fix login"), "{screen}");
+        assert!(screen.contains("[task canvas]"), "{screen}");
+        assert!(!screen.contains(" vs "), "{screen}");
+        assert!(screen.contains("notes/"), "{screen}");
+    }
+
     /// A command line is labelled as one, shown without its colon, and the
     /// listing title talks about the operand rather than the whole line.
     #[test]
@@ -1700,7 +1741,7 @@ mod tests {
             managed: true,
         };
         let mut explorer = Explorer::new(
-            repo,
+            Some(repo),
             dir.path().to_path_buf(),
             "feature".into(),
             "worktree".into(),

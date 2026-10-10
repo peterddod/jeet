@@ -14,39 +14,32 @@
 pub mod command;
 pub mod review;
 pub mod state;
+pub mod tasks;
+mod tasks_ui;
+pub mod term;
 pub mod ui;
 
-use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::cursor::Show;
+use anyhow::Result;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::crossterm::execute;
-use ratatui::crossterm::style::Print;
-use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 use crate::agent::{self, AgentSpec};
 use crate::context::App;
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
-use crate::resolve::RepoContext;
 use crate::review::{self as review_job, JobState};
 use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
 
 use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
-
-type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub use term::Tui;
+use term::{init_terminal, restore_terminal, suspended};
 
 /// Said when a key needs a highlighted row and the filter has left none.
 const NO_MATCH: &str = "nothing matches — ⌫ to widen the filter";
@@ -64,6 +57,10 @@ fn nothing_to_act_on(explorer: &Explorer) -> &'static str {
         (true, _) => "nothing here but hidden files — ctrl-d shows them",
     }
 }
+
+/// Said when a repository key is pressed on a task's canvas.
+const NOT_A_REPOSITORY: &str =
+    "the task canvas is not a repository — open one of its worktrees for that";
 
 /// Said when the highlighted row is a file and the key wanted a folder.
 const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
@@ -83,164 +80,81 @@ fn report_step(explorer: &mut Explorer, step: Step) {
     }
 }
 
-/// Ask the terminal for button and wheel reports, in SGR encoding.
-///
-/// Not crossterm's `EnableMouseCapture`: that also turns on `?1003h`,
-/// any-motion tracking, and then every wipe of the pointer across the window
-/// wakes the event loop and redraws the whole listing for nothing. `?1002h`
-/// reports presses, releases and drags, which is all we act on.
-const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
-const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l";
+/// Run the explorer on a terminal of its own, returning where the shell
+/// should end up. `repo` is None for a task's canvas, which is no repository.
+pub fn run(app: &App, repo: Option<&RepoRecord>, root: &Path, start_dir: &Path) -> Result<Exit> {
+    // Keep git's own output off the alternate screen.
+    crate::git::set_capture_output(true);
+    let mut terminal = init_terminal()?;
+    let result = explore(&mut terminal, app, repo, root, start_dir, None);
+    restore_terminal(&mut terminal)?;
+    crate::git::set_capture_output(false);
+    result
+}
 
-/// Run the explorer, returning where the shell should end up.
-pub fn run(app: &App, ctx: &RepoContext, start_dir: &Path) -> Result<Exit> {
+/// Run the explorer on a terminal that is already up — the tasks list's —
+/// returning how it was left. With `back`, esc on an empty filter leaves it
+/// with [`Exit::Back`] for that screen rather than quitting jeet.
+pub fn explore(
+    terminal: &mut Tui,
+    app: &App,
+    repo: Option<&RepoRecord>,
+    root: &Path,
+    start_dir: &Path,
+    back: Option<&str>,
+) -> Result<Exit> {
     let spec = AgentSpec::from_config(&app.config)?;
-    let (label, kind, status) = describe_root(app, &ctx.repo, &ctx.root);
+    let (label, kind, status) = describe_root(app, repo, root);
 
     let mut explorer = Explorer::new(
-        ctx.repo.clone(),
-        ctx.root.clone(),
+        repo.cloned(),
+        root.to_path_buf(),
         label,
         kind,
         status,
         start_dir.to_path_buf(),
         spec,
     )?;
-    explorer.set_status(format!(
-        "{} · type to filter · F1 for keys",
-        explorer.repo.trunk_path.clone()
-    ));
+    explorer.back = back.map(str::to_string);
+    if explorer.back.is_some() {
+        // The shell is wherever jeet was started, not where this screen
+        // opened the explorer: ctrl-q has to move it even from here.
+        if let Ok(cwd) = std::env::current_dir() {
+            explorer.origin = cwd;
+        }
+    }
+    let place = match &explorer.repo {
+        Some(repo) => repo.trunk_path.clone(),
+        None => format!("task {}", explorer.root_label),
+    };
+    let way_back = match &explorer.back {
+        Some(screen) => format!(" · esc back to {screen}"),
+        None => String::new(),
+    };
+    explorer.set_status(format!("{place} · type to filter · F1 for keys{way_back}"));
     refresh_diffs(&mut explorer);
     start_pr_lookup(&mut explorer);
 
-    // Keep git's own output off the alternate screen.
-    crate::git::set_capture_output(true);
-    let mut terminal = init_terminal()?;
-    let result = event_loop(app, &mut terminal, &mut explorer);
-    restore_terminal(&mut terminal)?;
-    crate::git::set_capture_output(false);
-    result?;
+    event_loop(app, terminal, &mut explorer)?;
     Ok(explorer.exit.clone())
 }
 
-fn init_terminal() -> Result<Tui> {
-    install_safety_net();
-    enable_raw_mode().context("enable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Print(MOUSE_ON)).context("enter alternate screen")?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")?;
-    // `jeet review` talks on stderr right up to this point, and a terminal
-    // that does not blank its alternate screen would leave that showing
-    // through every cell the first frame leaves empty.
-    terminal.clear().context("clear terminal")?;
-    Ok(terminal)
-}
-
-/// Put the terminal back however we leave: panic, or a signal from outside.
-///
-/// Raw mode swallows ctrl-c (we handle it as a key), so the only way a signal
-/// arrives is from elsewhere — `pkill`, an IDE tearing the session down, the
-/// window closing. Without this the user is left with no echo, no line editing
-/// and the alternate screen still up, recoverable only with `reset`.
-fn install_safety_net() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            emergency_restore();
-            previous(info);
-        }));
-
-        #[cfg(unix)]
-        for signal in [
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGHUP,
-            signal_hook::consts::SIGQUIT,
-        ] {
-            // SAFETY: the handler only restores terminal modes and re-raises;
-            // leaving the terminal wedged is the worse outcome by far.
-            unsafe {
-                let _ = signal_hook::low_level::register(signal, move || {
-                    emergency_restore();
-                    let _ = signal_hook::low_level::emulate_default_handler(signal);
-                });
-            }
-        }
-    });
-}
-
-/// Best-effort teardown for paths that cannot return a `Result`.
-fn emergency_restore() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Print(MOUSE_OFF), LeaveAlternateScreen, Show);
-}
-
-fn restore_terminal(terminal: &mut Tui) -> Result<()> {
-    disable_raw_mode().context("disable raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        Print(MOUSE_OFF),
-        LeaveAlternateScreen
-    )
-    .context("leave alternate screen")?;
-    terminal.show_cursor().context("show cursor")?;
-    Ok(())
-}
-
-/// Drop out of the alternate screen, run `f`, then restore the explorer.
-fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
-    restore_terminal(terminal)?;
-    let out = f();
-    enable_raw_mode().context("enable raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        Print(MOUSE_ON)
-    )
-    .context("enter alternate screen")?;
-    terminal.clear().context("clear terminal")?;
-    Ok(out)
-}
-
-/// Run `job` on a background thread while the UI keeps drawing.
-///
-/// git is slow and the network is slower — a `git push` on worktree creation
-/// froze the whole explorer for as long as the remote took, with nothing on
-/// screen to say why. Keystrokes that arrive meanwhile are dropped rather than
-/// queued, so they cannot fire against a screen the user never saw.
+/// [`term::with_progress`], drawing the explorer under the spinner.
 fn with_progress<T: Send>(
     terminal: &mut Tui,
     explorer: &mut Explorer,
     label: &str,
     job: impl FnOnce() -> T + Send,
 ) -> Result<T> {
-    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-    let (tx, rx) = mpsc::channel();
-
-    let outcome = std::thread::scope(|scope| -> Result<T> {
-        scope.spawn(move || {
-            let _ = tx.send(job());
-        });
-        let mut tick = 0usize;
-        loop {
-            match rx.try_recv() {
-                Ok(value) => return Ok(value),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    anyhow::bail!("background task failed")
-                }
-            }
-            explorer.working = Some(format!(" {} {label} ", FRAMES[tick % FRAMES.len()]));
-            terminal.draw(|frame| ui::draw(frame, explorer))?;
-            tick += 1;
-            while event::poll(Duration::from_millis(0))? {
-                let _ = event::read();
-            }
-            std::thread::sleep(Duration::from_millis(80));
-        }
-    });
-
+    let outcome = term::with_progress(
+        terminal,
+        label,
+        |frame, working| {
+            explorer.working = Some(working.to_string());
+            ui::draw(frame, explorer);
+        },
+        job,
+    );
     explorer.working = None;
     outcome
 }
@@ -336,6 +250,11 @@ fn handle_browse_key(
             start_pr_lookup(explorer);
             explorer.set_status("refreshed");
         }
+        // A task's canvas is no repository: nothing to diff, no PR, no
+        // worktrees of its own.
+        KeyCode::Char('f' | 'p' | 'o' | 'w') if ctrl && explorer.repo.is_none() => {
+            explorer.set_status(NOT_A_REPOSITORY);
+        }
         KeyCode::Char('f') if ctrl => {
             // The highlighted row, or the folder being listed when the filter
             // has left nothing highlighted.
@@ -405,7 +324,7 @@ fn handle_browse_key(
             if explorer.clear_filter() {
                 explorer.set_status("");
             } else {
-                explorer.quit_in_place();
+                explorer.leave();
             }
         }
 
@@ -783,7 +702,7 @@ fn handle_overlay_key(
             KeyCode::Char('o') => {
                 match explorer.worktree_rows.get(selected).and_then(|row| row.pr) {
                     Some(number) => {
-                        let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                        let trunk = explorer.trunk();
                         let opened =
                             with_progress(terminal, explorer, "opening the browser", || {
                                 github::open_in_browser(&trunk, number)
@@ -943,7 +862,7 @@ fn handle_overlay_key(
             },
             KeyCode::Char('o') => {
                 if let Some(number) = rows.get(selected).map(|r| r.pr.number) {
-                    let trunk = PathBuf::from(&explorer.repo.trunk_path);
+                    let trunk = explorer.trunk();
                     let opened = with_progress(terminal, explorer, "opening the browser", || {
                         github::open_in_browser(&trunk, number)
                     })?;
@@ -1051,7 +970,10 @@ fn delete_summary(row: &WorktreeRow) -> Vec<String> {
 }
 
 fn open_worktrees(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return;
+    };
     let root = explorer.root.clone();
     let rows = with_progress(terminal, explorer, "reading worktrees", || {
         collect_rows(app, &repo, &root)
@@ -1174,7 +1096,9 @@ fn create_worktree(
     explorer: &mut Explorer,
     name: Option<String>,
 ) -> Result<()> {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        return Ok(());
+    };
     let label = match &name {
         Some(branch) => format!("creating {branch} and publishing it"),
         None => "creating a detached worktree".to_string(),
@@ -1222,6 +1146,9 @@ fn rename_worktree(
     let Some(row) = explorer.worktree_rows.get(index).cloned() else {
         return Ok(());
     };
+    let Some(repo) = explorer.repo.clone() else {
+        return Ok(());
+    };
     let was = row.entry.display_name();
     let following = crate::resolve::same_path(&row.entry.path, &explorer.root);
     let sub_path = explorer
@@ -1230,7 +1157,6 @@ fn rename_worktree(
         .map(|rest| rest.to_path_buf())
         .ok();
 
-    let repo = explorer.repo.clone();
     let entry = row.entry.clone();
     let target = new_name.clone();
     let outcome = with_progress(
@@ -1284,7 +1210,9 @@ fn remove_worktree(
         open_worktrees(app, terminal, explorer);
         return Ok(());
     };
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        return Ok(());
+    };
     let entry = row.entry.clone();
     let outcome = with_progress(
         terminal,
@@ -1320,7 +1248,7 @@ fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()
     // touching anything if the new root cannot be read, and it is the only
     // thing that keeps the filter and the visible rows in step with `entries`.
     explorer.show(path.to_path_buf(), None)?;
-    let (label, kind, status) = describe_root(app, &explorer.repo, path);
+    let (label, kind, status) = describe_root(app, explorer.repo.as_ref(), path);
     explorer.root = path.to_path_buf();
     explorer.root_label = label;
     explorer.root_kind = kind;
@@ -1332,7 +1260,7 @@ fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()
 }
 
 fn refresh_root_status(app: &App, explorer: &mut Explorer) {
-    let (label, kind, status) = describe_root(app, &explorer.repo, &explorer.root.clone());
+    let (label, kind, status) = describe_root(app, explorer.repo.as_ref(), &explorer.root.clone());
     explorer.root_label = label;
     explorer.root_kind = kind;
     explorer.root_status = status;
@@ -1343,7 +1271,11 @@ fn refresh_root_status(app: &App, explorer: &mut Explorer) {
 /// the same base, and the same working-tree-inclusive diff, as the header's
 /// counter, so the listing adds up to what the header says.
 fn refresh_diffs(explorer: &mut Explorer) {
-    let base = worktrees::comparison_base(&explorer.repo);
+    let Some(repo) = &explorer.repo else {
+        explorer.diffs = DiffMap::default();
+        return;
+    };
+    let base = worktrees::comparison_base(repo);
     let merge_base = crate::git::merge_base(&explorer.root, &base);
     let files = merge_base
         .as_deref()
@@ -1355,8 +1287,13 @@ fn refresh_diffs(explorer: &mut Explorer) {
 /// Look the worktree's PR up on a background thread; the event loop picks
 /// the answer up when it lands, so opening the explorer never waits on it.
 fn start_pr_lookup(explorer: &mut Explorer) {
+    let Some(repo) = &explorer.repo else {
+        explorer.pr = PrLookup::Missing;
+        explorer.pr_updates = None;
+        return;
+    };
     let root = explorer.root.clone();
-    let default_branch = explorer.repo.default_branch.clone();
+    let default_branch = repo.default_branch.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let lookup = match crate::git::head_branch(&root) {
@@ -1398,8 +1335,8 @@ fn take_pr_update(app: &App, explorer: &mut Explorer) {
 }
 
 fn load_review_job(app: &App, explorer: &mut Explorer) {
-    explorer.review_job = match &explorer.pr {
-        PrLookup::Found(pr) => review_job::load(app, &explorer.repo, pr.number),
+    explorer.review_job = match (&explorer.pr, &explorer.repo) {
+        (PrLookup::Found(pr), Some(repo)) => review_job::load(app, repo, pr.number),
         _ => None,
     };
 }
@@ -1489,7 +1426,10 @@ fn open_pr_panel(app: &App, terminal: &mut Tui, explorer: &mut Explorer, refetch
 /// ctrl-o: the repository's open PRs, with the cursor on `keep` if it is
 /// still open, else on this worktree's own PR, else at the top.
 fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: Option<u64>) {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return;
+    };
     let rows = with_progress(terminal, explorer, "reading pull requests", || {
         crate::commands::prs::rows(app, &repo)
     })
@@ -1498,7 +1438,7 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
         Ok(rows) if rows.is_empty() => {
             explorer.overlay = Some(Overlay::Message {
                 title: "pull requests".into(),
-                lines: vec![format!("{} has no open pull requests", explorer.repo.id)],
+                lines: vec![format!("{} has no open pull requests", repo.id)],
                 from_panel: false,
             });
         }
@@ -1534,7 +1474,9 @@ fn check_out_pr(
     rows: Vec<crate::commands::prs::PrRow>,
     selected: usize,
 ) -> Result<()> {
-    let repo = explorer.repo.clone();
+    let Some(repo) = explorer.repo.clone() else {
+        return Ok(());
+    };
     let outcome = with_progress(
         terminal,
         explorer,
@@ -1706,10 +1648,14 @@ fn open_review_viewer(
 /// ctrl-f: step through the diff of a file or folder against the merge base,
 /// in whatever `git difftool` is set up to use.
 fn view_diff(app: &App, terminal: &mut Tui, explorer: &mut Explorer, path: &Path) -> Result<()> {
+    let Some(default_branch) = explorer.repo.as_ref().map(|r| r.default_branch.clone()) else {
+        explorer.set_status(NOT_A_REPOSITORY);
+        return Ok(());
+    };
     let Some(base) = explorer.diffs.merge_base.clone() else {
         explorer.set_status(format!(
             "no common history with {} to diff against",
-            explorer.repo.default_branch
+            default_branch
         ));
         return Ok(());
     };
@@ -1727,10 +1673,7 @@ fn view_diff(app: &App, terminal: &mut Tui, explorer: &mut Explorer, path: &Path
         rel.display().to_string()
     };
     if !changed {
-        explorer.set_status(format!(
-            "no changes in {shown} against {}",
-            explorer.repo.default_branch
-        ));
+        explorer.set_status(format!("no changes in {shown} against {}", default_branch));
         return Ok(());
     }
 
@@ -1776,7 +1719,24 @@ fn default_diff_tool(app: &App) -> &'static str {
 }
 
 /// Branch label, worktree kind and counters for the worktree at `root`.
-fn describe_root(app: &App, repo: &RepoRecord, root: &Path) -> (String, String, WorktreeStatus) {
+fn describe_root(
+    app: &App,
+    repo: Option<&RepoRecord>,
+    root: &Path,
+) -> (String, String, WorktreeStatus) {
+    let Some(repo) = repo else {
+        // A task's canvas: named for its task, with no branch or counters.
+        let name = crate::tasks::task_at(app, root)
+            .ok()
+            .flatten()
+            .map(|task| task.name)
+            .unwrap_or_else(|| {
+                root.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string())
+            });
+        return (name, "task canvas".to_string(), WorktreeStatus::default());
+    };
     let entries = worktrees::list(app, repo).unwrap_or_default();
     if let Some(entry) = entries
         .iter()
@@ -1841,10 +1801,10 @@ fn display_relative(explorer: &Explorer, path: &Path) -> String {
 }
 
 /// Directory the explorer should start listing, given where the user ran jeet.
-pub fn start_dir(ctx: &RepoContext, cwd: &Path) -> PathBuf {
-    if cwd.starts_with(&ctx.root) {
+pub fn start_dir(root: &Path, cwd: &Path) -> PathBuf {
+    if cwd.starts_with(root) {
         cwd.to_path_buf()
     } else {
-        ctx.root.clone()
+        root.to_path_buf()
     }
 }
