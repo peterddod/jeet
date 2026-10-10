@@ -84,6 +84,16 @@ impl AgentSpec {
         }
     }
 
+    /// Arguments that give an interactive session its first prompt, after
+    /// every other argument. `--` first, so a prompt that starts with a dash
+    /// is a prompt, not a flag.
+    pub fn prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec!["--".to_string(), prompt.to_string()]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
     pub fn supports_sessions(&self) -> bool {
         self.kind == AgentKind::ClaudeCode
     }
@@ -357,6 +367,13 @@ mod tests {
         assert!(spec.resume_args("x").is_none());
         assert!(spec.new_session_args("x", "task").is_none());
         assert!(spec.settings_args("{}").is_none());
+        assert!(spec.prompt_args("go").is_none());
+    }
+
+    #[test]
+    fn a_first_prompt_comes_after_the_options() {
+        let spec = AgentSpec::from_command("claude").unwrap();
+        assert_eq!(spec.prompt_args("--help me").unwrap(), ["--", "--help me"]);
     }
 
     #[test]

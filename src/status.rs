@@ -9,6 +9,12 @@
 //! A hook runs on every tool call, so it has to be quick (well under 50ms),
 //! must never print to stdout — Claude would read it as hook output — and
 //! always exits 0: a broken status line must never get in the agent's way.
+//!
+//! The one exception: a Stop hook that finds messages queued for the agent
+//! by `jeet task send` prints Claude's `block` decision with them, so the
+//! agent carries on with them instead of stopping. A turn the user
+//! interrupts ends with no Stop, so Claude's `idle_prompt` notification types
+//! anything still queued into the agent's pane instead.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -18,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::App;
 use crate::db::tasks::TaskSessionRecord;
+use crate::messages;
 use crate::tasks;
 use crate::worktrees::now_secs;
 
@@ -196,7 +203,7 @@ fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
     };
 
     if event == "SessionStart" {
-        let app = match app {
+        let app = match app.take() {
             Some(app) => app,
             None => App::open()?,
         };
@@ -209,10 +216,86 @@ fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
             return Ok(());
         }
     }
+    if event == "Stop" {
+        return stop(&task_dir, &input, event, session_id, now);
+    }
+    if event == "Notification" && is_idle_prompt(&input) {
+        return idle_prompt(&task_dir, &task_id, &input, event, app, now);
+    }
     match status_for(event, &input, now) {
         Some(status) => write_status(&task_dir, &status),
         None => Ok(()),
     }
+}
+
+/// Stop: hand over what `jeet task send` queued, else go idle. The inbox
+/// stays locked until the status is written, so a message is either taken
+/// here or sent after the session is idle, and typed in.
+fn stop(task_dir: &Path, input: &HookInput, event: &str, session_id: &str, now: i64) -> Result<()> {
+    // A broken inbox must not keep the status from being written.
+    let inbox = messages::Inbox::lock(task_dir)
+        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
+        .ok();
+    let queued = match &inbox {
+        Some(inbox) => inbox.take().unwrap_or_else(|e| {
+            eprintln!("jeet task-hook {event}: {e:#}");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    if !queued.is_empty() {
+        println!("{}", messages::stop_block(&queued));
+        // Not stopping after all: on to the messages.
+        return write_status(
+            task_dir,
+            &SessionStatus {
+                session_id: session_id.to_string(),
+                state: State::Running,
+                detail: Some("reading queued messages".to_string()),
+                event: event.to_string(),
+                at: now,
+            },
+        );
+    }
+    match status_for(event, input, now) {
+        Some(status) => write_status(task_dir, &status),
+        None => Ok(()),
+    }
+}
+
+/// Claude has sat idle at its prompt. A turn the user interrupted, or a
+/// permission they refused, ends with no Stop, so anything queued while it
+/// was busy is typed in now, or it would wait for good.
+fn idle_prompt(
+    task_dir: &Path,
+    task_id: &str,
+    input: &HookInput,
+    event: &str,
+    app: Option<App>,
+    now: i64,
+) -> Result<()> {
+    let inbox = messages::Inbox::lock(task_dir)
+        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
+        .ok();
+    // Idle before anything is typed in, so the prompt it submits is what
+    // marks it running again.
+    if let Some(status) = status_for(event, input, now) {
+        write_status(task_dir, &status)?;
+    }
+    let Some(inbox) = inbox else {
+        return Ok(());
+    };
+    if inbox.read()?.is_empty() {
+        return Ok(());
+    }
+    let app = match app {
+        Some(app) => app,
+        None => App::open()?,
+    };
+    let Some(task) = app.db.get_task(task_id)? else {
+        return Ok(());
+    };
+    messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(&app, &task)).map(|_| ())
 }
 
 /// The task the hook ran for: found by walking up from the session's

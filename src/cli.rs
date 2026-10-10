@@ -123,6 +123,18 @@ pub enum Commands {
         filter: String,
     },
 
+    /// Raise a desktop notification (Notification Center on macOS)
+    Notify {
+        title: String,
+        /// The notification's text
+        #[arg(long)]
+        body: Option<String>,
+        /// Web page opened when the notification is clicked, where the
+        /// notifier can (terminal-notifier on macOS)
+        #[arg(long)]
+        url: Option<String>,
+    },
+
     /// Print shell integration snippet for native cd command
     InitShell,
 
@@ -154,6 +166,9 @@ pub enum TaskCommands {
         /// Branch for the worktree of the single --repo
         #[arg(long, requires = "repos")]
         branch: Option<String>,
+        /// Start the task's agent straight away, with this as its first prompt
+        #[arg(long, allow_hyphen_values = true)]
+        prompt: Option<String>,
     },
 
     /// List tasks, most recently active first
@@ -171,6 +186,16 @@ pub enum TaskCommands {
         /// Resume this agent session instead of the task's latest one
         #[arg(long, value_name = "ID")]
         session: Option<String>,
+    },
+
+    /// Send the task's agent a message: typed in when it is idle, queued
+    /// for when it stops or sits idle when it is busy or waiting on you, its
+    /// first prompt when it is not running
+    Send {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        #[arg(allow_hyphen_values = true)]
+        message: String,
     },
 
     /// Remove a task's worktrees to free the disk, keeping what restores them

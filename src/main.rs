@@ -9,7 +9,10 @@ mod context;
 mod db;
 mod git;
 mod github;
+mod messages;
+mod notify;
 mod paths;
+mod permissions;
 mod pr_history;
 mod projects;
 mod remote;
@@ -34,7 +37,17 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let Some(command) = cli.command else {
+    // The assistant's own checks, before the command does anything.
+    let authorized = permissions::authorize(cli.command.as_ref())?;
+    let result = run(cli.command);
+    if let Some(action) = authorized {
+        action.finish(&result);
+    }
+    result
+}
+
+fn run(command: Option<Commands>) -> Result<()> {
+    let Some(command) = command else {
         let app = context::App::open()?;
         return commands::tasks::run(&app);
     };
@@ -43,6 +56,9 @@ fn main() -> Result<()> {
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
+        Commands::Notify { title, body, url } => {
+            commands::notify::run(&title, body.as_deref(), url.as_deref())?
+        }
         Commands::InstallShell => commands::install_shell::run()?,
         Commands::Clone { url } => {
             let app = context::App::open()?;
@@ -111,8 +127,17 @@ fn main() -> Result<()> {
                     project,
                     repos,
                     branch,
-                } => {
-                    commands::task::new(&app, &name, project.as_deref(), &repos, branch.as_deref())?
+                    prompt,
+                } => commands::task::new(
+                    &app,
+                    &name,
+                    project.as_deref(),
+                    &repos,
+                    branch.as_deref(),
+                    prompt.as_deref(),
+                )?,
+                TaskCommands::Send { name, message } => {
+                    commands::task::send(&app, &name, &message)?
                 }
                 TaskCommands::Ls { archived } => commands::task::ls(&app, archived)?,
                 TaskCommands::Open { name, session } => {

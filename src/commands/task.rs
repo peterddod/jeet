@@ -11,6 +11,7 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
+use crate::messages::{self, Delivered};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime;
@@ -24,7 +25,14 @@ pub fn new(
     project: Option<&str>,
     repos: &[String],
     branch: Option<&str>,
+    prompt: Option<&str>,
 ) -> Result<()> {
+    // Checked before the task is made, so a brief that cannot be given
+    // makes nothing.
+    let prompt = match prompt.map(messages::brief).transpose() {
+        Ok(prompt) => prompt,
+        Err(e) => bail!("--prompt: {e:#}"),
+    };
     let created = tasks::create(
         app,
         &NewTask {
@@ -38,7 +46,61 @@ pub fn new(
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("jeet: task {} -> {}", created.task.name, dir.display());
     println!("{}", dir.display());
-    cd::request(&dir)
+    cd::request(&dir)?;
+    let Some(prompt) = prompt else {
+        return Ok(());
+    };
+    match runtime::ensure_running(app, &created.task, None, Some(&prompt)) {
+        Ok(running) => {
+            warn_all(&running.warnings);
+            match running.started {
+                true => eprintln!(
+                    "jeet: started the agent with its brief in tmux session {}",
+                    running.tmux_session
+                ),
+                false => eprintln!(
+                    "jeet: an agent was already running in tmux session {}, so it was not \
+                     given the brief; `jeet task send {}` sends it",
+                    running.tmux_session, created.task.slug
+                ),
+            }
+            Ok(())
+        }
+        Err(e) => bail!(
+            "task {} was made, but its agent did not start: {e:#}",
+            created.task.name
+        ),
+    }
+}
+
+/// Get a message to the task's agent, however it is doing; see
+/// [`messages`].
+pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
+    let task = tasks::find(app, name)?;
+    if task.state == TaskState::Archived {
+        bail!(
+            "task {} is archived; `jeet task unarchive {}` first",
+            task.name,
+            task.slug
+        );
+    }
+    let dir = tasks::task_dir(app, &task);
+    let delivered = messages::deliver(&dir, &messages::TmuxAgent::new(app, &task), message)?;
+    let _ = app.db.touch_task(&task.id, now_secs());
+    match delivered {
+        Delivered::Typed => eprintln!("jeet: sent to {}'s agent", task.name),
+        Delivered::Queued => eprintln!(
+            "jeet: {}'s agent is busy or waiting on you, so the message is queued; it gets it \
+             when it finishes or sits idle",
+            task.name
+        ),
+        Delivered::Started => eprintln!(
+            "jeet: started {}'s agent with the message in tmux session {}",
+            task.name,
+            runtime::session_name(&task)
+        ),
+    }
+    Ok(())
 }
 
 pub fn ls(app: &App, archived: bool) -> Result<()> {
@@ -100,7 +162,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         );
     }
     let dir = tasks::task_dir(app, &task);
-    let running = runtime::ensure_running(app, &task, session)?;
+    let running = runtime::ensure_running(app, &task, session, None)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
     if running.started {

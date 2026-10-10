@@ -1553,7 +1553,7 @@ fn open_agent(
         terminal,
         explorer,
         &format!("starting {}'s agent", task.name),
-        || runtime::ensure_running(app, &task, session.as_deref()),
+        || runtime::ensure_running(app, &task, session.as_deref(), None),
     )?;
     let running = match running {
         Ok(running) => running,

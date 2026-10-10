@@ -2228,7 +2228,7 @@ impl Screen<'_> {
         }
         let running = self
             .progress(&format!("starting {}'s agent", task.name), || {
-                runtime::ensure_running(app, &task, session.as_deref())
+                runtime::ensure_running(app, &task, session.as_deref(), None)
             })
             .and_then(|inner| inner)?;
         let attached = term::suspended(self.terminal, || tmux::attach(&running.tmux_session))?;

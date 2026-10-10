@@ -75,6 +75,8 @@ jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fi
 jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
 jeet task ls [--archived]                # with what each task's agent is doing
 jeet task open fix-login                 # the task's agent, in tmux (started if need be)
+jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
+jeet task send fix-login "add tests too" # message the task's agent
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
@@ -441,6 +443,29 @@ is gone. Tasks are listed most recently active first, counting the agent's
 activity. Another agent (`agent = "aider"`) runs in tmux the same way, with no
 status. Archiving or deleting a task ends its tmux session.
 
+### Messaging an agent
+
+```bash
+jeet task send fix-login "also add tests"
+jeet task new fix-x --repo api --prompt "Fix X; add a test for it"
+```
+
+`jeet task send` gets a message to the task's agent however it is doing. An
+idle agent has it typed in (`tmux send-keys -l`) and submitted. A busy one, or
+one waiting on you, has it queued in `.jeet/inbox.jsonl`; when the agent
+finishes, its Stop hook hands the queue over and it carries straight on. A
+turn you interrupt with Esc has no Stop, so the queue is also typed in once
+Claude reports it has sat idle at its prompt (after about a minute). A message
+is never typed into a permission prompt, or into the dialogs Claude shows
+before its first hook runs, which it would answer. An agent that is not
+running is started with the message as its first prompt. `jeet task new
+--prompt` starts the new task's agent on a brief the same way.
+
+A message holds at most 8,000 bytes, which keeps what is typed in under
+tmux's limit on a command; queued messages that do not fit with it wait for
+the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
+as a shell command, a slash command or a memory, is sent as `Message: …`.
+
 ### Archiving and deleting
 
 ```bash
@@ -646,6 +671,38 @@ Both accept arguments (`editor = "code --wait"`) and are overridden by
 A `[review]` section sets what `jeet review` runs in the background — see
 [Reviewing](#reviewing).
 
+### Notifications
+
+`jeet notify "<title>" [--body B] [--url U]` raises a desktop notification:
+through `terminal-notifier` on macOS when it is installed (a click opens
+`--url`), else Notification Center via `osascript`, and `notify-send`
+elsewhere. Review jobs use it to say they are done. `JEET_NOTIFY_CMD` runs a
+command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
+`JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
+
+### The assistant's permissions
+
+jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
+do what `[assistant] allow` lists; anything else fails with a message saying
+what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet prs`, …) and
+`jeet notify` are always allowed; screens and shells (`jeet`, `jeet explore`,
+`jeet exec`) need a person at a terminal.
+
+```toml
+[assistant]
+allow = ["task.create", "task.send", "task.archive", "review.start", "worktree.add", "project.read"]
+notify = true   # a notification for each action it takes
+```
+
+The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
+`task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
+`review.start`, `project.read`, `project.create`, `project.delete`,
+`repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `pr.comment` and
+`pr.review`. Nothing is allowed until listed. The assistant's Claude settings
+pre-approve exactly the matching `jeet` commands, so allowed actions do not
+prompt. Every action it takes, and every one refused, is appended to
+`~/.jeet/assistant/actions.log`.
+
 ### Keeping the store fetched
 
 Commands that go to the network anyway (`jeet clone`, `jeet prs`,
@@ -680,9 +737,11 @@ export JEET_HOME=/tmp/jeet-test
   tasks/
     fix-login/                       # a task: the agent's working directory
       .jeet/task-id                  # marks it, so jeet finds the task from below
+      .jeet/inbox.jsonl              # messages queued for its busy agent
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
   projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
+  assistant/actions.log              # what the assistant did, one JSON object per line
 ```
 
 Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `jeet import`
