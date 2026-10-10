@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.6.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.7.0
 ```
 
 ## Quick start
@@ -744,6 +744,32 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.7
+
+jeet is now built around **tasks**. This is a breaking release: run
+`jeet import` to bring existing repos, branches and worktrees across.
+
+- **Tasks** (`jeet`, `jeet tasks`): a task is a folder that holds any number
+  of worktrees from any repo, added as needed with `jeet worktree add`. Each
+  task's agent runs in tmux, and the tasks list shows its live status, size
+  on disk, worktrees and PR history. Archiving a task frees its disk space
+  and keeps its state; deleting it removes everything it owns.
+- **Projects**: templates with repos, a CLAUDE.md and skills, applied when a
+  task is created.
+- **Store sync**: trunks live only in the store and stay current in the
+  background. `jeet sync` does the same on demand.
+- **Review viewer**: a GitHub-dark diff viewer with syntax highlighting,
+  inline comments, replies, reactions and verdicts. `jeet review <pr>` now
+  opens a review task.
+- **Explorer commands**: type `:mv`, `:cp`, `:mkdir`, `:rm` or `:touch` into
+  the filter.
+- **Assistant** (`jeet chat`): a global organiser with its own sessions,
+  `jeet todo`, and task steering with `jeet task send`. It acts only within
+  `[assistant] allow` and notifies you of what it did. `jeet watch` routes
+  GitHub events to it.
+- **Removed**: `adopt`, `scan`, `checkout`, `sessions` and
+  `exec --ephemeral`. `jeet worktree` now works only inside a task.
 
 ## What's new in v0.6
 
