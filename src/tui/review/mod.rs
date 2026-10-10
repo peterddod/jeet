@@ -2,13 +2,15 @@
 //! dark colours, with each review thread under the line it is about.
 //!
 //! Everything slow — the diff, the threads, the pending review, submitting a
-//! verdict, every comment, reply and reaction — runs on a background thread
-//! and comes back over a channel, so the viewer is on screen the moment it
-//! is asked for and never stops drawing while GitHub thinks. A poll of the
+//! verdict, every comment, reply and reaction, the syntax colours — runs on a
+//! background thread and comes back over a channel, so the viewer is on
+//! screen the moment it is asked for and never stops drawing while GitHub
+//! thinks. A poll of the
 //! PR's fingerprint notices when someone else has changed it.
 
 pub mod actions;
 pub mod diff;
+mod highlight;
 mod render;
 
 use std::path::{Path, PathBuf};
@@ -73,13 +75,14 @@ pub fn run(dir: &Path, pr: &PullRequest) -> Result<Outcome> {
 fn event_loop(terminal: &mut Tui, viewer: &mut Viewer) -> Result<()> {
     while viewer.exit.is_none() {
         viewer.take_updates();
+        viewer.update_highlights();
         if let Some(job) = viewer.tick(Instant::now()) {
             viewer.spawn(job);
         }
         terminal.draw(|frame| render::draw(frame, viewer))?;
         // Wait on input, but wake for an answer on its way or the next poll.
-        let wait = match viewer.jobs {
-            0 => viewer.until_poll(Instant::now()),
+        let wait = match (viewer.jobs, viewer.highlights.working) {
+            (0, false) => viewer.until_poll(Instant::now()),
             _ => Duration::from_millis(100),
         };
         if !event::poll(wait)? {
@@ -242,6 +245,8 @@ pub struct Viewer {
     rx: Receiver<(u64, Msg)>,
     /// Background threads yet to answer.
     jobs: usize,
+    /// Syntax colours for each file, worked out off the draw path.
+    pub highlights: highlight::Cache,
 }
 
 impl Viewer {
@@ -275,6 +280,7 @@ impl Viewer {
             tx,
             rx,
             jobs: 0,
+            highlights: highlight::Cache::new(),
         }
     }
 
@@ -405,6 +411,8 @@ impl Viewer {
             ))
         });
         let files = diff::parse(&text);
+        let old_files = old.as_ref().map(|r| r.files.as_slice()).unwrap_or(&[]);
+        self.highlights.renew(old_files, &files);
         self.marks = vec![(0, 0); files.len()];
         self.load = Load::Ready(Box::new(Review {
             files,
@@ -466,6 +474,15 @@ impl Viewer {
                 self.next_poll = None;
             }
             Some(_) => {}
+        }
+    }
+
+    /// Take in the syntax colours worked out so far, and start on the next
+    /// file that wants them: the page on screen first.
+    fn update_highlights(&mut self) {
+        self.highlights.take();
+        if let Load::Ready(review) = &self.load {
+            self.highlights.start(&review.files, self.page);
         }
     }
 
@@ -1828,6 +1845,38 @@ mod tests {
         viewer.take_updates();
         assert!(viewer.stale);
         assert_eq!(viewer.jobs, 0);
+    }
+
+    /// Run the event loop's highlighting step until `page` has its colours.
+    fn wait_for_colours(viewer: &mut Viewer, page: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while viewer.highlights.get(page).is_none() {
+            assert!(Instant::now() < deadline, "page {page} never highlighted");
+            viewer.update_highlights();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn colours_arrive_from_the_background_and_survive_a_refresh() {
+        let mut viewer = loaded_viewer(None);
+        assert!(viewer.highlights.get(0).is_none(), "plain to begin with");
+        wait_for_colours(&mut viewer, 0);
+        // The next page is worked out ahead of being turned to.
+        wait_for_colours(&mut viewer, 1);
+        viewer.handle_key(key(KeyCode::Right));
+        assert!(viewer.highlights.get(viewer.page).is_some());
+
+        // A refresh that brings the same files keeps their colours.
+        viewer.handle_key(key(KeyCode::Char('r')));
+        viewer.loaded(
+            Ok(include_str!("../../../tests/fixtures/pr.diff").to_string()),
+            Ok(threads()),
+            Ok(None),
+            Ok(print()),
+        );
+        assert!(viewer.highlights.get(0).is_some());
+        assert!(viewer.highlights.get(1).is_some());
     }
 
     #[test]
