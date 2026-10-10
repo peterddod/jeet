@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::cd;
 use crate::context::App;
 use crate::resolve;
+use crate::store;
 use crate::tui;
 use crate::tui::state::Exit;
 
@@ -29,6 +30,7 @@ pub fn run_at(app: &App, dir: &Path) -> Result<()> {
         anyhow::anyhow!("{e}\nrun `jeet cd <repo>` first, or `jeet ls` to see indexed repositories")
     })?;
 
+    store::maybe_sync_background(app);
     let start = tui::start_dir(&ctx, dir);
     let shell_cwd = std::env::current_dir().context("get cwd")?;
     let landing = match tui::run(app, &ctx, &start)? {

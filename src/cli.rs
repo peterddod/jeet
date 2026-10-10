@@ -66,6 +66,17 @@ pub enum Commands {
     #[command(hide = true)]
     ReviewJob { state: std::path::PathBuf },
 
+    /// Fetch every repository in the store, fast-forwarding clean trunks
+    Sync {
+        /// Sync only this repository
+        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
+    },
+
+    /// Run a background store sync (started by commands that touch the network)
+    #[command(hide = true)]
+    StoreSync,
+
     /// Worktree operations - with no subcommand, create a worktree here
     Worktree(WorktreeArgs),
 

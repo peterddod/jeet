@@ -19,7 +19,14 @@ pub struct Config {
     /// What `jeet review` does besides checking the PR out.
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
     pub review: ReviewConfig,
+
+    /// Minimum seconds between background fetches of the store (default:
+    /// 300). `0` turns background syncing off; `jeet sync` still works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_interval_secs: Option<u64>,
 }
+
+pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
 
 /// `[review]` in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,6 +69,7 @@ impl Default for Config {
             editor: None,
             agent: None,
             review: ReviewConfig::default(),
+            sync_interval_secs: None,
         }
     }
 }
@@ -83,6 +91,15 @@ impl Config {
     /// Coding agent command line, honouring `JEET_AGENT`, then config.
     pub fn agent_command(&self) -> String {
         first_set([env_non_empty("JEET_AGENT"), self.agent.clone()], "claude")
+    }
+
+    /// Background sync throttle, honouring `JEET_SYNC_INTERVAL_SECS`, then
+    /// config. An unparseable override is ignored rather than fatal.
+    pub fn sync_interval_secs(&self) -> u64 {
+        env_non_empty("JEET_SYNC_INTERVAL_SECS")
+            .and_then(|v| v.trim().parse().ok())
+            .or(self.sync_interval_secs)
+            .unwrap_or(DEFAULT_SYNC_INTERVAL_SECS)
     }
 }
 
@@ -226,6 +243,14 @@ mod tests {
         let out = toml::to_string_pretty(&config).unwrap();
         assert!(!out.contains("editor"), "{out}");
         assert!(!out.contains("review"), "{out}");
+        assert!(!out.contains("sync"), "{out}");
+    }
+
+    #[test]
+    fn reads_the_sync_interval() {
+        let config: Config = toml::from_str("sync_interval_secs = 0\n").unwrap();
+        assert_eq!(config.sync_interval_secs, Some(0));
+        assert!(Config::default().sync_interval_secs.is_none());
     }
 
     #[test]

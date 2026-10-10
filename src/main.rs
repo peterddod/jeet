@@ -13,6 +13,7 @@ mod paths;
 mod remote;
 mod resolve;
 mod review;
+mod store;
 mod tui;
 mod worktrees;
 
@@ -98,6 +99,14 @@ fn main() -> Result<()> {
             commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun)?;
         }
         Commands::ReviewJob { state } => review::run_job(&state)?,
+        Commands::Sync { repo } => {
+            let app = context::App::open()?;
+            commands::sync::run(&app, repo.as_deref())?;
+        }
+        Commands::StoreSync => {
+            let app = context::App::open()?;
+            store::run_background(&app)?;
+        }
         Commands::Sessions => {
             let app = context::App::open()?;
             commands::sessions::run(&app)?;

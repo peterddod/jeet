@@ -25,5 +25,6 @@ pub fn run(app: &App, url: &str) -> Result<()> {
     app.db.upsert_repo(&repo)?;
 
     println!("cloned {} -> {}", repo.id, trunk.display());
+    crate::store::maybe_sync_background(app);
     Ok(())
 }
