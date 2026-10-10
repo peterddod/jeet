@@ -9,6 +9,7 @@ use crate::context::App;
 use crate::store;
 use crate::tui::state::Exit;
 use crate::tui::tasks::{self, Start};
+use crate::watch;
 
 pub fn run(app: &App) -> Result<()> {
     open(app, Start::List)
@@ -29,6 +30,8 @@ fn open(app: &App, start: Start) -> Result<()> {
     // Every launch is a chance to bring the store up to date, in the
     // background; before the screen goes up, as it may say something.
     store::maybe_sync_background(app);
+    // And GitHub to be polled, when `[watch]` asks for it.
+    watch::maybe_background(&app.home, &app.config);
     match tasks::run(app, start)? {
         Exit::ChangeDir(path) => explore::hand_off(&path),
         Exit::Stay | Exit::Back => Ok(()),

@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{Commands, ProjectCommands, TaskCommands, WorktreeArgs, WorktreeCommands};
+use crate::cli::{
+    Commands, ProjectCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+};
 use crate::config;
 use crate::notify::{self, Notification};
 use crate::worktrees::now_secs;
@@ -91,6 +93,11 @@ pub const CAPABILITIES: &[Capability] = &[
         "shell.install",
         "change your shell's startup files",
         &["jeet install-shell"],
+    ),
+    cap(
+        "watch.install",
+        "install or remove the background GitHub watcher",
+        &["jeet watch install", "jeet watch uninstall"],
     ),
 ];
 
@@ -181,6 +188,17 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
             Gate::Interactive
         }
         Commands::InstallShell => needs("shell.install", "installed shell integration".into()),
+        // A poll hands events on as the user's rules say; installing one
+        // changes what runs on the user's machine.
+        Commands::Watch { command, .. } => match command {
+            None | Some(WatchCommands::Status) => Gate::Free,
+            Some(WatchCommands::Install) => {
+                needs("watch.install", "installed the GitHub watcher".into())
+            }
+            Some(WatchCommands::Uninstall) => {
+                needs("watch.install", "removed the GitHub watcher".into())
+            }
+        },
         Commands::Clone { url } => needs("repo.clone", format!("cloned {url}")),
         Commands::Import { paths, .. } => needs(
             "repo.import",
@@ -575,6 +593,16 @@ mod tests {
                 "shell.install",
                 "installed shell integration",
             ),
+            (
+                &["watch", "install"],
+                "watch.install",
+                "installed the GitHub watcher",
+            ),
+            (
+                &["watch", "uninstall"],
+                "watch.install",
+                "removed the GitHub watcher",
+            ),
         ];
         for (args, capability, action) in cases {
             assert_eq!(
@@ -604,6 +632,9 @@ mod tests {
             &["todo"],
             &["todo", "add", "x"],
             &["todo", "done", "1"],
+            &["watch", "--once"],
+            &["watch", "status"],
+            &["watch"],
         ] {
             assert_eq!(gate_of(args), Gate::Free, "{args:?}");
         }
@@ -665,7 +696,8 @@ mod tests {
                     "task.send" => args.extend(["x", "hi"]),
                     "worktree.add" | "worktree.rm" | "repo.clone" => args.push("x"),
                     "review.start" => args.push("1"),
-                    "project.read" | "repo.sync" | "repo.import" | "shell.install" => {}
+                    "project.read" | "repo.sync" | "repo.import" | "shell.install"
+                    | "watch.install" => {}
                     _ => args.push("x"),
                 }
                 assert_eq!(needs_of(&args).0, c.name, "{command}");

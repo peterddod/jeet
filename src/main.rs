@@ -26,6 +26,7 @@ mod tasks;
 mod tmux;
 mod todo;
 mod tui;
+mod watch;
 mod worktrees;
 
 use anyhow::Result;
@@ -33,7 +34,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, ProjectCommands, TaskCommands, TodoCommands, WorktreeArgs, WorktreeCommands,
+    Cli, Commands, ProjectCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs,
+    WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -64,6 +66,15 @@ fn run(command: Option<Commands>) -> Result<()> {
             commands::notify::run(&title, body.as_deref(), url.as_deref())?
         }
         Commands::InstallShell => commands::install_shell::run()?,
+        Commands::Watch { once, command } => {
+            let app = context::App::open()?;
+            match (once, command) {
+                (true, _) => watch::run_once(&app)?,
+                (false, Some(WatchCommands::Install)) => watch::install(&app)?,
+                (false, Some(WatchCommands::Uninstall)) => watch::uninstall()?,
+                (false, None | Some(WatchCommands::Status)) => watch::status(&app)?,
+            }
+        }
         Commands::Clone { url } => {
             let app = context::App::open()?;
             commands::clone::run(&app, &url)?;

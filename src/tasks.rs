@@ -508,7 +508,23 @@ pub fn add_worktree(
         pr_number: None,
         created_at: now_secs(),
     };
-    match app.db.insert_task_worktree(&record) {
+    // A `jeet task ls` running meanwhile reconciles: it can see the new
+    // worktree in `git worktree list` before its row is written, and adopt
+    // it as one an agent made. The row is then ours to fill in, not a reason
+    // to undo the worktree.
+    let inserted = app.db.insert_task_worktree(&record).or_else(|e| {
+        match app.db.get_task_worktree(&task.id, &record.dir_name) {
+            Ok(Some(adopted)) if adopted.repo_id == record.repo_id => {
+                let row = TaskWorktreeRecord {
+                    id: adopted.id,
+                    ..record.clone()
+                };
+                app.db.update_task_worktree(&row).map(|_| adopted.id)
+            }
+            _ => Err(e),
+        }
+    });
+    match inserted {
         Ok(id) => record.id = id,
         Err(e) => {
             let _ = git::worktree_remove(&trunk, &dest, true);

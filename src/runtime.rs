@@ -342,6 +342,7 @@ mod tests {
         let settings = AssistantConfig {
             allow: vec!["task.send".into()],
             notify: None,
+            rules: Vec::new(),
         };
         let json = assistant_settings_json(Path::new("/bin/jeet"), &settings);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -367,6 +368,7 @@ mod tests {
                 .map(|c| c.name.to_string())
                 .collect(),
             notify: None,
+            rules: Vec::new(),
         };
         let exe = format!("/{}/jeet", "d".repeat(200));
         let json = assistant_settings_json(Path::new(&exe), &settings);

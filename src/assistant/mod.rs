@@ -434,6 +434,14 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// fenced as untrusted, with who sent it: see [`fence_message`].
 pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
+    deliver(app, &fence_message(from, &message))
+}
+
+/// Get `text`, already fenced as whatever it is, to the assistant: in the
+/// session [`target`] picks, by the rules of `jeet task send`, or as the
+/// first prompt of a new `events <date>` session when none is running.
+/// Returns how, and the name of the session it went to, if one was running.
+pub fn deliver(app: &App, text: &str) -> Result<(Delivered, Option<String>)> {
     let task = ensure(app)?;
     let dir = tasks::task_dir(app, &task);
     let sessions = sessions(app, &task)?;
@@ -452,7 +460,7 @@ pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<S
         session: target.map(|s| s.id.clone()),
         window: target.and_then(|s| s.window.clone()),
     };
-    let delivered = messages::deliver(&dir, &agent, &fence_message(from, &message))?;
+    let delivered = messages::deliver(&dir, &agent, text)?;
     Ok((delivered, target.map(|s| s.name.clone())))
 }
 

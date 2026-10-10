@@ -88,6 +88,7 @@ jeet chat --new "plan the week"          # a fresh session beside the others
 jeet chat --pick                         # choose, rename, end or mark one primary
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
+jeet watch install                       # poll GitHub in the background (launchd)
 
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
@@ -559,6 +560,63 @@ Everything else in it is kept as written. `jeet todo` changes it under a lock
 and writes it whole, so the assistant's sessions never lose each other's
 edits. The assistant needs no permission for its own list.
 
+### Watching GitHub
+
+```bash
+jeet watch --once        # poll now: what launchd and the tasks list run
+jeet watch install       # every `interval_secs`, with launchd (macOS)
+jeet watch uninstall
+jeet watch status        # installed? last poll, what it follows
+```
+
+`jeet watch --once` asks GitHub, through `gh`, for your unread notifications
+(with `If-Modified-Since`, so a poll with nothing new costs nothing), the
+checks on your open pull requests, and the items of the GitHub Projects you
+name. What is new since the last poll becomes an event: `review_requested`,
+`mention`, `comment`, `assigned`, `ci_failed`, `ci_passed`, `pr_merged`,
+`pr_closed` or `project_item_changed`. The first poll of each only notes what
+is there, so turning the watcher on is not a flood.
+
+Rules decide where each event goes; the first that matches wins, and an event
+none matches is a desktop notification:
+
+```toml
+[watch]
+repos = ["acme/*", "me/jeet"]                 # only these (default: all)
+projects = [{ owner = "acme", number = 3 }]   # needs `gh auth refresh -s read:project`
+interval_secs = 120
+
+[[assistant.rules]]
+on = ["review_requested"]
+repos = ["acme/*"]
+action = "assistant"   # hand it to the assistant, which acts within its permissions
+
+[[assistant.rules]]
+on = ["ci_failed"]
+action = "task"        # tell the task whose PR it is (by its PR history); else the assistant
+
+[[assistant.rules]]
+on = ["mention"]
+action = "notify"      # just a notification
+```
+
+`on` and `repos` may be left out to match anything. Events for the assistant
+go to its sessions by the rules above (primary, else most recent, else a new
+`events <date>` session), several to a message; an event for a task goes to
+its agent the way `jeet task send` would send it. Either way the event is
+fenced as `<github-event untrusted="true">`, since titles and comments are
+written by other people: data to weigh, never instructions. One that cannot be
+delivered is notified instead. Each event, and where it went, is appended to
+`~/.jeet/watch-events.jsonl`.
+
+`jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,
+which runs `jeet watch --once` every `interval_secs` with the `PATH` you
+installed it from, logging to `~/.jeet/watch.log`, and loads it with
+`launchctl bootstrap`. Elsewhere it installs nothing, and prints a systemd user
+service and timer to set up instead. With a `[watch]` section, the tasks list
+also polls while it is open. Installing or removing the watcher takes the
+assistant the `watch.install` capability; polling takes none.
+
 ## Importing
 
 ```bash
@@ -762,8 +820,8 @@ notify = true   # a notification for each action it takes
 The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
-`repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `pr.comment` and
-`pr.review`. Nothing is allowed until listed. The assistant's Claude settings
+`repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
+`pr.comment` and `pr.review`. Nothing is allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, so allowed actions do not
 prompt. Every action it takes, and every one refused, is appended to
 `~/.jeet/assistant/actions.log`.
@@ -797,6 +855,8 @@ export JEET_HOME=/tmp/jeet-test
   config.toml
   index.db
   .last-sync, .sync.lock, .sync.log  # background store sync
+  watch.json, watch.log              # `jeet watch`: what it has seen, what it said
+  watch-events.jsonl                 # recent GitHub events and where each went
   store/
     github.com/acme/widget/          # trunk (default branch)
   tasks/

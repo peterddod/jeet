@@ -46,6 +46,7 @@ use crate::runtime;
 use crate::status::{self, Activity};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
+use crate::watch;
 use crate::worktrees::{self, now_secs, WorktreeEntry, WorktreeKind, WorktreeStatus};
 
 /// How often agent statuses are read again.
@@ -58,6 +59,10 @@ pub const RESIZE_EVERY: Duration = Duration::from_secs(120);
 /// How often the rows are read from the index again, for worktrees and
 /// tasks that came and went behind the list's back.
 pub const REREAD_EVERY: Duration = Duration::from_secs(5);
+
+/// How often the list sees whether a GitHub poll (`jeet watch --once`) is
+/// due, while it is open; `[watch] interval_secs` says how often one is.
+const WATCH_EVERY: Duration = Duration::from_secs(30);
 
 /// What the screen esc in the explorer comes back to.
 const BACK_LABEL: &str = "tasks";
@@ -1681,9 +1686,19 @@ impl Screen<'_> {
             self.perform(Action::Projects);
         }
         let mut last_read = Instant::now();
+        let mut last_watch = Instant::now();
         while self.ui.exit.is_none() {
             while let Ok(update) = self.bg.updates.try_recv() {
                 self.take(update);
+            }
+            // GitHub is polled by a jeet of its own, started off the draw
+            // path; it reports through the assistant, tasks and
+            // notifications, not this screen.
+            if last_watch.elapsed() >= WATCH_EVERY {
+                last_watch = Instant::now();
+                let home = self.app.home.clone();
+                let config = self.app.config.clone();
+                std::thread::spawn(move || watch::maybe_background(&home, &config));
             }
             // The agent adds and removes worktrees as it goes, and other
             // jeets make and archive tasks: keep the rows in step.
