@@ -10,7 +10,10 @@ use unicode_width::UnicodeWidthStr;
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::state::human_size;
-use super::tasks::{AddField, Field, NewTaskForm, Panel, Picker, TaskRow, TasksUi, View};
+use super::tasks::{
+    AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
+    View,
+};
 use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
@@ -759,13 +762,10 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 .collect();
             render_list(frame, area, title, items, *selected);
         }
-        Panel::NewProject { input } => {
-            let area = content_rect(60, 4, full);
-            let body = vec![
-                field_line("name", input, true, ""),
-                Line::from(""),
-                Line::from(dim("letters, digits, - _ and . · ⏎ create · esc back")),
-            ];
+        Panel::NewProject(form) => {
+            let body = new_project_lines(form);
+            // Room for the hint to wrap on a narrow terminal.
+            let area = content_rect(74, body.len() + 1, full);
             render_text(frame, area, " new project ".into(), Color::Green, body);
         }
         Panel::Prs {
@@ -1093,15 +1093,17 @@ fn field_line(label: &str, value: &str, focused: bool, hint: &str) -> Line<'stat
 
 /// Up to `rows` of a picker around its cursor, with marks when `marks`.
 fn picker_lines(picker: &Picker, marks: bool, rows: usize) -> Vec<Line<'static>> {
-    if picker.items.is_empty() {
-        return vec![Line::from(dim(
-            "  no repositories in the store yet — `jeet clone <url>` adds one",
-        ))];
+    // A multi-select picker adds what was typed on space; a single one
+    // takes it on ⏎.
+    let add = if marks { "space" } else { "⏎" };
+    if picker.visible.is_empty() && picker.filter.trim().is_empty() {
+        return vec![Line::from(dim(format!(
+            "  no repositories in the store yet — type a clone URL, {add} adds it"
+        )))];
     }
     if picker.visible.is_empty() {
         return vec![Line::from(dim(format!(
-            "  nothing matches \"{}\"",
-            picker.filter
+            "  nothing matches — {add} adds it as a new repository"
         )))];
     }
     let start = picker
@@ -1134,21 +1136,63 @@ fn picker_lines(picker: &Picker, marks: bool, rows: usize) -> Vec<Line<'static>>
         .collect()
 }
 
+/// The marked repositories by short name, for a form's repos field.
+fn chosen_names(picker: &Picker) -> String {
+    picker
+        .chosen()
+        .iter()
+        .map(|r| {
+            let r = r.trim_end_matches('/').trim_end_matches(".git");
+            r.rsplit(['/', ':']).next().unwrap_or(r).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A focused repos field's filter hint and picker, shared by the new-task
+/// and new-project forms.
+fn repos_picker_lines(picker: &Picker) -> Vec<Line<'static>> {
+    let filter = if picker.filter.is_empty() {
+        "type to narrow or paste a clone URL · space marks".to_string()
+    } else {
+        format!("matching \"{}\" · ^a adds it as typed", picker.filter)
+    };
+    let mut lines = vec![Line::from(dim(format!("         {filter}")))];
+    lines.extend(picker_lines(picker, true, 8));
+    lines
+}
+
+fn new_project_lines(form: &NewProjectForm) -> Vec<Line<'static>> {
+    let focus = form.field;
+    let mut lines = vec![
+        field_line(
+            "name",
+            &form.name,
+            focus == ProjectField::Name,
+            "letters, digits, - _ and .",
+        ),
+        field_line(
+            "repos",
+            &chosen_names(&form.repos),
+            focus == ProjectField::Repos,
+            "none: tasks from it start with no worktrees",
+        ),
+    ];
+    if focus == ProjectField::Repos {
+        lines.extend(repos_picker_lines(&form.repos));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim("⇥ switch field · ⏎ create · esc back")));
+    lines
+}
+
 fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
     let focus = form.field;
     let project = match form.project_name() {
         Some(name) => format!("‹ {name} ›"),
         None => "‹ none ›".to_string(),
     };
-    let chosen = form.repos.chosen();
-    let repos_value = match chosen.as_slice() {
-        [] => String::new(),
-        repos => repos
-            .iter()
-            .map(|r| r.rsplit('/').next().unwrap_or(r).to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
+    let repos_value = chosen_names(&form.repos);
     let mut lines = vec![
         field_line(
             "name",
@@ -1180,13 +1224,7 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
         ),
     ];
     if focus == Field::Repos {
-        let filter = if form.repos.filter.is_empty() {
-            "type to narrow · space marks".to_string()
-        } else {
-            format!("matching \"{}\"", form.repos.filter)
-        };
-        lines.push(Line::from(dim(format!("         {filter}"))));
-        lines.extend(picker_lines(&form.repos, true, 8));
+        lines.extend(repos_picker_lines(&form.repos));
     }
     lines.push(field_line(
         "branch",

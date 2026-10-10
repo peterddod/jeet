@@ -229,6 +229,53 @@ impl Picker {
         }
     }
 
+    /// Take the filter as a repository the store may not have yet — a URL or
+    /// `owner/repo` — and mark it. False when nothing was typed.
+    pub fn add_typed(&mut self) -> bool {
+        let typed = self.filter.trim().to_string();
+        if typed.is_empty() {
+            return false;
+        }
+        let index = match self.items.iter().position(|i| *i == typed) {
+            Some(index) => index,
+            None => {
+                self.items.push(typed);
+                self.marked.push(false);
+                self.items.len() - 1
+            }
+        };
+        self.marked[index] = true;
+        self.filter.clear();
+        self.refilter();
+        self.selected = self.visible.iter().position(|&i| i == index).unwrap_or(0);
+        true
+    }
+
+    /// The keys a multi-select picker takes: ↑↓ move, space marks (or adds
+    /// what was typed when it matches nothing), ^a adds what was typed,
+    /// anything else narrows. False for a key it has no use for.
+    fn multi_key(&mut self, key: &KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Up => self.move_by(-1),
+            KeyCode::Down => self.move_by(1),
+            KeyCode::Char(' ') if self.visible.is_empty() => {
+                self.add_typed();
+            }
+            KeyCode::Char(' ') => self.toggle(),
+            KeyCode::Char('a') if ctrl => {
+                self.add_typed();
+            }
+            KeyCode::Backspace => {
+                self.pop();
+            }
+            KeyCode::Char(c) if !ctrl && !alt => self.push(c),
+            _ => return false,
+        }
+        true
+    }
+
     /// The marked items, in list order.
     pub fn chosen(&self) -> Vec<String> {
         self.items
@@ -339,6 +386,32 @@ impl NewTaskForm {
     }
 }
 
+/// Which field of the new-project form has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectField {
+    Name,
+    Repos,
+}
+
+/// `n` in the projects panel: a name, and the repositories every task made
+/// from the project starts with.
+#[derive(Debug, Clone)]
+pub struct NewProjectForm {
+    pub field: ProjectField,
+    pub name: String,
+    pub repos: Picker,
+}
+
+impl NewProjectForm {
+    pub fn new(repos: Vec<String>) -> Self {
+        NewProjectForm {
+            field: ProjectField::Name,
+            name: String::new(),
+            repos: Picker::new(repos),
+        }
+    }
+}
+
 /// Which field of the add-worktree form has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddField {
@@ -439,9 +512,7 @@ pub enum Panel {
         lines: Vec<ProjectLine>,
         selected: usize,
     },
-    NewProject {
-        input: String,
-    },
+    NewProject(NewProjectForm),
     Prs {
         task_id: String,
         prs: Vec<TaskPrRecord>,
@@ -541,8 +612,10 @@ pub enum Action {
         task_id: String,
     },
     Projects,
+    NewProjectForm,
     CreateProject {
         name: String,
+        repos: Vec<String>,
     },
     EditProject {
         name: String,
@@ -1331,16 +1404,13 @@ impl TasksUi {
                     },
                     (KeyCode::Tab, _) => form.field = form.field.step(1),
                     (KeyCode::BackTab, _) => form.field = form.field.step(-1),
-                    (KeyCode::Up, Field::Repos) => form.repos.move_by(-1),
-                    (KeyCode::Down, Field::Repos) => form.repos.move_by(1),
+                    (_, Field::Repos) => {
+                        form.repos.multi_key(&key);
+                    }
                     (KeyCode::Up, _) => form.field = form.field.step(-1),
                     (KeyCode::Down, _) => form.field = form.field.step(1),
                     (KeyCode::Left, Field::Project) => form.cycle_project(-1),
                     (KeyCode::Right | KeyCode::Char(' '), Field::Project) => form.cycle_project(1),
-                    (KeyCode::Char(' '), Field::Repos) => form.repos.toggle(),
-                    (KeyCode::Backspace, Field::Repos) => {
-                        form.repos.pop();
-                    }
                     (KeyCode::Backspace, Field::Name) => {
                         form.name.pop();
                     }
@@ -1352,7 +1422,6 @@ impl TasksUi {
                     (_, field) => match (typed(&key), field) {
                         (Some(c), Field::Name) => form.name.push(c),
                         (Some(c), Field::Branch) => form.branch.push(c),
-                        (Some(c), Field::Repos) => form.repos.push(c),
                         _ => {}
                     },
                 }
@@ -1370,12 +1439,7 @@ impl TasksUi {
                 let action = match (key.code, name) {
                     (KeyCode::Esc | KeyCode::Char('q' | 'P'), _) => return None,
                     (KeyCode::Char('r'), _) => return Some(Action::Projects),
-                    (KeyCode::Char('n'), _) => {
-                        self.panel = Some(Panel::NewProject {
-                            input: String::new(),
-                        });
-                        return None;
-                    }
+                    (KeyCode::Char('n'), _) => return Some(Action::NewProjectForm),
                     (KeyCode::Char('e'), Some(name)) => Some(Action::EditProject { name }),
                     (KeyCode::Char('D'), Some(name)) => Some(Action::AskDeleteProject { name }),
                     (KeyCode::Enter, Some(name)) => Some(Action::NewTaskForm {
@@ -1391,27 +1455,42 @@ impl TasksUi {
                 }
                 action
             }
-            Panel::NewProject { mut input } => {
-                match key.code {
-                    KeyCode::Esc => return Some(Action::Projects),
-                    KeyCode::Enter => {
-                        let name = input.trim().to_string();
+            Panel::NewProject(mut form) => {
+                match (key.code, form.field) {
+                    (KeyCode::Esc, _) => return Some(Action::Projects),
+                    (KeyCode::Enter, _) => {
+                        let name = form.name.trim().to_string();
                         if !name.is_empty() {
-                            return Some(Action::CreateProject { name });
+                            let repos = form.repos.chosen();
+                            // Left up while the project is made, to come
+                            // back to if that fails.
+                            self.panel = Some(Panel::NewProject(form));
+                            return Some(Action::CreateProject { name, repos });
                         }
+                        form.field = ProjectField::Name;
                         self.set_status("a project needs a name");
                     }
-                    KeyCode::Backspace => {
-                        input.pop();
+                    (KeyCode::Tab | KeyCode::BackTab, ProjectField::Name) => {
+                        form.field = ProjectField::Repos
                     }
-                    KeyCode::Char('u') if ctrl => input.clear(),
-                    _ => {
+                    (KeyCode::Tab | KeyCode::BackTab, ProjectField::Repos) => {
+                        form.field = ProjectField::Name
+                    }
+                    (KeyCode::Down, ProjectField::Name) => form.field = ProjectField::Repos,
+                    (KeyCode::Backspace, ProjectField::Name) => {
+                        form.name.pop();
+                    }
+                    (KeyCode::Char('u'), ProjectField::Name) if ctrl => form.name.clear(),
+                    (_, ProjectField::Name) => {
                         if let Some(c) = typed(&key) {
-                            input.push(c);
+                            form.name.push(c);
                         }
                     }
+                    (_, ProjectField::Repos) => {
+                        form.repos.multi_key(&key);
+                    }
                 }
-                self.panel = Some(Panel::NewProject { input });
+                self.panel = Some(Panel::NewProject(form));
                 None
             }
             Panel::Prs {
@@ -2483,18 +2562,22 @@ impl Screen<'_> {
                 let lines = project_lines(app)?;
                 self.ui.panel = Some(Panel::Projects { lines, selected: 0 });
             }
-            Action::CreateProject { name } => match projects::create(app, &name, &[]) {
+            Action::NewProjectForm => {
+                let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
+                self.ui.panel = Some(Panel::NewProject(NewProjectForm::new(repos)));
+            }
+            Action::CreateProject { name, repos } => match projects::create(app, &name, &repos) {
                 Ok(_) => {
                     self.show_projects(Some(&name))?;
                     self.ui.set_status(format!(
-                        "created project {name} — e edits its repositories, ⏎ starts a task"
+                        "created project {name} — e edits it, ⏎ starts a task"
                     ));
                 }
-                Err(e) => self.ui.message(
-                    "could not create the project",
-                    vec![format!("{e:#}")],
-                    Some(Panel::NewProject { input: name }),
-                ),
+                Err(e) => {
+                    let back = self.ui.panel.take();
+                    self.ui
+                        .message("could not create the project", vec![format!("{e:#}")], back);
+                }
             },
             Action::EditProject { name } => {
                 let path = projects::config_path(app, &name)?;
@@ -3438,13 +3521,14 @@ mod tests {
         ui.message(
             "oops",
             vec!["x".into()],
-            Some(Panel::NewProject {
-                input: "half".into(),
-            }),
+            Some(Panel::NewProject(NewProjectForm {
+                name: "half".into(),
+                ..NewProjectForm::new(Vec::new())
+            })),
         );
         press(&mut ui, KeyCode::Enter);
         match &ui.panel {
-            Some(Panel::NewProject { input }) => assert_eq!(input, "half"),
+            Some(Panel::NewProject(form)) => assert_eq!(form.name, "half"),
             other => panic!("{other:?}"),
         }
     }
@@ -3554,14 +3638,67 @@ mod tests {
         });
         // Nothing to edit or delete in an empty panel; `n` still works.
         assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
-        press(&mut ui, KeyCode::Char('n'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewProjectForm)
+        );
+    }
+
+    #[test]
+    fn the_new_project_form_picks_repos_like_the_task_form() {
+        let mut ui = sample();
+        ui.panel = Some(Panel::NewProject(NewProjectForm::new(vec![
+            "github.com/acme/api".into(),
+            "github.com/acme/web".into(),
+        ])));
+        // A name is needed first.
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
         type_text(&mut ui, "infra");
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "web");
+        press(&mut ui, KeyCode::Char(' '));
         assert_eq!(
             press(&mut ui, KeyCode::Enter),
             Some(Action::CreateProject {
-                name: "infra".into()
+                name: "infra".into(),
+                repos: vec!["github.com/acme/web".into()],
             })
         );
+        // Left up, so a failure can come back to it.
+        assert!(matches!(ui.panel, Some(Panel::NewProject(_))));
+        assert_eq!(press(&mut ui, KeyCode::Esc), Some(Action::Projects));
+    }
+
+    #[test]
+    fn a_repos_picker_adds_a_repository_the_store_lacks() {
+        let mut picker = Picker::new(vec!["github.com/acme/api".into()]);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for c in "https://github.com/acme/web".chars() {
+            picker.multi_key(&key(KeyCode::Char(c)));
+        }
+        // Nothing matches, so space adds it rather than marking nothing.
+        assert!(picker.visible.is_empty());
+        picker.multi_key(&key(KeyCode::Char(' ')));
+        assert_eq!(picker.chosen(), vec!["https://github.com/acme/web"]);
+        assert!(picker.filter.is_empty());
+        // ^a adds what was typed even when it narrows to something else.
+        for c in "acme/api2".chars() {
+            picker.multi_key(&key(KeyCode::Char(c)));
+        }
+        picker.multi_key(&key(KeyCode::Backspace));
+        assert!(!picker.visible.is_empty());
+        picker.multi_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(
+            picker.chosen(),
+            vec!["https://github.com/acme/web", "acme/api"]
+        );
+        // Typing an existing item marks it rather than adding it twice.
+        for c in "github.com/acme/api".chars() {
+            picker.multi_key(&key(KeyCode::Char(c)));
+        }
+        picker.multi_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(picker.items.len(), 3);
+        assert_eq!(picker.chosen().len(), 3);
     }
 
     #[test]
