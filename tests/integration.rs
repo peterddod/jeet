@@ -3472,7 +3472,10 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\x0f");
     screen.wait_for_text("Widen the store");
     screen.type_keys(b"\r");
-    screen.wait_for_text("in task Wide store");
+    // The task's name is not waited for: the terminal only redraws the
+    // cells that changed, so its tail can arrive split from the rest. The
+    // checks after exit show where the checkout went.
+    screen.wait_for_text("checked out #7 in task");
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");
