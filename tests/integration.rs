@@ -10,6 +10,9 @@ fn jeet_bin() -> Command {
     // A background store sync would outlive the test and race its temp dirs;
     // the tests that want one turn it back on.
     cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
+    // Running the suite from inside a task's agent session must not point
+    // `jeet worktree` at that real task, or the shell wrapper's cd file.
+    cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
     cmd
 }
 
@@ -62,57 +65,6 @@ fn path_resolves_after_adopt() {
         path,
         repo_dir.path().canonicalize().unwrap().to_string_lossy()
     );
-}
-
-#[test]
-fn worktree_add_ls_remove_flow() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-
-    let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/demo.git");
-
-    jeet_bin()
-        .args(["adopt", repo_dir.path().to_str().unwrap()])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-
-    let output = jeet_bin()
-        .args(["worktree", "add", "acme/demo", "feature-a"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    if !output.status.success() {
-        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    assert!(output.status.success(), "worktree add failed");
-
-    let output = jeet_bin()
-        .args(["path", "acme/demo", "--branch", "feature-a"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(std::path::Path::new(&wt_path).exists());
-
-    let output = jeet_bin()
-        .args(["worktree", "ls", "acme/demo"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("feature-a"));
-
-    let output = jeet_bin()
-        .args(["worktree", "remove", "acme/demo", "feature-a"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(!std::path::Path::new(&wt_path).exists());
 }
 
 #[test]
@@ -282,7 +234,7 @@ fn list_subcommand_removed() {
 }
 
 // ---------------------------------------------------------------------------
-// explorer, worktree creation from anywhere, and cleaning
+// explorer, sessions and shell integration
 // ---------------------------------------------------------------------------
 
 fn git(args: &[&str], cwd: &std::path::Path) {
@@ -310,7 +262,6 @@ struct Lab {
     _bare: TempDir,
     home: String,
     repo: std::path::PathBuf,
-    bare: std::path::PathBuf,
 }
 
 fn lab(name: &str) -> Lab {
@@ -343,7 +294,6 @@ fn lab(name: &str) -> Lab {
     Lab {
         home: home_str,
         repo: repo.path().canonicalize().unwrap(),
-        bare: bare.path().canonicalize().unwrap(),
         _home: home,
         _repo: repo,
         _bare: bare,
@@ -359,148 +309,6 @@ impl Lab {
             .output()
             .unwrap()
     }
-
-    fn branches_on_remote(&self) -> String {
-        let output = Command::new("git")
-            .args(["branch", "--list"])
-            .current_dir(&self.bare)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).to_string()
-    }
-}
-
-#[test]
-fn worktree_with_name_creates_branch_and_publishes_it() {
-    let lab = lab("named");
-    let nested = lab.repo.join("nested/deep");
-    std::fs::create_dir_all(&nested).unwrap();
-
-    let output = lab.jeet(&["worktree", "feature-x"], &nested);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(std::path::Path::new(&path).exists(), "worktree not created");
-    assert!(path.contains("feature-x"));
-    assert!(
-        lab.branches_on_remote().contains("feature-x"),
-        "branch was not published: {}",
-        lab.branches_on_remote()
-    );
-}
-
-#[test]
-fn worktree_without_name_creates_a_detached_checkout() {
-    let lab = lab("detached");
-
-    let output = lab.jeet(&["worktree"], &lab.repo);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(
-        path.contains("ephemeral"),
-        "expected ephemeral path: {path}"
-    );
-
-    assert!(
-        std::path::Path::new(&path).is_dir(),
-        "path {path:?} missing; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let head = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "HEAD"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    assert!(!head.status.success(), "HEAD should be detached");
-}
-
-#[test]
-fn worktree_creation_hands_a_directory_back_to_the_shell() {
-    let lab = lab("handoff");
-    let cd_file = std::path::Path::new(&lab.home).join("cd-target");
-
-    let output = jeet_bin()
-        .args(["worktree", "handed-off", "--no-push"])
-        .current_dir(&lab.repo)
-        .env("JEET_HOME", &lab.home)
-        .env("JEET_CD_FILE", &cd_file)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let target = std::fs::read_to_string(&cd_file).unwrap();
-    assert!(target.contains("handed-off"), "cd hand-off was {target:?}");
-    assert!(std::path::Path::new(target.trim()).is_dir());
-}
-
-#[test]
-fn worktree_ls_reports_uncommitted_work_and_a_diff_counter() {
-    let lab = lab("counters");
-    let output = lab.jeet(&["worktree", "counted", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let wt = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let wt = std::path::Path::new(&wt);
-
-    std::fs::write(wt.join("tracked.txt"), "one\ntwo\n").unwrap();
-    git(&["add", "-A"], wt);
-    git(&["commit", "-qm", "add tracked"], wt);
-    std::fs::write(wt.join("dirty.txt"), "x").unwrap();
-
-    let output = lab.jeet(&["worktree", "ls", "acme/counters"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1 uncommitted"), "{stdout}");
-    assert!(stdout.contains("+2/-0 in 1 file"), "{stdout}");
-}
-
-#[test]
-fn worktree_clean_keeps_work_and_removes_throwaway_checkouts() {
-    let lab = lab("cleaning");
-
-    // A branch worktree with uncommitted work must survive.
-    let output = lab.jeet(&["worktree", "keep-me", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let keep = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    std::fs::write(std::path::Path::new(&keep).join("wip.txt"), "wip").unwrap();
-
-    // A detached ephemeral checkout is disposable.
-    let output = lab.jeet(&["worktree"], &lab.repo);
-    assert!(output.status.success());
-    let ephemeral = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[keep]"), "{stdout}");
-    assert!(stdout.contains("uncommitted change"), "{stdout}");
-    assert!(std::path::Path::new(&ephemeral).exists(), "dry run deleted");
-
-    let output = lab.jeet(&["worktree", "clean", "--yes"], &lab.repo);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!std::path::Path::new(&ephemeral).exists(), "not cleaned up");
-    assert!(std::path::Path::new(&keep).exists(), "work was discarded");
-}
-
-#[test]
-fn worktree_clean_refuses_to_discard_work_without_a_terminal() {
-    let lab = lab("prompting");
-    let output = lab.jeet(&["worktree"], &lab.repo);
-    assert!(output.status.success());
-
-    let output = lab.jeet(&["worktree", "clean"], &lab.repo);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--yes"), "{stderr}");
 }
 
 #[test]
@@ -512,27 +320,6 @@ fn explorer_needs_a_terminal() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("interactive terminal"), "{stderr}");
     }
-}
-
-#[test]
-fn commands_work_from_inside_a_linked_worktree() {
-    let lab = lab("nested");
-    let output = lab.jeet(&["worktree", "inner", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let wt = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let nested = std::path::Path::new(&wt).join("deep/deeper");
-    std::fs::create_dir_all(&nested).unwrap();
-
-    // Creating a worktree from inside another worktree still targets the trunk.
-    let output = lab.jeet(&["worktree", "sibling", "--no-push"], &nested);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let sibling = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(sibling.contains("sibling"));
-    assert!(std::path::Path::new(&sibling).exists());
 }
 
 #[test]
@@ -583,523 +370,6 @@ fn init_shell_wires_up_the_cd_handoff() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("JEET_CD_FILE"));
     assert!(stdout.contains("builtin cd --"));
-}
-
-// ---------------------------------------------------------------------------
-// renaming worktrees, including promoting a detached scratchpad
-// ---------------------------------------------------------------------------
-
-#[test]
-fn rename_promotes_a_detached_scratchpad_and_keeps_the_work() {
-    let lab = lab("scratchpad");
-
-    let output = lab.jeet(&["worktree"], &lab.repo);
-    assert!(output.status.success());
-    let scratch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let scratch = std::path::Path::new(&scratch);
-    assert!(scratch.to_string_lossy().contains("ephemeral"));
-
-    // Work that must survive the promotion: one commit and one untracked file.
-    std::fs::write(scratch.join("idea.txt"), "an idea\n").unwrap();
-    git(&["add", "-A"], scratch);
-    git(&["commit", "-qm", "the idea"], scratch);
-    std::fs::write(scratch.join("still-thinking.txt"), "wip").unwrap();
-
-    let output = lab.jeet(&["worktree", "rename", "login-page"], scratch);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let promoted = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let promoted = std::path::Path::new(&promoted);
-
-    assert!(!scratch.exists(), "the scratchpad should have moved");
-    assert!(promoted.is_dir(), "promoted worktree missing");
-    assert!(
-        !promoted.to_string_lossy().contains("ephemeral"),
-        "still ephemeral: {}",
-        promoted.display()
-    );
-    assert!(promoted.join("idea.txt").exists(), "commit lost");
-    assert!(
-        promoted.join("still-thinking.txt").exists(),
-        "uncommitted work lost"
-    );
-
-    let head = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(promoted)
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "login-page");
-    assert!(
-        lab.branches_on_remote().contains("login-page"),
-        "branch was not published: {}",
-        lab.branches_on_remote()
-    );
-
-    // The promoted worktree is no longer disposable.
-    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[keep]"), "{stdout}");
-    assert!(stdout.contains("login-page"), "{stdout}");
-}
-
-#[test]
-fn rename_moves_a_named_worktree_and_flags_the_stale_remote_branch() {
-    let lab = lab("renaming");
-
-    let output = lab.jeet(&["worktree", "old-name"], &lab.repo);
-    assert!(output.status.success());
-    let old = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    let output = lab.jeet(&["worktree", "rename", "old-name", "new-name"], &lab.repo);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let new = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(new.ends_with("new-name"), "{new}");
-    assert!(!std::path::Path::new(&old).exists());
-    assert!(std::path::Path::new(&new).is_dir());
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("origin/old-name still exists"), "{stderr}");
-    assert!(lab.branches_on_remote().contains("new-name"));
-}
-
-#[test]
-fn rename_refuses_names_that_are_already_taken() {
-    let lab = lab("collision");
-    lab.jeet(&["worktree", "first", "--no-push"], &lab.repo);
-    lab.jeet(&["worktree", "second", "--no-push"], &lab.repo);
-
-    let output = lab.jeet(&["worktree", "rename", "first", "second"], &lab.repo);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("already exists"), "{stderr}");
-}
-
-#[test]
-fn rename_takes_the_shell_with_it() {
-    let lab = lab("following");
-    let output = lab.jeet(&["worktree", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let scratch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let nested = std::path::Path::new(&scratch).join("nested");
-    std::fs::create_dir_all(&nested).unwrap();
-
-    let cd_file = std::path::Path::new(&lab.home).join("rename-cd");
-    let output = jeet_bin()
-        .args(["worktree", "rename", "named-now", "--no-push"])
-        .current_dir(&nested)
-        .env("JEET_HOME", &lab.home)
-        .env("JEET_CD_FILE", &cd_file)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // We were inside the worktree, in a subdirectory: land in the same place.
-    let landed = std::fs::read_to_string(&cd_file).unwrap();
-    assert!(landed.ends_with("named-now/nested"), "landed in {landed:?}");
-    assert!(std::path::Path::new(landed.trim()).is_dir());
-}
-
-#[test]
-fn renaming_someone_elses_worktree_leaves_the_shell_alone() {
-    let lab = lab("elsewhere");
-    lab.jeet(&["worktree", "target", "--no-push"], &lab.repo);
-
-    let cd_file = std::path::Path::new(&lab.home).join("no-cd");
-    let output = jeet_bin()
-        .args(["worktree", "rename", "target", "retarget", "--no-push"])
-        .current_dir(&lab.repo)
-        .env("JEET_HOME", &lab.home)
-        .env("JEET_CD_FILE", &cd_file)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(
-        !cd_file.exists() || std::fs::read_to_string(&cd_file).unwrap().is_empty(),
-        "should not move the shell into a worktree it was not in"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// regressions found in review
-// ---------------------------------------------------------------------------
-
-/// A worktree must not be classified by a path comparison that symlinks break —
-/// macOS resolves TempDir through /private/var, which used to make every
-/// jeet-managed worktree look external and silently disable clean and rename.
-#[test]
-fn worktrees_are_recognised_through_a_symlinked_home() {
-    let real = TempDir::new().unwrap();
-    let link_parent = TempDir::new().unwrap();
-    let link = link_parent.path().join("home-link");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(real.path(), &link).unwrap();
-    #[cfg(not(unix))]
-    return;
-
-    let repo = TempDir::new().unwrap();
-    init_repo_with_remote(repo.path(), "https://github.com/acme/symlinked.git");
-    let home = link.to_string_lossy().to_string();
-
-    let ok = jeet_bin()
-        .args(["adopt", repo.path().to_str().unwrap()])
-        .env("JEET_HOME", &home)
-        .output()
-        .unwrap();
-    assert!(ok.status.success());
-
-    let output = jeet_bin()
-        .args(["worktree", "through-link", "--no-push"])
-        .current_dir(repo.path())
-        .env("JEET_HOME", &home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let output = jeet_bin()
-        .args(["worktree", "ls", "acme/symlinked"])
-        .env("JEET_HOME", &home)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[worktree]") && !stdout.contains("[external]"),
-        "jeet did not recognise its own worktree: {stdout}"
-    );
-}
-
-/// `default_branch` used to fall back to the literal "main", which left every
-/// repo on another default branch unable to create a worktree at all.
-#[test]
-fn worktrees_work_on_a_repo_whose_default_branch_is_master() {
-    let home = TempDir::new().unwrap();
-    let home = home.path().to_string_lossy().to_string();
-    let repo = TempDir::new().unwrap();
-    init_repo_on_branch(
-        repo.path(),
-        "https://github.com/acme/mastered.git",
-        "master",
-    );
-    jeet_bin()
-        .args(["adopt", repo.path().to_str().unwrap()])
-        .env("JEET_HOME", &home)
-        .output()
-        .unwrap();
-
-    for args in [
-        vec!["worktree", "on-master", "--no-push"],
-        vec!["worktree", "--no-push"],
-    ] {
-        let output = jeet_bin()
-            .args(&args)
-            .current_dir(repo.path())
-            .env("JEET_HOME", &home)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(path_from(&output).is_dir());
-    }
-}
-
-/// Branch slugs are lossy: `feat/x` and `feat-x` share a directory. Handing the
-/// second one the first one's worktree drops you on the wrong branch.
-#[test]
-fn a_slug_collision_is_refused_rather_than_silently_reused() {
-    let lab = lab("slugs");
-
-    let output = lab.jeet(&["worktree", "feat/x", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let first = path_from(&output);
-    assert!(first.ends_with("feat-x"));
-
-    let output = lab.jeet(&["worktree", "feat-x", "--no-push"], &lab.repo);
-    assert!(!output.status.success(), "collision was silently accepted");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not the worktree for feat-x"), "{stderr}");
-}
-
-/// A directory that is not a worktree at all must never be adopted as one.
-#[test]
-fn a_stray_directory_is_not_mistaken_for_a_worktree() {
-    let lab = lab("stray");
-    let stray = std::path::Path::new(&lab.home).join("worktrees/github.com/acme/stray/leftover");
-    std::fs::create_dir_all(&stray).unwrap();
-    std::fs::write(stray.join("junk.txt"), "left behind").unwrap();
-
-    let output = lab.jeet(&["worktree", "leftover", "--no-push"], &lab.repo);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not the worktree for leftover"), "{stderr}");
-}
-
-/// `git status --porcelain` never lists ignored files, so a worktree holding
-/// only a .env used to read as "nothing to lose" and be deleted unattended.
-#[test]
-fn clean_does_not_silently_discard_ignored_files() {
-    let lab = lab("ignored");
-    std::fs::write(lab.repo.join(".gitignore"), ".env\n").unwrap();
-    git(&["add", "-A"], &lab.repo);
-    git(&["commit", "-qm", "ignore env"], &lab.repo);
-
-    let output = lab.jeet(&["worktree", "has-secrets", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let wt = path_from(&output);
-    std::fs::write(wt.join(".env"), "AWS_SECRET=hunter2").unwrap();
-
-    // Unattended: nobody reads the report, so it must not decide to destroy.
-    let output = lab.jeet(&["worktree", "clean", "--yes"], &lab.repo);
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[keep]"), "{stdout}");
-    assert!(stdout.contains("ignored file"), "{stdout}");
-    assert!(wt.join(".env").exists(), "the .env was destroyed");
-
-    // ...but it does say what would go, so an interactive run can decide.
-    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("1 ignored file will be deleted"),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("nothing to lose"), "{stdout}");
-}
-
-/// Removal must not pass --force on jeet's own judgement: git independently
-/// re-checks at removal time and catches anything written since.
-#[test]
-fn clean_defers_to_gits_own_check_at_removal_time() {
-    let lab = lab("toctou");
-    let output = lab.jeet(&["worktree", "racy", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-    let wt = path_from(&output);
-
-    // Appears clean when classified...
-    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("[remove]"));
-
-    // ...but gains work before the removal actually runs.
-    std::fs::write(wt.join("late.txt"), "written after the check").unwrap();
-    let output = lab.jeet(&["worktree", "clean", "--yes"], &lab.repo);
-    assert!(output.status.success());
-    assert!(
-        wt.join("late.txt").exists(),
-        "work written after classification was destroyed"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[keep]"), "{stdout}");
-
-    // And the last line of defence: an explicit remove still defers to git.
-    let output = lab.jeet(&["worktree", "remove", "acme/toctou", "racy"], &lab.repo);
-    assert!(!output.status.success());
-    assert!(wt.join("late.txt").exists());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("uncommitted change"), "{stderr}");
-}
-
-/// --force decides whether work may be discarded. It must not also widen scope
-/// to worktrees the user created outside ~/.jeet.
-#[test]
-fn force_does_not_widen_clean_scope_to_external_worktrees() {
-    let lab = lab("scope");
-    let outside = TempDir::new().unwrap();
-    let external = outside.path().join("mine");
-    git(
-        &[
-            "worktree",
-            "add",
-            "-q",
-            &external.to_string_lossy(),
-            "-b",
-            "mine",
-        ],
-        &lab.repo,
-    );
-    std::fs::write(external.join("wip.txt"), "uncommitted").unwrap();
-
-    let output = lab.jeet(&["worktree", "clean", "--force", "--yes"], &lab.repo);
-    assert!(output.status.success());
-    assert!(
-        external.exists(),
-        "--force deleted a worktree outside ~/.jeet without --all"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("jeet did not create this worktree"),
-        "{stdout}"
-    );
-}
-
-/// A worktree jeet cannot assess is not a worktree jeet may delete.
-#[test]
-fn clean_keeps_worktrees_it_cannot_assess() {
-    let lab = lab("failclosed");
-    let output = lab.jeet(&["worktree", "unassessable", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-
-    // The recorded default branch stops resolving, so the comparison fails.
-    git(&["branch", "-m", "main", "renamed-away"], &lab.repo);
-
-    let output = lab.jeet(&["worktree", "clean", "--dry-run"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[keep]"), "{stdout}");
-    assert!(stdout.contains("could not compare"), "{stdout}");
-    assert!(!stdout.contains("nothing to lose"), "{stdout}");
-}
-
-/// The diff counter is documented as including uncommitted edits.
-#[test]
-fn the_diff_counter_includes_uncommitted_edits() {
-    let lab = lab("counter");
-    std::fs::write(lab.repo.join("tracked.txt"), "one\n").unwrap();
-    git(&["add", "-A"], &lab.repo);
-    git(&["commit", "-qm", "seed"], &lab.repo);
-
-    let output = lab.jeet(&["worktree", "counting", "--no-push"], &lab.repo);
-    let wt = path_from(&output);
-    std::fs::write(wt.join("tracked.txt"), "one\ntwo\nthree\n").unwrap();
-
-    let output = lab.jeet(&["worktree", "ls", "acme/counter"], &lab.repo);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("+2/-0 in 1 file"), "{stdout}");
-}
-
-/// Renaming onto a branch that already exists on the remote would publish this
-/// worktree over somebody else's work.
-#[test]
-fn rename_refuses_to_publish_over_an_existing_remote_branch() {
-    let lab = lab("remotecollide");
-    let output = lab.jeet(&["worktree", "taken"], &lab.repo);
-    assert!(output.status.success());
-    assert!(lab.branches_on_remote().contains("taken"));
-
-    let output = lab.jeet(&["worktree", "scratch", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-
-    let output = lab.jeet(&["worktree", "rename", "scratch", "taken"], &lab.repo);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("already exists"), "{stderr}");
-}
-
-/// A branch that was never published tracks origin/<default>; telling the user
-/// to delete that would be catastrophic advice.
-#[test]
-fn rename_only_warns_about_a_remote_branch_that_exists() {
-    let lab = lab("nowarn");
-    let output = lab.jeet(&["worktree", "unpublished", "--no-push"], &lab.repo);
-    assert!(output.status.success());
-
-    let output = lab.jeet(
-        &["worktree", "rename", "unpublished", "renamed", "--no-push"],
-        &lab.repo,
-    );
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("still exists"),
-        "warned about a branch that was never pushed: {stderr}"
-    );
-}
-
-/// The shell wrapper is the only way the cd hand-off reaches a shell, so run
-/// the emitted snippet for real rather than grepping it.
-#[test]
-fn the_emitted_shell_wrapper_actually_changes_directory() {
-    let lab = lab("wrapper");
-    let output = jeet_bin().args(["init-shell"]).output().unwrap();
-    let snippet = String::from_utf8_lossy(&output.stdout).to_string();
-    let script = std::path::Path::new(&lab.home).join("wrapper.sh");
-    std::fs::write(&script, snippet).unwrap();
-
-    let program = format!(
-        r#"set -u
-export PATH="{}:$PATH"
-. "{}"
-cd "{}"
-jeet worktree wrapped --no-push >/dev/null 2>&1
-pwd"#,
-        std::path::Path::new(env!("CARGO_BIN_EXE_jeet"))
-            .parent()
-            .unwrap()
-            .display(),
-        script.display(),
-        lab.repo.display(),
-    );
-
-    let mut cmd = Command::new("bash");
-    hermetic_git(&mut cmd);
-    let output = cmd
-        .args(["--noprofile", "--norc", "-c", &program])
-        .env("JEET_HOME", &lab.home)
-        .output()
-        .unwrap();
-    let landed = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(
-        landed.ends_with("wrapped"),
-        "wrapper left the shell in {landed:?}; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// A dry run must report the same verdict as the run it previews — otherwise
-/// `--dry-run` says "remove" for a worktree that the real command then keeps.
-#[test]
-fn dry_run_previews_the_same_policy_it_would_apply() {
-    let lab = lab("preview");
-    std::fs::write(lab.repo.join(".gitignore"), ".env\n").unwrap();
-    git(&["add", "-A"], &lab.repo);
-    git(&["commit", "-qm", "ignore env"], &lab.repo);
-
-    let output = lab.jeet(&["worktree", "previewed", "--no-push"], &lab.repo);
-    let wt = path_from(&output);
-    std::fs::write(wt.join(".env"), "SECRET=1").unwrap();
-
-    let verdict = |args: &[&str]| -> String {
-        let out = lab.jeet(args, &lab.repo);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout
-            .lines()
-            .find(|l| l.contains("previewed"))
-            .unwrap_or("")
-            .to_string();
-        if line.contains("[remove]") {
-            "remove".into()
-        } else if line.contains("[keep]") {
-            "keep".into()
-        } else {
-            format!("unrecognised: {line}")
-        }
-    };
-
-    // Unattended: the preview and the run must agree...
-    assert_eq!(
-        verdict(&["worktree", "clean", "--dry-run", "--yes"]),
-        "keep"
-    );
-    assert!(wt.join(".env").exists());
-    assert_eq!(verdict(&["worktree", "clean", "--yes"]), "keep");
-    assert!(
-        wt.join(".env").exists(),
-        "the run discarded what the preview kept"
-    );
-
-    // ...and an interactive preview reports the interactive policy.
-    assert_eq!(verdict(&["worktree", "clean", "--dry-run"]), "remove");
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,4 +835,646 @@ fn review_without_a_terminal_prints_only_the_worktree_path() {
             .all(|c| c.starts_with("pr view") || c.starts_with("pr checkout")),
         "{calls}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// tasks and their worktrees
+// ---------------------------------------------------------------------------
+
+impl StoreLab {
+    /// `jeet` run from `cwd`, with extra environment on top of the lab's.
+    fn jeet_at(
+        &self,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &[(&str, &str)],
+    ) -> std::process::Output {
+        let mut cmd = jeet_bin();
+        self.wire(&mut cmd).args(args).current_dir(cwd);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.output().unwrap()
+    }
+
+    /// `jeet task new <name>`, run from outside any task; the task directory.
+    fn new_task(&self, name: &str) -> std::path::PathBuf {
+        let output = self.jeet_at(&["task", "new", name], &self.home(), &[]);
+        succeeded(&output);
+        path_from(&output)
+    }
+
+    /// `jeet worktree add <args…>` from inside `task`; the worktree's path.
+    fn add(&self, task: &std::path::Path, args: &[&str]) -> std::path::PathBuf {
+        let mut full = vec!["worktree", "add"];
+        full.extend_from_slice(args);
+        let output = self.jeet_at(&full, task, &[]);
+        succeeded(&output);
+        path_from(&output)
+    }
+}
+
+/// Assert a command worked, showing its stderr when it did not.
+fn succeeded(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn stdout_of(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn stderr_of(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+fn git_stdout(args: &[&str], cwd: &std::path::Path) -> String {
+    let mut cmd = Command::new("git");
+    hermetic_git(&mut cmd);
+    let output = cmd.args(args).current_dir(cwd).output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}: {}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn is_detached(dir: &std::path::Path) -> bool {
+    !Command::new("git")
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+fn task_id(task: &std::path::Path) -> String {
+    std::fs::read_to_string(task.join(".jeet/task-id"))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn an_empty_task_takes_worktrees_on_demand() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    lab.clone_repo("gadget");
+    // Pushed after the clone: a worktree must start from origin as it is now.
+    let upstream = lab.commit("widget", "upstream work");
+
+    let task = lab.new_task("Fix the login page");
+    assert!(
+        task.ends_with("tasks/fix-the-login-page"),
+        "{}",
+        task.display()
+    );
+    // An empty canvas: the marker and the jeet skill, nothing else.
+    let mut entries: Vec<String> = std::fs::read_dir(&task)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, [".claude", ".jeet"]);
+    assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
+    let id = task_id(&task);
+
+    // From a subdirectory of the task, which is found by walking up.
+    let notes = task.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let output = lab.jeet_at(&["worktree", "add", "widget"], &notes, &[]);
+    succeeded(&output);
+    let first = path_from(&output);
+    assert_eq!(first, task.join("widget"));
+    assert!(is_detached(&first));
+    assert_eq!(rev(&first, "HEAD"), upstream);
+
+    // From anywhere at all, with the task in the environment as an agent
+    // session has it — and a second worktree of the same repository.
+    let output = lab.jeet_at(
+        &["worktree", "add", "acme/widget", "--branch", "feat-a"],
+        &lab.home(),
+        &[("JEET_TASK_ID", &id)],
+    );
+    succeeded(&output);
+    let second = path_from(&output);
+    assert_eq!(second, task.join("widget-2"));
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &second),
+        "feat-a"
+    );
+
+    // From deep inside one of the task's own worktrees.
+    let deep = first.join("src/deep");
+    std::fs::create_dir_all(&deep).unwrap();
+    let output = lab.jeet_at(&["worktree", "add", "gadget"], &deep, &[]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), task.join("gadget"));
+
+    let output = lab.jeet_at(&["worktree", "ls"], &task, &[]);
+    succeeded(&output);
+    let listing = stdout_of(&output);
+    assert_eq!(listing.lines().count(), 3, "{listing}");
+    assert!(listing.contains("feat-a"), "{listing}");
+    assert!(listing.contains("github.com/acme/gadget"), "{listing}");
+
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &[]);
+    assert!(
+        stdout_of(&output).contains("3 wt: widget, gadget"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    for args in [
+        vec![
+            "worktree",
+            "path",
+            "widget-2",
+            "--task",
+            "fix-the-login-page",
+        ],
+        vec![
+            "worktree",
+            "--task",
+            "fix-the-login-page",
+            "path",
+            "widget-2",
+        ],
+    ] {
+        let output = lab.jeet_at(&args, &lab.home(), &[]);
+        succeeded(&output);
+        assert_eq!(path_from(&output), second);
+    }
+    // Without a terminal, opening a task just names its directory.
+    for verb in ["path", "open"] {
+        let output = lab.jeet_at(&["task", verb, "fix-the-login-page"], &lab.home(), &[]);
+        succeeded(&output);
+        assert_eq!(path_from(&output), task);
+    }
+
+    // Outside any task there is nothing to add a worktree to.
+    let output = lab.jeet_at(&["worktree", "add", "widget"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("not inside a task"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn reconcile_adopts_worktrees_made_by_hand_and_forgets_vanished_ones() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let task = lab.new_task("by hand");
+    let made = lab.add(&task, &["widget"]);
+
+    // What an agent might do without asking jeet.
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "manual",
+            &task.join("manual").to_string_lossy(),
+        ],
+        &trunk,
+    );
+    std::fs::remove_dir_all(&made).unwrap();
+
+    let output = lab.jeet_at(&["worktree", "ls"], &task, &[]);
+    succeeded(&output);
+    let listing = stdout_of(&output);
+    assert!(listing.starts_with("manual "), "{listing}");
+    assert_eq!(listing.lines().count(), 1, "{listing}");
+    let registered = git_stdout(&["worktree", "list", "--porcelain"], &trunk);
+    assert!(
+        !registered.contains(made.to_str().unwrap()),
+        "git still lists the vanished worktree: {registered}"
+    );
+
+    // Adopted means owned: it can be removed like any other, and its branch,
+    // which the task did not make, stays.
+    succeeded(&lab.jeet_at(&["worktree", "rm", "manual"], &task, &[]));
+    assert!(!task.join("manual").exists());
+    assert_eq!(
+        git_stdout(&["branch", "--list", "manual"], &trunk),
+        "manual"
+    );
+}
+
+#[test]
+fn archive_and_unarchive_bring_back_every_kind_of_work() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let seed = lab.seed("widget");
+    std::fs::write(seed.join("tracked.txt"), "one\n").unwrap();
+    git(&["add", "-A"], &seed);
+    git(&["commit", "-qm", "tracked"], &seed);
+    git(&["push", "-q", "origin", "main"], &seed);
+
+    let task = lab.new_task("round trip");
+    let id = task_id(&task);
+    let branchy = lab.add(&task, &["widget", "--branch", "feat"]);
+    let detached = lab.add(&task, &["widget"]);
+
+    // A commit on a detached HEAD: on no branch at all.
+    std::fs::write(detached.join("note.txt"), "kept\n").unwrap();
+    git(&["add", "-A"], &detached);
+    git(&["commit", "-qm", "detached work"], &detached);
+    let detached_head = rev(&detached, "HEAD");
+    // Every kind of uncommitted change.
+    std::fs::write(branchy.join("tracked.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(branchy.join("staged.txt"), "staged\n").unwrap();
+    git(&["add", "staged.txt"], &branchy);
+    std::fs::write(branchy.join("untracked.txt"), "loose\n").unwrap();
+    let branch_head = rev(&branchy, "HEAD");
+
+    let output = lab.jeet_at(&["task", "archive", "round-trip"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(output.stdout.is_empty(), "archive wrote to stdout");
+    assert!(
+        !branchy.exists() && !detached.exists(),
+        "archive left worktrees on disk"
+    );
+    assert!(
+        task.join(".jeet/task-id").is_file(),
+        "the task directory must stay"
+    );
+    let refs = git_stdout(
+        &["for-each-ref", "--format=%(refname)", "refs/jeet/"],
+        &trunk,
+    );
+    assert!(
+        refs.contains(&format!("refs/jeet/stash/{id}/widget")),
+        "{refs}"
+    );
+    assert!(
+        refs.contains(&format!("refs/jeet/head/{id}/widget-2")),
+        "{refs}"
+    );
+    // Nothing archived may depend on git keeping unreachable objects.
+    git(&["gc", "-q", "--prune=now"], &trunk);
+
+    let output = lab.jeet_at(&["task", "ls", "--archived"], &lab.home(), &[]);
+    assert!(stdout_of(&output).contains("round-trip"));
+    let output = lab.jeet_at(&["worktree", "add", "widget"], &task, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("archived"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    succeeded(&lab.jeet_at(&["task", "unarchive", "round-trip"], &lab.home(), &[]));
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &branchy),
+        "feat"
+    );
+    assert_eq!(rev(&branchy, "HEAD"), branch_head);
+    assert_eq!(
+        std::fs::read_to_string(branchy.join("tracked.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(branchy.join("untracked.txt")).unwrap(),
+        "loose\n"
+    );
+    assert_eq!(
+        git_stdout(&["diff", "--cached", "--name-only"], &branchy),
+        "staged.txt",
+        "staged changes should come back staged"
+    );
+    assert!(is_detached(&detached));
+    assert_eq!(rev(&detached, "HEAD"), detached_head);
+    assert_eq!(
+        std::fs::read_to_string(detached.join("note.txt")).unwrap(),
+        "kept\n"
+    );
+    assert_eq!(
+        git_stdout(&["for-each-ref", "refs/jeet/"], &trunk),
+        "",
+        "unarchive left its refs behind"
+    );
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &[]);
+    assert!(stdout_of(&output).contains("round-trip"));
+}
+
+#[test]
+fn delete_takes_everything_the_task_owns_and_nothing_else() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    git(&["branch", "existing"], &trunk);
+
+    let task = lab.new_task("doomed");
+    let made = lab.add(&task, &["widget", "--branch", "made"]);
+    let kept = lab.add(&task, &["widget", "--branch", "existing"]);
+    std::fs::write(made.join("work.txt"), "work").unwrap();
+    git(&["add", "-A"], &made);
+    git(&["commit", "-qm", "unpushed"], &made);
+    std::fs::write(kept.join("wip.txt"), "dirty").unwrap();
+    // Archived first, so there are refs to clean up too.
+    succeeded(&lab.jeet_at(&["task", "archive", "doomed"], &lab.home(), &[]));
+
+    // Without a terminal, delete says what would be lost and does nothing.
+    let output = lab.jeet_at(&["task", "delete", "doomed"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("widget (made): 1 commit on no other branch"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("uncommitted changes saved"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(task.is_dir());
+
+    succeeded(&lab.jeet_at(&["task", "delete", "doomed", "--force"], &lab.home(), &[]));
+    assert!(!task.exists(), "the task directory survived");
+    assert_eq!(
+        git_stdout(&["branch", "--list", "made"], &trunk),
+        "",
+        "the branch the task made survived"
+    );
+    assert_eq!(
+        git_stdout(&["branch", "--list", "existing"], &trunk),
+        "existing",
+        "a branch the task did not make was deleted"
+    );
+    assert_eq!(git_stdout(&["for-each-ref", "refs/jeet/"], &trunk), "");
+    let registered = git_stdout(&["worktree", "list", "--porcelain"], &trunk);
+    assert_eq!(
+        registered
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        1,
+        "{registered}"
+    );
+    let output = lab.jeet_at(&["task", "ls", "--archived"], &lab.home(), &[]);
+    assert!(!stdout_of(&output).contains("doomed"));
+}
+
+#[test]
+fn a_branch_checked_out_in_another_task_is_refused() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let first = lab.new_task("first");
+    let second = lab.new_task("second");
+    lab.add(&first, &["widget", "--branch", "shared"]);
+
+    let output = lab.jeet_at(
+        &["worktree", "add", "widget", "--branch", "shared"],
+        &second,
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("in task first"), "{stderr}");
+    assert!(!second.join("widget").exists());
+
+    // Deleting a live task frees the branch it held.
+    succeeded(&lab.jeet_at(&["task", "delete", "first", "-f"], &lab.home(), &[]));
+    assert!(!first.exists());
+    lab.add(&second, &["widget", "--branch", "shared"]);
+}
+
+#[test]
+fn worktree_rm_refuses_to_lose_work_unless_forced() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let task = lab.new_task("tidy");
+
+    // Nothing in it: removed, and the branch it made goes with it.
+    lab.add(&task, &["widget", "--branch", "tidy-a"]);
+    succeeded(&lab.jeet_at(&["worktree", "rm", "widget"], &task, &[]));
+    assert_eq!(git_stdout(&["branch", "--list", "tidy-a"], &trunk), "");
+
+    // An unpushed commit: refused, then forced — and the branch is kept.
+    let wt = lab.add(&task, &["widget", "--branch", "tidy-b"]);
+    std::fs::write(wt.join("work.txt"), "work").unwrap();
+    git(&["add", "-A"], &wt);
+    git(&["commit", "-qm", "work"], &wt);
+    let output = lab.jeet_at(&["worktree", "rm", "widget"], &task, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("1 unpushed commit"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(wt.is_dir());
+    let output = lab.jeet_at(&["worktree", "rm", "widget", "--force"], &task, &[]);
+    succeeded(&output);
+    assert!(!wt.exists());
+    assert!(stderr_of(&output).contains("kept branch tidy-b"));
+    assert_eq!(
+        git_stdout(&["branch", "--list", "tidy-b"], &trunk),
+        "tidy-b"
+    );
+
+    // Uncommitted changes: refused, and from inside it, refused outright.
+    let wt = lab.add(&task, &["widget"]);
+    std::fs::write(wt.join("wip.txt"), "wip").unwrap();
+    let output = lab.jeet_at(&["worktree", "rm", "widget"], &task, &[]);
+    assert!(stderr_of(&output).contains("1 uncommitted change"));
+    let output = lab.jeet_at(&["worktree", "rm", "widget", "-f"], &wt, &[]);
+    assert!(
+        stderr_of(&output).contains("cd out"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(wt.join("wip.txt").exists());
+}
+
+#[test]
+fn a_task_can_start_with_a_repo_on_a_branch() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let home = lab.home();
+
+    let output = lab.jeet_at(
+        &[
+            "task", "new", "Preset", "--repo", "widget", "--branch", "feat-p",
+        ],
+        &home,
+        &[],
+    );
+    succeeded(&output);
+    let task = path_from(&output);
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &task.join("widget")),
+        "feat-p"
+    );
+
+    // --branch names one repository's branch.
+    let output = lab.jeet_at(
+        &[
+            "task", "new", "Two", "--repo", "widget", "--repo", "widget", "--branch", "x",
+        ],
+        &home,
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("exactly one"));
+
+    // A preset that cannot be added leaves no half-made task behind.
+    let output = lab.jeet_at(
+        &["task", "new", "Broken", "--repo", "nosuchrepo"],
+        &home,
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(!home.join("tasks/broken").exists());
+    let output = lab.jeet_at(&["task", "ls"], &home, &[]);
+    assert!(!stdout_of(&output).contains("broken"));
+}
+
+/// `git worktree list` reports symlink-resolved paths; a home reached through
+/// a symlink must not stop jeet recognising worktrees inside its tasks.
+#[cfg(unix)]
+#[test]
+fn tasks_work_through_a_symlinked_home() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let links = TempDir::new().unwrap();
+    let link = links.path().join("home-link");
+    std::os::unix::fs::symlink(lab.home.path(), &link).unwrap();
+    let env = [("JEET_HOME", link.to_str().unwrap())];
+
+    succeeded(&lab.jeet_at(&["task", "new", "linked"], links.path(), &env));
+    let through_link = link.join("tasks/linked");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &through_link.join("manual").to_string_lossy(),
+        ],
+        &trunk,
+    );
+    let output = lab.jeet_at(&["worktree", "ls"], &through_link, &env);
+    succeeded(&output);
+    assert!(
+        stdout_of(&output).contains("manual"),
+        "{}",
+        stdout_of(&output)
+    );
+}
+
+/// Offline, the store's last fetch is a fine base; and a repo whose default
+/// branch is not `main` must still give worktrees.
+#[test]
+fn a_worktree_is_added_offline_from_a_repo_on_master() {
+    let home = TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo_on_branch(
+        repo.path(),
+        "https://github.com/acme/mastered.git",
+        "master",
+    );
+    let jeet = |args: &[&str], cwd: &std::path::Path| {
+        jeet_bin()
+            .args(args)
+            .current_dir(cwd)
+            .env("JEET_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    succeeded(&jeet(&["adopt", repo.path().to_str().unwrap()], &home));
+    let output = jeet(&["task", "new", "offline"], &home);
+    succeeded(&output);
+    let task = path_from(&output);
+
+    let output = jeet(&["worktree", "add", "mastered"], &task);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("could not fetch"),
+        "{}",
+        stderr_of(&output)
+    );
+    let wt = path_from(&output);
+    assert_eq!(rev(&wt, "HEAD"), rev(repo.path(), "master"));
+}
+
+/// The shell wrapper is the only way the cd hand-off reaches a shell, so run
+/// the emitted snippet for real rather than grepping it.
+#[test]
+fn the_emitted_shell_wrapper_actually_changes_directory() {
+    let lab = StoreLab::new();
+    let output = jeet_bin().args(["init-shell"]).output().unwrap();
+    let script = lab.home().join("wrapper.sh");
+    std::fs::write(&script, stdout_of(&output)).unwrap();
+
+    let program = format!(
+        r#"set -u
+export PATH="{}:$PATH"
+. "{}"
+cd "{}"
+jeet task new wrapped >/dev/null 2>&1
+pwd"#,
+        std::path::Path::new(env!("CARGO_BIN_EXE_jeet"))
+            .parent()
+            .unwrap()
+            .display(),
+        script.display(),
+        lab.home().display(),
+    );
+    let mut cmd = Command::new("bash");
+    hermetic_git(&mut cmd);
+    let output = cmd
+        .args(["--noprofile", "--norc", "-c", &program])
+        .env("JEET_HOME", lab.home())
+        .env("JEET_SYNC_INTERVAL_SECS", "0")
+        .env_remove("JEET_CD_FILE")
+        .output()
+        .unwrap();
+    let landed = stdout_of(&output).trim().to_string();
+    assert!(
+        landed.ends_with("tasks/wrapped"),
+        "wrapper left the shell in {landed:?}; stderr: {}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn a_task_from_a_project_gets_a_copy_of_its_files() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let project = home.join("projects/web");
+    std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
+    std::fs::write(project.join("CLAUDE.md"), "be careful\n").unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy it\n").unwrap();
+
+    let output = lab.jeet_at(&["task", "new", "Launch", "--project", "web"], &home, &[]);
+    succeeded(&output);
+    let task = path_from(&output);
+    assert_eq!(
+        std::fs::read_to_string(task.join("CLAUDE.md")).unwrap(),
+        "be careful\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(task.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "deploy it\n"
+    );
+    assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
+    // A snapshot: editing the project later leaves the task alone.
+    std::fs::write(project.join("CLAUDE.md"), "changed\n").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(task.join("CLAUDE.md")).unwrap(),
+        "be careful\n"
+    );
+
+    for bad in ["nope", "../projects/web"] {
+        let output = lab.jeet_at(&["task", "new", "Bad", "--project", bad], &home, &[]);
+        assert!(!output.status.success(), "{bad} was accepted");
+    }
+    assert!(!home.join("tasks/bad").exists());
 }

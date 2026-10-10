@@ -69,14 +69,20 @@ jeet ls acme
 jeet cd acme/widget                      # jump to the trunk
 jeet                                     # open the file explorer there
 
-# Worktrees — from anywhere inside a repo or worktree
-jeet worktree feature-x                  # branch feature-x, published to origin
-jeet worktree                            # detached checkout of the default branch
-jeet worktree rename login-page          # name a scratchpad once you know what it is
-jeet worktree ls acme/widget             # with dirty + diff counters
-jeet worktree clean                      # drop worktrees holding no work
-jeet worktree add acme/widget feature-x  # explicit form; does not push
-jeet worktree remove acme/widget feature-x [--force]
+# Tasks — a workspace directory per piece of work, worktrees added on demand
+jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fix-login
+jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
+jeet task ls [--archived]
+jeet task archive fix-login              # free the disk, keep the work
+jeet task unarchive fix-login
+jeet task delete fix-login [--force]
+
+# Worktrees — of the task you are in (or --task <name>)
+jeet worktree add api                    # detached at origin's default branch; prints the path
+jeet worktree add api --branch feat-x    # existing branch, origin's, or a new one
+jeet worktree ls                         # with dirty + diff counters
+jeet worktree rm api [--force]
+jeet worktree path api
 
 # Navigation
 jeet path acme/widget                    # print path (scripting)
@@ -286,90 +292,71 @@ would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
 `$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
 `$JEET_REVIEW_LOG`. Jobs and their logs live under `~/.jeet/reviews`.
 
-## Worktrees
+## Tasks
+
+A task is a directory under `~/.jeet/tasks/<slug>`: a blank canvas for one
+piece of work, with any number of git worktrees inside it, added and removed as
+the work needs them — several repositories, or several checkouts of one.
 
 ```bash
-jeet worktree feature-x     # create the branch, worktree it, push it to origin
-jeet worktree               # detached checkout of the default branch
-jeet worktree feature-x --no-push
-jeet worktree feature-x --repo acme/widget
+cd "$(jeet task new "Fix login")"   # prints the task directory (and cds there with the wrapper)
+jeet worktree add api               # -> ~/.jeet/tasks/fix-login/api, detached at origin/main
+jeet worktree add web --branch fix-login
+jeet worktree add api               # a second checkout: api-2
+jeet worktree ls
 ```
 
-Scratchpad first, name it later:
+`jeet worktree` works on the task you are in — anywhere below its directory,
+including inside one of its worktrees — or on the one in `$JEET_TASK_ID`, or on
+`--task <name>`. Outside a task it says so rather than guessing. `add` and
+`path` print the worktree's path and nothing else, so a script or a coding
+agent can `cd "$(jeet worktree add api)"`.
+
+`add` fetches the repository first, so a worktree starts from what origin has
+now; offline, it starts from the last fetch and says so. The repository can be
+a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
+is cloned into the store. Without `--branch` the worktree is detached at the
+default branch. With it, an existing local branch is checked out, a branch that
+exists only on origin is tracked, and anything else is created from the default
+branch. A branch already checked out elsewhere is refused, naming the task that
+has it.
+
+Every task gets a jeet skill (`.claude/skills/jeet/SKILL.md`) that tells a
+coding agent how to do all of this itself. A worktree made with plain
+`git worktree add` inside a task directory is adopted into the task the next
+time jeet looks, and one whose directory was deleted is forgotten.
 
 ```bash
-jeet worktree               # detached: poke at something
-# ...an hour of hacking...
-jeet worktree rename login-page
+jeet worktree rm api        # refuses while it has uncommitted or unpushed work
+jeet worktree rm api -f     # removes it anyway
 ```
 
-Both forms work from **anywhere** inside a repo or one of its worktrees, not
-just the root, and both drop you into the new worktree when the shell wrapper is
-installed. Named worktrees live under `~/.jeet/worktrees`; detached ones live under
-`~/.jeet/ephemeral`. `jeet worktree clean` collects both — see below for exactly
-what it will and will not delete.
+A branch the task created is deleted with its worktree only when its commits are
+on origin or on the default branch; otherwise it is kept, and jeet says so.
 
-### Renaming
+### Archiving and deleting
 
 ```bash
-jeet worktree rename login-page          # rename the worktree you are in
-jeet worktree rename old-name new-name   # or name the one to rename
-jeet worktree rename login-page --no-push
+jeet task archive fix-login
+jeet task unarchive fix-login
+jeet task delete fix-login
 ```
 
-Like `jeet worktree <name>`, renaming **publishes the new branch to `origin`**
-unless you pass `--no-push`. Renaming onto a name that already exists on the
-remote is refused rather than pushed over.
+**Archive** frees the disk and keeps the work: each worktree's uncommitted
+changes — staged, unstaged and untracked — are saved under
+`refs/jeet/stash/<task-id>/<dir>`, its HEAD is pinned under
+`refs/jeet/head/<task-id>/<dir>` so not even a commit on a detached HEAD is lost
+to gc, and only then is the worktree removed. Ignored files (build output,
+`.env`) are not kept, and archive says how many went. The task directory itself
+stays, so an agent's sessions still find it. **Unarchive** puts every worktree
+back on its branch (or detached at its commit) with its changes reapplied, then
+drops the refs.
 
-Renaming a **detached** worktree creates that branch at its current HEAD and
-moves it out of the ephemeral root, so a throwaway scratchpad becomes a real
-branch once you know what it is. Nothing in the working tree is touched —
-uncommitted and untracked files come along — and `clean` stops treating it as
-disposable.
-
-Renaming a **named** worktree renames its branch and moves the directory to
-match. If the old branch was already published, jeet says so rather than
-deleting anything on the remote for you:
-
-```text
-jeet: origin/old-name still exists; delete it with `git push origin --delete old-name`
-```
-
-If your shell was inside the worktree, it follows the move — right down to the
-subdirectory you were standing in. Worktrees jeet did not create keep their
-directory where you put it; only the branch is renamed.
-
-### Cleaning up
-
-```bash
-jeet worktree ls acme/widget    # every worktree with its counters
-jeet worktree clean --dry-run   # what would go, and why the rest stays
-jeet worktree clean --yes
-jeet worktree clean --all --force
-```
-
-`clean` removes worktrees that hold nothing you would miss, and reports the ones
-it keeps with the reason. What counts as something to lose:
-
-- **uncommitted changes** or **commits not on the default branch** — kept unless
-  `--force`.
-- **anything jeet could not assess** (a git error, a default branch that no
-  longer resolves) — kept, because "I could not tell" must never read as "safe
-  to delete".
-- **ignored files** (`.env`, local databases, build output) — git deletes these
-  without complaint, so jeet counts them separately. They are named in the
-  report so an interactive run can decide, and an unattended `--yes` run keeps
-  the worktree rather than destroying them silently. `--force` discards them.
-
-Scope is separate from all of that. By default `clean` only touches worktrees
-jeet created; **`--all` also deletes worktrees you made yourself, wherever you
-put them**. `--force` never widens scope — it only decides whether work already
-in scope may be discarded.
-
-Removal itself is not forced: git independently re-checks for modified,
-untracked and submodule content at removal time, and jeet reports the refusal
-rather than overriding it. `d` in the explorer's worktree panel (`ctrl-w`) does the same,
-showing the counters before it asks; `y` removes and `f` forces.
+**Delete** removes everything the task owns: its worktrees, the branches it
+created (never ones that existed before), its `refs/jeet` refs and its
+directory. It first lists what would be lost — uncommitted changes, and commits
+that would be left on no branch or remote — and asks; without a terminal it
+needs `--force`.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
 
@@ -521,10 +508,16 @@ export JEET_HOME=/tmp/jeet-test
   .last-sync, .sync.lock, .sync.log  # background store sync
   store/
     github.com/acme/widget/          # trunk (default branch)
+  tasks/
+    fix-login/                       # a task: the agent's working directory
+      .jeet/task-id                  # marks it, so jeet finds the task from below
+      .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
+      widget/  widget-2/             # its worktrees, added on demand
+  projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
   worktrees/
     github.com/acme/widget/feature-x/
   ephemeral/
-    github.com/acme/widget/<uuid>/    # detached checkouts (exec --ephemeral, jeet worktree)
+    github.com/acme/widget/<uuid>/    # detached checkouts (exec --ephemeral)
 ```
 
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.

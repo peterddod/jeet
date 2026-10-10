@@ -741,6 +741,233 @@ pub fn worktree_prune(repo_path: &Path) -> Result<()> {
     )
 }
 
+/// Run git in `dir` and return its stdout, failing with git's own message.
+/// `env` is added to git's environment and `input`, if any, is its stdin.
+fn git_output(
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+    input: Option<&[u8]>,
+) -> Result<String> {
+    use std::io::Write as _;
+    let what = format!("git {}", args.first().copied().unwrap_or(""));
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("spawn {what}"))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin
+            .write_all(bytes)
+            .with_context(|| format!("write to {what}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for {what}"))?;
+    if !output.status.success() {
+        bail!("{what} failed: {}", first_error_line(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// How many commits reachable from `rev` are reachable from none of
+/// `exclude` (refs, or pseudo-refs such as `--remotes` and `--branches`).
+/// `None` when git could not say, which callers treat as "maybe some".
+pub fn count_commits_not_in(path: &Path, rev: &str, exclude: &[&str]) -> Option<usize> {
+    let mut args = vec!["rev-list", "--count", rev, "--not"];
+    args.extend_from_slice(exclude);
+    // Revisions end here, so a ref that shares a file's name is not misread.
+    args.push("--");
+    let out = git_output(path, &args, &[], None).ok()?;
+    out.parse().ok()
+}
+
+/// Point `name` at `oid`, creating the ref if need be.
+pub fn update_ref(repo_path: &Path, name: &str, oid: &str) -> Result<()> {
+    git_output(repo_path, &["update-ref", name, oid], &[], None).map(|_| ())
+}
+
+pub fn delete_ref(repo_path: &Path, name: &str) -> Result<()> {
+    git_output(repo_path, &["update-ref", "-d", name], &[], None).map(|_| ())
+}
+
+/// Every ref whose name starts with `prefix` (a directory such as
+/// `refs/jeet/stash/<id>/`).
+pub fn refs_under(repo_path: &Path, prefix: &str) -> Result<Vec<String>> {
+    let out = git_output(
+        repo_path,
+        &["for-each-ref", "--format=%(refname)", prefix],
+        &[],
+        None,
+    )?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// Apply a commit made by [`snapshot_changes`] to the worktree at `wt_path`.
+/// With `index`, staged changes come back staged.
+pub fn stash_apply(wt_path: &Path, rev: &str, index: bool) -> Result<()> {
+    // `stash apply` reports with a full `git status` on stdout; captured, so
+    // it never lands in the one line a path command prints.
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(wt_path).args(["stash", "apply"]);
+    if index {
+        cmd.arg("--index");
+    }
+    cmd.arg(rev);
+    run_captured(&mut cmd, "git stash apply")
+}
+
+/// Save every uncommitted change in the worktree at `wt_path` — staged,
+/// unstaged and untracked (but not ignored) files — as one commit, returning
+/// it, or `None` if there is nothing to save.
+///
+/// The commit has the shape `git stash push --include-untracked` gives a
+/// stash (HEAD, index and untracked-files parents), so `git stash apply`
+/// brings it all back. Unlike `stash push` it touches nothing: not the
+/// working tree, not the index, and not `refs/stash`, which every worktree of
+/// the repository shares with the user.
+pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
+    let Some(head) = rev_parse(wt_path, "HEAD") else {
+        bail!("{} has no commits", wt_path.display());
+    };
+    let listing = git_output_raw(
+        wt_path,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    let untracked: Vec<&[u8]> = listing
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if let Some(nested) = untracked.iter().find(|p| p.ends_with(b"/")) {
+        // git lists a repository inside the worktree as one directory and
+        // cannot save its contents; it would be deleted with the worktree.
+        bail!(
+            "{} holds another git repository at {}; move it out first",
+            wt_path.display(),
+            String::from_utf8_lossy(nested)
+        );
+    }
+    // Tracked changes, as a stash commit with HEAD and index parents; empty
+    // when there are none, untracked files notwithstanding.
+    let tracked = git_output(wt_path, &["stash", "create"], &[], None)?;
+    let tracked = (!tracked.is_empty()).then_some(tracked);
+    if untracked.is_empty() {
+        return Ok(tracked);
+    }
+
+    let (tree, index_commit) = match &tracked {
+        Some(stash) => {
+            let index = rev_parse(wt_path, &format!("{stash}^2"))
+                .with_context(|| format!("read the index of {stash}"))?;
+            (format!("{stash}^{{tree}}"), index)
+        }
+        None => {
+            let index = git_output(
+                wt_path,
+                &[
+                    "commit-tree",
+                    "--no-gpg-sign",
+                    "HEAD^{tree}",
+                    "-p",
+                    &head,
+                    "-m",
+                    "jeet: index",
+                ],
+                &[],
+                None,
+            )?;
+            ("HEAD^{tree}".to_string(), index)
+        }
+    };
+
+    // The untracked files go in a tree of their own, built in a scratch index
+    // so the worktree's real one is left alone.
+    let scratch = PathBuf::from(git_output(
+        wt_path,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "jeet-snapshot-index",
+        ],
+        &[],
+        None,
+    )?);
+    let _ = std::fs::remove_file(&scratch);
+    let mut list = Vec::new();
+    for path in &untracked {
+        list.extend_from_slice(path);
+        list.push(0);
+    }
+    let env = [("GIT_INDEX_FILE", scratch.as_path())];
+    let built = git_output(
+        wt_path,
+        &["update-index", "--add", "-z", "--stdin"],
+        &env,
+        Some(&list),
+    )
+    .and_then(|_| git_output(wt_path, &["write-tree"], &env, None));
+    let _ = std::fs::remove_file(&scratch);
+    let untracked_tree = built?;
+    let untracked_commit = git_output(
+        wt_path,
+        &[
+            "commit-tree",
+            "--no-gpg-sign",
+            &untracked_tree,
+            "-m",
+            "jeet: untracked files",
+        ],
+        &[],
+        None,
+    )?;
+    let snapshot = git_output(
+        wt_path,
+        &[
+            "commit-tree",
+            "--no-gpg-sign",
+            &tree,
+            "-p",
+            &head,
+            "-p",
+            &index_commit,
+            "-p",
+            &untracked_commit,
+            "-m",
+            "jeet: uncommitted changes",
+        ],
+        &[],
+        None,
+    )?;
+    Ok(Some(snapshot))
+}
+
+/// [`git_output`] without decoding, for `-z` listings whose paths need not
+/// be UTF-8.
+fn git_output_raw(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let what = format!("git {}", args.first().copied().unwrap_or(""));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("spawn {what}"))?;
+    if !output.status.success() {
+        bail!("{what} failed: {}", first_error_line(&output.stderr));
+    }
+    Ok(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,4 +13,5 @@ pub mod scan;
 pub mod sessions;
 pub mod shell;
 pub mod sync;
+pub mod task;
 pub mod worktree;

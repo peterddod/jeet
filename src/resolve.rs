@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use crate::db::tasks::TaskRecord;
 use crate::db::{Database, RepoRecord};
 
 /// Resolve a repository from an arbitrary path by detecting if it's inside a git repo
@@ -71,10 +72,20 @@ pub struct RepoContext {
     /// Checked-out branch, or `None` when HEAD is detached.
     pub branch: Option<String>,
     pub is_trunk: bool,
+    /// The task whose directory holds this worktree, if any.
+    pub task: Option<TaskRecord>,
 }
 
 impl RepoContext {
     pub fn label(&self) -> String {
+        let label = self.checkout_label();
+        match &self.task {
+            Some(task) => format!("{label} in task {}", task.name),
+            None => label,
+        }
+    }
+
+    fn checkout_label(&self) -> String {
         match (&self.branch, self.is_trunk) {
             (Some(b), true) => format!("{b} (trunk)"),
             (Some(b), false) => b.clone(),
@@ -90,9 +101,24 @@ impl RepoContext {
 ///
 /// Unlike [`resolve_repo_from_path`], this works from nested directories and
 /// from linked worktrees, indexing the trunk on demand when it is not known yet.
+/// Inside a task directory it also finds the task, by walking up to the
+/// task's `.jeet/task-id`.
 pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoContext> {
-    let root = crate::git::git_toplevel(dir)
-        .map_err(|_| anyhow::anyhow!("not inside a git repository: {}", dir.display()))?;
+    // A marker naming a task the index no longer has is a leftover, not a
+    // reason to stop browsing the repository.
+    let task = crate::tasks::task_at(app, dir).unwrap_or(None);
+    let root = match crate::git::git_toplevel(dir) {
+        Ok(root) => root,
+        Err(_) => match &task {
+            Some(task) => bail!(
+                "{} is in task {}'s workspace, not in one of its worktrees; \
+                 `jeet worktree ls` lists them",
+                dir.display(),
+                task.name
+            ),
+            None => bail!("not inside a git repository: {}", dir.display()),
+        },
+    };
     let trunk = trunk_for(&root)?;
 
     let repo = match find_repo_by_trunk(&app.db, &trunk)? {
@@ -111,7 +137,23 @@ pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoCont
         repo,
         root,
         is_trunk,
+        task,
     })
+}
+
+/// Resolve the repository from an explicit filter, else from the current directory.
+pub fn repo_from_filter_or_cwd(
+    app: &crate::context::App,
+    filter: Option<&str>,
+) -> Result<RepoRecord> {
+    if let Some(filter) = filter {
+        return resolve_repo_filter(&app.db, filter);
+    }
+    let cwd = std::env::current_dir()?;
+    match resolve_context(app, &cwd) {
+        Ok(ctx) => Ok(ctx.repo),
+        Err(e) => bail!("{e}\nrun from inside a repository or pass --repo <filter>"),
+    }
 }
 
 /// The main working tree for a (possibly linked) worktree root.
