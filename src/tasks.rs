@@ -951,13 +951,15 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// both are recorded on its row, and only then is the worktree removed. The
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
-/// finishes the job.
+/// finishes the job. It is refused from inside the agent's tmux session,
+/// which ending the agent would end too.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    runtime::refuse_inside_session(task, "archive")?;
     let mut warnings = Vec::new();
-    // The agent goes first: it works in the worktrees about to be removed.
-    if let Err(e) = runtime::stop(task) {
-        warnings.push(format!("could not end the agent's tmux session ({e:#})"));
-    }
+    // The agent goes first, and is gone before anything is saved: it works
+    // in the worktrees about to be removed, and what it wrote after the
+    // snapshot would be lost.
+    runtime::stop(task).context("end the agent's tmux session")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
@@ -1279,9 +1281,11 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             task.slug
         );
     }
+    runtime::refuse_inside_session(task, "delete")?;
     let mut warnings = Vec::new();
-    // Stopped before anything is removed: a running agent would carry on
-    // working in worktrees that are about to go.
+    // Stopped, and gone, before anything is removed: a running agent would
+    // carry on working in worktrees that are about to go, and its exit hook
+    // would write into the task directory as it was being removed.
     runtime::stop(task).context("end the agent's tmux session")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {

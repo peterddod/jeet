@@ -210,12 +210,30 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// End the task's agent, if it is running. Without tmux there is none.
+/// End the task's agent, if it is running, returning once it and everything
+/// it started have exited. Without tmux there is none.
 pub fn stop(task: &TaskRecord) -> Result<()> {
     if !tmux::available() {
         return Ok(());
     }
     tmux::kill(&session_name(task))
+}
+
+/// Fail when this jeet runs inside the task's agent session, whether as the
+/// agent's own command or in a window the user opened there: ending the
+/// session to `verb` the task would end this jeet with it, before it had
+/// done anything.
+pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
+    let name = session_name(task);
+    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
+    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+        bail!(
+            "this jeet runs inside tmux session {name}, the agent's session for task {}, \
+             which ending the agent would end too; {verb} the task from outside that session",
+            task.name
+        );
+    }
+    Ok(())
 }
 
 /// What the task's agent is doing. Runs tmux and reads files, so it belongs

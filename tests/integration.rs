@@ -1903,7 +1903,10 @@ fn a_task_from_a_project_gets_a_copy_of_its_files() {
 
 /// A stand-in `tmux` that records each call, in order, and keeps one
 /// session's liveness in a file: `new-session` makes it, `kill-session`
-/// ends it, and `has-session` and `list-panes` report it.
+/// ends it, and `has-session` and `list-panes` report it. The pane's pid is
+/// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
+/// does. `display-message` prints the `current` file: the session the
+/// caller runs in.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -1921,8 +1924,16 @@ case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session) [ -e "$here/alive" ] ;;
   new-session) touch "$here/alive" ;;
-  kill-session) rm -f "$here/alive" ;;
-  list-panes) [ -e "$here/alive" ] && echo 0 ;;
+  kill-session)
+    rm -f "$here/alive"
+    if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
+  list-panes)
+    [ -e "$here/alive" ] || exit 1
+    case "$*" in
+      *pane_pid*) echo "0 $(cat "$here/pid" 2>/dev/null)" ;;
+      *) echo 0 ;;
+    esac ;;
+  display-message) cat "$here/current" 2>/dev/null ;;
   show-options) echo C-b ;;
 esac
 "#,
@@ -2354,6 +2365,121 @@ fn an_agent_other_than_claude_just_runs_in_tmux() {
     let argv = calls_of(&tmux, "new-session").pop().unwrap();
     let dash = argv.iter().position(|a| a == "--").unwrap();
     assert_eq!(argv[dash + 1..], ["aider", "--yes"]);
+}
+
+/// `kill-session` returns at once, while the agent may still be finishing a
+/// tool call. Archive waits for it to be gone before it saves anything, so
+/// what it writes on the way out is kept.
+#[cfg(unix)]
+#[test]
+fn archive_keeps_what_the_agent_writes_as_it_exits() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("slow exit");
+    let worktree = lab.add(&task, &["widget"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub_dir = tmux.parent().unwrap().to_path_buf();
+    let ready = scratch.path().join("ready");
+
+    // An agent that takes a moment, once hung up on, to write its last file.
+    let mut agent = Command::new("sh")
+        .arg("-c")
+        .arg(
+            r#"trap 'sleep 1; echo late > "$WT/late.txt"; exit 0' HUP
+               touch "$READY"
+               while :; do sleep 0.1; done"#,
+        )
+        .env("WT", &worktree)
+        .env("READY", &ready)
+        .spawn()
+        .unwrap();
+    while !ready.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(stub_dir.join("pid"), agent.id().to_string()).unwrap();
+    std::fs::write(stub_dir.join("alive"), "").unwrap();
+
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    succeeded(&lab.jeet_at(&["task", "archive", "slow-exit"], &lab.home(), &env));
+    assert!(
+        agent.try_wait().unwrap().is_some(),
+        "archive returned while the agent was still running"
+    );
+    assert!(!worktree.exists());
+
+    succeeded(&lab.jeet_at(&["task", "unarchive", "slow-exit"], &lab.home(), &env));
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("late.txt")).unwrap(),
+        "late\n"
+    );
+}
+
+/// Ending the agent's session ends everything in it, so jeet run from
+/// inside it would die before archiving or deleting anything.
+#[cfg(unix)]
+#[test]
+fn archive_and_delete_refuse_inside_the_agents_session() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("inside");
+    let id = task_id(&task);
+    let worktree = lab.add(&task, &["widget"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub_dir = tmux.parent().unwrap().to_path_buf();
+    std::fs::write(stub_dir.join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let base = ("JEET_TMUX", tmux_env.as_str());
+    let refused = |output: &std::process::Output| {
+        assert!(!output.status.success());
+        assert!(
+            stderr_of(output).contains("inside tmux session jeet-inside"),
+            "{}",
+            stderr_of(output)
+        );
+        assert!(calls_of(&tmux, "kill-session").is_empty());
+        assert!(worktree.exists());
+    };
+
+    // Run by the agent, or anything it started.
+    refused(&lab.jeet_at(
+        &["task", "archive", "inside"],
+        &lab.home(),
+        &[base, ("JEET_TASK_ID", &id)],
+    ));
+
+    // Run in a window the user opened in the agent's session.
+    std::fs::write(stub_dir.join("current"), "jeet-inside\n").unwrap();
+    let in_tmux = [
+        base,
+        ("TMUX", "/tmp/tmux-1/default,1,0"),
+        ("TMUX_PANE", "%3"),
+    ];
+    refused(&lab.jeet_at(&["task", "archive", "inside"], &lab.home(), &in_tmux));
+    assert!(calls_of(&tmux, "display-message")
+        .iter()
+        .all(|c| c == &["display-message", "-p", "-t", "%3", "#{session_name}"]));
+    refused(&lab.jeet_at(
+        &["task", "delete", "inside", "--force"],
+        &lab.home(),
+        &in_tmux,
+    ));
+    let state = |id: &str| -> String {
+        lab.index()
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(state(&id), "active");
+    assert!(task.is_dir());
+
+    // From any other session it goes ahead.
+    std::fs::write(stub_dir.join("current"), "elsewhere\n").unwrap();
+    succeeded(&lab.jeet_at(&["task", "archive", "inside"], &lab.home(), &in_tmux));
+    assert_eq!(calls_of(&tmux, "kill-session").len(), 1);
+    assert!(!worktree.exists());
+    assert_eq!(state(&id), "archived");
 }
 
 /// Kills the private tmux server a test started, however the test ends.

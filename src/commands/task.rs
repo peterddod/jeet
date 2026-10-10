@@ -159,6 +159,8 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
             dir.display()
         );
     }
+    // Before asking, not after: the answer would count for nothing.
+    runtime::refuse_inside_session(&task, "delete")?;
     if !force {
         confirm_delete(app, &task)?;
     }
