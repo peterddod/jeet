@@ -124,8 +124,16 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn archive(app: &App, name: &str) -> Result<()> {
+/// Archive a task once the user has seen which ignored files would go with
+/// its worktrees and agreed — or passed --force. Without a terminal there is
+/// no agreeing, only --force.
+pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
     let task = tasks::find(app, name)?;
+    // Before asking, not after: the answer would count for nothing.
+    runtime::refuse_inside_session(&task, "archive")?;
+    if !force {
+        confirm_archive(app, &task)?;
+    }
     let warnings = tasks::archive(app, &task)?;
     warn_all(&warnings);
     eprintln!("jeet: archived task {}", task.name);
@@ -172,6 +180,42 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {
+    let unkept = tasks::unkept(app, task)?;
+    if unkept.is_empty() {
+        return Ok(());
+    }
+    let mut report = format!(
+        "archiving task {} keeps its uncommitted work, but not the files git ignores, \
+         which are deleted with its worktrees:",
+        task.name
+    );
+    for line in &unkept {
+        report.push_str(&format!("\n  {line}"));
+    }
+    confirm(
+        &report,
+        "archive it?",
+        &format!("kept task {} as it is", task.name),
+    )
+}
+
+/// Ask before going on, on the terminal; without one, refuse, naming --force.
+fn confirm(report: &str, question: &str, declined: &str) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("{report}\npass --force to go ahead without a terminal");
+    }
+    eprintln!("jeet: {report}");
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        bail!("{declined}");
+    }
+    Ok(())
+}
+
 fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
     let losses = tasks::losses(app, task)?;
     let mut report = format!(
@@ -185,18 +229,7 @@ fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
     for loss in &losses {
         report.push_str(&format!("\n  {loss}"));
     }
-    if !std::io::stdin().is_terminal() {
-        bail!("{report}\npass --force to delete it without a terminal");
-    }
-    eprintln!("jeet: {report}");
-    eprint!("delete it? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
-        bail!("kept task {}", task.name);
-    }
-    Ok(())
+    confirm(&report, "delete it?", &format!("kept task {}", task.name))
 }
 
 /// Copy the task's project files again: those the task left alone are

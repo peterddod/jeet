@@ -523,6 +523,46 @@ pub fn status_counts(path: &Path) -> Result<(usize, usize)> {
     Ok((dirty, ignored))
 }
 
+/// What a worktree holds that git ignores, as `git status` names it: a
+/// directory ignored whole is one entry ending in `/`, such as `target/`.
+/// These are what `git worktree remove --force` deletes and no snapshot
+/// keeps.
+pub fn ignored_paths(path: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=normal",
+            "--ignored=matching",
+        ])
+        .output()
+        .context("spawn git status --porcelain")?;
+    if !output.status.success() {
+        bail!("git status failed: {}", first_error_line(&output.stderr));
+    }
+    Ok(ignored_entries(&output.stdout))
+}
+
+/// The `!!` entries of `git status --porcelain -z` output. A rename or copy
+/// is followed by a field of its own, its old path, which is no entry.
+fn ignored_entries(stdout: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut fields = stdout.split(|&b| b == 0);
+    while let Some(field) = fields.next() {
+        match field {
+            [b'!', b'!', b' ', name @ ..] => out.push(String::from_utf8_lossy(name).to_string()),
+            [b'R' | b'C', ..] | [_, b'R' | b'C', ..] => {
+                fields.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// `(ahead, behind)` commit counts of HEAD relative to `base`.
 pub fn ahead_behind(path: &Path, base: &str) -> Option<(usize, usize)> {
     let range = format!("{base}...HEAD");
@@ -934,6 +974,13 @@ fn git_output_raw(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignored_entries_are_the_bang_lines_only() {
+        let stdout = b" M src/lib.rs\0R  new.rs\0!! old.rs\0?? notes.txt\0!! .env\0!! target/\0";
+        assert_eq!(ignored_entries(stdout), [".env", "target/"]);
+        assert!(ignored_entries(b"").is_empty());
+    }
 
     #[test]
     fn parses_left_right_counts() {

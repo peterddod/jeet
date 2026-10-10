@@ -480,7 +480,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 super::tasks::Pending::ForceResync { .. } => {
                     "f replace the task's copies too · n keep them"
                 }
-                super::tasks::Pending::Archive { .. } => "y archive · n keep it running",
+                super::tasks::Pending::Archive { .. } => "y archive · n keep it as it is",
                 _ => "y delete · n keep it",
             };
             body.push(Line::from(dim(keys)));

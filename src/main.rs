@@ -118,7 +118,9 @@ fn main() -> Result<()> {
                 TaskCommands::Open { name, session } => {
                     commands::task::open(&app, &name, session.as_deref())?
                 }
-                TaskCommands::Archive { name } => commands::task::archive(&app, &name)?,
+                TaskCommands::Archive { name, force } => {
+                    commands::task::archive(&app, &name, force)?
+                }
                 TaskCommands::Unarchive { name } => commands::task::unarchive(&app, &name)?,
                 TaskCommands::Delete { name, force } => commands::task::delete(&app, &name, force)?,
                 TaskCommands::Path { name } => commands::task::path(&app, &name)?,

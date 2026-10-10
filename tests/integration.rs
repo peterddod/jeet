@@ -1537,6 +1537,100 @@ fn delete_takes_everything_the_task_owns_and_nothing_else() {
     assert!(!stdout_of(&output).contains("doomed"));
 }
 
+/// A git checkout on the canvas that is none of the task's worktrees — a
+/// clone made there, or a worktree of a repository jeet has not indexed —
+/// goes with the task directory, so delete names it before it goes.
+#[test]
+fn delete_names_the_checkouts_on_the_canvas_it_does_not_manage() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("canvas");
+    lab.add(&task, &["widget"]);
+    // A clone made by hand, with work in it.
+    let clone = task.join("vendor/lib");
+    std::fs::create_dir_all(&clone).unwrap();
+    git(&["init", "-q", "-b", "main"], &clone);
+    std::fs::write(clone.join("patch.txt"), "work").unwrap();
+    // A worktree of a repository outside the store.
+    let outside = TempDir::new().unwrap();
+    let repo = outside.path().canonicalize().unwrap().join("other");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"], &repo);
+    let linked = task.join("other");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+        &repo,
+    );
+
+    let output = lab.jeet_at(&["task", "delete", "canvas"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("vendor/lib: a git clone"), "{stderr}");
+    assert!(stderr.contains("(1 uncommitted change)"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("other: a worktree of {}", repo.display())),
+        "{stderr}"
+    );
+    // The task's own worktree is not one of them.
+    assert!(!stderr.contains("widget: a"), "{stderr}");
+    assert!(clone.join("patch.txt").is_file());
+
+    succeeded(&lab.jeet_at(&["task", "delete", "canvas", "--force"], &lab.home(), &[]));
+    assert!(!task.exists());
+    // The outside repository is told its worktree has gone.
+    let registered = git_stdout(&["worktree", "list", "--porcelain"], &repo);
+    assert_eq!(
+        registered
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        1,
+        "{registered}"
+    );
+}
+
+/// Archive keeps uncommitted work, but not what git ignores — a `.env` —
+/// which removing the worktree deletes. It says so first, and goes ahead
+/// only when told to.
+#[test]
+fn archive_asks_before_deleting_what_git_ignores() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("secrets");
+    let worktree = lab.add(&task, &["widget"]);
+    std::fs::write(worktree.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(worktree.join(".env"), "TOKEN=1\n").unwrap();
+
+    let output = lab.jeet_at(&["task", "archive", "secrets"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("widget: .env"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(worktree.join(".env").is_file(), "nothing was touched");
+    let archived = stdout_of(&lab.jeet_at(&["task", "ls", "--archived"], &lab.home(), &[]));
+    assert!(!archived.contains("secrets"), "{archived}");
+
+    let output = lab.jeet_at(&["task", "archive", "secrets", "-f"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("1 ignored file or directory not kept"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!worktree.exists());
+    // What was not ignored comes back.
+    succeeded(&lab.jeet_at(&["task", "unarchive", "secrets"], &lab.home(), &[]));
+    assert!(worktree.join(".gitignore").is_file());
+    assert!(!worktree.join(".env").exists());
+}
+
 #[test]
 fn a_branch_checked_out_in_another_task_is_refused() {
     let lab = StoreLab::new();

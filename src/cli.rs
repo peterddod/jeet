@@ -177,6 +177,9 @@ pub enum TaskCommands {
     Archive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
+        /// Do not ask, even when files git ignores (which are not kept) would go
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Bring an archived task's worktrees back

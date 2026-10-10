@@ -1084,6 +1084,9 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// task with some worktrees still present, and running archive again
 /// finishes the job. It is refused from inside the agent's tmux session,
 /// which ending the agent would end too.
+///
+/// Files git ignores are not kept: removing a worktree deletes them. The
+/// caller has already confirmed what [`unkept`] lists.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     runtime::refuse_inside_session(task, "archive")?;
     let mut warnings = Vec::new();
@@ -1159,6 +1162,143 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         }
     }
     Ok(warnings)
+}
+
+/// The most ignored paths [`unkept`] names per worktree before summing up the rest.
+const UNKEPT_SHOWN: usize = 5;
+
+/// What archiving `task` would not keep, one line per worktree: the files
+/// git ignores in it — a `.env`, local config, build output — which go with
+/// the worktree, as no snapshot holds them. A worktree whose ignored files
+/// cannot be listed is named too: unknown is never read as "nothing".
+pub fn unkept(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    if task.state == TaskState::Active {
+        let _ = reconcile(app);
+    }
+    let mut out = Vec::new();
+    for row in app.db.list_task_worktrees(&task.id)? {
+        let path = worktree_dir(app, task, &row.dir_name);
+        if !path.exists() {
+            continue;
+        }
+        match git::ignored_paths(&path) {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => out.push(format!("{}: {}", row.dir_name, name_some(&paths))),
+            Err(e) => out.push(format!(
+                "{}: could not list the files git ignores ({e})",
+                row.dir_name
+            )),
+        }
+    }
+    Ok(out)
+}
+
+/// The first few of `paths`, then how many more.
+fn name_some(paths: &[String]) -> String {
+    let mut out = paths
+        .iter()
+        .take(UNKEPT_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > UNKEPT_SHOWN {
+        out.push_str(&format!(" and {} more", paths.len() - UNKEPT_SHOWN));
+    }
+    out
+}
+
+/// A git checkout on a task's canvas that is none of the task's worktrees:
+/// a clone made there, or a worktree of a repository the store does not
+/// have. Deleting the task deletes it with the directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignCheckout {
+    pub path: PathBuf,
+    /// For a linked worktree, the repository it belongs to (its common git
+    /// directory), which needs telling once it is gone. None for a clone.
+    pub common_dir: Option<PathBuf>,
+}
+
+/// Every git checkout under the task directory that is not one of the
+/// task's own worktrees, outermost only: what is inside a checkout is that
+/// checkout's. Symlinks are not followed.
+pub fn foreign_checkouts(app: &App, task: &TaskRecord) -> Result<Vec<ForeignCheckout>> {
+    let dir = task_dir(app, task);
+    let own: Vec<PathBuf> = app
+        .db
+        .list_task_worktrees(&task.id)?
+        .iter()
+        .map(|row| worktree_dir(app, task, &row.dir_name))
+        .collect();
+    Ok(checkouts_under(&dir, &own))
+}
+
+fn checkouts_under(dir: &Path, own: &[PathBuf]) -> Vec<ForeignCheckout> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    let mut walk = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter();
+    while let Some(entry) = walk.next() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if own.iter().any(|o| o == path) {
+            walk.skip_current_dir();
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path.join(".git")) else {
+            continue;
+        };
+        walk.skip_current_dir();
+        // A `.git` file points into another repository's git directory.
+        let common_dir = match meta.is_file() {
+            true => git::git_common_dir(path).ok(),
+            false => None,
+        };
+        out.push(ForeignCheckout {
+            path: path.to_path_buf(),
+            common_dir,
+        });
+    }
+    out
+}
+
+/// One line of [`losses`] for a checkout the task does not manage.
+fn describe_foreign(dir: &Path, checkout: &ForeignCheckout) -> String {
+    let rel = checkout
+        .path
+        .strip_prefix(dir)
+        .unwrap_or(&checkout.path)
+        .display()
+        .to_string();
+    let mut line = match &checkout.common_dir {
+        Some(common) => {
+            let repo = match common.file_name().is_some_and(|n| n == ".git") {
+                true => common.parent().unwrap_or(common),
+                false => common.as_path(),
+            };
+            format!(
+                "{rel}: a worktree of {}, not one of the task's, deleted with it",
+                repo.display()
+            )
+        }
+        None => {
+            format!("{rel}: a git clone on the task's canvas, deleted with it and every commit only it has")
+        }
+    };
+    match git::status_counts(&checkout.path) {
+        Ok((0, _)) => {}
+        Ok((dirty, _)) => line.push_str(&format!(" ({})", plural(dirty, "uncommitted change"))),
+        Err(e) => line.push_str(&format!(" (could not read its status: {e})")),
+    }
+    line
 }
 
 /// Bring an archived task's worktrees back: each on its branch, or detached
@@ -1276,6 +1416,9 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// task made (delete removes it), a HEAD pinned at archive that the branch
 /// has since moved away from, and anything set aside under `refs/jeet/kept`.
 /// A branch the task did not make keeps its commits, so it is not listed.
+/// Every git checkout on the canvas that is none of the task's worktrees —
+/// a clone, or a worktree of a repository outside the store — is listed,
+/// as it goes with the task directory.
 pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.state == TaskState::Active {
         let _ = reconcile(app);
@@ -1395,13 +1538,21 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             None => out.push(format!("{name}: could not check its commits")),
         }
     }
+
+    // Checkouts on the canvas that are none of the task's worktrees: the
+    // directory goes, and they go with it.
+    let dir = task_dir(app, task);
+    for checkout in foreign_checkouts(app, task)? {
+        out.push(describe_foreign(&dir, &checkout));
+    }
     Ok(out)
 }
 
 /// Delete a task and everything it owns: its agent's tmux session, its
-/// worktrees, the branches it made, its `refs/jeet` refs, its directory and
-/// its rows. Branches it did not make
-/// are left alone. The caller has already confirmed what [`losses`] lists.
+/// worktrees, the branches it made, its `refs/jeet` refs, its directory —
+/// with whatever else is on its canvas, other git checkouts included — and
+/// its rows. Branches it did not make are left alone. The caller has already
+/// confirmed what [`losses`] lists.
 ///
 /// The rows go last, so a failure part-way leaves a task that can be deleted
 /// again.
@@ -1463,8 +1614,14 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     for (trunk, name) in kept_refs(app, task)? {
         git::delete_ref(&trunk, &name).with_context(|| format!("delete {name}"))?;
     }
+    // Worktrees of other repositories on the canvas go with the directory;
+    // their repositories are told, so they do not keep a record of them.
+    let foreign = foreign_checkouts(app, task)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+    }
+    for common in foreign.iter().filter_map(|c| c.common_dir.as_ref()) {
+        let _ = git::worktree_prune(common);
     }
     app.db.delete_task(&task.id)?;
     Ok(warnings)
@@ -1473,6 +1630,46 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_checkouts_are_the_outermost_ones_the_task_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mk = |rel: &str| std::fs::create_dir_all(root.join(rel)).unwrap();
+        // The task's own worktree, with a nested clone of its own inside.
+        mk("api/vendor/x/.git");
+        std::fs::write(
+            root.join("api/.git"),
+            "gitdir: /store/api/.git/worktrees/api\n",
+        )
+        .unwrap();
+        // A clone on the canvas, holding another: only the outer one counts.
+        mk("libs/tool/.git");
+        mk("libs/tool/sub/.git");
+        // Plain folders are not checkouts.
+        mk("notes/drafts");
+        mk(".jeet/status");
+        // Nor is a symlink to one.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("libs/tool"), root.join("link")).unwrap();
+
+        let found = checkouts_under(root, &[root.join("api")]);
+        assert_eq!(
+            found,
+            [ForeignCheckout {
+                path: root.join("libs/tool"),
+                common_dir: None,
+            }]
+        );
+        assert!(checkouts_under(&root.join("missing"), &[]).is_empty());
+    }
+
+    #[test]
+    fn unkept_paths_are_named_up_to_a_few() {
+        let paths: Vec<String> = (1..=7).map(|n| format!("f{n}")).collect();
+        assert_eq!(name_some(&paths[..2]), "f1, f2");
+        assert_eq!(name_some(&paths), "f1, f2, f3, f4, f5 and 2 more");
+    }
 
     #[test]
     fn slugs_are_plain_lowercase_words() {

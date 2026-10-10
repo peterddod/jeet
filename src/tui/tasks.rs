@@ -1411,6 +1411,25 @@ fn removal_summary(line: &WorktreeLine) -> Vec<String> {
     lines
 }
 
+/// What the archive confirm says: that a running agent is ended, and which
+/// files git ignores go with the worktrees, as nothing keeps them.
+fn archive_warning(name: &str, running: bool, unkept: &[String]) -> Vec<String> {
+    let mut lines = match running {
+        true => vec![
+            format!("{name} has its agent running"),
+            "archiving ends it, then frees the worktrees' disk".into(),
+        ],
+        false => vec![format!("archiving {name} frees its worktrees' disk")],
+    };
+    lines.push("(uncommitted work is kept, and comes back on unarchive)".into());
+    if !unkept.is_empty() {
+        lines.push(String::new());
+        lines.push("⚠ files git ignores are not kept — they go with the worktrees:".into());
+        lines.extend(unkept.iter().map(|line| format!("  {line}")));
+    }
+    lines
+}
+
 fn plural(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
@@ -2014,19 +2033,23 @@ impl Screen<'_> {
                 let running = row.agent_running()
                     || (row.activity.is_none()
                         && tmux::pane_alive(&runtime::session_name(&row.task)));
-                if !confirmed && running {
+                let task = row.task;
+                let unkept = match confirmed {
+                    true => Vec::new(),
+                    false => self
+                        .progress("checking what archiving would not keep", || {
+                            tasks::unkept(app, &task)
+                        })
+                        .and_then(|inner| inner)?,
+                };
+                if !confirmed && (running || !unkept.is_empty()) {
                     self.ui.panel = Some(Panel::Confirm {
-                        title: "archive task".into(),
-                        lines: vec![
-                            format!("{} has its agent running", row.task.name),
-                            "archiving ends it, then frees the worktrees' disk".into(),
-                            "(uncommitted work is kept, and comes back on unarchive)".into(),
-                        ],
+                        title: format!("archive task {}", task.name),
+                        lines: archive_warning(&task.name, running, &unkept),
                         action: Pending::Archive { task_id },
                     });
                     return Ok(());
                 }
-                let task = row.task;
                 let archived = self
                     .progress(&format!("archiving {}", task.name), || {
                         tasks::archive(app, &task)
@@ -2554,6 +2577,18 @@ fn with_warnings(what: String, warnings: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::db::tasks::TaskKind;
+
+    #[test]
+    fn the_archive_confirm_names_what_is_not_kept() {
+        let quiet = archive_warning("Fix login", false, &[]);
+        assert_eq!(quiet[0], "archiving Fix login frees its worktrees' disk");
+        assert!(!quiet.iter().any(|l| l.contains("ignores")));
+
+        let lines = archive_warning("Fix login", true, &["api: .env, target/".into()]);
+        assert_eq!(lines[0], "Fix login has its agent running");
+        assert!(lines.iter().any(|l| l.contains("git ignores are not kept")));
+        assert_eq!(lines.last().unwrap(), "  api: .env, target/");
+    }
 
     fn task(id: &str, name: &str, state: TaskState, last: i64) -> TaskRow {
         TaskRow {
