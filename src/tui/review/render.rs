@@ -3,13 +3,14 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::actions::{Compose, Confirm, Picker};
 use super::diff::{DiffLine, FileDiff, FileStatus, LineKind};
 use super::{Load, Row, Viewer};
-use crate::github::ReviewThread;
+use crate::github::{Reaction, ReviewThread};
 
 /// The colours, as GitHub's dark theme has them — or the nearest the
 /// 256-colour palette has, for a terminal that cannot show the real thing.
@@ -91,15 +92,38 @@ impl Palette {
     }
 }
 
-/// The keys, as the bottom bar spells them.
-const KEYS: [(&str, &str); 6] = [
-    ("←→", "file"),
-    ("↑↓", "move"),
-    ("A", "approve"),
-    ("C", "comment"),
-    ("X", "request changes"),
-    ("Esc", "back"),
-];
+/// The keys that work where the cursor is, as the bottom bar spells them:
+/// what can be done to a line of code, or to a comment — editing and
+/// deleting only on a comment GitHub says the user may change.
+fn keys(viewer: &Viewer) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("←→", "file"),
+        ("↑↓", "move"),
+        ("A", "approve"),
+        ("C", "comment"),
+        ("X", "request changes"),
+    ];
+    match viewer.row() {
+        Some(Row::Line(..)) => keys.push(("c", "inline comment")),
+        Some(Row::Comment { .. }) => {
+            keys.extend([("R", "reply"), ("+", "react")]);
+            if let Some((_, comment)) = viewer.comment() {
+                if comment.viewer_can_update {
+                    keys.push(("e", "edit"));
+                }
+                if comment.viewer_can_delete {
+                    keys.push(("d", "delete"));
+                }
+            }
+        }
+        _ => {}
+    }
+    keys.extend([("r", "refresh"), ("Esc", "back")]);
+    keys
+}
+
+/// Which keys give up their place first when the bar is too narrow.
+const DROP_FIRST: [&str; 3] = ["←→", "↑↓", "r"];
 
 pub fn draw(frame: &mut Frame, viewer: &mut Viewer) {
     let p = viewer.palette;
@@ -132,7 +156,10 @@ pub fn draw(frame: &mut Frame, viewer: &mut Viewer) {
         ))),
         chunks[3],
     );
-    frame.render_widget(Paragraph::new(key_bar(&p, chunks[4].width)), chunks[4]);
+    frame.render_widget(
+        Paragraph::new(key_bar(&p, keys(viewer), chunks[4].width)),
+        chunks[4],
+    );
 
     if let Some(draft) = &viewer.draft {
         let pending = viewer.review().and_then(|r| r.pending.as_ref());
@@ -143,6 +170,15 @@ pub fn draw(frame: &mut Frame, viewer: &mut Viewer) {
             &draft.input,
             pending,
         );
+    }
+    if let Some(compose) = &viewer.compose {
+        draw_compose(frame, &p, compose);
+    }
+    if let Some(picker) = &viewer.picker {
+        draw_picker(frame, &p, picker);
+    }
+    if let Some(confirm) = &viewer.confirm {
+        draw_confirm(frame, &p, confirm);
     }
     if let Some(busy) = &viewer.busy {
         super::super::ui::draw_working(frame, busy);
@@ -162,8 +198,19 @@ fn draw_header(frame: &mut Frame, area: Rect, viewer: &Viewer) {
         }
         _ => String::new(),
     };
+    // Changes on GitHub the screen does not show yet, or a fetch of them.
+    let (news, news_style) = if viewer.refreshing {
+        ("refreshing…  ", Style::default().fg(p.muted))
+    } else if viewer.stale {
+        (
+            "⟳ updates – r  ",
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("", Style::default())
+    };
     let number = format!(" #{} ", viewer.pr.number);
-    let room = width.saturating_sub(number.width() + position.width() + 1);
+    let room = width.saturating_sub(number.width() + news.width() + position.width() + 1);
     let title = Line::from(vec![
         Span::styled(number, Style::default().fg(p.accent)),
         Span::styled(
@@ -180,8 +227,11 @@ fn draw_header(frame: &mut Frame, area: Rect, viewer: &Viewer) {
     let top = rows[0];
     frame.render_widget(Paragraph::new(title), top);
     frame.render_widget(
-        Paragraph::new(Span::styled(position, Style::default().fg(p.muted)))
-            .alignment(Alignment::Right),
+        Paragraph::new(Line::from(vec![
+            Span::styled(news, news_style),
+            Span::styled(position, Style::default().fg(p.muted)),
+        ]))
+        .alignment(Alignment::Right),
         top,
     );
 
@@ -259,10 +309,23 @@ fn file_line(
     ])
 }
 
-fn key_bar(p: &Palette, width: u16) -> Line<'static> {
+fn key_bar(p: &Palette, mut keys: Vec<(&str, &str)>, width: u16) -> Line<'static> {
+    let len = |keys: &[(&str, &str)]| -> usize {
+        1 + keys
+            .iter()
+            .map(|(key, what)| key.width() + 1 + what.width())
+            .sum::<usize>()
+            + 3 * keys.len().saturating_sub(1)
+    };
+    for key in DROP_FIRST {
+        if len(&keys) <= width as usize {
+            break;
+        }
+        keys.retain(|(k, _)| *k != key);
+    }
     let mut spans = vec![Span::raw(" ")];
     let mut used = 1;
-    for (i, (key, what)) in KEYS.iter().enumerate() {
+    for (i, (key, what)) in keys.iter().enumerate() {
         let sep = if i == 0 { "" } else { " · " };
         let len = sep.width() + key.width() + 1 + what.width();
         if used + len > width as usize {
@@ -334,6 +397,162 @@ fn draw_body(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
         },
     };
     frame.render_widget(Paragraph::new(lines).style(base(&p)), area);
+}
+
+/// A box over the diff in the viewer's colours, `width` by `height` cells
+/// counting its border, centred and cut down to fit the frame. Returns the
+/// space inside the border.
+fn draw_box(
+    frame: &mut Frame,
+    p: &Palette,
+    title: &str,
+    title_color: Color,
+    width: usize,
+    height: usize,
+) -> Rect {
+    let area = frame.area();
+    let w = (width as u16).min(area.width);
+    let h = (height as u16).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    let title = fit(
+        &format!(" {} ", clean(title)),
+        (w as usize).saturating_sub(2),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.border))
+        .title(Span::styled(title, Style::default().fg(title_color)))
+        .style(Style::default().bg(p.comment).fg(p.fg));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    inner
+}
+
+/// The width of a box that takes most of the frame, but not absurdly much.
+fn box_width(frame: &Frame) -> usize {
+    let width = frame.area().width as usize;
+    (width * 7 / 10).clamp(40.min(width), 100)
+}
+
+/// The text box for an inline comment, a reply or an edit.
+fn draw_compose(frame: &mut Frame, p: &Palette, compose: &Compose) {
+    let width = box_width(frame);
+    let inner = width.saturating_sub(2).max(1);
+    let hint = format!(
+        "⏎ {} · ctrl-j new line · ctrl-u clear · esc cancel",
+        compose.target.send_label()
+    );
+    let mut text: Vec<Line<'static>> = Vec::new();
+    for line in compose.text.split('\n') {
+        for wrapped in super::super::ui::wrap_words(&clean(line), inner) {
+            text.push(Line::from(Span::styled(wrapped, Style::default().fg(p.fg))));
+        }
+    }
+    // The cursor, after the last character typed.
+    if let Some(last) = text.last_mut() {
+        last.spans
+            .push(Span::styled("█", Style::default().fg(p.accent)));
+    }
+    if compose.text.is_empty() {
+        text = vec![Line::from(vec![
+            Span::styled("█", Style::default().fg(p.accent)),
+            Span::styled("leave a comment", Style::default().fg(p.muted)),
+        ])];
+    }
+    // Room for the hint under a blank line; a long text shows its end, where
+    // the typing is.
+    let room = (frame.area().height as usize).saturating_sub(4).max(1);
+    let shown = text.len().min(room.saturating_sub(2).max(1));
+    let mut lines: Vec<Line<'static>> = text.split_off(text.len() - shown);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        fit(&hint, inner),
+        Style::default().fg(p.muted),
+    )));
+    let area = draw_box(
+        frame,
+        p,
+        &compose.target.title(),
+        p.accent,
+        width,
+        lines.len() + 2,
+    );
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The row of reactions to pick from.
+fn draw_picker(frame: &mut Frame, p: &Palette, picker: &Picker) {
+    let mut row = vec![Span::raw(" ")];
+    for (i, reaction) in Reaction::ALL.iter().enumerate() {
+        let mut style = Style::default().fg(p.fg);
+        if picker.mine.contains(reaction) {
+            style = style.fg(p.accent).add_modifier(Modifier::UNDERLINED);
+        }
+        if i == picker.selected {
+            style = style.bg(p.accent);
+        }
+        row.push(Span::styled(format!(" {} ", reaction.emoji()), style));
+    }
+    let digits: String = (1..=Reaction::ALL.len())
+        .map(|n| format!("  {n} "))
+        .collect();
+    let lines = vec![
+        Line::from(row),
+        Line::from(Span::styled(
+            format!(" {digits}"),
+            Style::default().fg(p.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " ←→ choose · ⏎ react · esc cancel",
+            Style::default().fg(p.muted),
+        )),
+    ];
+    let area = draw_box(frame, p, "react", p.accent, 38, lines.len() + 2);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The question before a comment is deleted.
+fn draw_confirm(frame: &mut Frame, p: &Palette, confirm: &Confirm) {
+    let width = box_width(frame).min(64);
+    let inner = width.saturating_sub(2).max(1);
+    let lines = vec![
+        Line::from(Span::styled(
+            fit(&format!("“{}”", clean(&confirm.preview)), inner),
+            Style::default().fg(p.fg).add_modifier(Modifier::ITALIC),
+        )),
+        Line::from(Span::styled(
+            "Delete this comment? GitHub cannot bring it back.",
+            Style::default().fg(p.muted),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(p.removed_sign)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" delete · ", Style::default().fg(p.muted)),
+            Span::styled("n", Style::default().fg(p.fg).add_modifier(Modifier::BOLD)),
+            Span::styled(" keep it", Style::default().fg(p.muted)),
+        ]),
+    ];
+    let area = draw_box(
+        frame,
+        p,
+        "delete comment",
+        p.removed_sign,
+        width,
+        lines.len() + 2,
+    );
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The first row to draw so the cursor's row is wholly on screen, moving the
@@ -896,12 +1115,199 @@ mod tests {
         let mut viewer = Viewer::new("/x".into(), super::super::tests::pr(), Palette::indexed());
         let (screen, _) = render(&mut viewer, 80, 12);
         assert!(screen.contains("loading #42 from GitHub"), "{screen}");
-        viewer.loaded(Err("gh: auth required".into()), Ok(Vec::new()), Ok(None));
+        viewer.loaded(
+            Err("gh: auth required".into()),
+            Ok(Vec::new()),
+            Ok(None),
+            Err("gh: auth required".into()),
+        );
         let (screen, _) = render(&mut viewer, 80, 12);
         assert!(
             screen.contains("could not load the pull request:"),
             "{screen}"
         );
         assert!(screen.contains("gh: auth required"), "{screen}");
+    }
+
+    fn go_to(viewer: &mut Viewer, row: Row) {
+        viewer.cursor = viewer.rows.iter().position(|r| *r == row).unwrap();
+    }
+
+    fn own_reply() -> Row {
+        Row::Comment {
+            thread: 0,
+            index: 1,
+            anchored: true,
+        }
+    }
+
+    #[test]
+    fn the_key_bar_offers_what_works_where_the_cursor_is() {
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, Row::Line(0, 5));
+        let (screen, _) = render(&mut viewer, 120, 30);
+        let bar = screen.lines().last().unwrap();
+        assert!(
+            bar.contains("A approve · C comment · X request changes · c inline comment"),
+            "{bar}"
+        );
+        assert!(bar.contains("r refresh · Esc back"), "{bar}");
+        assert!(!bar.contains("reply"), "{bar}");
+
+        // Someone else's comment: reply and react, but no edit or delete.
+        go_to(
+            &mut viewer,
+            Row::Comment {
+                thread: 0,
+                index: 0,
+                anchored: true,
+            },
+        );
+        let (screen, _) = render(&mut viewer, 120, 30);
+        let bar = screen.lines().last().unwrap();
+        assert!(bar.contains("R reply · + react · r refresh"), "{bar}");
+        assert!(!bar.contains("edit") && !bar.contains("delete"), "{bar}");
+        assert!(!bar.contains("inline comment"), "{bar}");
+
+        // The user's own.
+        go_to(&mut viewer, own_reply());
+        let (screen, _) = render(&mut viewer, 120, 30);
+        let bar = screen.lines().last().unwrap();
+        assert!(
+            bar.contains("R reply · + react · e edit · d delete"),
+            "{bar}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_key_bar_drops_the_obvious_keys_first() {
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, own_reply());
+        let (screen, _) = render(&mut viewer, 96, 30);
+        let bar = screen.lines().last().unwrap();
+        assert!(!bar.contains("←→"), "{bar}");
+        assert!(bar.contains("e edit · d delete"), "{bar}");
+        assert!(bar.contains("Esc back"), "{bar}");
+    }
+
+    #[test]
+    fn news_from_github_shows_in_the_header() {
+        let mut viewer = loaded_viewer(None);
+        let (screen, _) = render(&mut viewer, 100, 20);
+        assert!(!screen.contains("⟳"), "{screen}");
+        viewer.stale = true;
+        let (screen, buffer) = render(&mut viewer, 100, 20);
+        let top = screen.lines().next().unwrap();
+        assert!(top.contains("⟳ updates – r  file 1/5"), "{top}");
+        let at = top.chars().position(|c| c == '⟳').unwrap() as u16;
+        assert_eq!(buffer[(at, 0)].fg, Color::Rgb(0x2f, 0x81, 0xf7));
+        viewer.refreshing = true;
+        let (screen, _) = render(&mut viewer, 100, 20);
+        assert!(screen.lines().next().unwrap().contains("refreshing…"));
+    }
+
+    #[test]
+    fn the_comment_box_says_what_it_is_for() {
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, Row::Line(0, 5));
+        viewer.handle_key(key(KeyCode::Char('c')));
+        let (screen, _) = render(&mut viewer, 100, 30);
+        assert!(screen.contains("comment on src/lib.rs:12"), "{screen}");
+        assert!(screen.contains("leave a comment"), "{screen}");
+        assert!(screen.contains("⏎ add to your pending review"), "{screen}");
+        for c in "first".chars() {
+            viewer.handle_key(key(KeyCode::Char(c)));
+        }
+        viewer.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        for c in "second".chars() {
+            viewer.handle_key(key(KeyCode::Char(c)));
+        }
+        let (screen, _) = render(&mut viewer, 100, 30);
+        assert!(screen.contains("first"), "{screen}");
+        assert!(screen.contains("second█"), "{screen}");
+
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, own_reply());
+        viewer.handle_key(key(KeyCode::Char('R')));
+        let (screen, _) = render(&mut viewer, 100, 30);
+        assert!(screen.contains("reply to ada"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_comment_box_shows_where_the_typing_is() {
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, Row::Line(0, 5));
+        viewer.handle_key(key(KeyCode::Char('c')));
+        for i in 0..40 {
+            for c in format!("line {i}").chars() {
+                viewer.handle_key(key(KeyCode::Char(c)));
+            }
+            viewer.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        }
+        viewer.handle_key(key(KeyCode::Char('z')));
+        let (screen, _) = render(&mut viewer, 80, 20);
+        assert!(screen.contains("z█"), "{screen}");
+        assert!(screen.contains("⏎ add to your pending review"), "{screen}");
+        assert!(
+            !screen.contains("line 0 "),
+            "the start scrolled away: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_picker_shows_every_reaction() {
+        let mut viewer = loaded_viewer(None);
+        go_to(
+            &mut viewer,
+            Row::Comment {
+                thread: 0,
+                index: 0,
+                anchored: true,
+            },
+        );
+        viewer.handle_key(key(KeyCode::Char('+')));
+        viewer.handle_key(key(KeyCode::Right));
+        let (screen, buffer) = render(&mut viewer, 100, 30);
+        assert!(screen.contains("react"), "{screen}");
+        for emoji in ["👍", "👎", "😄", "🎉", "😕", "🚀", "👀"] {
+            assert!(screen.contains(emoji), "{emoji} missing: {screen}");
+        }
+        assert!(screen.contains("⏎ react"), "{screen}");
+        // The chosen one stands out.
+        let (y, line) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("👎"))
+            .unwrap();
+        let x = line[..line.find("👎").unwrap()].chars().count() as u16;
+        assert_eq!(buffer[(x, y as u16)].bg, Color::Rgb(0x2f, 0x81, 0xf7));
+    }
+
+    #[test]
+    fn a_delete_asks_first() {
+        let mut viewer = loaded_viewer(None);
+        go_to(&mut viewer, own_reply());
+        viewer.handle_key(key(KeyCode::Char('d')));
+        let (screen, _) = render(&mut viewer, 100, 30);
+        assert!(screen.contains("delete comment"), "{screen}");
+        assert!(screen.contains("Good catch, fixed."), "{screen}");
+        assert!(screen.contains("y delete · n keep it"), "{screen}");
+    }
+
+    #[test]
+    fn every_box_draws_at_any_size() {
+        for (width, height) in [(1, 1), (2, 5), (10, 3), (20, 8), (30, 40), (240, 6)] {
+            for open in ['c', 'R', '+', 'd', 'e'] {
+                let mut viewer = loaded_viewer(None);
+                let row = match open {
+                    'c' => Row::Line(0, 5),
+                    _ => own_reply(),
+                };
+                go_to(&mut viewer, row);
+                viewer.handle_key(key(KeyCode::Char(open)));
+                assert!(viewer.overlay_open(), "{open}");
+                render(&mut viewer, width, height);
+            }
+        }
     }
 }

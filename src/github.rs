@@ -121,7 +121,7 @@ pub struct PendingReview {
 /// A prompt would block on a stdin the explorer is reading, invisibly; and
 /// `gh` writing to our stdout would break the shell wrapper's hand-off.
 fn gh(dir: &Path, args: &[&str]) -> Result<Output> {
-    let output = Command::new("gh")
+    let output = Command::new(gh_program()?)
         .args(args)
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")
@@ -135,6 +135,29 @@ fn gh(dir: &Path, args: &[&str]) -> Result<Output> {
             _ => anyhow::anyhow!("could not run gh: {e}"),
         })?;
     Ok(output)
+}
+
+/// The `gh` to run: the real one, except in unit tests.
+#[cfg(not(test))]
+fn gh_program() -> Result<std::ffi::OsString> {
+    Ok("gh".into())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A stand-in `gh` for the unit tests on this thread.
+    pub static GH_PROGRAM: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Unit tests run only the stand-in they set up: the real `gh` would reach
+/// GitHub, and a test that gets here by accident fails instead.
+#[cfg(test)]
+fn gh_program() -> Result<std::ffi::OsString> {
+    match GH_PROGRAM.with(|p| p.borrow().clone()) {
+        Some(stub) => Ok(stub.into()),
+        None => bail!("unit tests do not run the real gh"),
+    }
 }
 
 /// `gh` that must succeed, returning its stdout.
@@ -417,7 +440,6 @@ pub enum DiffSide {
 
 impl DiffSide {
     /// The name GitHub's API uses.
-    #[allow(dead_code)] // the viewer's inline comments send it
     pub fn as_str(self) -> &'static str {
         match self {
             DiffSide::Left => "LEFT",
@@ -702,7 +724,6 @@ const FINGERPRINT_QUERY: &str = "query($owner: String!, $name: String!, $number:
 }";
 
 /// The PR's [`Fingerprint`], for noticing that the viewer is out of date.
-#[allow(dead_code)] // polled by the review viewer's refresh
 pub fn pr_fingerprint(repo_dir: &Path, number: u64) -> Result<Fingerprint> {
     let text = gh_ok(
         repo_dir,
@@ -768,7 +789,6 @@ fn parse_fingerprint(text: &str) -> Result<Fingerprint> {
 }
 
 /// Reply to the thread that review comment `comment_id` belongs to.
-#[allow(dead_code)] // the review viewer's reply key
 pub fn reply(repo_dir: &Path, number: u64, comment_id: u64, body: &str) -> Result<()> {
     gh_ok(
         repo_dir,
@@ -785,7 +805,6 @@ pub fn reply(repo_dir: &Path, number: u64, comment_id: u64, body: &str) -> Resul
 }
 
 /// Replace a review comment's text. Only its author can.
-#[allow(dead_code)] // the review viewer's edit key
 pub fn edit_comment(repo_dir: &Path, comment_id: u64, body: &str) -> Result<()> {
     gh_ok(
         repo_dir,
@@ -801,7 +820,6 @@ pub fn edit_comment(repo_dir: &Path, comment_id: u64, body: &str) -> Result<()> 
     .map(|_| ())
 }
 
-#[allow(dead_code)] // the review viewer's delete key
 pub fn delete_comment(repo_dir: &Path, comment_id: u64) -> Result<()> {
     gh_ok(
         repo_dir,
@@ -815,7 +833,6 @@ pub fn delete_comment(repo_dir: &Path, comment_id: u64) -> Result<()> {
     .map(|_| ())
 }
 
-#[allow(dead_code)] // the review viewer's reaction picker
 pub fn react(repo_dir: &Path, comment_id: u64, reaction: Reaction) -> Result<()> {
     gh_ok(
         repo_dir,
@@ -842,7 +859,6 @@ const ADD_THREAD_MUTATION: &str = "mutation($review: ID!, $path: String!, $line:
 /// GitHub allows one pending review per user per PR, so the comment joins
 /// the one there is — an agent's, say — and only starts a new one when there
 /// is none. Either way nothing is published until a verdict submits it.
-#[allow(dead_code)] // the review viewer's inline-comment key
 pub fn add_inline_comment(
     repo_dir: &Path,
     number: u64,

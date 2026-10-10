@@ -263,6 +263,14 @@ page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, commen
 or request changes — submitting your pending review if you have one — and
 `Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
 
+On a line of code, `c` writes an inline comment, which joins your pending
+review (starting one if need be) until a verdict submits it. On a comment, `R`
+replies to its thread, `+` picks a reaction, and — on your own comments only —
+`e` edits it and `d` deletes it, after asking. The viewer checks the PR every
+30 seconds; when someone else has pushed or commented, the header shows
+`⟳ updates – r`, and `r` fetches it all again with the cursor kept on the line
+it was on.
+
 Give it a command in `config.toml` and it also starts that in the background
 from the new worktree — say, Claude Code with your own review command:
 
