@@ -1200,6 +1200,8 @@ pub struct MyPr {
     pub number: u64,
     pub title: String,
     pub url: String,
+    /// The head branch's name.
+    pub branch: String,
     /// The head commit.
     pub sha: String,
     /// GitHub's rollup of the head commit's checks and statuses: `SUCCESS`,
@@ -1211,7 +1213,7 @@ pub struct MyPr {
 /// one query.
 const MY_PRS_QUERY: &str = "query { viewer { pullRequests(states: OPEN, first: 50, \
     orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { number title url \
-    repository { nameWithOwner } commits(last: 1) { nodes { commit { oid \
+    headRefName repository { nameWithOwner } commits(last: 1) { nodes { commit { oid \
     statusCheckRollup { state } } } } } } } }";
 
 pub fn my_open_prs(dir: &Path) -> Result<Vec<MyPr>> {
@@ -1234,6 +1236,7 @@ pub fn parse_my_prs(text: &str) -> Result<Vec<MyPr>> {
                 number: pr["number"].as_u64()?,
                 title: pr["title"].as_str().unwrap_or_default().to_string(),
                 url: pr["url"].as_str().unwrap_or_default().to_string(),
+                branch: pr["headRefName"].as_str().unwrap_or_default().to_string(),
                 sha: commit["oid"].as_str().unwrap_or_default().to_string(),
                 checks: commit["statusCheckRollup"]["state"]
                     .as_str()
@@ -1567,7 +1570,9 @@ mod tests {
         assert_eq!(prs[0].number, 42);
         assert_eq!(prs[0].checks.as_deref(), Some("FAILURE"));
         assert_eq!(prs[0].sha, "1111111111111111111111111111111111111111");
+        assert_eq!(prs[0].branch, "rate-limit");
         assert_eq!(prs[1].checks, None);
+        assert_eq!(prs[1].branch, "");
         assert!(parse_my_prs(r#"{"errors":[{"message":"x"}]}"#).is_err());
     }
 

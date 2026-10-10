@@ -179,6 +179,25 @@ fn read_reason(reason: &str, subject_type: &str, title: &str) -> Reading {
     }
 }
 
+/// The branch a CI notification is about, from GitHub's title
+/// `<workflow> workflow run failed for <branch> branch`.
+fn ci_branch(title: &str) -> Option<&str> {
+    let (_, branch) = title.strip_suffix(" branch")?.rsplit_once(" for ")?;
+    Some(branch).filter(|b| !b.is_empty())
+}
+
+/// Whether CI notification `n` is about the head branch of one of the
+/// user's open PRs in `checks`.
+fn ci_on_own_pr(checks: Option<&BTreeMap<String, PrCheck>>, n: &Notification) -> bool {
+    let Some(branch) = ci_branch(&n.subject.title) else {
+        return false;
+    };
+    checks
+        .into_iter()
+        .flat_map(|c| c.values())
+        .any(|pr| pr.branch == branch && pr.repo.eq_ignore_ascii_case(&n.repository.full_name))
+}
+
 /// The issue or PR number at the end of a notification's subject address.
 fn subject_number(api_url: &str) -> Option<u64> {
     let mut parts = api_url.rsplit('/');
@@ -262,6 +281,9 @@ pub struct PrCheck {
     pub number: u64,
     pub title: String,
     pub url: String,
+    /// The head branch; empty in state from before jeet kept it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
     pub sha: String,
     /// GitHub's checks rollup; empty without any checks.
     pub state: String,
@@ -369,17 +391,21 @@ pub fn poll(source: &dyn Source, watch: &WatchConfig, state: &mut WatchState, no
             own.extend(prs.iter().map(|p| pr_key(&p.repo, p.number)));
             let diff = diff_checks(state.checks.as_ref(), &prs, now);
             out.events.extend(diff.events);
+            let mut checks = diff.checks;
             for gone in diff.departed {
                 match source.pull_state(&gone.repo, gone.number) {
                     Ok(pull) => out
                         .events
                         .extend(closed_event(checked_event(&gone, now), &pull)),
-                    Err(e) => out
-                        .errors
-                        .push(format!("{} #{}: {e:#}", gone.repo, gone.number)),
+                    // Kept, to be asked about again next time.
+                    Err(e) => {
+                        out.errors
+                            .push(format!("{} #{}: {e:#}", gone.repo, gone.number));
+                        checks.insert(pr_key(&gone.repo, gone.number), gone);
+                    }
                 }
             }
-            state.checks = Some(diff.checks);
+            state.checks = Some(checks);
         }
         Err(e) => out.errors.push(format!("your pull requests: {e:#}")),
     }
@@ -403,6 +429,13 @@ pub fn poll(source: &dyn Source, watch: &WatchConfig, state: &mut WatchState, no
                 }
                 let reading = read_reason(&n.reason, &n.subject.kind, &n.subject.title);
                 let kind = match reading {
+                    // CI on one of the user's own PRs is told from its
+                    // checks, which know the PR; the notification does not.
+                    Reading::Kind(EventKind::CiFailed | EventKind::CiPassed)
+                        if ci_on_own_pr(state.checks.as_ref(), n) =>
+                    {
+                        continue;
+                    }
                     Reading::Kind(kind) => kind,
                     Reading::Ignore => continue,
                     Reading::StateChange => {
@@ -501,6 +534,7 @@ pub fn diff_checks(
             number: pr.number,
             title: pr.title.clone(),
             url: pr.url.clone(),
+            branch: pr.branch.clone(),
             sha: pr.sha.clone(),
             state: state.clone(),
         };
@@ -1213,8 +1247,9 @@ pub fn install(app: &App) -> Result<()> {
     if interval == 0 {
         bail!("`[watch] interval_secs` is 0; set how often to poll GitHub first");
     }
+    // As run, not canonicalized: through a package manager's link, such as
+    // Homebrew's, it outlives an upgrade.
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
     if !cfg!(target_os = "macos") {
         let [service, timer] = systemd_units(&exe, &app.home, interval);
         for (name, text) in [&service, &timer] {
@@ -1396,6 +1431,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://github.com/{repo}/pull/{number}"),
+            branch: format!("branch-{number}"),
             sha: sha.into(),
             checks: checks.map(str::to_string),
         }
@@ -1623,6 +1659,76 @@ mod tests {
             ]
         );
         assert!(state.checks.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_departed_pr_github_cannot_be_asked_about_is_asked_again() {
+        let mut fake = Fake::default();
+        fake.prs
+            .borrow_mut()
+            .extend([vec![], vec![], vec![pr("acme/api", 42, "a", None)]]);
+        let mut state = WatchState::default();
+        poll(&fake, &WatchConfig::default(), &mut state, 1000);
+
+        // Gone, and GitHub cannot say how: kept, and said so.
+        let polled = poll(&fake, &WatchConfig::default(), &mut state, 2000);
+        assert!(polled.events.is_empty(), "{:?}", polled.events);
+        assert_eq!(polled.errors.len(), 1, "{:?}", polled.errors);
+        assert!(state.checks.as_ref().unwrap().contains_key("acme/api#42"));
+
+        // Next time GitHub answers.
+        fake.pulls.insert(
+            "acme/api#42".into(),
+            PullState {
+                state: "closed".into(),
+                merged: true,
+                merged_by: None,
+            },
+        );
+        let polled = poll(&fake, &WatchConfig::default(), &mut state, 3000);
+        assert!(polled.errors.is_empty(), "{:?}", polled.errors);
+        assert_eq!(kinds(&polled.events), [(EventKind::PrMerged, Some(42))]);
+        assert!(state.checks.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ci_on_an_own_pr_is_told_once_from_its_checks() {
+        // The fixture's CI notification is about `main`; here that is the
+        // head branch of the user's acme/api#42.
+        let own = |checks| MyPr {
+            branch: "main".into(),
+            ..pr("acme/api", 42, "a", Some(checks))
+        };
+        let fake = Fake::default();
+        fake.prs
+            .borrow_mut()
+            .extend([vec![own("FAILURE")], vec![own("PENDING")]]);
+        fake.notifications.borrow_mut().extend([
+            changed("notifications.json", "b"),
+            changed("notifications_before.json", "a"),
+        ]);
+        let mut state = WatchState::default();
+        poll(&fake, &WatchConfig::default(), &mut state, 1000);
+        let polled = poll(&fake, &WatchConfig::default(), &mut state, 2000);
+        let ci: Vec<(EventKind, Option<u64>)> = kinds(&polled.events)
+            .into_iter()
+            .filter(|(k, _)| matches!(k, EventKind::CiFailed | EventKind::CiPassed))
+            .collect();
+        assert_eq!(ci, [(EventKind::CiFailed, Some(42))]);
+    }
+
+    #[test]
+    fn ci_notifications_name_their_branch() {
+        assert_eq!(
+            ci_branch("CI workflow run failed for main branch"),
+            Some("main")
+        );
+        assert_eq!(
+            ci_branch("Build for release workflow run succeeded for feat/x branch"),
+            Some("feat/x")
+        );
+        assert_eq!(ci_branch("Run failed"), None);
+        assert_eq!(ci_branch("CI workflow run failed for  branch"), None);
     }
 
     #[test]
