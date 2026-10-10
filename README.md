@@ -108,7 +108,7 @@ From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 
 ```text
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
-│worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
+│worktree feature-x  [task]  1 uncommitted  +2/-0 in 1 file     │
 │path     /src                                                  │
 │filter   co█  1 of 2                                           │
 └───────────────────────────────────────────────────────────────┘
