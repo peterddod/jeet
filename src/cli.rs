@@ -86,6 +86,25 @@ pub enum Commands {
     /// The tasks list: open, explore, archive and delete tasks (also plain `jeet`)
     Tasks,
 
+    /// Talk to the assistant: resume its most recently active session in
+    /// tmux, start a new one, or pick one
+    Chat {
+        /// Start a new session, called NAME if given
+        #[arg(long, value_name = "NAME", num_args = 0..=1, conflicts_with = "pick")]
+        new: Option<Option<String>>,
+        /// Choose a session: resume, start, rename or end one, or mark the
+        /// primary one (without a terminal, list them)
+        #[arg(long)]
+        pick: bool,
+    },
+
+    /// The assistant's todo list, `todo.md` in its home (with no
+    /// subcommand: the list)
+    Todo {
+        #[command(subcommand)]
+        command: Option<TodoCommands>,
+    },
+
     /// Tasks: a workspace directory with any number of worktrees in it
     Task {
         #[command(subcommand)]
@@ -190,7 +209,7 @@ pub enum TaskCommands {
 
     /// Send the task's agent a message: typed in when it is idle, queued
     /// for when it stops or sits idle when it is busy or waiting on you, its
-    /// first prompt when it is not running
+    /// first prompt when it is not running (`assistant` for the assistant)
     Send {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -245,6 +264,54 @@ pub enum TaskCommands {
         /// Replace copies the task has changed, too
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TodoCommands {
+    /// List the items, numbered, most important first
+    Ls {
+        /// Print them as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add an item, in priority order
+    Add {
+        /// What there is to do
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// Its priority: 1 is the most important (written as `!p1`)
+        #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=9))]
+        priority: Option<u8>,
+        /// A task it is about (written as `@slug`; repeatable)
+        #[arg(long = "task", value_name = "TASK", add = ArgValueCandidates::new(task_candidates))]
+        tasks: Vec<String>,
+        /// Print the item as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Tick items off, by number
+    Done {
+        #[arg(required = true)]
+        ids: Vec<usize>,
+        /// Put them back as not done
+        #[arg(long)]
+        undo: bool,
+        /// Print the items as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove items, by number
+    #[command(alias = "remove")]
+    Rm {
+        #[arg(required = true)]
+        ids: Vec<usize>,
+        /// Print the removed items as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 

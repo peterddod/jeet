@@ -84,6 +84,29 @@ const MIGRATIONS: &[&str] = &[
     "
     DROP TABLE IF EXISTS worktrees;
     ",
+    // v3: the assistant, a task of kind 'assistant' — only ever one — whose
+    // sessions are recorded like any task's; and the session of it the user
+    // marked primary, which events go to first. SQLite cannot change a
+    // CHECK in place, so `tasks` is rebuilt; foreign keys are off while
+    // migrations run, so dropping the old table takes no rows with it.
+    "
+    CREATE TABLE tasks_v3 (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        project TEXT,
+        kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'review', 'assistant')),
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+        created_at INTEGER NOT NULL,
+        last_activity INTEGER NOT NULL
+    );
+    INSERT INTO tasks_v3 (id, slug, name, project, kind, state, created_at, last_activity)
+        SELECT id, slug, name, project, kind, state, created_at, last_activity FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE tasks_v3 RENAME TO tasks;
+    CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
+    ALTER TABLE task_sessions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
@@ -134,9 +157,11 @@ impl Database {
     /// the last whole version rather than half-way through one.
     fn migrate(&self) -> Result<()> {
         let mut conn = self.conn();
-        // Off by default in SQLite, and the task tables lean on ON DELETE
-        // CASCADE. Per connection, and a no-op inside a transaction, so first.
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Off while the schema changes: rebuilding a table means dropping
+        // the old one, which with them on would cascade to every row that
+        // references it. Per connection, and a no-op inside a transaction,
+        // so set outside one.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
         conn.execute_batch(BASELINE)?;
         let current = effective_version(&conn)?;
         let latest = MIGRATIONS.len() as i64;
@@ -155,6 +180,9 @@ impl Database {
             tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
             tx.commit()?;
         }
+        // Off by default in SQLite, and the task tables lean on ON DELETE
+        // CASCADE.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(())
     }
 
@@ -333,10 +361,48 @@ mod tests {
             .unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
         assert!(!has_table(&db, "worktrees"));
         assert_eq!(db.list_tasks(None).unwrap().len(), 1);
         assert_eq!(db.list_repos(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rebuilding_tasks_for_the_assistant_keeps_every_row_that_points_at_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(BASELINE).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch(MIGRATIONS[1]).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version = 2;
+                 PRAGMA foreign_keys = ON;
+                 INSERT INTO repos (id, trunk_path, remote_url, default_branch)
+                     VALUES ('github.com/acme/api', '/t', 'u', 'main');
+                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                     VALUES ('t1', 'fix', 'Fix', 'review', 1, 1);
+                 INSERT INTO task_worktrees (task_id, repo_id, dir_name, created_at)
+                     VALUES ('t1', 'github.com/acme/api', 'api', 1);
+                 INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
+                     VALUES ('s1', 't1', 'Fix', 1, 1);
+                 INSERT INTO task_prs (task_id, repo_id, number, title, url, state, updated_at)
+                     VALUES ('t1', 'github.com/acme/api', 7, 'x', 'u', 'OPEN', 'z');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let task = db.get_task("t1").unwrap().unwrap();
+        assert_eq!(task.kind, tasks::TaskKind::Review);
+        assert_eq!(db.list_task_worktrees("t1").unwrap().len(), 1);
+        assert_eq!(db.list_task_sessions("t1").unwrap().len(), 1);
+        assert_eq!(db.list_task_prs("t1").unwrap().len(), 1);
+        // Foreign keys are back on, and still point at the rebuilt table.
+        db.delete_task("t1").unwrap();
+        assert!(db.list_task_worktrees("t1").unwrap().is_empty());
+        assert!(db.list_task_sessions("t1").unwrap().is_empty());
     }
 
     #[test]

@@ -2,7 +2,9 @@
 //!
 //! Every task's agent lives in a detached tmux session named `jeet-<slug>`,
 //! so it keeps working after the terminal that started it has gone, and can
-//! be attached to again from anywhere.
+//! be attached to again from anywhere. The assistant, which may have several
+//! sessions going at once, has a window for each in one tmux session; see
+//! [`new_window`].
 //!
 //! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
 //! tests, which point it at a stub so they never reach a real server.
@@ -102,12 +104,258 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
 /// that starts with a dash from being read as a flag. The caller removes
 /// control characters: sent literally, they would still drive the pane.
 pub fn send_text(name: &str, text: &str) -> Result<()> {
-    let pane = format!("{}:", target(name));
-    send_keys(&["-t", &pane, "-l", "--", &literal_arg(text)])?;
+    type_into(&format!("{}:", target(name)), text)
+}
+
+/// [`send_text`] for the window with tmux id `window` (`@3`).
+pub fn send_text_to_window(window: &str, text: &str) -> Result<()> {
+    type_into(window, text)
+}
+
+fn type_into(pane: &str, text: &str) -> Result<()> {
+    send_keys(&["-t", pane, "-l", "--", &literal_arg(text)])?;
     // A moment between the text and the Enter, or a pane reading the two as
     // one paste may take the Enter as part of the text.
     std::thread::sleep(Duration::from_millis(100));
-    send_keys(&["-t", &pane, "Enter"])
+    send_keys(&["-t", pane, "Enter"])
+}
+
+/// The window option a window made by [`new_window`] is keyed by.
+const KEY_OPTION: &str = "@jeet_key";
+
+/// One window of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    /// tmux's id for it, e.g. `@3`: unique on the server, and a target as
+    /// it is.
+    pub id: String,
+    /// Whether its program is still running.
+    pub alive: bool,
+    /// What [`new_window`] keyed it by, if it made it.
+    pub key: Option<String>,
+}
+
+/// The windows of session `name`: none when it is not running.
+pub fn windows(name: &str) -> Vec<Window> {
+    let Ok(output) = Command::new(binary())
+        .args([
+            "list-windows",
+            "-t",
+            &target(name),
+            "-F",
+            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}"),
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_windows(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_windows(listing: &str) -> Vec<Window> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let id = fields.next()?.trim();
+            if !id.starts_with('@') {
+                return None;
+            }
+            let alive = fields.next()?.trim() == "0";
+            let key = fields
+                .next()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_string);
+            Some(Window {
+                id: id.to_string(),
+                alive,
+                key,
+            })
+        })
+        .collect()
+}
+
+/// Start `argv` in a new window of session `name`, making the session if it
+/// is not running, and key the window by `key` so [`windows`] can tell it
+/// apart. `title` is what tmux shows for it. Returns the window's id.
+/// `argv` is run directly, never through a shell; the session's environment
+/// is kept clean the way [`new_session`]'s is.
+pub fn new_window(
+    name: &str,
+    key: &str,
+    title: &str,
+    cwd: &Path,
+    env: &[(&str, &str)],
+    argv: &[String],
+) -> Result<String> {
+    if argv.is_empty() {
+        bail!("nothing to run in tmux session {name}");
+    }
+    let mut creating = !has_session(name);
+    let mut attempts = 0;
+    let output = loop {
+        attempts += 1;
+        let mut cmd = Command::new(binary());
+        match creating {
+            true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
+            false => cmd.args([
+                "new-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-t",
+                &format!("{}:", target(name)),
+            ]),
+        };
+        // tmux expands formats in a window name, and `#(…)` in one runs a
+        // shell command: the name is the user's, so it goes in literally.
+        cmd.args(["-n", &format_literal(title), "-c"]).arg(cwd);
+        for (key, value) in env {
+            cmd.arg("-e").arg(format!("{key}={value}"));
+        }
+        cmd.arg("--").args(argv);
+        cmd.env_remove(crate::cd::CD_FILE_ENV)
+            .env_remove(crate::tasks::TASK_ID_ENV)
+            .env_remove(crate::permissions::ASSISTANT_ENV)
+            .stdin(Stdio::null());
+        let output = cmd.output().context("run tmux")?;
+        // Another jeet made the session between the look and the start:
+        // a window in it does as well.
+        if !output.status.success() && creating && attempts == 1 && has_session(name) {
+            creating = false;
+            continue;
+        }
+        break output;
+    };
+    if !output.status.success() {
+        bail!(
+            "tmux could not start a window in session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !id.starts_with('@') {
+        bail!("tmux started a window in session {name} but did not say which ({id:?})");
+    }
+    if !set_window_key(&id, key) {
+        let _ = kill_window(&id);
+        bail!("tmux could not label its new window in session {name}");
+    }
+    if creating {
+        set_detach_hint(name);
+    }
+    Ok(id)
+}
+
+/// Key window `id` by `key`, as [`new_window`] does: for a window whose
+/// program has gone on to something else to be known by.
+pub fn set_window_key(id: &str, key: &str) -> bool {
+    quiet()
+        .args(["set-option", "-w", "-t", id, KEY_OPTION, key])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The window this process runs in, by `$TMUX_PANE`, when it is one of
+/// session `name`'s: its id and what it is keyed by.
+pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
+    std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
+    // The pane this process runs in, never whichever the client last used.
+    let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
+    let output = Command::new(binary())
+        .args(["display-message", "-p", "-t", &pane])
+        .arg(format!(
+            "#{{session_name}}\t#{{window_id}}\t#{{{KEY_OPTION}}}"
+        ))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_current_window(&String::from_utf8_lossy(&output.stdout), name)
+}
+
+fn parse_current_window(line: &str, name: &str) -> Option<(String, Option<String>)> {
+    let mut fields = line.trim_end_matches(['\n', '\r']).split('\t');
+    if fields.next()? != name {
+        return None;
+    }
+    let id = fields.next()?.trim();
+    if !id.starts_with('@') {
+        return None;
+    }
+    let key = fields
+        .next()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
+    Some((id.to_string(), key))
+}
+
+/// Make window `id` the one its session shows.
+pub fn select_window(id: &str) -> Result<()> {
+    let output = Command::new(binary())
+        .args(["select-window", "-t", id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not switch to window {id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// End window `id` and what runs in it, the way [`kill`] ends a session; a
+/// window that is already gone is fine.
+pub fn kill_window(id: &str) -> Result<()> {
+    let pids = process_tree(&pane_pids(&["-t", id]));
+    let output = Command::new(binary())
+        .args(["kill-window", "-t", id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() && window_exists(id) {
+        bail!(
+            "tmux could not end window {id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    end_processes(&pids, EXIT_GRACE)
+        .with_context(|| format!("end what was running in tmux window {id}"))
+}
+
+fn window_exists(id: &str) -> bool {
+    quiet()
+        .args(["list-panes", "-t", id])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether the program in window `id` is still running.
+pub fn window_alive(id: &str) -> bool {
+    let Ok(output) = Command::new(binary())
+        .args(["list-panes", "-t", id, "-F", "#{pane_dead}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && any_pane_alive(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn send_keys(args: &[&str]) -> Result<()> {
@@ -158,7 +406,13 @@ fn set_detach_hint(name: &str) {
 
 fn detach_hint(prefix: &str) -> String {
     // `#` starts a format in status-right; a prefix key could be `#`.
-    format!(" {} d → jeet ", prefix.replace('#', "##"))
+    format!(" {} d → jeet ", format_literal(prefix))
+}
+
+/// `text` as tmux shows it where it expands formats: `#` starts one, and
+/// `#(…)` runs a shell command, so each is doubled to stand for itself.
+fn format_literal(text: &str) -> String {
+    text.replace('#', "##")
 }
 
 /// Attach the terminal to session `name` until the user detaches, returning
@@ -220,15 +474,15 @@ const KILL_WAIT: Duration = Duration::from_secs(3);
 /// The pids of the programs still running in session `name`'s panes. A dead
 /// pane's pid is left out: that process is gone and the pid may be reused.
 fn live_pane_pids(name: &str) -> Vec<u32> {
+    pane_pids(&["-s", "-t", &target(name)])
+}
+
+/// The pids of the live panes `list-panes` with `args` lists.
+fn pane_pids(args: &[&str]) -> Vec<u32> {
     let Ok(output) = Command::new(binary())
-        .args([
-            "list-panes",
-            "-s",
-            "-t",
-            &target(name),
-            "-F",
-            "#{pane_dead} #{pane_pid}",
-        ])
+        .arg("list-panes")
+        .args(args)
+        .args(["-F", "#{pane_dead} #{pane_pid}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -429,9 +683,60 @@ mod tests {
     }
 
     #[test]
+    fn windows_are_read_with_their_keys() {
+        let listing = "@1\t0\tabc\n@2\t1\t\n@3\t0\n%junk\t0\tx\n";
+        assert_eq!(
+            parse_windows(listing),
+            [
+                Window {
+                    id: "@1".into(),
+                    alive: true,
+                    key: Some("abc".into()),
+                },
+                Window {
+                    id: "@2".into(),
+                    alive: false,
+                    key: None,
+                },
+                Window {
+                    id: "@3".into(),
+                    alive: true,
+                    key: None,
+                },
+            ]
+        );
+        assert!(parse_windows("").is_empty());
+    }
+
+    #[test]
     fn hint_escapes_format_characters() {
         assert_eq!(detach_hint("C-b"), " C-b d → jeet ");
         assert_eq!(detach_hint("#"), " ## d → jeet ");
+    }
+
+    #[test]
+    fn window_names_cannot_run_formats() {
+        assert_eq!(format_literal("plan the week"), "plan the week");
+        assert_eq!(
+            format_literal("#(touch /tmp/pwned) #{pane_pid} ##"),
+            "##(touch /tmp/pwned) ##{pane_pid} ####"
+        );
+    }
+
+    #[test]
+    fn the_current_window_is_one_of_the_session() {
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\tabc\n", "jeet-assistant"),
+            Some(("@4".into(), Some("abc".into())))
+        );
+        assert_eq!(
+            parse_current_window("jeet-assistant\t@4\t\n", "jeet-assistant"),
+            Some(("@4".into(), None))
+        );
+        // Another session's window, or nothing sensible.
+        assert!(parse_current_window("jeet-api\t@4\tabc\n", "jeet-assistant").is_none());
+        assert!(parse_current_window("jeet-assistant\t%4\tabc", "jeet-assistant").is_none());
+        assert!(parse_current_window("", "jeet-assistant").is_none());
     }
 
     #[test]

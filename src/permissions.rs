@@ -119,6 +119,10 @@ const READ_ONLY: &[&str] = &[
     "jeet notify",
 ];
 
+/// The assistant's own files, which it keeps through jeet: pre-approved
+/// too, and needing no capability.
+const OWN: &[&str] = &["jeet todo"];
+
 pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
 }
@@ -167,11 +171,15 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { .. }
+        // Its own todo list.
+        | Commands::Todo { .. }
         // Started by jeet itself, under the command that was checked.
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. } => Gate::Free,
-        Commands::Tasks | Commands::Explore | Commands::Exec { .. } => Gate::Interactive,
+        Commands::Tasks | Commands::Explore | Commands::Exec { .. } | Commands::Chat { .. } => {
+            Gate::Interactive
+        }
         Commands::InstallShell => needs("shell.install", "installed shell integration".into()),
         Commands::Clone { url } => needs("repo.clone", format!("cloned {url}")),
         Commands::Import { paths, .. } => needs(
@@ -316,7 +324,8 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
 }
 
 /// The `permissions.allow` rules for the assistant's Claude settings: the
-/// read-only jeet commands, and the commands of each allowed capability.
+/// read-only jeet commands, its own, and the commands of each allowed
+/// capability.
 pub fn bash_allow(allow: &[String]) -> Vec<String> {
     let allowed = CAPABILITIES
         .iter()
@@ -324,6 +333,7 @@ pub fn bash_allow(allow: &[String]) -> Vec<String> {
         .flat_map(|c| c.commands.iter());
     READ_ONLY
         .iter()
+        .chain(OWN)
         .chain(allowed)
         .map(|command| format!("Bash({command}:*)"))
         .collect()
@@ -591,6 +601,9 @@ mod tests {
             &["notify", "hi"],
             &["task-hook", "Stop"],
             &["store-sync"],
+            &["todo"],
+            &["todo", "add", "x"],
+            &["todo", "done", "1"],
         ] {
             assert_eq!(gate_of(args), Gate::Free, "{args:?}");
         }
@@ -599,6 +612,8 @@ mod tests {
             &["explore"],
             &["exec", "api"],
             &["projects", "edit", "w"],
+            &["chat"],
+            &["chat", "--new", "plan"],
         ] {
             assert_eq!(gate_of(args), Gate::Interactive, "{args:?}");
         }
@@ -636,7 +651,8 @@ mod tests {
             .iter()
             .any(|r| r.contains("delete") || r.contains("archive")));
         assert!(!rules.contains(&"Bash(jeet worktree:*)".to_string()));
-        assert_eq!(bash_allow(&[]).len(), READ_ONLY.len());
+        assert!(rules.contains(&"Bash(jeet todo:*)".to_string()));
+        assert_eq!(bash_allow(&[]).len(), READ_ONLY.len() + OWN.len());
     }
 
     #[test]

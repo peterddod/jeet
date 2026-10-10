@@ -1,5 +1,5 @@
-//! The task tables (schema v1): a task, the worktrees it holds, its agent
-//! sessions and its PR history.
+//! The task tables (schema v1, v3): a task, the worktrees it holds, its
+//! agent sessions and its PR history.
 
 // The tasks milestone is the first caller; until it lands only the tests here
 // use most of this.
@@ -15,6 +15,9 @@ pub enum TaskKind {
     Work,
     /// Reviewing someone else's PR.
     Review,
+    /// The global assistant: there is one, and it is kept out of the tasks
+    /// list; see [`crate::assistant`].
+    Assistant,
 }
 
 impl TaskKind {
@@ -22,6 +25,7 @@ impl TaskKind {
         match self {
             TaskKind::Work => "work",
             TaskKind::Review => "review",
+            TaskKind::Assistant => "assistant",
         }
     }
 
@@ -29,6 +33,7 @@ impl TaskKind {
         match s {
             "work" => Ok(TaskKind::Work),
             "review" => Ok(TaskKind::Review),
+            "assistant" => Ok(TaskKind::Assistant),
             other => Err(bad_enum("kind", other)),
         }
     }
@@ -230,15 +235,29 @@ impl Database {
     }
 
     /// Tasks in `state` (all of them for `None`), most recently active first.
+    /// The assistant is not among them: it is no task to list, open, archive
+    /// or delete.
     pub fn list_tasks(&self, state: Option<TaskState>) -> Result<Vec<TaskRecord>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {TASK_COLUMNS} FROM tasks
-             WHERE ?1 IS NULL OR state = ?1
+             WHERE (?1 IS NULL OR state = ?1) AND kind != 'assistant'
              ORDER BY last_activity DESC, created_at DESC, slug"
         ))?;
         let rows = stmt.query_map(params![state.map(TaskState::as_str)], task_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The assistant's row, once it has one.
+    pub fn get_assistant_task(&self) -> Result<Option<TaskRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE kind = 'assistant'"),
+                [],
+                task_from_row,
+            )
+            .optional()?)
     }
 
     /// The review task for PR `number` of `repo_id`: the one with a worktree
@@ -432,6 +451,47 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![task_id], task_session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Give a session a new display name.
+    pub fn rename_task_session(&self, session_id: &str, name: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE task_sessions SET name = ?2 WHERE session_id = ?1",
+            params![session_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// Mark `session_id` as the task's primary session, unmarking any other;
+    /// `None` leaves it with none.
+    pub fn set_primary_session(&self, task_id: &str, session_id: Option<&str>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE task_sessions SET is_primary = (session_id IS ?2) WHERE task_id = ?1",
+            params![task_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// The session marked primary, if any.
+    pub fn primary_session(&self, task_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT session_id FROM task_sessions WHERE task_id = ?1 AND is_primary != 0
+                 LIMIT 1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Forget a session.
+    pub fn delete_task_session(&self, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM task_sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
     }
 
     pub fn touch_task_session(&self, session_id: &str, at: i64) -> Result<()> {
@@ -689,6 +749,63 @@ mod tests {
 
         db.touch_task_session("s1", 30).unwrap();
         assert_eq!(db.list_task_sessions("t").unwrap()[0].session_id, "s1");
+    }
+
+    #[test]
+    fn there_is_one_assistant_and_it_is_never_listed() {
+        let (_dir, db) = open();
+        assert!(db.get_assistant_task().unwrap().is_none());
+        let mut assistant = task("a", "assistant", 50);
+        assistant.kind = TaskKind::Assistant;
+        db.insert_task(&assistant).unwrap();
+        db.insert_task(&task("w", "work", 10)).unwrap();
+        assert_eq!(db.get_assistant_task().unwrap(), Some(assistant.clone()));
+        let listed: Vec<String> = db
+            .list_tasks(None)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(listed, ["work"]);
+        // Found by id, as its hooks look it up.
+        assert_eq!(db.get_task("a").unwrap(), Some(assistant));
+        let mut second = task("b", "assistant-2", 1);
+        second.kind = TaskKind::Assistant;
+        assert!(db.insert_task(&second).is_err());
+    }
+
+    #[test]
+    fn one_session_at_most_is_primary() {
+        let (_dir, db) = open();
+        db.insert_task(&task("t", "work", 1)).unwrap();
+        db.insert_task(&task("u", "other", 1)).unwrap();
+        for (id, task_id) in [("s1", "t"), ("s2", "t"), ("s3", "u")] {
+            db.upsert_task_session(&TaskSessionRecord {
+                session_id: id.into(),
+                task_id: task_id.into(),
+                parent_id: None,
+                name: "x".into(),
+                created_at: 1,
+                last_activity: 1,
+            })
+            .unwrap();
+        }
+        assert_eq!(db.primary_session("t").unwrap(), None);
+        db.set_primary_session("t", Some("s1")).unwrap();
+        db.set_primary_session("u", Some("s3")).unwrap();
+        assert_eq!(db.primary_session("t").unwrap().as_deref(), Some("s1"));
+        db.set_primary_session("t", Some("s2")).unwrap();
+        assert_eq!(db.primary_session("t").unwrap().as_deref(), Some("s2"));
+        // Another task's mark is its own.
+        assert_eq!(db.primary_session("u").unwrap().as_deref(), Some("s3"));
+        db.set_primary_session("t", None).unwrap();
+        assert_eq!(db.primary_session("t").unwrap(), None);
+
+        db.rename_task_session("s1", "planning").unwrap();
+        db.delete_task_session("s2").unwrap();
+        let sessions = db.list_task_sessions("t").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "planning");
     }
 
     #[test]

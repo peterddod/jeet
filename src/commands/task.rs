@@ -8,10 +8,12 @@ use std::io::{IsTerminal, Write};
 use anyhow::{bail, Result};
 
 use crate::agent::{self, AgentSpec};
+use crate::assistant;
 use crate::cd;
 use crate::context::App;
-use crate::db::tasks::{TaskRecord, TaskState};
+use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::messages::{self, Delivered};
+use crate::permissions;
 use crate::pr_history;
 use crate::projects;
 use crate::runtime;
@@ -74,8 +76,12 @@ pub fn new(
 }
 
 /// Get a message to the task's agent, however it is doing; see
-/// [`messages`].
+/// [`messages`]. `assistant` is the assistant, whose message goes to the
+/// session [`assistant::target`] picks.
 pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
+    if name.trim() == assistant::SLUG {
+        return send_to_assistant(app, message);
+    }
     let task = tasks::find(app, name)?;
     if task.state == TaskState::Archived {
         bail!(
@@ -101,6 +107,49 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+fn send_to_assistant(app: &App, message: &str) -> Result<()> {
+    let (delivered, session) = assistant::send(app, &sender(app), message)?;
+    let session = session.map(|name| printable(&name)).unwrap_or_default();
+    match delivered {
+        Delivered::Typed => eprintln!("jeet: sent to the assistant's session {session}"),
+        Delivered::Queued => eprintln!(
+            "jeet: the assistant is busy or waiting on you, so the message is queued; it gets \
+             it when it finishes or sits idle"
+        ),
+        Delivered::Started => eprintln!(
+            "jeet: started a session of the assistant's with the message in tmux session {}",
+            assistant::TMUX_SESSION
+        ),
+    }
+    Ok(())
+}
+
+/// Who is sending a message, as far as jeet can tell, for the assistant to
+/// weigh it by: a task's agent, by its environment or where it runs, or
+/// else the command line. Anything can claim to be the command line, so the
+/// assistant is told never to take that for the user.
+fn sender(app: &App) -> String {
+    if permissions::assistant_mode() {
+        return "the assistant".to_string();
+    }
+    let by_env = std::env::var(tasks::TASK_ID_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let by_dir = || {
+        let cwd = std::env::current_dir().ok()?;
+        tasks::find_task_root(&cwd).map(|(_, id)| id)
+    };
+    let task = by_env
+        .or_else(by_dir)
+        .and_then(|id| app.db.get_task(&id).ok().flatten())
+        .filter(|t| t.kind != TaskKind::Assistant);
+    match task {
+        Some(task) => format!("task {}", task.slug),
+        None => "the command line".to_string(),
+    }
 }
 
 pub fn ls(app: &App, archived: bool) -> Result<()> {
