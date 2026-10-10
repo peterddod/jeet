@@ -29,7 +29,7 @@ jeet does without that feature:
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary) | the assistant starts without its summary |
 | `has_session`, `sessions`, `copy_sessions`, `latest_activity` | read the agent's own session store for a directory | sessions are only what jeet recorded; `jeet import` copies none |
 | `startup_prompt(pane)`, `accept_trust(pane)` | spot a prompt that blocks the agent before its first hook, and accept a trust prompt one key at a time | the task shows `needs input – startup prompt?` after 15s |
-| `instructions_file` | the file the agent reads its instructions from (`CLAUDE.md`, `AGENTS.md`) | – |
+| `instructions_file`, `instructions_import` | the file the agent reads its instructions from, and, when that is not `AGENTS.md`, what jeet writes in it to import `AGENTS.md` (Claude Code: `CLAUDE.md` holding `@AGENTS.md`) | none of jeet's instruction files is written for it |
 
 `AgentSpec::supports_sessions` and `AgentSpec::has_hooks` check whether these
 methods return `Some`, so they must return `Some` for any arguments, empty
