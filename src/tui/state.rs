@@ -204,10 +204,13 @@ pub enum Exit {
     Stay,
     /// Ask the shell wrapper to cd here.
     ChangeDir(PathBuf),
+    /// Back to the screen the explorer was opened from, which carries on.
+    Back,
 }
 
 pub struct Explorer {
-    pub repo: RepoRecord,
+    /// None while browsing a task's canvas, which is no repository.
+    pub repo: Option<RepoRecord>,
     /// Root of the worktree being browsed.
     pub root: PathBuf,
     pub root_label: String,
@@ -261,6 +264,8 @@ pub struct Explorer {
     pub pr_area: Option<Rect>,
     /// The `jeet review` job for this worktree's PR, if one was started.
     pub review_job: Option<Job>,
+    /// The screen esc returns to, when the explorer was opened from one.
+    pub back: Option<String>,
 }
 
 /// Two presses on the same cell inside this window are one double-click.
@@ -268,7 +273,7 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 impl Explorer {
     pub fn new(
-        repo: RepoRecord,
+        repo: Option<RepoRecord>,
         root: PathBuf,
         root_label: String,
         root_kind: String,
@@ -306,6 +311,7 @@ impl Explorer {
             pr_updates: None,
             pr_area: None,
             review_job: None,
+            back: None,
         };
         explorer.reload(None)?;
         Ok(explorer)
@@ -713,6 +719,17 @@ impl Explorer {
         self.should_quit = true;
     }
 
+    /// Esc with nothing left to clear: back to the screen that opened the
+    /// explorer, if one did, else out of jeet without moving the shell.
+    pub fn leave(&mut self) {
+        if self.back.is_some() {
+            self.exit = Exit::Back;
+            self.should_quit = true;
+        } else {
+            self.quit_in_place();
+        }
+    }
+
     pub fn quit_in_place(&mut self) {
         // A rename can move the directory the shell is sitting in out from
         // under it; leaving it somewhere that no longer exists helps nobody.
@@ -731,7 +748,15 @@ impl Explorer {
                 return candidate.clone();
             }
         }
-        PathBuf::from(&self.repo.trunk_path)
+        self.trunk()
+    }
+
+    /// The repository's trunk, or the root itself on a task's canvas.
+    pub fn trunk(&self) -> PathBuf {
+        match &self.repo {
+            Some(repo) => PathBuf::from(&repo.trunk_path),
+            None => self.root.clone(),
+        }
     }
 }
 
@@ -756,15 +781,23 @@ pub fn folded(text: &str) -> String {
 /// and `/` to act on: type a folder's name out and it is the row under the
 /// cursor.
 pub fn filter_matches(entries: &[FsEntry], filter: &str) -> Vec<usize> {
+    rank_matches(entries.iter().map(|e| e.name.as_str()), filter)
+}
+
+/// [`filter_matches`] over plain names, for any list a filter narrows: the
+/// indices of the names `filter` keeps, spelled-out first, then prefixed,
+/// then contained, each group in the order given.
+pub fn rank_matches<'a>(names: impl IntoIterator<Item = &'a str>, filter: &str) -> Vec<usize> {
+    let names = names.into_iter();
     if filter.is_empty() {
-        return (0..entries.len()).collect();
+        return (0..names.count()).collect();
     }
     let needle = folded(filter);
     let mut exact = Vec::new();
     let mut prefixed = Vec::new();
     let mut contained = Vec::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let name = folded(&entry.name);
+    for (index, name) in names.enumerate() {
+        let name = folded(name);
         if name == needle {
             exact.push(index);
         } else if name.starts_with(&needle) {
@@ -970,7 +1003,7 @@ mod tests {
             ..crate::config::Config::default()
         };
         Explorer::new(
-            repo,
+            Some(repo),
             root.to_path_buf(),
             "main".into(),
             "trunk".into(),

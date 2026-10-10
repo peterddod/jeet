@@ -191,7 +191,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!(" vs {}", explorer.repo.default_branch),
+            match &explorer.repo {
+                Some(repo) => format!(" vs {}", repo.default_branch),
+                None => String::new(),
+            },
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -265,7 +268,10 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
         ])
     };
 
-    let heading = format!(" jeet · {} ", explorer.repo.id);
+    let heading = match &explorer.repo {
+        Some(repo) => format!(" jeet · {} ", repo.id),
+        None => format!(" jeet · task {} ", explorer.root_label),
+    };
     let mut block = Block::default().borders(Borders::ALL).title(Span::styled(
         heading.clone(),
         Style::default()
@@ -1320,7 +1326,7 @@ pub fn truncate(text: &str, width: usize) -> String {
 }
 
 /// A centered box sized to its content (plus borders), clamped to the frame.
-fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
+pub(super) fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
     let width = (cols as u16).saturating_add(2).min(area.width);
     let height = (lines as u16).saturating_add(2).min(area.height);
     Rect {
@@ -1332,7 +1338,7 @@ fn fitted_rect(cols: usize, lines: usize, area: Rect) -> Rect {
 }
 
 /// A centered box `lines` rows tall (plus borders), clamped to the frame.
-fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
+pub(super) fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
     let wanted = (lines as u16).saturating_add(2);
     let height = wanted.min(area.height);
     let top = area.height.saturating_sub(height) / 2;
@@ -1354,7 +1360,7 @@ fn content_rect(percent_x: u16, lines: usize, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1641,7 +1647,7 @@ mod tests {
             managed: true,
         };
         let mut explorer = Explorer::new(
-            repo,
+            Some(repo),
             dir.path().to_path_buf(),
             "feature".into(),
             "worktree".into(),
@@ -1700,7 +1706,7 @@ mod tests {
             managed: true,
         };
         let mut explorer = Explorer::new(
-            repo,
+            Some(repo),
             dir.path().to_path_buf(),
             "feature".into(),
             "worktree".into(),

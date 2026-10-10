@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
     let Some(command) = cli.command else {
         let app = context::App::open()?;
-        return commands::explore::run(&app);
+        return commands::tasks::run(&app);
     };
 
     match command {
@@ -85,6 +85,10 @@ fn main() -> Result<()> {
         } => {
             let app = context::App::open()?;
             commands::exec::run(&app, &filter, branch.as_deref(), ephemeral)?;
+        }
+        Commands::Tasks => {
+            let app = context::App::open()?;
+            commands::tasks::run(&app)?;
         }
         Commands::Explore => {
             let app = context::App::open()?;
@@ -145,13 +149,18 @@ fn main() -> Result<()> {
         }
         Commands::Projects { command } => {
             let app = context::App::open()?;
-            match command.unwrap_or(ProjectCommands::Ls) {
-                ProjectCommands::Ls => commands::projects::ls(&app)?,
-                ProjectCommands::New { name, repos } => {
+            match command {
+                None if std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+                    commands::tasks::run_projects(&app)?
+                }
+                None | Some(ProjectCommands::Ls) => commands::projects::ls(&app)?,
+                Some(ProjectCommands::New { name, repos }) => {
                     commands::projects::new(&app, &name, &repos)?
                 }
-                ProjectCommands::Edit { name } => commands::projects::edit(&app, &name)?,
-                ProjectCommands::Rm { name, force } => commands::projects::rm(&app, &name, force)?,
+                Some(ProjectCommands::Edit { name }) => commands::projects::edit(&app, &name)?,
+                Some(ProjectCommands::Rm { name, force }) => {
+                    commands::projects::rm(&app, &name, force)?
+                }
             }
         }
         Commands::Worktree(WorktreeArgs { command, task }) => {
