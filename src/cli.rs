@@ -189,8 +189,8 @@ pub enum TaskCommands {
     },
 
     /// Send the task's agent a message: typed in when it is idle, queued
-    /// for when it stops when it is busy or waiting on you, its first prompt
-    /// when it is not running
+    /// for when it stops or sits idle when it is busy or waiting on you, its
+    /// first prompt when it is not running
     Send {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,

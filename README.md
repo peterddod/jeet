@@ -454,9 +454,17 @@ jeet task new fix-x --repo api --prompt "Fix X; add a test for it"
 idle agent has it typed in (`tmux send-keys -l`) and submitted. A busy one, or
 one waiting on you, has it queued in `.jeet/inbox.jsonl`; when the agent
 finishes, its Stop hook hands the queue over and it carries straight on. A
-message is never typed into a permission prompt, which it would answer. An
-agent that is not running is started with the message as its first prompt.
-`jeet task new --prompt` starts the new task's agent on a brief the same way.
+turn you interrupt with Esc has no Stop, so the queue is also typed in once
+Claude reports it has sat idle at its prompt (after about a minute). A message
+is never typed into a permission prompt, or into the dialogs Claude shows
+before its first hook runs, which it would answer. An agent that is not
+running is started with the message as its first prompt. `jeet task new
+--prompt` starts the new task's agent on a brief the same way.
+
+A message holds at most 8,000 bytes, which keeps what is typed in under
+tmux's limit on a command; queued messages that do not fit with it wait for
+the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
+as a shell command, a slash command or a memory, is sent as `Message: …`.
 
 ### Archiving and deleting
 

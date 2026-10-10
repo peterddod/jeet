@@ -356,6 +356,27 @@ mod tests {
     }
 
     #[test]
+    fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
+        // tmux refuses a command over 16KB; the prompt shares new-session's
+        // with the settings, a long path to jeet, and every capability.
+        let settings = AssistantConfig {
+            allow: crate::permissions::CAPABILITIES
+                .iter()
+                .map(|c| c.name.to_string())
+                .collect(),
+            notify: None,
+        };
+        let exe = format!("/{}/jeet", "d".repeat(200));
+        let json = assistant_settings_json(Path::new(&exe), &settings);
+        let budget = 16 * 1024 - 2048; // the rest of the command
+        assert!(
+            json.len() + crate::messages::MAX_MESSAGE + 16 < budget,
+            "{} bytes of settings",
+            json.len()
+        );
+    }
+
+    #[test]
     fn quoting_survives_the_shell() {
         let word = r#"a 'b' "c" $(d) `e`"#;
         let output = std::process::Command::new("sh")

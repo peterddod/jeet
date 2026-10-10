@@ -27,10 +27,12 @@ pub fn new(
     branch: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<()> {
-    let prompt = prompt.map(messages::clean);
-    if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
-        bail!("--prompt is empty");
-    }
+    // Checked before the task is made, so a brief that cannot be given
+    // makes nothing.
+    let prompt = match prompt.map(messages::brief).transpose() {
+        Ok(prompt) => prompt,
+        Err(e) => bail!("--prompt: {e:#}"),
+    };
     let created = tasks::create(
         app,
         &NewTask {
@@ -88,7 +90,8 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {}'s agent", task.name),
         Delivered::Queued => eprintln!(
-            "jeet: {}'s agent is busy or waiting on you; it gets the message when it stops",
+            "jeet: {}'s agent is busy or waiting on you, so the message is queued; it gets it \
+             when it finishes or sits idle",
             task.name
         ),
         Delivered::Started => eprintln!(
