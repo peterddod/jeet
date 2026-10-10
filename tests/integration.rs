@@ -1885,3 +1885,280 @@ fn a_task_from_a_project_gets_a_copy_of_its_files() {
     }
     assert!(!home.join("tasks/bad").exists());
 }
+
+/// A stand-in `$EDITOR`: a script that writes `text` to the file it is
+/// given, appending (`>>`) or replacing (`>`) per `redirect`.
+#[cfg(unix)]
+fn fake_editor(
+    dir: &std::path::Path,
+    name: &str,
+    redirect: &str,
+    text: &str,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join(name);
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncat {redirect} \"$1\" <<'JEET_EOF'\n{text}\nJEET_EOF\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn projects_are_made_listed_edited_and_removed() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+
+    // None yet: bare `jeet projects` lists, and says how to make one.
+    let output = lab.jeet_at(&["projects"], &home, &[]);
+    succeeded(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_of(&output).contains("jeet projects new"));
+
+    let output = lab.jeet_at(
+        &[
+            "projects",
+            "new",
+            "web",
+            "--repo",
+            "widget",
+            "--repo",
+            "acme/gadget",
+        ],
+        &home,
+        &[],
+    );
+    succeeded(&output);
+    let dir = path_from(&output);
+    assert_eq!(dir, home.join("projects/web"));
+    assert!(dir.join("CLAUDE.md").is_file());
+    assert!(dir.join("skills").is_dir());
+    let toml = std::fs::read_to_string(dir.join("project.toml")).unwrap();
+    assert!(
+        toml.contains(r#"repos = ["widget", "acme/gadget"]"#),
+        "{toml}"
+    );
+
+    for bad in ["web", "../escape", ".hidden", "two words"] {
+        let output = lab.jeet_at(&["projects", "new", bad], &home, &[]);
+        assert!(!output.status.success(), "{bad} was accepted");
+    }
+    assert!(!home.join("escape").exists());
+
+    for args in [vec!["projects"], vec!["projects", "ls"]] {
+        let output = lab.jeet_at(&args, &home, &[]);
+        succeeded(&output);
+        let listing = stdout_of(&output);
+        let row = listing.lines().find(|l| l.starts_with("web ")).unwrap();
+        assert!(row.contains("widget, acme/gadget"), "{listing}");
+        assert!(row.contains("CLAUDE.md"), "{listing}");
+    }
+
+    // An edit that parses is accepted…
+    let scripts = TempDir::new().unwrap();
+    let good = fake_editor(
+        scripts.path(),
+        "good",
+        ">>",
+        "[agent]\nargs = [\"--verbose\"]",
+    );
+    let output = lab.jeet_at(
+        &["projects", "edit", "web"],
+        &home,
+        &[("JEET_EDITOR", good.to_str().unwrap())],
+    );
+    succeeded(&output);
+    assert!(output.stdout.is_empty());
+    assert!(std::fs::read_to_string(dir.join("project.toml"))
+        .unwrap()
+        .contains("--verbose"));
+
+    // …and one that does not is reported straight away, file left for fixing.
+    let bad = fake_editor(scripts.path(), "bad", ">>", "repo = [\"typo\"]");
+    let output = lab.jeet_at(
+        &["projects", "edit", "web"],
+        &home,
+        &[("JEET_EDITOR", bad.to_str().unwrap())],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("jeet projects edit web"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(&["projects"], &home, &[]);
+    assert!(
+        stdout_of(&output).contains("broken"),
+        "{}",
+        stdout_of(&output)
+    );
+    // A broken project is still editable: that is how it gets fixed.
+    let fix = fake_editor(scripts.path(), "fix", ">", "repos = []");
+    succeeded(&lab.jeet_at(
+        &["projects", "edit", "web"],
+        &home,
+        &[("JEET_EDITOR", fix.to_str().unwrap())],
+    ));
+    let output = lab.jeet_at(&["projects"], &home, &[]);
+    assert!(!stdout_of(&output).contains("broken"));
+    // Broken again, and removable all the same.
+    std::fs::write(dir.join("project.toml"), "not toml at all [\n").unwrap();
+
+    // Removing needs a yes, which takes a terminal, or --force.
+    let output = lab.jeet_at(&["projects", "rm", "web"], &home, &[]);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("--force"));
+    assert!(dir.is_dir());
+    succeeded(&lab.jeet_at(&["projects", "rm", "web", "--force"], &home, &[]));
+    assert!(!dir.exists());
+    let output = lab.jeet_at(&["projects", "rm", "web", "--force"], &home, &[]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn a_task_from_a_project_starts_with_its_repositories() {
+    let lab = StoreLab::new();
+    let widget = lab.clone_repo("widget");
+    lab.clone_repo("gadget");
+    let home = lab.home();
+    succeeded(&lab.jeet_at(
+        &[
+            "projects",
+            "new",
+            "web",
+            "--repo",
+            "widget",
+            "--repo",
+            "https://github.com/acme/gadget.git",
+        ],
+        &home,
+        &[],
+    ));
+
+    // The project's worktrees first, detached; then --repo's, on --branch.
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "Launch",
+            "--project",
+            "web",
+            "--repo",
+            "widget",
+            "--branch",
+            "feat-l",
+        ],
+        &home,
+        &[],
+    );
+    succeeded(&output);
+    let task = path_from(&output);
+    assert!(is_detached(&task.join("widget")));
+    assert!(is_detached(&task.join("gadget")));
+    assert_eq!(
+        git_stdout(
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+            &task.join("widget-2")
+        ),
+        "feat-l"
+    );
+    assert!(task.join("CLAUDE.md").is_file());
+    assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
+    let output = lab.jeet_at(&["worktree", "ls"], &task, &[]);
+    assert_eq!(
+        stdout_of(&output).lines().count(),
+        3,
+        "{}",
+        stdout_of(&output)
+    );
+
+    let output = lab.jeet_at(&["projects"], &home, &[]);
+    let row = stdout_of(&output)
+        .lines()
+        .find(|l| l.starts_with("web "))
+        .map(str::to_string)
+        .unwrap();
+    assert!(row.split_whitespace().nth(1) == Some("1"), "{row}");
+
+    // A repository the project names but jeet cannot get: no half-made task.
+    std::fs::write(
+        home.join("projects/web/project.toml"),
+        "repos = [\"widget\", \"nosuchrepo\"]\n",
+    )
+    .unwrap();
+    let output = lab.jeet_at(&["task", "new", "Broken", "--project", "web"], &home, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("nosuchrepo"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!home.join("tasks/broken").exists());
+    let worktrees = git_stdout(&["worktree", "list"], &widget);
+    assert!(!worktrees.contains("tasks/broken"), "{worktrees}");
+
+    // A project.toml that does not parse stops the task before it starts.
+    std::fs::write(home.join("projects/web/project.toml"), "repo = []\n").unwrap();
+    let output = lab.jeet_at(&["task", "new", "Typo", "--project", "web"], &home, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("project.toml"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!home.join("tasks/typo").exists());
+}
+
+#[test]
+fn resync_updates_what_the_task_left_alone() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let project = home.join("projects/web");
+    std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
+    std::fs::create_dir_all(project.join("skills/old")).unwrap();
+    std::fs::write(project.join("CLAUDE.md"), "v1\n").unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy v1\n").unwrap();
+    std::fs::write(project.join("skills/old/SKILL.md"), "old\n").unwrap();
+
+    let output = lab.jeet_at(&["task", "new", "Launch", "--project", "web"], &home, &[]);
+    succeeded(&output);
+    let task = path_from(&output);
+
+    // The agent makes CLAUDE.md its own; the project moves on.
+    std::fs::write(task.join("CLAUDE.md"), "the task's notes\n").unwrap();
+    std::fs::write(project.join("CLAUDE.md"), "v2\n").unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy v2\n").unwrap();
+    std::fs::create_dir_all(project.join("skills/review")).unwrap();
+    std::fs::write(project.join("skills/review/SKILL.md"), "review\n").unwrap();
+    std::fs::remove_dir_all(project.join("skills/old")).unwrap();
+    // Whatever happened to the built-in skill, resync puts it back.
+    std::fs::remove_dir_all(task.join(".claude/skills/jeet")).unwrap();
+
+    let output = lab.jeet_at(&["task", "resync", "launch"], &home, &[]);
+    succeeded(&output);
+    assert!(output.stdout.is_empty(), "{}", stdout_of(&output));
+    let read = |rel: &str| std::fs::read_to_string(task.join(rel)).unwrap();
+    assert_eq!(read("CLAUDE.md"), "the task's notes\n");
+    assert_eq!(read(".claude/skills/deploy/SKILL.md"), "deploy v2\n");
+    assert_eq!(read(".claude/skills/review/SKILL.md"), "review\n");
+    assert!(!task.join(".claude/skills/old").exists());
+    assert!(task.join(".claude/skills/jeet/SKILL.md").is_file());
+    assert!(
+        stderr_of(&output).contains("CLAUDE.md: changed in the task"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    let output = lab.jeet_at(&["task", "resync", "launch", "--force"], &home, &[]);
+    succeeded(&output);
+    assert_eq!(read("CLAUDE.md"), "v2\n");
+
+    // Only a task made from a project has anything to resync from.
+    lab.new_task("Plain");
+    let output = lab.jeet_at(&["task", "resync", "plain"], &home, &[]);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("not made from a project"));
+}

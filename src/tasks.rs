@@ -25,6 +25,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
+use crate::projects::{self, Project};
 use crate::remote;
 use crate::resolve;
 use crate::store;
@@ -125,11 +126,14 @@ fn numbered(base: &str, n: usize) -> String {
 /// What `jeet task new` asks for.
 pub struct NewTask<'a> {
     pub name: &'a str,
+    /// Project to start from: its files are copied in, and a worktree of each
+    /// of its repositories is added.
     pub project: Option<&'a str>,
-    /// Repositories to add a worktree of straight away. None at all, and no
-    /// project, makes an empty canvas.
+    /// Repositories to add a worktree of straight away, after the project's.
+    /// None at all, and no project, makes an empty canvas.
     pub repos: &'a [String],
-    /// Branch for the single preset repository's worktree.
+    /// Branch for the worktree of the single repository in `repos`; the
+    /// project's worktrees start detached.
     pub branch: Option<&'a str>,
 }
 
@@ -140,7 +144,7 @@ pub struct Created {
 }
 
 /// Make a task: its directory, marker and skill, the project's files, and a
-/// worktree of each preset repository.
+/// worktree of each preset repository — the project's first, then `repos`.
 ///
 /// If a preset worktree cannot be added the whole task is undone — it was
 /// made a moment ago and holds nothing of anyone's yet.
@@ -152,8 +156,9 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     if spec.branch.is_some() && spec.repos.len() != 1 {
         bail!("--branch needs exactly one --repo: it names that repository's branch");
     }
+    // Read up front, so a missing or broken project makes nothing at all.
     let project = match spec.project {
-        Some(project) => Some(project_dir(app, project)?),
+        Some(name) => Some(projects::load(app, name)?),
         None => None,
     };
 
@@ -171,16 +176,23 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    if let Err(e) =
-        scaffold(&dir, &task, project.as_deref()).and_then(|_| app.db.insert_task(&task))
+    let mut warnings = match scaffold(&dir, &task, project.as_ref())
+        .and_then(|notes| app.db.insert_task(&task).map(|_| notes))
     {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(e);
-    }
+        Ok(notes) => notes,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+    };
 
-    let mut warnings = Vec::new();
-    for repo in spec.repos {
-        match add_worktree(app, &task, repo, spec.branch, None) {
+    let preset = project
+        .iter()
+        .flat_map(|p| &p.config.repos)
+        .map(|r| (r, None));
+    let given = spec.repos.iter().map(|r| (r, spec.branch));
+    for (repo, branch) in preset.chain(given) {
+        match add_worktree(app, &task, repo, branch, None) {
             Ok(added) => warnings.extend(added.warnings),
             Err(e) => {
                 let e = e.context(format!("could not add {repo} to the new task"));
@@ -198,17 +210,24 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     Ok(Created { task, warnings })
 }
 
-/// The marker, the project's files and the jeet skill.
-fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Path>) -> Result<()> {
+/// The marker, the project's files and the jeet skill. Returns notes on
+/// project files that were not copied.
+fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
     let marker = dir.join(MARKER_DIR);
     std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
     std::fs::write(marker.join(MARKER_FILE), format!("{}\n", task.id))
         .context("write the task marker")?;
-    if let Some(project) = project {
-        copy_project(project, dir)?;
-    }
-    // Last, so a project's own skills cannot shadow it.
-    install_skill(dir)
+    let notes = match project {
+        Some(project) => projects::copy_files(project, dir, false)?
+            .notes()
+            .into_iter()
+            .map(|note| format!("project {}: {note}", project.name))
+            .collect(),
+        None => Vec::new(),
+    };
+    // Last, so nothing of the project's can shadow it.
+    install_skill(dir)?;
+    Ok(notes)
 }
 
 /// Write the built-in jeet skill into a task directory.
@@ -216,50 +235,6 @@ pub fn install_skill(task_dir: &Path) -> Result<()> {
     let dir = task_dir.join(".claude").join("skills").join("jeet");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("SKILL.md"), SKILL).context("write the jeet skill")
-}
-
-/// A project's directory. A project is named, never given as a path, so the
-/// name may not climb out of the projects directory.
-fn project_dir(app: &App, name: &str) -> Result<PathBuf> {
-    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
-        bail!("{name:?} is not a project name");
-    }
-    let dir = app.projects_root().join(name);
-    if !dir.is_dir() {
-        bail!("no project named {name} (looked for {})", dir.display());
-    }
-    Ok(dir)
-}
-
-/// Copy a project's CLAUDE.md and skills into a new task: a snapshot, so a
-/// later edit to the project leaves tasks already started alone.
-fn copy_project(project: &Path, dir: &Path) -> Result<()> {
-    let claude_md = project.join("CLAUDE.md");
-    if claude_md.is_file() {
-        std::fs::copy(&claude_md, dir.join("CLAUDE.md")).context("copy the project's CLAUDE.md")?;
-    }
-    let skills = project.join("skills");
-    if skills.is_dir() {
-        copy_tree(&skills, &dir.join(".claude").join("skills"))?;
-    }
-    Ok(())
-}
-
-/// Copy files and directories; symlinks are skipped rather than followed out
-/// of the project.
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    for entry in walkdir::WalkDir::new(from).follow_links(false) {
-        let entry = entry?;
-        let rel = entry.path().strip_prefix(from)?;
-        let dest = to.join(rel);
-        if entry.file_type().is_dir() {
-            std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
-        } else if entry.file_type().is_file() {
-            std::fs::copy(entry.path(), &dest)
-                .with_context(|| format!("copy {}", entry.path().display()))?;
-        }
-    }
-    Ok(())
 }
 
 /// The task a user means by `key`: its slug, its id, its name (any case), or

@@ -12,6 +12,7 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
+use crate::projects;
 use crate::tasks::{self, NewTask};
 use crate::worktrees::now_secs;
 
@@ -88,7 +89,13 @@ pub fn open(app: &App, name: &str) -> Result<()> {
         return Ok(());
     }
 
-    let spec = AgentSpec::from_config(&app.config)?;
+    let mut spec = AgentSpec::from_config(&app.config)?;
+    // The project's own arguments; a project since deleted or broken costs
+    // only those, not the task.
+    match projects::agent_args(app, &task) {
+        Ok(args) => spec.argv.extend(args),
+        Err(e) => eprintln!("jeet: warning: no agent arguments from the task's project: {e:#}"),
+    }
     let (program, args) = spec
         .argv
         .split_first()
@@ -177,6 +184,27 @@ fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
     std::io::stdin().read_line(&mut answer)?;
     if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
         bail!("kept task {}", task.name);
+    }
+    Ok(())
+}
+
+/// Copy the task's project files again: those the task left alone are
+/// brought up to date, those it changed are kept unless `force`.
+pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
+    let task = tasks::find(app, name)?;
+    let sync = projects::resync(app, &task, force)?;
+    for rel in &sync.written {
+        eprintln!("jeet: updated {rel}");
+    }
+    for rel in &sync.removed {
+        eprintln!("jeet: removed {rel}");
+    }
+    warn_all(&sync.notes());
+    if !sync.kept.is_empty() && !force {
+        eprintln!("jeet: pass --force to replace the task's changed copies too");
+    }
+    if sync.written.is_empty() && sync.removed.is_empty() && sync.kept.is_empty() {
+        eprintln!("jeet: task {} already has its project's files", task.name);
     }
     Ok(())
 }
