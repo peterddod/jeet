@@ -162,11 +162,17 @@ pub trait Harness: Sync {
         None
     }
 
-    /// The file in a session's directory it reads its instructions from.
-    /// Not read yet: the switch of jeet's own instruction files to
-    /// AGENTS.md uses it to decide which harnesses need a shim.
-    #[allow(dead_code)]
+    /// The file in a session's directory it reads its instructions from:
+    /// `AGENTS.md`, or a file of its own that imports it (see
+    /// [`Harness::instructions_import`]).
     fn instructions_file(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// What its [`Harness::instructions_file`] holds, when that is not
+    /// `AGENTS.md`, for it to read `AGENTS.md` instead. jeet writes it next
+    /// to every `AGENTS.md` of its own; see `src/instructions.rs`.
+    fn instructions_import(&self) -> Option<&'static str> {
         None
     }
 }

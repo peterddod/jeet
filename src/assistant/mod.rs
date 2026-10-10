@@ -33,7 +33,7 @@ use crate::cd;
 use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord, TaskState};
-use crate::instructions::{self, CLAUDE_SHIM};
+use crate::instructions;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
 use crate::runtime;
@@ -58,14 +58,21 @@ const WORKLOG: &str = include_str!("templates/worklog.md");
 /// What `todo.md` starts as.
 pub const TODO: &str = include_str!("templates/todo.md");
 
-/// Each template, and where in the home it goes.
-const TEMPLATES: [(&str, &str); 5] = [
-    (instructions::AGENTS_MD, AGENTS_MD),
-    (instructions::CLAUDE_MD, CLAUDE_SHIM),
-    (".claude/skills/jeet-assistant/SKILL.md", SKILL),
-    ("notes/worklog.md", WORKLOG),
-    ("todo.md", TODO),
-];
+/// Each template, and where in the home it goes: AGENTS.md and each
+/// harness's import of it first.
+fn templates() -> Vec<(&'static str, &'static str)> {
+    let imports = instructions::imports()
+        .into_iter()
+        .map(|i| (i.file, i.text));
+    std::iter::once((instructions::AGENTS_MD, AGENTS_MD))
+        .chain(imports)
+        .chain([
+            (".claude/skills/jeet-assistant/SKILL.md", SKILL),
+            ("notes/worklog.md", WORKLOG),
+            ("todo.md", TODO),
+        ])
+        .collect()
+}
 
 /// The longest title tmux shows for a session's window.
 const TITLE_MAX: usize = 30;
@@ -83,7 +90,7 @@ pub fn home_dir(home: &Path) -> PathBuf {
 pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
     instructions::migrate(dir).context("move the assistant's CLAUDE.md to AGENTS.md")?;
     let mut written = Vec::new();
-    for (rel, text) in TEMPLATES {
+    for (rel, text) in templates() {
         let path = dir.join(rel);
         if std::fs::symlink_metadata(&path).is_ok() {
             continue;
@@ -901,6 +908,7 @@ fn event_line(logged: &watch::Logged) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instructions::CLAUDE_SHIM;
 
     fn session(id: &str, last: i64, running: bool, primary: bool) -> Session {
         Session {
@@ -940,8 +948,8 @@ mod tests {
     fn templates_are_written_only_where_nothing_is() {
         let dir = tempfile::tempdir().unwrap();
         let written = ensure_files(dir.path()).unwrap();
-        assert_eq!(written.len(), TEMPLATES.len());
-        for (rel, text) in TEMPLATES {
+        assert_eq!(written.len(), templates().len());
+        for (rel, text) in templates() {
             assert_eq!(std::fs::read_to_string(dir.path().join(rel)).unwrap(), text);
         }
         std::fs::write(dir.path().join("todo.md"), "- [ ] mine\n").unwrap();

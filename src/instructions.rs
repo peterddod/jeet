@@ -8,21 +8,70 @@
 //! reads the file twice, and it is a plain file, which copies anywhere a
 //! symlink might not.
 //!
+//! Which files import `AGENTS.md`, and what they hold, is each harness's
+//! to say ([`Harness::instructions_file`], [`Harness::instructions_import`]):
+//! [`imports`] lists them all, so a task works whichever harness runs in it.
+//!
 //! Before AGENTS.md, jeet wrote `CLAUDE.md` itself. [`migrate`] moves such a
 //! file to `AGENTS.md` and leaves the import in its place, never replacing
 //! anything.
+//!
+//! [`Harness::instructions_file`]: crate::harness::Harness::instructions_file
+//! [`Harness::instructions_import`]: crate::harness::Harness::instructions_import
 
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub const AGENTS_MD: &str = "AGENTS.md";
-pub const CLAUDE_MD: &str = "CLAUDE.md";
+use crate::harness::{claude, HARNESSES};
 
-/// All a `CLAUDE.md` next to an `AGENTS.md` needs: Claude Code reads the
-/// import as if the file were inlined.
-pub const CLAUDE_SHIM: &str = "@AGENTS.md\n";
+pub const AGENTS_MD: &str = "AGENTS.md";
+
+/// The file jeet wrote before AGENTS.md, which [`migrate`] moves: Claude
+/// Code's.
+pub const CLAUDE_MD: &str = claude::INSTRUCTIONS_FILE;
+
+/// All a `CLAUDE.md` next to an `AGENTS.md` needs.
+pub const CLAUDE_SHIM: &str = claude::IMPORT_AGENTS_MD;
+
+/// A file that has a harness read `AGENTS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Import {
+    /// Its name, e.g. `CLAUDE.md`.
+    pub file: &'static str,
+    /// What it holds.
+    pub text: &'static str,
+    /// The harness that reads it, e.g. `Claude Code`.
+    pub harness: &'static str,
+}
+
+/// Every harness's import, one per file: those that read `AGENTS.md`
+/// themselves need none.
+pub fn imports() -> Vec<Import> {
+    let mut out: Vec<Import> = Vec::new();
+    for harness in HARNESSES {
+        let (Some(file), Some(text)) = (harness.instructions_file(), harness.instructions_import())
+        else {
+            continue;
+        };
+        if file != AGENTS_MD && !out.iter().any(|i| i.file == file) {
+            out.push(Import {
+                file,
+                text,
+                harness: harness.name(),
+            });
+        }
+    }
+    out
+}
+
+/// Every instruction file jeet writes: `AGENTS.md`, then the imports.
+pub fn files() -> Vec<&'static str> {
+    std::iter::once(AGENTS_MD)
+        .chain(imports().into_iter().map(|i| i.file))
+        .collect()
+}
 
 /// Whether `text` is the import and nothing else.
 pub fn is_shim(text: &[u8]) -> bool {
@@ -130,6 +179,19 @@ mod tests {
             .unwrap();
         assert!(!migrate(dir.path()).unwrap());
         assert!(!dir.path().join(AGENTS_MD).exists());
+    }
+
+    #[test]
+    fn the_harnesses_say_which_files_import_agents_md() {
+        assert_eq!(
+            imports(),
+            [Import {
+                file: "CLAUDE.md",
+                text: "@AGENTS.md\n",
+                harness: "Claude Code",
+            }]
+        );
+        assert_eq!(files(), ["AGENTS.md", "CLAUDE.md"]);
     }
 
     #[test]

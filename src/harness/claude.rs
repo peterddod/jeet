@@ -49,6 +49,13 @@ const HOOK_TIMEOUT_SECS: u64 = 10;
 const TRUST_QUESTION: &str = "Is this a project you created or one you trust?";
 const TRUST_YES: &str = "Yes, I trust this folder";
 const TRUST_NO: &str = "No, exit";
+/// The file Claude Code reads its instructions from.
+pub const INSTRUCTIONS_FILE: &str = "CLAUDE.md";
+
+/// A `CLAUDE.md` that reads `AGENTS.md`: Claude Code reads the import as if
+/// the file were inlined.
+pub const IMPORT_AGENTS_MD: &str = "@AGENTS.md\n";
+
 /// What marks the selected option.
 const CURSOR: char = '❯';
 
@@ -194,7 +201,11 @@ impl Harness for ClaudeCode {
     }
 
     fn instructions_file(&self) -> Option<&'static str> {
-        Some("CLAUDE.md")
+        Some(INSTRUCTIONS_FILE)
+    }
+
+    fn instructions_import(&self) -> Option<&'static str> {
+        Some(IMPORT_AGENTS_MD)
     }
 }
 
