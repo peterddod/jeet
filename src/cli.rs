@@ -50,7 +50,7 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Check a pull request out into its own worktree and open the review viewer
+    /// Check a pull request out into its review task and open the review viewer
     Review {
         /// PR number, with or without a leading #, or the PR's URL
         pr: String,
@@ -212,6 +212,16 @@ pub enum TaskCommands {
     Path {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
+    },
+
+    /// Look up the task's pull requests on GitHub and list its PR history
+    Prs {
+        /// Task to list; defaults to $JEET_TASK_ID, then the task you are in
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: Option<String>,
+        /// List what is recorded, without asking GitHub
+        #[arg(long)]
+        offline: bool,
     },
 
     /// Copy the task's project files (CLAUDE.md, skills) in again

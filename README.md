@@ -80,6 +80,7 @@ jeet task open fix-login                 # the task's agent, in tmux (started if
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
+jeet task prs fix-login                  # the PRs that came out of the task
 
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
@@ -262,11 +263,16 @@ github.com/acme/widget: 3 open pull requests
   #121  Rework the config loader        linus    +901 -377 draft
 ```
 
-From anywhere inside a repository, `jeet review` checks the PR out into its own
-worktree (reusing the one that already has its branch, and bringing it up to
-date if it is clean), opens it in the review viewer, and `cd`s you into the
-worktree when you leave. A PR from a fork is checked out as `pr/<number>`, so
-it can never land on a branch of yours with the same name.
+From anywhere inside a repository, `jeet review` finds or makes the PR's
+**review task**, `review-<repo>-<number>`, checks the PR out in it (or, when
+the task already has it, brings that checkout up to date if it is clean, and
+brings an archived task back), opens it in the review viewer, and `cd`s you
+into the worktree when you leave. The review task is a task like any other: it
+shows in the tasks list, where `v` opens the viewer again, and archiving or
+deleting it frees the disk. A PR from a fork is checked out as `pr/<number>`,
+so it can never land on a branch of yours with the same name; and when the
+PR's branch is checked out already — in your own task, say — the review is
+checked out detached at the PR's head instead.
 
 The review viewer shows the PR's diff one file to a page, in GitHub's dark
 colours (or the nearest 256-colour match when `COLORTERM` is not `truecolor`),
@@ -384,13 +390,38 @@ name the way the explorer does.
 | `D` | delete the task, after listing any work that would be lost |
 | `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
-| `p` | the pull requests recorded for the task |
+| `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser |
+| `v` | on a review task, its pull request in the review viewer |
 | `r` | refresh, re-reading the worktrees on disk |
 | `?` | every key |
 | `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
 
 Launching the list also starts a background fetch of the store, when one is
 due. `jeet projects` on a terminal opens it with the projects panel up.
+
+### Pull request history
+
+A task remembers the pull requests that came out of it. When the tasks list
+opens (and on `r`, and on `p` for the one task), each worktree is looked up on
+GitHub in the background through `gh`: PRs from its branch, open or not; for a
+detached checkout with commits of its own, the PRs that hold its HEAD; for a
+review task, the PR it reviews. What comes back is kept, so the history
+outlives the branches — a merged PR still shows long after its worktree is
+gone.
+
+```bash
+jeet task prs              # the current task's PRs, after asking GitHub for news
+jeet task prs fix-login    # another task's
+jeet task prs --offline    # only what is recorded
+```
+
+```text
+STATE     ADDED REMOVED PR      TITLE                                            URL
+merged     +212     -40 #128    Cache the index between runs                     https://github.com/acme/widget/pull/128
+open         +3      -1 #131    Fix the flaky clone test                         https://github.com/acme/widget/pull/131
+```
+
+Without `gh` there is nothing to ask, and the history is what was recorded.
 
 ### The agent
 
@@ -501,8 +532,8 @@ jeet complete branches acme/widget
 
 ## What's new in v0.5
 
-- `jeet review <pr>` checks a pull request out into its own worktree, opens
-  the explorer there, and can start a review command (Claude Code, say) in the
+- `jeet review <pr>` checks a pull request out into its own review task, opens
+  the review viewer there, and can start a review command (Claude Code, say) in the
   background with a desktop notification when it finishes. See
   [Reviewing](#reviewing).
 - The explorer shows `+added -removed` for every changed file and folder

@@ -6,10 +6,10 @@
 //! open its agent, browse it, manage its worktrees, archive, delete, and the
 //! projects new tasks start from.
 //!
-//! Nothing slow happens in a draw. Agent statuses are polled and task sizes
-//! walked on background threads that report over a channel, tagged by task
-//! id; everything git or the network does on a key press runs under
-//! [`term::with_progress`], so the screen keeps drawing.
+//! Nothing slow happens in a draw. Agent statuses are polled, task sizes
+//! walked and PRs looked up on background threads that report over a
+//! channel, tagged by task id; everything git or the network does on a key
+//! press runs under [`term::with_progress`], so the screen keeps drawing.
 //!
 //! Unlike the explorer, commands here are bare letters, the way the task
 //! keys are learned; `/` opens the filter, which then takes typed characters
@@ -19,6 +19,7 @@
 //! touching the terminal, the index or git, so the whole key map is unit
 //! tested; [`run`] carries the actions out.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -39,6 +40,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskPrRecord, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::git;
 use crate::github;
+use crate::pr_history;
 use crate::projects;
 use crate::runtime;
 use crate::status::{self, Activity};
@@ -137,6 +139,8 @@ pub enum Update {
         id: String,
         bytes: u64,
     },
+    /// A task's PRs, as GitHub has them now.
+    Prs(pr_history::Found),
 }
 
 /// A list to choose from, narrowed by typing — one repository for a new
@@ -424,6 +428,10 @@ pub enum Panel {
         task_id: String,
         prs: Vec<TaskPrRecord>,
         selected: usize,
+        /// GitHub is being asked for news of them.
+        looking: bool,
+        /// Why the last lookup came back empty-handed, if it did.
+        note: Option<String>,
     },
 }
 
@@ -539,6 +547,8 @@ pub struct TasksUi {
     pub list_area: Rect,
     /// Set when the user is done; how the shell should be left.
     pub exit: Option<Exit>,
+    /// The PR links on screen last frame, made clickable after it is drawn.
+    pub links: Vec<term::Link>,
 }
 
 impl Default for TasksUi {
@@ -562,6 +572,7 @@ impl TasksUi {
             list: ListState::default(),
             list_area: Rect::default(),
             exit: None,
+            links: Vec::new(),
         };
         ui.set_rows(rows);
         ui
@@ -677,7 +688,40 @@ impl TasksUi {
                     row.size = Some(bytes);
                 }
             }
+            // Recorded by the screen, which has the index; the panel is
+            // updated from what it then reads back.
+            Update::Prs(_) => {}
         }
+    }
+
+    /// `prs` are now what the index has for task `task_id`: show them if its
+    /// PR panel is open, keeping the cursor on the PR it was on.
+    pub fn prs_found(&mut self, task_id: &str, prs: Vec<TaskPrRecord>, note: Option<String>) {
+        let Some(Panel::Prs {
+            task_id: open,
+            prs: shown,
+            selected,
+            looking,
+            note: shown_note,
+        }) = &mut self.panel
+        else {
+            return;
+        };
+        if open != task_id {
+            return;
+        }
+        let was = shown
+            .get(*selected)
+            .map(|pr| (pr.repo_id.clone(), pr.number));
+        *selected = was
+            .and_then(|(repo, number)| {
+                prs.iter()
+                    .position(|pr| pr.repo_id == repo && pr.number == number)
+            })
+            .unwrap_or(0);
+        *shown = prs;
+        *looking = false;
+        *shown_note = note;
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -1199,30 +1243,31 @@ impl TasksUi {
                 task_id,
                 prs,
                 mut selected,
-            } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q' | 'p') => None,
-                KeyCode::Enter | KeyCode::Char('o') => {
-                    let action = prs.get(selected).map(|pr| Action::OpenPr {
-                        repo_id: pr.repo_id.clone(),
-                        number: pr.number,
-                    });
-                    self.panel = Some(Panel::Prs {
-                        task_id,
-                        prs,
-                        selected,
-                    });
-                    action
-                }
-                code => {
-                    selected = list_move(code, selected, prs.len());
-                    self.panel = Some(Panel::Prs {
-                        task_id,
-                        prs,
-                        selected,
-                    });
-                    None
-                }
-            },
+                looking,
+                note,
+            } => {
+                let action = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q' | 'p') => return None,
+                    KeyCode::Enter | KeyCode::Char('o') => {
+                        prs.get(selected).map(|pr| Action::OpenPr {
+                            repo_id: pr.repo_id.clone(),
+                            number: pr.number,
+                        })
+                    }
+                    code => {
+                        selected = list_move(code, selected, prs.len());
+                        None
+                    }
+                };
+                self.panel = Some(Panel::Prs {
+                    task_id,
+                    prs,
+                    selected,
+                    looking,
+                    note,
+                });
+                action
+            }
         }
     }
 
@@ -1390,11 +1435,12 @@ pub struct Probe {
     pub active: bool,
 }
 
-/// The two background threads: their inboxes, and the one channel both
+/// The background threads: their inboxes, and the one channel they all
 /// answer on. Dropping it stops them.
 struct Background {
     probes: Sender<Vec<Probe>>,
     sizes: Sender<Vec<(String, PathBuf)>>,
+    prs: Sender<Vec<pr_history::Job>>,
     updates: Receiver<Update>,
 }
 
@@ -1403,13 +1449,25 @@ impl Background {
         let (tx, updates) = mpsc::channel();
         let (probes, probe_rx) = mpsc::channel();
         let (sizes, size_rx) = mpsc::channel();
+        let (prs, pr_rx) = mpsc::channel();
         let status_tx = tx.clone();
+        let size_tx = tx.clone();
         std::thread::spawn(move || poll_statuses(probe_rx, status_tx));
-        std::thread::spawn(move || walk_sizes(size_rx, tx));
+        std::thread::spawn(move || walk_sizes(size_rx, size_tx));
+        std::thread::spawn(move || find_prs(pr_rx, tx));
         Background {
             probes,
             sizes,
+            prs,
             updates,
+        }
+    }
+
+    /// Have the PR thread look these tasks' PRs up, before any it has yet
+    /// to get to.
+    fn find_prs(&self, jobs: Vec<pr_history::Job>) {
+        if !jobs.is_empty() {
+            let _ = self.prs.send(jobs);
         }
     }
 
@@ -1503,6 +1561,44 @@ fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Sender<Update>) {
     }
 }
 
+/// Look up each task's PRs in turn, as [`enqueue`] orders them.
+fn find_prs(jobs: Receiver<Vec<pr_history::Job>>, tx: Sender<Update>) {
+    let mut queue: VecDeque<pr_history::Job> = VecDeque::new();
+    loop {
+        // Everything asked for so far, waiting for something when idle.
+        loop {
+            let batch = match queue.is_empty() {
+                true => match jobs.recv() {
+                    Ok(batch) => batch,
+                    Err(_) => return,
+                },
+                false => match jobs.try_recv() {
+                    Ok(batch) => batch,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                },
+            };
+            enqueue(&mut queue, batch);
+        }
+        let Some(job) = queue.pop_front() else {
+            continue;
+        };
+        if tx.send(Update::Prs(pr_history::discover(&job))).is_err() {
+            return;
+        }
+    }
+}
+
+/// Put `batch` at the front of the queue, in its own order: the latest ask
+/// is the one somebody is waiting on — the PR panel just opened. An older
+/// job for the same task goes, as the new one supersedes it.
+pub fn enqueue(queue: &mut VecDeque<pr_history::Job>, batch: Vec<pr_history::Job>) {
+    queue.retain(|old| !batch.iter().any(|new| new.task_id == old.task_id));
+    for job in batch.into_iter().rev() {
+        queue.push_front(job);
+    }
+}
+
 /// Bytes in the files under `dir`. Symlinks are not followed, so a link to
 /// somewhere big costs nothing; a worktree's `.git` is a file pointing into
 /// the trunk, so the shared object store is never counted either.
@@ -1568,7 +1664,7 @@ impl Screen<'_> {
         let mut last_read = Instant::now();
         while self.ui.exit.is_none() {
             while let Ok(update) = self.bg.updates.try_recv() {
-                self.ui.apply(update);
+                self.take(update);
             }
             // The agent adds and removes worktrees as it goes, and other
             // jeets make and archive tasks: keep the rows in step.
@@ -1578,8 +1674,13 @@ impl Screen<'_> {
                     self.ui.set_status(format!("could not read tasks: {e:#}"));
                 }
             }
-            self.terminal
+            let frame = self
+                .terminal
                 .draw(|frame| tasks_ui::draw(frame, &mut self.ui))?;
+            if !self.ui.links.is_empty() {
+                let buffer = frame.buffer.clone();
+                term::paint_links(self.terminal, &buffer, &self.ui.links)?;
+            }
             // Wake for the background threads' answers as well as for keys.
             if !event::poll(Duration::from_millis(250))? {
                 continue;
@@ -1595,6 +1696,42 @@ impl Screen<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Take in what a background thread found out. PRs are written to the
+    /// index here, on the screen's thread: that is quick, and the threads
+    /// that ask GitHub have no index of their own.
+    fn take(&mut self, update: Update) {
+        let Update::Prs(found) = update else {
+            self.ui.apply(update);
+            return;
+        };
+        if let Err(e) = pr_history::record(self.app, &found) {
+            self.ui
+                .set_status(format!("could not record pull requests: {e:#}"));
+            return;
+        }
+        match self.app.db.list_task_prs(&found.task_id) {
+            Ok(prs) => {
+                let note = found.errors.first().cloned();
+                self.ui.prs_found(&found.task_id, prs, note);
+            }
+            Err(e) => self
+                .ui
+                .set_status(format!("could not read pull requests: {e:#}")),
+        }
+    }
+
+    /// Have every active task's PRs looked up in the background.
+    fn discover_prs(&mut self) {
+        let jobs = self
+            .ui
+            .rows
+            .iter()
+            .filter(|row| row.task.state == TaskState::Active)
+            .filter_map(|row| pr_history::job(self.app, &row.task).ok())
+            .collect();
+        self.bg.find_prs(jobs);
     }
 
     /// Run `job` off the draw path, with a spinner saying `label`.
@@ -1638,6 +1775,11 @@ impl Screen<'_> {
                     self.bg.watch(&self.ui.rows);
                 } else {
                     self.bg.probe(&self.ui.rows);
+                }
+                // Only on a full refresh — opening, and `r` — as it is a
+                // `gh` call per worktree.
+                if reconcile {
+                    self.discover_prs();
                 }
                 if let Some(warning) = warning {
                     self.ui.set_status(warning);
@@ -2129,25 +2271,24 @@ impl Screen<'_> {
         Ok(())
     }
 
-    /// `p`: the PRs recorded for the task.
+    /// `p`: the PRs recorded for the task, straight away, while GitHub is
+    /// asked in the background for any news of them.
     fn prs(&mut self, task_id: &str) -> Result<()> {
         let Some(task) = self.task(task_id) else {
             return Ok(());
         };
-        let mut prs = self.app.db.list_task_prs(&task.id)?;
-        if prs.is_empty() {
-            self.ui.message(
-                "pull requests",
-                vec![format!("no pull requests recorded for {} yet", task.name)],
-                None,
-            );
-            return Ok(());
+        let prs = self.app.db.list_task_prs(&task.id)?;
+        let job = pr_history::job(self.app, &task)?;
+        let looking = !job.sources.is_empty() || !job.open.is_empty();
+        if looking {
+            self.bg.find_prs(vec![job]);
         }
-        prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         self.ui.panel = Some(Panel::Prs {
             task_id: task_id.to_string(),
             prs,
             selected: 0,
+            looking,
+            note: None,
         });
         Ok(())
     }
@@ -3049,6 +3190,123 @@ mod tests {
             .iter()
             .any(|u| matches!(u, Update::Status { id, .. } if id == "t")));
         drop(bg);
+    }
+
+    fn pr(number: u64) -> TaskPrRecord {
+        TaskPrRecord {
+            task_id: "a".into(),
+            repo_id: "github.com/acme/api".into(),
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/acme/api/pull/{number}"),
+            state: "OPEN".into(),
+            is_draft: false,
+            additions: 1,
+            deletions: 1,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_pr_panel_opens_the_pr_under_the_cursor() {
+        let mut ui = sample();
+        ui.panel = Some(Panel::Prs {
+            task_id: "a".into(),
+            prs: vec![pr(1), pr(2)],
+            selected: 0,
+            looking: true,
+            note: None,
+        });
+        assert_eq!(press(&mut ui, KeyCode::Down), None);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('o')),
+            Some(Action::OpenPr {
+                repo_id: "github.com/acme/api".into(),
+                number: 2
+            })
+        );
+        // Still open, still looking, for the next one.
+        assert!(matches!(
+            ui.panel,
+            Some(Panel::Prs {
+                selected: 1,
+                looking: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::OpenPr {
+                repo_id: "github.com/acme/api".into(),
+                number: 2
+            })
+        );
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
+    }
+
+    #[test]
+    fn found_prs_land_in_the_open_panel_keeping_the_cursor() {
+        let mut ui = sample();
+        ui.panel = Some(Panel::Prs {
+            task_id: "a".into(),
+            prs: vec![pr(1), pr(2)],
+            selected: 1,
+            looking: true,
+            note: None,
+        });
+        // Another task's answer leaves the panel be.
+        ui.prs_found("b", vec![pr(9)], None);
+        assert!(matches!(&ui.panel, Some(Panel::Prs { prs, looking: true, .. }) if prs.len() == 2));
+        // A new PR at the top: the cursor stays on #2.
+        ui.prs_found("a", vec![pr(3), pr(1), pr(2)], None);
+        match &ui.panel {
+            Some(Panel::Prs {
+                prs,
+                selected,
+                looking,
+                ..
+            }) => {
+                assert_eq!(prs[*selected].number, 2);
+                assert!(!looking);
+            }
+            other => panic!("{other:?}"),
+        }
+        // With no panel open there is nothing to update.
+        ui.panel = None;
+        ui.prs_found("a", vec![pr(1)], None);
+        assert!(ui.panel.is_none());
+    }
+
+    #[test]
+    fn the_latest_pr_lookups_go_first_and_replace_older_ones() {
+        let job = |id: &str| pr_history::Job {
+            task_id: id.into(),
+            sources: Vec::new(),
+            open: Vec::new(),
+        };
+        let mut queue = VecDeque::new();
+        enqueue(&mut queue, vec![job("a"), job("b"), job("c")]);
+        enqueue(&mut queue, vec![job("c")]);
+        let order: Vec<&str> = queue.iter().map(|j| j.task_id.as_str()).collect();
+        assert_eq!(order, ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn the_pr_thread_answers_for_each_task() {
+        let bg = Background::start();
+        bg.find_prs(vec![pr_history::Job {
+            task_id: "t".into(),
+            sources: Vec::new(),
+            open: Vec::new(),
+        }]);
+        match bg.updates.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Update::Prs(found) => {
+                assert_eq!(found.task_id, "t");
+                assert!(found.prs.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

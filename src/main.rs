@@ -10,6 +10,7 @@ mod db;
 mod git;
 mod github;
 mod paths;
+mod pr_history;
 mod projects;
 mod remote;
 mod resolve;
@@ -144,6 +145,9 @@ fn main() -> Result<()> {
                 TaskCommands::Unarchive { name } => commands::task::unarchive(&app, &name)?,
                 TaskCommands::Delete { name, force } => commands::task::delete(&app, &name, force)?,
                 TaskCommands::Path { name } => commands::task::path(&app, &name)?,
+                TaskCommands::Prs { name, offline } => {
+                    commands::task::prs(&app, name.as_deref(), offline)?
+                }
                 TaskCommands::Resync { name, force } => commands::task::resync(&app, &name, force)?,
             }
         }

@@ -9,9 +9,12 @@ use unicode_width::UnicodeWidthStr;
 
 use super::state::human_size;
 use super::tasks::{AddField, Field, NewTaskForm, Panel, Picker, TaskRow, TasksUi, View};
+use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
-use crate::db::tasks::{TaskKind, TaskState};
+use crate::commands::task::printable;
+use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
+use crate::pr_history;
 use crate::status::Activity;
 use crate::worktrees::WorktreeStatus;
 
@@ -20,7 +23,10 @@ pub const HELP: [(&str, &str); 22] = [
     ("⏎", "open the task's agent in tmux (C-b d comes back here)"),
     ("e", "explore the task: its canvas or one of its worktrees"),
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),
-    ("p", "pull requests recorded for the task"),
+    (
+        "p",
+        "the task's pull requests; ⏎ or o opens one in the browser",
+    ),
     ("v", "a review task's pull request in the review viewer"),
     (
         "n",
@@ -118,9 +124,10 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
         chunks[3],
     );
 
-    if let Some(panel) = &ui.panel {
-        draw_panel(frame, ui, panel);
-    }
+    ui.links = match &ui.panel {
+        Some(panel) => draw_panel(frame, ui, panel),
+        None => Vec::new(),
+    };
     if let Some(working) = &ui.working {
         draw_working(frame, working);
     }
@@ -419,7 +426,8 @@ fn task_name(ui: &TasksUi, id: &str) -> String {
     ui.row(id).map(|r| r.task.name.clone()).unwrap_or_default()
 }
 
-fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) {
+/// Draw `panel` over the list, returning the links it shows.
+fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
     let full = frame.area();
     match panel {
         Panel::Help { scroll } => {
@@ -548,7 +556,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) {
                     )),
                 ];
                 render_text(frame, area, title, Color::Green, body);
-                return;
+                return Vec::new();
             }
             let items = lines
                 .iter()
@@ -620,7 +628,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) {
                     Line::from(dim("n makes one")),
                 ];
                 render_text(frame, area, title, Color::Green, body);
-                return;
+                return Vec::new();
             }
             let items = lines
                 .iter()
@@ -659,39 +667,116 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) {
             task_id,
             prs,
             selected,
+            looking,
+            note,
         } => {
-            let items = prs
-                .iter()
-                .map(|pr| {
-                    let (state, color) = match (pr.state.as_str(), pr.is_draft) {
-                        ("OPEN", true) => ("draft", Color::DarkGray),
-                        ("OPEN", false) => ("open", Color::Green),
-                        ("MERGED", _) => ("merged", Color::Magenta),
-                        _ => ("closed", Color::Red),
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{state:<8}"), Style::default().fg(color)),
-                        Span::styled(
-                            format!("+{}", pr.additions),
-                            Style::default().fg(Color::Green),
-                        ),
-                        Span::raw(" "),
-                        Span::styled(
-                            format!("−{:<6}", pr.deletions),
-                            Style::default().fg(Color::Red),
-                        ),
-                        Span::styled(format!("#{} ", pr.number), Style::default().fg(Color::Blue)),
-                        Span::raw(pr.title.clone()),
-                    ]))
-                })
-                .collect();
             let area = centered_rect(85, 60, full);
-            let title = format!(
-                " {} · pull requests · ⏎ open in the browser  esc close ",
-                task_name(ui, task_id)
-            );
-            render_list(frame, area, title, items, *selected);
+            let name = task_name(ui, task_id);
+            if prs.is_empty() {
+                let said = match (looking, note) {
+                    (true, _) => "looking for pull requests…".to_string(),
+                    (false, Some(note)) => format!("could not look them up: {note}"),
+                    (false, None) => {
+                        "none yet: PRs opened from the task's worktrees show up here".into()
+                    }
+                };
+                let body = vec![Line::from(""), Line::from(dim(format!("  {said}")))];
+                render_text(
+                    frame,
+                    area,
+                    format!(" {name} · pull requests "),
+                    Color::Green,
+                    body,
+                );
+                return Vec::new();
+            }
+            let looking = if *looking { " · looking…" } else { "" };
+            let title =
+                format!(" {name} · pull requests{looking} · ⏎/o open in the browser  esc close ");
+            return draw_prs(frame, area, title, prs, *selected);
         }
+    }
+    Vec::new()
+}
+
+/// The PR history: state, size, number and title — the title a link to the
+/// PR, written in after the frame by [`super::term::paint_links`]. Returns
+/// where the links are.
+fn draw_prs(
+    frame: &mut Frame,
+    area: Rect,
+    title: String,
+    prs: &[TaskPrRecord],
+    selected: usize,
+) -> Vec<Link> {
+    let added: Vec<String> = prs.iter().map(|pr| format!("+{}", pr.additions)).collect();
+    let removed: Vec<String> = prs.iter().map(|pr| format!("−{}", pr.deletions)).collect();
+    let numbers: Vec<String> = prs.iter().map(|pr| format!("#{}", pr.number)).collect();
+    let widest = |column: &[String]| column.iter().map(|c| c.width()).max().unwrap_or(0);
+    let (wa, wr, wn) = (widest(&added), widest(&removed), widest(&numbers));
+    // state, then the columns, each followed by a space.
+    let lead = 7 + 1 + wa + 1 + wr + 1 + wn + 1;
+
+    let items: Vec<ListItem> = prs
+        .iter()
+        .enumerate()
+        .map(|(i, pr)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<7} ", pr_history::state_label(pr)),
+                    Style::default().fg(pr_state_color(pr)),
+                ),
+                Span::styled(
+                    format!("{:>wa$} ", added[i]),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("{:>wr$} ", removed[i]),
+                    Style::default().fg(Color::Red),
+                ),
+                Span::styled(
+                    format!("{:<wn$} ", numbers[i]),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::raw(printable(&pr.title)),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(Clear, area);
+    let mut state = ListState::default();
+    state.select(Some(selected.min(prs.len() - 1)));
+    let list = List::new(items)
+        .block(list_block(title))
+        .highlight_style(highlighted());
+    frame.render_stateful_widget(list, area, &mut state);
+
+    let inner = area.inner(ratatui::layout::Margin::new(1, 1));
+    let room = (inner.width as usize).saturating_sub(lead);
+    prs.iter()
+        .enumerate()
+        .skip(state.offset())
+        .take(inner.height as usize)
+        .enumerate()
+        .filter_map(|(row, (_, pr))| {
+            let width = printable(&pr.title).width().min(room);
+            (width > 0).then(|| Link {
+                x: inner.x + lead as u16,
+                y: inner.y + row as u16,
+                width: width as u16,
+                url: pr.url.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Open green, draft grey, merged purple, closed red, as GitHub has them.
+pub fn pr_state_color(pr: &TaskPrRecord) -> Color {
+    match pr_history::state_label(pr) {
+        "open" => Color::Green,
+        "draft" => Color::DarkGray,
+        "merged" => Color::Magenta,
+        _ => Color::Red,
     }
 }
 
@@ -995,6 +1080,121 @@ mod tests {
         r.task.state = TaskState::Archived;
         assert_eq!(glyph(&r).0, "▪");
         assert_eq!(status_text(&r), "archived");
+    }
+
+    fn history(number: u64, state: &str, title: &str) -> TaskPrRecord {
+        TaskPrRecord {
+            task_id: "fix-login".into(),
+            repo_id: "github.com/acme/api".into(),
+            number,
+            title: title.into(),
+            url: format!("https://github.com/acme/api/pull/{number}"),
+            state: state.into(),
+            is_draft: false,
+            additions: number * 100,
+            deletions: number,
+            updated_at: String::new(),
+        }
+    }
+
+    fn prs_panel(prs: Vec<TaskPrRecord>, selected: usize) -> Panel {
+        Panel::Prs {
+            task_id: "fix-login".into(),
+            prs,
+            selected,
+            looking: false,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn the_pr_panel_lines_up_state_size_number_and_a_linked_title() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        let mut merged = history(12, "MERGED", "Widen the store");
+        merged.additions = 1200;
+        ui.panel = Some(prs_panel(
+            vec![merged, history(3, "OPEN", "Fix \x1b[2Jit")],
+            0,
+        ));
+        let screen = render(&mut ui, 120, 30);
+        let first = screen.iter().find(|l| l.contains("Widen")).unwrap();
+        let second = screen.iter().find(|l| l.contains("Fix")).unwrap();
+        assert!(
+            first.contains("merged  +1200 −12 #12 Widen the store"),
+            "{first}"
+        );
+        assert!(
+            second.contains("open     +300  −3 #3  Fix [2Jit"),
+            "{second}"
+        );
+
+        // Each title is a link to its PR, exactly where it was drawn.
+        assert_eq!(ui.links.len(), 2);
+        let link = &ui.links[0];
+        assert_eq!(link.url, "https://github.com/acme/api/pull/12");
+        let line = &screen[link.y as usize];
+        let at: String = line
+            .chars()
+            .skip(link.x as usize)
+            .take(link.width as usize)
+            .collect();
+        assert_eq!(at, "Widen the store");
+        // No panel, no links.
+        ui.panel = None;
+        render(&mut ui, 120, 30);
+        assert!(ui.links.is_empty());
+    }
+
+    #[test]
+    fn links_follow_the_pr_list_as_it_scrolls() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        let prs: Vec<_> = (1..=40)
+            .map(|n| history(n, "OPEN", &format!("change {n}")))
+            .collect();
+        ui.panel = Some(prs_panel(prs, 39));
+        let screen = render(&mut ui, 120, 30);
+        let last = ui.links.last().unwrap();
+        assert_eq!(last.url, "https://github.com/acme/api/pull/40");
+        assert!(screen[last.y as usize].contains("change 40"));
+        assert!(ui
+            .links
+            .iter()
+            .all(|l| screen[l.y as usize].contains("change")));
+    }
+
+    #[test]
+    fn an_empty_pr_panel_says_whether_it_is_still_looking() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        ui.panel = Some(Panel::Prs {
+            task_id: "fix-login".into(),
+            prs: Vec::new(),
+            selected: 0,
+            looking: true,
+            note: None,
+        });
+        assert!(render(&mut ui, 120, 30)
+            .join("\n")
+            .contains("looking for pull requests"));
+        ui.prs_found("fix-login", Vec::new(), Some("gh is not installed".into()));
+        let screen = render(&mut ui, 120, 30).join("\n");
+        assert!(
+            screen.contains("could not look them up: gh is not installed"),
+            "{screen}"
+        );
+        ui.prs_found("fix-login", Vec::new(), None);
+        assert!(render(&mut ui, 120, 30).join("\n").contains("none yet"));
+    }
+
+    #[test]
+    fn pr_states_have_their_colours() {
+        let mut pr = history(1, "OPEN", "x");
+        assert_eq!(pr_state_color(&pr), Color::Green);
+        pr.is_draft = true;
+        assert_eq!(pr_state_color(&pr), Color::DarkGray);
+        pr.state = "MERGED".into();
+        assert_eq!(pr_state_color(&pr), Color::Magenta);
+        pr.state = "CLOSED".into();
+        assert_eq!(pr_state_color(&pr), Color::Red);
     }
 
     #[test]

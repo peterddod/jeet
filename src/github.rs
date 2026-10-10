@@ -14,6 +14,11 @@ use serde::Deserialize;
 /// The fields jeet asks `gh pr view` / `gh pr list` for.
 const PR_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,headRefName,headRefOid,baseRefName,isCrossRepository";
 
+/// [`PR_FIELDS`] plus what a task's PR history shows: the size of the change
+/// and when it last moved. Kept apart because `additions`/`deletions` make
+/// GitHub count the diff, which a plain lookup has no use for.
+const PR_HISTORY_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,headRefName,headRefOid,baseRefName,isCrossRepository,additions,deletions,updatedAt";
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
@@ -68,6 +73,21 @@ impl PullRequest {
             _ => None,
         }
     }
+}
+
+/// A PR as a task's history records it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPr {
+    #[serde(flatten)]
+    pub pr: PullRequest,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    /// GitHub's ISO-8601 timestamp.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// What a review says overall.
@@ -129,12 +149,17 @@ fn gh(dir: &Path, args: &[&str]) -> Result<Output> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                anyhow::anyhow!("the GitHub CLI (`gh`) is not installed")
-            }
+            std::io::ErrorKind::NotFound => anyhow::anyhow!(NOT_INSTALLED),
             _ => anyhow::anyhow!("could not run gh: {e}"),
         })?;
     Ok(output)
+}
+
+const NOT_INSTALLED: &str = "the GitHub CLI (`gh`) is not installed";
+
+/// Whether `e` says there is no `gh` to run — which no retry will change.
+pub fn is_not_installed(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| cause.to_string() == NOT_INSTALLED)
 }
 
 /// The `gh` to run: the real one, except in unit tests.
@@ -210,7 +235,8 @@ pub fn pr_for_branch(repo_dir: &Path, branch: &str) -> Result<Option<PullRequest
     Ok(Some(pr))
 }
 
-fn fork_pr_number(branch: &str) -> Option<u64> {
+/// The PR number in a `pr/<n>` branch, the name a fork's PR is reviewed on.
+pub fn fork_pr_number(branch: &str) -> Option<u64> {
     branch.strip_prefix("pr/")?.parse().ok()
 }
 
@@ -228,6 +254,70 @@ pub fn open_prs_by_branch(repo_dir: &Path) -> Result<Vec<(String, u64)>> {
         .into_iter()
         .map(|pr| (pr.local_branch(), pr.number))
         .collect())
+}
+
+/// A PR by number, with the fields a task's history keeps.
+pub fn pr_history(repo_dir: &Path, number: u64) -> Result<HistoryPr> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            PR_HISTORY_FIELDS,
+        ],
+    )?;
+    serde_json::from_str(&text).context("parse gh pr view output")
+}
+
+/// Every PR, open or not, whose head is `branch` in this repository.
+///
+/// `--head` matches the branch name alone, so a fork's PR from a branch of
+/// the same name — very often `main` — would come back too; those are
+/// someone else's, and are left out.
+pub fn prs_for_branch(repo_dir: &Path, branch: &str) -> Result<Vec<HistoryPr>> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--limit",
+            "30",
+            "--json",
+            PR_HISTORY_FIELDS,
+        ],
+    )?;
+    let prs: Vec<HistoryPr> = serde_json::from_str(&text).context("parse gh pr list output")?;
+    Ok(prs
+        .into_iter()
+        .filter(|p| !p.pr.is_cross_repository)
+        .collect())
+}
+
+/// Every PR, open or not, that contains commit `sha`: how a detached
+/// checkout's work is traced to the PR it went into.
+pub fn prs_for_commit(repo_dir: &Path, sha: &str) -> Result<Vec<HistoryPr>> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "pr",
+            "list",
+            "--search",
+            sha,
+            "--state",
+            "all",
+            "--limit",
+            "10",
+            "--json",
+            PR_HISTORY_FIELDS,
+        ],
+    )?;
+    serde_json::from_str(&text).context("parse gh pr list output")
 }
 
 /// A PR as `jeet prs` lists it: enough to decide which one to review.
@@ -313,16 +403,18 @@ pub fn current_user(repo_dir: &Path) -> Result<String> {
         .to_string())
 }
 
-/// Check `number` out on `branch` in the worktree at `dir`.
+/// Check `number` out on `branch` in the worktree at `dir` — or, with no
+/// branch, at the PR's head with HEAD detached.
 ///
 /// `gh pr checkout` rather than a hand-rolled fetch: it knows where a fork's
 /// branch lives and sets up tracking so a later run pulls new commits.
-pub fn checkout(dir: &Path, number: u64, branch: &str) -> Result<()> {
-    gh_ok(
-        dir,
-        &["pr", "checkout", &number.to_string(), "--branch", branch],
-    )
-    .map(|_| ())
+pub fn checkout(dir: &Path, number: u64, branch: Option<&str>) -> Result<()> {
+    let number = number.to_string();
+    let args: Vec<&str> = match branch {
+        Some(branch) => vec!["pr", "checkout", &number, "--branch", branch],
+        None => vec!["pr", "checkout", &number, "--detach"],
+    };
+    gh_ok(dir, &args).map(|_| ())
 }
 
 /// Open the PR in the browser, through `gh` so its browser setting applies.
@@ -1047,6 +1139,19 @@ mod tests {
         assert_eq!(pr.number, 10);
         assert_eq!(pr.state_label(), "draft");
         assert_eq!(pr.decision_label(), None);
+    }
+
+    #[test]
+    fn parses_pr_history_fields() {
+        let json = r#"[{"additions":120,"baseRefName":"main","deletions":7,"headRefName":"feat","headRefOid":"5f13","isCrossRepository":false,"isDraft":false,"number":12,"reviewDecision":"APPROVED","state":"MERGED","title":"Widen it","updatedAt":"2026-10-01T09:00:00Z","url":"https://github.com/acme/widget/pull/12"}]"#;
+        let prs: Vec<HistoryPr> = serde_json::from_str(json).unwrap();
+        let pr = &prs[0];
+        assert_eq!(pr.pr.number, 12);
+        assert_eq!(pr.pr.state_label(), "merged");
+        assert_eq!((pr.additions, pr.deletions), (120, 7));
+        assert_eq!(pr.updated_at, "2026-10-01T09:00:00Z");
+        // The plain fields still parse alone, so PR_FIELDS answers keep working.
+        assert!(PR_HISTORY_FIELDS.starts_with(PR_FIELDS));
     }
 
     #[test]

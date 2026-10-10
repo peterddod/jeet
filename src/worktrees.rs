@@ -366,17 +366,7 @@ pub fn checkout_pr(
         .into_iter()
         .find(|e| e.branch.as_deref() == Some(branch.as_str()) && !e.missing)
     {
-        let mut warnings = Vec::new();
-        match git::status_counts(&existing.path) {
-            Ok((0, _)) => {
-                if let Err(e) = crate::github::checkout(&existing.path, pr.number, &branch) {
-                    warnings.push(format!("could not update {branch} from the PR: {e}"));
-                }
-            }
-            _ => warnings.push(format!(
-                "{branch} has uncommitted changes, so it was not updated from the PR"
-            )),
-        }
+        let warnings = refresh_pr_worktree(&existing.path, pr, Some(&branch));
         return Ok(Outcome {
             path: existing.path,
             warnings,
@@ -391,21 +381,83 @@ pub fn checkout_pr(
             dest.display()
         );
     }
-    // Detached first, then `gh pr checkout` inside it: gh knows where a fork's
-    // branch lives and how to track it, and git will not put one branch in two
-    // worktrees, so the branch cannot be created before the worktree exists.
-    let start = resolve_start_point(&trunk, &repo.default_branch)?;
-    git::worktree_add_detached(&trunk, &dest, &start).context("create worktree for the PR")?;
-    if let Err(e) = crate::github::checkout(&dest, pr.number, &branch) {
-        let _ = git::worktree_remove(&trunk, &dest, true);
+    if let Err(e) = add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, Some(&branch)) {
         prune_empty_parents(&dest, &[app.worktrees_root()]);
-        return Err(e.context(format!("check out #{} on {branch}", pr.number)));
+        return Err(e);
     }
     register(app, repo, &branch, &dest)?;
     Ok(Outcome {
         path: dest,
         warnings: Vec::new(),
     })
+}
+
+/// Make a worktree of `trunk` at `dest` with `pr` checked out on `branch`,
+/// or detached at the PR's head when there is no branch to use. A failed
+/// checkout takes the half-made worktree away again.
+///
+/// The caller holds the repo's fetch lock: `gh pr checkout` fetches.
+pub fn add_pr_worktree(
+    trunk: &Path,
+    default_branch: &str,
+    dest: &Path,
+    pr: &crate::github::PullRequest,
+    branch: Option<&str>,
+) -> Result<()> {
+    // Detached first, then `gh pr checkout` inside it: gh knows where a fork's
+    // branch lives and how to track it, and git will not put one branch in two
+    // worktrees, so the branch cannot be created before the worktree exists.
+    let start = resolve_start_point(trunk, default_branch)?;
+    git::worktree_add_detached(trunk, dest, &start).context("create worktree for the PR")?;
+    if let Err(e) = crate::github::checkout(dest, pr.number, branch) {
+        let _ = git::worktree_remove(trunk, dest, true);
+        let on = branch.unwrap_or("a detached HEAD");
+        return Err(e.context(format!("check out #{} on {on}", pr.number)));
+    }
+    Ok(())
+}
+
+/// Bring a worktree that already has `pr` checked out up to date with it —
+/// only when it is clean: it may be the user's own branch with work in it,
+/// and a review is not a reason to touch that. A detached checkout must also
+/// have no commits that only its HEAD holds, or moving HEAD to the PR's head
+/// would leave them on no ref. Returns what went unsaid.
+pub fn refresh_pr_worktree(
+    path: &Path,
+    pr: &crate::github::PullRequest,
+    branch: Option<&str>,
+) -> Vec<String> {
+    let what = branch.unwrap_or("the review checkout");
+    match git::status_counts(path) {
+        Ok((0, _)) => {}
+        _ => {
+            return vec![format!(
+                "{what} has uncommitted changes, so it was not updated from the PR"
+            )]
+        }
+    }
+    if git::head_branch(path).is_none() {
+        let held_only_by_head =
+            git::count_commits_not_in(path, "HEAD", &["--remotes", "--branches", "--tags"]);
+        match held_only_by_head {
+            Some(0) => {}
+            Some(n) => {
+                let s = if n == 1 { "" } else { "s" };
+                return vec![format!(
+                    "{what} has {n} commit{s} on no branch, so it was not updated from the PR"
+                )];
+            }
+            None => {
+                return vec![format!(
+                    "could not check {what} for commits on no branch, so it was not updated from the PR"
+                )]
+            }
+        }
+    }
+    match crate::github::checkout(path, pr.number, branch) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("could not update {what} from the PR: {e}")],
+    }
 }
 
 /// Confirm `dest` is a worktree of `trunk` with `branch` checked out.

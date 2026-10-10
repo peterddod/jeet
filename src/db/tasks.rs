@@ -241,6 +241,36 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The review task for PR `number` of `repo_id`: the one with a worktree
+    /// checked out for it, else one whose history records it. Oldest first,
+    /// should there ever be two.
+    pub fn find_review_task(&self, repo_id: &str, number: u64) -> Result<Option<TaskRecord>> {
+        let columns = TASK_COLUMNS
+            .split(", ")
+            .map(|c| format!("t.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {columns},
+                       EXISTS (SELECT 1 FROM task_worktrees w
+                               WHERE w.task_id = t.id AND w.repo_id = ?1 AND w.pr_number = ?2)
+                         AS checked_out
+                     FROM tasks t
+                     WHERE t.kind = 'review' AND (checked_out OR EXISTS (
+                       SELECT 1 FROM task_prs p
+                       WHERE p.task_id = t.id AND p.repo_id = ?1 AND p.number = ?2))
+                     ORDER BY checked_out DESC, t.created_at, t.slug
+                     LIMIT 1"
+                ),
+                params![repo_id, number as i64],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {
         self.conn().execute(
             "UPDATE tasks SET state = ?2 WHERE id = ?1",
@@ -658,6 +688,40 @@ mod tests {
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0], merged);
         assert_eq!(prs[1].number, 2);
+    }
+
+    #[test]
+    fn a_review_task_is_found_by_its_pr() {
+        let (_dir, db) = open();
+        db.upsert_repo(&repo("github.com/acme/api")).unwrap();
+        db.upsert_repo(&repo("github.com/other/api")).unwrap();
+        let mut review = task("r", "review-api-7", 2);
+        review.kind = TaskKind::Review;
+        db.insert_task(&review).unwrap();
+        // A work task that happens to have the same PR is not a review of it.
+        db.insert_task(&task("w", "work", 1)).unwrap();
+        db.upsert_task_pr(&pr("w", 7, "2026-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(db.find_review_task("github.com/acme/api", 7).unwrap(), None);
+
+        let mut wt = worktree("r", "api", Some("feat"));
+        wt.pr_number = Some(7);
+        db.insert_task_worktree(&wt).unwrap();
+        let found = db.find_review_task("github.com/acme/api", 7).unwrap();
+        assert_eq!(found.map(|t| t.id), Some("r".to_string()));
+        // Same number, another repository: another PR.
+        assert_eq!(
+            db.find_review_task("github.com/other/api", 7).unwrap(),
+            None
+        );
+        assert_eq!(db.find_review_task("github.com/acme/api", 8).unwrap(), None);
+
+        // With its worktree gone, the history still says which PR it reviews.
+        db.delete_task_worktree("r", "api").unwrap();
+        db.upsert_task_pr(&pr("r", 7, "2026-01-01T00:00:00Z"))
+            .unwrap();
+        let found = db.find_review_task("github.com/acme/api", 7).unwrap();
+        assert_eq!(found.map(|t| t.id), Some("r".to_string()));
     }
 
     #[test]

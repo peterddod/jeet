@@ -2897,6 +2897,20 @@ impl Pty {
         use std::process::Stdio;
         let dir = TempDir::new().unwrap();
         let log = dir.path().join("typescript");
+        // The tasks list looks PRs up through gh as it opens: never the real
+        // one, which would reach GitHub. A test that wants answers passes a
+        // PATH with a stub of its own.
+        let no_gh = dir.path().join("bin");
+        std::fs::create_dir_all(&no_gh).unwrap();
+        write_script(
+            &no_gh.join("gh"),
+            "#!/bin/sh\necho 'no GitHub in tests' >&2\nexit 1\n",
+        );
+        let path = format!(
+            "{}:{}",
+            no_gh.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let inner = format!(
             "stty rows 40 cols 140 && exec '{}' {args}",
             env!("CARGO_BIN_EXE_jeet")
@@ -2917,6 +2931,7 @@ impl Pty {
             .env_remove("TMUX")
             .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude")
             .env("TERM", "xterm-256color")
+            .env("PATH", path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -3175,4 +3190,335 @@ fn explore_inside_a_task_directory_browses_its_canvas() {
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");
+}
+
+/// Write an executable script.
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR history and review tasks
+// ---------------------------------------------------------------------------
+
+/// A stand-in `gh` for PR history and review tasks, recording each call's
+/// arguments NUL-separated, one file per call, under `bin/calls`:
+///
+/// - `pr view <n>`: PR `n` on branch `wide-store` (#7) or `pr-<n>`;
+///   with `--web`, nothing.
+/// - `pr checkout <n> --branch <b>` checks `b` out; `--detach` stays put.
+/// - `pr list --head feat`: #3, merged, plus a fork's #4 from a branch of the
+///   same name; `--search <sha>`: #5, an open draft; anything else, none.
+#[cfg(unix)]
+fn stub_history_gh(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("gh-bin");
+    std::fs::create_dir_all(bin.join("calls")).unwrap();
+    write_script(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\0' "$@" > "$here/calls/.call.$$"
+mv "$here/calls/.call.$$" "$here/calls/call.$$"
+[ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
+pr() {
+  # number title state draft branch cross additions deletions
+  printf '{"number":%s,"title":"%s","url":"https://github.com/acme/widget/pull/%s","state":"%s","isDraft":%s,"reviewDecision":"","headRefName":"%s","headRefOid":"abc123","baseRefName":"main","isCrossRepository":%s,"additions":%s,"deletions":%s,"updatedAt":"2026-10-0%sT00:00:00Z"}' \
+    "$1" "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$(( $1 % 9 + 1 ))"
+}
+case "$1 $2" in
+  "pr view")
+    for arg in "$@"; do [ "$arg" = --web ] && exit 0; done
+    case "$3" in
+      7) pr 7 "Widen the store" OPEN false wide-store false 12 3 ;;
+      *) pr "$3" "PR $3" OPEN false "pr-$3" false 1 1 ;;
+    esac
+    exit 0 ;;
+  "pr checkout")
+    case "$4" in
+      --detach) exit 0 ;;
+      *) exec git checkout -q -B "$5" ;;
+    esac ;;
+  "pr list")
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --head)
+          [ "$2" = feat ] || { echo '[]'; exit 0; }
+          printf '['; pr 3 "Fix the feature" MERGED false feat false 10 2
+          printf ','; pr 4 "A fork with a feat branch" OPEN false feat true 99 99
+          echo ']'; exit 0 ;;
+        --search)
+          printf '['; pr 5 "Detached work" OPEN true x false 7 0; echo ']'; exit 0 ;;
+      esac
+      shift
+    done
+    echo '[]'; exit 0 ;;
+esac
+echo "unexpected gh $*" >&2
+exit 1
+"#,
+    );
+    bin
+}
+
+/// `PATH` with `bin` in front.
+fn path_with(bin: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn review_makes_a_review_task_and_comes_back_to_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let env = [("PATH", path.as_str())];
+
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    let worktree = path_from(&output);
+    let task = lab.home().join("tasks/review-widget-7");
+    assert_eq!(worktree, task.join("widget"));
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
+        "wide-store"
+    );
+    assert!(stderr_of(&output).contains("new task review-widget-7"));
+    // A task like any other, marked as a review, with its PR in the history.
+    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &[]));
+    assert!(listed.contains("review-widget-7"), "{listed}");
+    assert!(listed.contains("1 wt: widget"), "{listed}");
+    let prs = lab.jeet_at(
+        &["task", "prs", "review-widget-7", "--offline"],
+        &lab.home(),
+        &[],
+    );
+    succeeded(&prs);
+    let prs = stdout_of(&prs);
+    assert!(prs.contains("#7"), "{prs}");
+    assert!(prs.contains("Widen the store"), "{prs}");
+    assert!(prs.contains("+12") && prs.contains("-3"), "{prs}");
+
+    // Again: the same task and checkout, brought up to date with the PR.
+    let output = lab.jeet_at(&["review", "#7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert!(
+        !stderr_of(&output).contains("new task"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!lab.home().join("tasks/review-widget-7-2").exists());
+
+    // Its checkout deleted behind jeet's back, the next review makes it
+    // again, on the branch.
+    std::fs::remove_dir_all(&worktree).unwrap();
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
+        "wide-store"
+    );
+
+    // Archived, it is brought back rather than made again.
+    succeeded(&lab.jeet_at(&["task", "archive", "review-widget-7"], &lab.home(), &[]));
+    assert!(!worktree.exists());
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
+        "wide-store"
+    );
+    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &[]));
+    let reviews = listed.lines().filter(|l| l.contains("review-widget"));
+    assert_eq!(reviews.count(), 1, "{listed}");
+
+    // Deleting the task takes the branch it made for the review.
+    succeeded(&lab.jeet_at(
+        &["task", "delete", "review-widget-7", "--force"],
+        &lab.home(),
+        &[],
+    ));
+    assert!(!task.exists());
+    assert_eq!(git_stdout(&["branch", "--list", "wide-store"], &trunk), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_review_of_a_branch_another_task_has_is_detached() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    // The author's own task has the PR's branch.
+    let mine = lab.new_task("Wide store");
+    let own = lab.add(&mine, &["widget", "--branch", "wide-store"]);
+
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]);
+    succeeded(&output);
+    let worktree = path_from(&output);
+    assert!(worktree.starts_with(lab.home().join("tasks/review-widget-7")));
+    assert!(is_detached(&worktree), "the branch stays where it was");
+    assert!(
+        stderr_of(&output).contains("checked out in task Wide store"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &own),
+        "wide-store"
+    );
+    let checkouts: Vec<_> = gh_calls(&bin)
+        .into_iter()
+        .filter(|c| c.starts_with(&["pr".into(), "checkout".into()]))
+        .collect();
+    assert_eq!(checkouts.len(), 1, "{checkouts:?}");
+    assert!(
+        checkouts[0].contains(&"--detach".to_string()),
+        "{checkouts:?}"
+    );
+
+    // Clean and holding nothing of its own, it is brought up to date again.
+    succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
+    let checkouts = |bin: &std::path::Path| {
+        gh_calls(bin)
+            .into_iter()
+            .filter(|c| c.starts_with(&["pr".into(), "checkout".into()]))
+            .count()
+    };
+    assert_eq!(checkouts(&bin), 2);
+
+    // A fixup committed on the detached checkout is on no branch: the next
+    // review must not move HEAD off it to pick up the PR's new pushes.
+    git(&["commit", "-q", "--allow-empty", "-m", "fixup"], &worktree);
+    let fixup = rev(&worktree, "HEAD");
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert!(
+        stderr_of(&output).contains("1 commit on no branch, so it was not updated"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(rev(&worktree, "HEAD"), fixup);
+    assert_eq!(checkouts(&bin), 2, "no checkout over the fixup");
+}
+
+#[cfg(unix)]
+#[test]
+fn task_prs_finds_prs_by_branch_and_by_detached_commit() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let task = lab.new_task("Feature");
+    let on_branch = lab.add(&task, &["widget", "--branch", "feat"]);
+    // Work on a detached HEAD that origin does not have.
+    let detached = lab.add(&task, &["widget"]);
+    git(
+        &["commit", "-q", "--allow-empty", "-m", "detached work"],
+        &detached,
+    );
+    let work = rev(&detached, "HEAD");
+    // A fresh checkout of the default branch: nothing of this task's.
+    lab.add(&task, &["widget"]);
+
+    let output = lab.jeet_at(&["task", "prs"], &task, &[("PATH", &path)]);
+    succeeded(&output);
+    let listed = stdout_of(&output);
+    assert!(
+        listed.contains("#3") && listed.contains("merged"),
+        "{listed}"
+    );
+    assert!(listed.contains("+10") && listed.contains("-2"), "{listed}");
+    assert!(
+        listed.contains("#5") && listed.contains("draft"),
+        "{listed}"
+    );
+    assert!(
+        !listed.contains("#4"),
+        "a fork's PR is not this task's: {listed}"
+    );
+
+    let calls = gh_calls(&bin);
+    let searches: Vec<_> = calls
+        .iter()
+        .filter(|c| c.contains(&"--search".to_string()))
+        .collect();
+    assert_eq!(searches.len(), 1, "{calls:?}");
+    assert!(searches[0].contains(&work), "{searches:?}");
+    assert!(calls
+        .iter()
+        .any(|c| c.contains(&"--head".to_string()) && c.contains(&"feat".to_string())));
+
+    // The history outlives the branch.
+    succeeded(&lab.jeet_at(&["worktree", "rm", "widget", "--force"], &task, &[]));
+    assert!(!on_branch.exists());
+    let output = lab.jeet_at(&["task", "prs", "--offline"], &task, &[]);
+    succeeded(&output);
+    assert!(stdout_of(&output).contains("#3"), "{}", stdout_of(&output));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tasks_list_shows_pr_history_with_links_and_opens_the_viewer() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let task = lab.new_task("Feature");
+    lab.add(&task, &["widget", "--branch", "feat"]);
+
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[("PATH", &path)]);
+    screen.wait_for_text("Feature");
+    screen.type_keys(b"p");
+    screen.wait_for_text("Fix the feature");
+    let drawn = screen.screen();
+    assert!(
+        drawn.contains("\x1b]8;;https://github.com/acme/widget/pull/3\x1b\\"),
+        "the title is a link"
+    );
+    assert!(!drawn.contains("A fork with a feat branch"));
+    // o opens it in the browser, through gh.
+    screen.type_keys(b"o");
+    wait_until("the browser", || {
+        gh_calls(&bin)
+            .iter()
+            .any(|c| c.contains(&"--web".to_string()) && c.contains(&"3".to_string()))
+    });
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+
+    // A review task opens in the review viewer on v, and esc comes back.
+    let viewer = stub_viewer_gh(&lab.home());
+    let path = path_with(&viewer);
+    succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[("PATH", &path)]);
+    screen.wait_for_text("review-widget-7 (review)");
+    screen.type_keys(b"/review\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"v");
+    wait_for_calls(&viewer, 1, "the viewer's diff", |c| {
+        c.starts_with(&["pr".into(), "diff".into()])
+    });
+    screen.wait_for_text("src/lib.rs");
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
 }
