@@ -47,7 +47,7 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Check a pull request out into its own worktree and open the explorer there
+    /// Check a pull request out into its own worktree and open the review viewer
     Review {
         /// PR number, with or without a leading #, or the PR's URL
         pr: String,

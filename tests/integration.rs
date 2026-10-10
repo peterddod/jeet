@@ -1098,3 +1098,79 @@ fn dry_run_previews_the_same_policy_it_would_apply() {
     // ...and an interactive preview reports the interactive policy.
     assert_eq!(verdict(&["worktree", "clean", "--dry-run"]), "remove");
 }
+
+/// A stand-in `gh` on PATH, so `jeet review` runs end to end with no network:
+/// `pr view` answers from a fixture and `pr checkout` makes the branch.
+fn stub_gh(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("gh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+# jeet must never let gh prompt.
+[ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
+echo "$*" >> "$(dirname "$0")/calls"
+case "$1 $2" in
+  "pr view")
+    echo '{"number":7,"title":"Widen the store","url":"https://github.com/acme/review/pull/7","state":"OPEN","isDraft":false,"reviewDecision":"","headRefName":"wide-store","headRefOid":"abc123","baseRefName":"main","isCrossRepository":false}'
+    ;;
+  "pr checkout")
+    exec git checkout -q -b "$5"
+    ;;
+  *)
+    echo "unexpected gh $*" >&2
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Without a terminal `jeet review` opens no viewer: it is scripted, so it
+/// prints the PR's worktree and nothing else on stdout.
+#[test]
+fn review_without_a_terminal_prints_only_the_worktree_path() {
+    let lab = lab("review");
+    let bin = stub_gh(std::path::Path::new(&lab.home));
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = jeet_bin()
+        .args(["review", "#7"])
+        .current_dir(&lab.repo)
+        .env("JEET_HOME", &lab.home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "review failed: {stderr}");
+    let worktree = path_from(&output);
+    assert!(worktree.is_dir());
+    let head = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "wide-store");
+    assert!(stderr.contains("#7 Widen the store"), "{stderr}");
+
+    // Only the lookups a checkout needs: the viewer's diff and threads are
+    // fetched by the viewer, which needs a terminal.
+    let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
+    assert!(
+        calls
+            .lines()
+            .all(|c| c.starts_with("pr view") || c.starts_with("pr checkout")),
+        "{calls}"
+    );
+}

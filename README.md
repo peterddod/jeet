@@ -248,9 +248,16 @@ github.com/acme/widget: 3 open pull requests
 
 From anywhere inside a repository, `jeet review` checks the PR out into its own
 worktree (reusing the one that already has its branch, and bringing it up to
-date if it is clean), `cd`s you there, and opens the explorer on it. A PR
-from a fork is checked out as `pr/<number>`, so it can never land on a branch
-of yours with the same name.
+date if it is clean), opens it in the review viewer, and `cd`s you into the
+worktree when you leave. A PR from a fork is checked out as `pr/<number>`, so
+it can never land on a branch of yours with the same name.
+
+The review viewer shows the PR's diff one file to a page, in GitHub's dark
+colours (or the nearest 256-colour match when `COLORTERM` is not `truecolor`),
+with each review thread boxed under the line it is about. `←`/`→` turn the
+page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
+or request changes — submitting your pending review if you have one — and
+`Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
 
 Give it a command in `config.toml` and it also starts that in the background
 from the new worktree — say, Claude Code with your own review command:

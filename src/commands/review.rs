@@ -1,4 +1,5 @@
-//! `jeet review <pr>`: check a pull request out and start reviewing it.
+//! `jeet review <pr>`: check a pull request out and open it in the review
+//! viewer.
 
 use std::io::{self, IsTerminal};
 
@@ -37,7 +38,9 @@ pub fn run(
     }
 
     if io::stdout().is_terminal() {
-        return crate::commands::explore::run_at(app, &checkout.path);
+        // The review itself, then the shell lands in the worktree to work on it.
+        crate::tui::review::run(&checkout.path, &pr)?;
+        return crate::commands::explore::hand_off(&checkout.path);
     }
     // Scripted: behave like `jeet worktree`, printing the path to consume.
     println!("{}", checkout.path.display());

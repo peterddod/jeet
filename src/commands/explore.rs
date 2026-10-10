@@ -36,16 +36,33 @@ pub fn run_at(app: &App, dir: &Path) -> Result<()> {
         Exit::Stay if !resolve::same_path(dir, &shell_cwd) => Some(dir.to_path_buf()),
         Exit::Stay => None,
     };
-    if let Some(path) = landing {
-        cd::request(&path)?;
-        if cd::wrapper_active() {
-            eprintln!("jeet: {}", path.display());
-        } else {
-            println!("{}", path.display());
-            eprintln!(
-                "jeet: add `eval \"$(jeet init-shell)\"` to your shell rc to cd here automatically"
-            );
-        }
+    match landing {
+        Some(path) => land(&path),
+        None => Ok(()),
+    }
+}
+
+/// Leave the shell in `dir` once an interactive screen closes, unless it is
+/// already there.
+pub fn hand_off(dir: &Path) -> Result<()> {
+    let shell_cwd = std::env::current_dir().context("get cwd")?;
+    if resolve::same_path(dir, &shell_cwd) {
+        return Ok(());
+    }
+    land(dir)
+}
+
+/// Send the shell to `path`: through the wrapper when it is installed, else
+/// by printing it, the one line on stdout.
+fn land(path: &Path) -> Result<()> {
+    cd::request(path)?;
+    if cd::wrapper_active() {
+        eprintln!("jeet: {}", path.display());
+    } else {
+        println!("{}", path.display());
+        eprintln!(
+            "jeet: add `eval \"$(jeet init-shell)\"` to your shell rc to cd here automatically"
+        );
     }
     Ok(())
 }
