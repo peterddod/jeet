@@ -135,7 +135,9 @@ fn invocation(
             argv
         }
         // The script reads the text from its arguments rather than having it
-        // pasted in.
+        // pasted in. `--` ends osascript's options: without it, a title
+        // starting with `-e` would be one more line of script, and a script
+        // can run any shell command.
         Os::MacOs => vec![
             "osascript".to_string(),
             "-e".into(),
@@ -146,6 +148,7 @@ fn invocation(
                 .into(),
             "-e".into(),
             "end run".into(),
+            "--".into(),
             title,
             subtitle.unwrap_or_default(),
             body,
@@ -268,7 +271,45 @@ mod tests {
         // The script is fixed; the text only ever follows it.
         let script: Vec<&String> = run.argv[1..7].iter().collect();
         assert!(script.iter().all(|a| !a.contains("pwned")), "{script:?}");
-        assert_eq!(run.argv[7..], [hostile, "sub", hostile]);
+        assert_eq!(run.argv[7..], ["--", hostile, "sub", hostile]);
+    }
+
+    /// A title that would be another `-e` line of script, were it read as
+    /// an option, once `one_line` has trimmed the space that got it past
+    /// jeet's own flags.
+    const OPTION_TITLE: &str = r#" -eproperty p : (do shell script "echo INJECTED > injected")"#;
+
+    #[test]
+    fn osascript_never_reads_the_text_as_options() {
+        let n = note(OPTION_TITLE, "-e body", None);
+        let run = invocation(&n, Os::MacOs, None, |_| false).unwrap();
+        let end = run.argv.iter().position(|a| a == "--").unwrap();
+        assert_eq!(end, 7, "{:?}", run.argv);
+        assert_eq!(run.argv[8], OPTION_TITLE.trim_start());
+        assert_eq!(run.argv[10], "-e body");
+    }
+
+    /// The same arguments, run, with the notification swapped for a script
+    /// that hands back what it was given: the title comes back as text, and
+    /// nothing in it has run.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn osascript_hands_the_title_over_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = note(OPTION_TITLE, "body", None);
+        let mut argv = invocation(&n, Os::MacOs, None, |_| false).unwrap().argv;
+        argv[4] = "return (item 1 of argv) & \"|\" & (count of argv)".into();
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("{}|3", OPTION_TITLE.trim_start())
+        );
+        assert!(!dir.path().join("injected").exists());
     }
 
     #[test]
