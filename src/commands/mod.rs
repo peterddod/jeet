@@ -8,6 +8,7 @@ pub mod install_shell;
 pub mod ls;
 pub mod notify;
 pub mod path;
+pub mod pr;
 pub mod projects;
 pub mod prs;
 pub mod review;

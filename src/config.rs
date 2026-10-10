@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::github::MergeMethod;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_scan_roots")]
@@ -25,6 +27,10 @@ pub struct Config {
     /// What `jeet review` does besides checking the PR out.
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
     pub review: ReviewConfig,
+
+    /// How `jeet pr merge` merges (`[merge]`).
+    #[serde(default, skip_serializing_if = "MergeConfig::is_empty")]
+    pub merge: MergeConfig,
 
     /// Minimum seconds between background fetches of the store (default:
     /// 300). `0` turns background syncing off; `jeet sync` still works.
@@ -94,6 +100,21 @@ impl ReviewConfig {
 
     pub fn notify(&self) -> bool {
         self.notify.unwrap_or(true)
+    }
+}
+
+/// `[merge]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MergeConfig {
+    /// Merge method used when `--method` is not given and the repository
+    /// allows it; otherwise the repository's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
+}
+
+impl MergeConfig {
+    fn is_empty(&self) -> bool {
+        self.method.is_none()
     }
 }
 
@@ -212,6 +233,7 @@ impl Default for Config {
             harness: None,
             agent: None,
             review: ReviewConfig::default(),
+            merge: MergeConfig::default(),
             sync_interval_secs: None,
             assistant: AssistantConfig::default(),
             watch: None,

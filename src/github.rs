@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The fields jeet asks `gh pr view` / `gh pr list` for.
 const PR_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,headRefName,headRefOid,baseRefName,isCrossRepository";
@@ -415,6 +415,235 @@ pub fn checkout(dir: &Path, number: u64, branch: Option<&str>) -> Result<()> {
         None => vec!["pr", "checkout", &number, "--detach"],
     };
     gh_ok(dir, &args).map(|_| ())
+}
+
+/// How a pull request's commits land on its base branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// In the order GitHub offers them.
+    pub const ALL: [MergeMethod; 3] =
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+
+    /// The name GitHub's REST API and config.toml use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+}
+
+/// The merge methods a repository allows, and the one GitHub offers the
+/// user first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeSettings {
+    #[serde(default)]
+    pub merge_commit_allowed: bool,
+    #[serde(default)]
+    pub squash_merge_allowed: bool,
+    #[serde(default)]
+    pub rebase_merge_allowed: bool,
+    /// GitHub deletes the head branch itself once a PR is merged.
+    #[serde(default)]
+    pub delete_branch_on_merge: bool,
+    /// `MERGE`, `SQUASH` or `REBASE`.
+    #[serde(default)]
+    pub viewer_default_merge_method: String,
+}
+
+impl MergeSettings {
+    pub fn allows(&self, method: MergeMethod) -> bool {
+        match method {
+            MergeMethod::Merge => self.merge_commit_allowed,
+            MergeMethod::Squash => self.squash_merge_allowed,
+            MergeMethod::Rebase => self.rebase_merge_allowed,
+        }
+    }
+
+    /// The method GitHub's merge button starts on, if it is allowed.
+    pub fn default_method(&self) -> Option<MergeMethod> {
+        let method = match self.viewer_default_merge_method.as_str() {
+            "MERGE" => MergeMethod::Merge,
+            "SQUASH" => MergeMethod::Squash,
+            "REBASE" => MergeMethod::Rebase,
+            _ => return None,
+        };
+        self.allows(method).then_some(method)
+    }
+
+    pub fn allowed(&self) -> Vec<MergeMethod> {
+        MergeMethod::ALL
+            .into_iter()
+            .filter(|m| self.allows(*m))
+            .collect()
+    }
+}
+
+/// The repository's merge settings.
+pub fn merge_settings(repo_dir: &Path) -> Result<MergeSettings> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed,deleteBranchOnMerge,viewerDefaultMergeMethod",
+        ],
+    )?;
+    serde_json::from_str(&text).context("parse gh repo view output")
+}
+
+/// One check run or commit status on a PR's head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "__typename")]
+pub enum StatusCheck {
+    #[serde(rename_all = "camelCase")]
+    CheckRun {
+        #[serde(default)]
+        name: String,
+        /// `COMPLETED` once it has finished.
+        #[serde(default)]
+        status: String,
+        /// `SUCCESS`, `FAILURE`, `NEUTRAL`, `SKIPPED`, … once completed.
+        #[serde(default)]
+        conclusion: String,
+    },
+    StatusContext {
+        #[serde(default)]
+        context: String,
+        /// `SUCCESS`, `PENDING`, `EXPECTED`, `FAILURE` or `ERROR`.
+        #[serde(default)]
+        state: String,
+    },
+    /// A kind GitHub may add later: jeet cannot tell whether it passed.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where a check stands, for deciding whether to merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Passed,
+    Pending,
+    Failed,
+}
+
+impl StatusCheck {
+    pub fn name(&self) -> &str {
+        match self {
+            StatusCheck::CheckRun { name, .. } => name,
+            StatusCheck::StatusContext { context, .. } => context,
+            StatusCheck::Unknown => "a check jeet cannot read",
+        }
+    }
+
+    pub fn state(&self) -> CheckState {
+        match self {
+            StatusCheck::CheckRun {
+                status, conclusion, ..
+            } => match (status.as_str(), conclusion.as_str()) {
+                ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => CheckState::Passed,
+                ("COMPLETED", _) => CheckState::Failed,
+                _ => CheckState::Pending,
+            },
+            StatusCheck::StatusContext { state, .. } => match state.as_str() {
+                "SUCCESS" => CheckState::Passed,
+                "PENDING" | "EXPECTED" => CheckState::Pending,
+                _ => CheckState::Failed,
+            },
+            StatusCheck::Unknown => CheckState::Pending,
+        }
+    }
+}
+
+/// A PR with what decides whether it can be merged.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeStatus {
+    #[serde(flatten)]
+    pub history: HistoryPr,
+    /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN` (not worked out yet).
+    #[serde(default)]
+    pub mergeable: String,
+    /// GitHub's verdict with branch protection taken into account: `CLEAN`,
+    /// `BLOCKED`, `BEHIND`, `DIRTY`, `DRAFT`, `HAS_HOOKS`, `UNSTABLE` or
+    /// `UNKNOWN`.
+    #[serde(default)]
+    pub merge_state_status: String,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub status_check_rollup: Vec<StatusCheck>,
+}
+
+fn null_as_empty<'de, D>(deserializer: D) -> std::result::Result<Vec<StatusCheck>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<StatusCheck>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// PR `number` with its mergeability and checks.
+pub fn merge_status(repo_dir: &Path, number: u64) -> Result<MergeStatus> {
+    let fields = format!("{PR_HISTORY_FIELDS},mergeable,mergeStateStatus,statusCheckRollup");
+    let text = gh_ok(
+        repo_dir,
+        &["pr", "view", &number.to_string(), "--json", &fields],
+    )?;
+    serde_json::from_str(&text).context("parse gh pr view output")
+}
+
+/// Merge `number`, only if its head is still `head_oid`.
+///
+/// The REST endpoint rather than `gh pr merge`, which turns on auto-merge
+/// or joins a merge queue when it cannot merge straight away; this either
+/// merges now or fails.
+pub fn merge_pr(repo_dir: &Path, number: u64, method: MergeMethod, head_oid: &str) -> Result<()> {
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "PUT",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{number}/merge"),
+            "-f",
+            &format!("merge_method={}", method.as_str()),
+            "-f",
+            &format!("sha={head_oid}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+/// Delete `branch` on GitHub. Only the remote one: a task may still have it
+/// checked out.
+pub fn delete_remote_branch(repo_dir: &Path, branch: &str) -> Result<()> {
+    let encoded: String = branch
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "DELETE",
+            &format!("repos/{{owner}}/{{repo}}/git/refs/heads/{encoded}"),
+        ],
+    )
+    .map(|_| ())
 }
 
 /// Open the PR in the browser, through `gh` so its browser setting applies.

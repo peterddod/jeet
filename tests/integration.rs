@@ -4577,6 +4577,214 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     assert!(stderr_of(&output).contains("review jobs jeet started"));
 }
 
+/// A stand-in `gh` for `jeet pr merge`, recording calls as
+/// [`stub_history_gh`] does: `pr view` prints `pr.json` beside it, `repo
+/// view` prints `repo.json`, and the merge and branch deletion through
+/// `gh api` succeed.
+#[cfg(unix)]
+fn stub_merge_gh(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("gh-merge-bin");
+    std::fs::create_dir_all(bin.join("calls")).unwrap();
+    write_script(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\0' "$@" > "$here/calls/.call.$$"
+mv "$here/calls/.call.$$" "$here/calls/call.$$"
+[ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
+case "$1 $2" in
+  "pr view") cat "$here/pr.json"; exit 0 ;;
+  "repo view") cat "$here/repo.json"; exit 0 ;;
+  "api --method")
+    case "$3" in
+      PUT) echo '{"merged":true,"message":"Pull Request successfully merged"}'; exit 0 ;;
+      DELETE) exit 0 ;;
+    esac ;;
+esac
+echo "unexpected gh $*" >&2
+exit 1
+"#,
+    );
+    std::fs::write(
+        bin.join("repo.json"),
+        r#"{"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":false,"deleteBranchOnMerge":false,"viewerDefaultMergeMethod":"SQUASH"}"#,
+    )
+    .unwrap();
+    bin
+}
+
+/// PR #9 of widget, on branch `feat`, ready to merge; `change` makes it
+/// otherwise.
+fn merge_pr_json(change: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut pr = serde_json::json!({
+        "number": 9, "title": "Ship it", "url": "https://github.com/acme/widget/pull/9",
+        "state": "OPEN", "isDraft": false, "reviewDecision": "APPROVED",
+        "headRefName": "feat", "headRefOid": "abc123", "baseRefName": "main",
+        "isCrossRepository": false, "additions": 4, "deletions": 1,
+        "updatedAt": "2026-10-10T00:00:00Z",
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "StatusContext", "context": "lint", "state": "SUCCESS"}
+        ]
+    });
+    change(&mut pr);
+    pr.to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_assistant_merges_a_pr_only_when_allowed_and_ready() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("Feature");
+    lab.add(&task, &["widget", "--branch", "feat"]);
+    let bin = stub_merge_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let merge = ["pr", "merge", "9", "--repo", "widget"];
+    let pr_json = bin.join("pr.json");
+    std::fs::write(&pr_json, merge_pr_json(|_| {})).unwrap();
+
+    // Not allowed: refused before GitHub is asked anything.
+    let output = lab.jeet_at(&merge, &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("may not merge pull requests"), "{stderr}");
+    assert!(stderr.contains("`pr.merge`"), "{stderr}");
+    assert!(gh_calls(&bin).is_empty());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["capability"], "pr.merge");
+    assert_eq!(log[0]["outcome"], "denied");
+
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"pr.merge\"]\n",
+    )
+    .unwrap();
+
+    // Allowed, but not ready: each refused, saying why, with nothing merged.
+    let not_ready: Vec<(String, &str)> = vec![
+        (merge_pr_json(|p| p["state"] = "CLOSED".into()), "is closed"),
+        (
+            merge_pr_json(|p| p["state"] = "MERGED".into()),
+            "already merged",
+        ),
+        (merge_pr_json(|p| p["isDraft"] = true.into()), "is a draft"),
+        (
+            merge_pr_json(|p| p["mergeable"] = "CONFLICTING".into()),
+            "has conflicts",
+        ),
+        (
+            merge_pr_json(|p| p["statusCheckRollup"][0]["conclusion"] = "FAILURE".into()),
+            "checks failed on #9: build",
+        ),
+        (
+            merge_pr_json(|p| {
+                p["statusCheckRollup"][0]["status"] = "IN_PROGRESS".into();
+                p["statusCheckRollup"][0]["conclusion"] = "".into();
+            }),
+            "not finished on #9: build",
+        ),
+        (
+            merge_pr_json(|p| p["statusCheckRollup"][1]["state"] = "PENDING".into()),
+            "not finished on #9: lint",
+        ),
+        (
+            merge_pr_json(|p| p["mergeStateStatus"] = "BLOCKED".into()),
+            "blocks merging",
+        ),
+        (
+            merge_pr_json(|p| p["reviewDecision"] = "REVIEW_REQUIRED".into()),
+            "approving review",
+        ),
+    ];
+    for (json, why) in &not_ready {
+        std::fs::write(&pr_json, json).unwrap();
+        let output = lab.jeet_at(&merge, &lab.home(), &env);
+        assert!(!output.status.success(), "{why}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("not merging"), "{stderr}");
+        assert!(stderr.contains(why), "{why}: {stderr}");
+    }
+    let calls = gh_calls(&bin);
+    assert!(
+        calls.iter().all(|c| c[0] == "pr" && c[1] == "view"),
+        "only looked: {calls:?}"
+    );
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 1 + not_ready.len());
+    assert!(log[1..].iter().all(|r| r["outcome"] == "failed"));
+    assert!(notes(&notifier).is_empty());
+
+    // A method the repository does not allow is refused too.
+    std::fs::write(&pr_json, merge_pr_json(|_| {})).unwrap();
+    let mut rebase = merge.to_vec();
+    rebase.extend(["--method", "rebase"]);
+    let output = lab.jeet_at(&rebase, &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("does not allow rebase"));
+
+    // Ready: merged at the commit that was checked, the repository's own
+    // method, the branch deleted on GitHub; logged, announced and recorded.
+    let output = lab.jeet_at(&merge, &lab.home(), &env);
+    succeeded(&output);
+    let calls = gh_calls(&bin);
+    assert!(
+        !calls.iter().flatten().any(|a| a.contains("admin")),
+        "{calls:?}"
+    );
+    let put: Vec<_> = calls.iter().filter(|c| c.contains(&"PUT".into())).collect();
+    assert_eq!(put.len(), 1, "{calls:?}");
+    assert!(put[0].contains(&"repos/{owner}/{repo}/pulls/9/merge".to_string()));
+    assert!(
+        put[0].contains(&"merge_method=squash".to_string()),
+        "{put:?}"
+    );
+    assert!(put[0].contains(&"sha=abc123".to_string()), "{put:?}");
+    assert!(calls.iter().any(|c| c.contains(&"DELETE".into())
+        && c.contains(&"repos/{owner}/{repo}/git/refs/heads/feat".to_string())));
+    let log = actions(&lab.home());
+    let last = log.last().unwrap();
+    assert_eq!(last["outcome"], "done");
+    assert_eq!(last["action"], "merged #9 of widget");
+    assert_eq!(notes(&notifier), ["Assistant|merged #9 of widget|"]);
+    let output = lab.jeet_at(&["task", "prs", "--offline"], &task, &[]);
+    succeeded(&output);
+    let history = stdout_of(&output);
+    assert!(
+        history.contains("#9") && history.contains("merged"),
+        "{history}"
+    );
+
+    // --method and --keep-branch, by the user, outside the assistant.
+    let before = gh_calls(&bin).len();
+    let mut kept = merge.to_vec();
+    kept.extend(["--method", "merge", "--keep-branch"]);
+    succeeded(&lab.jeet_at(&kept, &lab.home(), &[("PATH", path.as_str())]));
+    let calls = gh_calls(&bin);
+    assert!(calls
+        .iter()
+        .any(|c| c.contains(&"merge_method=merge".to_string())));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.contains(&"DELETE".into()))
+            .count(),
+        1,
+        "the branch is kept"
+    );
+    assert!(calls.len() > before);
+}
+
 #[cfg(unix)]
 #[test]
 fn notify_reports_through_the_notifier() {

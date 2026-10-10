@@ -68,6 +68,12 @@ pub enum Commands {
         rerun: bool,
     },
 
+    /// Pull requests: merge one
+    Pr {
+        #[command(subcommand)]
+        command: PrCommands,
+    },
+
     /// Run a background review job (started by `jeet review`)
     #[command(hide = true)]
     ReviewJob { state: std::path::PathBuf },
@@ -289,6 +295,27 @@ pub enum TaskCommands {
         /// Replace copies the task has changed, too
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PrCommands {
+    /// Merge a pull request, only when it is open, not a draft, free of
+    /// conflicts, its checks have all passed and GitHub does not block it
+    Merge {
+        /// PR number, with or without a leading #, or the PR's URL
+        pr: String,
+        /// Repository the PR belongs to; defaults to the PR URL's, then the
+        /// one containing the current directory
+        #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
+        repo: Option<String>,
+        /// Merge method (default: `[merge] method` in config.toml if the
+        /// repository allows it, else the repository's default)
+        #[arg(long, value_enum)]
+        method: Option<crate::github::MergeMethod>,
+        /// Keep the PR's branch on GitHub instead of deleting it
+        #[arg(long)]
+        keep_branch: bool,
     },
 }
 
