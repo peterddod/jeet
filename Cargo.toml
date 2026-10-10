@@ -1,6 +1,6 @@
 [package]
 name = "jeet"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "Global git repo index and worktree manager"
 license = "MIT"

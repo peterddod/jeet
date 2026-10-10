@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.7.1
+cargo install --git https://github.com/peterddod/jeet --tag v0.7.2
 ```
 
 ## Quick start
@@ -774,6 +774,9 @@ jeet is now built around **tasks**. This is a breaking release: run
 v0.7.1: notifications never hold jeet up. `terminal-notifier` waits until
 macOS grants it permission, which stalled `jeet notify`, the assistant's
 actions and `jeet watch`; jeet now gives it two seconds and moves on.
+
+v0.7.2: **Ctrl-Q** goes back to jeet from a task's agent and leaves it
+running (quitting Claude ends it). The tmux status line now says so.
 
 ## What's new in v0.6
 
