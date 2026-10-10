@@ -375,7 +375,7 @@ is told `status: queued, 8/8 live`. It starts when a slot frees.
   from status files.
 - **Turns:** one per `Stopped` event.
 - **Cost:** only where the harness reports usage (a new optional `usage()` on
-  the #23 trait). Otherwise it shows as `n/a`, and a cost budget is refused at
+  the #23 trait, #26). Otherwise it shows as `n/a`, and a cost budget is refused at
   creation, not silently ignored.
 
 A child's spend counts toward every ancestor. At 80% the node and its parent
@@ -393,7 +393,7 @@ jeet agent stop --all         # the user's panic button: everything below the ro
 ```
 
 `paused` means: `messages::deliver` queues instead of typing, nothing is
-started, and the harness's `interrupt` (new; Esc for Claude Code) ends the
+started, and the harness's `interrupt` (new, #32; Esc for Claude Code) ends the
 current turn. `resume` hands the queue over. A manager may pause or stop its
 descendants. Only the user may `--all` or act on the root.
 
@@ -431,7 +431,7 @@ They are gated by the harness permission rules jeet writes for each node
 | `gh pr comment` / `review` | root only, with `pr.comment` / `pr.review` |
 | `gh pr merge` | **the user only** in phases 1-3; `pr.merge` is reserved |
 
-This needs a *deny* rule list from the harness, not just allow rules (§7).
+This needs a *deny* rule list from the harness, not just allow rules (§7, #32).
 
 ### 5.7 What this does not protect against
 
@@ -446,7 +446,7 @@ already excludes the assistant's, unless the user opts in.
 
 **Decision:** this cooperative model is accepted for phase 1. There the only
 manager is the assistant, and it already runs under it. The model must be
-reviewed again before phase 2 ships (see the gate in §8).
+reviewed again before phase 2 ships (see the gate in §8, tracked in #33).
 
 ## 6. Agents pane (TUI)
 
@@ -495,18 +495,18 @@ missing piece named. Workers keep #23's degrade-don't-fail rule.
 | add context at session start | yes | no: falls back to `BRIEF.md` + `AGENTS.md` telling it to read it |
 | continue-turn output (to hand the inbox over at Stop) | yes | yes (else reports wait for the idle typing path) |
 | allow rules from capabilities | yes (command prefixes) | yes (else every action prompts the user, which is not autonomous) |
-| **deny rules** | no, **new** | yes for children (5.6) |
-| **interrupt** a running turn | no, **new** | yes (pause) |
-| **usage** (tokens/cost) | no, **new**, optional | no (cost budgets only) |
+| **deny rules** | no, **new** (#32) | yes for children (5.6) |
+| **interrupt** a running turn | no, **new** (#32) | yes (pause) |
+| **usage** (tokens/cost) | no, **new** (#26), optional | no (cost budgets only) |
 | instructions file | yes (`instructions_file`, #22) | yes (manager role template) |
 
-Goose (per #23's survey) would qualify once it can write hook files. Its lack
+Goose (per #23's survey; #28) would qualify once it can write hook files (#27). Its lack
 of a `NeedsInput` event means a prompt it shows is seen only as `idle`, so
 it is acceptable only as a worker until then.
 
 ## 8. Phasing
 
-**Phase 1: parent link and reporting up. The assistant is the only manager.**
+**Phase 1: parent link and reporting up. The assistant is the only manager.** (#31)
 - `tasks.parent_id` (v4 migration, without `agent` kind or the other tables
   except `task_reports` and `task_briefs`). A task the assistant makes gets
   `parent_id = assistant`.
@@ -524,7 +524,7 @@ it is acceptable only as a worker until then.
   `tasks.rs` (teach `jeet report`), and `tui/tasks_ui.rs` (a `↳ assistant`
   marker and the last report in the row).
 
-**Gate before phase 2 ships: review the identity model (5.7).** Phase 1 accepts
+**Gate before phase 2 ships: review the identity model (5.7, #33).** Phase 1 accepts
 the cooperative model. Phase 2 lets agents below the root hold real
 capabilities, so before it ships, decide whether the cooperative model is
 still enough. The alternative is to require harness enforcement (deny rules,
@@ -532,7 +532,7 @@ or sandboxing that keeps a node out of `tmux`, `index.db`, `config.toml` and
 other nodes' homes) for any harness that runs a manager below the root.
 Record the outcome in this doc.
 
-**Phase 2: agents as managers.**
+**Phase 2: agents as managers.** (#34; needs #32 and #33)
 - `kind = 'agent'`, `jeet agent new|ls|show|grant`, `task_grants`, effective
   allow-lists, depth/fan-out/`max_live`, time and turn budgets, pause/stop,
   and recursive archive/delete.
@@ -544,13 +544,13 @@ Record the outcome in this doc.
   (archive/delete/unarchive cascade), `harness/` (`interrupt`, deny rules),
   `startup.rs` (#23 trust scope excludes manager homes), `cli.rs`.
 
-**Phase 3: the agents pane.**
+**Phase 3: the agents pane.** (#35)
 - The tree view, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
   parent fields.
 - Touch points: `tui/tasks.rs`, `tui/tasks_ui.rs`, `tui/state.rs`, a new
   `tui/agents.rs`, and #21's form (`tui/tasks.rs` new-task form).
 
-**Phase 4: escalation to the user and the rest.**
+**Phase 4: escalation to the user and the rest.** (#36; cost budgets need #26)
 - `needs_user`, `jeet report answer|escalate`, answers from the user, cost
   budgets via `Harness::usage`, `jeet watch` rules targeting agents, and
   `--reparent`.
