@@ -13,7 +13,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::{AgentSession, AgentSpec};
+use crate::agent::AgentSpec;
+use crate::db::tasks::TaskRecord;
 use crate::db::RepoRecord;
 use crate::github::{PendingReview, PullRequest, Verdict};
 use crate::review::Job;
@@ -134,8 +135,10 @@ pub enum PendingAction {
 pub enum Overlay {
     /// Selection into [`Explorer::worktree_rows`].
     Worktrees { selected: usize },
+    /// The sessions of the task being browsed, whose agent ⏎ resumes one of.
     Sessions {
-        sessions: Vec<AgentSession>,
+        task: TaskRecord,
+        sessions: Vec<super::tasks::SessionChoice>,
         selected: usize,
     },
     Confirm {

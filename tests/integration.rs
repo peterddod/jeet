@@ -3200,7 +3200,8 @@ fn write_script(path: &std::path::Path, text: &str) {
 ///   with `--web`, nothing.
 /// - `pr checkout <n> --branch <b>` checks `b` out; `--detach` stays put.
 /// - `pr list --head feat`: #3, merged, plus a fork's #4 from a branch of the
-///   same name; `--search <sha>`: #5, an open draft; anything else, none.
+///   same name; `--search <sha>`: #5, an open draft; anything else, none —
+///   unless `STUB_OPEN_PRS` is set, when it is #7, open, as `jeet prs` reads it.
 #[cfg(unix)]
 fn stub_history_gh(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("gh-bin");
@@ -3243,6 +3244,10 @@ case "$1 $2" in
       esac
       shift
     done
+    if [ -n "$STUB_OPEN_PRS" ]; then
+      echo '[{"number":7,"title":"Widen the store","author":{"login":"someone"},"additions":12,"deletions":3,"isDraft":false,"reviewDecision":"","headRefName":"wide-store","isCrossRepository":false,"reviewRequests":[]}]'
+      exit 0
+    fi
     echo '[]'; exit 0 ;;
 esac
 echo "unexpected gh $*" >&2
@@ -3400,6 +3405,151 @@ fn a_review_of_a_branch_another_task_has_is_detached() {
     );
     assert_eq!(rev(&worktree, "HEAD"), fixup);
     assert_eq!(checkouts(&bin), 2, "no checkout over the fixup");
+}
+
+/// ⏎ on a PR in the explorer's PR list browses it in a task: the PR's
+/// review task, made like `jeet review` makes it — or the task whose
+/// worktree has the PR's branch already. Never a checkout outside a task.
+#[cfg(unix)]
+#[test]
+fn the_explorers_pr_list_checks_out_into_tasks() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let env = [("PATH", path.as_str()), ("STUB_OPEN_PRS", "1")];
+
+    let mut screen = Pty::open(&lab, "explore", &trunk, &env);
+    screen.wait_for_text("acme/widget · type to filter");
+    // The trunk is in no task, so it has no agent to start.
+    screen.type_keys(b"\x01");
+    screen.wait_for_text("agents run in tasks");
+    screen.esc();
+    screen.type_keys(b"\x0f");
+    screen.wait_for_text("Widen the store");
+    screen.type_keys(b"\r");
+    let review = lab.home().join("tasks/review-widget-7/widget");
+    wait_until("the review task", || review.join(".git").exists());
+    screen.wait_for_text("in new task review-widget-7");
+    screen.esc();
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet explore exited with {status}");
+
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &review),
+        "wide-store"
+    );
+    assert!(
+        !lab.home().join("worktrees").exists(),
+        "a checkout outside any task"
+    );
+    let prs = stdout_of(&lab.jeet_at(
+        &["task", "prs", "review-widget-7", "--offline"],
+        &lab.home(),
+        &[],
+    ));
+    assert!(prs.contains("#7"), "{prs}");
+
+    // With the branch in the author's own task, that is where it goes.
+    succeeded(&lab.jeet_at(
+        &["task", "delete", "review-widget-7", "--force"],
+        &lab.home(),
+        &[],
+    ));
+    let mine = lab.new_task("Wide store");
+    let own = lab.add(&mine, &["widget", "--branch", "wide-store"]);
+    let mut screen = Pty::open(&lab, "explore", &trunk, &env);
+    screen.wait_for_text("acme/widget · type to filter");
+    screen.type_keys(b"\x0f");
+    screen.wait_for_text("Widen the store");
+    screen.type_keys(b"\r");
+    screen.wait_for_text("in task Wide store");
+    screen.esc();
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet explore exited with {status}");
+    assert!(!lab.home().join("tasks/review-widget-7").exists());
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &own),
+        "wide-store"
+    );
+}
+
+/// ctrl-s and ctrl-a in the explorer act on the task being browsed: its
+/// sessions, and its agent in tmux, as ⏎ in the tasks list does.
+#[cfg(unix)]
+#[test]
+fn the_explorer_opens_the_tasks_agent_in_tmux() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    let (older, newer) = (
+        "aaaaaaaa-1111-4111-8111-111111111111",
+        "bbbbbbbb-2222-4222-8222-222222222222",
+    );
+    for session in [older, newer] {
+        let output = lab.hook(
+            "SessionStart",
+            &hook_input("SessionStart", session, &task),
+            &[],
+        );
+        hook_ok(&output);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    std::fs::create_dir(task.join("notes")).unwrap();
+
+    let mut screen = Pty::open(&lab, "explore", &task.join("notes"), &env);
+    screen.wait_for_text("jeet · task Fix login");
+    // The task's sessions, newest first; resume the older one.
+    screen.type_keys(b"\x13");
+    screen.wait_for_text("Fix login · sessions");
+    screen.type_keys(b"j\r");
+    wait_until("the attach", || {
+        !calls_of(&tmux, "attach-session").is_empty()
+    });
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let argv = &started[0];
+    let at = argv.iter().position(|a| a == "-c").unwrap();
+    assert_eq!(
+        std::path::Path::new(&argv[at + 1]).canonicalize().unwrap(),
+        task,
+        "{argv:?}"
+    );
+    let at = argv.iter().position(|a| a == "--session-id").unwrap();
+    assert_eq!(argv[at + 1], older, "{argv:?}");
+    assert!(argv.iter().any(|a| a == "--settings"), "{argv:?}");
+    assert_eq!(
+        calls_of(&tmux, "attach-session")[0][1..],
+        ["-t".to_string(), "=jeet-fix-login".into()]
+    );
+
+    // Running now: ctrl-a attaches to it as it is.
+    screen.wait_for_text("back from Fix login's agent");
+    screen.type_keys(b"\x01");
+    wait_until("the second attach", || {
+        calls_of(&tmux, "attach-session").len() == 2
+    });
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    screen.esc();
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet explore exited with {status}");
 }
 
 #[cfg(unix)]
@@ -4125,6 +4275,8 @@ fn import_leaves_pull_request_checkouts_alone() {
     succeeded(&output);
     let stderr = stderr_of(&output);
     assert!(stderr.contains("pull request"), "{stderr}");
+    // Said how to remove one, as jeet itself no longer does.
+    assert!(stderr.contains("`git worktree remove`"), "{stderr}");
     assert!(stderr.contains("nothing to import"), "{stderr}");
     assert!(lab.task_slugs().is_empty());
     assert!(review.is_dir());

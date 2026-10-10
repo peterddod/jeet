@@ -621,7 +621,11 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 );
             frame.render_stateful_widget(list, area, &mut state);
         }
-        Overlay::Sessions { sessions, selected } => {
+        Overlay::Sessions {
+            task,
+            sessions,
+            selected,
+        } => {
             let area = centered_rect(85, 70, frame.area());
             frame.render_widget(Clear, area);
             let items: Vec<ListItem> = sessions
@@ -629,14 +633,15 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .map(|session| {
                     ListItem::new(Line::from(vec![
                         Span::styled(
-                            format!("{:<10}", session.age()),
+                            format!("{:<10}", crate::agent::age_label(session.last)),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::styled(
-                            format!("{:<9}", format!("{} msgs", session.entries)),
-                            Style::default().fg(Color::DarkGray),
+                            format!("{:<10}", session.state),
+                            Style::default().fg(Color::Cyan),
                         ),
-                        Span::raw(truncate(&session.summary, 60)),
+                        Span::raw(format!("{}  ", truncate(&session.name, 30))),
+                        Span::styled(session.id.clone(), Style::default().fg(Color::DarkGray)),
                     ]))
                 })
                 .collect();
@@ -646,10 +651,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             } else {
                 Some((*selected).min(sessions.len() - 1))
             });
-            let title = format!(
-                " {} sessions · ⏎ resume  esc close ",
-                explorer.agent.display()
-            );
+            let title = format!(" {} · sessions · ⏎ resume  esc close ", task.name);
             let list = List::new(items)
                 .block(
                     Block::default()
@@ -1035,8 +1037,8 @@ const HELP: [(&str, &str); 27] = [
     ("shift-drag", "select text — jeet has the mouse otherwise"),
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
-    ("ctrl-a", "start a coding agent at the worktree root"),
-    ("ctrl-s", "previous agent sessions for this worktree"),
+    ("ctrl-a", "this task's agent, in tmux: started if need be"),
+    ("ctrl-s", "this task's agent sessions: ⏎ resumes one"),
     ("ctrl-w", "worktrees of this repository: switch to one"),
     ("", "  in the panel: o open its PR, r refresh, esc close"),
     (
@@ -1047,7 +1049,10 @@ const HELP: [(&str, &str); 27] = [
         "ctrl-p",
         "pull request: open it, approve, comment, request changes",
     ),
-    ("ctrl-o", "the repo's open pull requests: ⏎ checks one out"),
+    (
+        "ctrl-o",
+        "the repo's open pull requests: ⏎ checks one out in a task",
+    ),
     ("ctrl-d", "toggle hidden dotfiles"),
     ("ctrl-r", "refresh the listing and counters"),
     ("ctrl-q", "quit, leaving the shell in this directory"),

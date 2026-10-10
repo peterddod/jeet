@@ -1,9 +1,9 @@
 //! The `jeet` file explorer.
 //!
-//! Running `jeet` with no arguments inside a repository opens this: a single
+//! `jeet explore`, or `e` in the tasks list, opens this: a single
 //! level of the tree at a time, arrow keys or the mouse to move through it,
 //! and shortcuts for the things you actually came to do — switch worktree,
-//! edit a file, or hand the worktree to a coding agent.
+//! edit a file, or open the task's coding agent.
 //!
 //! Typing filters the level you are on from the moment the window opens, so
 //! every command that is not navigation carries a ctrl: a bare letter belongs
@@ -32,9 +32,12 @@ use ratatui::layout::Rect;
 
 use crate::agent::{self, AgentSpec};
 use crate::context::App;
+use crate::db::tasks::{TaskRecord, TaskState};
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
 use crate::review::{self as review_job, JobState};
+use crate::runtime;
+use crate::tmux;
 use crate::worktrees::{self, WorktreeStatus};
 
 use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
@@ -266,8 +269,8 @@ fn handle_browse_key(
         }
         KeyCode::Char('p') if ctrl => open_pr_panel(app, terminal, explorer, false),
         KeyCode::Char('o') if ctrl => open_repo_prs(app, terminal, explorer, None),
-        KeyCode::Char('a') if ctrl => launch_agent(app, terminal, explorer, &[])?,
-        KeyCode::Char('s') if ctrl => open_sessions(explorer),
+        KeyCode::Char('a') if ctrl => open_agent(app, terminal, explorer, None)?,
+        KeyCode::Char('s') if ctrl => open_sessions(app, terminal, explorer),
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
         // F1 alone would do, except macOS gives it to the media keys by
         // default and some terminals keep it for their own menu. ctrl-g is
@@ -669,26 +672,38 @@ fn handle_overlay_key(
             _ => explorer.overlay = Some(Overlay::Worktrees { selected }),
         },
         Overlay::Sessions {
+            task,
             sessions,
             mut selected,
         } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {}
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = selected.saturating_sub(1);
-                explorer.overlay = Some(Overlay::Sessions { sessions, selected });
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                });
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 selected = (selected + 1).min(sessions.len().saturating_sub(1));
-                explorer.overlay = Some(Overlay::Sessions { sessions, selected });
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                });
             }
             KeyCode::Enter => match sessions.get(selected) {
-                Some(session) => {
-                    let args = explorer.agent.resume_args(&session.id).unwrap_or_default();
-                    launch_agent(app, terminal, explorer, &args)?;
-                }
+                Some(session) => open_agent(app, terminal, explorer, Some(session.id.clone()))?,
                 None => explorer.set_status("no session selected"),
             },
-            _ => explorer.overlay = Some(Overlay::Sessions { sessions, selected }),
+            _ => {
+                explorer.overlay = Some(Overlay::Sessions {
+                    task,
+                    sessions,
+                    selected,
+                })
+            }
         },
         Overlay::PullRequest {
             pending,
@@ -897,7 +912,45 @@ fn collect_rows(app: &App, repo: &RepoRecord, current_root: &Path) -> Result<Vec
     Ok(rows)
 }
 
-fn open_sessions(explorer: &mut Explorer) {
+/// The task the explorer is browsing in, for the keys that act on its agent.
+/// Anywhere else there is none to act on — agents run in tasks — and the
+/// reason is put up in a panel instead.
+fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
+    let (title, lines) = match crate::tasks::task_at(app, &explorer.root) {
+        Ok(Some(task)) if task.state == TaskState::Archived => (
+            "task archived",
+            vec![
+                format!("task {} is archived", task.name),
+                format!("`jeet task unarchive {}` brings it back", task.slug),
+            ],
+        ),
+        Ok(Some(task)) => return Some(task),
+        Ok(None) => (
+            "agents run in tasks",
+            vec![
+                "this is in no task:".into(),
+                explorer.root.display().to_string(),
+                String::new(),
+                "a task's agent runs in tmux, in the task's directory,".into(),
+                "with its worktrees around it. n in the tasks list".into(),
+                "(`jeet`) or `jeet task new <name> --repo <repo>` makes one".into(),
+            ],
+        ),
+        Err(e) => ("agent", vec![format!("{e:#}")]),
+    };
+    explorer.overlay = Some(Overlay::Message {
+        title: title.into(),
+        lines,
+        from_panel: false,
+    });
+    None
+}
+
+/// ctrl-s: the sessions of this task's agent, ⏎ to resume one.
+fn open_sessions(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
+    let Some(task) = task_here(app, explorer) else {
+        return;
+    };
     if !explorer.agent.supports_sessions() {
         explorer.overlay = Some(Overlay::Message {
             title: "sessions".into(),
@@ -909,21 +962,26 @@ fn open_sessions(explorer: &mut Explorer) {
         });
         return;
     }
-    match agent::sessions_for(&explorer.agent, &explorer.root) {
+    let dir = crate::tasks::task_dir(app, &task);
+    let sessions = with_progress(terminal, explorer, "reading sessions", || {
+        tasks::session_choices(app, &task, &dir)
+    })
+    .and_then(|inner| inner);
+    match sessions {
         Ok(sessions) if sessions.is_empty() => {
             explorer.overlay = Some(Overlay::Message {
                 title: "sessions".into(),
                 lines: vec![
-                    format!("no {} sessions recorded for", explorer.agent.display()),
-                    explorer.root.display().to_string(),
+                    format!("task {} has no agent sessions yet", task.name),
                     String::new(),
-                    "press ctrl-a to start one".into(),
+                    "press ctrl-a to start its agent".into(),
                 ],
                 from_panel: false,
             });
         }
         Ok(sessions) => {
             explorer.overlay = Some(Overlay::Sessions {
+                task,
                 sessions,
                 selected: 0,
             })
@@ -1160,9 +1218,10 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
     }
 }
 
-/// ⏎ in the PR list: check the PR out — or find the worktree that already
-/// has it — and browse it. Deliberately not `jeet review`: no review command
-/// starts from here, this is only a way in.
+/// ⏎ in the PR list: browse the PR in a task — the one whose worktree has
+/// its branch already, else its review task, made if need be — and record
+/// it in that task's PR history. Deliberately not `jeet review`: no review
+/// command starts from here, this is only a way in.
 fn check_out_pr(
     app: &App,
     terminal: &mut Tui,
@@ -1178,17 +1237,28 @@ fn check_out_pr(
         terminal,
         explorer,
         &format!("checking out #{number}"),
-        || {
-            let pr = github::pr_view(std::path::Path::new(&repo.trunk_path), number)?;
-            worktrees::checkout_pr(app, &repo, &pr)
+        || -> Result<_> {
+            let found = github::pr_history(std::path::Path::new(&repo.trunk_path), number)?;
+            let mut checkout = crate::tasks::browse_pr(app, &repo, &found.pr)?;
+            let record = crate::pr_history::to_record(&checkout.task.id, &repo.id, found);
+            if let Err(e) = app.db.upsert_task_pr(&record) {
+                checkout
+                    .warnings
+                    .push(format!("could not record #{number} in the task: {e:#}"));
+            }
+            Ok(checkout)
         },
     )?;
     match outcome {
-        Ok(checked_out) => {
-            switch_worktree(app, explorer, &checked_out.path)?;
-            let mut status = format!("checked out #{number}");
-            if !checked_out.warnings.is_empty() {
-                status.push_str(&format!(" — {}", checked_out.warnings.join("; ")));
+        Ok(checkout) => {
+            switch_worktree(app, explorer, &checkout.path)?;
+            let task = &checkout.task.name;
+            let mut status = match checkout.created {
+                true => format!("checked out #{number} in new task {task}"),
+                false => format!("checked out #{number} in task {task}"),
+            };
+            if !checkout.warnings.is_empty() {
+                status.push_str(&format!(" — {}", checkout.warnings.join("; ")));
             }
             explorer.set_status(status);
         }
@@ -1466,24 +1536,47 @@ fn open_editor(app: &App, terminal: &mut Tui, explorer: &mut Explorer, file: &Pa
     Ok(())
 }
 
-/// Launch the coding agent from the worktree root, so it sees the whole tree.
-fn launch_agent(
+/// ctrl-a, or ⏎ on a session: attach to the agent of the task being
+/// browsed, in its tmux session, starting it first if need be — resuming
+/// `session` when given, else the task's latest — exactly as ⏎ in the tasks
+/// list does. Detaching comes back here.
+fn open_agent(
     app: &App,
     terminal: &mut Tui,
     explorer: &mut Explorer,
-    extra: &[String],
+    session: Option<String>,
 ) -> Result<()> {
-    let argv = explorer.agent.argv.clone();
-    let root = explorer.root.clone();
-    let extra = extra.to_vec();
-    let outcome = suspended(terminal, || agent::run_in(&argv, &root, &extra))?;
-    match outcome {
-        Ok(0) => explorer.set_status(format!("{} exited", explorer.agent.display())),
-        Ok(code) => explorer.set_status(format!(
-            "{} exited with status {code}",
-            explorer.agent.display()
-        )),
-        Err(e) => explorer.set_status(format!("could not start agent: {e}")),
+    let Some(task) = task_here(app, explorer) else {
+        return Ok(());
+    };
+    let running = with_progress(
+        terminal,
+        explorer,
+        &format!("starting {}'s agent", task.name),
+        || runtime::ensure_running(app, &task, session.as_deref()),
+    )?;
+    let running = match running {
+        Ok(running) => running,
+        Err(e) => {
+            explorer.overlay = Some(Overlay::Message {
+                title: "could not start the agent".into(),
+                lines: vec![format!("{e:#}")],
+                from_panel: false,
+            });
+            return Ok(());
+        }
+    };
+    let attached = suspended(terminal, || tmux::attach(&running.tmux_session))?;
+    let _ = app.db.touch_task(&task.id, crate::worktrees::now_secs());
+    match attached {
+        Ok(_) => {
+            let mut status = format!("back from {}'s agent", task.name);
+            if !running.warnings.is_empty() {
+                status.push_str(&format!(" — {}", running.warnings.join("; ")));
+            }
+            explorer.set_status(status);
+        }
+        Err(e) => explorer.set_status(format!("could not attach: {e:#}")),
     }
     refresh_root_status(app, explorer);
     let keep = explorer.selected_entry().map(|e| e.path.clone());

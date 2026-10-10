@@ -15,8 +15,9 @@
 //! - a worktree of a store trunk that sits outside any task — one jeet made
 //!   before tasks, or one made by hand — is jeet's own, so it is moved into a
 //!   task with `git worktree move`, work and all. With paths given, only the
-//!   worktrees under them are; and a pull request's checkout, which
-//!   `jeet review` and the explorer make, never is.
+//!   worktrees under them are; and a pull request's checkout — one a review
+//!   job ran in, or one the explorer made before PR checkouts moved into
+//!   review tasks — never is. `git worktree remove` removes one.
 //!
 //! Work a task already has is not offered again. A checkout counts as in a
 //! task only when the task's worktree has its commit and exactly its
@@ -347,7 +348,8 @@ fn plan_store_repo(
         let pr = scope.is_pr(&e.path);
         if pr {
             plan.notes.push(format!(
-                "left {}: a pull request's checkout, from `jeet review` or the explorer",
+                "left {}: a pull request's checkout, from `jeet review` or the explorer; \
+                 `git worktree remove` removes it",
                 e.path.display()
             ));
         }

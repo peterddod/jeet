@@ -178,8 +178,7 @@ pub fn projects_root(home: &Path) -> PathBuf {
 }
 
 /// Where free-standing worktrees lived before tasks. Nothing new is made
-/// here (bar PR checkouts, until review moves into tasks); `jeet import`
-/// moves what is left into tasks.
+/// here; `jeet import` moves what is left into tasks.
 pub fn worktrees_root(home: &Path) -> PathBuf {
     home.join("worktrees")
 }

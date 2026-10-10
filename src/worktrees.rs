@@ -8,8 +8,6 @@ use anyhow::{bail, Context, Result};
 use crate::context::App;
 use crate::db::RepoRecord;
 use crate::git;
-use crate::paths;
-use crate::remote;
 use crate::resolve;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,62 +231,6 @@ pub fn status_against(entry: &WorktreeEntry, base: &str) -> WorktreeStatus {
     }
 }
 
-/// The worktree a command left you with, plus anything worth telling the user
-/// that is not serious enough to fail on (a failed publish, say).
-#[derive(Debug, Clone)]
-pub struct Outcome {
-    pub path: PathBuf,
-    pub warnings: Vec<String>,
-}
-
-/// Check a pull request out into a worktree of its own, reusing the one that
-/// already has its branch.
-///
-/// A reused worktree is brought up to date with the PR only when it is clean
-/// — it may be the user's own branch with work in it, and a review is not a
-/// reason to touch that.
-///
-/// `gh pr checkout` fetches into the trunk's repository, so it holds the
-/// repo's fetch lock: a store sync fetching the same repo at the same moment
-/// would otherwise fight it for ref locks, and the checkout would fail.
-pub fn checkout_pr(
-    app: &App,
-    repo: &RepoRecord,
-    pr: &crate::github::PullRequest,
-) -> Result<Outcome> {
-    let trunk = PathBuf::from(&repo.trunk_path);
-    let branch = pr.local_branch();
-    let _fetch = crate::store::lock_repo(&app.home, &repo.id)?;
-
-    if let Some(existing) = list(app, repo)?
-        .into_iter()
-        .find(|e| e.branch.as_deref() == Some(branch.as_str()) && !e.missing)
-    {
-        let warnings = refresh_pr_worktree(&existing.path, pr, Some(&branch));
-        return Ok(Outcome {
-            path: existing.path,
-            warnings,
-        });
-    }
-
-    let identity = remote::identity_from_id(&repo.id)?;
-    let dest = paths::worktree_path(&app.worktrees_root(), &identity, &branch);
-    if dest.exists() {
-        bail!(
-            "{} already exists but is not a worktree for {branch}",
-            dest.display()
-        );
-    }
-    if let Err(e) = add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, Some(&branch)) {
-        prune_empty_parents(&dest, &[app.worktrees_root()]);
-        return Err(e);
-    }
-    Ok(Outcome {
-        path: dest,
-        warnings: Vec::new(),
-    })
-}
-
 /// Make a worktree of `trunk` at `dest` with `pr` checked out on `branch`,
 /// or detached at the PR's head when there is no branch to use. A failed
 /// checkout takes the half-made worktree away again.
@@ -371,8 +313,9 @@ fn mark_pr_checkout(path: &Path, number: u64) -> Result<()> {
 }
 
 /// Whether the worktree at `path` is a pull request's, made by
-/// [`add_pr_worktree`]: a review task's, or the explorer's. Not a worktree of the
-/// user's own, so `jeet import` leaves it alone.
+/// [`add_pr_worktree`]. Those are made in review tasks now; one outside any
+/// task was made by the explorer of a build from before that, and is not
+/// the user's own work, so `jeet import` leaves it alone.
 pub fn is_pr_checkout(path: &Path) -> bool {
     git::git_dir(path).is_ok_and(|dir| dir.join(PR_MARKER).is_file())
 }

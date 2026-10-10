@@ -559,6 +559,40 @@ pub fn review_task(
     }
 }
 
+/// Somewhere in a task to look at `pr`, for the explorer's PR list: the task
+/// worktree that has the PR's branch already — the author's own, say —
+/// brought up to date with the PR when clean, else the PR's review task, as
+/// `jeet review` makes it but without starting a review. Never a checkout
+/// outside a task.
+pub fn browse_pr(
+    app: &App,
+    repo: &RepoRecord,
+    pr: &crate::github::PullRequest,
+) -> Result<ReviewCheckout> {
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let branch = pr.local_branch();
+    let holder = git::worktree_list(&trunk)?
+        .into_iter()
+        .find(|e| e.branch.as_deref() == Some(branch.as_str()) && e.path.is_dir());
+    if let Some(entry) = holder {
+        if let Some(task) = task_owning(app, &entry.path)? {
+            if task.state == TaskState::Active {
+                // `gh pr checkout` fetches into the trunk.
+                let _fetch = store::lock_repo(&app.home, &repo.id)?;
+                let warnings = worktrees::refresh_pr_worktree(&entry.path, pr, Some(&branch));
+                let _ = app.db.touch_task(&task.id, now_secs());
+                return Ok(ReviewCheckout {
+                    task,
+                    path: entry.path,
+                    created: false,
+                    warnings,
+                });
+            }
+        }
+    }
+    review_task(app, repo, pr)
+}
+
 /// The review task's checkout of `pr`: the one it has, refreshed, or a new
 /// one. The PR's branch is used unless another worktree has it — the
 /// author's own task, say — and then the checkout is detached at the PR's

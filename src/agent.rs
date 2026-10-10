@@ -89,20 +89,13 @@ impl AgentSpec {
     }
 }
 
-/// A previously recorded agent session for a worktree.
+/// A Claude Code session recorded for a directory, found by its transcript.
 #[derive(Debug, Clone)]
 pub struct AgentSession {
     pub id: String,
     /// Unix seconds of the last write.
     pub modified: i64,
     pub summary: String,
-    pub entries: usize,
-}
-
-impl AgentSession {
-    pub fn age(&self) -> String {
-        age_label(self.modified)
-    }
 }
 
 /// `just now`, `5m ago`, `3h ago`… for a unix timestamp.
@@ -156,16 +149,6 @@ pub fn claude_project_slug(root: &Path) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
-}
-
-/// Sessions recorded for `root`, most recently used first.
-pub fn sessions_for(spec: &AgentSpec, root: &Path) -> Result<Vec<AgentSession>> {
-    match spec.kind {
-        AgentKind::ClaudeCode => claude_sessions(root),
-        AgentKind::Unknown(ref name) => {
-            bail!("jeet does not know where `{name}` stores its sessions")
-        }
-    }
 }
 
 /// Where Claude Code keeps the transcripts of sessions started in `root`.
@@ -252,12 +235,10 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
             .ok()
             .and_then(|m| mtime_secs(&m))
             .unwrap_or(0);
-        let (summary, entries) = summarise_session(&path);
         sessions.push(AgentSession {
             id,
             modified,
-            summary,
-            entries,
+            summary: summarise_session(&path),
         });
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
@@ -265,31 +246,18 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
 }
 
 /// Best-effort first prompt (or recorded summary) plus the transcript length.
-fn summarise_session(path: &Path) -> (String, usize) {
-    // Transcripts run to many megabytes and the overlay summarises every
-    // session in the project, so read them a line at a time rather than
-    // holding the sum of all of them in memory at once.
+fn summarise_session(path: &Path) -> String {
+    // Transcripts run to many megabytes, so read them a line at a time, and
+    // only as far as the first prompt.
     let Ok(file) = std::fs::File::open(path) else {
-        return ("(unreadable transcript)".to_string(), 0);
+        return "(unreadable transcript)".to_string();
     };
-    let mut summary = None;
-    let mut count = 0;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        count += 1;
-        if summary.is_some() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-            summary = extract_summary(&value);
-        }
-    }
-    (
-        summary.unwrap_or_else(|| "(no prompt recorded)".to_string()),
-        count,
-    )
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .find_map(|line| extract_summary(&serde_json::from_str(&line).ok()?))
+        .unwrap_or_else(|| "(no prompt recorded)".to_string())
 }
 
 fn extract_summary(value: &serde_json::Value) -> Option<String> {
@@ -389,7 +357,6 @@ mod tests {
         assert!(spec.resume_args("x").is_none());
         assert!(spec.new_session_args("x", "task").is_none());
         assert!(spec.settings_args("{}").is_none());
-        assert!(sessions_for(&spec, Path::new("/tmp")).is_err());
     }
 
     #[test]

@@ -2473,7 +2473,11 @@ fn load_rows(app: &App) -> Result<Vec<TaskRow>> {
 }
 
 /// The task's sessions for the picker, newest first.
-fn session_choices(app: &App, task: &TaskRecord, dir: &Path) -> Result<Vec<SessionChoice>> {
+pub(crate) fn session_choices(
+    app: &App,
+    task: &TaskRecord,
+    dir: &Path,
+) -> Result<Vec<SessionChoice>> {
     let mut choices: Vec<SessionChoice> = app
         .db
         .list_task_sessions(&task.id)?
