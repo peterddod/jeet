@@ -1,0 +1,44 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 3b18e51..a2c4f1d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -8,7 +8,8 @@ pub struct Store {
+     name: String,
+     root: PathBuf,
+ 
+-    size: u32,
++    size: u64,
++    files: usize,
+ }
+ 
+ impl Store {
+@@ -30,3 +31,2 @@ impl Store {
+     fn drop_all(&mut self) {
+-        // nothing
+--- not a header, a removed line
++        self.files = 0;
+diff --git a/src/old.rs b/src/old.rs
+deleted file mode 100644
+index 9daeafb..0000000
+--- a/src/old.rs
++++ /dev/null
+@@ -1,3 +0,0 @@
+-fn old() {
+-    legacy();
+-}
+\ No newline at end of file
+diff --git a/docs/new file.md b/docs/new file.md
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/docs/new file.md
+@@ -0,0 +1,2 @@
++# Notes
++
+diff --git a/assets/logo.png b/assets/logo.png
+index 1111111..2222222 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+diff --git a/src/a.rs b/src/b.rs
+similarity index 100%
+rename from src/a.rs
+rename to src/b.rs

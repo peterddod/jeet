@@ -12,6 +12,7 @@
 //! ⏎ against the folder being listed; see [`command`].
 
 pub mod command;
+pub mod review;
 pub mod state;
 pub mod ui;
 
@@ -40,7 +41,7 @@ use crate::context::App;
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
 use crate::resolve::RepoContext;
-use crate::review::{self, JobState};
+use crate::review::{self as review_job, JobState};
 use crate::worktrees::{self, WorktreeKind, WorktreeStatus};
 
 use state::{DiffMap, Exit, Explorer, Overlay, PendingAction, PrLookup, Step, WorktreeRow};
@@ -900,10 +901,7 @@ fn handle_overlay_key(
                     pending_error,
                 });
             }
-            KeyCode::Char('d') => {
-                let root = explorer.root.clone();
-                view_diff(app, terminal, explorer, &root)?;
-            }
+            KeyCode::Char('d') => open_review_viewer(terminal, explorer, pending, pending_error)?,
             KeyCode::Char('v') => {
                 match explorer.review_job.as_ref().map(|job| job.log.clone()) {
                     Some(log) => open_editor(app, terminal, explorer, &log)?,
@@ -966,37 +964,22 @@ fn handle_overlay_key(
             verdict,
             mut input,
             pending,
-        } => {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt = key.modifiers.contains(KeyModifiers::ALT);
-            match key.code {
-                KeyCode::Esc => {
-                    explorer.overlay = Some(Overlay::PullRequest {
-                        pending,
-                        pending_error: None,
-                    });
-                    return Ok(());
-                }
-                // A newline: ctrl-j is a line feed in every terminal; alt-⏎
-                // where the terminal reports it.
-                KeyCode::Char('j') if ctrl => input.push('\n'),
-                KeyCode::Enter if alt => input.push('\n'),
-                KeyCode::Enter => {
-                    return submit_review(terminal, explorer, verdict, input, pending);
-                }
-                KeyCode::Char('u') if ctrl => input.clear(),
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char(c) if !ctrl && !alt => input.push(c),
-                _ => {}
+        } => match edit_review_body(&mut input, key) {
+            BodyKey::Cancel => {
+                explorer.overlay = Some(Overlay::PullRequest {
+                    pending,
+                    pending_error: None,
+                });
             }
-            explorer.overlay = Some(Overlay::ReviewBody {
-                verdict,
-                input,
-                pending,
-            });
-        }
+            BodyKey::Submit => return submit_review(terminal, explorer, verdict, input, pending),
+            BodyKey::Typing => {
+                explorer.overlay = Some(Overlay::ReviewBody {
+                    verdict,
+                    input,
+                    pending,
+                });
+            }
+        },
         Overlay::Confirm {
             title,
             lines,
@@ -1416,7 +1399,7 @@ fn take_pr_update(app: &App, explorer: &mut Explorer) {
 
 fn load_review_job(app: &App, explorer: &mut Explorer) {
     explorer.review_job = match &explorer.pr {
-        PrLookup::Found(pr) => review::load(app, &explorer.repo, pr.number),
+        PrLookup::Found(pr) => review_job::load(app, &explorer.repo, pr.number),
         _ => None,
     };
 }
@@ -1608,9 +1591,7 @@ fn submit_review(
     };
     let number = pr.number;
     let body = input.trim().to_string();
-    // GitHub refuses a comment or a change request that says nothing; better
-    // to say so here than after the round trip.
-    if body.is_empty() && verdict != Verdict::Approve && pending.is_none() {
+    if needs_body(verdict, &body, pending.is_some()) {
         explorer.set_status(format!("{} needs a comment to go with it", verdict.label()));
         explorer.overlay = Some(Overlay::ReviewBody {
             verdict,
@@ -1629,11 +1610,7 @@ fn submit_review(
     )?;
     match outcome {
         Ok(()) => {
-            explorer.set_status(match verdict {
-                Verdict::Approve => format!("approved #{number}"),
-                Verdict::Comment => format!("commented on #{number}"),
-                Verdict::RequestChanges => format!("requested changes on #{number}"),
-            });
+            explorer.set_status(submitted_label(verdict, number));
             start_pr_lookup(explorer);
         }
         Err(e) => {
@@ -1644,6 +1621,84 @@ fn submit_review(
                 pending,
             });
         }
+    }
+    Ok(())
+}
+
+/// What a key did to a review summary being typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyKey {
+    Typing,
+    Cancel,
+    Submit,
+}
+
+/// Edit a review summary: the one text box both the PR panel and the review
+/// viewer type verdicts into.
+fn edit_review_body(input: &mut String, key: KeyEvent) -> BodyKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Esc => return BodyKey::Cancel,
+        // A newline: ctrl-j is a line feed in every terminal; alt-⏎ where the
+        // terminal reports it.
+        KeyCode::Char('j') if ctrl => input.push('\n'),
+        KeyCode::Enter if alt => input.push('\n'),
+        KeyCode::Enter => return BodyKey::Submit,
+        KeyCode::Char('u') if ctrl => input.clear(),
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        KeyCode::Char(c) if !ctrl && !alt => input.push(c),
+        _ => {}
+    }
+    BodyKey::Typing
+}
+
+/// GitHub refuses a comment or a change request that says nothing — unless
+/// it submits a pending review, whose inline comments say it. Better to say
+/// so before the round trip than after.
+fn needs_body(verdict: Verdict, body: &str, pending: bool) -> bool {
+    body.trim().is_empty() && verdict != Verdict::Approve && !pending
+}
+
+fn submitted_label(verdict: Verdict, number: u64) -> String {
+    match verdict {
+        Verdict::Approve => format!("approved #{number}"),
+        Verdict::Comment => format!("commented on #{number}"),
+        Verdict::RequestChanges => format!("requested changes on #{number}"),
+    }
+}
+
+/// `d` in the PR panel: the PR in the review viewer. Esc comes back to the
+/// panel; a verdict submitted from the viewer closes it, since the pending
+/// review it was showing has gone out.
+fn open_review_viewer(
+    terminal: &mut Tui,
+    explorer: &mut Explorer,
+    pending: Option<github::PendingReview>,
+    pending_error: Option<String>,
+) -> Result<()> {
+    let PrLookup::Found(pr) = &explorer.pr else {
+        return Ok(());
+    };
+    let pr = (**pr).clone();
+    let root = explorer.root.clone();
+    let outcome = review::view(terminal, &root, &pr)?;
+    match outcome.submitted {
+        Some(verdict) => {
+            explorer.set_status(submitted_label(verdict, pr.number));
+            start_pr_lookup(explorer);
+        }
+        None => {
+            explorer.overlay = Some(Overlay::PullRequest {
+                pending,
+                pending_error,
+            })
+        }
+    }
+    if outcome.exit == review::Exit::Quit {
+        explorer.quit_in_place();
     }
     Ok(())
 }

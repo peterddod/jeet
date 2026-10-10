@@ -111,6 +111,8 @@ impl Verdict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingReview {
     pub id: u64,
+    /// The GraphQL id, which adding a thread to the review needs.
+    pub node_id: String,
     pub comments: usize,
 }
 
@@ -308,6 +310,8 @@ pub fn open_in_browser(repo_dir: &Path, number: u64) -> Result<()> {
 #[derive(Deserialize)]
 struct ReviewRecord {
     id: u64,
+    #[serde(default)]
+    node_id: String,
     state: String,
 }
 
@@ -343,6 +347,7 @@ pub fn pending_review(repo_dir: &Path, number: u64) -> Result<Option<PendingRevi
         serde_json::from_str(&text).context("parse review comments")?;
     Ok(Some(PendingReview {
         id: review.id,
+        node_id: review.node_id,
         comments: pages.iter().map(Vec::len).sum(),
     }))
 }
@@ -391,6 +396,535 @@ pub fn submit_review(
         )
         .map(|_| ()),
     }
+}
+
+/// The PR's unified diff, as `gh pr diff` prints it.
+pub fn pr_diff(repo_dir: &Path, number: u64) -> Result<String> {
+    gh_ok(
+        repo_dir,
+        &["pr", "diff", &number.to_string(), "--color", "never"],
+    )
+}
+
+/// Which version of a file a review comment is on: the base (`LEFT`, a
+/// removed or unchanged line) or the head (`RIGHT`, an added or unchanged one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum DiffSide {
+    Left,
+    Right,
+}
+
+impl DiffSide {
+    /// The name GitHub's API uses.
+    #[allow(dead_code)] // the viewer's inline comments send it
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiffSide::Left => "LEFT",
+            DiffSide::Right => "RIGHT",
+        }
+    }
+}
+
+/// A conversation anchored to a line of the diff.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThread {
+    /// GraphQL id of the thread.
+    pub id: String,
+    pub path: String,
+    /// The line in the current diff, or none once the thread is outdated
+    /// and its line has gone.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// The line in the diff the thread was started on.
+    #[serde(default)]
+    pub original_line: Option<u32>,
+    pub diff_side: DiffSide,
+    #[serde(default)]
+    pub is_resolved: bool,
+    #[serde(default)]
+    pub is_outdated: bool,
+    #[serde(default, deserialize_with = "nodes")]
+    pub comments: Vec<ThreadComment>,
+}
+
+/// One comment in a [`ReviewThread`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadComment {
+    /// GraphQL id.
+    pub id: String,
+    /// REST id, which replying, editing, deleting and reacting all take.
+    pub database_id: u64,
+    /// None for a deleted account ("ghost").
+    #[serde(default)]
+    pub author: Option<Login>,
+    #[serde(default)]
+    pub body: String,
+    /// RFC 3339, e.g. `2026-10-08T12:34:56Z`.
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub viewer_can_update: bool,
+    #[serde(default)]
+    pub viewer_can_delete: bool,
+    #[serde(default)]
+    pub reaction_groups: Vec<ReactionGroup>,
+}
+
+impl ThreadComment {
+    /// The author's login, with GitHub's own name for an account that is gone.
+    pub fn author_login(&self) -> &str {
+        match &self.author {
+            Some(author) if !author.login.is_empty() => &author.login,
+            _ => "ghost",
+        }
+    }
+
+    /// When the comment was made, as a unix timestamp.
+    pub fn created_secs(&self) -> Option<i64> {
+        parse_timestamp(&self.created_at)
+    }
+}
+
+/// How many people reacted to a comment with one emoji.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactionGroup {
+    /// GraphQL's name for it: `THUMBS_UP`, `HEART`…
+    pub content: String,
+    #[serde(default)]
+    pub viewer_has_reacted: bool,
+    #[serde(default)]
+    pub users: TotalCount,
+}
+
+impl ReactionGroup {
+    pub fn count(&self) -> u64 {
+        self.users.total_count
+    }
+
+    pub fn reaction(&self) -> Option<Reaction> {
+        Reaction::from_graphql(&self.content)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TotalCount {
+    #[serde(default)]
+    pub total_count: u64,
+}
+
+/// The reactions GitHub offers on a review comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reaction {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+
+impl Reaction {
+    pub const ALL: [Reaction; 8] = [
+        Reaction::ThumbsUp,
+        Reaction::ThumbsDown,
+        Reaction::Laugh,
+        Reaction::Hooray,
+        Reaction::Confused,
+        Reaction::Heart,
+        Reaction::Rocket,
+        Reaction::Eyes,
+    ];
+
+    pub fn emoji(self) -> &'static str {
+        match self {
+            Reaction::ThumbsUp => "👍",
+            Reaction::ThumbsDown => "👎",
+            Reaction::Laugh => "😄",
+            Reaction::Hooray => "🎉",
+            Reaction::Confused => "😕",
+            Reaction::Heart => "❤️",
+            Reaction::Rocket => "🚀",
+            Reaction::Eyes => "👀",
+        }
+    }
+
+    fn graphql(self) -> &'static str {
+        match self {
+            Reaction::ThumbsUp => "THUMBS_UP",
+            Reaction::ThumbsDown => "THUMBS_DOWN",
+            Reaction::Laugh => "LAUGH",
+            Reaction::Hooray => "HOORAY",
+            Reaction::Confused => "CONFUSED",
+            Reaction::Heart => "HEART",
+            Reaction::Rocket => "ROCKET",
+            Reaction::Eyes => "EYES",
+        }
+    }
+
+    /// The name the REST reactions endpoint takes.
+    fn rest(self) -> &'static str {
+        match self {
+            Reaction::ThumbsUp => "+1",
+            Reaction::ThumbsDown => "-1",
+            Reaction::Laugh => "laugh",
+            Reaction::Hooray => "hooray",
+            Reaction::Confused => "confused",
+            Reaction::Heart => "heart",
+            Reaction::Rocket => "rocket",
+            Reaction::Eyes => "eyes",
+        }
+    }
+
+    pub fn from_graphql(name: &str) -> Option<Reaction> {
+        Reaction::ALL.into_iter().find(|r| r.graphql() == name)
+    }
+}
+
+/// GraphQL wraps every list in `{ "nodes": [...] }`; this unwraps one.
+fn nodes<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    struct Nodes<T> {
+        #[serde(default = "Vec::new")]
+        nodes: Vec<T>,
+    }
+    Ok(Option::<Nodes<T>>::deserialize(deserializer)?
+        .map(|n| n.nodes)
+        .unwrap_or_default())
+}
+
+/// The review threads query. `$endCursor` and `pageInfo` are what
+/// `gh api --paginate` needs to walk past the first hundred threads; a thread
+/// with more than a hundred comments is shown with its first hundred.
+const THREADS_QUERY: &str =
+    "query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id path line originalLine diffSide isResolved isOutdated
+          comments(first: 100) {
+            nodes {
+              id databaseId author { login } body createdAt
+              viewerCanUpdate viewerCanDelete
+              reactionGroups { content viewerHasReacted users { totalCount } }
+            }
+          }
+        }
+      }
+    }
+  }
+}";
+
+/// Every review thread on `number`, in the order GitHub gives them.
+pub fn review_threads(repo_dir: &Path, number: u64) -> Result<Vec<ReviewThread>> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "name={repo}",
+            "-F",
+            &format!("number={number}"),
+            "-f",
+            &format!("query={THREADS_QUERY}"),
+        ],
+    )?;
+    parse_threads(&text)
+}
+
+/// Threads out of `gh api graphql --paginate --slurp`: an array of pages.
+fn parse_threads(text: &str) -> Result<Vec<ReviewThread>> {
+    #[derive(Deserialize)]
+    struct Page {
+        data: Data,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repository>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Repository {
+        pull_request: Option<PullRequestThreads>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PullRequestThreads {
+        #[serde(deserialize_with = "nodes")]
+        review_threads: Vec<ReviewThread>,
+    }
+    let pages: Vec<Page> = serde_json::from_str(text).context("parse review threads")?;
+    let mut threads = Vec::new();
+    for page in pages {
+        let Some(pr) = page.data.repository.and_then(|r| r.pull_request) else {
+            bail!("GitHub did not return the pull request's review threads");
+        };
+        threads.extend(pr.review_threads);
+    }
+    Ok(threads)
+}
+
+/// What changes when anything on a PR does: new commits, a new comment, an
+/// edit. Compared, not shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    pub head_ref_oid: String,
+    pub updated_at: String,
+    /// Conversation comments plus review-thread comments.
+    pub comments: u64,
+}
+
+const FINGERPRINT_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid updatedAt
+      comments { totalCount }
+      reviewThreads(first: 100) { nodes { comments { totalCount } } }
+    }
+  }
+}";
+
+/// The PR's [`Fingerprint`], for noticing that the viewer is out of date.
+#[allow(dead_code)] // polled by the review viewer's refresh
+pub fn pr_fingerprint(repo_dir: &Path, number: u64) -> Result<Fingerprint> {
+    let text = gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "name={repo}",
+            "-F",
+            &format!("number={number}"),
+            "-f",
+            &format!("query={FINGERPRINT_QUERY}"),
+        ],
+    )?;
+    parse_fingerprint(&text)
+}
+
+fn parse_fingerprint(text: &str) -> Result<Fingerprint> {
+    #[derive(Deserialize)]
+    struct Page {
+        data: Data,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repository>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Repository {
+        pull_request: Option<Pr>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pr {
+        head_ref_oid: String,
+        updated_at: String,
+        #[serde(default)]
+        comments: TotalCount,
+        #[serde(default, deserialize_with = "nodes")]
+        review_threads: Vec<Thread>,
+    }
+    #[derive(Deserialize)]
+    struct Thread {
+        #[serde(default)]
+        comments: TotalCount,
+    }
+    let page: Page = serde_json::from_str(text).context("parse pull request fingerprint")?;
+    let Some(pr) = page.data.repository.and_then(|r| r.pull_request) else {
+        bail!("GitHub did not return the pull request");
+    };
+    let threaded: u64 = pr
+        .review_threads
+        .iter()
+        .map(|t| t.comments.total_count)
+        .sum();
+    Ok(Fingerprint {
+        head_ref_oid: pr.head_ref_oid,
+        updated_at: pr.updated_at,
+        comments: pr.comments.total_count + threaded,
+    })
+}
+
+/// Reply to the thread that review comment `comment_id` belongs to.
+#[allow(dead_code)] // the review viewer's reply key
+pub fn reply(repo_dir: &Path, number: u64, comment_id: u64, body: &str) -> Result<()> {
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "POST",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments/{comment_id}/replies"),
+            "-f",
+            &format!("body={body}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+/// Replace a review comment's text. Only its author can.
+#[allow(dead_code)] // the review viewer's edit key
+pub fn edit_comment(repo_dir: &Path, comment_id: u64, body: &str) -> Result<()> {
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "PATCH",
+            &format!("repos/{{owner}}/{{repo}}/pulls/comments/{comment_id}"),
+            "-f",
+            &format!("body={body}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+#[allow(dead_code)] // the review viewer's delete key
+pub fn delete_comment(repo_dir: &Path, comment_id: u64) -> Result<()> {
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "DELETE",
+            &format!("repos/{{owner}}/{{repo}}/pulls/comments/{comment_id}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+#[allow(dead_code)] // the review viewer's reaction picker
+pub fn react(repo_dir: &Path, comment_id: u64, reaction: Reaction) -> Result<()> {
+    gh_ok(
+        repo_dir,
+        &[
+            "api",
+            "--method",
+            "POST",
+            &format!("repos/{{owner}}/{{repo}}/pulls/comments/{comment_id}/reactions"),
+            "-f",
+            &format!("content={}", reaction.rest()),
+        ],
+    )
+    .map(|_| ())
+}
+
+const ADD_THREAD_MUTATION: &str = "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+  addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, line: $line, side: $side, body: $body}) {
+    thread { id }
+  }
+}";
+
+/// Comment on one line of the diff, as part of the user's pending review.
+///
+/// GitHub allows one pending review per user per PR, so the comment joins
+/// the one there is — an agent's, say — and only starts a new one when there
+/// is none. Either way nothing is published until a verdict submits it.
+#[allow(dead_code)] // the review viewer's inline-comment key
+pub fn add_inline_comment(
+    repo_dir: &Path,
+    number: u64,
+    path: &str,
+    line: u32,
+    side: DiffSide,
+    body: &str,
+) -> Result<()> {
+    match pending_review(repo_dir, number)? {
+        Some(review) => gh_ok(
+            repo_dir,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={ADD_THREAD_MUTATION}"),
+                "-f",
+                &format!("review={}", review.node_id),
+                "-f",
+                &format!("path={path}"),
+                "-F",
+                &format!("line={line}"),
+                "-f",
+                &format!("side={}", side.as_str()),
+                "-f",
+                &format!("body={body}"),
+            ],
+        )
+        .map(|_| ()),
+        // A review created without an event stays pending.
+        None => gh_ok(
+            repo_dir,
+            &[
+                "api",
+                "--method",
+                "POST",
+                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews"),
+                "-f",
+                &format!("comments[][path]={path}"),
+                "-F",
+                &format!("comments[][line]={line}"),
+                "-f",
+                &format!("comments[][side]={}", side.as_str()),
+                "-f",
+                &format!("comments[][body]={body}"),
+            ],
+        )
+        .map(|_| ()),
+    }
+}
+
+/// Seconds since the epoch for an RFC 3339 UTC timestamp, as GitHub writes
+/// them (`2026-10-08T12:34:56Z`, fractional seconds allowed). None for
+/// anything else rather than a wrong answer.
+pub fn parse_timestamp(text: &str) -> Option<i64> {
+    let (date, time) = text.split_once('T')?;
+    let time = time.strip_suffix('Z')?;
+    let mut date_parts = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (year, month, day) = (
+        date_parts.next()??,
+        date_parts.next()??,
+        date_parts.next()??,
+    );
+    let time = time.split('.').next()?;
+    let mut time_parts = time.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+    let (hour, minute, second) = (
+        time_parts.next()??,
+        time_parts.next()??,
+        time_parts.next()??,
+    );
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days from the civil date, after Howard Hinnant's algorithm.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// A PR number from what the user typed: `123`, `#123`, or a PR's URL.
@@ -472,5 +1006,87 @@ mod tests {
         assert_eq!(pr.number, 10);
         assert_eq!(pr.state_label(), "draft");
         assert_eq!(pr.decision_label(), None);
+    }
+
+    #[test]
+    fn parses_paginated_review_threads() {
+        let threads = parse_threads(include_str!("../tests/fixtures/review_threads.json")).unwrap();
+        assert_eq!(threads.len(), 3, "both pages are read");
+
+        let first = &threads[0];
+        assert_eq!(first.path, "src/lib.rs");
+        assert_eq!(first.line, Some(12));
+        assert_eq!(first.original_line, Some(11));
+        assert_eq!(first.diff_side, DiffSide::Right);
+        assert!(!first.is_resolved && !first.is_outdated);
+        assert_eq!(first.comments.len(), 2);
+        let opener = &first.comments[0];
+        assert_eq!(opener.database_id, 1001);
+        assert_eq!(opener.author_login(), "ada");
+        assert!(opener.body.contains('\n'));
+        assert_eq!(
+            opener.reaction_groups[0].reaction(),
+            Some(Reaction::ThumbsUp)
+        );
+        assert_eq!(opener.reaction_groups[0].count(), 2);
+        assert!(opener.reaction_groups[0].viewer_has_reacted);
+        let reply = &first.comments[1];
+        assert!(reply.viewer_can_update && reply.viewer_can_delete);
+        assert_eq!(
+            reply.created_secs(),
+            opener.created_secs().map(|t| t + 90 * 60),
+            "fractional seconds are ignored"
+        );
+
+        let removed = &threads[1];
+        assert_eq!(removed.diff_side, DiffSide::Left);
+        assert!(removed.is_resolved);
+        assert_eq!(removed.comments[0].author_login(), "ghost");
+
+        let outdated = &threads[2];
+        assert!(outdated.is_outdated);
+        assert_eq!(outdated.line, None);
+        assert_eq!(outdated.original_line, Some(40));
+    }
+
+    #[test]
+    fn a_missing_pull_request_is_an_error_not_an_empty_list() {
+        let json = r#"[{"data":{"repository":{"pullRequest":null}}}]"#;
+        assert!(parse_threads(json).is_err());
+        assert!(parse_threads("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_the_fingerprint() {
+        let print =
+            parse_fingerprint(include_str!("../tests/fixtures/pr_fingerprint.json")).unwrap();
+        assert_eq!(print.head_ref_oid, "5f13c0ffee");
+        assert_eq!(print.updated_at, "2026-10-09T08:00:00Z");
+        assert_eq!(print.comments, 6, "conversation plus thread comments");
+    }
+
+    #[test]
+    fn reactions_round_trip_through_their_api_names() {
+        for reaction in Reaction::ALL {
+            assert_eq!(Reaction::from_graphql(reaction.graphql()), Some(reaction));
+            assert!(!reaction.rest().is_empty());
+            assert!(!reaction.emoji().is_empty());
+        }
+        assert_eq!(Reaction::from_graphql("NOPE"), None);
+        assert_eq!(Reaction::ThumbsUp.rest(), "+1");
+    }
+
+    #[test]
+    fn parses_github_timestamps() {
+        assert_eq!(parse_timestamp("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_timestamp("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(parse_timestamp("2026-10-08T12:34:56Z"), Some(1_791_462_896));
+        assert_eq!(
+            parse_timestamp("2026-10-08T12:34:56.789Z"),
+            Some(1_791_462_896)
+        );
+        assert_eq!(parse_timestamp("2026-10-08"), None);
+        assert_eq!(parse_timestamp("2026-13-08T00:00:00Z"), None);
+        assert_eq!(parse_timestamp("2026-10-08T12:34:56+02:00"), None);
     }
 }

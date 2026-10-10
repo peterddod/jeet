@@ -8,7 +8,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PendingAction, PrLookup};
-use crate::github::PullRequest;
+use crate::github::{PendingReview, PullRequest, Verdict};
 use crate::review::JobState;
 use crate::worktrees::WorktreeStatus;
 
@@ -150,7 +150,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
 
 /// A small banner shown while a background job runs, so a slow push or a big
 /// worktree scan never looks like a hang.
-fn draw_working(frame: &mut Frame, working: &str) {
+pub(super) fn draw_working(frame: &mut Frame, working: &str) {
     let area = content_rect(44, 1, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -866,7 +866,7 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 ""
             };
             body.push(Line::from(Span::styled(
-                format!("o open in browser · d view diff{view} · r refresh · esc close"),
+                format!("o open in browser · d review the diff{view} · r refresh · esc close"),
                 dim,
             )));
             let area = content_rect(76, body.len() + 1, frame.area());
@@ -1000,65 +1000,9 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             input,
             pending,
         } => {
-            let number = match &explorer.pr {
-                PrLookup::Found(pr) => pr.number,
-                _ => return,
-            };
-            let dim = Style::default().fg(Color::DarkGray);
-            let what = match pending {
-                Some(review) => format!(
-                    "submits your pending review and its {} inline comment{}",
-                    review.comments,
-                    if review.comments == 1 { "" } else { "s" }
-                ),
-                None => "posts a new review".to_string(),
-            };
-            let mut body = vec![Line::from(Span::styled(what, dim)), Line::from("")];
-            let typed: Vec<&str> = input.split('\n').collect();
-            let last = typed.len() - 1;
-            for (i, line) in typed.iter().enumerate() {
-                let mut spans = vec![Span::styled(
-                    line.to_string(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if i == last {
-                    spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
-                }
-                body.push(Line::from(spans));
+            if let PrLookup::Found(pr) = &explorer.pr {
+                draw_review_body(frame, pr.number, *verdict, input, pending.as_ref());
             }
-            if input.is_empty() {
-                body.push(Line::from(Span::styled(
-                    match verdict {
-                        crate::github::Verdict::Approve => "(optional) summary comment",
-                        _ => "summary comment",
-                    },
-                    dim,
-                )));
-            }
-            body.push(Line::from(""));
-            body.push(Line::from(Span::styled(
-                "⏎ submit to GitHub · ctrl-j new line · ctrl-u clear · esc back",
-                dim,
-            )));
-            let area = content_rect(70, body.len() + 2, frame.area());
-            frame.render_widget(Clear, area);
-            frame.render_widget(
-                Paragraph::new(body)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(format!(" {} #{number} ", verdict.label()))
-                            .title_style(Style::default().fg(match verdict {
-                                crate::github::Verdict::Approve => Color::Green,
-                                crate::github::Verdict::Comment => Color::Blue,
-                                crate::github::Verdict::RequestChanges => Color::Red,
-                            })),
-                    )
-                    .wrap(Wrap { trim: false }),
-                area,
-            );
         }
         Overlay::Message {
             title,
@@ -1089,6 +1033,72 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
             );
         }
     }
+}
+
+/// The summary that goes with a verdict, being typed — over the explorer's
+/// PR panel or over the review viewer, which share it.
+pub(super) fn draw_review_body(
+    frame: &mut Frame,
+    number: u64,
+    verdict: Verdict,
+    input: &str,
+    pending: Option<&PendingReview>,
+) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let what = match pending {
+        Some(review) => format!(
+            "submits your pending review and its {} inline comment{}",
+            review.comments,
+            if review.comments == 1 { "" } else { "s" }
+        ),
+        None => "posts a new review".to_string(),
+    };
+    let mut body = vec![Line::from(Span::styled(what, dim)), Line::from("")];
+    let typed: Vec<&str> = input.split('\n').collect();
+    let last = typed.len() - 1;
+    for (i, line) in typed.iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if i == last {
+            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+        }
+        body.push(Line::from(spans));
+    }
+    if input.is_empty() {
+        body.push(Line::from(Span::styled(
+            match verdict {
+                Verdict::Approve => "(optional) summary comment",
+                _ => "summary comment",
+            },
+            dim,
+        )));
+    }
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        "⏎ submit to GitHub · ctrl-j new line · ctrl-u clear · esc back",
+        dim,
+    )));
+    let area = content_rect(70, body.len() + 2, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} #{number} ", verdict.label()))
+                    .title_style(Style::default().fg(match verdict {
+                        Verdict::Approve => Color::Green,
+                        Verdict::Comment => Color::Blue,
+                        Verdict::RequestChanges => Color::Red,
+                    })),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// The key list, as it is both rendered and measured.
@@ -1202,7 +1212,7 @@ fn wrap_columns(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap, breaking a word that is wider than the line itself.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split(' ') {
