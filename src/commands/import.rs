@@ -24,8 +24,8 @@
 //! uncommitted changes; a branch a task has, but without all the work on it,
 //! comes across detached.
 //!
-//! Claude Code sessions started in a checkout are copied to the task, so they
-//! can be resumed there. Everything said goes to stderr.
+//! The agent's sessions started in a checkout (Claude Code's, say) are copied
+//! to the task, so they can be resumed there. Everything said goes to stderr.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap};
@@ -36,7 +36,7 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::agent;
+use crate::agent::AgentSpec;
 use crate::commands::clone;
 use crate::config;
 use crate::context::App;
@@ -1308,14 +1308,24 @@ fn import_move(
     })
 }
 
-/// Copy the Claude Code sessions started in `from` to the task, and record
+/// Copy the agent's sessions started in `from` to the task, and record
 /// them so the task can resume them. Best effort: a failure is a warning.
 fn copy_sessions(app: &App, task: &TaskRecord, from: &Path, warnings: &mut Vec<String>) {
     let dir = tasks::task_dir(app, task);
-    let copied = match agent::copy_claude_sessions(from, &dir) {
+    let harness = match AgentSpec::from_config(&app.config) {
+        Ok(spec) => spec.harness,
+        Err(e) => {
+            warnings.push(format!("could not copy its agent sessions ({e:#})"));
+            return;
+        }
+    };
+    let copied = match harness.copy_sessions(from, &dir) {
         Ok(copied) => copied,
         Err(e) => {
-            warnings.push(format!("could not copy its Claude sessions ({e:#})"));
+            warnings.push(format!(
+                "could not copy its {} sessions ({e:#})",
+                harness.name()
+            ));
             return;
         }
     };
@@ -1335,7 +1345,7 @@ fn copy_sessions(app: &App, task: &TaskRecord, from: &Path, warnings: &mut Vec<S
     if !copied.is_empty() {
         warnings.push(format!(
             "{} copied; `jeet task open {}` resumes the latest",
-            plural(copied.len(), "Claude session"),
+            plural(copied.len(), &format!("{} session", harness.name())),
             task.slug
         ));
     }

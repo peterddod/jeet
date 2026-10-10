@@ -1,21 +1,24 @@
-//! What a task's agent is doing, as Claude Code's hooks report it.
+//! What a task's agent is doing, as its harness's hooks report it.
 //!
-//! jeet launches Claude with a `--settings` JSON whose hooks run the hidden
-//! `jeet task-hook <Event>`. Each run reads the hook's JSON on stdin and
-//! rewrites `<task>/.jeet/status/<session>.json` with the state the event
-//! leaves that session in. The tasks list reads those files back, together
-//! with whether the task's tmux pane is still alive, into an [`Activity`].
+//! jeet launches the agent with hooks (see [`Harness::hook_args`]) that run
+//! the hidden `jeet task-hook <Event>`. Each run hands the hook's stdin to
+//! the harness, which says what it means as a [`HookEvent`], and rewrites
+//! `<task>/.jeet/status/<session>.json` with the state the event leaves that
+//! session in. The tasks list reads those files back, together with whether
+//! the task's tmux pane is still alive, into an [`Activity`].
 //!
 //! A hook runs on every tool call, so it has to be quick (well under 50ms),
-//! must never print to stdout — Claude would read it as hook output — and
-//! always exits 0: a broken status line must never get in the agent's way.
+//! must never print to stdout — the agent would read it as hook output —
+//! and always exits 0: a broken status line must never get in its way.
 //!
-//! The exceptions: a Stop hook that finds messages queued for the agent by
-//! `jeet task send` prints Claude's `block` decision with them, so the agent
-//! carries on with them instead of stopping. A turn the user interrupts ends
-//! with no Stop, so Claude's `idle_prompt` notification types anything still
-//! queued into the agent's pane instead. And the assistant's SessionStart
-//! prints the summary of the user's work it starts every session with.
+//! The exceptions: a turn ending ([`EventKind::Stopped`]) that finds
+//! messages queued for the agent by `jeet task send` prints the harness's
+//! [`Harness::continue_output`] with them, so the agent carries on with them
+//! instead of stopping. A turn the user interrupts ends with no Stop, so the
+//! agent reporting itself idle ([`EventKind::Idle`]) types anything still
+//! queued into its pane instead, as does a turn ending for a harness that
+//! cannot carry on. And the assistant's session start prints the summary of
+//! the user's work it starts every session with.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -26,27 +29,17 @@ use serde::{Deserialize, Serialize};
 use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
+use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::messages;
 use crate::tasks;
 use crate::worktrees::now_secs;
-
-/// Every hook event jeet installs.
-pub const HOOK_EVENTS: [&str; 7] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "SubagentStop",
-    "Notification",
-    "Stop",
-    "SessionEnd",
-];
 
 /// More than any hook payload jeet cares about; a pasted novel of a prompt
 /// is cut off rather than held in memory.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
 /// How much of a prompt or message is kept as the status detail.
-const DETAIL_MAX: usize = 60;
+pub const DETAIL_MAX: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -75,83 +68,29 @@ pub struct SessionStatus {
     pub at: i64,
 }
 
-/// The fields of a Claude Code hook payload that jeet reads; every event
-/// sends a different subset.
-#[derive(Debug, Default, Deserialize)]
-pub struct HookInput {
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub hook_event_name: Option<String>,
-    #[serde(default)]
-    pub tool_name: Option<String>,
-    #[serde(default)]
-    pub message: Option<String>,
-    #[serde(default)]
-    pub notification_type: Option<String>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub prompt: Option<String>,
-}
-
 /// The status `event` leaves a session in, or `None` for an event that
 /// says nothing about it.
-pub fn status_for(event: &str, input: &HookInput, now: i64) -> Option<SessionStatus> {
-    let session_id = input.session_id.clone()?;
-    let (state, detail) = match event {
-        "SessionStart" => (State::Idle, None),
-        "UserPromptSubmit" => (
-            State::Running,
-            input
-                .prompt
-                .as_deref()
-                .and_then(|p| first_line(p, DETAIL_MAX)),
-        ),
-        "PreToolUse" => (
-            State::Running,
-            input.tool_name.as_deref().map(|tool| match tool {
-                "Workflow" => "running workflow".to_string(),
-                "Agent" | "Task" => "waiting for subagents".to_string(),
-                other => other.to_string(),
-            }),
-        ),
-        "SubagentStop" => (State::Running, None),
-        "Notification" if is_idle_prompt(input) => (State::Idle, None),
-        "Notification" => (
-            State::Waiting,
-            input
-                .message
-                .as_deref()
-                .and_then(|m| first_line(m, DETAIL_MAX)),
-        ),
-        "Stop" => (State::Idle, None),
-        "SessionEnd" => (State::Ended, None),
-        _ => return None,
+pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
+    let session_id = event.session_id.clone()?;
+    let (state, detail) = match event.kind.clone()? {
+        EventKind::SessionStarted(_) => (State::Idle, None),
+        EventKind::Working(detail) => (State::Running, detail),
+        EventKind::Idle => (State::Idle, None),
+        EventKind::NeedsInput(detail) => (State::Waiting, detail),
+        EventKind::Stopped => (State::Idle, None),
+        EventKind::Ended => (State::Ended, None),
     };
     Some(SessionStatus {
         session_id,
         state,
         detail,
-        event: event.to_string(),
+        event: event.name.clone(),
         at: now,
     })
 }
 
-/// Claude nags with a notification after a minute of waiting at an empty
-/// prompt; that is idleness, not a question for the user.
-fn is_idle_prompt(input: &HookInput) -> bool {
-    input.notification_type.as_deref() == Some("idle_prompt")
-        || input
-            .message
-            .as_deref()
-            .is_some_and(|m| m.contains("waiting for your input"))
-}
-
 /// The first non-blank line of `text`, cut to `max` characters.
-fn first_line(text: &str, max: usize) -> Option<String> {
+pub fn first_line(text: &str, max: usize) -> Option<String> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.chars().count() <= max {
         return Some(line.to_string());
@@ -173,38 +112,40 @@ pub fn status_dir(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("status")
 }
 
-/// `jeet task-hook <event>`: record what the hook on stdin says. Never
-/// fails, never prints to stdout; what goes wrong is noted on stderr, which
-/// Claude keeps out of the conversation.
-pub fn run_hook(event: &str) {
+/// `jeet task-hook <event>`: record what the hook on stdin says, as the
+/// harness called `harness` reports it. Never fails, never prints to
+/// stdout; what goes wrong is noted on stderr, which the agent keeps out of
+/// the conversation.
+pub fn run_hook(harness: &str, event: &str) {
+    let Some(found) = harness::by_id(harness) else {
+        eprintln!("jeet task-hook {event}: no harness {harness:?}");
+        return;
+    };
     let mut raw = String::new();
     if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(MAX_INPUT).read_to_string(&mut raw);
     }
-    if let Err(e) = handle_hook(event, &raw, now_secs()) {
+    if let Err(e) = handle_hook(found, event, &raw, now_secs()) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
 }
 
-fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
-    let input: HookInput = serde_json::from_str(raw).context("parse the hook input")?;
-    let event = match event {
-        "" => input.hook_event_name.as_deref().unwrap_or_default(),
-        named => named,
-    };
-    let Some(session_id) = input.session_id.as_deref() else {
+fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Result<()> {
+    let hook = harness.parse_hook(event, raw)?;
+    let event = hook.name.as_str();
+    let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
     if !valid_session_id(session_id) {
         anyhow::bail!("{session_id:?} is not a session id");
     }
     let mut app = None;
-    let Some((task_dir, task_id)) = locate_task(&input, &mut app)? else {
+    let Some((task_dir, task_id)) = locate_task(&hook, &mut app)? else {
         // Not a jeet task: nothing to report to.
         return Ok(());
     };
 
-    if event == "SessionStart" {
+    if let Some(EventKind::SessionStarted(source)) = hook.kind {
         let app = match app.take() {
             Some(app) => app,
             None => App::open()?,
@@ -225,47 +166,52 @@ fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
                     eprintln!("jeet task-hook {event}: {e:#}");
                 }
             }
-            record_session(
-                &app,
-                &task,
-                session_id,
-                input.source.as_deref(),
-                before.as_deref(),
-                now,
-            )?;
-            if assistant {
-                // Claude adds this to the conversation; a summary that
-                // cannot be made costs the session its context, not its start.
+            record_session(&app, &task, session_id, source, before.as_deref(), now)?;
+            // The harness adds this to the conversation; a summary that
+            // cannot be made costs the session its context, not its start.
+            if assistant && harness.session_context_output("").is_some() {
                 match assistant::session_context(&app, &task, session_id, now) {
-                    Ok(context) => println!("{}", assistant::session_start_output(&context)),
+                    Ok(context) => {
+                        if let Some(output) = harness.session_context_output(&context) {
+                            println!("{output}");
+                        }
+                    }
                     Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
                 }
             }
         }
         // A compaction can happen mid-prompt; the session carries on in
         // whatever state it was in.
-        if input.source.as_deref() == Some("compact")
-            && read_status(&task_dir, session_id).is_some()
-        {
+        if source == StartSource::Compact && read_status(&task_dir, session_id).is_some() {
             return Ok(());
         }
     }
-    if event == "Stop" {
-        return stop(&task_dir, &input, event, session_id, now);
-    }
-    if event == "Notification" && is_idle_prompt(&input) {
-        return idle_prompt(&task_dir, &task_id, &input, event, app, now);
-    }
-    match status_for(event, &input, now) {
-        Some(status) => write_status(&task_dir, &status),
-        None => Ok(()),
+    match hook.kind {
+        // A harness that cannot carry on past a turn's end is idle at it.
+        Some(EventKind::Stopped) if harness.continue_output("").is_some() => {
+            stop(harness, &task_dir, &hook, session_id, now)
+        }
+        Some(EventKind::Stopped | EventKind::Idle) => {
+            idle_prompt(&task_dir, &task_id, &hook, app, now)
+        }
+        _ => match status_for(&hook, now) {
+            Some(status) => write_status(&task_dir, &status),
+            None => Ok(()),
+        },
     }
 }
 
 /// Stop: hand over what `jeet task send` queued, else go idle. The inbox
 /// stays locked until the status is written, so a message is either taken
 /// here or sent after the session is idle, and typed in.
-fn stop(task_dir: &Path, input: &HookInput, event: &str, session_id: &str, now: i64) -> Result<()> {
+fn stop(
+    harness: &dyn Harness,
+    task_dir: &Path,
+    hook: &HookEvent,
+    session_id: &str,
+    now: i64,
+) -> Result<()> {
+    let event = hook.name.as_str();
     // A broken inbox must not keep the status from being written.
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
@@ -283,7 +229,9 @@ fn stop(task_dir: &Path, input: &HookInput, event: &str, session_id: &str, now: 
         None => Vec::new(),
     };
     if !queued.is_empty() {
-        println!("{}", messages::stop_block(&queued));
+        if let Some(output) = harness.continue_output(&messages::queued_reason(&queued)) {
+            println!("{output}");
+        }
         // Not stopping after all: on to the messages.
         return write_status(
             task_dir,
@@ -296,35 +244,35 @@ fn stop(task_dir: &Path, input: &HookInput, event: &str, session_id: &str, now: 
             },
         );
     }
-    match status_for(event, input, now) {
+    match status_for(hook, now) {
         Some(status) => write_status(task_dir, &status),
         None => Ok(()),
     }
 }
 
-/// Claude has sat idle at its prompt. A turn the user interrupted, or a
+/// The agent has sat idle at its prompt. A turn the user interrupted, or a
 /// permission they refused, ends with no Stop, so anything queued while it
 /// was busy is typed in now, or it would wait for good.
 fn idle_prompt(
     task_dir: &Path,
     task_id: &str,
-    input: &HookInput,
-    event: &str,
+    hook: &HookEvent,
     app: Option<App>,
     now: i64,
 ) -> Result<()> {
+    let event = hook.name.as_str();
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
         .ok();
     // Idle before anything is typed in, so the prompt it submits is what
     // marks it running again.
-    if let Some(status) = status_for(event, input, now) {
+    if let Some(status) = status_for(hook, now) {
         write_status(task_dir, &status)?;
     }
     let Some(inbox) = inbox else {
         return Ok(());
     };
-    let Some(session_id) = input.session_id.as_deref() else {
+    let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
     if inbox.read_for(Some(session_id))?.is_empty() {
@@ -354,12 +302,12 @@ fn idle_prompt(
 /// directory, which needs no index, else by `$JEET_TASK_ID`. The assistant
 /// goes by `$JEET_TASK_ID` first: it may well `cd` into a task's directory,
 /// and its sessions must not report as that task's.
-fn locate_task(input: &HookInput, app: &mut Option<App>) -> Result<Option<(PathBuf, String)>> {
+fn locate_task(hook: &HookEvent, app: &mut Option<App>) -> Result<Option<(PathBuf, String)>> {
     let env_id = std::env::var(tasks::TASK_ID_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
-    let cwd = match input.cwd.as_deref().filter(|c| !c.is_empty()) {
+    let cwd = match hook.cwd.as_deref().filter(|c| !c.is_empty()) {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().context("get cwd")?,
     };
@@ -390,7 +338,7 @@ fn record_session(
     app: &App,
     task: &TaskRecord,
     session_id: &str,
-    source: Option<&str>,
+    source: StartSource,
     before: Option<&str>,
     now: i64,
 ) -> Result<()> {
@@ -423,7 +371,7 @@ fn record_session(
 fn parent_of<'a>(
     known: &'a [TaskSessionRecord],
     session_id: &str,
-    source: Option<&str>,
+    source: StartSource,
     before: Option<&str>,
     guess: bool,
 ) -> Option<&'a TaskSessionRecord> {
@@ -434,9 +382,9 @@ fn parent_of<'a>(
         return Some(parent);
     }
     match source {
-        Some("startup") | None => None,
-        Some(_) if guess => known.first(),
-        Some(_) => None,
+        StartSource::Startup => None,
+        _ if guess => known.first(),
+        _ => None,
     }
 }
 
@@ -510,8 +458,8 @@ pub enum Activity {
     NotStarted,
     /// The agent's tmux session is gone, though it never said it finished.
     NotRunning,
-    /// Something is running that reports no status: an agent other than
-    /// Claude Code.
+    /// Something is running that reports no status: an agent whose harness
+    /// has no hooks.
     Live,
     Idle {
         since: i64,
@@ -574,81 +522,6 @@ impl Activity {
 mod tests {
     use super::*;
 
-    fn fixture(event: &str) -> HookInput {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/hooks")
-            .join(format!("{event}.json"));
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-    }
-
-    fn status(event: &str) -> SessionStatus {
-        status_for(event, &fixture(event), 1000).unwrap()
-    }
-
-    #[test]
-    fn each_event_leaves_the_session_in_its_state() {
-        let cases: [(&str, State, Option<&str>); 7] = [
-            ("SessionStart", State::Idle, None),
-            (
-                "UserPromptSubmit",
-                State::Running,
-                Some("Fix the login page so that the session cookie survives a pa…"),
-            ),
-            ("PreToolUse", State::Running, Some("Bash")),
-            ("SubagentStop", State::Running, None),
-            (
-                "Notification",
-                State::Waiting,
-                Some("Claude needs your permission to use Bash"),
-            ),
-            ("Stop", State::Idle, None),
-            ("SessionEnd", State::Ended, None),
-        ];
-        for (event, state, detail) in cases {
-            let status = status(event);
-            assert_eq!(status.state, state, "{event}");
-            assert_eq!(status.detail.as_deref(), detail, "{event}");
-            assert_eq!(status.event, event);
-            assert_eq!(status.session_id, "3f1c2a9e-5b7d-4e61-9a0b-2c4d6e8f0a1b");
-            assert_eq!(status.at, 1000);
-        }
-        // Every installed event is covered.
-        assert_eq!(cases.map(|c| c.0), HOOK_EVENTS);
-    }
-
-    #[test]
-    fn tools_that_wait_on_others_say_so() {
-        let mut input = fixture("PreToolUse");
-        for (tool, detail) in [
-            ("Workflow", "running workflow"),
-            ("Agent", "waiting for subagents"),
-            ("Task", "waiting for subagents"),
-        ] {
-            input.tool_name = Some(tool.into());
-            let status = status_for("PreToolUse", &input, 1).unwrap();
-            assert_eq!(status.detail.as_deref(), Some(detail));
-        }
-    }
-
-    #[test]
-    fn an_idle_prompt_notification_is_idleness() {
-        let status = status_for("Notification", &fixture("Notification-idle"), 1).unwrap();
-        assert_eq!(status.state, State::Idle);
-        assert_eq!(status.detail, None);
-        let mut input = fixture("Notification-idle");
-        input.notification_type = None;
-        assert_eq!(
-            status_for("Notification", &input, 1).unwrap().state,
-            State::Idle
-        );
-    }
-
-    #[test]
-    fn unknown_events_and_anonymous_sessions_say_nothing() {
-        assert!(status_for("PostToolUse", &fixture("PreToolUse"), 1).is_none());
-        assert!(status_for("Stop", &HookInput::default(), 1).is_none());
-    }
-
     #[test]
     fn a_new_session_follows_on_from_the_one_its_window_ran() {
         let record = |id: &str| TaskSessionRecord {
@@ -665,17 +538,18 @@ mod tests {
         let parent = |id, source, before, guess| {
             parent_of(&known, id, source, before, guess).map(|s| s.session_id.as_str())
         };
-        assert_eq!(parent("c", Some("clear"), Some("b"), false), Some("b"));
-        assert_eq!(parent("c", Some("clear"), Some("b"), true), Some("b"));
+        use StartSource::*;
+        assert_eq!(parent("c", Clear, Some("b"), false), Some("b"));
+        assert_eq!(parent("c", Clear, Some("b"), true), Some("b"));
         // No window to go by: a task's agent has only the one session, the
         // assistant may have several, so it does not guess.
-        assert_eq!(parent("c", Some("clear"), None, true), Some("a"));
-        assert_eq!(parent("c", Some("clear"), None, false), None);
-        assert_eq!(parent("c", Some("clear"), Some("gone"), false), None);
+        assert_eq!(parent("c", Clear, None, true), Some("a"));
+        assert_eq!(parent("c", Other, None, true), Some("a"));
+        assert_eq!(parent("c", Clear, None, false), None);
+        assert_eq!(parent("c", Clear, Some("gone"), false), None);
         // Started from scratch, or seen before: nothing to follow on from.
-        assert_eq!(parent("c", Some("startup"), None, true), None);
-        assert_eq!(parent("c", None, None, true), None);
-        assert_eq!(parent("a", Some("resume"), Some("b"), true), None);
+        assert_eq!(parent("c", Startup, None, true), None);
+        assert_eq!(parent("a", Resume, Some("b"), true), None);
     }
 
     #[test]

@@ -19,6 +19,9 @@ fn jeet_bin() -> Command {
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude");
+    // Nor run whatever `claude` is on the developer's PATH to check its
+    // version.
+    cmd.env("JEET_HARNESS_VERSION_CHECK", "0");
     // Nor pop up notifications, or be held to the assistant's permissions
     // because the suite runs inside its session.
     cmd.env("JEET_NOTIFY_CMD", "true")
@@ -2307,7 +2310,7 @@ fn hook_input(event_fixture: &str, session: &str, cwd: &std::path::Path) -> Stri
         None => event_fixture,
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/hooks")
+        .join("tests/fixtures/hooks/claude-code")
         .join(format!("{file}.json"));
     let mut value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -2993,6 +2996,7 @@ impl Pty {
             .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
             .env_remove("TMUX")
             .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude")
+            .env("JEET_HARNESS_VERSION_CHECK", "0")
             .env("TERM", "xterm-256color")
             .env("PATH", path)
             .stdin(Stdio::piped())

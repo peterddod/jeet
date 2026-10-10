@@ -10,6 +10,7 @@ mod context;
 mod db;
 mod git;
 mod github;
+mod harness;
 mod instructions;
 mod messages;
 mod notify;
@@ -150,10 +151,10 @@ fn run(command: Option<Commands>) -> Result<()> {
             let app = context::App::open()?;
             store::run_background(&app)?;
         }
-        // Run by Claude on every tool call: quick, silent on stdout, and
+        // Run by the agent on every tool call: quick, silent on stdout, and
         // never a failure, whatever goes wrong.
-        Commands::TaskHook { event } => {
-            let _ = std::panic::catch_unwind(|| status::run_hook(&event));
+        Commands::TaskHook { event, harness } => {
+            let _ = std::panic::catch_unwind(|| status::run_hook(&harness, &event));
         }
         Commands::Task { command } => {
             let app = context::App::open()?;

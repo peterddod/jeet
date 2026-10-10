@@ -1,0 +1,380 @@
+//! Coding-agent harnesses: what jeet knows about the agent it runs in a
+//! task's tmux session.
+//!
+//! A [`Harness`] is everything jeet needs from one agent: how to launch it
+//! (a new session under an id jeet picks, a resumed one, a first prompt),
+//! how to install jeet's hooks, what its hook payloads mean as a
+//! [`HookEvent`], which sessions it has recorded for a directory, and the
+//! instruction file it reads. Each harness is one module here; the rest of
+//! jeet sees only the trait and the neutral events.
+//!
+//! Whatever a harness cannot do it answers with `None` (or nothing), and
+//! jeet does without: no status, no resume, no first prompt. [`Generic`] is
+//! the harness that can do none of it, for any other command.
+//!
+//! `docs/harnesses.md` says how to add one.
+
+pub mod claude;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+
+use crate::agent::AgentSession;
+
+/// Every harness jeet knows, the default first.
+pub static HARNESSES: &[&dyn Harness] = &[&claude::ClaudeCode, &Generic];
+
+/// The harness used when nothing says otherwise.
+pub fn default_harness() -> &'static dyn Harness {
+    HARNESSES[0]
+}
+
+/// The harness called `id` in config.toml, e.g. `claude-code`.
+pub fn by_id(id: &str) -> Option<&'static dyn Harness> {
+    HARNESSES.iter().copied().find(|h| h.id() == id.trim())
+}
+
+/// The harness a command runs, going by its program's file name; anything
+/// unrecognised is [`Generic`].
+pub fn detect(program: &str) -> &'static dyn Harness {
+    let name = Path::new(program)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| program.to_string());
+    HARNESSES
+        .iter()
+        .copied()
+        .find(|h| h.runs_program(&name))
+        .unwrap_or(&Generic)
+}
+
+/// `claude-code, generic`: what `harness` in config.toml may be.
+pub fn ids() -> String {
+    HARNESSES
+        .iter()
+        .map(|h| h.id())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A coding agent jeet can run. Every method but the first few has a
+/// default that says "not supported".
+pub trait Harness: Sync {
+    /// What `harness` in config.toml calls it, e.g. `claude-code`.
+    fn id(&self) -> &'static str;
+
+    /// What messages call it, e.g. `Claude Code`.
+    fn name(&self) -> &'static str;
+
+    /// The command run when config.toml names the harness but no command.
+    /// `None` when there is no sensible default.
+    fn default_command(&self) -> Option<&'static str>;
+
+    /// Whether a program file name (no directory) is this harness, so that
+    /// `agent = "/opt/bin/claude"` needs no `harness` beside it.
+    fn runs_program(&self, _program: &str) -> bool {
+        false
+    }
+
+    /// The version jeet was last tested with. Only the latest is supported:
+    /// an older one is warned about, never refused.
+    fn tested_version(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Arguments that start a new session with id `id` and display name
+    /// `name`, so jeet can record the session before the agent runs.
+    fn new_session_args(&self, _id: &str, _name: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Arguments that resume recorded session `id`.
+    fn resume_args(&self, _id: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Arguments, after every other, that give an interactive session its
+    /// first prompt.
+    fn prompt_args(&self, _prompt: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Arguments that install jeet's hooks for this launch only, without
+    /// writing anything to disk.
+    fn hook_args(&self, _hooks: &HookSetup) -> Option<Vec<String>> {
+        None
+    }
+
+    /// What a hook installed by [`Harness::hook_args`] reported: `event`
+    /// as the hook command named it (may be empty), `raw` its stdin.
+    fn parse_hook(&self, _event: &str, _raw: &str) -> Result<HookEvent> {
+        Ok(HookEvent::default())
+    }
+
+    /// What a hook prints for a turn that is ending to carry on instead,
+    /// with `reason` as what to do next. `None`: it cannot, and what was
+    /// queued for it is typed in once it is idle.
+    fn continue_output(&self, _reason: &str) -> Option<String> {
+        None
+    }
+
+    /// What a session-start hook prints to add `context` to the session.
+    fn session_context_output(&self, _context: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether it has a record of session `id` started in `dir`, i.e.
+    /// whether resuming it there would find anything.
+    fn has_session(&self, _dir: &Path, _id: &str) -> bool {
+        false
+    }
+
+    /// The sessions it recorded for `dir`, most recent first.
+    fn sessions(&self, _dir: &Path) -> Result<Vec<AgentSession>> {
+        Ok(Vec::new())
+    }
+
+    /// Copy the sessions started in `from` to where it looks for those
+    /// started in `to`, returning those copied.
+    fn copy_sessions(&self, _from: &Path, _to: &Path) -> Result<Vec<AgentSession>> {
+        Ok(Vec::new())
+    }
+
+    /// When any of its sessions in `dir` last recorded anything; cheap.
+    fn latest_activity(&self, _dir: &Path) -> Option<i64> {
+        None
+    }
+
+    /// The file in a session's directory it reads its instructions from.
+    /// Not read yet: the switch of jeet's own instruction files to
+    /// AGENTS.md uses it to decide which harnesses need a shim.
+    #[allow(dead_code)]
+    fn instructions_file(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+impl std::fmt::Debug for dyn Harness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// Any other command: it just runs, with none of jeet's integration.
+#[derive(Debug)]
+pub struct Generic;
+
+impl Harness for Generic {
+    fn id(&self) -> &'static str {
+        "generic"
+    }
+
+    fn name(&self) -> &'static str {
+        "the agent"
+    }
+
+    fn default_command(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// What jeet's hooks need to know, for [`Harness::hook_args`].
+pub struct HookSetup {
+    /// The jeet binary the hooks run, as `jeet task-hook`.
+    pub exe: PathBuf,
+    /// Command prefixes the agent may run without asking, e.g.
+    /// `jeet worktree`.
+    pub allow: Vec<String>,
+}
+
+/// One hook report, in jeet's terms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookEvent {
+    /// The harness's own name for the event, kept in the status file.
+    pub name: String,
+    pub session_id: Option<String>,
+    /// The session's working directory.
+    pub cwd: Option<String>,
+    /// `None` for an event that says nothing jeet uses.
+    pub kind: Option<EventKind>,
+}
+
+/// What a session is doing, as a hook reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventKind {
+    /// A session began, or began again.
+    SessionStarted(StartSource),
+    /// Busy with a prompt; the detail says on what.
+    Working(Option<String>),
+    /// Sitting at its prompt, waiting for the next one, without a turn
+    /// having just ended: the queue is typed in.
+    Idle,
+    /// Stopped mid-turn for the user: a permission, a question.
+    NeedsInput(Option<String>),
+    /// A turn finished; the queue is handed over.
+    Stopped,
+    /// The session is over.
+    Ended,
+}
+
+/// Why a session started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartSource {
+    /// From scratch.
+    Startup,
+    Resume,
+    /// The conversation was cleared: a new session following on.
+    Clear,
+    /// The conversation was compacted mid-turn.
+    Compact,
+    /// Anything else that carries on from an earlier session.
+    Other,
+}
+
+/// A word the shell reads back exactly, whatever it holds.
+pub fn shell_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// When any harness recorded anything in `dir`.
+pub fn latest_activity(dir: &Path) -> Option<i64> {
+    HARNESSES
+        .iter()
+        .filter_map(|h| h.latest_activity(dir))
+        .max()
+}
+
+/// Set to `0` to skip [`version_warning`]'s `--version` run.
+pub const VERSION_CHECK_ENV: &str = "JEET_HARNESS_VERSION_CHECK";
+
+/// A warning when `program --version` reports an older version of
+/// `harness` than jeet was tested with. Runs it at most once per run; one
+/// that will not run or says nothing parseable is not warned about.
+pub fn version_warning(harness: &dyn Harness, program: &str) -> Option<String> {
+    static CHECKED: OnceLock<Option<String>> = OnceLock::new();
+    let tested = harness.tested_version()?;
+    if std::env::var(VERSION_CHECK_ENV).is_ok_and(|v| v.trim() == "0") {
+        return None;
+    }
+    CHECKED
+        .get_or_init(|| {
+            let found = installed_version(program)?;
+            older_than(&found, tested).then(|| {
+                format!(
+                    "`{program} --version` says {found}, older than {} {tested}, the version \
+                     jeet is tested with; update it if anything misbehaves",
+                    harness.name()
+                )
+            })
+        })
+        .clone()
+}
+
+/// The version `program --version` prints, given a couple of seconds.
+fn installed_version(program: &str) -> Option<String> {
+    let mut child = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().ok()?;
+    parse_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The first `1.2.3`-like word of `text`.
+fn parse_version(text: &str) -> Option<String> {
+    text.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| version_parts(w).is_some_and(|p| p.len() >= 2))
+        .map(str::to_string)
+}
+
+fn version_parts(version: &str) -> Option<Vec<u64>> {
+    version.split('.').map(|p| p.parse().ok()).collect()
+}
+
+/// Whether `found` is an older version than `tested`; unparseable is not.
+fn older_than(found: &str, tested: &str) -> bool {
+    match (version_parts(found), version_parts(tested)) {
+        (Some(found), Some(tested)) => found < tested,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harnesses_are_found_by_id_and_program() {
+        assert_eq!(default_harness().id(), "claude-code");
+        assert_eq!(by_id("claude-code").unwrap().id(), "claude-code");
+        assert_eq!(by_id(" generic ").unwrap().id(), "generic");
+        assert!(by_id("claude").is_none());
+        assert_eq!(detect("claude").id(), "claude-code");
+        assert_eq!(detect("/opt/bin/claude").id(), "claude-code");
+        assert_eq!(detect("claude-beta").id(), "claude-code");
+        assert_eq!(detect("aider").id(), "generic");
+        assert_eq!(ids(), "claude-code, generic");
+    }
+
+    #[test]
+    fn the_generic_harness_supports_nothing() {
+        let h = &Generic;
+        assert!(h.new_session_args("x", "n").is_none());
+        assert!(h.resume_args("x").is_none());
+        assert!(h.prompt_args("go").is_none());
+        let hooks = HookSetup {
+            exe: "/bin/jeet".into(),
+            allow: Vec::new(),
+        };
+        assert!(h.hook_args(&hooks).is_none());
+        assert!(h.parse_hook("Stop", "{}").unwrap().kind.is_none());
+        assert!(h.continue_output("x").is_none());
+        assert!(h.session_context_output("x").is_none());
+        assert!(!h.has_session(Path::new("/"), "x"));
+        assert!(h.tested_version().is_none());
+    }
+
+    #[test]
+    fn versions_are_read_and_compared() {
+        assert_eq!(
+            parse_version("2.1.296 (Claude Code)\n").as_deref(),
+            Some("2.1.296")
+        );
+        assert_eq!(parse_version("goose v1.9.0").as_deref(), Some("1.9.0"));
+        assert_eq!(parse_version("opencode 0.15").as_deref(), Some("0.15"));
+        assert!(parse_version("no version here 7").is_none());
+        assert!(older_than("2.0.9", "2.1.0"));
+        assert!(older_than("2.1", "2.1.0"));
+        assert!(!older_than("2.10.0", "2.9.9"));
+        assert!(!older_than("2.1.0", "2.1.0"));
+        assert!(!older_than("junk", "2.1.0"));
+    }
+
+    #[test]
+    fn quoting_survives_the_shell() {
+        let word = r#"a 'b' "c" $(d) `e`"#;
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", shell_quote(word)))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), word);
+    }
+}

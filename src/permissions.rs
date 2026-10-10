@@ -37,8 +37,8 @@ pub struct Capability {
     pub name: &'static str,
     /// What it lets the assistant do, to finish "the assistant may not …".
     pub about: &'static str,
-    /// The command lines that use it, pre-approved in the assistant's Claude
-    /// settings when it is allowed.
+    /// The command lines that use it, pre-approved in the assistant's
+    /// harness when it is allowed.
     pub commands: &'static [&'static str],
 }
 
@@ -341,10 +341,9 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
     Some(message)
 }
 
-/// The `permissions.allow` rules for the assistant's Claude settings: the
-/// read-only jeet commands, its own, and the commands of each allowed
-/// capability.
-pub fn bash_allow(allow: &[String]) -> Vec<String> {
+/// The command prefixes the assistant's harness pre-approves: the read-only
+/// jeet commands, its own, and the commands of each allowed capability.
+pub fn allowed_commands(allow: &[String]) -> Vec<String> {
     let allowed = CAPABILITIES
         .iter()
         .filter(|c| allow.iter().any(|a| a.trim() == c.name))
@@ -353,7 +352,7 @@ pub fn bash_allow(allow: &[String]) -> Vec<String> {
         .iter()
         .chain(OWN)
         .chain(allowed)
-        .map(|command| format!("Bash({command}:*)"))
+        .map(|command| command.to_string())
         .collect()
 }
 
@@ -672,18 +671,18 @@ mod tests {
     }
 
     #[test]
-    fn claude_is_pre_approved_exactly_the_allowed_commands() {
-        let rules = bash_allow(&["task.create".into(), "task.send".into(), "bogus".into()]);
-        assert!(rules.contains(&"Bash(jeet task new:*)".to_string()));
-        assert!(rules.contains(&"Bash(jeet task send:*)".to_string()));
-        assert!(rules.contains(&"Bash(jeet task ls:*)".to_string()));
-        assert!(rules.contains(&"Bash(jeet notify:*)".to_string()));
+    fn the_harness_pre_approves_exactly_the_allowed_commands() {
+        let rules = allowed_commands(&["task.create".into(), "task.send".into(), "bogus".into()]);
+        assert!(rules.contains(&"jeet task new".to_string()));
+        assert!(rules.contains(&"jeet task send".to_string()));
+        assert!(rules.contains(&"jeet task ls".to_string()));
+        assert!(rules.contains(&"jeet notify".to_string()));
         assert!(!rules
             .iter()
             .any(|r| r.contains("delete") || r.contains("archive")));
-        assert!(!rules.contains(&"Bash(jeet worktree:*)".to_string()));
-        assert!(rules.contains(&"Bash(jeet todo:*)".to_string()));
-        assert_eq!(bash_allow(&[]).len(), READ_ONLY.len() + OWN.len());
+        assert!(!rules.contains(&"jeet worktree".to_string()));
+        assert!(rules.contains(&"jeet todo".to_string()));
+        assert_eq!(allowed_commands(&[]).len(), READ_ONLY.len() + OWN.len());
     }
 
     #[test]
