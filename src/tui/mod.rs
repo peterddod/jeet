@@ -11,6 +11,7 @@
 //! command line instead — `:mv`, `:cp`, `:mkdir`, `:rm`, `:touch` — run with
 //! ⏎ against the folder being listed; see [`command`].
 
+mod assistant_info;
 pub mod chat;
 pub mod command;
 pub mod review;

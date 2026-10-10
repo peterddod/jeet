@@ -7,6 +7,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
+use super::chat;
 use super::state::human_size;
 use super::tasks::{AddField, Field, NewTaskForm, Panel, Picker, TaskRow, TasksUi, View};
 use super::term::Link;
@@ -16,10 +18,11 @@ use crate::commands::task::printable;
 use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
 use crate::pr_history;
 use crate::status::Activity;
+use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
-pub const HELP: [(&str, &str); 22] = [
+pub const HELP: [(&str, &str); 28] = [
     ("⏎", "open the task's agent in tmux (C-b d comes back here)"),
     ("e", "explore the task: its canvas or one of its worktrees"),
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),
@@ -40,6 +43,24 @@ pub const HELP: [(&str, &str); 22] = [
     ("S", "copy the task's project files in again"),
     ("P", "projects: n new, e edit, D delete, ⏎ start a task"),
     ("", ""),
+    (
+        "c",
+        "talk to the assistant: its latest session (C-b d comes back)",
+    ),
+    (
+        "C",
+        "the assistant's sessions: ⏎ attach, n new, R rename, x end, * primary",
+    ),
+    ("t", "its todo list: space done, ⏎ go to the task, a add"),
+    (
+        "i",
+        "its inbox: GitHub events, messages, what it did; ⏎ opens a link",
+    ),
+    (
+        "o",
+        "sort tasks by todo priority, or back by latest activity",
+    ),
+    ("", ""),
     ("⇥", "switch between active and archived tasks"),
     ("/", "filter by name; ⏎ keeps the filter, esc drops it"),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
@@ -59,11 +80,14 @@ pub const HELP: [(&str, &str); 22] = [
 /// Width of the key column in the help panel.
 const KEY_WIDTH: usize = 10;
 
-const HINTS: [&str; 13] = [
+const HINTS: [&str; 16] = [
     "⏎ open",
     "e explore",
     "w worktrees",
     "n new",
+    "c assistant",
+    "t todo",
+    "i inbox",
     "a archive",
     "D delete",
     "p PRs",
@@ -99,6 +123,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -106,22 +131,26 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
         .split(frame.area());
 
     draw_header(frame, chunks[0], ui);
-    ui.list_area = chunks[1];
-    draw_list(frame, chunks[1], ui);
+    frame.render_widget(
+        Paragraph::new(assistant_line(ui.assistant.as_ref())),
+        chunks[1],
+    );
+    ui.list_area = chunks[2];
+    draw_list(frame, chunks[2], ui);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ui.status_line.clone(),
             Style::default().fg(Color::Yellow),
         ))),
-        chunks[2],
+        chunks[3],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(chunks[3].width),
+            hints(chunks[4].width),
             Style::default().fg(Color::DarkGray),
         ))),
-        chunks[3],
+        chunks[4],
     );
 
     ui.links = match &ui.panel {
@@ -196,18 +225,85 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
+/// The most running sessions the assistant's row names.
+const SESSIONS_SHOWN: usize = 4;
+
+/// The assistant, pinned above the list: its sessions and what each running
+/// one is doing, what is queued for it, and its open todo items.
+pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        " ✦ assistant  ",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let Some(info) = info else {
+        spans.push(dim("…"));
+        return Line::from(spans);
+    };
+    match info.sessions.len() {
+        0 => spans.push(dim("no sessions yet — c starts one")),
+        n => {
+            spans.push(Span::styled(
+                format!("{n} session{}", if n == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Blue),
+            ));
+            let running: Vec<_> = info.sessions.iter().filter(|s| s.running()).collect();
+            if running.is_empty() {
+                spans.push(dim(" · none running"));
+            }
+            for session in running.iter().take(SESSIONS_SHOWN) {
+                let (glyph, color) = activity_glyph(Some(&session.activity));
+                let star = if session.primary { "*" } else { "" };
+                spans.push(Span::styled(
+                    format!(
+                        "  {glyph} {star}{}",
+                        truncate(&printable(&session.name), 18)
+                    ),
+                    Style::default().fg(color),
+                ));
+            }
+            if running.len() > SESSIONS_SHOWN {
+                spans.push(dim(format!("  +{}", running.len() - SESSIONS_SHOWN)));
+            }
+        }
+    }
+    let inbox = format!(" · inbox {}", info.inbox);
+    spans.push(match info.inbox {
+        0 => dim(inbox),
+        _ => Span::styled(
+            inbox,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    });
+    match &info.todo_error {
+        Some(_) => spans.push(Span::styled(
+            " · todo.md unreadable",
+            Style::default().fg(Color::Red),
+        )),
+        None => spans.push(dim(format!(" · todo {} open", info.open_todo()))),
+    }
+    spans.push(dim("   c chat  C sessions  t todo  i inbox"));
+    Line::from(spans)
+}
+
 fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let which = match ui.view {
         View::Active => "active",
         View::Archived => "archived",
     };
     let total = ui.count(ui.view);
-    let title = match (ui.filter.is_empty(), ui.visible.len()) {
+    let mut title = match (ui.filter.is_empty(), ui.visible.len()) {
         (true, 0) => format!(" no {which} tasks "),
         (true, n) => format!(" {n} {which} task{} ", if n == 1 { "" } else { "s" }),
         (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
         (false, n) => format!(" {n} of {total} match \"{}\" ", ui.filter),
     };
+    if ui.by_priority {
+        title.push_str("· by todo priority ");
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -306,7 +402,13 @@ pub fn glyph(row: &TaskRow) -> (&'static str, Color) {
     if row.task.state == TaskState::Archived {
         return ("▪", Color::DarkGray);
     }
-    match &row.activity {
+    activity_glyph(row.activity.as_ref())
+}
+
+/// The glyph and colour for what an agent is doing; `…` before anyone has
+/// looked.
+pub fn activity_glyph(activity: Option<&Activity>) -> (&'static str, Color) {
+    match activity {
         None => ("…", Color::DarkGray),
         Some(Activity::Running { .. } | Activity::Live) => ("●", Color::Green),
         Some(Activity::Waiting { .. }) => ("◆", Color::Yellow),
@@ -695,8 +797,158 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 format!(" {name} · pull requests{looking} · ⏎/o open in the browser  esc close ");
             return draw_prs(frame, area, title, prs, *selected);
         }
+        Panel::Assistant(picker) => {
+            let area = centered_rect(85, 60, full);
+            let [list, footer] = with_footer(frame, area);
+            let title = " assistant · sessions ".to_string();
+            if picker.sessions.is_empty() {
+                let body = vec![
+                    Line::from("no sessions yet"),
+                    Line::from(""),
+                    Line::from(dim("n starts one")),
+                ];
+                render_text(frame, list, title, Color::Green, body);
+            } else {
+                let items = picker.sessions.iter().map(chat::session_line).collect();
+                render_list(frame, list, title, items, picker.selected);
+            }
+            let line = match &picker.renaming {
+                Some(input) => field_line("new name", input, true, "⏎ save  esc cancel"),
+                None if !picker.status.is_empty() => Line::from(Span::styled(
+                    picker.status.clone(),
+                    Style::default().fg(Color::Yellow),
+                )),
+                None => Line::from(dim(chat::KEYS.replace("q quit", "esc back"))),
+            };
+            frame.render_widget(Paragraph::new(line), footer);
+        }
+        Panel::Todo { selected, adding } => {
+            let area = centered_rect(80, 60, full);
+            let [list, footer] = with_footer(frame, area);
+            let open = ui.todo().iter().filter(|i| !i.done).count();
+            let title =
+                format!(" todo · {open} open · space done  ⏎ go to task  a add  esc close ");
+            if ui.todo().is_empty() {
+                let said = match &ui.assistant {
+                    None => "reading todo.md…".to_string(),
+                    Some(info) => match &info.todo_error {
+                        Some(error) => format!("could not read todo.md: {error}"),
+                        None => "nothing to do".to_string(),
+                    },
+                };
+                let body = vec![
+                    Line::from(printable(&said)),
+                    Line::from(""),
+                    Line::from(dim(
+                        "a adds an item; the assistant keeps the list too, in todo.md",
+                    )),
+                ];
+                render_text(frame, list, title, Color::Green, body);
+            } else {
+                let items = ui.todo().iter().map(todo_line).collect();
+                render_list(frame, list, title, items, *selected);
+            }
+            let line = match adding {
+                Some(input) => field_line(
+                    "new item",
+                    input,
+                    true,
+                    "!p1 gives it a priority, @task-slug links a task",
+                ),
+                None => Line::from(""),
+            };
+            frame.render_widget(Paragraph::new(line), footer);
+        }
+        Panel::Inbox { selected } => {
+            let area = centered_rect(90, 70, full);
+            let queued = ui.assistant.as_ref().map_or(0, |a| a.inbox);
+            let title =
+                format!(" inbox & activity · {queued} queued · ⏎ open the link  esc close ");
+            if ui.feed().is_empty() {
+                let body = vec![
+                    Line::from(match ui.assistant {
+                        None => "reading…",
+                        Some(_) => "nothing yet",
+                    }),
+                    Line::from(""),
+                    Line::from(dim(
+                        "messages queued for the assistant, what `jeet watch` saw on GitHub",
+                    )),
+                    Line::from(dim("and what the assistant did show up here, newest first")),
+                ];
+                render_text(frame, area, title, Color::Green, body);
+                return Vec::new();
+            }
+            let items = ui.feed().iter().map(feed_line).collect();
+            render_list(frame, area, title, items, *selected);
+        }
     }
     Vec::new()
+}
+
+/// `area`, cleared, as a box and the line below it.
+fn with_footer(frame: &mut Frame, area: Rect) -> [Rect; 2] {
+    frame.render_widget(Clear, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(area);
+    [rows[0], rows[1]]
+}
+
+/// `[ ] p1 Fix the login cookie  @fix-login`, dimmed once it is done.
+fn todo_line(item: &ItemView) -> ListItem<'static> {
+    let (mark, style) = match item.done {
+        true => ("[x] ", Style::default().fg(Color::DarkGray)),
+        false => ("[ ] ", Style::default()),
+    };
+    let mut spans = vec![Span::styled(mark, style)];
+    if let Some(p) = item.priority {
+        let color = match (item.done, p) {
+            (true, _) => Color::DarkGray,
+            (false, 1) => Color::Red,
+            (false, 2) => Color::Yellow,
+            (false, _) => Color::Blue,
+        };
+        spans.push(Span::styled(format!("p{p} "), Style::default().fg(color)));
+    }
+    spans.push(Span::styled(printable(&item.title), style));
+    for slug in &item.tasks {
+        spans.push(Span::styled(
+            format!("  @{slug}"),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    ListItem::new(Line::from(spans))
+}
+
+/// When, what, the text and where: one entry of the inbox panel. `↗` marks
+/// the ones ⏎ opens.
+fn feed_line(entry: &FeedEntry) -> ListItem<'static> {
+    let color = match (entry.kind, entry.what.as_str()) {
+        (FeedKind::Queued, _) => Color::Yellow,
+        (FeedKind::Event, _) => Color::Cyan,
+        (FeedKind::Action, "done") => Color::Green,
+        (FeedKind::Action, _) => Color::Red,
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<10}", age_label(entry.at)),
+            Style::default().fg(Color::Blue),
+        ),
+        Span::styled(
+            format!("{:<18}", truncate(&entry.what, 17)),
+            Style::default().fg(color),
+        ),
+        Span::raw(printable(&entry.text)),
+    ];
+    if !entry.place.is_empty() {
+        spans.push(dim(format!("  {}", printable(&entry.place))));
+    }
+    if entry.url.is_some() {
+        spans.push(Span::styled(" ↗", Style::default().fg(Color::Cyan)));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 /// The PR history: state, size, number and title — the title a link to the
@@ -1046,13 +1298,131 @@ mod tests {
                 lines: Vec::new(),
                 selected: 0,
             }),
+            Some(Panel::Assistant(chat::Picker::new(Vec::new()))),
+            Some(Panel::Assistant(chat::Picker::new(vec![session(
+                "s", true, true,
+            )]))),
+            Some(Panel::Todo {
+                selected: 5,
+                adding: Some("half".into()),
+            }),
+            Some(Panel::Inbox { selected: 9 }),
         ];
-        for panel in panels {
-            ui.panel = panel;
-            for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
-                render(&mut ui, w, h);
+        for info in [None, Some(info())] {
+            ui.assistant = info;
+            for panel in panels.clone() {
+                ui.panel = panel;
+                for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
+                    render(&mut ui, w, h);
+                }
             }
         }
+    }
+
+    fn session(id: &str, primary: bool, running: bool) -> crate::assistant::Session {
+        crate::assistant::Session {
+            id: id.into(),
+            name: format!("{id} name"),
+            primary,
+            last: 1,
+            activity: match running {
+                true => Activity::Running { detail: None },
+                false => Activity::NotRunning,
+            },
+            window: running.then(|| "@1".to_string()),
+        }
+    }
+
+    fn info() -> AssistantInfo {
+        AssistantInfo {
+            sessions: vec![session("plan", true, true), session("triage", false, false)],
+            inbox: 2,
+            todo: crate::todo::parse(
+                "- [ ] !p1 fix \u{1b}[2Jit @fix-login\n- [x] shipped\n- [ ] later\n",
+            )
+            .views(),
+            todo_error: None,
+            feed: vec![FeedEntry {
+                at: crate::worktrees::now_secs() - 60,
+                kind: FeedKind::Event,
+                what: "review requested".into(),
+                text: "Widen\u{1b}]8;;x\u{7} the store".into(),
+                place: "acme/api #4 → the assistant".into(),
+                url: Some("https://github.com/acme/api/pull/4".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn the_assistant_is_pinned_above_the_tasks() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        let screen = render(&mut ui, 140, 12);
+        assert!(screen[3].contains("✦ assistant  …"), "{}", screen[3]);
+        ui.assistant = Some(AssistantInfo::default());
+        let screen = render(&mut ui, 140, 12);
+        assert!(
+            screen[3].contains("no sessions yet — c starts one"),
+            "{}",
+            screen[3]
+        );
+        ui.assistant = Some(info());
+        let screen = render(&mut ui, 140, 12);
+        let line = &screen[3];
+        assert!(line.contains("2 sessions  ● *plan name"), "{line}");
+        assert!(!line.contains("triage"), "only running sessions: {line}");
+        assert!(line.contains("inbox 2 · todo 2 open"), "{line}");
+        // The tasks are below it, as before.
+        assert!(screen[5].contains("fix-login"), "{}", screen[5]);
+    }
+
+    #[test]
+    fn the_todo_and_inbox_panels_show_what_was_read_and_nothing_it_could_do() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        ui.assistant = Some(info());
+        ui.panel = Some(Panel::Todo {
+            selected: 0,
+            adding: None,
+        });
+        let screen = render(&mut ui, 120, 30).join("\n");
+        assert!(screen.contains("todo · 2 open"), "{screen}");
+        assert!(screen.contains("[ ] p1 fix [2Jit  @fix-login"), "{screen}");
+        assert!(screen.contains("[x] shipped"), "{screen}");
+        ui.panel = Some(Panel::Todo {
+            selected: 0,
+            adding: Some("!p2 new".into()),
+        });
+        assert!(render(&mut ui, 120, 30)
+            .join("\n")
+            .contains("new item !p2 new█"));
+
+        ui.panel = Some(Panel::Inbox { selected: 0 });
+        let screen = render(&mut ui, 120, 30).join("\n");
+        assert!(screen.contains("2 queued"), "{screen}");
+        assert!(
+            screen
+                .contains("review requested  Widen]8;;x the store  acme/api #4 → the assistant ↗"),
+            "{screen}"
+        );
+        assert!(!screen.contains('\u{1b}'));
+
+        ui.assistant = Some(AssistantInfo::default());
+        assert!(render(&mut ui, 120, 30).join("\n").contains("nothing yet"));
+        ui.panel = Some(Panel::Todo {
+            selected: 0,
+            adding: None,
+        });
+        assert!(render(&mut ui, 120, 30)
+            .join("\n")
+            .contains("nothing to do"));
+    }
+
+    #[test]
+    fn sorting_by_priority_says_so() {
+        let mut ui = TasksUi::new(vec![row("fix-login", None)]);
+        ui.by_priority = true;
+        assert!(render(&mut ui, 120, 12)
+            .join("\n")
+            .contains("1 active task · by todo priority"));
     }
 
     #[test]
