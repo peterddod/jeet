@@ -392,7 +392,7 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `C-b d` comes back here |
+| `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
@@ -446,7 +446,7 @@ jeet task open fix-login --session <id>  # resume that session instead of the la
 ```
 
 Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
-task directory, so it keeps working when you detach (`C-b d`) or close the
+task directory, so it keeps working when you detach (`Ctrl-Q`, or tmux's own `C-b d`) or close the
 terminal. tmux is required (`brew install tmux`, `apt install tmux`); without
 it `jeet task open` says so. Opening a task attaches to its session, starting
 the agent first if it is not running: Claude Code resumes the task's latest

@@ -17,6 +17,9 @@ use anyhow::{bail, Context, Result};
 
 pub const BINARY_ENV: &str = "JEET_TMUX";
 
+/// Every tmux session jeet makes is named with this in front.
+pub const SESSION_PREFIX: &str = "jeet-";
+
 /// Set by jeet's launchd job and systemd unit. A tmux server keeps the
 /// environment of whoever started it, and hands it to every pane it makes
 /// from then on, the user's own included; a job runs with almost none of the
@@ -429,28 +432,34 @@ fn literal_arg(text: &str) -> String {
     }
 }
 
-/// Show how to get back to jeet in the session's status line. Cosmetic, so
-/// failures are ignored.
-fn set_detach_hint(name: &str) {
-    let prefix = Command::new(binary())
-        .args(["show-options", "-gv", "prefix"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| !p.is_empty() && p != "None")
-        .unwrap_or_else(|| "C-b".to_string());
-    let _ = quiet()
-        .args(["set-option", "-t", &target(name), "status-right"])
-        .arg(detach_hint(&prefix))
-        .status();
-}
+/// The way back to jeet that leaves the agent running: one key, no prefix.
+/// Quitting Claude ends it; detaching is what keeps it going, and `C-b d`
+/// is two steps that Claude Code's own `C-b` gets in the way of.
+pub const DETACH_KEY: &str = "C-q";
 
-fn detach_hint(prefix: &str) -> String {
-    // `#` starts a format in status-right; a prefix key could be `#`.
-    format!(" {} d → jeet ", format_literal(prefix))
+/// What the status line says about [`DETACH_KEY`].
+const DETACH_HINT: &str = " Ctrl-Q → back to jeet (keeps running) ";
+
+/// Make [`DETACH_KEY`] detach from session `name`, and say so in its status
+/// line. Key bindings belong to the whole server, so the key only detaches
+/// from jeet's own sessions and is passed through everywhere else.
+/// Cosmetic, so failures are ignored.
+fn set_detach_hint(name: &str) {
+    let _ = quiet()
+        .args(["bind-key", "-n", DETACH_KEY, "if-shell", "-F"])
+        .arg(format!("#{{m:{SESSION_PREFIX}*,#{{session_name}}}}"))
+        .args(["detach-client", &format!("send-keys {DETACH_KEY}")])
+        .status();
+    let _ = quiet()
+        .args([
+            "set-option",
+            "-t",
+            // A pane target: a bare `=name` is no session to set-option.
+            &format!("{}:", target(name)),
+            "status-right",
+            DETACH_HINT,
+        ])
+        .status();
 }
 
 /// `text` as tmux shows it where it expands formats: `#` starts one, and
@@ -750,12 +759,6 @@ mod tests {
             ]
         );
         assert!(parse_windows("").is_empty());
-    }
-
-    #[test]
-    fn hint_escapes_format_characters() {
-        assert_eq!(detach_hint("C-b"), " C-b d → jeet ");
-        assert_eq!(detach_hint("#"), " ## d → jeet ");
     }
 
     #[test]
