@@ -469,7 +469,9 @@ Import which? ⏎ all, one task each · `1+3` puts 1 and 3 in one task, `1+3=nam
 
 The originals are only read. `--remove-originals` removes, after asking (or
 with `--yes`), each linked worktree and parked branch whose task holds an
-exact copy; a repository's main working tree is never removed. Running import
+exact copy and that has not changed since. A worktree holding ignored files
+stays, since those were not copied, and a repository's main working tree is
+never removed. Running import
 again skips work already in a task. Everything it says goes to stderr.
 
 `jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.

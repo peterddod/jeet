@@ -696,6 +696,10 @@ struct Original {
     /// The repository's git directory, where git can act on it.
     common: PathBuf,
     kind: OriginalKind,
+    /// What was copied: HEAD, and the snapshot of its uncommitted changes.
+    /// Removal checks the original still holds exactly this.
+    head: String,
+    snapshot: Option<String>,
 }
 
 enum OriginalKind {
@@ -713,10 +717,30 @@ impl Original {
         }
     }
 
+    /// Remove the original, unless it has changed since it was copied:
+    /// whatever is new in it would go with it.
     fn remove(&self) -> Result<()> {
         match &self.kind {
-            OriginalKind::Worktree(path) => git::worktree_remove(&self.common, path, true),
-            OriginalKind::Branch(branch) => git::delete_local_branch(&self.common, branch),
+            OriginalKind::Worktree(path) => {
+                let (_, ignored) = git::status_counts(path)?;
+                let now = git::snapshot_changes(path)?;
+                let same = match (&self.snapshot, &now) {
+                    (None, None) => true,
+                    (Some(then), Some(now)) => same_changes(&self.common, then, now),
+                    _ => false,
+                };
+                if !same || ignored > 0 || git::rev_parse(path, "HEAD") != Some(self.head.clone()) {
+                    bail!("it has changed since it was copied; left in place");
+                }
+                git::worktree_remove(&self.common, path, true)
+            }
+            OriginalKind::Branch(branch) => {
+                let tip = git::rev_parse(&self.common, &format!("refs/heads/{branch}"));
+                if tip.as_deref() != Some(self.head.as_str()) {
+                    bail!("it has moved since it was copied; left in place");
+                }
+                git::delete_local_branch(&self.common, branch)
+            }
         }
     }
 }
@@ -960,7 +984,9 @@ fn import_copy(
     if let Some(checkout) = checkout {
         copy_sessions(app, task, checkout, &mut warnings);
     }
-    let original = match (verified, checkout, linked, branch) {
+    // Ignored files (.env, build output) were not copied, and removing the
+    // original would delete them, so such a one stays.
+    let original = match (verified && ignored == 0, checkout, linked, branch) {
         (true, Some(path), true, _) => Some(OriginalKind::Worktree(path.clone())),
         (true, None, _, Some(branch)) => Some(OriginalKind::Branch(branch.to_string())),
         _ => None,
@@ -968,6 +994,8 @@ fn import_copy(
     .map(|kind| Original {
         common: repo.common.clone(),
         kind,
+        head: head.clone(),
+        snapshot: snapshot.clone(),
     });
     Ok(Imported {
         path,

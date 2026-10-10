@@ -3390,6 +3390,23 @@ fn import_removes_originals_only_when_asked_and_never_the_repository() {
     write(&topic.join("wip.txt"), "wip\n");
     let topic_head = rev(&topic, "HEAD");
     let side_head = rev(&lib, "HEAD");
+    // And one holding an ignored file, which import does not copy: removing
+    // that original would lose it.
+    write(&lib.join(".git/info/exclude"), "*.log\n");
+    let logs = lib.parent().unwrap().join("lib-logs");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "logs",
+            &logs.to_string_lossy(),
+        ],
+        &lib,
+    );
+    git(&["commit", "-q", "--allow-empty", "-m", "logs work"], &logs);
+    write(&logs.join("debug.log"), "keep me\n");
 
     // Without a terminal to ask on, and no --yes: nothing happens.
     let output = lab.import(&[lib.to_str().unwrap()], &[]);
@@ -3403,7 +3420,13 @@ fn import_removes_originals_only_when_asked_and_never_the_repository() {
 
     let output = lab.import(&[lib.to_str().unwrap(), "--yes", "--remove-originals"], &[]);
     succeeded(&output);
-    assert_eq!(lab.task_slugs(), ["side", "topic"]);
+    assert_eq!(lab.task_slugs(), ["logs", "side", "topic"]);
+    assert!(
+        stderr_of(&output).contains("1 ignored file or directory not copied"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(read(&logs.join("debug.log")), "keep me\n");
     let copied = lab.home().join("tasks/topic/lib");
     assert_eq!(rev(&copied, "HEAD"), topic_head);
     assert_eq!(read(&copied.join("wip.txt")), "wip\n");
