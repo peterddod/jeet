@@ -2892,7 +2892,8 @@ struct Pty {
 }
 
 impl Pty {
-    fn open(lab: &StoreLab, args: &str, cwd: &std::path::Path) -> Pty {
+    /// `jeet <args>` in `cwd`, with `env` on top of the hermetic defaults.
+    fn open(lab: &StoreLab, args: &str, cwd: &std::path::Path, env: &[(&str, &str)]) -> Pty {
         use std::process::Stdio;
         let dir = TempDir::new().unwrap();
         let log = dir.path().join("typescript");
@@ -2908,8 +2909,7 @@ impl Pty {
         }
         hermetic_git(&mut cmd);
         lab.wire(&mut cmd);
-        let mut child = cmd
-            .current_dir(cwd)
+        cmd.current_dir(cwd)
             .env("JEET_SYNC_INTERVAL_SECS", "0")
             .env_remove("JEET_TASK_ID")
             .env_remove("JEET_CD_FILE")
@@ -2919,9 +2919,11 @@ impl Pty {
             .env("TERM", "xterm-256color")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().unwrap();
         let keys = child.stdin.take().unwrap();
         Pty {
             child,
@@ -3024,7 +3026,7 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
         stdout_of(&lab.jeet(&args))
     };
 
-    let mut screen = Pty::open(&lab, "tasks", &lab.home());
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[]);
     screen.wait_for_text("no tasks yet");
 
     // A blank form makes an empty canvas under a made-up name.
@@ -3086,4 +3088,91 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
     screen.type_keys(b"q");
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet tasks exited with {status}");
+}
+
+#[test]
+fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    // Two sessions the agent reported, a second apart.
+    let (older, newer) = (
+        "aaaaaaaa-1111-4111-8111-111111111111",
+        "bbbbbbbb-2222-4222-8222-222222222222",
+    );
+    for session in [older, newer] {
+        let output = lab.hook(
+            "SessionStart",
+            &hook_input("SessionStart", session, &task),
+            &[],
+        );
+        hook_ok(&output);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &env);
+    screen.wait_for_text("jeet · tasks");
+    // No agent is running, and there are two sessions: which one?
+    screen.type_keys(b"\r");
+    screen.wait_for_text("which session?");
+    assert!(
+        calls_of(&tmux, "new-session").is_empty(),
+        "nothing started yet"
+    );
+    // The newest is first; take the older one.
+    screen.type_keys(b"j\r");
+    wait_until("the attach", || {
+        !calls_of(&tmux, "attach-session").is_empty()
+    });
+
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let argv = &started[0];
+    let at = argv.iter().position(|a| a == "--session-id").unwrap();
+    assert_eq!(argv[at + 1], older, "{argv:?}");
+    let attached = calls_of(&tmux, "attach-session");
+    assert_eq!(
+        attached[0][1..],
+        ["-t".to_string(), "=jeet-fix-login".into()]
+    );
+
+    // The agent is running now: ⏎ attaches straight away, no picker.
+    screen.type_keys(b"\r");
+    wait_until("the second attach", || {
+        calls_of(&tmux, "attach-session").len() == 2
+    });
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+
+    screen.type_keys(b"q");
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet tasks exited with {status}");
+}
+
+#[test]
+fn explore_inside_a_task_directory_browses_its_canvas() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    std::fs::create_dir(task.join("notes")).unwrap();
+    let mut screen = Pty::open(&lab, "explore", &task.join("notes"), &[]);
+    screen.wait_for_text("jeet · task Fix login");
+    screen.esc();
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet explore exited with {status}");
 }

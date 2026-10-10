@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{
@@ -52,6 +52,10 @@ pub const POLL_EVERY: Duration = Duration::from_secs(2);
 /// How often task sizes are walked again, for worktrees an agent added or
 /// build output that grew while the list was open.
 pub const RESIZE_EVERY: Duration = Duration::from_secs(120);
+
+/// How often the rows are read from the index again, for worktrees and
+/// tasks that came and went behind the list's back.
+pub const REREAD_EVERY: Duration = Duration::from_secs(5);
 
 /// What the screen esc in the explorer comes back to.
 const BACK_LABEL: &str = "tasks";
@@ -1412,6 +1416,12 @@ impl Background {
     /// Point both threads at the tasks now listed, and have them report
     /// straight away.
     fn watch(&self, rows: &[TaskRow]) {
+        self.probe(rows);
+        self.resize(rows);
+    }
+
+    /// Have the status poller read every task's status now.
+    fn probe(&self, rows: &[TaskRow]) {
         let probes = rows
             .iter()
             .map(|row| Probe {
@@ -1423,7 +1433,6 @@ impl Background {
             })
             .collect();
         let _ = self.probes.send(probes);
-        self.resize(rows);
     }
 
     fn resize(&self, rows: &[TaskRow]) {
@@ -1556,9 +1565,18 @@ impl Screen<'_> {
         if start == Start::Projects {
             self.perform(Action::Projects);
         }
+        let mut last_read = Instant::now();
         while self.ui.exit.is_none() {
             while let Ok(update) = self.bg.updates.try_recv() {
                 self.ui.apply(update);
+            }
+            // The agent adds and removes worktrees as it goes, and other
+            // jeets make and archive tasks: keep the rows in step.
+            if last_read.elapsed() >= REREAD_EVERY && self.ui.panel.is_none() {
+                last_read = Instant::now();
+                if let Err(e) = self.reread() {
+                    self.ui.set_status(format!("could not read tasks: {e:#}"));
+                }
             }
             self.terminal
                 .draw(|frame| tasks_ui::draw(frame, &mut self.ui))?;
@@ -1612,14 +1630,47 @@ impl Screen<'_> {
         };
         match loaded {
             Ok((rows, warning)) => {
-                self.ui.set_rows(rows);
-                self.bg.watch(&self.ui.rows);
+                let changed = self.set_rows(rows);
+                // Sizes are walked again only when there are new tasks to
+                // measure: a walk restarted on every action never finishes
+                // a big task.
+                if reconcile || changed {
+                    self.bg.watch(&self.ui.rows);
+                } else {
+                    self.bg.probe(&self.ui.rows);
+                }
                 if let Some(warning) = warning {
                     self.ui.set_status(warning);
                 }
             }
             Err(e) => self.ui.set_status(format!("could not read tasks: {e:#}")),
         }
+    }
+
+    /// Read the tasks again, quietly: the background threads hear of it
+    /// only when tasks came, went or changed state.
+    fn reread(&mut self) -> Result<()> {
+        let rows = load_rows(self.app)?;
+        if self.set_rows(rows) {
+            self.bg.watch(&self.ui.rows);
+        }
+        Ok(())
+    }
+
+    /// Replace the rows, saying whether the tasks themselves changed rather
+    /// than only what is known about them.
+    fn set_rows(&mut self, rows: Vec<TaskRow>) -> bool {
+        let tasks = |rows: &[TaskRow]| {
+            let mut ids: Vec<(String, TaskState)> = rows
+                .iter()
+                .map(|r| (r.task.id.clone(), r.task.state))
+                .collect();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            ids
+        };
+        let before = tasks(&self.ui.rows);
+        self.ui.set_rows(rows);
+        tasks(&self.ui.rows) != before
     }
 
     fn task(&self, id: &str) -> Option<TaskRecord> {
@@ -1682,6 +1733,7 @@ impl Screen<'_> {
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
+                self.bg.resize(&self.ui.rows);
                 match added {
                     Ok(added) => {
                         self.worktrees(&task_id)?;

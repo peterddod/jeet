@@ -1689,6 +1689,41 @@ mod tests {
         assert!(explorer.pr_area.is_none(), "30 columns has no room for it");
     }
 
+    /// A task's canvas is headed by its task, with no branch to compare.
+    #[test]
+    fn a_canvas_is_headed_by_its_task() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        let mut explorer = Explorer::new(
+            None,
+            dir.path().to_path_buf(),
+            "Fix login".into(),
+            "task canvas".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            crate::agent::AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut explorer)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("jeet · task Fix login"), "{screen}");
+        assert!(screen.contains("[task canvas]"), "{screen}");
+        assert!(!screen.contains(" vs "), "{screen}");
+        assert!(screen.contains("notes/"), "{screen}");
+    }
+
     /// A command line is labelled as one, shown without its colon, and the
     /// listing title talks about the operand rather than the whole line.
     #[test]

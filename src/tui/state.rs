@@ -1078,6 +1078,43 @@ mod tests {
         assert!(new.is_dir(), "handed the shell a path that does not exist");
     }
 
+    /// Opened from another screen, esc on an empty filter goes back to it;
+    /// opened on its own, it quits.
+    #[test]
+    fn leaving_goes_back_to_the_screen_that_opened_it() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        explorer.leave();
+        assert_eq!(explorer.exit, Exit::Stay);
+
+        let mut explorer = explorer_at(dir.path());
+        explorer.back = Some("tasks".into());
+        explorer.leave();
+        assert!(explorer.should_quit);
+        assert_eq!(explorer.exit, Exit::Back);
+    }
+
+    /// A task's canvas has no repository, and the explorer browses it all
+    /// the same; its trunk is the canvas itself.
+    #[test]
+    fn a_canvas_with_no_repository_is_browsable() {
+        let dir = fixture();
+        let mut explorer = Explorer::new(
+            None,
+            dir.path().to_path_buf(),
+            "my task".into(),
+            "task canvas".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+            AgentSpec::from_command("claude").unwrap(),
+        )
+        .unwrap();
+        assert!(explorer.visible_len() > 0);
+        assert_eq!(explorer.trunk(), dir.path());
+        explorer.descend().unwrap();
+        assert_ne!(explorer.cwd, dir.path());
+    }
+
     /// If everything under the cursor has gone, fall back to somewhere real
     /// rather than asking the shell to cd into a deleted directory.
     #[test]
