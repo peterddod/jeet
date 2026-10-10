@@ -419,7 +419,9 @@ pub fn add_pr_worktree(
 
 /// Bring a worktree that already has `pr` checked out up to date with it —
 /// only when it is clean: it may be the user's own branch with work in it,
-/// and a review is not a reason to touch that. Returns what went unsaid.
+/// and a review is not a reason to touch that. A detached checkout must also
+/// have no commits that only its HEAD holds, or moving HEAD to the PR's head
+/// would leave them on no ref. Returns what went unsaid.
 pub fn refresh_pr_worktree(
     path: &Path,
     pr: &crate::github::PullRequest,
@@ -427,13 +429,34 @@ pub fn refresh_pr_worktree(
 ) -> Vec<String> {
     let what = branch.unwrap_or("the review checkout");
     match git::status_counts(path) {
-        Ok((0, _)) => match crate::github::checkout(path, pr.number, branch) {
-            Ok(()) => Vec::new(),
-            Err(e) => vec![format!("could not update {what} from the PR: {e}")],
-        },
-        _ => vec![format!(
-            "{what} has uncommitted changes, so it was not updated from the PR"
-        )],
+        Ok((0, _)) => {}
+        _ => {
+            return vec![format!(
+                "{what} has uncommitted changes, so it was not updated from the PR"
+            )]
+        }
+    }
+    if git::head_branch(path).is_none() {
+        let held_only_by_head =
+            git::count_commits_not_in(path, "HEAD", &["--remotes", "--branches", "--tags"]);
+        match held_only_by_head {
+            Some(0) => {}
+            Some(n) => {
+                let s = if n == 1 { "" } else { "s" };
+                return vec![format!(
+                    "{what} has {n} commit{s} on no branch, so it was not updated from the PR"
+                )];
+            }
+            None => {
+                return vec![format!(
+                    "could not check {what} for commits on no branch, so it was not updated from the PR"
+                )]
+            }
+        }
+    }
+    match crate::github::checkout(path, pr.number, branch) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("could not update {what} from the PR: {e}")],
     }
 }
 

@@ -3388,6 +3388,31 @@ fn a_review_of_a_branch_another_task_has_is_detached() {
         checkouts[0].contains(&"--detach".to_string()),
         "{checkouts:?}"
     );
+
+    // Clean and holding nothing of its own, it is brought up to date again.
+    succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
+    let checkouts = |bin: &std::path::Path| {
+        gh_calls(bin)
+            .into_iter()
+            .filter(|c| c.starts_with(&["pr".into(), "checkout".into()]))
+            .count()
+    };
+    assert_eq!(checkouts(&bin), 2);
+
+    // A fixup committed on the detached checkout is on no branch: the next
+    // review must not move HEAD off it to pick up the PR's new pushes.
+    git(&["commit", "-q", "--allow-empty", "-m", "fixup"], &worktree);
+    let fixup = rev(&worktree, "HEAD");
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert!(
+        stderr_of(&output).contains("1 commit on no branch, so it was not updated"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(rev(&worktree, "HEAD"), fixup);
+    assert_eq!(checkouts(&bin), 2, "no checkout over the fixup");
 }
 
 #[cfg(unix)]
