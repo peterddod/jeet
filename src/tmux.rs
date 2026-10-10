@@ -116,7 +116,9 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     }
     refuse_new_server(name)?;
     let mut cmd = Command::new(binary());
-    cmd.args(["new-session", "-d", "-s", name, "-c"]).arg(cwd);
+    cmd.args(extended_keys_first())
+        .args(["new-session", "-d", "-s", name, "-c"])
+        .arg(cwd);
     for (key, value) in env {
         cmd.arg("-e").arg(format!("{key}={value}"));
     }
@@ -244,10 +246,12 @@ pub fn new_window(
     if creating {
         refuse_new_server(name)?;
     }
+    let first = extended_keys_first();
     let mut attempts = 0;
     let output = loop {
         attempts += 1;
         let mut cmd = Command::new(binary());
+        cmd.args(&first);
         match creating {
             true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
             false => cmd.args([
@@ -493,6 +497,66 @@ fn set_detach_hint(name: &str) {
             DETACH_HINT,
         ])
         .status();
+}
+
+/// The server option that has tmux pass modified keys such as Shift+Enter
+/// on to a program that asks for them, rather than the plain key: Claude
+/// Code asks, and takes Shift+Enter for a new line. tmux has it off.
+const EXTENDED_KEYS: &str = "extended-keys";
+
+/// Set on the server once jeet has turned [`EXTENDED_KEYS`] on there, so a
+/// user who turns it off again is not overruled.
+const EXTENDED_KEYS_MARK: &str = "@jeet-extended-keys";
+
+/// A tmux command to run first, in the same call, wherever jeet starts a
+/// session or window: it turns [`EXTENDED_KEYS`] on, and tells tmux the
+/// outer terminal can send such keys too (which takes effect for a client
+/// on attaching). It has to come first: tmux drops a program's request for
+/// these keys while the option is off, and does not remember it.
+///
+/// The server is the user's own, so the option is changed only from tmux's
+/// default, once per server, and never when the user's tmux.conf sets it.
+/// A tmux that has no such option (before 3.2) expands it to nothing, and
+/// nothing is done.
+fn extended_keys_first() -> Vec<String> {
+    if config_sets_extended_keys() {
+        return Vec::new();
+    }
+    vec![
+        "if-shell".into(),
+        "-F".into(),
+        format!("#{{==:#{{{EXTENDED_KEYS}}}#{{{EXTENDED_KEYS_MARK}}},off}}"),
+        format!(
+            "set-option -s {EXTENDED_KEYS} on ; \
+             set-option -as terminal-features 'xterm*:extkeys' ; \
+             set-option -s {EXTENDED_KEYS_MARK} on"
+        ),
+        ";".into(),
+    ]
+}
+
+/// Whether one of the files tmux reads its configuration from sets
+/// [`EXTENDED_KEYS`], to whatever value.
+fn config_sets_extended_keys() -> bool {
+    let mut files = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        files.push(home.join(".tmux.conf"));
+        files.push(home.join(".config/tmux/tmux.conf"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        files.push(Path::new(&xdg).join("tmux/tmux.conf"));
+    }
+    files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .any(|conf| sets_extended_keys(&conf))
+}
+
+fn sets_extended_keys(conf: &str) -> bool {
+    conf.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with('#'))
+        .any(|line| line.split_whitespace().any(|word| word == EXTENDED_KEYS))
 }
 
 /// `text` as tmux shows it where it expands formats: `#` starts one, and
@@ -792,6 +856,17 @@ mod tests {
             ]
         );
         assert!(parse_windows("").is_empty());
+    }
+
+    #[test]
+    fn a_tmux_conf_that_sets_extended_keys_is_found() {
+        assert!(sets_extended_keys(
+            "set -g mouse on\nset -s extended-keys off\n"
+        ));
+        assert!(sets_extended_keys("  set-option -s extended-keys always"));
+        assert!(!sets_extended_keys("# set -s extended-keys on\n"));
+        assert!(!sets_extended_keys("set -s extended-keys-format csi-u\n"));
+        assert!(!sets_extended_keys(""));
     }
 
     #[test]

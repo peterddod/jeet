@@ -2252,6 +2252,12 @@ n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
 rmdir "$here/lock"
+# One call may run more than one command, `;` between: act on the last.
+for arg in "$@"; do [ "$arg" = ";" ] && chained=1; done
+if [ -n "$chained" ]; then
+  while [ "$1" != ";" ]; do shift; done
+  shift
+fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
@@ -2283,7 +2289,8 @@ esac
     script
 }
 
-/// Every call the stub `tmux` has had, oldest first, each as its arguments.
+/// Every command the stub `tmux` has had, oldest first, each as its
+/// arguments: a call that chains several with `;` counts as each of them.
 #[cfg(unix)]
 fn tmux_calls(script: &std::path::Path) -> Vec<Vec<String>> {
     let dir = script.parent().unwrap().join("calls");
@@ -2294,12 +2301,15 @@ fn tmux_calls(script: &std::path::Path) -> Vec<Vec<String>> {
     names.sort();
     names
         .into_iter()
-        .map(|p| {
-            std::fs::read_to_string(p)
+        .flat_map(|p| {
+            let args: Vec<String> = std::fs::read_to_string(p)
                 .unwrap()
                 .split_terminator('\0')
                 .map(str::to_string)
-                .collect()
+                .collect();
+            args.split(|a| a == ";")
+                .map(<[String]>::to_vec)
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -2939,10 +2949,15 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
     let sockets = TempDir::new().unwrap();
     let server = TmuxServer(sockets.path().to_path_buf());
     let sockets_env = sockets.path().to_string_lossy().to_string();
+    // No tmux.conf: the server is tmux's defaults, and jeet's.
+    let home = TempDir::new().unwrap();
+    let home_env = home.path().to_string_lossy().to_string();
     let env = [
         ("JEET_TMUX", "tmux"),
         ("TMUX_TMPDIR", sockets_env.as_str()),
         ("JEET_AGENT", "sleep 300"),
+        ("HOME", home_env.as_str()),
+        ("XDG_CONFIG_HOME", home_env.as_str()),
     ];
 
     succeeded(&lab.jeet_at(&["task", "open", "real"], &lab.home(), &env));
@@ -2950,6 +2965,30 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         .tmux(&["has-session", "-t", "=jeet-real"])
         .status
         .success());
+    // Shift+Enter reaches the agent, where tmux knows how (3.2 and later).
+    let show = |option: &str| {
+        let output = server.tmux(&["show-options", "-sv", option]);
+        output
+            .status
+            .success()
+            .then(|| stdout_of(&output).trim().to_string())
+    };
+    if let Some(keys) = show("extended-keys") {
+        assert_eq!(keys, "on");
+        let features = show("terminal-features").unwrap();
+        assert_eq!(features.matches("xterm*:extkeys").count(), 1, "{features}");
+        // Turned off again by the user: it stays off.
+        assert!(server
+            .tmux(&["set-option", "-s", "extended-keys", "off"])
+            .status
+            .success());
+        lab.new_task("again");
+        succeeded(&lab.jeet_at(&["task", "open", "again"], &lab.home(), &env));
+        assert_eq!(show("extended-keys").unwrap(), "off");
+        let features = show("terminal-features").unwrap();
+        assert_eq!(features.matches("xterm*:extkeys").count(), 1, "{features}");
+        succeeded(&lab.jeet_at(&["task", "archive", "again"], &lab.home(), &env));
+    }
     let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
     assert!(
         stdout_of(&output).contains("running"),
@@ -2962,6 +3001,65 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         .tmux(&["has-session", "-t", "=jeet-real"])
         .status
         .success());
+}
+
+/// jeet turns tmux's extended keys on, for Shift+Enter to reach the agent,
+/// in the same call that starts the session: tmux drops an agent's request
+/// for them made while they are off. A user whose tmux.conf has a say on
+/// them is left to it.
+#[cfg(unix)]
+#[test]
+fn tmux_passes_shift_enter_unless_the_user_says_otherwise() {
+    let lab = StoreLab::new();
+    lab.new_task("keys");
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let home_env = home.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+        ("HOME", home_env.as_str()),
+        ("XDG_CONFIG_HOME", home_env.as_str()),
+    ];
+
+    succeeded(&lab.jeet_at(&["task", "open", "keys"], &lab.home(), &env));
+    let calls = tmux_calls(&tmux);
+    let first = calls
+        .iter()
+        .position(|c| c[0] == "if-shell" && c[1] == "-F")
+        .unwrap();
+    assert_eq!(
+        calls[first],
+        [
+            "if-shell",
+            "-F",
+            "#{==:#{extended-keys}#{@jeet-extended-keys},off}",
+            "set-option -s extended-keys on ; \
+             set-option -as terminal-features 'xterm*:extkeys' ; \
+             set-option -s @jeet-extended-keys on",
+        ]
+    );
+    // Run by the very call that starts the session, just ahead of it.
+    let raw = std::fs::read_dir(tmux.parent().unwrap().join("calls"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .find(|call| call.contains("new-session"))
+        .unwrap();
+    let raw: Vec<&str> = raw.split_terminator('\0').collect();
+    assert_eq!(raw[..4], calls[first][..]);
+    assert_eq!(raw[4..6], [";", "new-session"]);
+
+    // Set in the user's tmux.conf, to anything: theirs to decide.
+    succeeded(&lab.jeet_at(&["task", "archive", "keys"], &lab.home(), &env));
+    lab.new_task("mine");
+    std::fs::write(home.join(".tmux.conf"), "set -s extended-keys off\n").unwrap();
+    succeeded(&lab.jeet_at(&["task", "open", "mine"], &lab.home(), &env));
+    let starts = calls_of(&tmux, "new-session");
+    assert_eq!(starts.len(), 2);
+    assert_eq!(calls_of(&tmux, "if-shell").len(), 1);
 }
 
 /// The project's agent arguments follow the configured agent's into the
@@ -5051,6 +5149,11 @@ n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
 rmdir "$here/lock"
+for arg in "$@"; do [ "$arg" = ";" ] && chained=1; done
+if [ -n "$chained" ]; then
+  while [ "$1" != ";" ]; do shift; done
+  shift
+fi
 target=""
 prev=""
 for a in "$@"; do

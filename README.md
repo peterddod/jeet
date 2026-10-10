@@ -522,6 +522,20 @@ counting the agent's activity. An agent jeet has no harness for
 (`agent = "aider"`) runs in tmux the same way, with no status: just
 `running`. Archiving or deleting a task ends its tmux session.
 
+Shift+Enter starts a new line in Claude Code instead of sending the message.
+Inside tmux that needs tmux's `extended-keys`, which is off by default, so
+jeet turns it on (with `set -s extended-keys on` and
+`set -as terminal-features 'xterm*:extkeys'`) as it starts an agent. The
+setting covers the whole tmux server, so jeet changes it only while it is at
+tmux's default, and only once per server. If you switch it off again, it stays
+off. If your `tmux.conf` sets `extended-keys` itself, jeet leaves it alone.
+tmux older than 3.2 has no such setting, and jeet skips it. Agents that were
+already running when jeet turned it on, and terminals that were already
+attached, need a restart or a detach and reattach. A terminal that cannot
+send Shift+Enter differently from Enter still sends the message on
+Shift+Enter. In that case, use `Ctrl+J`, or type `\` and then press Enter, to
+start a new line.
+
 Claude Code asks once per folder whether you trust it, before any hook runs,
 and a task's agent waits at that question until you answer it. Trusting a
 folder covers the folders inside it (checked with Claude Code 2.1.296), so
