@@ -288,10 +288,21 @@ fn operand(word: &Path, cwd: &Path, root: &Path) -> Result<PathBuf> {
     let Ok(rest) = path.strip_prefix(root) else {
         bail!("refused: {} is outside the worktree root", word.display());
     };
-    if rest.components().any(|c| c.as_os_str() == ".git") {
+    if in_git(rest) {
         bail!("refused: {} is inside .git", word.display());
     }
     Ok(path)
+}
+
+/// Whether a path below the root runs through `.git`, in any letter case:
+/// macOS and Windows file systems are case-insensitive by default, so
+/// `.GIT` opens the same directory.
+fn in_git(rest: &Path) -> bool {
+    rest.components().any(|c| {
+        c.as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(b".git")
+    })
 }
 
 fn not_the_root(path: &Path, root: &Path) -> Result<()> {
@@ -317,8 +328,12 @@ fn contained(path: &Path, follow: bool, real_root: &Path) -> Result<()> {
         _ => path,
     };
     let real = physical(checked)?;
-    if !real.starts_with(real_root) {
+    let Ok(rest) = real.strip_prefix(real_root) else {
         bail!("refused: {} leads outside the worktree root", name(path));
+    };
+    // A symlink to `.git` passes the lexical check; its target does not.
+    if in_git(rest) {
+        bail!("refused: {} leads into .git", name(path));
     }
     Ok(())
 }
@@ -725,6 +740,44 @@ mod tests {
         assert!(refused("mv . ../elsewhere", &t.root, &t.root).contains("refused"));
         assert!(refused("rm -r .git", &t.root, &t.root).contains(".git"));
         assert!(refused("touch .git/HEAD", &t.root, &t.root).contains(".git"));
+    }
+
+    #[test]
+    fn git_is_off_limits_in_any_letter_case() {
+        let t = tree();
+        let src = t.root.join("src");
+        for line in [
+            "rm -r .GIT",
+            "rm -r .Git/objects",
+            "mv .GIT elsewhere",
+            "mv README.md .gIt/README.md",
+            "cp README.md .Git/config",
+            "touch .GIT/HEAD",
+            "mkdir -p .GiT/hooks",
+        ] {
+            let why = refused(line, &t.root, &t.root);
+            assert!(why.contains(".git"), "{line:?}: {why}");
+        }
+        assert!(refused("rm -r ../.GIT", &src, &t.root).contains(".git"));
+        assert!(t.root.join(".git").is_dir());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinks_cannot_smuggle_a_path_into_git() {
+        let t = tree();
+        std::os::unix::fs::symlink(t.root.join(".git"), t.root.join("g")).unwrap();
+        for line in [
+            "touch g/HEAD",
+            "rm -r g/objects",
+            "mkdir -p g/hooks",
+            "cp README.md g/config",
+        ] {
+            let why = refused(line, &t.root, &t.root);
+            assert!(why.contains(".git"), "{line:?}: {why}");
+        }
+        // The link itself is ours to remove.
+        assert!(resolve("rm g", &t.root, &t.root).is_ok());
     }
 
     #[test]
