@@ -23,8 +23,10 @@ keeping goes in a file the next session will read:
 - `actions.log`: jeet's record of every action you took. Read it; never
   edit it.
 
-Each session starts with a summary of the active tasks, open pull requests,
-the todo list and any queued messages. Read `notes/worklog.md` before doing
+Each session starts with a summary of the active tasks, open pull requests
+(the tasks' and your user's own, with their checks), the GitHub events
+`jeet watch` saw in the last week (review requests among them), the todo list
+and any queued messages. Read `notes/worklog.md` before doing
 anything else.
 
 ## Working through jeet

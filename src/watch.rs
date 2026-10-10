@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -693,7 +693,7 @@ pub fn decide(rules: &[Rule], event: &Event) -> RuleAction {
 
 /// `text` as one line that cannot close the fence it is put in or open
 /// another, cut to [`FIELD_MAX`].
-fn field(text: &str) -> String {
+pub fn field(text: &str) -> String {
     let flat: String = messages::clean(text)
         .chars()
         .map(|c| match c {
@@ -797,7 +797,7 @@ fn owning_task(app: &App, event: &Event) -> Result<Option<TaskRecord>> {
 
 /// Whether the index's repo id (`github.com/acme/api`) is `repo`
 /// (`acme/api`).
-fn repo_id_is(repo_id: &str, repo: &str) -> bool {
+pub fn repo_id_is(repo_id: &str, repo: &str) -> bool {
     if repo.is_empty() {
         return false;
     }
@@ -958,6 +958,44 @@ fn log_events(home: &Path, logged: &[Logged]) -> Result<()> {
         std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())
+}
+
+/// The whole lines in the last `max` bytes of `path`, oldest first.
+pub fn tail_lines(path: &Path, max: u64) -> Vec<String> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if file.take(max).read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // Started part way through a line: that part is no line at all.
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
+}
+
+/// The end of the events log the assistant's summary reads.
+const RECENT_BYTES: u64 = 64 * 1024;
+
+/// The events logged at or after `since`, newest first, from the end of
+/// the log; lines that are not an event are passed over.
+pub fn recent_events(home: &Path, since: i64) -> Vec<Logged> {
+    let mut events: Vec<Logged> = tail_lines(&events_path(home), RECENT_BYTES)
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Logged>(line).ok())
+        .filter(|logged| logged.event.at >= since)
+        .collect();
+    events.reverse();
+    events
 }
 
 /// The lock a poll holds, released when dropped.
@@ -2081,6 +2119,20 @@ mod tests {
              [Timer]\nOnBootSec=1min\nOnUnitActiveSec=90s\n\n\
              [Install]\nWantedBy=timers.target\n"
         );
+    }
+
+    #[test]
+    fn only_the_end_of_a_long_log_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &text).unwrap();
+        let lines = tail_lines(&path, 100);
+        assert_eq!(lines.last().unwrap(), "line 999");
+        assert!(lines.iter().all(|l| l.starts_with("line ")), "{lines:?}");
+        assert!(lines.len() < 15, "{lines:?}");
+        assert_eq!(tail_lines(&path, 1_000_000).len(), 1000);
+        assert!(tail_lines(&dir.path().join("missing"), 100).is_empty());
     }
 
     #[test]

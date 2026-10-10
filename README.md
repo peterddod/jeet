@@ -536,8 +536,10 @@ matters, and two can run at once — one planning your week, one triaging
 reviews. Each runs in a window of its own in the tmux session
 `jeet-assistant`, with the same hooks and status as a task's agent, and with
 `JEET_ASSISTANT=1`. Every session starts with a summary of the active tasks,
-their open pull requests (fenced as data written by others), the todo list and
-any messages queued for it.
+their open pull requests and your own that `jeet watch` follows, with their
+checks, the GitHub events the watcher saw in the last week, such as review
+requests (all fenced as data written by others), the todo list and any
+messages queued for it.
 
 Messages for the assistant go to the session you marked primary (`*` in the
 picker) while it runs, else to the most recently active running one, by the

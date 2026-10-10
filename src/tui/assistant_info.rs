@@ -13,7 +13,6 @@
 //! it is a web address, handed to the opener as one argument.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -131,13 +130,13 @@ pub fn gather(probe: &Probe, windows: &[tmux::Window]) -> Info {
     };
     let mut feed: Vec<FeedEntry> = queued.iter().map(queued_entry).collect();
     feed.extend(
-        tail_lines(&watch::events_path(&probe.home), TAIL_BYTES)
+        watch::tail_lines(&watch::events_path(&probe.home), TAIL_BYTES)
             .iter()
             .filter_map(|line| serde_json::from_str::<Logged>(line).ok())
             .map(event_entry),
     );
     feed.extend(
-        tail_lines(&permissions::actions_log(&probe.home), TAIL_BYTES)
+        watch::tail_lines(&permissions::actions_log(&probe.home), TAIL_BYTES)
             .iter()
             .filter_map(|line| serde_json::from_str::<ActionRecord>(line).ok())
             .map(action_entry),
@@ -170,29 +169,6 @@ fn queued(dir: &Path) -> Vec<Queued> {
     messages::Inbox::lock(dir)
         .and_then(|inbox| inbox.read())
         .unwrap_or_default()
-}
-
-/// The whole lines in the last `max` bytes of `path`, oldest first.
-pub fn tail_lines(path: &Path, max: u64) -> Vec<String> {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(max);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if file.take(max).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    // Started part way through a line: that part is no line at all.
-    if start > 0 && !lines.is_empty() {
-        lines.remove(0);
-    }
-    lines
 }
 
 fn event_entry(logged: Logged) -> FeedEntry {
@@ -559,20 +535,6 @@ mod tests {
             text.contains("- [ ] !p1 ship it @fix-login\n- [x] tidy up\n"),
             "{text}"
         );
-    }
-
-    #[test]
-    fn only_the_end_of_a_long_log_is_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log");
-        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
-        std::fs::write(&path, &text).unwrap();
-        let lines = tail_lines(&path, 100);
-        assert_eq!(lines.last().unwrap(), "line 999");
-        assert!(lines.iter().all(|l| l.starts_with("line ")), "{lines:?}");
-        assert!(lines.len() < 15, "{lines:?}");
-        assert_eq!(tail_lines(&path, 1_000_000).len(), 1000);
-        assert!(tail_lines(&dir.path().join("missing"), 100).is_empty());
     }
 
     #[test]
