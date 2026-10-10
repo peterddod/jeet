@@ -18,6 +18,10 @@ fn jeet_bin() -> Command {
     cmd.env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
         .env_remove("TMUX")
         .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude");
+    // Nor pop up notifications, or be held to the assistant's permissions
+    // because the suite runs inside its session.
+    cmd.env("JEET_NOTIFY_CMD", "true")
+        .env_remove("JEET_ASSISTANT");
     cmd
 }
 
@@ -4281,4 +4285,318 @@ fn import_leaves_pull_request_checkouts_alone() {
     assert!(lab.task_slugs().is_empty());
     assert!(review.is_dir());
     assert!(explored.is_dir());
+}
+
+// ---------------------------------------------------------------------------
+// the assistant: permissions, actions.log, notifications, task messaging
+// ---------------------------------------------------------------------------
+
+/// A `JEET_NOTIFY_CMD` that notes each notification as a line in `notes`
+/// beside it: `title|body|url`.
+#[cfg(unix)]
+fn stub_notifier(dir: &std::path::Path) -> std::path::PathBuf {
+    let script = dir.join("notify-stub");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$JEET_NOTIFY_TITLE\" \"$JEET_NOTIFY_BODY\" \
+         \"$JEET_NOTIFY_URL\" >> \"$(dirname \"$0\")/notes\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn notes(script: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(script.parent().unwrap().join("notes"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn actions(home: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(home.join("assistant/actions.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let config = lab.home().join("config.toml");
+
+    // Nothing is allowed until config.toml says so: refused, with what to
+    // do about it, before anything is made.
+    let output = lab.jeet_at(&["task", "new", "fix-login"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("may not create tasks"), "{stderr}");
+    assert!(stderr.contains("`task.create`"), "{stderr}");
+    assert!(stderr.contains("[assistant] allow"), "{stderr}");
+    assert!(!lab.home().join("tasks/fix-login").exists());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["outcome"], "denied");
+    assert_eq!(log[0]["capability"], "task.create");
+    assert!(notes(&notifier).is_empty());
+
+    // Allowed: done, logged and announced.
+    std::fs::write(
+        &config,
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\"]\n",
+    )
+    .unwrap();
+    let output = lab.jeet_at(&["task", "new", "fix-login"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), lab.home().join("tasks/fix-login"));
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[1]["outcome"], "done");
+    assert_eq!(log[1]["action"], "created task fix-login");
+    assert_eq!(notes(&notifier), ["Assistant|created task fix-login|"]);
+
+    // Still refused: what was not listed.
+    let output = lab.jeet_at(&["task", "delete", "fix-login", "-f"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("may not delete tasks"));
+    assert!(lab.home().join("tasks/fix-login").is_dir());
+
+    // Reads are free and leave no trace; screens are for people.
+    succeeded(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
+    let output = lab.jeet_at(&["tasks"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("person at a terminal"));
+    assert_eq!(actions(&lab.home()).len(), 3);
+
+    // A failure is logged as one, and not announced.
+    let output = lab.jeet_at(
+        &["task", "new", "broken", "--repo", "nowhere"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    let log = actions(&lab.home());
+    assert_eq!(log[3]["outcome"], "failed");
+    assert!(log[3]["error"].as_str().is_some());
+    assert_eq!(notes(&notifier).len(), 1);
+
+    // Notifications can be turned off; the log is kept regardless.
+    std::fs::write(
+        &config,
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\nnotify = false\n",
+    )
+    .unwrap();
+    succeeded(&lab.jeet_at(&["task", "new", "quiet"], &lab.home(), &env));
+    assert_eq!(actions(&lab.home()).len(), 5);
+    assert_eq!(notes(&notifier).len(), 1);
+
+    // Outside the assistant, none of it applies.
+    let plain = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
+    succeeded(&lab.jeet_at(&["task", "delete", "quiet", "-f"], &lab.home(), &plain));
+    assert_eq!(actions(&lab.home()).len(), 5);
+    assert_eq!(notes(&notifier).len(), 1);
+
+    // A review job runs whatever its state file says: only one jeet wrote.
+    let state = scratch.path().join("job.json");
+    std::fs::write(&state, "{}").unwrap();
+    let output = lab.jeet_at(&["review-job", &state.to_string_lossy()], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("review jobs jeet started"));
+}
+
+#[cfg(unix)]
+#[test]
+fn notify_reports_through_the_notifier() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
+
+    let output = lab.jeet_at(
+        &[
+            "notify",
+            "3 reviews waiting",
+            "--body",
+            "acme/api #4, #5\nand #6",
+            "--url",
+            "https://github.com/pulls",
+        ],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "");
+    assert_eq!(
+        notes(&notifier),
+        ["3 reviews waiting|acme/api #4, #5 and #6|https://github.com/pulls"]
+    );
+
+    // Only a web page may be opened from one.
+    let output = lab.jeet_at(
+        &["notify", "x", "--url", "file:///etc/passwd"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert_eq!(notes(&notifier).len(), 1);
+
+    // The assistant's notifications follow `[assistant] notify`.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\n",
+    )
+    .unwrap();
+    let mut assistant = env.to_vec();
+    assistant.push(("JEET_ASSISTANT", "1"));
+    succeeded(&lab.jeet_at(&["notify", "hush"], &lab.home(), &assistant));
+    assert_eq!(notes(&notifier).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("fix-x");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let session = "11111111-2222-4333-8444-555555555555";
+
+    // Not running: started, with the message as its first prompt.
+    let output = lab.jeet_at(&["task", "send", "fix-x", "-start here"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "");
+    assert!(
+        stderr_of(&output).contains("started"),
+        "{}",
+        stderr_of(&output)
+    );
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0][started[0].len() - 2..], ["--", "-start here"]);
+
+    // Idle: typed in, literally, then Enter.
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, &task), &[]));
+    let output = lab.jeet_at(
+        &["task", "send", "fix-x", "also add tests;\nthanks\u{1b}"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(
+        calls_of(&tmux, "send-keys"),
+        [
+            vec![
+                "send-keys",
+                "-t",
+                "=jeet-fix-x:",
+                "-l",
+                "--",
+                "also add tests; thanks"
+            ],
+            vec!["send-keys", "-t", "=jeet-fix-x:", "Enter"],
+        ]
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+
+    // Busy: queued, and the Stop hook hands it over instead of stopping.
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", session, &task),
+        &[],
+    ));
+    for message in ["and docs", "and a changelog"] {
+        let output = lab.jeet_at(&["task", "send", "fix-x", message], &lab.home(), &env);
+        succeeded(&output);
+        assert!(
+            stderr_of(&output).contains("busy"),
+            "{}",
+            stderr_of(&output)
+        );
+    }
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+    assert!(task.join(".jeet/inbox.jsonl").is_file());
+
+    let output = lab.hook("Stop", &hook_input("Stop", session, &task), &[]);
+    succeeded(&output);
+    let decision: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+    assert_eq!(decision["decision"], "block");
+    let reason = decision["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("and docs\n\n---\n\nand a changelog"),
+        "{reason}"
+    );
+    assert_eq!(status_file(&task, session)["state"], "running");
+    assert!(!task.join(".jeet/inbox.jsonl").exists());
+    // Handed over once: the next Stop is a stop.
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, &task), &[]));
+    assert_eq!(status_file(&task, session)["state"], "idle");
+
+    // Waiting on a permission: never typed in, where it would answer it.
+    hook_ok(&lab.hook(
+        "Notification",
+        &hook_input("Notification", session, &task),
+        &[],
+    ));
+    succeeded(&lab.jeet_at(&["task", "send", "fix-x", "1"], &lab.home(), &env));
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+    assert!(task.join(".jeet/inbox.jsonl").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn task_new_with_a_prompt_starts_its_agent_on_it() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "Fix X",
+            "--prompt",
+            "Fix X in api.\nAdd tests.",
+        ],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(path_from(&output), lab.home().join("tasks/fix-x"));
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        started[0][started[0].len() - 2..],
+        ["--", "Fix X in api.\nAdd tests."]
+    );
+
+    // An agent that takes no first prompt: the task is made, and it says
+    // why the agent is not running.
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "aider")];
+    let output = lab.jeet_at(
+        &["task", "new", "other", "--prompt", "go"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("takes no first prompt"));
+    assert!(lab.home().join("tasks/other").is_dir());
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 }

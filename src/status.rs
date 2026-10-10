@@ -9,6 +9,10 @@
 //! A hook runs on every tool call, so it has to be quick (well under 50ms),
 //! must never print to stdout — Claude would read it as hook output — and
 //! always exits 0: a broken status line must never get in the agent's way.
+//!
+//! The one exception: a Stop hook that finds messages queued for the agent
+//! by `jeet task send` prints Claude's `block` decision with them, so the
+//! agent carries on with them instead of stopping.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -18,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::App;
 use crate::db::tasks::TaskSessionRecord;
+use crate::messages;
 use crate::tasks;
 use crate::worktrees::now_secs;
 
@@ -207,6 +212,27 @@ fn handle_hook(event: &str, raw: &str, now: i64) -> Result<()> {
             && read_status(&task_dir, session_id).is_some()
         {
             return Ok(());
+        }
+    }
+    if event == "Stop" {
+        // A broken inbox must not keep the status from being written.
+        let queued = messages::drain(&task_dir).unwrap_or_else(|e| {
+            eprintln!("jeet task-hook {event}: {e:#}");
+            Vec::new()
+        });
+        if !queued.is_empty() {
+            println!("{}", messages::stop_block(&queued));
+            // Not stopping after all: on to the messages.
+            return write_status(
+                &task_dir,
+                &SessionStatus {
+                    session_id: session_id.to_string(),
+                    state: State::Running,
+                    detail: Some("reading queued messages".to_string()),
+                    event: event.to_string(),
+                    at: now,
+                },
+            );
         }
     }
     match status_for(event, &input, now) {

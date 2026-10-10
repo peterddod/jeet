@@ -78,10 +78,11 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     }
     cmd.arg("--").args(argv);
     // A server this starts keeps a copy of our environment for every pane it
-    // ever makes: the shell wrapper's cd file and this task's id must not
-    // leak into sessions of other tasks that way.
+    // ever makes: the shell wrapper's cd file, this task's id and the
+    // assistant's restrictions must not leak into other sessions that way.
     cmd.env_remove(crate::cd::CD_FILE_ENV)
         .env_remove(crate::tasks::TASK_ID_ENV)
+        .env_remove(crate::permissions::ASSISTANT_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null());
     let output = cmd.output().context("run tmux")?;
@@ -93,6 +94,47 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     }
     set_detach_hint(name);
     Ok(())
+}
+
+/// Type `text` into the active pane of session `name`, then press Enter.
+///
+/// `-l` sends the text as it is, never as key names, and `--` keeps text
+/// that starts with a dash from being read as a flag. The caller removes
+/// control characters: sent literally, they would still drive the pane.
+pub fn send_text(name: &str, text: &str) -> Result<()> {
+    let pane = format!("{}:", target(name));
+    send_keys(&["-t", &pane, "-l", "--", &literal_arg(text)])?;
+    // A moment between the text and the Enter, or a pane reading the two as
+    // one paste may take the Enter as part of the text.
+    std::thread::sleep(Duration::from_millis(100));
+    send_keys(&["-t", &pane, "Enter"])
+}
+
+fn send_keys(args: &[&str]) -> Result<()> {
+    let output = Command::new(binary())
+        .arg("send-keys")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not type into the agent's pane: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// tmux reads an argument that ends in `;` as the end of its command, and
+/// drops the `;`; one ending in `\;` keeps a literal `;`. So the last
+/// `;` is escaped, and the text arrives whole.
+fn literal_arg(text: &str) -> String {
+    match text.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => text.to_string(),
+    }
 }
 
 /// Show how to get back to jeet in the session's status line. Cosmetic, so
@@ -374,6 +416,16 @@ mod tests {
     #[test]
     fn targets_match_exactly() {
         assert_eq!(target("jeet-api"), "=jeet-api");
+    }
+
+    #[test]
+    fn a_trailing_semicolon_is_typed_not_parsed() {
+        assert_eq!(literal_arg("do it"), "do it");
+        assert_eq!(literal_arg("do it;"), r"do it\;");
+        assert_eq!(literal_arg(";"), r"\;");
+        // Escaped already: tmux unescapes once, so it stays as typed.
+        assert_eq!(literal_arg(r"a\;"), r"a\\;");
+        assert_eq!(literal_arg("a; b"), "a; b");
     }
 
     #[test]

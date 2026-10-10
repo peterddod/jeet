@@ -5,6 +5,7 @@ pub mod explore;
 pub mod import;
 pub mod install_shell;
 pub mod ls;
+pub mod notify;
 pub mod path;
 pub mod projects;
 pub mod prs;

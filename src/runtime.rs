@@ -14,8 +14,10 @@ use uuid::Uuid;
 
 use crate::agent::{self, AgentSpec};
 use crate::cd;
+use crate::config::AssistantConfig;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskSessionRecord};
+use crate::permissions;
 use crate::projects;
 use crate::status::{self, Activity, HOOK_EVENTS};
 use crate::tasks;
@@ -44,8 +46,14 @@ pub struct Running {
 
 /// Make sure the task's agent is running in its tmux session, starting it if
 /// not: resuming `session` when given, else the task's latest session, else
-/// a new one.
-pub fn ensure_running(app: &App, task: &TaskRecord, session: Option<&str>) -> Result<Running> {
+/// a new one. An agent this starts gets `prompt` as its first prompt; one
+/// already running does not.
+pub fn ensure_running(
+    app: &App,
+    task: &TaskRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<Running> {
     tmux::require()?;
     let name = session_name(task);
     let mut warnings = Vec::new();
@@ -79,7 +87,7 @@ pub fn ensure_running(app: &App, task: &TaskRecord, session: Option<&str>) -> Re
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
     }
-    let argv = launch_argv(app, task, &spec, session)?;
+    let argv = launch_argv(app, task, &spec, session, prompt)?;
     let home = app.home.to_string_lossy();
     let env = [
         (tasks::TASK_ID_ENV, task.id.as_str()),
@@ -100,14 +108,23 @@ pub fn ensure_running(app: &App, task: &TaskRecord, session: Option<&str>) -> Re
 }
 
 /// The agent's command line. For Claude Code it resumes or starts a
-/// recorded session and carries jeet's settings.
+/// recorded session, carries jeet's settings and, given one, its first
+/// prompt.
 fn launch_argv(
     app: &App,
     task: &TaskRecord,
     spec: &AgentSpec,
     session: Option<&str>,
+    prompt: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut argv = spec.argv.clone();
+    if prompt.is_some() && spec.prompt_args("").is_none() {
+        bail!(
+            "{} takes no first prompt from jeet; start it with `jeet task open {}` and send              the message once it is running",
+            spec.display(),
+            task.slug
+        );
+    }
     if !spec.supports_sessions() {
         if let Some(id) = session {
             bail!(
@@ -137,7 +154,13 @@ fn launch_argv(
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    argv.extend(spec.settings_args(&settings_json(&exe)).unwrap_or_default());
+    argv.extend(
+        spec.settings_args(&settings_json(&exe, &ALLOWED))
+            .unwrap_or_default(),
+    );
+    if let Some(prompt) = prompt {
+        argv.extend(spec.prompt_args(prompt).unwrap_or_default());
+    }
     Ok(argv)
 }
 
@@ -188,8 +211,8 @@ fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String> {
 }
 
 /// The `--settings` JSON: a hook per event running `jeet task-hook`, and
-/// permission to run the jeet commands the skill describes.
-pub fn settings_json(exe: &Path) -> String {
+/// permission to run the jeet commands `allow` names (`Bash(…)` rules).
+pub fn settings_json<S: AsRef<str>>(exe: &Path, allow: &[S]) -> String {
     let program = shell_quote(&exe.to_string_lossy());
     let mut hooks = serde_json::Map::new();
     for event in HOOK_EVENTS {
@@ -207,9 +230,19 @@ pub fn settings_json(exe: &Path) -> String {
     }
     serde_json::json!({
         "hooks": hooks,
-        "permissions": { "allow": ALLOWED },
+        "permissions": {
+            "allow": allow.iter().map(|a| a.as_ref()).collect::<Vec<&str>>(),
+        },
     })
     .to_string()
+}
+
+/// The `--settings` JSON for the assistant: jeet's hooks, and permission to
+/// run the read-only jeet commands and those of each capability
+/// `[assistant] allow` lists, so allowed actions do not prompt.
+#[allow(dead_code)] // for launching the assistant's own session
+pub fn assistant_settings_json(exe: &Path, settings: &AssistantConfig) -> String {
+    settings_json(exe, &permissions::bash_allow(&settings.allow))
 }
 
 /// A word the shell reads back exactly, whatever it holds.
@@ -282,7 +315,7 @@ mod tests {
 
     #[test]
     fn settings_install_every_hook_and_the_jeet_permissions() {
-        let json = settings_json(Path::new("/opt/it's here/jeet"));
+        let json = settings_json(Path::new("/opt/it's here/jeet"), &ALLOWED);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         for event in HOOK_EVENTS {
             let groups = value["hooks"][event].as_array().unwrap();
@@ -300,6 +333,26 @@ mod tests {
             value["permissions"]["allow"],
             serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
         );
+    }
+
+    #[test]
+    fn the_assistant_is_pre_approved_what_it_is_allowed() {
+        let settings = AssistantConfig {
+            allow: vec!["task.send".into()],
+            notify: None,
+        };
+        let json = assistant_settings_json(Path::new("/bin/jeet"), &settings);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let allow: Vec<&str> = value["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(allow.contains(&"Bash(jeet task send:*)"), "{allow:?}");
+        assert!(allow.contains(&"Bash(jeet task ls:*)"), "{allow:?}");
+        assert!(!allow.contains(&"Bash(jeet task new:*)"), "{allow:?}");
+        assert!(value["hooks"]["Stop"].is_array());
     }
 
     #[test]

@@ -24,6 +24,10 @@ pub struct Config {
     /// 300). `0` turns background syncing off; `jeet sync` still works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_interval_secs: Option<u64>,
+
+    /// What the assistant may do (`[assistant]`).
+    #[serde(default, skip_serializing_if = "AssistantConfig::is_empty")]
+    pub assistant: AssistantConfig,
 }
 
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
@@ -58,6 +62,29 @@ impl ReviewConfig {
     }
 }
 
+/// `[assistant]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AssistantConfig {
+    /// Capabilities the assistant may use, e.g. `task.create`. Nothing is
+    /// allowed unless listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+
+    /// Desktop notification for each action it takes (default: on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+impl AssistantConfig {
+    fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.notify.is_none()
+    }
+
+    pub fn notify(&self) -> bool {
+        self.notify.unwrap_or(true)
+    }
+}
+
 fn default_scan_roots() -> Vec<String> {
     vec!["~/Projects".into(), "~/code".into()]
 }
@@ -70,6 +97,7 @@ impl Default for Config {
             agent: None,
             review: ReviewConfig::default(),
             sync_interval_secs: None,
+            assistant: AssistantConfig::default(),
         }
     }
 }
@@ -177,6 +205,12 @@ pub fn projects_root(home: &Path) -> PathBuf {
     home.join("projects")
 }
 
+/// The assistant's home: its CLAUDE.md, worklog, todo, inbox and
+/// `actions.log`.
+pub fn assistant_dir(home: &Path) -> PathBuf {
+    home.join("assistant")
+}
+
 /// Where free-standing worktrees lived before tasks. Nothing new is made
 /// here; `jeet import` moves what is left into tasks.
 pub fn worktrees_root(home: &Path) -> PathBuf {
@@ -276,5 +310,18 @@ mod tests {
         assert!(!config.review.notify());
         assert!(Config::default().review.command().is_none());
         assert!(Config::default().review.notify());
+    }
+
+    #[test]
+    fn reads_the_assistant_section() {
+        let text = "[assistant]\nallow = [\"task.create\", \"task.send\"]\nnotify = false\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.assistant.allow, ["task.create", "task.send"]);
+        assert!(!config.assistant.notify());
+        // Nothing is allowed until the user says so.
+        assert!(Config::default().assistant.allow.is_empty());
+        assert!(Config::default().assistant.notify());
+        let out = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!out.contains("assistant"), "{out}");
     }
 }
