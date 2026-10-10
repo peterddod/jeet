@@ -172,12 +172,12 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 
 | key | action |
 |-----|--------|
-| `ctrl-a` | start a coding agent from the worktree root |
-| `ctrl-s` | previous agent sessions for this worktree (⏎ resumes one) |
+| `ctrl-a` | the task's coding agent, in its tmux session — started if it is not running |
+| `ctrl-s` | the task's agent sessions (`⏎` resumes one) |
 | `ctrl-w` | the repository's worktrees: `⏎` switches to one, `o` opens its PR |
 | `ctrl-f` | diff the highlighted file or folder against the default branch |
 | `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
-| `ctrl-o` | the repository's open pull requests: `⏎` checks one out and switches to it, `o` opens it in the browser |
+| `ctrl-o` | the repository's open pull requests: `⏎` checks one out in a task and switches to it, `o` opens it in the browser |
 | `ctrl-d` | toggle hidden dotfiles |
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
@@ -197,9 +197,11 @@ Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
 
 The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
-agent defaults to `claude`. Both are configurable (see below). Session listing
-knows Claude Code's transcript store — other agents still launch with `ctrl-a`, they
-just have no session history to show.
+agent defaults to `claude`. Both are configurable (see below). `ctrl-a` and
+`ctrl-s` act on the task you are browsing in — its agent runs in the task's
+tmux session, exactly as `⏎` in the tasks list runs it — so outside a task
+(a store trunk, say) they only say so. Sessions are Claude Code's; other agents
+still run with `ctrl-a`, they just have no sessions to show.
 
 ### Diffs
 
@@ -224,9 +226,10 @@ comments waiting to be submitted — the verdict submits that review, comments
 and all, rather than posting a second one.
 
 `ctrl-o` lists every open PR in the repository — the same list as
-`jeet prs` — and `⏎` checks the highlighted one out (or finds the worktree
-that already has it) and switches the explorer there. It is a way in, not
-`jeet review`: no review command is started.
+`jeet prs` — and `⏎` switches the explorer to it in a task: the task whose
+worktree has the PR's branch already, or else the PR's review task, which it
+makes just as `jeet review` would. It is a way in, not `jeet review`: no
+review command is started.
 
 PR support goes through the [GitHub CLI](https://cli.github.com): install
 `gh` and `gh auth login`, and the lookups happen in the background so the
@@ -294,8 +297,8 @@ notify = true   # desktop notification when it finishes (the default)
 The command runs detached from your terminal, so quitting the explorer or
 closing the window does not stop it. When it finishes you get a notification,
 the header's `review running` turns to `review ready`, and `v` in the PR panel
-opens its output. A Claude Code review also leaves a session behind, so
-`ctrl-s` can resume the conversation with it. Running `jeet review` again for
+opens its output. A Claude Code review also leaves a session behind, which
+`claude --resume` in the review task's worktree picks up. Running `jeet review` again for
 the same commit does not start a second review; new commits do (and
 `--rerun` forces one).
 
@@ -441,26 +444,30 @@ status. Archiving or deleting a task ends its tmux session.
 ### Archiving and deleting
 
 ```bash
-jeet task archive fix-login
+jeet task archive fix-login          # -f: without asking about ignored files
 jeet task unarchive fix-login
-jeet task delete fix-login
+jeet task delete fix-login           # -f: without asking about what is lost
 ```
 
 **Archive** frees the disk and keeps the work: each worktree's uncommitted
 changes — staged, unstaged and untracked — are saved under
 `refs/jeet/stash/<task-id>/<dir>`, its HEAD is pinned under
 `refs/jeet/head/<task-id>/<dir>` so not even a commit on a detached HEAD is lost
-to gc, and only then is the worktree removed. Ignored files (build output,
-`.env`) are not kept, and archive says how many went. The task directory itself
+to gc, and only then is the worktree removed. Files git ignores (build output,
+`.env`, local config) are not kept: removing the worktree deletes them. So
+archive names them first and asks — the tasks list in its confirm, the CLI on
+the terminal — and without a terminal it needs `--force`. The task directory itself
 stays, so an agent's sessions still find it. **Unarchive** puts every worktree
 back on its branch (or detached at its commit) with its changes reapplied, then
 drops the refs.
 
 **Delete** removes everything the task owns: its worktrees, the branches it
 created (never ones that existed before), its `refs/jeet` refs and its
-directory. It first lists what would be lost — uncommitted changes, and commits
-that would be left on no branch or remote — and asks; without a terminal it
-needs `--force`.
+directory, with everything else on its canvas. It first lists what would be
+lost — uncommitted changes, commits that would be left on no branch or remote,
+and any git checkout on the canvas that is none of the task's worktrees (a
+clone made there, or a worktree of a repository outside the store) — and asks;
+without a terminal it needs `--force`.
 
 ## Importing
 
@@ -558,7 +565,7 @@ into tasks.
 | `jeet checkout <branch>` | `jeet worktree add <repo> --branch <branch>` in a task |
 | `jeet exec <repo> --branch <b>`, `jeet path <repo> --branch <b>` | `jeet worktree path <name>` |
 | `jeet exec <repo> --ephemeral` | `jeet task new <name> --repo <repo>`, then `jeet task delete` |
-| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer |
+| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer, inside a task |
 | `jeet worktree clean`, `jeet worktree rename` | `jeet worktree rm`, `jeet task delete` |
 
 ## Migration from v0.1.x
