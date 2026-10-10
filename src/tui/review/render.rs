@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::actions::{Compose, Confirm, Picker};
 use super::diff::{DiffLine, FileDiff, FileStatus, LineKind};
+use super::highlight::{self, FileHighlight, Rgb, Run};
 use super::{Load, Row, Viewer};
 use crate::github::{Reaction, ReviewThread};
 
@@ -33,6 +34,9 @@ pub struct Palette {
     pub border: Color,
     pub accent: Color,
     pub warn: Color,
+    /// Whether code is coloured in the theme's own RGB, or the nearest the
+    /// 256-colour palette has.
+    pub truecolor: bool,
 }
 
 impl Palette {
@@ -66,6 +70,7 @@ impl Palette {
             border: Color::Rgb(0x30, 0x36, 0x3d),
             accent: Color::Rgb(0x2f, 0x81, 0xf7),
             warn: Color::Rgb(0xd2, 0x99, 0x22),
+            truecolor: true,
         }
     }
 
@@ -88,7 +93,42 @@ impl Palette {
             border: Color::Indexed(237),
             accent: Color::Indexed(33),
             warn: Color::Indexed(178),
+            truecolor: false,
         }
+    }
+
+    /// A colour from the syntax theme, as this terminal can show it.
+    pub fn code(&self, (r, g, b): Rgb) -> Color {
+        match self.truecolor {
+            true => Color::Rgb(r, g, b),
+            false => Color::Indexed(nearest_indexed((r, g, b))),
+        }
+    }
+}
+
+/// The xterm 256-colour entry nearest `rgb`: the closest of the 6×6×6 cube
+/// and the grey ramp.
+pub fn nearest_indexed((r, g, b): Rgb) -> u8 {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let level = |c: u8| {
+        (0..6)
+            .min_by_key(|&i| (LEVELS[i] as i32 - c as i32).abs())
+            .unwrap_or(0)
+    };
+    let distance = |(x, y, z): Rgb| {
+        let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+        d(x, r) + d(y, g) + d(z, b)
+    };
+    let (ri, gi, bi) = (level(r), level(g), level(b));
+    let cube = 16 + 36 * ri + 6 * gi + bi;
+    let cube_rgb = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
+    // The greys run 8, 18, … 238.
+    let average = (r as usize + g as usize + b as usize) / 3;
+    let step = (average.saturating_sub(3) / 10).min(23);
+    let grey = 8 + 10 * step as u8;
+    match distance((grey, grey, grey)) < distance(cube_rgb) {
+        true => 232 + step as u8,
+        false => cube as u8,
     }
 }
 
@@ -378,6 +418,7 @@ fn draw_body(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
                 let ctx = Ctx {
                     p: &p,
                     file,
+                    highlight: viewer.highlights.get(viewer.page),
                     threads: &review.threads,
                     numbers: file.number_width().max(3),
                     width: area.width as usize,
@@ -581,6 +622,8 @@ pub fn fit_scroll(
 struct Ctx<'a> {
     p: &'a Palette,
     file: &'a FileDiff,
+    /// The file's syntax colours, once worked out; plain until then.
+    highlight: Option<&'a FileHighlight>,
     threads: &'a [ReviewThread],
     /// Digits in the widest line number.
     numbers: usize,
@@ -599,7 +642,10 @@ impl Ctx<'_> {
         match row {
             Row::Note(text) => vec![self.note(text, selected)],
             Row::Hunk(h) => vec![self.hunk(&self.file.hunks[*h].header, selected)],
-            Row::Line(h, l) => vec![self.diff_line(&self.file.hunks[*h].lines[*l], selected)],
+            Row::Line(h, l) => {
+                let runs = self.highlight.and_then(|hl| hl.line(*h, *l));
+                vec![self.diff_line(&self.file.hunks[*h].lines[*l], runs, selected)]
+            }
             Row::Comment {
                 thread,
                 index,
@@ -638,7 +684,7 @@ impl Ctx<'_> {
         line.finish(style)
     }
 
-    fn diff_line(&self, diff: &DiffLine, selected: bool) -> Line<'static> {
+    fn diff_line(&self, diff: &DiffLine, runs: Option<&[Run]>, selected: bool) -> Line<'static> {
         let p = self.p;
         let (bg, word, sign, sign_color) = match diff.kind {
             LineKind::Added => (p.added, p.added_word, "+", p.added_sign),
@@ -666,13 +712,23 @@ impl Ctx<'_> {
         );
         line.push(sign, Style::default().fg(sign_color).bg(bg));
         line.push(" ", code);
-        match &diff.emphasis {
-            Some(range) => {
-                line.push_code(&diff.text[..range.start], code);
-                line.push_code(&diff.text[range.clone()], code.bg(word));
-                line.push_code(&diff.text[range.end..], code);
+        // The syntax colours the text; the diff keeps the backgrounds.
+        let pieces = highlight::pieces(&diff.text, runs.unwrap_or(&[]), diff.emphasis.as_ref());
+        for (range, tint, emphasised) in pieces {
+            let mut style = code;
+            if let Some(fg) = tint.fg {
+                style = style.fg(p.code(fg));
             }
-            None => line.push_code(&diff.text, code),
+            if tint.bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if tint.italic {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            if emphasised {
+                style = style.bg(word);
+            }
+            line.push_code(&diff.text[range], style);
         }
         line.finish(code)
     }
@@ -1018,6 +1074,85 @@ mod tests {
             buffer[(at - 3, removed_row)].bg,
             Color::Rgb(0x25, 0x17, 0x1c)
         );
+    }
+
+    /// Where `needle` starts on the screen's first line containing it.
+    fn find(screen: &str, needle: &str) -> (u16, u16) {
+        let (y, line) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} not on screen: {screen}"));
+        let x = line[..line.find(needle).unwrap()].chars().count();
+        (x as u16, y as u16)
+    }
+
+    /// The page on screen highlighted, as the background thread would.
+    fn highlight_page(viewer: &mut Viewer) {
+        let file = viewer.file().unwrap().clone();
+        viewer
+            .highlights
+            .insert(viewer.page, super::super::highlight::highlight(&file));
+    }
+
+    #[test]
+    fn code_is_plain_until_its_colours_are_ready() {
+        let mut viewer = loaded_viewer(None);
+        let (screen, buffer) = render(&mut viewer, 100, 40);
+        let (x, y) = find(&screen, "impl Store");
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xe6, 0xed, 0xf3));
+
+        highlight_page(&mut viewer);
+        let (screen, buffer) = render(&mut viewer, 100, 40);
+        let (x, y) = find(&screen, "impl Store");
+        // The keyword in GitHub's red, the type name in its orange.
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xff, 0x7b, 0x72));
+        assert_eq!(buffer[(x + 5, y)].fg, Color::Rgb(0xff, 0xa6, 0x57));
+        assert_eq!(buffer[(x, y)].bg, Color::Rgb(0x0d, 0x11, 0x17));
+    }
+
+    #[test]
+    fn colours_sit_on_the_added_and_removed_backgrounds() {
+        let mut viewer = loaded_viewer(None);
+        highlight_page(&mut viewer);
+        let (screen, buffer) = render(&mut viewer, 100, 40);
+        // `usize` on an added line: syntax colour, added background.
+        let (x, y) = find(&screen, "usize");
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xff, 0x7b, 0x72));
+        assert_eq!(buffer[(x, y)].bg, Color::Rgb(0x12, 0x26, 0x1e));
+        // `u32`, the word that changed on a removed line, keeps its
+        // emphasis under the colour.
+        let (x, y) = find(&screen, "u32");
+        assert_eq!(buffer[(x, y)].bg, Color::Rgb(0x6e, 0x1e, 0x23));
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xff, 0x7b, 0x72));
+        assert_eq!(buffer[(x - 3, y)].bg, Color::Rgb(0x25, 0x17, 0x1c));
+        // The line under the cursor is still marked.
+        assert!(screen.contains("▌"), "{screen}");
+    }
+
+    #[test]
+    fn colours_fall_back_to_the_256_colour_palette() {
+        let mut viewer = loaded_viewer(None);
+        viewer.palette = Palette::indexed();
+        highlight_page(&mut viewer);
+        let (screen, buffer) = render(&mut viewer, 100, 40);
+        let (x, y) = find(&screen, "impl Store");
+        assert_eq!(
+            buffer[(x, y)].fg,
+            Color::Indexed(nearest_indexed((0xff, 0x7b, 0x72)))
+        );
+        // `{` has nothing to say, and keeps the text's usual colour.
+        assert_eq!(buffer[(x + 11, y)].fg, Color::Indexed(255));
+    }
+
+    #[test]
+    fn nearest_indexed_picks_the_closest_entry() {
+        assert_eq!(nearest_indexed((0, 0, 0)), 16);
+        assert_eq!(nearest_indexed((255, 255, 255)), 231);
+        assert_eq!(nearest_indexed((255, 0, 0)), 196);
+        assert_eq!(nearest_indexed((0x80, 0x80, 0x80)), 244, "a grey");
+        assert_eq!(nearest_indexed((0xff, 0x7b, 0x72)), 209);
+        assert_eq!(nearest_indexed((0xe6, 0xed, 0xf3)), 255);
     }
 
     #[test]

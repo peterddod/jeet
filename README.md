@@ -265,8 +265,10 @@ it can never land on a branch of yours with the same name.
 
 The review viewer shows the PR's diff one file to a page, in GitHub's dark
 colours (or the nearest 256-colour match when `COLORTERM` is not `truecolor`),
-with each review thread boxed under the line it is about. `←`/`→` turn the
-page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
+with each review thread boxed under the line it is about. Code is
+syntax-highlighted in the same theme, over the added and removed backgrounds;
+a file shows plain for the moment it takes to work its colours out. `←`/`→`
+turn the page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
 or request changes — submitting your pending review if you have one — and
 `Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
 
