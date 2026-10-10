@@ -44,8 +44,10 @@ must print nothing on stdout except the outputs above, and always exits 0.
 `task-hook` takes care of that: `parse_hook` only reads the payload.
 
 If the agent can take hooks only from a file, not a flag or an environment
-variable, the launch arguments alone cannot install them. That needs a
-change to the trait, so raise it in the PR.
+variable, the launch arguments alone cannot install them. Likewise, if it
+cannot start a session under an id jeet picks, jeet has to learn the id
+from the first hook instead of recording it before launch. Both need a
+change to the trait, so raise them in the PR.
 
 ### Mapping hook payloads to events
 
