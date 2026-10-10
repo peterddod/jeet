@@ -44,7 +44,7 @@ pub fn new(app: &App, name: &str, repos: &[String]) -> Result<()> {
     let dir = projects::create(app, name, repos)?;
     eprintln!("jeet: project {name} -> {}", dir.display());
     eprintln!(
-        "jeet: put agent instructions in CLAUDE.md and skills in skills/; \
+        "jeet: put agent instructions in AGENTS.md and skills in skills/; \
          `jeet projects edit {name}` sets its repositories"
     );
     println!("{}", dir.display());

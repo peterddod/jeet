@@ -728,7 +728,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                     Line::from("no projects yet"),
                     Line::from(""),
                     Line::from(dim(
-                        "a project presets repositories, CLAUDE.md and skills for new tasks;",
+                        "a project presets repositories, AGENTS.md and skills for new tasks;",
                     )),
                     Line::from(dim("n makes one")),
                 ];

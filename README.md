@@ -360,6 +360,35 @@ jeet worktree rm api -f     # removes it anyway
 A branch the task created is deleted with its worktree only when its commits are
 on origin or on the default branch; otherwise it is kept, and jeet says so.
 
+### Projects
+
+A project is a template for tasks, in `~/.jeet/projects/<name>`: a
+`project.toml` naming the repositories each task starts with a worktree of, an
+`AGENTS.md` with instructions for the agent, and `skills/`. `jeet task new
+--project <name>` copies the instructions and skills into the new task — a
+snapshot — and `jeet task resync` brings them up to date later, keeping any file
+the task changed.
+
+```bash
+jeet projects new web --repo api --repo web   # prints ~/.jeet/projects/web
+jeet task new "Launch" --project web
+jeet task resync launch                       # --force replaces the task's edits too
+```
+
+`AGENTS.md` is the file Codex, Cursor, Amp, Gemini CLI and most other coding
+agents read, so a project works whichever agent you run. Next to it, jeet writes
+a `CLAUDE.md` holding only `@AGENTS.md`, an import: Claude Code reads
+`AGENTS.md` itself only when there is no `CLAUDE.md`, and some of its sessions
+(older versions, the first session after an upgrade) read `CLAUDE.md` alone.
+Claude-only instructions can go below the import.
+
+A project made before jeet wrote `AGENTS.md` has only a `CLAUDE.md`. The next
+time a task is made or resynced from it, jeet moves it to `AGENTS.md` and leaves
+the import in its place, and says so. A project with both files is left as it
+is, and if the move fails, its `CLAUDE.md` is copied as it is. Tasks already
+made keep their `CLAUDE.md` until they are resynced: one the task never changed
+becomes the import, next to the project's `AGENTS.md`; one it changed is kept.
+
 ### The tasks list
 
 ```bash
@@ -525,10 +554,12 @@ jeet task send assistant "…"       # message it, as you would a task's agent
 The assistant is one Claude Code organiser for all your work: it keeps a
 running worklog and your todo list, and sets up, steers and tidies away tasks
 through the jeet CLI, within the permissions you give it (below). Its home is
-`~/.jeet/assistant`, set up by the first `jeet chat`: a `CLAUDE.md` on its
-role, a `jeet-assistant` skill with the commands it uses, `notes/worklog.md`
-and `todo.md`. They are written only when missing, so your edits and its own
-survive.
+`~/.jeet/assistant`, set up by the first `jeet chat`: an `AGENTS.md` on its
+role (with a `CLAUDE.md` importing it, as in a project), a `jeet-assistant`
+skill with the commands it uses, `notes/worklog.md` and `todo.md`. They are
+written only when missing, so your edits and its own survive. A home from
+before `AGENTS.md` has its `CLAUDE.md`, edited or not, moved to `AGENTS.md`
+behind the import, never written over.
 
 One home, any number of sessions. Continuity lives in those files rather than
 in any one conversation, so a fresh session or a `/clear` loses nothing that
@@ -918,9 +949,14 @@ export JEET_HOME=/tmp/jeet-test
       .jeet/inbox.jsonl              # messages queued for its busy agent
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
-  projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
+  projects/<name>/                   # templates: AGENTS.md and skills/ copied into new tasks
+    project.toml                     # its repositories and agent arguments
+    AGENTS.md                        # instructions for the agent
+    CLAUDE.md                        # `@AGENTS.md`: the same, for Claude Code
+    skills/                          # copied to the task's .claude/skills/
   assistant/                         # the assistant's home (`jeet chat`)
-    CLAUDE.md                        # its role; yours to edit
+    AGENTS.md                        # its role; yours to edit
+    CLAUDE.md                        # `@AGENTS.md`
     .claude/skills/jeet-assistant/   # the jeet commands it uses
     notes/worklog.md                 # its running memory
     todo.md                          # the todo list (`jeet todo`)

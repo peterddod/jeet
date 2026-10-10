@@ -10,6 +10,7 @@ mod context;
 mod db;
 mod git;
 mod github;
+mod instructions;
 mod messages;
 mod notify;
 mod paths;

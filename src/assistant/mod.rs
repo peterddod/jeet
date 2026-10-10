@@ -1,7 +1,8 @@
 //! The assistant: one global Claude Code organiser for everything the user
 //! has on, opened with `jeet chat`.
 //!
-//! "One" means one home, `$JEET_HOME/assistant/`: its CLAUDE.md and skill,
+//! "One" means one home, `$JEET_HOME/assistant/`: its AGENTS.md (with the
+//! CLAUDE.md importing it) and skill,
 //! `notes/worklog.md`, `todo.md`, `actions.log` and the usual `.jeet/`
 //! status and inbox. It does not mean one conversation. Any number of
 //! sessions can run, one after another or at once, and continuity lives in
@@ -19,7 +20,8 @@
 //! with `JEET_ASSISTANT=1`, under the permissions in [`crate::permissions`].
 //!
 //! The templates are written only where nothing is, so the user's and the
-//! assistant's edits survive every upgrade.
+//! assistant's edits survive every upgrade. A home from before AGENTS.md has
+//! its CLAUDE.md moved to AGENTS.md first ([`instructions::migrate`]).
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +33,7 @@ use crate::cd;
 use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord, TaskState};
+use crate::instructions::{self, CLAUDE_SHIM};
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
 use crate::runtime;
@@ -49,15 +52,16 @@ pub const TMUX_SESSION: &str = "jeet-assistant";
 
 const NAME: &str = "assistant";
 
-const CLAUDE_MD: &str = include_str!("templates/CLAUDE.md");
+const AGENTS_MD: &str = include_str!("templates/AGENTS.md");
 const SKILL: &str = include_str!("templates/SKILL.md");
 const WORKLOG: &str = include_str!("templates/worklog.md");
 /// What `todo.md` starts as.
 pub const TODO: &str = include_str!("templates/todo.md");
 
 /// Each template, and where in the home it goes.
-const TEMPLATES: [(&str, &str); 4] = [
-    ("CLAUDE.md", CLAUDE_MD),
+const TEMPLATES: [(&str, &str); 5] = [
+    (instructions::AGENTS_MD, AGENTS_MD),
+    (instructions::CLAUDE_MD, CLAUDE_SHIM),
     (".claude/skills/jeet-assistant/SKILL.md", SKILL),
     ("notes/worklog.md", WORKLOG),
     ("todo.md", TODO),
@@ -74,8 +78,10 @@ pub fn home_dir(home: &Path) -> PathBuf {
 }
 
 /// Write each template that is not in `dir` yet, returning those written.
-/// Nothing there is ever replaced.
+/// Nothing there is ever replaced: a CLAUDE.md of the user's own, from
+/// before AGENTS.md, is moved to AGENTS.md rather than written over.
 pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
+    instructions::migrate(dir).context("move the assistant's CLAUDE.md to AGENTS.md")?;
     let mut written = Vec::new();
     for (rel, text) in TEMPLATES {
         let path = dir.join(rel);
@@ -950,6 +956,10 @@ mod tests {
         std::fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
         assert_eq!(ensure_files(dir.path()).unwrap(), ["CLAUDE.md"]);
         assert_eq!(
+            std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
+            CLAUDE_SHIM
+        );
+        assert_eq!(
             std::fs::read_to_string(dir.path().join("todo.md")).unwrap(),
             "- [ ] mine\n"
         );
@@ -959,8 +969,25 @@ mod tests {
     fn the_skill_is_a_skill_and_the_todo_template_is_an_empty_list() {
         assert!(SKILL.starts_with("---\nname: jeet-assistant\ndescription: "));
         assert!(todo::parse(TODO).items().is_empty());
-        assert!(CLAUDE_MD.contains("untrusted"));
-        assert!(CLAUDE_MD.contains("<jeet-message from="));
+        assert!(AGENTS_MD.contains("untrusted"));
+        assert!(AGENTS_MD.contains("<jeet-message from="));
+    }
+
+    #[test]
+    fn a_home_from_before_agents_md_keeps_the_users_claude_md_as_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "my assistant\n").unwrap();
+        let written = ensure_files(dir.path()).unwrap();
+        assert!(!written.contains(&"AGENTS.md"), "{written:?}");
+        assert!(!written.contains(&"CLAUDE.md"), "{written:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap(),
+            "my assistant\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
+            CLAUDE_SHIM
+        );
     }
 
     #[test]

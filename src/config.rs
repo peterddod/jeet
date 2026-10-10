@@ -291,7 +291,7 @@ pub fn projects_root(home: &Path) -> PathBuf {
     home.join("projects")
 }
 
-/// The assistant's home: its CLAUDE.md, worklog, todo, inbox and
+/// The assistant's home: its AGENTS.md, worklog, todo, inbox and
 /// `actions.log`.
 pub fn assistant_dir(home: &Path) -> PathBuf {
     home.join("assistant")

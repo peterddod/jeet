@@ -111,7 +111,7 @@ pub enum Commands {
         command: TaskCommands,
     },
 
-    /// Projects: repositories, CLAUDE.md and skills a task can start from
+    /// Projects: repositories, AGENTS.md and skills a task can start from
     /// (with no subcommand: the projects panel on a terminal, else the list)
     Projects {
         #[command(subcommand)]
@@ -187,7 +187,7 @@ pub enum TaskCommands {
     /// Start a task and print its directory; with no --repo it is an empty canvas
     New {
         name: String,
-        /// Project to start from: copies its CLAUDE.md and skills, and adds a
+        /// Project to start from: copies its AGENTS.md and skills, and adds a
         /// worktree of each of its repositories
         #[arg(long, add = ArgValueCandidates::new(project_candidates))]
         project: Option<String>,
@@ -269,7 +269,7 @@ pub enum TaskCommands {
         offline: bool,
     },
 
-    /// Copy the task's project files (CLAUDE.md, skills) in again
+    /// Copy the task's project files (AGENTS.md, skills) in again
     Resync {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
