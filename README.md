@@ -82,6 +82,13 @@ jeet task unarchive fix-login
 jeet task delete fix-login [--force]
 jeet task prs fix-login                  # the PRs that came out of the task
 
+# The assistant — one organiser for everything, in tmux
+jeet chat                                # resume its latest session (set up on first run)
+jeet chat --new "plan the week"          # a fresh session beside the others
+jeet chat --pick                         # choose, rename, end or mark one primary
+jeet todo add "ship the fix" -p 1 --task fix-login
+jeet todo                                # its todo list; done, rm, --json
+
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
 jeet worktree add api --branch feat-x    # existing branch, origin's, or a new one
@@ -494,6 +501,55 @@ and any git checkout on the canvas that is none of the task's worktrees (a
 clone made there, or a worktree of a repository outside the store) — and asks;
 without a terminal it needs `--force`.
 
+## The assistant
+
+```bash
+jeet chat                          # resume its most recently active session
+jeet chat --new [name]             # start a fresh one
+jeet chat --pick                   # ⏎ attach  n new  R rename  x end  * primary
+jeet task send assistant "…"       # message it, as you would a task's agent
+```
+
+The assistant is one Claude Code organiser for all your work: it keeps a
+running worklog and your todo list, and sets up, steers and tidies away tasks
+through the jeet CLI, within the permissions you give it (below). Its home is
+`~/.jeet/assistant`, set up by the first `jeet chat`: a `CLAUDE.md` on its
+role, a `jeet-assistant` skill with the commands it uses, `notes/worklog.md`
+and `todo.md`. They are written only when missing, so your edits and its own
+survive.
+
+One home, any number of sessions. Continuity lives in those files rather than
+in any one conversation, so a fresh session or a `/clear` loses nothing that
+matters, and two can run at once — one planning your week, one triaging
+reviews. Each runs in a window of its own in the tmux session
+`jeet-assistant`, with the same hooks and status as a task's agent, and with
+`JEET_ASSISTANT=1`. Every session starts with a summary of the active tasks,
+their open pull requests (fenced as data written by others), the todo list and
+any messages queued for it.
+
+Messages for the assistant go to the session you marked primary (`*` in the
+picker) while it runs, else to the most recently active running one, by the
+same idle/busy/not-running rules as a task's agent; with none running, a
+session called `events <date>` starts with them.
+
+The assistant is not a task: it is not listed, opened, archived or deleted
+like one, and no task can be called `assistant`.
+
+### Todo
+
+```bash
+jeet todo add "fix the cookie" -p 1 --task fix-login   # in priority order
+jeet todo ls [--json]                                  # numbered; also plain `jeet todo`
+jeet todo done 2 [--undo]
+jeet todo rm 3
+```
+
+`~/.jeet/assistant/todo.md` is the list: markdown, one checkbox per item, most
+important first, with an optional `!p1`/`!p2`… priority and `@task-slug` links.
+Everything else in it is kept as written. `jeet todo` changes it under a lock
+and writes it whole, so the assistant's sessions never lose each other's
+edits. The assistant needs no permission for its own list.
+
 ## Importing
 
 ```bash
@@ -684,9 +740,9 @@ command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
 
 jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
 do what `[assistant] allow` lists; anything else fails with a message saying
-what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet prs`, …) and
-`jeet notify` are always allowed; screens and shells (`jeet`, `jeet explore`,
-`jeet exec`) need a person at a terminal.
+what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet prs`, …),
+`jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
+`jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
 
 ```toml
 [assistant]
@@ -741,7 +797,13 @@ export JEET_HOME=/tmp/jeet-test
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
   projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
-  assistant/actions.log              # what the assistant did, one JSON object per line
+  assistant/                         # the assistant's home (`jeet chat`)
+    CLAUDE.md                        # its role; yours to edit
+    .claude/skills/jeet-assistant/   # the jeet commands it uses
+    notes/worklog.md                 # its running memory
+    todo.md                          # the todo list (`jeet todo`)
+    actions.log                      # what it did, one JSON object per line
+    .jeet/                           # its status files and inbox, as a task's
 ```
 
 Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `jeet import`
