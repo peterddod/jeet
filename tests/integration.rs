@@ -2185,10 +2185,14 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# The tasks list calls tmux from more than one thread: number the calls
+# under a lock, or two can take the same number and one record is lost.
+until mkdir "$here/lock" 2>/dev/null; do :; done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
+rmdir "$here/lock"
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
@@ -4678,10 +4682,14 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# The tasks list calls tmux from more than one thread: number the calls
+# under a lock, or two can take the same number and one record is lost.
+until mkdir "$here/lock" 2>/dev/null; do :; done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
+rmdir "$here/lock"
 target=""
 prev=""
 for a in "$@"; do
