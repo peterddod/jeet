@@ -1566,3 +1566,235 @@ fn review_without_a_terminal_prints_only_the_worktree_path() {
         "{calls}"
     );
 }
+
+/// A stand-in `gh` that answers everything the review viewer asks — the
+/// diff, threads, pending review and fingerprint from the fixtures — and
+/// records each call's arguments, NUL-separated, one file per call.
+#[cfg(unix)]
+fn stub_viewer_gh(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(bin.join("calls")).unwrap();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for name in ["pr.diff", "review_threads.json", "pr_fingerprint.json"] {
+        std::fs::copy(fixtures.join(name), bin.join(name)).unwrap();
+    }
+    let script = bin.join("gh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+here=$(dirname "$0")
+# Written whole, then renamed, so a reader never sees half a call.
+printf '%s\0' "$@" > "$here/calls/.call.$$"
+mv "$here/calls/.call.$$" "$here/calls/call.$$"
+[ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
+case "$1 $2" in
+  "pr view")
+    echo '{"number":7,"title":"Widen the store","url":"https://github.com/acme/viewer/pull/7","state":"OPEN","isDraft":false,"reviewDecision":"","headRefName":"wide-store","headRefOid":"abc123","baseRefName":"main","isCrossRepository":false}'
+    exit 0 ;;
+  "pr checkout") exec git checkout -q -b "$5" ;;
+  "pr diff") exec cat "$here/pr.diff" ;;
+  "api graphql")
+    case "$3" in
+      --paginate) exec cat "$here/review_threads.json" ;;
+      *) exec cat "$here/pr_fingerprint.json" ;;
+    esac ;;
+esac
+for arg in "$@"; do
+  case "$arg" in
+    */reviews\?per_page=100) echo '[[]]'; exit 0 ;;
+  esac
+done
+echo '{}'
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// The calls the stub `gh` has had so far, each as its arguments.
+#[cfg(unix)]
+fn gh_calls(bin: &std::path::Path) -> Vec<Vec<String>> {
+    let Ok(dir) = std::fs::read_dir(bin.join("calls")) else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("call."))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .map(|text| text.split_terminator('\0').map(str::to_string).collect())
+        .collect()
+}
+
+/// Wait up to 30s for the stub `gh` to have been called `count` times in a
+/// way `pick` likes.
+#[cfg(unix)]
+fn wait_for_calls(
+    bin: &std::path::Path,
+    count: usize,
+    what: &str,
+    pick: impl Fn(&[String]) -> bool,
+) -> Vec<Vec<String>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let calls: Vec<_> = gh_calls(bin).into_iter().filter(|c| pick(c)).collect();
+        if calls.len() >= count {
+            return calls;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "gave up waiting for {what}; calls so far: {:?}",
+            gh_calls(bin)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// `jeet review` on a pseudo-terminal, typed at like a person would: the
+/// viewer loads the PR through `gh`; `+` reacts to a comment, `R` replies to
+/// its thread and `c` comments on a line, each through `gh` and each followed
+/// by a fresh fetch of the review; and Esc leaves.
+///
+/// `script` provides the terminal; where it is missing the test says so and
+/// passes, since there is nothing to drive the viewer with.
+#[cfg(unix)]
+#[test]
+fn the_review_viewer_reacts_replies_and_comments_through_gh() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    if Command::new("script")
+        .arg("-q")
+        .arg("/dev/null")
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = lab("viewer");
+    let bin = stub_viewer_gh(std::path::Path::new(&lab.home));
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    // A terminal of a known size, then the viewer in it.
+    let inner = format!(
+        "stty rows 40 cols 120 && exec '{}' review 7",
+        env!("CARGO_BIN_EXE_jeet")
+    );
+    let mut cmd = Command::new("script");
+    if cfg!(target_os = "linux") {
+        cmd.args(["-q", "-e", "-c", &inner, "/dev/null"]);
+    } else {
+        cmd.args(["-q", "/dev/null", "sh", "-c", &inner]);
+    }
+    hermetic_git(&mut cmd);
+    let mut child = cmd
+        .current_dir(&lab.repo)
+        .env("JEET_HOME", &lab.home)
+        .env("JEET_SYNC_INTERVAL_SECS", "0")
+        .env("PATH", &path)
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut keys = child.stdin.take().unwrap();
+    let mut type_keys = |text: &[u8]| {
+        keys.write_all(text).unwrap();
+        keys.flush().unwrap();
+    };
+    let is_diff = |c: &[String]| c.starts_with(&["pr".into(), "diff".into()]);
+    // Each load asks for the diff once; wait for the `n`th to have been
+    // answered and drawn.
+    let loaded = |n: usize| {
+        wait_for_calls(&bin, n, "a load of the review", is_diff);
+        wait_for_calls(&bin, 2 * n, "the threads and fingerprint", |c| {
+            c.starts_with(&["api".into(), "graphql".into()])
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    };
+    loaded(1);
+
+    // The cursor starts on the outdated thread heading the page: grace's
+    // comment, REST id 1004. React to it with the first reaction, 👍.
+    type_keys(b"+\r");
+    let reactions = wait_for_calls(&bin, 1, "the reaction", |c| {
+        c.iter().any(|a| a.ends_with("/reactions"))
+    });
+    assert!(
+        reactions[0].contains(&"repos/{owner}/{repo}/pulls/comments/1004/reactions".to_string()),
+        "{:?}",
+        reactions[0]
+    );
+    assert!(reactions[0].contains(&"content=+1".to_string()));
+    loaded(2);
+
+    // The refetch kept the cursor on the comment: reply to its thread.
+    type_keys(b"Rthanks, grace\r");
+    let replies = wait_for_calls(&bin, 1, "the reply", |c| {
+        c.iter().any(|a| a.ends_with("/replies"))
+    });
+    let reply = &replies[0];
+    assert!(
+        reply.contains(&"repos/{owner}/{repo}/pulls/7/comments/1004/replies".to_string()),
+        "{reply:?}"
+    );
+    assert!(reply.contains(&"POST".to_string()), "{reply:?}");
+    // The text is one argument, whatever it says.
+    assert!(
+        reply.contains(&"body=thanks, grace".to_string()),
+        "{reply:?}"
+    );
+    loaded(3);
+
+    // Down past the hunk header to head line 8, and comment on it. There is
+    // no pending review, so this starts one.
+    type_keys(b"jjc$(touch pwned) `id`\r");
+    let comments = wait_for_calls(&bin, 1, "the inline comment", |c| {
+        c.iter().any(|a| a.starts_with("comments[][body]="))
+    });
+    let comment = &comments[0];
+    for arg in [
+        "repos/{owner}/{repo}/pulls/7/reviews",
+        "comments[][path]=src/lib.rs",
+        "comments[][line]=8",
+        "comments[][side]=RIGHT",
+        "comments[][body]=$(touch pwned) `id`",
+    ] {
+        assert!(comment.contains(&arg.to_string()), "{arg}: {comment:?}");
+    }
+    loaded(4);
+
+    type_keys(b"\x1b");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the viewer did not close on Esc");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    drop(keys);
+    assert!(status.success(), "jeet review exited with {status}");
+
+    // Nothing went to GitHub but reads and those three changes.
+    let writes: Vec<_> = gh_calls(&bin)
+        .into_iter()
+        .filter(|c| {
+            c.iter()
+                .any(|a| a == "POST" || a == "PATCH" || a == "DELETE")
+        })
+        .collect();
+    assert_eq!(writes.len(), 3, "{writes:?}");
+}
