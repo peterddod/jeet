@@ -124,6 +124,18 @@ pub fn load(app: &App, repo: &RepoRecord, pr: u64) -> Option<Job> {
     Some(job)
 }
 
+/// The worktree of every review job ever recorded, under any repository.
+pub fn recorded_worktrees(app: &App) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(app.home.join("reviews"))
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| read(e.path()).ok())
+        .map(|job| job.worktree)
+        .collect()
+}
+
 fn read(path: &Path) -> Result<Job> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read review state {}", path.display()))?;

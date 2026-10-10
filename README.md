@@ -6,7 +6,7 @@
 
 Global git repository index and worktree manager.
 
-`jeet` keeps a canonical store of repository trunks, mirrors worktrees under a predictable layout, and maintains a SQLite index so you can list, find, and jump into repos quickly.
+`jeet` keeps a canonical store of repository trunks, organises work into **tasks** — a directory per piece of work, with as many git worktrees inside it as the work needs — and maintains a SQLite index so you can list, find, and jump into repos quickly. The only checkouts on disk are the store's trunks and the tasks' worktrees.
 
 Run `jeet` with no arguments and you get your tasks: one row per piece of work, with what its coding agent is doing, the worktrees it holds and when anything last happened in it, and one keystroke to attach to the agent, browse the task, or archive it. `jeet explore` inside a repo gives you a file explorer: one level of the tree at a time, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
 
@@ -55,13 +55,11 @@ jeet clone https://github.com/acme/widget.git
 jeet sync
 jeet sync --repo acme/widget
 
-# Register an existing local checkout
-jeet adopt ~/Projects/exceed
+# Bring repositories and work from outside jeet into the store and tasks
+jeet import                              # scans scan_roots (see config)
+jeet import ~/Projects/exceed            # or just these
 
-# Scan configured roots (see config)
-jeet scan
-
-# List indexed repos
+# List the store's repos
 jeet ls
 jeet ls acme
 
@@ -90,15 +88,9 @@ jeet worktree rm api [--force]
 jeet worktree path api
 
 # Navigation
-jeet path acme/widget                    # print path (scripting)
+jeet path acme/widget                    # print the trunk's path (scripting)
 jeet cd acme/widget                      # native cd (requires init-shell)
-jeet checkout feature-x                  # cd into that branch's worktree, creating it if needed
-jeet exec acme/widget                    # subshell in trunk
-jeet exec acme/widget --branch feature-x # subshell in worktree
-jeet exec acme/widget --ephemeral        # throwaway worktree (auto-removed on exit)
-
-# Coding agents
-jeet sessions                            # previous agent sessions for this worktree
+jeet exec acme/widget                    # subshell in the trunk
 
 # Reviewing pull requests — from anywhere inside the repo
 jeet prs                                 # the open PRs, and which you have checked out
@@ -110,14 +102,14 @@ jeet review 123 --repo acme/widget
 ## The explorer
 
 ```bash
-jeet explore  # inside any repo, trunk or worktree — or a task's directory
+jeet explore  # inside a store repo, trunk or task worktree — or a task's directory
 ```
 
 From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 
 ```text
 ┌ jeet · github.com/acme/widget ────────────────────────────────┐
-│worktree feature-x  [worktree]  1 uncommitted  +2/-0 in 1 file │
+│worktree feature-x  [task]  1 uncommitted  +2/-0 in 1 file     │
 │path     /src                                                  │
 │filter   co█  1 of 2                                           │
 └───────────────────────────────────────────────────────────────┘
@@ -182,7 +174,7 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 |-----|--------|
 | `ctrl-a` | start a coding agent from the worktree root |
 | `ctrl-s` | previous agent sessions for this worktree (⏎ resumes one) |
-| `ctrl-w` | worktrees: `⏎` switch, `n` new branch, `e` detached, `m` rename, `d` delete, `o` open its PR |
+| `ctrl-w` | the repository's worktrees: `⏎` switches to one, `o` opens its PR |
 | `ctrl-f` | diff the highlighted file or folder against the default branch |
 | `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
 | `ctrl-o` | the repository's open pull requests: `⏎` checks one out and switches to it, `o` opens it in the browser |
@@ -192,15 +184,14 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `esc` | quit without moving your shell (unless it moved out from under you) |
 | `F1` or `ctrl-g` | the key list, in jeet |
 
-In the worktree panel: `r` refreshes, `esc` closes, and `ctrl-u` clears the
-name field in the new/rename prompts. Deleting asks first: `y` removes, and
-`f` forces past git's refusal when the worktree still holds work. The panels
-are keyboard-driven, so single letters still work inside them, and the key
-that opened one closes it again.
+In the worktree panel: `r` refreshes and `esc` closes. Worktrees are added to
+and removed from tasks — `jeet worktree`, or `w` in the tasks list — not here.
+The panels are keyboard-driven, so single letters still work inside them, and
+the key that opened one closes it again.
 
-Anything slow — reading a repo's worktrees, or creating and renaming, which
-push to `origin` — runs in the background with a progress indicator, so the
-explorer keeps drawing instead of freezing on the network.
+Anything slow — reading a repo's worktrees, or looking up pull requests —
+runs in the background with a progress indicator, so the explorer keeps
+drawing instead of freezing on the network.
 
 Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
@@ -471,15 +462,56 @@ directory. It first lists what would be lost — uncommitted changes, and commit
 that would be left on no branch or remote — and asks; without a terminal it
 needs `--force`.
 
-`jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
+## Importing
 
-Ephemeral sessions warn on uncommitted changes when you exit, then remove the worktree anyway.
+```bash
+jeet import                          # scan_roots, jeet's old directories, every indexed trunk
+jeet import ~/Projects/api ~/src     # just these
+jeet import --yes                    # everything found, one task each, no questions
+jeet import --remove-originals       # and remove each original once its task has a copy
+```
+
+`jeet import` is the way in for work that lives outside jeet. It looks for git
+checkouts and lists what it would do:
+
+```text
+jeet: into the store, cloned from origin:
+  github.com/acme/api                      git@github.com:acme/api.git
+jeet: to import, one task each unless grouped:
+  1  github.com/acme/api   feat/login · 2 unpushed commits, 3 uncommitted changes · copied from ~/Projects/api
+  2  github.com/acme/api   parked · 1 unpushed commit · copied from (branch)
+  3  github.com/acme/web   old-feature · moved from ~/.jeet/worktrees/github.com/acme/web/old-feature
+Import which? ⏎ all, one task each · `1+3` puts 1 and 3 in one task, `1+3=name` names it · …
+```
+
+- **A repository outside the store** is cloned into it from its origin. Each
+  of its branches and checkouts with work in it — commits origin does not
+  have, or uncommitted changes — becomes a task whose worktree holds the same
+  work: the branch is fetched across from the original, and uncommitted
+  changes (staged, unstaged and untracked; not ignored files) are reapplied on
+  top. Work on the default branch comes across detached at the same commit,
+  since the store's trunk has that branch. Branches with nothing origin lacks
+  are left out: `jeet worktree add <repo> --branch <name>` gets those.
+- **A worktree of a store trunk outside any task** — what `jeet checkout` and
+  `jeet exec --ephemeral` made before tasks — is jeet's own, so it is moved
+  into a task as it is with `git worktree move`.
+- **Claude Code sessions** started in a checkout are copied to its task, so
+  `jeet task open` can resume them.
+
+The originals are only read. `--remove-originals` removes, after asking (or
+with `--yes`), each linked worktree and parked branch whose task holds an
+exact copy and that has not changed since. A worktree holding ignored files
+stays, since those were not copied, and a repository's main working tree is
+never removed. Running import
+again skips work already in a task. Everything it says goes to stderr.
+
+`jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
 
 ## Tab completion
 
 ### Homebrew and apt
 
-`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters and `--branch` values come from your index (not directory listing).
+`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters, task and worktree names, and `--branch` values come from your index (not directory listing).
 
 - **bash (Linux):** requires the `bash-completion` package (recommended by the `.deb`).
 - **bash (macOS):** install Homebrew `bash-completion@2` and load it in your profile.
@@ -511,6 +543,23 @@ Shell scripts can query candidates directly:
 jeet complete repos
 jeet complete branches acme/widget
 ```
+
+## Moving to tasks
+
+Every checkout now belongs to a task, and the commands that made or registered
+checkouts anywhere else are gone. Run `jeet import` once: it brings repositories
+you registered with `adopt` or `scan` into the store, and moves what `checkout`
+and `exec --ephemeral` left under `~/.jeet/worktrees` and `~/.jeet/ephemeral`
+into tasks.
+
+| before | now |
+|--------|-----|
+| `jeet adopt <path>`, `jeet scan` | `jeet import [path]` |
+| `jeet checkout <branch>` | `jeet worktree add <repo> --branch <branch>` in a task |
+| `jeet exec <repo> --branch <b>`, `jeet path <repo> --branch <b>` | `jeet worktree path <name>` |
+| `jeet exec <repo> --ephemeral` | `jeet task new <name> --repo <repo>`, then `jeet task delete` |
+| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer |
+| `jeet worktree clean`, `jeet worktree rename` | `jeet worktree rm`, `jeet task delete` |
 
 ## Migration from v0.1.x
 
@@ -574,7 +623,7 @@ jeet complete branches acme/widget
 On first run, `jeet` creates `~/.jeet/config.toml`:
 
 ```toml
-scan_roots = ["~/Projects", "~/code"]
+scan_roots = ["~/Projects", "~/code"]   # where `jeet import` looks by default
 ```
 
 Two optional keys are not written by default; add them yourself to override:
@@ -627,17 +676,12 @@ export JEET_HOME=/tmp/jeet-test
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
   projects/<name>/                   # templates: CLAUDE.md and skills/ copied into new tasks
-  worktrees/
-    github.com/acme/widget/feature-x/
-  ephemeral/
-    github.com/acme/widget/<uuid>/    # detached checkouts (exec --ephemeral)
 ```
 
+Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `jeet import`
+moves anything left there into tasks.
+
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.
-
-## Branch slugs
-
-Branch names are converted to filesystem-safe slugs (`feat/foo` → `feat-foo`).
 
 ## Packaging
 

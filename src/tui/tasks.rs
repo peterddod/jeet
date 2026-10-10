@@ -2486,7 +2486,7 @@ fn worktree_lines(app: &App, row: &TaskRow) -> Result<Vec<WorktreeLine>> {
                 let entry = WorktreeEntry {
                     path: path.clone(),
                     branch: branch.clone(),
-                    kind: WorktreeKind::Managed,
+                    kind: WorktreeKind::Task,
                     last_used: 0,
                     missing: false,
                 };

@@ -44,48 +44,29 @@ fn main() -> Result<()> {
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
         Commands::InstallShell => commands::install_shell::run()?,
-        Commands::Checkout {
-            repo_filter,
-            branch_name,
-            create_branch,
-            start_point,
-        } => {
-            let app = context::App::open()?;
-            commands::checkout::run(
-                &app,
-                repo_filter.as_deref(),
-                branch_name.as_deref(),
-                create_branch,
-                start_point.as_deref(),
-            )?;
-        }
         Commands::Clone { url } => {
             let app = context::App::open()?;
             commands::clone::run(&app, &url)?;
         }
-        Commands::Adopt { path } => {
+        Commands::Import {
+            paths,
+            yes,
+            remove_originals,
+        } => {
             let app = context::App::open()?;
-            commands::adopt::run(&app, &path)?;
-        }
-        Commands::Scan => {
-            let app = context::App::open()?;
-            commands::scan::run(&app)?;
+            commands::import::run(&app, &paths, yes, remove_originals)?;
         }
         Commands::Ls { filter } => {
             let app = context::App::open()?;
             commands::ls::run(&app, filter.as_deref())?;
         }
-        Commands::Path { filter, branch } => {
+        Commands::Path { filter } => {
             let app = context::App::open()?;
-            commands::path::run(&app, &filter, branch.as_deref())?;
+            commands::path::run(&app, &filter)?;
         }
-        Commands::Exec {
-            filter,
-            branch,
-            ephemeral,
-        } => {
+        Commands::Exec { filter } => {
             let app = context::App::open()?;
-            commands::exec::run(&app, &filter, branch.as_deref(), ephemeral)?;
+            commands::exec::run(&app, &filter)?;
         }
         Commands::Tasks => {
             let app = context::App::open()?;
@@ -116,10 +97,6 @@ fn main() -> Result<()> {
         Commands::StoreSync => {
             let app = context::App::open()?;
             store::run_background(&app)?;
-        }
-        Commands::Sessions => {
-            let app = context::App::open()?;
-            commands::sessions::run(&app)?;
         }
         // Run by Claude on every tool call: quick, silent on stdout, and
         // never a failure, whatever goes wrong.

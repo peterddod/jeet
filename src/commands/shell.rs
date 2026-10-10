@@ -19,7 +19,7 @@ else
   _JEET_BIN="$(type -P jeet 2>/dev/null)"
 fi
 jeet() {
-  local _jeet_bin _jeet_status _jeet_target _jeet_out
+  local _jeet_bin _jeet_status _jeet_target
   # Re-resolve if the rc file was eval'd before PATH knew about jeet.
   _jeet_bin="${_JEET_BIN:-}"
   if [ -z "$_jeet_bin" ]; then
@@ -40,16 +40,6 @@ jeet() {
     [ -n "$_jeet_target" ] || return 1
     builtin cd -- "$_jeet_target"
     return $?
-  fi
-  if [[ "${1:-}" == "checkout" ]]; then
-    shift
-    _jeet_out="$("$_jeet_bin" checkout "$@")"
-    _jeet_status=$?
-    _jeet_out="${_jeet_out%%$'\n'*}"
-    if [[ -d "$_jeet_out" ]]; then
-      builtin cd -- "$_jeet_out"
-    fi
-    return $_jeet_status
   fi
 
   # Everything else runs the binary, which may ask us to cd by writing a path
@@ -85,19 +75,6 @@ jeet() {
     compadd -- $(command jeet complete repos 2>/dev/null)
     return
   fi
-  if (( CURRENT == 5 )) && [[ ${words[2]} == cd && ${words[4]} == --branch ]]; then
-    compadd -- $(command jeet complete branches "${words[3]}" 2>/dev/null)
-    return
-  fi
-  # checkout: first arg is branch, second is repo filter
-  if (( CURRENT == 3 )) && [[ ${words[2]} == checkout ]]; then
-    compadd -- $(command jeet complete branches 2>/dev/null)
-    return
-  fi
-  if (( CURRENT == 4 )) && [[ ${words[2]} == checkout ]]; then
-    compadd -- $(command jeet complete repos 2>/dev/null)
-    return
-  fi
   _clap_dynamic_completer_jeet "$@"
 }
 (( $+functions[compdef] )) && compdef _jeet_wrapper jeet
@@ -114,19 +91,6 @@ fi
   local cur
   cur="${COMP_WORDS[COMP_CWORD]}"
   if [[ ${COMP_WORDS[1]} == "cd" && $COMP_CWORD -eq 2 ]]; then
-    mapfile -t COMPREPLY < <(compgen -W "$(command jeet complete repos 2>/dev/null)" -- "$cur")
-    return
-  fi
-  if [[ ${COMP_WORDS[1]} == "cd" && $COMP_CWORD -eq 4 && ${COMP_WORDS[COMP_CWORD-1]} == --branch ]]; then
-    mapfile -t COMPREPLY < <(compgen -W "$(command jeet complete branches "${COMP_WORDS[2]}" 2>/dev/null)" -- "$cur")
-    return
-  fi
-  # checkout: first arg is branch, second is repo filter
-  if [[ ${COMP_WORDS[1]} == "checkout" && $COMP_CWORD -eq 2 ]]; then
-    mapfile -t COMPREPLY < <(compgen -W "$(command jeet complete branches 2>/dev/null)" -- "$cur")
-    return
-  fi
-  if [[ ${COMP_WORDS[1]} == "checkout" && $COMP_CWORD -eq 3 ]]; then
     mapfile -t COMPREPLY < <(compgen -W "$(command jeet complete repos 2>/dev/null)" -- "$cur")
     return
   fi

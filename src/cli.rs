@@ -23,25 +23,28 @@ pub enum Commands {
     /// Clone a repository into the canonical store  
     Clone { url: String },
 
-    /// Register an existing local repository in the index
-    Adopt {
+    /// Bring repositories, branches and worktrees from outside jeet into the
+    /// store and into tasks (scans `scan_roots` when no path is given)
+    Import {
+        /// Directories to scan for repositories instead of `scan_roots`
         #[arg(value_hint = clap::ValueHint::DirPath)]
-        path: String,
+        paths: Vec<String>,
+        /// Import everything found, one task per branch, without asking
+        #[arg(short, long)]
+        yes: bool,
+        /// Remove each original worktree or branch once its task has a copy
+        #[arg(long)]
+        remove_originals: bool,
     },
-    /// Scan configured roots and index git repositories
-    Scan,
 
-    /// List indexed repositories  
+    /// List the repositories in the store
     Ls {
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: Option<String>,
     },
 
-    /// Open the file explorer for the repository you are in
+    /// Open the file explorer for the repository or task you are in
     Explore,
-
-    /// List previous coding-agent sessions for the current worktree
-    Sessions,
 
     /// List a repository's open pull requests
     Prs {
@@ -107,34 +110,17 @@ pub enum Commands {
     /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
-    /// Checkout a branch to navigate its workspace - cd into the workspace at that location
-    Checkout {
-        #[arg(add = ArgValueCandidates::new(all_branch_candidates))]
-        branch_name: Option<String>, // Branch name; if omitted, error
-        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        repo_filter: Option<String>, // Repo filter like "." or "project/"; if omitted, auto-detect from CWD
-        #[arg(short, long)]
-        create_branch: bool, // Create a new branch (-c, equivalent to git checkout -b)
-        #[arg(long)]
-        start_point: Option<String>, // Start point for new branch
-    },
-
-    /// Print a file path to repository trunk or worktree location
+    /// Print the path to a repository's trunk in the store
     Path {
+        #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
         filter: String,
-        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
-        branch: Option<String>,
     },
 
-    /// Execute an interactive shell in a repo/trunk/worktree workspace (provides CWD)
+    /// Start an interactive shell in a repository's trunk
     Exec {
+        /// Repository: a name like `api`, `owner/repo`, or an id
         #[arg(add = ArgValueCandidates::new(repo_filter_candidates))]
-        filter: String, // Repo path filter like "."
-        /// Open the worktree for this branch instead of the trunk
-        #[arg(long, add = ArgValueCandidates::new(all_branch_candidates))]
-        branch: Option<String>,
-        #[arg(long)]
-        ephemeral: bool, // Auto-cleanup on exit?
+        filter: String,
     },
 
     /// Print shell integration snippet for native cd command

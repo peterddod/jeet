@@ -29,7 +29,6 @@ pub fn clone_into_store(app: &App, url: &str) -> Result<RepoRecord> {
         trunk_path: trunk.to_string_lossy().to_string(),
         remote_url,
         default_branch,
-        managed: true,
     };
     app.db.upsert_repo(&repo)?;
     Ok(repo)

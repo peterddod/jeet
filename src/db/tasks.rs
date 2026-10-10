@@ -382,6 +382,17 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every task worktree of `repo_id`, in any task.
+    pub fn task_worktrees_of_repo(&self, repo_id: &str) -> Result<Vec<TaskWorktreeRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TASK_WORKTREE_COLUMNS} FROM task_worktrees
+             WHERE repo_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![repo_id], task_worktree_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn delete_task_worktree(&self, task_id: &str, dir_name: &str) -> Result<()> {
         self.conn().execute(
             "DELETE FROM task_worktrees WHERE task_id = ?1 AND dir_name = ?2",
@@ -492,7 +503,6 @@ mod tests {
             trunk_path: format!("/store/{id}"),
             remote_url: format!("https://{id}.git"),
             default_branch: "main".into(),
-            managed: true,
         }
     }
 
@@ -616,6 +626,16 @@ mod tests {
             .unwrap();
         assert_eq!(holders.len(), 1);
         assert_eq!(holders[0].task_id, "t");
+        assert_eq!(
+            db.task_worktrees_of_repo("github.com/acme/api")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(db
+            .task_worktrees_of_repo("github.com/acme/web")
+            .unwrap()
+            .is_empty());
 
         db.delete_task_worktree("t", "api").unwrap();
         assert!(db.get_task_worktree("t", "api").unwrap().is_none());

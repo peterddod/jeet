@@ -31,105 +31,38 @@ fn hermetic_git(cmd: &mut Command) -> &mut Command {
         .env("GIT_COMMITTER_EMAIL", "test@test.com")
 }
 
-fn init_repo_with_remote(path: &std::path::Path, remote: &str) {
-    init_repo_on_branch(path, remote, "main");
-}
-
-fn init_repo_on_branch(path: &std::path::Path, remote: &str, branch: &str) {
-    git(&["init", "-b", branch], path);
-    git(&["remote", "add", "origin", remote], path);
-    // Nothing here should ever reach the network: if a code path does try the
-    // https origin, fail immediately rather than hanging or hitting GitHub.
-    git(&["config", "http.proxy", "127.0.0.1:1"], path);
-    git(&["commit", "--allow-empty", "-m", "init"], path);
+#[test]
+fn path_prints_the_store_trunk() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let output = lab.jeet(&["path", "acme/widget"]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), trunk);
+    // Worktrees belong to tasks now: `jeet worktree path` prints those.
+    let output = lab.jeet(&["path", "acme/widget", "--branch", "feat"]);
+    assert!(!output.status.success());
 }
 
 #[test]
-fn path_resolves_after_adopt() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-
-    let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/widget.git");
-
-    let output = jeet_bin()
-        .args(["adopt", repo_dir.path().to_str().unwrap()])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "adopt failed");
-
-    let output = jeet_bin()
-        .args(["path", "acme/widget"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert_eq!(
-        path,
-        repo_dir.path().canonicalize().unwrap().to_string_lossy()
-    );
+fn ls_lists_the_store() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("listed");
+    let output = lab.jeet(&["ls", "listed"]);
+    succeeded(&output);
+    let stdout = stdout_of(&output);
+    assert!(stdout.contains("github.com/acme/listed"), "{stdout}");
+    assert!(stdout.contains(&trunk.display().to_string()), "{stdout}");
+    assert!(stdout.contains("0 in tasks"), "{stdout}");
+    assert!(!stdout.contains("outside the store"), "{stdout}");
 }
 
 #[test]
-fn ls_after_adopt_and_scan() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-
-    let scan_root = home.path().join("scan");
-    std::fs::create_dir_all(&scan_root).unwrap();
-    let repo_dir = scan_root.join("demo");
-    std::fs::create_dir_all(&repo_dir).unwrap();
-    init_repo_with_remote(&repo_dir, "https://github.com/acme/scanned.git");
-
-    std::fs::write(
-        home.path().join("config.toml"),
-        format!(
-            "scan_roots = [\"{}\"]\n",
-            scan_root.to_string_lossy().replace('\\', "\\\\")
-        ),
-    )
-    .unwrap();
-
-    let output = jeet_bin()
-        .args(["scan"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let output = jeet_bin()
-        .args(["ls", "scanned"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("acme/scanned"));
-}
-
-#[test]
-fn complete_repos_lists_adopted() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-
-    let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/complete.git");
-
-    jeet_bin()
-        .args(["adopt", repo_dir.path().to_str().unwrap()])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-
-    let output = jeet_bin()
-        .args(["complete", "repos"])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("acme/complete"));
+fn complete_repos_lists_the_store() {
+    let lab = StoreLab::new();
+    lab.clone_repo("complete");
+    let output = lab.jeet(&["complete", "repos"]);
+    succeeded(&output);
+    assert!(stdout_of(&output).contains("acme/complete"));
 }
 
 #[test]
@@ -143,19 +76,11 @@ fn completions_zsh_generates_dynamic() {
 
 #[test]
 fn dynamic_completion_lists_repos_for_exec() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-    let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/dynamic.git");
-
-    jeet_bin()
-        .args(["adopt", repo_dir.path().to_str().unwrap()])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-
-    let output = jeet_bin()
-        .env("JEET_HOME", &env_home)
+    let lab = StoreLab::new();
+    lab.clone_repo("dynamic");
+    let mut cmd = jeet_bin();
+    let output = lab
+        .wire(&mut cmd)
         .env("COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", "2")
         .env("_CLAP_IFS", "\n")
@@ -163,8 +88,7 @@ fn dynamic_completion_lists_repos_for_exec() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("acme/dynamic"));
+    assert!(stdout_of(&output).contains("acme/dynamic"));
 }
 
 #[test]
@@ -174,9 +98,10 @@ fn init_shell_includes_completion() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("jeet()"));
     assert!(stdout.contains("_JEET_BIN"));
-    assert!(stdout.contains("checkout"));
     assert!(stdout.contains("_jeet_wrapper"));
     assert!(stdout.contains("_clap_dynamic_completer_jeet"));
+    // `jeet checkout` went with the hard cut to tasks.
+    assert!(!stdout.contains("checkout"), "{stdout}");
     assert!(
         !stdout.contains("source <"),
         "init-shell should inline completions, not use source"
@@ -192,54 +117,93 @@ fn cd_subcommand_not_in_binary() {
 }
 
 #[test]
-fn ephemeral_exec_cleans_up_and_warns_when_dirty() {
-    let home = TempDir::new().unwrap();
-    let env_home = home.path().to_string_lossy().to_string();
-    let ephemeral_root = home.path().join("ephemeral");
-
-    let repo_dir = TempDir::new().unwrap();
-    init_repo_with_remote(repo_dir.path(), "https://github.com/acme/ephemeral.git");
-
-    jeet_bin()
-        .args(["adopt", repo_dir.path().to_str().unwrap()])
-        .env("JEET_HOME", &env_home)
-        .output()
-        .unwrap();
-
-    let output = jeet_bin()
-        .args(["exec", "acme/ephemeral", "--ephemeral"])
-        .env("JEET_HOME", &env_home)
-        .env("JEET_SHELL", "/bin/sh")
-        .env("JEET_EXEC_INIT", "touch dirty-file && exit 0")
-        .output()
-        .unwrap();
-
-    if !output.status.success() {
-        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    assert!(output.status.success(), "ephemeral exec failed");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("uncommitted changes"));
-
-    let remaining: Vec<_> = std::fs::read_dir(&ephemeral_root)
-        .map(|rd| rd.filter_map(|e| e.ok()).collect())
-        .unwrap_or_default();
-    assert!(
-        remaining.is_empty(),
-        "ephemeral directory should be cleaned up"
-    );
-}
-
-#[test]
 fn list_subcommand_removed() {
     let output = jeet_bin().args(["list"]).output().unwrap();
     assert!(!output.status.success());
 }
 
+/// The hard cut to tasks: the commands that made checkouts outside the store
+/// and tasks, or registered them, are gone.
+#[test]
+fn the_pre_task_commands_are_gone() {
+    let lab = StoreLab::new();
+    lab.clone_repo("gone");
+    for args in [
+        vec!["adopt", "."],
+        vec!["scan"],
+        vec!["checkout", "feat"],
+        vec!["sessions"],
+        vec!["exec", "acme/gone", "--ephemeral"],
+        vec!["exec", "acme/gone", "--branch", "feat"],
+        vec!["worktree", "clean"],
+        vec!["worktree", "rename", "a", "b"],
+    ] {
+        let output = lab.jeet(&args);
+        assert!(!output.status.success(), "{args:?} still works");
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains("unrecognized") || stderr.contains("unexpected"),
+            "{args:?}: {stderr}"
+        );
+    }
+    assert!(!lab.home().join("worktrees").exists());
+    assert!(!lab.home().join("ephemeral").exists());
+}
+
+#[test]
+fn exec_opens_a_shell_in_the_trunk() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("shell");
+    let mut cmd = jeet_bin();
+    let output = lab
+        .wire(&mut cmd)
+        .args(["exec", "acme/shell"])
+        .env("JEET_SHELL", "/bin/sh")
+        .env("JEET_EXEC_INIT", "pwd -P")
+        .output()
+        .unwrap();
+    succeeded(&output);
+    assert_eq!(stdout_of(&output).trim(), trunk.display().to_string());
+}
+
+/// A repository outside the store is refused rather than registered: jeet
+/// works on its store and its tasks, and `jeet import` is the way in.
+#[test]
+fn a_repository_outside_the_store_is_pointed_at_import() {
+    let lab = StoreLab::new();
+    lab.origin("outside");
+    let outside = TempDir::new().unwrap();
+    let checkout = outside.path().join("outside");
+    git(
+        &[
+            "clone",
+            "-q",
+            &lab.origins
+                .path()
+                .join("acme/outside.git")
+                .to_string_lossy(),
+            &checkout.to_string_lossy(),
+        ],
+        outside.path(),
+    );
+    let output = lab.jeet_at(&["prs"], &checkout, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("jeet import"),
+        "{}",
+        stderr_of(&output)
+    );
+    // And nothing was added to the index on the way.
+    let output = lab.jeet(&["ls"]);
+    assert!(
+        stdout_of(&output).contains("no repositories"),
+        "{}",
+        stdout_of(&output)
+    );
+}
+
 // ---------------------------------------------------------------------------
-// explorer, sessions and shell integration
+// explorer and shell integration
 // ---------------------------------------------------------------------------
 
 fn git(args: &[&str], cwd: &std::path::Path) {
@@ -259,49 +223,25 @@ fn path_from(output: &std::process::Output) -> std::path::PathBuf {
     std::path::PathBuf::from(text)
 }
 
-/// A repo whose origin *looks* like GitHub but pushes to a local bare repo, so
-/// tests exercise the publish path without touching the network.
+/// A repository in the store whose origin *looks* like GitHub but is a local
+/// bare repo. Commands run against it with only `JEET_HOME` set, so the
+/// trunk's own config refuses the network outright should anything try.
 struct Lab {
-    _home: TempDir,
-    _repo: TempDir,
-    _bare: TempDir,
+    _store: StoreLab,
     home: String,
     repo: std::path::PathBuf,
 }
 
 fn lab(name: &str) -> Lab {
-    let home = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    let bare = TempDir::new().unwrap();
-
-    git(&["init", "--bare", "-q"], bare.path());
-    init_repo_with_remote(repo.path(), &format!("https://github.com/acme/{name}.git"));
-    // Push stays local; the https URL is only an identity.
-    git(
-        &[
-            "remote",
-            "set-url",
-            "--push",
-            "origin",
-            &bare.path().to_string_lossy(),
-        ],
-        repo.path(),
-    );
-
-    let home_str = home.path().to_string_lossy().to_string();
-    let output = jeet_bin()
-        .args(["adopt", repo.path().to_str().unwrap()])
-        .env("JEET_HOME", &home_str)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "adopt failed");
-
+    let store = StoreLab::new();
+    let repo = store.clone_repo(name);
+    // Nothing here should ever reach the network: if a code path does try the
+    // https origin, fail immediately rather than hanging or hitting GitHub.
+    git(&["config", "http.proxy", "127.0.0.1:1"], &repo);
     Lab {
-        home: home_str,
-        repo: repo.path().canonicalize().unwrap(),
-        _home: home,
-        _repo: repo,
-        _bare: bare,
+        home: store.home().to_string_lossy().to_string(),
+        repo,
+        _store: store,
     }
 }
 
@@ -325,48 +265,6 @@ fn explorer_needs_a_terminal() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("interactive terminal"), "{stderr}");
     }
-}
-
-#[test]
-fn sessions_lists_recorded_agent_transcripts() {
-    let lab = lab("sessions");
-    let fake_home = TempDir::new().unwrap();
-    let slug: String = lab
-        .repo
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let dir = fake_home.path().join(".claude").join("projects").join(slug);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("0f0f0f0f-1111-2222-3333-444444444444.jsonl"),
-        "{\"type\":\"user\",\"message\":{\"content\":[{\"text\":\"wire up the parser\"}]}}\n",
-    )
-    .unwrap();
-
-    let output = jeet_bin()
-        .args(["sessions"])
-        .current_dir(&lab.repo)
-        .env("JEET_HOME", &lab.home)
-        .env("HOME", fake_home.path())
-        // Pin both, so the caller's own JEET_AGENT/CLAUDE_CONFIG_DIR cannot
-        // steer the test — or worse, point it at their real session store.
-        .env("JEET_AGENT", "claude")
-        .env("CLAUDE_CONFIG_DIR", fake_home.path().join(".claude"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("wire up the parser"), "{stdout}");
-    assert!(
-        stdout.contains("0f0f0f0f-1111-2222-3333-444444444444"),
-        "{stdout}"
-    );
 }
 
 #[test]
@@ -1790,28 +1688,23 @@ fn tasks_work_through_a_symlinked_home() {
 /// branch is not `main` must still give worktrees.
 #[test]
 fn a_worktree_is_added_offline_from_a_repo_on_master() {
-    let home = TempDir::new().unwrap();
-    let home = home.path().canonicalize().unwrap();
-    let repo = TempDir::new().unwrap();
-    init_repo_on_branch(
-        repo.path(),
-        "https://github.com/acme/mastered.git",
-        "master",
-    );
-    let jeet = |args: &[&str], cwd: &std::path::Path| {
-        jeet_bin()
-            .args(args)
-            .current_dir(cwd)
-            .env("JEET_HOME", &home)
-            .output()
-            .unwrap()
-    };
-    succeeded(&jeet(&["adopt", repo.path().to_str().unwrap()], &home));
-    let output = jeet(&["task", "new", "offline"], &home);
-    succeeded(&output);
-    let task = path_from(&output);
+    let lab = StoreLab::new();
+    let bare = lab.origins.path().join("acme/mastered.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&["init", "--bare", "-q", "-b", "master"], &bare);
+    let seed = lab.seed("mastered");
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&["init", "-q", "-b", "master"], &seed);
+    git(&["remote", "add", "origin", &bare.to_string_lossy()], &seed);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"], &seed);
+    git(&["push", "-q", "origin", "master"], &seed);
+    succeeded(&lab.clone_with_interval("mastered", "0"));
+    let trunk = lab.home().join("store/github.com/acme/mastered");
+    // Offline from here on: origin is gone.
+    std::fs::remove_dir_all(&bare).unwrap();
 
-    let output = jeet(&["worktree", "add", "mastered"], &task);
+    let task = lab.new_task("offline");
+    let output = lab.jeet_at(&["worktree", "add", "mastered"], &task, &[]);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("could not fetch"),
@@ -1819,7 +1712,7 @@ fn a_worktree_is_added_offline_from_a_repo_on_master() {
         stderr_of(&output)
     );
     let wt = path_from(&output);
-    assert_eq!(rev(&wt, "HEAD"), rev(repo.path(), "master"));
+    assert_eq!(rev(&wt, "HEAD"), rev(&trunk, "master"));
 }
 
 /// The shell wrapper is the only way the cd hand-off reaches a shell, so run
@@ -3521,4 +3414,625 @@ fn the_tasks_list_shows_pr_history_with_links_and_opens_the_viewer() {
     screen.esc();
     screen.type_keys(b"q");
     assert!(screen.wait_for_exit().success());
+}
+
+// ---------------------------------------------------------------------------
+// import
+// ---------------------------------------------------------------------------
+
+impl StoreLab {
+    /// A clone of `name`'s origin made outside jeet, the way a user has one:
+    /// cloned from GitHub (here, its local stand-in) with origin naming the
+    /// https URL. Returns the checkout, symlinks resolved as git reports it.
+    fn outside_clone(&self, name: &str, parent: &std::path::Path) -> std::path::PathBuf {
+        let bare = self.origins.path().join("acme").join(format!("{name}.git"));
+        let checkout = parent.canonicalize().unwrap().join(name);
+        git(
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &checkout.to_string_lossy(),
+            ],
+            parent,
+        );
+        let url = format!("https://github.com/acme/{name}.git");
+        git(&["remote", "set-url", "origin", &url], &checkout);
+        // The user's own checkout never reaches the network from a test.
+        git(&["config", "http.proxy", "127.0.0.1:1"], &checkout);
+        checkout
+    }
+
+    /// `jeet import <args…>` from the jeet home, with no scan roots: the
+    /// default ones are the developer's own ~/Projects and ~/code.
+    fn import(&self, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+        std::fs::write(self.home().join("config.toml"), "scan_roots = []\n").unwrap();
+        let mut full = vec!["import"];
+        full.extend_from_slice(args);
+        self.jeet_at(&full, &self.home(), env)
+    }
+
+    /// The task directories, by slug.
+    fn task_slugs(&self) -> Vec<String> {
+        let mut slugs: Vec<String> = std::fs::read_dir(self.home().join("tasks"))
+            .map(|dir| {
+                dir.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        slugs.sort();
+        slugs
+    }
+}
+
+/// Everything about a checkout an import must leave alone: HEAD, every ref,
+/// its worktrees, its status and the bytes of every file in it.
+fn state_of(checkout: &std::path::Path) -> String {
+    let mut state = vec![
+        git_stdout(&["rev-parse", "HEAD"], checkout),
+        git_stdout(
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+            checkout,
+        ),
+        git_stdout(&["worktree", "list", "--porcelain"], checkout),
+        git_stdout(&["status", "--porcelain=v1", "-uall"], checkout),
+        git_stdout(&["diff", "--cached"], checkout),
+        git_stdout(&["diff"], checkout),
+    ];
+    let mut files: Vec<_> = walk_files(checkout);
+    files.sort();
+    for file in files {
+        let bytes = std::fs::read(checkout.join(&file)).unwrap();
+        state.push(format!(
+            "{}: {}",
+            file.display(),
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    state.join("\n")
+}
+
+/// Every file under `dir` but `.git`, relative to it.
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap().flatten() {
+            let path = entry.path();
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path.strip_prefix(dir).unwrap().to_path_buf());
+            }
+        }
+    }
+    out
+}
+
+fn write(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+}
+
+fn read(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// The verification case: a repository outside jeet with a branch origin
+/// has not seen, uncommitted work of every kind on top of it, and a parked
+/// branch, becomes tasks holding exactly that — and the original is left
+/// exactly as it was.
+#[test]
+fn import_copies_an_outside_repo_into_tasks_and_leaves_it_untouched() {
+    let lab = StoreLab::new();
+    lab.origin("api");
+    let outside = TempDir::new().unwrap();
+    let api = lab.outside_clone("api", outside.path());
+
+    // parked: one commit origin does not have, checked out nowhere.
+    git(&["checkout", "-q", "-b", "parked"], &api);
+    git(
+        &["commit", "-q", "--allow-empty", "-m", "parked work"],
+        &api,
+    );
+    git(&["checkout", "-q", "main"], &api);
+    // feat: two commits origin does not have, and on top of them a staged
+    // file, an unstaged edit and an untracked file.
+    git(&["checkout", "-q", "-b", "feat"], &api);
+    write(&api.join("tracked.txt"), "one\n");
+    git(&["add", "tracked.txt"], &api);
+    git(&["commit", "-q", "-m", "feat one"], &api);
+    write(&api.join("tracked.txt"), "two\n");
+    git(&["commit", "-q", "-am", "feat two"], &api);
+    write(&api.join("tracked.txt"), "three, unstaged\n");
+    write(&api.join("staged.txt"), "staged\n");
+    git(&["add", "staged.txt"], &api);
+    write(&api.join("untracked.txt"), "untracked\n");
+    // A Claude Code session started in the checkout.
+    let claude = TempDir::new().unwrap();
+    let slug = |p: &std::path::Path| -> String {
+        p.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    };
+    let session = "0f0f0f0f-1111-2222-3333-444444444444";
+    let sessions = claude.path().join("projects").join(slug(&api));
+    std::fs::create_dir_all(&sessions).unwrap();
+    write(
+        &sessions.join(format!("{session}.jsonl")),
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"text\":\"wire up the parser\"}]}}\n",
+    );
+    let claude_dir = claude.path().to_string_lossy().to_string();
+    let env = [("CLAUDE_CONFIG_DIR", claude_dir.as_str())];
+
+    let before = state_of(&api);
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &env);
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "", "import keeps stdout clean");
+    assert_eq!(state_of(&api), before, "the original changed");
+
+    // The repository is in the store, cloned from origin.
+    let trunk = lab.home().join("store/github.com/acme/api");
+    assert!(trunk.join(".git").is_dir());
+    assert_eq!(
+        git_stdout(&["remote", "get-url", "origin"], &trunk),
+        "https://github.com/acme/api.git"
+    );
+    // main had nothing origin lacks: no task. One each for feat and parked.
+    assert_eq!(lab.task_slugs(), ["feat", "parked"]);
+
+    let feat = lab.home().join("tasks/feat/api");
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &feat),
+        "feat"
+    );
+    assert_eq!(rev(&feat, "HEAD"), rev(&api, "HEAD"));
+    for file in ["tracked.txt", "staged.txt", "untracked.txt"] {
+        assert_eq!(read(&feat.join(file)), read(&api.join(file)), "{file}");
+    }
+    // Staged stays staged, unstaged unstaged, untracked untracked.
+    assert_eq!(
+        git_stdout(&["status", "--porcelain=v1", "-uall"], &feat),
+        git_stdout(&["status", "--porcelain=v1", "-uall"], &api)
+    );
+
+    let parked = lab.home().join("tasks/parked/api");
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &parked),
+        "parked"
+    );
+    assert_eq!(rev(&parked, "HEAD"), rev(&api, "parked"));
+    assert_eq!(git_stdout(&["status", "--porcelain"], &parked), "");
+
+    // Every worktree is the task's own, as far as jeet is concerned.
+    let output = lab.jeet_at(&["worktree", "ls", "--task", "feat"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(stdout_of(&output).contains("github.com/acme/api"));
+
+    // The session came along, and the task knows it.
+    let task = lab.home().join("tasks/feat");
+    assert!(claude
+        .path()
+        .join("projects")
+        .join(slug(&task))
+        .join(format!("{session}.jsonl"))
+        .is_file());
+    let recorded = lab.sessions(&task_id(&task));
+    assert_eq!(recorded, [(session.to_string(), None)]);
+
+    // Imported once is enough: the work is in tasks already.
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("already in task"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(lab.task_slugs(), ["feat", "parked"]);
+    assert_eq!(state_of(&api), before, "the original changed");
+}
+
+/// jeet's own worktrees from before tasks are moved into tasks as they are,
+/// work and all, and the old directories cleared away.
+#[test]
+fn import_moves_jeets_old_worktrees_into_tasks() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("web");
+    let home = lab.home();
+    let legacy = home.join("worktrees/github.com/acme/web/old-feature");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "old-feature",
+            &legacy.to_string_lossy(),
+        ],
+        &trunk,
+    );
+    write(&legacy.join("notes.txt"), "mine\n");
+    let scratch = home.join("ephemeral/github.com/acme/web/0a1b2c");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &scratch.to_string_lossy(),
+        ],
+        &trunk,
+    );
+
+    let output = lab.import(&["--yes"], &[]);
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "");
+    assert_eq!(lab.task_slugs(), ["0a1b2c", "old-feature"]);
+
+    let moved = home.join("tasks/old-feature/web");
+    assert_eq!(read(&moved.join("notes.txt")), "mine\n");
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &moved),
+        "old-feature"
+    );
+    assert!(home.join("tasks/0a1b2c/web").is_dir());
+    assert!(is_detached(&home.join("tasks/0a1b2c/web")));
+    // Gone from where they were, empty directories and all.
+    assert!(!legacy.exists());
+    assert!(!scratch.exists());
+    assert!(!home.join("worktrees/github.com").exists());
+    assert!(!home.join("ephemeral/github.com").exists());
+    // git agrees where they are now, and so does the task.
+    let listed = git_stdout(&["worktree", "list"], &trunk);
+    assert!(listed.contains(&moved.display().to_string()), "{listed}");
+    let output = lab.jeet_at(&["worktree", "ls", "--task", "old-feature"], &home, &[]);
+    succeeded(&output);
+    assert!(
+        stdout_of(&output).contains("1 uncommitted"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    // Nothing left to import.
+    let output = lab.import(&["--yes"], &[]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("nothing to import"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+/// Originals stay unless asked; asked, a copied linked worktree goes, while
+/// the repository itself — its main working tree — never does.
+#[test]
+fn import_removes_originals_only_when_asked_and_never_the_repository() {
+    let lab = StoreLab::new();
+    lab.origin("lib");
+    let outside = TempDir::new().unwrap();
+    let lib = lab.outside_clone("lib", outside.path());
+    git(&["checkout", "-q", "-b", "side"], &lib);
+    git(&["commit", "-q", "--allow-empty", "-m", "side work"], &lib);
+    let topic = lib.parent().unwrap().join("lib-topic");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "topic",
+            &topic.to_string_lossy(),
+        ],
+        &lib,
+    );
+    git(
+        &["commit", "-q", "--allow-empty", "-m", "topic work"],
+        &topic,
+    );
+    write(&topic.join("wip.txt"), "wip\n");
+    let topic_head = rev(&topic, "HEAD");
+    let side_head = rev(&lib, "HEAD");
+    // And one holding an ignored file, which import does not copy: removing
+    // that original would lose it.
+    write(&lib.join(".git/info/exclude"), "*.log\n");
+    let logs = lib.parent().unwrap().join("lib-logs");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "logs",
+            &logs.to_string_lossy(),
+        ],
+        &lib,
+    );
+    git(&["commit", "-q", "--allow-empty", "-m", "logs work"], &logs);
+    write(&logs.join("debug.log"), "keep me\n");
+
+    // Without a terminal to ask on, and no --yes: nothing happens.
+    let output = lab.import(&[lib.to_str().unwrap()], &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("--yes"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!lab.home().join("store/github.com/acme/lib").exists());
+
+    let output = lab.import(&[lib.to_str().unwrap(), "--yes", "--remove-originals"], &[]);
+    succeeded(&output);
+    assert_eq!(lab.task_slugs(), ["logs", "side", "topic"]);
+    assert!(
+        stderr_of(&output).contains("1 ignored file or directory not copied"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(read(&logs.join("debug.log")), "keep me\n");
+    let copied = lab.home().join("tasks/topic/lib");
+    assert_eq!(rev(&copied, "HEAD"), topic_head);
+    assert_eq!(read(&copied.join("wip.txt")), "wip\n");
+    assert_eq!(rev(&lab.home().join("tasks/side/lib"), "HEAD"), side_head);
+
+    // The linked worktree went; its branch, and the repository, stay.
+    assert!(!topic.exists());
+    let listed = git_stdout(&["worktree", "list"], &lib);
+    assert!(!listed.contains("lib-topic"), "{listed}");
+    assert_eq!(rev(&lib, "topic"), topic_head);
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &lib),
+        "side"
+    );
+    assert_eq!(rev(&lib, "HEAD"), side_head);
+}
+
+/// Asked on a terminal, the answer groups items into tasks and names them.
+#[test]
+fn import_asks_which_and_groups_as_told() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    lab.origin("app");
+    let outside = TempDir::new().unwrap();
+    let app = lab.outside_clone("app", outside.path());
+    for branch in ["one", "two", "three"] {
+        git(&["checkout", "-q", "-b", branch, "main"], &app);
+        git(&["commit", "-q", "--allow-empty", "-m", branch], &app);
+    }
+    git(&["checkout", "-q", "main"], &app);
+    std::fs::write(lab.home().join("config.toml"), "scan_roots = []\n").unwrap();
+
+    let args = format!("import '{}'", app.display());
+    let mut screen = Pty::open(&lab, &args, &lab.home(), &[]);
+    screen.wait_for_text("Import which?");
+    // Branches are listed in name order: one, three, two.
+    screen.type_keys(b"1+3=both\r");
+    let status = screen.wait_for_exit();
+    assert!(status.success(), "jeet import exited with {status}");
+
+    // Two of the three, in one task; `three` was left out.
+    assert_eq!(lab.task_slugs(), ["both"]);
+    let task = lab.home().join("tasks/both");
+    assert_eq!(rev(&task.join("app"), "HEAD"), rev(&app, "one"));
+    assert_eq!(rev(&task.join("app-2"), "HEAD"), rev(&app, "two"));
+}
+
+/// Work on the default branch cannot have that branch in a task — the
+/// store's trunk has it — so it comes across detached at the same commit,
+/// changes and all, in a task named after the checkout.
+#[test]
+fn import_brings_work_on_the_default_branch_across_detached() {
+    let lab = StoreLab::new();
+    lab.origin("site");
+    let outside = TempDir::new().unwrap();
+    let site = lab.outside_clone("site", outside.path());
+    git(
+        &["commit", "-q", "--allow-empty", "-m", "local only"],
+        &site,
+    );
+    write(&site.join("draft.md"), "draft\n");
+    let before = state_of(&site);
+
+    let output = lab.import(&[site.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    assert_eq!(state_of(&site), before, "the original changed");
+    assert_eq!(lab.task_slugs(), ["site"]);
+    let copy = lab.home().join("tasks/site/site");
+    assert!(is_detached(&copy));
+    assert_eq!(rev(&copy, "HEAD"), rev(&site, "HEAD"));
+    assert_eq!(read(&copy.join("draft.md")), "draft\n");
+    // The trunk is still on main, at origin's main.
+    let trunk = lab.home().join("store/github.com/acme/site");
+    assert_eq!(
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &trunk),
+        "main"
+    );
+    assert_eq!(rev(&trunk, "HEAD"), rev(&lab.seed("site"), "HEAD"));
+}
+
+/// A repository registered before tasks (`jeet adopt`, `jeet scan`) has its
+/// trunk outside the store. Import finds it from the index alone, clones it
+/// into the store, points the index there, and makes tasks of its work.
+#[test]
+fn import_moves_a_repository_registered_before_tasks_into_the_store() {
+    let lab = StoreLab::new();
+    lab.origin("old");
+    let outside = TempDir::new().unwrap();
+    let old = lab.outside_clone("old", outside.path());
+    git(&["checkout", "-q", "-b", "wip"], &old);
+    git(&["commit", "-q", "--allow-empty", "-m", "wip"], &old);
+    succeeded(&lab.jeet(&["ls"]));
+    lab.index()
+        .execute(
+            "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
+             VALUES ('github.com/acme/old', ?1, 'https://github.com/acme/old.git', 'main', 0)",
+            [old.to_string_lossy()],
+        )
+        .unwrap();
+    let output = lab.jeet(&["ls"]);
+    assert!(stdout_of(&output).contains("outside the store"));
+    let before = state_of(&old);
+
+    let output = lab.import(&["--yes"], &[]);
+    succeeded(&output);
+    assert_eq!(state_of(&old), before, "the original changed");
+    let trunk = lab.home().join("store/github.com/acme/old");
+    let output = lab.jeet(&["path", "old"]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), trunk);
+    assert_eq!(lab.task_slugs(), ["wip"]);
+    assert_eq!(
+        rev(&lab.home().join("tasks/wip/old"), "HEAD"),
+        rev(&old, "wip")
+    );
+}
+
+/// Uncommitted work on the default branch is not "already imported" because
+/// some task happens to be at the same commit: the task lacks the changes.
+/// Once a task holds them, it is.
+#[test]
+fn import_does_not_take_dirty_work_for_a_task_at_the_same_commit() {
+    let lab = StoreLab::new();
+    lab.clone_repo("api");
+    let scratch = lab.new_task("scratch");
+    let detached = lab.add(&scratch, &["api"]);
+    let outside = TempDir::new().unwrap();
+    let api = lab.outside_clone("api", outside.path());
+    assert_eq!(rev(&detached, "HEAD"), rev(&api, "HEAD"));
+    write(&api.join("wip.txt"), "wip\n");
+    write(&api.join("more.txt"), "more\n");
+
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(!stderr.contains("already in task"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["api", "scratch"]);
+    let copy = lab.home().join("tasks/api/api");
+    assert_eq!(read(&copy.join("wip.txt")), "wip\n");
+    assert_eq!(read(&copy.join("more.txt")), "more\n");
+
+    // Now a task has exactly that work.
+    let output = lab.import(&[api.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("already in task api"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["api", "scratch"]);
+}
+
+/// A branch a task holds, with new work in the original the task lacks, is
+/// not passed over: the work comes across detached.
+#[test]
+fn import_brings_new_work_on_a_branch_a_task_holds_across_detached() {
+    let lab = StoreLab::new();
+    lab.origin("lib");
+    let outside = TempDir::new().unwrap();
+    let lib = lab.outside_clone("lib", outside.path());
+    git(&["checkout", "-q", "-b", "feat"], &lib);
+    git(&["commit", "-q", "--allow-empty", "-m", "feat"], &lib);
+    succeeded(&lab.import(&[lib.to_str().unwrap(), "--yes"], &[]));
+    assert_eq!(lab.task_slugs(), ["feat"]);
+
+    write(&lib.join("later.txt"), "later\n");
+    let output = lab.import(&[lib.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("lacks work"), "{stderr}");
+    assert_eq!(lab.task_slugs(), ["feat", "feat-2"]);
+    let copy = lab.home().join("tasks/feat-2/lib");
+    assert!(is_detached(&copy));
+    assert_eq!(rev(&copy, "HEAD"), rev(&lib, "HEAD"));
+    assert_eq!(read(&copy.join("later.txt")), "later\n");
+    // The first task's worktree is as it was.
+    assert!(!lab.home().join("tasks/feat/lib/later.txt").exists());
+}
+
+/// `jeet import <PATH>` moves a store trunk's worktrees under PATH, and no
+/// others: one elsewhere on disk stays where the user put it.
+#[test]
+fn import_with_a_path_moves_only_the_worktrees_under_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("web");
+    let outside = TempDir::new().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let here = base.join("scratch/web-a");
+    let elsewhere = base.join("other/web-b");
+    for (path, branch) in [(&here, "a"), (&elsewhere, "b")] {
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                &path.to_string_lossy(),
+            ],
+            &trunk,
+        );
+    }
+
+    let scratch = base.join("scratch");
+    let output = lab.import(&[scratch.to_str().unwrap(), "--yes"], &[]);
+    succeeded(&output);
+    assert_eq!(lab.task_slugs(), ["a"]);
+    assert!(!here.exists());
+    assert!(lab.home().join("tasks/a/web").is_dir());
+    assert!(elsewhere.is_dir(), "a worktree outside the path was moved");
+    let listed = git_stdout(&["worktree", "list"], &trunk);
+    assert!(
+        listed.contains(&elsewhere.display().to_string()),
+        "{listed}"
+    );
+}
+
+/// A pull request's checkout — a review job's, or one the explorer made —
+/// is not the user's work, and moving it would pull a review job's worktree
+/// out from under it. Import leaves it.
+#[test]
+fn import_leaves_pull_request_checkouts_alone() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("web");
+    let home = lab.home();
+    let review = home.join("worktrees/github.com/acme/web/pr-42");
+    let explored = home.join("worktrees/github.com/acme/web/pr-7");
+    for path in [&review, &explored] {
+        git(
+            &["worktree", "add", "-q", "--detach", &path.to_string_lossy()],
+            &trunk,
+        );
+    }
+    // A review job ran in pr-42.
+    let jobs = home.join("reviews/github.com/acme/web");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let job = serde_json::json!({
+        "pr": 42,
+        "title": "Add a thing",
+        "head": rev(&review, "HEAD"),
+        "worktree": review,
+        "command": "true",
+        "env": [],
+        "notify": false,
+        "log": jobs.join("42.log"),
+        "started_at": 0,
+        "finished_at": 1,
+        "exit_code": 0,
+    });
+    write(&jobs.join("42.json"), &job.to_string());
+    // The explorer checked out pr-7, and marked it so.
+    let admin = git_stdout(&["rev-parse", "--absolute-git-dir"], &explored);
+    write(&std::path::Path::new(&admin).join("jeet-pr"), "7\n");
+
+    let output = lab.import(&["--yes"], &[]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("pull request"), "{stderr}");
+    assert!(stderr.contains("nothing to import"), "{stderr}");
+    assert!(lab.task_slugs().is_empty());
+    assert!(review.is_dir());
+    assert!(explored.is_dir());
 }

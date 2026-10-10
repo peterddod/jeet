@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Debug, Clone)]
 pub struct GitWorktreeEntry {
     pub path: PathBuf,
-    pub _head: String,
+    pub head: String,
     pub branch: Option<String>,
+    /// The repository's own directory, for a bare one: no working tree.
+    pub bare: bool,
 }
 
 /// When set, git subprocesses capture their output instead of writing to the
@@ -88,19 +90,22 @@ pub fn clone_repo(url: &str, dest: &Path) -> Result<()> {
     run_git(["clone", url, &dest.to_string_lossy()], "git clone")
 }
 
+/// origin's URL as configured. Read from the config rather than with
+/// `git remote get-url`, which applies `url.<base>.insteadOf` rewrites: the
+/// URL as written is what names the repository.
 pub fn origin_url(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args([
             "-C",
             &repo_path.to_string_lossy(),
-            "remote",
-            "get-url",
-            "origin",
+            "config",
+            "--get",
+            "remote.origin.url",
         ])
         .output()
-        .context("spawn git remote get-url")?;
+        .context("spawn git config")?;
     if !output.status.success() {
-        bail!("git remote get-url origin failed");
+        bail!("no origin remote");
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -130,13 +135,6 @@ pub fn default_branch(repo_path: &Path) -> Result<String> {
         return Ok(branch);
     }
     Ok("main".to_string())
-}
-
-pub fn fetch(repo_path: &Path, remote: &str, branch: &str) -> Result<()> {
-    run_git(
-        ["-C", &repo_path.to_string_lossy(), "fetch", remote, branch],
-        "git fetch",
-    )
 }
 
 /// `git fetch origin --prune`, unattended: it may run in the background, or
@@ -296,24 +294,6 @@ pub fn worktree_add_detached(repo_path: &Path, dest: &Path, start_point: &str) -
     )
 }
 
-/// Create `branch` at the worktree's current HEAD and check it out there.
-///
-/// This is how a detached scratchpad becomes a real branch in place.
-pub fn checkout_new_branch_here(wt_path: &Path, branch: &str) -> Result<()> {
-    run_git(
-        ["-C", &wt_path.to_string_lossy(), "checkout", "-b", branch],
-        "git checkout -b",
-    )
-}
-
-/// Rename the branch checked out in `wt_path`.
-pub fn rename_current_branch(wt_path: &Path, new_name: &str) -> Result<()> {
-    run_git(
-        ["-C", &wt_path.to_string_lossy(), "branch", "-m", new_name],
-        "git branch -m",
-    )
-}
-
 /// Relocate a linked worktree, keeping git's bookkeeping in step.
 ///
 /// `dest` must not exist: git moves a worktree *into* an existing directory.
@@ -335,40 +315,6 @@ pub fn worktree_move(repo_path: &Path, from: &Path, dest: &Path) -> Result<()> {
         ],
         "git worktree move",
     )
-}
-
-/// The upstream ref a branch tracks, if any.
-pub fn upstream_of(wt_path: &Path, branch: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &wt_path.to_string_lossy(),
-            "rev-parse",
-            "--abbrev-ref",
-            &format!("{branch}@{{upstream}}"),
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if upstream.is_empty() {
-        None
-    } else {
-        Some(upstream)
-    }
-}
-
-pub fn status_porcelain(repo_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"])
-        .output()
-        .context("spawn git status --porcelain")?;
-    if !output.status.success() {
-        bail!("git status --porcelain failed");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<()> {
@@ -414,16 +360,19 @@ fn parse_worktree_porcelain(text: &str) -> Result<Vec<GitWorktreeEntry>> {
     let mut path = None;
     let mut head = None;
     let mut branch = None;
+    let mut bare = false;
 
     for line in text.lines() {
         if line.is_empty() {
-            if let (Some(p), Some(h)) = (path.take(), head.take()) {
+            if let Some(p) = path.take() {
                 entries.push(GitWorktreeEntry {
                     path: PathBuf::from(p),
-                    _head: h,
+                    head: head.take().unwrap_or_default(),
                     branch: branch.take(),
+                    bare,
                 });
             }
+            bare = false;
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
@@ -432,13 +381,16 @@ fn parse_worktree_porcelain(text: &str) -> Result<Vec<GitWorktreeEntry>> {
             head = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("branch ") {
             branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
+        } else if line == "bare" {
+            bare = true;
         }
     }
-    if let (Some(p), Some(h)) = (path, head) {
+    if let Some(p) = path {
         entries.push(GitWorktreeEntry {
             path: PathBuf::from(p),
-            _head: h,
+            head: head.unwrap_or_default(),
             branch,
+            bare,
         });
     }
     Ok(entries)
@@ -462,10 +414,6 @@ pub fn git_toplevel(path: &Path) -> Result<PathBuf> {
     ))
 }
 
-pub fn is_git_repo(path: &Path) -> bool {
-    git_toplevel(path).is_ok()
-}
-
 /// Path to the shared git directory (for a linked worktree this is the trunk's `.git`).
 pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
     let output = Command::new("git")
@@ -484,6 +432,12 @@ pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(
         String::from_utf8_lossy(&output.stdout).trim(),
     ))
+}
+
+/// The checkout's own git directory: for a linked worktree, the one under
+/// the repository's `worktrees/` that is its alone.
+pub fn git_dir(path: &Path) -> Result<PathBuf> {
+    git_output(path, &["rev-parse", "--absolute-git-dir"], &[], None).map(PathBuf::from)
 }
 
 /// The checked-out branch, or `None` when HEAD is detached.
@@ -718,35 +672,6 @@ pub fn configured_diff_tool(path: &Path) -> Option<String> {
     (output.status.success() && !tool.is_empty()).then_some(tool)
 }
 
-pub fn remote_exists(repo_path: &Path, remote: &str) -> bool {
-    Command::new("git")
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "remote",
-            "get-url",
-            remote,
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Publish `branch` to `remote`, setting upstream tracking.
-pub fn push_set_upstream(repo_path: &Path, remote: &str, branch: &str) -> Result<()> {
-    run_git(
-        [
-            "-C",
-            &repo_path.to_string_lossy(),
-            "push",
-            "--set-upstream",
-            remote,
-            branch,
-        ],
-        "git push",
-    )
-}
-
 pub fn worktree_prune(repo_path: &Path) -> Result<()> {
     run_git(
         ["-C", &repo_path.to_string_lossy(), "worktree", "prune"],
@@ -802,6 +727,31 @@ pub fn count_commits_not_in(path: &Path, rev: &str, exclude: &[&str]) -> Option<
     args.push("--");
     let out = git_output(path, &args, &[], None).ok()?;
     out.parse().ok()
+}
+
+/// Fetch `refspecs` into the repository at `repo_path` from the one at
+/// `source`, a local path: how `jeet import` copies branches and commits into
+/// the store without going through a remote. Only fast-forwards, unless a
+/// refspec says otherwise, and git refuses to move a branch that is checked
+/// out anywhere.
+pub fn fetch_local(repo_path: &Path, source: &Path, refspecs: &[&str]) -> Result<()> {
+    let source = source.to_string_lossy();
+    let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"];
+    args.push(&source);
+    args.extend_from_slice(refspecs);
+    git_output(repo_path, &args, &[], None).map(|_| ())
+}
+
+/// Detach the worktree at `wt_path` at `rev`. A clean worktree is assumed:
+/// git refuses rather than carry changes over.
+pub fn checkout_detached(wt_path: &Path, rev: &str) -> Result<()> {
+    git_output(
+        wt_path,
+        &["checkout", "--quiet", "--detach", rev, "--"],
+        &[],
+        None,
+    )
+    .map(|_| ())
 }
 
 /// Point `name` at `oid`, creating the ref if need be.
@@ -1028,5 +978,19 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
         assert_eq!(entries[1].path, PathBuf::from("/path/feature"));
+        assert_eq!(entries[1].head, "def456");
+        assert!(!entries[0].bare);
+    }
+
+    #[test]
+    fn parses_porcelain_with_bare_and_detached_entries() {
+        let text = "worktree /path/repo.git\nbare\n\nworktree /path/wt\nHEAD abc123\ndetached\n\n";
+        let entries = parse_worktree_porcelain(text).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].bare);
+        assert!(entries[0].head.is_empty());
+        assert!(!entries[1].bare);
+        assert_eq!(entries[1].branch, None);
+        assert_eq!(entries[1].head, "abc123");
     }
 }
