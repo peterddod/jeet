@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.7.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.7.1
 ```
 
 ## Quick start
@@ -770,6 +770,10 @@ jeet is now built around **tasks**. This is a breaking release: run
   GitHub events to it.
 - **Removed**: `adopt`, `scan`, `checkout`, `sessions` and
   `exec --ephemeral`. `jeet worktree` now works only inside a task.
+
+v0.7.1: notifications never hold jeet up. `terminal-notifier` waits until
+macOS grants it permission, which stalled `jeet notify`, the assistant's
+actions and `jeet watch`; jeet now gives it two seconds and moves on.
 
 ## What's new in v0.6
 
