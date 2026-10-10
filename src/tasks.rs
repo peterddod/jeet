@@ -28,6 +28,7 @@ use crate::git;
 use crate::projects::{self, Project};
 use crate::remote;
 use crate::resolve;
+use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
 
@@ -37,7 +38,7 @@ pub const TASK_ID_ENV: &str = "JEET_TASK_ID";
 
 /// `<task>/.jeet/task-id` marks a task directory, so the task can be found
 /// from anywhere beneath it.
-const MARKER_DIR: &str = ".jeet";
+pub const MARKER_DIR: &str = ".jeet";
 const MARKER_FILE: &str = "task-id";
 
 const SLUG_MAX: usize = 48;
@@ -917,17 +918,23 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
     Some((slug, rest.join("/")))
 }
 
-/// Archive a task: free the disk its worktrees take while keeping what is
-/// needed to bring each back as it was.
+/// Archive a task: end its agent and free the disk its worktrees take while
+/// keeping what is needed to bring each back as it was.
 ///
 /// For each worktree: uncommitted changes, untracked files included, are
 /// saved under `refs/jeet/stash/…`; HEAD is pinned under `refs/jeet/head/…`;
 /// both are recorded on its row, and only then is the worktree removed. The
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
-/// finishes the job.
+/// finishes the job. It is refused from inside the agent's tmux session,
+/// which ending the agent would end too.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    runtime::refuse_inside_session(task, "archive")?;
     let mut warnings = Vec::new();
+    // The agent goes first, and is gone before anything is saved: it works
+    // in the worktrees about to be removed, and what it wrote after the
+    // snapshot would be lost.
+    runtime::stop(task).context("end the agent's tmux session")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
@@ -1235,8 +1242,9 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Delete a task and everything it owns: its worktrees, the branches it made,
-/// its `refs/jeet` refs, its directory and its rows. Branches it did not make
+/// Delete a task and everything it owns: its agent's tmux session, its
+/// worktrees, the branches it made, its `refs/jeet` refs, its directory and
+/// its rows. Branches it did not make
 /// are left alone. The caller has already confirmed what [`losses`] lists.
 ///
 /// The rows go last, so a failure part-way leaves a task that can be deleted
@@ -1248,7 +1256,12 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             task.slug
         );
     }
+    runtime::refuse_inside_session(task, "delete")?;
     let mut warnings = Vec::new();
+    // Stopped, and gone, before anything is removed: a running agent would
+    // carry on working in worktrees that are about to go, and its exit hook
+    // would write into the task directory as it was being removed.
+    runtime::stop(task).context("end the agent's tmux session")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));

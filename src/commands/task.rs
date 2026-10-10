@@ -4,16 +4,17 @@
 //! everything else jeet has to say goes to stderr.
 
 use std::io::{IsTerminal, Write};
-use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
 use crate::projects;
+use crate::runtime;
 use crate::tasks::{self, NewTask};
+use crate::tmux;
 use crate::worktrees::now_secs;
 
 pub fn new(
@@ -48,7 +49,13 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     } else {
         TaskState::Active
     };
-    let list = app.db.list_tasks(Some(state))?;
+    let mut list: Vec<(i64, TaskRecord)> = app
+        .db
+        .list_tasks(Some(state))?
+        .into_iter()
+        .map(|t| (runtime::last_activity(app, &t), t))
+        .collect();
+    list.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     if list.is_empty() {
         eprintln!(
             "jeet: no {} tasks; `jeet task new <name>` starts one",
@@ -56,24 +63,33 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
         );
         return Ok(());
     }
-    println!("{:<28} {:<28} {:<10} NAME", "TASK", "WORKTREES", "ACTIVE");
-    for task in list {
+    let tmux_ok = tmux::available();
+    println!(
+        "{:<28} {:<28} {:<10} {:<24} NAME",
+        "TASK", "WORKTREES", "ACTIVE", "STATUS"
+    );
+    for (at, task) in list {
         let rows = app.db.list_task_worktrees(&task.id)?;
+        let status = match task.state {
+            TaskState::Active => runtime::activity(app, &task, tmux_ok).label(),
+            TaskState::Archived => "archived".to_string(),
+        };
         println!(
-            "{:<28} {:<28} {:<10} {}",
+            "{:<28} {:<28} {:<10} {:<24} {}",
             task.slug,
             tasks::worktree_summary(&rows),
-            agent::age_label(task.last_activity),
+            agent::age_label(at),
+            status,
             task.name
         );
     }
     Ok(())
 }
 
-/// Start the configured agent in the task directory, in the foreground.
-/// Without a terminal there is nobody to talk to it, so the directory is
-/// printed instead.
-pub fn open(app: &App, name: &str) -> Result<()> {
+/// Attach to the task's agent in its tmux session, starting the agent first
+/// if it is not running. Without a terminal there is nobody to attach, so
+/// the agent is left running detached and the directory is printed instead.
+pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     let task = tasks::find(app, name)?;
     if task.state == TaskState::Archived {
         bail!(
@@ -83,34 +99,26 @@ pub fn open(app: &App, name: &str) -> Result<()> {
         );
     }
     let dir = tasks::task_dir(app, &task);
-    let _ = app.db.touch_task(&task.id, now_secs());
+    let running = runtime::ensure_running(app, &task, session)?;
+    warn_all(&running.warnings);
+    let tmux_session = &running.tmux_session;
+    if running.started {
+        eprintln!(
+            "jeet: started {} in tmux session {tmux_session}",
+            AgentSpec::from_config(&app.config)?.display()
+        );
+    }
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        eprintln!("jeet: `tmux attach -t {tmux_session}` to talk to the agent");
         println!("{}", dir.display());
         return Ok(());
     }
 
-    let mut spec = AgentSpec::from_config(&app.config)?;
-    // The project's own arguments; a project since deleted or broken costs
-    // only those, not the task.
-    match projects::agent_args(app, &task) {
-        Ok(args) => spec.argv.extend(args),
-        Err(e) => eprintln!("jeet: warning: no agent arguments from the task's project: {e:#}"),
-    }
-    let (program, args) = spec
-        .argv
-        .split_first()
-        .ok_or_else(|| anyhow::anyhow!("empty agent command"))?;
-    eprintln!("jeet: starting {} in {}", spec.display(), dir.display());
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(&dir)
-        .env(tasks::TASK_ID_ENV, &task.id)
-        .status()
-        .with_context(|| format!("failed to launch `{program}`"))?;
+    let code = tmux::attach(tmux_session)?;
     let _ = app.db.touch_task(&task.id, now_secs());
     cd::request(&dir)?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }
@@ -152,6 +160,8 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
             dir.display()
         );
     }
+    // Before asking, not after: the answer would count for nothing.
+    runtime::refuse_inside_session(&task, "delete")?;
     if !force {
         confirm_delete(app, &task)?;
     }

@@ -13,6 +13,11 @@ fn jeet_bin() -> Command {
     // Running the suite from inside a task's agent session must not point
     // `jeet worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
+    // No test may reach the developer's tmux server or Claude sessions: tmux
+    // is missing unless a test supplies one, and Claude's store is empty.
+    cmd.env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+        .env_remove("TMUX")
+        .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude");
     cmd
 }
 
@@ -1243,12 +1248,18 @@ fn an_empty_task_takes_worktrees_on_demand() {
         succeeded(&output);
         assert_eq!(path_from(&output), second);
     }
-    // Without a terminal, opening a task just names its directory.
-    for verb in ["path", "open"] {
-        let output = lab.jeet_at(&["task", verb, "fix-the-login-page"], &lab.home(), &[]);
-        succeeded(&output);
-        assert_eq!(path_from(&output), task);
-    }
+    let output = lab.jeet_at(&["task", "path", "fix-the-login-page"], &lab.home(), &[]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), task);
+    // The agent runs in tmux, and there is none here.
+    let output = lab.jeet_at(&["task", "open", "fix-the-login-page"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("brew install tmux"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(stdout_of(&output), "");
 
     // Outside any task there is nothing to add a worktree to.
     let output = lab.jeet_at(&["worktree", "add", "widget"], &lab.home(), &[]);
@@ -2161,4 +2172,675 @@ fn resync_updates_what_the_task_left_alone() {
     let output = lab.jeet_at(&["task", "resync", "plain"], &home, &[]);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("not made from a project"));
+}
+
+// ---------------------------------------------------------------------------
+// the agent runtime: tmux, hooks and status
+// ---------------------------------------------------------------------------
+
+/// A stand-in `tmux` that records each call, in order, and keeps one
+/// session's liveness in a file: `new-session` makes it, `kill-session`
+/// ends it, and `has-session` and `list-panes` report it. The pane's pid is
+/// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
+/// does. `display-message` prints the `current` file: the session the
+/// caller runs in.
+#[cfg(unix)]
+fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("tmux-stub");
+    std::fs::create_dir_all(bin.join("calls")).unwrap();
+    let script = bin.join("tmux");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+here=$(dirname "$0")
+n=$(cat "$here/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$here/count"
+printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
+case "$1" in
+  -V) echo "tmux 3.4" ;;
+  has-session) [ -e "$here/alive" ] ;;
+  new-session) touch "$here/alive" ;;
+  kill-session)
+    rm -f "$here/alive"
+    if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
+  list-panes)
+    [ -e "$here/alive" ] || exit 1
+    case "$*" in
+      *pane_pid*) echo "0 $(cat "$here/pid" 2>/dev/null)" ;;
+      *) echo 0 ;;
+    esac ;;
+  display-message) cat "$here/current" 2>/dev/null ;;
+  show-options) echo C-b ;;
+esac
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// Every call the stub `tmux` has had, oldest first, each as its arguments.
+#[cfg(unix)]
+fn tmux_calls(script: &std::path::Path) -> Vec<Vec<String>> {
+    let dir = script.parent().unwrap().join("calls");
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .split_terminator('\0')
+                .map(str::to_string)
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn calls_of(script: &std::path::Path, verb: &str) -> Vec<Vec<String>> {
+    tmux_calls(script)
+        .into_iter()
+        .filter(|c| c.first().map(String::as_str) == Some(verb))
+        .collect()
+}
+
+/// A hook fixture, as Claude would send it for `session` working in `cwd`.
+/// `SessionStart-<source>` is the SessionStart fixture with that source.
+fn hook_input(event_fixture: &str, session: &str, cwd: &std::path::Path) -> String {
+    let file = match event_fixture.strip_prefix("SessionStart-") {
+        Some(_) => "SessionStart",
+        None => event_fixture,
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hooks")
+        .join(format!("{file}.json"));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    value["session_id"] = session.into();
+    value["cwd"] = cwd.to_string_lossy().to_string().into();
+    if let Some(source) = event_fixture.strip_prefix("SessionStart-") {
+        value["source"] = source.into();
+    }
+    value.to_string()
+}
+
+impl StoreLab {
+    /// `jeet task-hook <event>` with `input` on stdin, the way Claude runs it.
+    fn hook(&self, event: &str, input: &str, env: &[(&str, &str)]) -> std::process::Output {
+        use std::io::Write;
+        let mut cmd = jeet_bin();
+        self.wire(&mut cmd)
+            .args(["task-hook", event])
+            .current_dir(self.home())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn index(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.home().join("index.db")).unwrap()
+    }
+
+    /// A task's sessions as (id, parent), oldest first.
+    fn sessions(&self, task_id: &str) -> Vec<(String, Option<String>)> {
+        let db = self.index();
+        let mut stmt = db
+            .prepare(
+                "SELECT session_id, parent_id FROM task_sessions WHERE task_id = ?1
+                 ORDER BY created_at, rowid",
+            )
+            .unwrap();
+        stmt.query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+}
+
+fn status_file(task: &std::path::Path, session: &str) -> serde_json::Value {
+    let path = task.join(".jeet/status").join(format!("{session}.json"));
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// A hook must never put anything on stdout — Claude would read it — and
+/// never fail.
+fn hook_ok(output: &std::process::Output) {
+    succeeded(output);
+    assert_eq!(stdout_of(output), "", "a hook printed to stdout");
+}
+
+#[test]
+fn task_hook_writes_the_status_each_event_leaves() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("hooked");
+    let id = task_id(&task);
+    let session = "11111111-2222-4333-8444-555555555555";
+    // Claude's directory may be anywhere in the task.
+    let cwd = task.join("notes");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let cases: [(&str, &str, Option<&str>); 8] = [
+        ("SessionStart", "idle", None),
+        (
+            "UserPromptSubmit",
+            "running",
+            Some("Fix the login page so that the session cookie survives a pa…"),
+        ),
+        ("PreToolUse", "running", Some("Bash")),
+        ("SubagentStop", "running", None),
+        (
+            "Notification",
+            "waiting",
+            Some("Claude needs your permission to use Bash"),
+        ),
+        ("Notification-idle", "idle", None),
+        ("Stop", "idle", None),
+        ("SessionEnd", "ended", None),
+    ];
+    for (fixture, state, detail) in cases {
+        let event = fixture.split('-').next().unwrap();
+        let output = lab.hook(event, &hook_input(fixture, session, &cwd), &[]);
+        hook_ok(&output);
+        let status = status_file(&task, session);
+        assert_eq!(status["state"], state, "{fixture}: {status}");
+        assert_eq!(status["detail"].as_str(), detail, "{fixture}: {status}");
+        assert_eq!(status["event"], event);
+        assert_eq!(status["session_id"], session);
+    }
+    // Written whole: nothing half-done is left beside the status files.
+    let leftovers: Vec<_> = std::fs::read_dir(task.join(".jeet/status"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| n != &format!("{session}.json"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // SessionStart recorded the session; clearing the conversation starts
+    // another, which follows on from it.
+    assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+    let cleared = "66666666-7777-4888-8999-000000000000";
+    hook_ok(&lab.hook(
+        "SessionStart",
+        &hook_input("SessionStart-clear", cleared, &task),
+        &[],
+    ));
+    assert_eq!(
+        lab.sessions(&id),
+        [
+            (session.to_string(), None),
+            (cleared.to_string(), Some(session.to_string()))
+        ]
+    );
+    // Seen again on resume, it keeps its parent.
+    hook_ok(&lab.hook(
+        "SessionStart",
+        &hook_input("SessionStart-resume", cleared, &task),
+        &[],
+    ));
+    assert_eq!(lab.sessions(&id)[1].1.as_deref(), Some(session));
+}
+
+#[test]
+fn task_hook_finds_its_task_or_quietly_does_nothing() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("elsewhere");
+    let id = task_id(&task);
+    let outside = TempDir::new().unwrap();
+    let session = "abcdefab-1111-4222-8333-444444444444";
+
+    // Outside any task, a hook has nobody to report to.
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, outside.path()), &[]));
+    assert!(!task.join(".jeet/status").exists());
+    assert!(!outside.path().join(".jeet").exists());
+
+    // The task in the environment is enough.
+    hook_ok(&lab.hook(
+        "PreToolUse",
+        &hook_input("PreToolUse", session, outside.path()),
+        &[("JEET_TASK_ID", &id)],
+    ));
+    assert_eq!(status_file(&task, session)["state"], "running");
+
+    // Garbage, nothing at all, a session id that climbs out of the status
+    // directory, an event jeet does not know: none of it fails the agent.
+    hook_ok(&lab.hook("Stop", "not json", &[]));
+    hook_ok(&lab.hook("Stop", "", &[]));
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", "../../escape", &task), &[]));
+    assert!(!task.join(".jeet/escape.json").exists());
+    assert!(!task.join("escape.json").exists());
+    hook_ok(&lab.hook(
+        "PostToolUse",
+        &hook_input("PreToolUse", "other-session", &task),
+        &[],
+    ));
+    assert!(!task.join(".jeet/status/other-session.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    let id = task_id(&task);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude --model opus"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+
+    // Started detached; without a terminal only the directory is printed.
+    let output = lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), task);
+    assert!(
+        stderr_of(&output).contains("tmux attach -t jeet-fix-login"),
+        "{}",
+        stderr_of(&output)
+    );
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1);
+    let argv = &started[0];
+    let home = lab.home().canonicalize().unwrap();
+    let dash = argv.iter().position(|a| a == "--").unwrap();
+    assert_eq!(
+        argv[..dash],
+        [
+            "new-session".to_string(),
+            "-d".into(),
+            "-s".into(),
+            "jeet-fix-login".into(),
+            "-c".into(),
+            task.to_string_lossy().to_string(),
+            "-e".into(),
+            format!("JEET_TASK_ID={id}"),
+            "-e".into(),
+            format!("JEET_HOME={}", home.display()),
+            "-e".into(),
+            "JEET_CD_FILE=".into(),
+        ]
+    );
+    let agent = &argv[dash + 1..];
+    assert_eq!(agent[..4], ["claude", "--model", "opus", "--session-id"]);
+    let session = agent[4].clone();
+    assert_eq!(agent[5..7], ["-n".to_string(), "Fix login".to_string()]);
+    assert_eq!(agent[7], "--settings");
+    assert_eq!(agent.len(), 9, "{agent:?}");
+    let settings: serde_json::Value = serde_json::from_str(&agent[8]).unwrap();
+    let stop = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        stop.starts_with('\'') && stop.ends_with("' task-hook Stop"),
+        "{stop}"
+    );
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
+    );
+    // Known before the agent ever ran.
+    assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
+    let hint = calls_of(&tmux, "set-option");
+    assert_eq!(
+        hint[0],
+        [
+            "set-option",
+            "-t",
+            "=jeet-fix-login",
+            "status-right",
+            " C-b d → jeet "
+        ]
+    );
+
+    // Running already: nothing new starts, and the session asked for is not
+    // forced on it.
+    let output = lab.jeet_at(
+        &["task", "open", "fix-login", "--session", &session],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(path_from(&output), task);
+    assert!(stderr_of(&output).contains("already running"));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    assert!(calls_of(&tmux, "has-session")
+        .iter()
+        .all(|c| c == &["has-session", "-t", "=jeet-fix-login"]));
+
+    // What the hooks report shows in the task list.
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("running"),
+        "{}",
+        stdout_of(&output)
+    );
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("running – Fix the login page"),
+        "{}",
+        stdout_of(&output)
+    );
+    // The agent dies without a word: its status is stale, and says so.
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("not running"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    // Opened again, the session is resumed once Claude has a transcript of
+    // it; until then it is started afresh under the same id.
+    let output = lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env);
+    succeeded(&output);
+    let again = calls_of(&tmux, "new-session").pop().unwrap();
+    assert!(
+        again.windows(2).any(|w| w == ["--session-id", &session]),
+        "{again:?}"
+    );
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    let slug: String = task
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = claude_dir.join("projects").join(slug);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(transcripts.join(format!("{session}.jsonl")), "{}\n").unwrap();
+    let output = lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env);
+    succeeded(&output);
+    let resumed = calls_of(&tmux, "new-session").pop().unwrap();
+    let dash = resumed.iter().position(|a| a == "--").unwrap();
+    assert_eq!(
+        resumed[dash + 1..dash + 6],
+        ["claude", "--model", "opus", "--resume", &session]
+    );
+    assert!(!resumed.contains(&"--session-id".to_string()));
+    assert_eq!(lab.sessions(&id).len(), 1);
+
+    // A session the task never had is refused, before anything starts.
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    let before = calls_of(&tmux, "new-session").len();
+    let output = lab.jeet_at(
+        &["task", "open", "fix-login", "--session", "nope"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("has no session nope"));
+    assert_eq!(calls_of(&tmux, "new-session").len(), before);
+
+    // Archiving ends the agent; so does deleting.
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    succeeded(&lab.jeet_at(&["task", "archive", "fix-login"], &lab.home(), &env));
+    assert_eq!(
+        calls_of(&tmux, "kill-session"),
+        [["kill-session", "-t", "=jeet-fix-login"]]
+    );
+    let output = lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("archived"));
+    succeeded(&lab.jeet_at(&["task", "unarchive", "fix-login"], &lab.home(), &env));
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    succeeded(&lab.jeet_at(
+        &["task", "delete", "fix-login", "--force"],
+        &lab.home(),
+        &env,
+    ));
+    assert_eq!(calls_of(&tmux, "kill-session").len(), 2);
+    assert!(!task.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_other_than_claude_just_runs_in_tmux() {
+    let lab = StoreLab::new();
+    lab.new_task("plain");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "aider --yes"),
+    ];
+
+    let output = lab.jeet_at(
+        &["task", "open", "plain", "--session", "x"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("keeps no sessions"));
+
+    succeeded(&lab.jeet_at(&["task", "open", "plain"], &lab.home(), &env));
+    let argv = calls_of(&tmux, "new-session").pop().unwrap();
+    let dash = argv.iter().position(|a| a == "--").unwrap();
+    assert_eq!(argv[dash + 1..], ["aider", "--yes"]);
+}
+
+/// `kill-session` returns at once, while the agent may still be finishing a
+/// tool call. Archive waits for it to be gone before it saves anything, so
+/// what it writes on the way out is kept.
+#[cfg(unix)]
+#[test]
+fn archive_keeps_what_the_agent_writes_as_it_exits() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("slow exit");
+    let worktree = lab.add(&task, &["widget"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub_dir = tmux.parent().unwrap().to_path_buf();
+    let ready = scratch.path().join("ready");
+
+    // An agent that takes a moment, once hung up on, to write its last file.
+    let mut agent = Command::new("sh")
+        .arg("-c")
+        .arg(
+            r#"trap 'sleep 1; echo late > "$WT/late.txt"; exit 0' HUP
+               touch "$READY"
+               while :; do sleep 0.1; done"#,
+        )
+        .env("WT", &worktree)
+        .env("READY", &ready)
+        .spawn()
+        .unwrap();
+    while !ready.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(stub_dir.join("pid"), agent.id().to_string()).unwrap();
+    std::fs::write(stub_dir.join("alive"), "").unwrap();
+
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    succeeded(&lab.jeet_at(&["task", "archive", "slow-exit"], &lab.home(), &env));
+    assert!(
+        agent.try_wait().unwrap().is_some(),
+        "archive returned while the agent was still running"
+    );
+    assert!(!worktree.exists());
+
+    succeeded(&lab.jeet_at(&["task", "unarchive", "slow-exit"], &lab.home(), &env));
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("late.txt")).unwrap(),
+        "late\n"
+    );
+}
+
+/// Ending the agent's session ends everything in it, so jeet run from
+/// inside it would die before archiving or deleting anything.
+#[cfg(unix)]
+#[test]
+fn archive_and_delete_refuse_inside_the_agents_session() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("inside");
+    let id = task_id(&task);
+    let worktree = lab.add(&task, &["widget"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub_dir = tmux.parent().unwrap().to_path_buf();
+    std::fs::write(stub_dir.join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let base = ("JEET_TMUX", tmux_env.as_str());
+    let refused = |output: &std::process::Output| {
+        assert!(!output.status.success());
+        assert!(
+            stderr_of(output).contains("inside tmux session jeet-inside"),
+            "{}",
+            stderr_of(output)
+        );
+        assert!(calls_of(&tmux, "kill-session").is_empty());
+        assert!(worktree.exists());
+    };
+
+    // Run by the agent, or anything it started.
+    refused(&lab.jeet_at(
+        &["task", "archive", "inside"],
+        &lab.home(),
+        &[base, ("JEET_TASK_ID", &id)],
+    ));
+
+    // Run in a window the user opened in the agent's session.
+    std::fs::write(stub_dir.join("current"), "jeet-inside\n").unwrap();
+    let in_tmux = [
+        base,
+        ("TMUX", "/tmp/tmux-1/default,1,0"),
+        ("TMUX_PANE", "%3"),
+    ];
+    refused(&lab.jeet_at(&["task", "archive", "inside"], &lab.home(), &in_tmux));
+    assert!(calls_of(&tmux, "display-message")
+        .iter()
+        .all(|c| c == &["display-message", "-p", "-t", "%3", "#{session_name}"]));
+    refused(&lab.jeet_at(
+        &["task", "delete", "inside", "--force"],
+        &lab.home(),
+        &in_tmux,
+    ));
+    let state = |id: &str| -> String {
+        lab.index()
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(state(&id), "active");
+    assert!(task.is_dir());
+
+    // From any other session it goes ahead.
+    std::fs::write(stub_dir.join("current"), "elsewhere\n").unwrap();
+    succeeded(&lab.jeet_at(&["task", "archive", "inside"], &lab.home(), &in_tmux));
+    assert_eq!(calls_of(&tmux, "kill-session").len(), 1);
+    assert!(!worktree.exists());
+    assert_eq!(state(&id), "archived");
+}
+
+/// Kills the private tmux server a test started, however the test ends.
+struct TmuxServer(std::path::PathBuf);
+
+impl TmuxServer {
+    fn tmux(&self, args: &[&str]) -> std::process::Output {
+        Command::new("tmux")
+            .args(args)
+            .env("TMUX_TMPDIR", &self.0)
+            .env_remove("TMUX")
+            .output()
+            .unwrap()
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]);
+    }
+}
+
+/// The real thing, on a private tmux server. Where tmux is missing the test
+/// says so and passes.
+#[test]
+fn a_task_agent_lives_in_a_real_tmux_session() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("tmux is not installed; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    lab.new_task("real");
+    let sockets = TempDir::new().unwrap();
+    let server = TmuxServer(sockets.path().to_path_buf());
+    let sockets_env = sockets.path().to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", "tmux"),
+        ("TMUX_TMPDIR", sockets_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+    ];
+
+    succeeded(&lab.jeet_at(&["task", "open", "real"], &lab.home(), &env));
+    assert!(server
+        .tmux(&["has-session", "-t", "=jeet-real"])
+        .status
+        .success());
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("running"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    succeeded(&lab.jeet_at(&["task", "archive", "real"], &lab.home(), &env));
+    assert!(!server
+        .tmux(&["has-session", "-t", "=jeet-real"])
+        .status
+        .success());
+}
+
+/// The project's agent arguments follow the configured agent's into the
+/// task's tmux session.
+#[cfg(unix)]
+#[test]
+fn a_project_task_agent_gets_the_projects_arguments() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let output = lab.jeet_at(&["projects", "new", "web"], &home, &[]);
+    succeeded(&output);
+    let toml = path_from(&output).join("project.toml");
+    let mut text = std::fs::read_to_string(&toml).unwrap();
+    text.push_str("\n[agent]\nargs = [\"--verbose\"]\n");
+    std::fs::write(&toml, text).unwrap();
+    succeeded(&lab.jeet_at(&["task", "new", "Site", "--project", "web"], &home, &[]));
+
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "aider --yes"),
+    ];
+    succeeded(&lab.jeet_at(&["task", "open", "site"], &home, &env));
+    let argv = calls_of(&tmux, "new-session").pop().unwrap();
+    let dash = argv.iter().position(|a| a == "--").unwrap();
+    assert_eq!(argv[dash + 1..], ["aider", "--yes", "--verbose"]);
 }

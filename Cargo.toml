@@ -34,7 +34,7 @@ license-file = ["LICENSE", "4"]
 extended-description = """\
 jeet manages a canonical store of git repository trunks, mirrors worktrees \
 under a predictable layout, and maintains a SQLite index for discovery."""
-depends = "$auto, git"
+depends = "$auto, git, tmux"
 recommends = "bash-completion"
 section = "utility"
 priority = "optional"

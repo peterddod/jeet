@@ -61,6 +61,29 @@ impl AgentSpec {
         }
     }
 
+    /// Arguments that start a new session with a known id and display name,
+    /// so jeet can record the session before the agent is even running.
+    pub fn new_session_args(&self, session_id: &str, name: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec![
+                "--session-id".to_string(),
+                session_id.to_string(),
+                "-n".to_string(),
+                name.to_string(),
+            ]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
+    /// Arguments that layer a settings JSON (hooks, permissions) over the
+    /// user's own, without writing anything to disk.
+    pub fn settings_args(&self, json: &str) -> Option<Vec<String>> {
+        match self.kind {
+            AgentKind::ClaudeCode => Some(vec!["--settings".to_string(), json.to_string()]),
+            AgentKind::Unknown(_) => None,
+        }
+    }
+
     pub fn supports_sessions(&self) -> bool {
         self.kind == AgentKind::ClaudeCode
     }
@@ -145,12 +168,43 @@ pub fn sessions_for(spec: &AgentSpec, root: &Path) -> Result<Vec<AgentSession>> 
     }
 }
 
+/// Where Claude Code keeps the transcripts of sessions started in `root`.
+fn claude_session_dir(root: &Path) -> Option<PathBuf> {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Some(claude_projects_dir()?.join(claude_project_slug(&canonical)))
+}
+
+/// Whether Claude Code has a transcript of session `id` started in `root`,
+/// i.e. whether `--resume id` there would find anything.
+pub fn claude_has_transcript(root: &Path, id: &str) -> bool {
+    claude_session_dir(root).is_some_and(|dir| dir.join(format!("{id}.jsonl")).is_file())
+}
+
+/// When any Claude Code session in `root` last wrote to its transcript.
+/// Only directory metadata is read, so it is cheap however long they are.
+pub fn claude_latest_activity(root: &Path) -> Option<i64> {
+    let dir = claude_session_dir(root)?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| mtime_secs(&e.metadata().ok()?))
+        .max()
+}
+
+/// A file's modification time in unix seconds.
+pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
 fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
-    let Some(projects) = claude_projects_dir() else {
+    let Some(dir) = claude_session_dir(root) else {
         bail!("could not locate the Claude Code config directory");
     };
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let dir = projects.join(claude_project_slug(&canonical));
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -168,10 +222,8 @@ fn claude_sessions(root: &Path) -> Result<Vec<AgentSession>> {
         };
         let modified = entry
             .metadata()
-            .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .and_then(|m| mtime_secs(&m))
             .unwrap_or(0);
         let (summary, entries) = summarise_session(&path);
         sessions.push(AgentSession {
@@ -285,6 +337,19 @@ mod tests {
     }
 
     #[test]
+    fn claude_sessions_get_an_id_a_name_and_settings() {
+        let spec = AgentSpec::from_command("claude").unwrap();
+        assert_eq!(
+            spec.new_session_args("abc", "Fix the login").unwrap(),
+            ["--session-id", "abc", "-n", "Fix the login"]
+        );
+        assert_eq!(
+            spec.settings_args(r#"{"hooks":{}}"#).unwrap(),
+            ["--settings", r#"{"hooks":{}}"#]
+        );
+    }
+
+    #[test]
     fn detects_claude_by_path_not_just_name() {
         let spec = AgentSpec::from_command("/opt/bin/claude").unwrap();
         assert_eq!(spec.kind, AgentKind::ClaudeCode);
@@ -295,6 +360,8 @@ mod tests {
         let spec = AgentSpec::from_command("aider").unwrap();
         assert!(!spec.supports_sessions());
         assert!(spec.resume_args("x").is_none());
+        assert!(spec.new_session_args("x", "task").is_none());
+        assert!(spec.settings_args("{}").is_none());
         assert!(sessions_for(&spec, Path::new("/tmp")).is_err());
     }
 
