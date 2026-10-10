@@ -183,7 +183,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         // Started by jeet itself, under the command that was checked.
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
-        | Commands::TaskHook { .. } => Gate::Free,
+        | Commands::TaskHook { .. }
+        | Commands::TaskStartup { .. } => Gate::Free,
         Commands::Tasks | Commands::Explore | Commands::Exec { .. } | Commands::Chat { .. } => {
             Gate::Interactive
         }

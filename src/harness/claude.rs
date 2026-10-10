@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use super::{shell_quote, EventKind, Harness, HookEvent, HookSetup, StartSource};
+use super::{
+    shell_quote, EventKind, Harness, HookEvent, HookSetup, StartSource, StartupPrompt, TrustStep,
+};
 use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
 
@@ -32,6 +34,23 @@ pub const HOOK_EVENTS: [&str; 7] = [
 
 /// Seconds Claude gives a hook before giving up on it.
 const HOOK_TIMEOUT_SECS: u64 = 10;
+
+/// The trust prompt Claude shows once for a folder not under one already
+/// trusted, before any hook runs:
+///
+/// ```text
+///  Quick safety check: Is this a project you created or one you trust? …
+///  ❯ No, exit
+///    Yes, I trust this folder
+///  Enter to confirm · Esc to cancel
+/// ```
+///
+/// "No" is selected first, so Enter alone exits.
+const TRUST_QUESTION: &str = "Is this a project you created or one you trust?";
+const TRUST_YES: &str = "Yes, I trust this folder";
+const TRUST_NO: &str = "No, exit";
+/// What marks the selected option.
+const CURSOR: char = '❯';
 
 #[derive(Debug)]
 pub struct ClaudeCode;
@@ -157,9 +176,34 @@ impl Harness for ClaudeCode {
             .max()
     }
 
+    fn startup_prompt(&self, pane: &str) -> Option<StartupPrompt> {
+        // Joined up, so a question the pane wrapped still matches.
+        let flat = pane.split_whitespace().collect::<Vec<_>>().join(" ");
+        (flat.contains(TRUST_QUESTION) && flat.contains(TRUST_YES)).then_some(StartupPrompt::Trust)
+    }
+
+    /// Down to "Yes", and Enter only once "Yes" is seen selected: Enter on
+    /// "No" exits.
+    fn accept_trust(&self, pane: &str) -> Option<TrustStep> {
+        self.startup_prompt(pane)?;
+        match selected_option(pane)? {
+            TRUST_YES => Some(TrustStep::Confirm(vec!["Enter"])),
+            TRUST_NO => Some(TrustStep::Select(vec!["Down"])),
+            _ => None,
+        }
+    }
+
     fn instructions_file(&self) -> Option<&'static str> {
         Some("CLAUDE.md")
     }
+}
+
+/// The option the cursor is on, in a pane showing a list of them.
+fn selected_option(pane: &str) -> Option<&str> {
+    pane.lines()
+        .filter_map(|line| line.trim().strip_prefix(CURSOR))
+        .map(str::trim)
+        .next_back()
 }
 
 /// The fields of a Claude Code hook payload that jeet reads; every event
@@ -528,6 +572,49 @@ mod tests {
             value["hookSpecificOutput"]["additionalContext"],
             "hello\nworld"
         );
+    }
+
+    fn pane(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/panes/claude-code")
+            .join(format!("{name}.txt"));
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn the_trust_prompt_is_seen_and_accepted_one_step_at_a_time() {
+        let no = pane("trust-no-selected");
+        assert_eq!(ClaudeCode.startup_prompt(&no), Some(StartupPrompt::Trust));
+        // Never Enter on "No, exit": that quits.
+        assert_eq!(
+            ClaudeCode.accept_trust(&no),
+            Some(TrustStep::Select(vec!["Down"]))
+        );
+        let yes = pane("trust-yes-selected");
+        assert_eq!(ClaudeCode.startup_prompt(&yes), Some(StartupPrompt::Trust));
+        assert_eq!(
+            ClaudeCode.accept_trust(&yes),
+            Some(TrustStep::Confirm(vec!["Enter"]))
+        );
+    }
+
+    #[test]
+    fn no_prompt_means_no_keys() {
+        let ready = pane("no-prompt");
+        assert!(ClaudeCode.startup_prompt(&ready).is_none());
+        assert!(ClaudeCode.accept_trust(&ready).is_none());
+        assert!(ClaudeCode.accept_trust("").is_none());
+    }
+
+    #[test]
+    fn a_wrapped_prompt_is_still_seen_but_an_unknown_selection_is_left_alone() {
+        let narrow = pane("trust-no-selected").replace("created or one", "created or\n one");
+        assert_eq!(
+            ClaudeCode.startup_prompt(&narrow),
+            Some(StartupPrompt::Trust)
+        );
+        let odd = pane("trust-no-selected").replace("❯ No, exit", "❯ Maybe");
+        assert!(ClaudeCode.accept_trust(&odd).is_none());
     }
 
     #[test]

@@ -149,6 +149,19 @@ pub trait Harness: Sync {
         None
     }
 
+    /// The prompt, if any, the agent is blocked at before its session can
+    /// start, from the text of its tmux pane.
+    fn startup_prompt(&self, _pane: &str) -> Option<StartupPrompt> {
+        None
+    }
+
+    /// The next keys towards accepting the trust prompt the pane shows.
+    /// `None` when it shows none, or not in a state jeet knows: then no key
+    /// is sent.
+    fn accept_trust(&self, _pane: &str) -> Option<TrustStep> {
+        None
+    }
+
     /// The file in a session's directory it reads its instructions from.
     /// Not read yet: the switch of jeet's own instruction files to
     /// AGENTS.md uses it to decide which harnesses need a shim.
@@ -219,6 +232,23 @@ pub enum EventKind {
     Stopped,
     /// The session is over.
     Ended,
+}
+
+/// A prompt an agent shows before its session starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupPrompt {
+    /// Whether to trust the folder it was started in.
+    Trust,
+}
+
+/// One step of accepting a trust prompt, as tmux key names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustStep {
+    /// Keys that move the selection towards accepting; the pane is looked
+    /// at again before anything else is sent.
+    Select(Vec<&'static str>),
+    /// Accepting is selected: the keys that confirm it.
+    Confirm(Vec<&'static str>),
 }
 
 /// Why a session started.
@@ -348,6 +378,8 @@ mod tests {
         assert!(h.continue_output("x").is_none());
         assert!(h.session_context_output("x").is_none());
         assert!(!h.has_session(Path::new("/"), "x"));
+        assert!(h.startup_prompt("Yes, I trust this folder").is_none());
+        assert!(h.accept_trust("Yes, I trust this folder").is_none());
         assert!(h.tested_version().is_none());
     }
 

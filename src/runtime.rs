@@ -21,6 +21,7 @@ use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
 use crate::permissions;
 use crate::projects;
+use crate::startup;
 use crate::status::{self, Activity};
 use crate::tasks;
 use crate::tmux;
@@ -89,8 +90,12 @@ pub fn ensure_running(
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
     }
-    let argv = launch_argv(app, task, &spec, session, prompt)?;
+    let (argv, session_id) = launch_argv(app, task, &spec, session, prompt)?;
     warnings.extend(spec.version_warning());
+    let hooks = spec.has_hooks();
+    if let Err(e) = status::mark_launched(&dir, hooks) {
+        warnings.push(format!("could not note the agent's launch: {e:#}"));
+    }
     let home = app.home.to_string_lossy();
     let env = [
         (tasks::TASK_ID_ENV, task.id.as_str()),
@@ -102,6 +107,12 @@ pub fn ensure_running(
         (cd::CD_FILE_ENV, ""),
     ];
     tmux::new_session(&name, &dir, &env, &argv)?;
+    // Something to see it through a startup prompt, which no hook reports.
+    if hooks {
+        if let Err(e) = startup::launch(app, task, session_id.as_deref()) {
+            warnings.push(format!("could not watch the agent start: {e:#}"));
+        }
+    }
     let _ = app.db.touch_task(&task.id, now_secs());
     Ok(Running {
         tmux_session: name,
@@ -119,7 +130,7 @@ fn launch_argv(
     spec: &AgentSpec,
     session: Option<&str>,
     prompt: Option<&str>,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Option<String>)> {
     let mut argv = spec.argv.clone();
     if prompt.is_some() && spec.harness.prompt_args("").is_none() {
         bail!(
@@ -135,7 +146,7 @@ fn launch_argv(
                 spec.display()
             );
         }
-        return Ok(argv);
+        return Ok((argv, None));
     }
 
     let dir = tasks::task_dir(app, task);
@@ -161,7 +172,7 @@ fn launch_argv(
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
-    Ok(argv)
+    Ok((argv, Some(id)))
 }
 
 /// Which session to run, and whether it is resumed. A recorded session that
@@ -266,7 +277,12 @@ pub fn activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
 /// a thread that has no index to look the task up in.
 pub fn activity_at(dir: &Path, session: &str, tmux_ok: bool) -> Activity {
     let alive = tmux_ok && tmux::pane_alive(session);
-    status::activity(status::current_status(dir).as_ref(), alive)
+    status::activity_since(
+        status::current_status(dir).as_ref(),
+        alive,
+        status::launched_at(dir),
+        now_secs(),
+    )
 }
 
 /// When anything last happened in the task: jeet touching it, a hook

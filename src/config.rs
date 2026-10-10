@@ -54,6 +54,14 @@ pub enum HarnessConfig {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// Accept the agent's "trust this folder?" prompt in task
+        /// directories under `$JEET_HOME/tasks` (default: off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_trust: Option<bool>,
+        /// With `auto_trust`, accept it for review tasks too, whose
+        /// checkouts are other people's PR branches (default: off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_trust_reviews: Option<bool>,
     },
 }
 
@@ -233,6 +241,22 @@ impl Config {
             None => None,
         };
         name.map(|n| n.trim()).filter(|n| !n.is_empty())
+    }
+
+    /// `[harness] auto_trust` and `auto_trust_reviews`, both off unless
+    /// set.
+    pub fn auto_trust(&self) -> (bool, bool) {
+        match &self.harness {
+            Some(HarnessConfig::Table {
+                auto_trust,
+                auto_trust_reviews,
+                ..
+            }) => (
+                auto_trust.unwrap_or(false),
+                auto_trust.unwrap_or(false) && auto_trust_reviews.unwrap_or(false),
+            ),
+            _ => (false, false),
+        }
     }
 
     /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
@@ -444,6 +468,8 @@ mod tests {
             Some(HarnessConfig::Table {
                 name: Some("claude-code".into()),
                 command: Some("/opt/claude --verbose".into()),
+                auto_trust: None,
+                auto_trust_reviews: None,
             })
         );
         let out = toml::to_string_pretty(&config).unwrap();
@@ -455,6 +481,23 @@ mod tests {
         // A typo is an error, not a silently ignored key.
         assert!(toml::from_str::<Config>("[harness]\nnmae = \"x\"\n").is_err());
         assert!(Config::default().harness_name().is_none());
+    }
+
+    #[test]
+    fn auto_trust_is_off_unless_asked_and_reviews_need_their_own_yes() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap().auto_trust();
+        assert_eq!(Config::default().auto_trust(), (false, false));
+        assert_eq!(read("harness = \"claude-code\"\n"), (false, false));
+        assert_eq!(read("[harness]\nauto_trust = true\n"), (true, false));
+        assert_eq!(
+            read("[harness]\nauto_trust = true\nauto_trust_reviews = true\n"),
+            (true, true)
+        );
+        // Reviews only ever on top of tasks.
+        assert_eq!(
+            read("[harness]\nauto_trust_reviews = true\n"),
+            (false, false)
+        );
     }
 
     #[test]

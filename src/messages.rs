@@ -8,11 +8,12 @@
 //!   over when it finishes, so it carries straight on. Typed into a
 //!   permission prompt, a message would answer it — `1` and Enter is yes —
 //!   and that answer is the user's to give. A turn the user interrupts ends
-//!   with no Stop, so the queue is also typed in when Claude says it has sat
-//!   idle at its prompt (its `idle_prompt` notification, after a minute);
-//! - Claude Code that no hook has reported on yet: queued too. It is still
-//!   showing its startup dialogs (trusting the folder), which typing would
-//!   answer;
+//!   with no Stop, so the queue is also typed in when the agent reports it
+//!   has sat idle at its prompt (Claude Code's `idle_prompt` notification,
+//!   after a minute);
+//! - an agent with hooks that none has reported on yet: queued too. It is
+//!   still showing its startup dialogs (Claude Code's folder trust), which
+//!   typing would answer;
 //! - not running: the agent is started with it as its first prompt.
 //!
 //! Anything still queued when a message is typed in or starts the agent goes
@@ -263,6 +264,7 @@ pub fn route(activity: &Activity, hooks: bool) -> Route {
         // Code's folder trust), which typing would answer; its first idle
         // report takes the queue.
         Activity::Live if hooks => Route::Queue,
+        Activity::Starting => Route::Queue,
         // Another agent has no hooks to queue for.
         Activity::Live => Route::Type,
         Activity::Running { .. } | Activity::Waiting { .. } => Route::Queue,
@@ -622,6 +624,7 @@ mod tests {
         // Claude Code before its first hook is still at its startup
         // dialogs; another agent never says more than that it is running.
         assert_eq!(route(&Activity::Live, true), Route::Queue);
+        assert_eq!(route(&Activity::Starting, true), Route::Queue);
         assert_eq!(route(&Activity::Live, false), Route::Type);
     }
 

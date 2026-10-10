@@ -112,6 +112,55 @@ pub fn status_dir(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("status")
 }
 
+/// Seconds an agent with hooks is "starting" before its first hook, after
+/// which it is taken to be stuck at a startup prompt.
+pub const STARTING_SECS: i64 = 15;
+
+/// Touched when an agent whose harness has hooks is launched, so that one
+/// with no status yet reads as starting rather than running.
+fn launched_path(task_dir: &Path) -> PathBuf {
+    task_dir.join(tasks::MARKER_DIR).join("launched")
+}
+
+/// Note that the task's agent was just launched, `hooks` saying whether its
+/// harness reports its status.
+pub fn mark_launched(task_dir: &Path, hooks: bool) -> Result<()> {
+    let path = launched_path(task_dir);
+    if !hooks {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
+    std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
+}
+
+/// When an agent with hooks was last launched in the task.
+pub fn launched_at(task_dir: &Path) -> Option<i64> {
+    crate::agent::mtime_secs(&std::fs::metadata(launched_path(task_dir)).ok()?)
+}
+
+/// Mark session `session_id` as waiting for the user at its startup:
+/// `detail` says on what. Its first hook replaces this.
+pub fn mark_startup_prompt(
+    task_dir: &Path,
+    session_id: &str,
+    detail: &str,
+    now: i64,
+) -> Result<()> {
+    write_status(
+        task_dir,
+        &SessionStatus {
+            session_id: session_id.to_string(),
+            state: State::Waiting,
+            detail: Some(detail.to_string()),
+            event: "StartupPrompt".to_string(),
+            at: now,
+        },
+    )
+}
+
 /// `jeet task-hook <event>`: record what the hook on stdin says, as the
 /// harness called `harness` reports it. Never fails, never prints to
 /// stdout; what goes wrong is noted on stderr, which the agent keeps out of
@@ -461,6 +510,9 @@ pub enum Activity {
     /// Something is running that reports no status: an agent whose harness
     /// has no hooks.
     Live,
+    /// An agent with hooks, launched moments ago, that none has reported
+    /// on yet.
+    Starting,
     Idle {
         since: i64,
     },
@@ -476,10 +528,27 @@ pub enum Activity {
 
 /// Combine the latest status with whether the task's tmux pane is alive.
 pub fn activity(status: Option<&SessionStatus>, alive: bool) -> Activity {
+    activity_since(status, alive, None, 0)
+}
+
+/// [`activity`] for an agent `launched` at that time, when its harness has
+/// hooks. Alive with no status, it is starting for [`STARTING_SECS`], then
+/// most likely held up at a startup prompt: one with hooks says something
+/// as soon as it is going.
+pub fn activity_since(
+    status: Option<&SessionStatus>,
+    alive: bool,
+    launched: Option<i64>,
+    now: i64,
+) -> Activity {
     let Some(status) = status else {
-        return match alive {
-            true => Activity::Live,
-            false => Activity::NotStarted,
+        return match (alive, launched) {
+            (false, _) => Activity::NotStarted,
+            (true, None) => Activity::Live,
+            (true, Some(at)) if now - at < STARTING_SECS => Activity::Starting,
+            (true, Some(_)) => Activity::Waiting {
+                detail: Some("startup prompt?".to_string()),
+            },
         };
     };
     match (status.state, alive) {
@@ -505,6 +574,7 @@ impl Activity {
             Activity::NotStarted => "no agent".to_string(),
             Activity::NotRunning => "not running".to_string(),
             Activity::Live => "running".to_string(),
+            Activity::Starting => "starting".to_string(),
             Activity::Idle { since } => {
                 match crate::agent::age_label(*since).strip_suffix(" ago") {
                     Some(age) => format!("idle {age}"),
@@ -632,5 +702,48 @@ mod tests {
             ..s(State::Idle, None)
         };
         assert_eq!(label(Some(&just_now), true), "idle");
+    }
+
+    #[test]
+    fn an_agent_with_hooks_but_no_status_is_starting_then_stuck() {
+        let label = |alive, launched, now| activity_since(None, alive, launched, now).label();
+        // No hooks: nothing better to say than that it runs.
+        assert_eq!(label(true, None, 100), "running");
+        assert_eq!(label(true, Some(100), 100), "starting");
+        assert_eq!(label(true, Some(100), 100 + STARTING_SECS - 1), "starting");
+        assert_eq!(
+            label(true, Some(100), 100 + STARTING_SECS),
+            "needs input – startup prompt?"
+        );
+        assert_eq!(label(false, Some(100), 500), "no agent");
+        // What a hook said wins.
+        let idle = SessionStatus {
+            session_id: "s".into(),
+            state: State::Idle,
+            detail: None,
+            event: "Stop".into(),
+            at: 400,
+        };
+        assert!(matches!(
+            activity_since(Some(&idle), true, Some(100), 500),
+            Activity::Idle { .. }
+        ));
+    }
+
+    #[test]
+    fn the_launch_marker_is_kept_only_for_agents_with_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(launched_at(dir.path()).is_none());
+        mark_launched(dir.path(), true).unwrap();
+        assert!(launched_at(dir.path()).is_some());
+        mark_launched(dir.path(), false).unwrap();
+        assert!(launched_at(dir.path()).is_none());
+        mark_launched(dir.path(), false).unwrap();
+        mark_startup_prompt(dir.path(), "s", "trust folder", 7).unwrap();
+        let status = current_status(dir.path()).unwrap();
+        assert_eq!(
+            activity(Some(&status), true).label(),
+            "needs input – trust folder"
+        );
     }
 }

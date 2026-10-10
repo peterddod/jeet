@@ -112,6 +112,7 @@ impl TaskRow {
             self.activity,
             Some(
                 Activity::Live
+                    | Activity::Starting
                     | Activity::Idle { .. }
                     | Activity::Running { .. }
                     | Activity::Waiting { .. }

@@ -22,6 +22,7 @@ mod remote;
 mod resolve;
 mod review;
 mod runtime;
+mod startup;
 mod status;
 mod store;
 mod tasks;
@@ -155,6 +156,11 @@ fn run(command: Option<Commands>) -> Result<()> {
         // never a failure, whatever goes wrong.
         Commands::TaskHook { event, harness } => {
             let _ = std::panic::catch_unwind(|| status::run_hook(&harness, &event));
+        }
+        // Launched in the background with a task's agent; says nothing.
+        Commands::TaskStartup { task, session } => {
+            let app = context::App::open()?;
+            startup::run(&app, &task, session.as_deref())?;
         }
         Commands::Task { command } => {
             let app = context::App::open()?;

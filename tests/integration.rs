@@ -22,6 +22,9 @@ fn jeet_bin() -> Command {
     // Nor run whatever `claude` is on the developer's PATH to check its
     // version.
     cmd.env("JEET_HARNESS_VERSION_CHECK", "0");
+    // Nor leave a watcher polling a stub tmux after the test is done; the
+    // tests that want one run `jeet task-startup` themselves.
+    cmd.env("JEET_STARTUP_WATCH", "0");
     // Nor pop up notifications, or be held to the assistant's permissions
     // because the suite runs inside its session.
     cmd.env("JEET_NOTIFY_CMD", "true")
@@ -2264,6 +2267,13 @@ case "$1" in
     esac ;;
   display-message) cat "$here/current" 2>/dev/null ;;
   show-options) echo C-b ;;
+  # A pane to look at, which Down and Enter change when the test says how.
+  capture-pane) cat "$here/pane" 2>/dev/null ;;
+  send-keys)
+    case "$*" in
+      *" Down") if [ -e "$here/pane-down" ]; then cp "$here/pane-down" "$here/pane"; fi ;;
+      *" Enter") if [ -e "$here/on-enter" ]; then sh "$here/on-enter"; fi ;;
+    esac ;;
 esac
 "#,
     )
@@ -2594,10 +2604,11 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         .iter()
         .all(|c| c == &["has-session", "-t", "=jeet-fix-login"]));
 
-    // What the hooks report shows in the task list.
+    // What the hooks report shows in the task list; before the first, it
+    // is starting.
     let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
     assert!(
-        stdout_of(&output).contains("running"),
+        stdout_of(&output).contains("starting"),
         "{}",
         stdout_of(&output)
     );
@@ -2708,6 +2719,76 @@ fn an_agent_other_than_claude_just_runs_in_tmux() {
     let argv = calls_of(&tmux, "new-session").pop().unwrap();
     let dash = argv.iter().position(|a| a == "--").unwrap();
     assert_eq!(argv[dash + 1..], ["aider", "--yes"]);
+}
+
+fn pane_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/panes/claude-code")
+        .join(format!("{name}.txt"))
+}
+
+/// Claude's trust prompt, which no hook reports, is accepted only when
+/// config.toml says so, one key at a time; otherwise the task says it needs
+/// the user.
+#[cfg(unix)]
+#[test]
+fn a_trust_prompt_is_accepted_only_with_auto_trust() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("Fix login");
+    let id = task_id(&task);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    let session = lab.sessions(&id)[0].0.clone();
+    let startup = |extra: &[&str]| {
+        let mut args = vec!["task-startup", id.as_str(), "--session", session.as_str()];
+        args.extend(extra);
+        succeeded(&lab.jeet_at(&args, &lab.home(), &env));
+    };
+    std::fs::copy(pane_fixture("trust-no-selected"), stub.join("pane")).unwrap();
+    std::fs::copy(pane_fixture("trust-yes-selected"), stub.join("pane-down")).unwrap();
+
+    // Off by default: nothing pressed, and the task says why it waits.
+    startup(&[]);
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    let status = status_file(&task, &session);
+    assert_eq!(status["state"], "waiting");
+    assert_eq!(status["detail"], "trust folder");
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    assert!(
+        stdout_of(&output).contains("needs input – trust folder"),
+        "{}",
+        stdout_of(&output)
+    );
+
+    // On: Down to "Yes", and Enter only once it shows selected. The
+    // SessionStart hook that trusting lets through is what it waits for.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[harness]\nname = \"claude-code\"\nauto_trust = true\n",
+    )
+    .unwrap();
+    std::fs::remove_dir_all(task.join(".jeet/status")).unwrap();
+    let jeet = env!("CARGO_BIN_EXE_jeet");
+    let hook = hook_input("SessionStart", &session, &task).replace('\'', "'\\''");
+    std::fs::write(
+        stub.join("on-enter"),
+        format!(
+            "printf '%s' '{hook}' | JEET_HOME='{}' '{jeet}' task-hook SessionStart\n",
+            lab.home().display()
+        ),
+    )
+    .unwrap();
+    startup(&[]);
+    let keys: Vec<String> = calls_of(&tmux, "send-keys")
+        .into_iter()
+        .map(|c| c.last().unwrap().clone())
+        .collect();
+    assert_eq!(keys, ["Down", "Enter"]);
+    assert_eq!(status_file(&task, &session)["event"], "SessionStart");
 }
 
 /// `kill-session` returns at once, while the agent may still be finishing a
@@ -2997,6 +3078,7 @@ impl Pty {
             .env_remove("TMUX")
             .env("CLAUDE_CONFIG_DIR", "/nonexistent/jeet-test-claude")
             .env("JEET_HARNESS_VERSION_CHECK", "0")
+            .env("JEET_STARTUP_WATCH", "0")
             .env("TERM", "xterm-256color")
             .env("PATH", path)
             .stdin(Stdio::piped())

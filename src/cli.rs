@@ -129,6 +129,16 @@ pub enum Commands {
         harness: String,
     },
 
+    /// Watch a task's agent start, for a trust prompt (run by jeet)
+    #[command(hide = true)]
+    TaskStartup {
+        /// The task's id
+        task: String,
+        /// The session jeet started it with
+        #[arg(long)]
+        session: Option<String>,
+    },
+
     /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
