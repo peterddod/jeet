@@ -485,11 +485,23 @@ running detached and prints the task directory.
 jeet starts Claude Code with hooks (passed with `--settings`; nothing is
 written into the task or a repository) that record what the agent is doing in
 `.jeet/status/<session>.json`, and with permission to run `jeet worktree` and
-`jeet ls` without asking. `jeet task ls` shows it: `running – <tool>`,
-`needs input – <question>`, `idle 5m`, or `not running` once the tmux session
-is gone. Tasks are listed most recently active first, counting the agent's
-activity. Another agent (`agent = "aider"`) runs in tmux the same way, with no
-status. Archiving or deleting a task ends its tmux session.
+`jeet ls` without asking. `jeet task ls` shows it: `starting`,
+`running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
+once the tmux session is gone. An agent with hooks that has said nothing 15
+seconds after starting is most likely held up at a startup prompt, and shows
+`needs input – startup prompt?`. Tasks are listed most recently active first,
+counting the agent's activity. An agent jeet has no harness for
+(`agent = "aider"`) runs in tmux the same way, with no status: just
+`running`. Archiving or deleting a task ends its tmux session.
+
+Claude Code asks once per folder whether you trust it, before any hook runs,
+and a task's agent waits at that question until you answer it. Trusting a
+folder covers the folders inside it (checked with Claude Code 2.1.296), so
+trusting `~/.jeet/tasks` once, by running `claude` there, covers every task
+to come. Until then, jeet watches each agent it starts for the question for
+about 30 seconds: the task shows `needs input – trust folder`, with a
+notification unless you are attached to it, or, with
+[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you.
 
 ### Messaging an agent
 
@@ -868,12 +880,60 @@ scan_roots = ["~/Projects", "~/code"]   # where `jeet import` looks by default
 Two optional keys are not written by default; add them yourself to override:
 
 ```toml
-editor = "vim"       # opened by ⏎ in the explorer; defaults to $VISUAL/$EDITOR
-agent = "claude"     # launched by `ctrl-a`; may include arguments
+editor = "vim"            # opened by ⏎ in the explorer; defaults to $VISUAL/$EDITOR
+harness = "claude-code"   # the coding agent; see below
 ```
 
-Both accept arguments (`editor = "code --wait"`) and are overridden by
-`JEET_EDITOR` / `JEET_AGENT`.
+`editor` accepts arguments (`editor = "code --wait"`) and is overridden by
+`JEET_EDITOR`.
+
+### The coding agent's harness
+
+jeet runs your coding agent through a *harness*: what it knows about that
+agent, from how to start and resume its sessions to what its hooks report.
+Claude Code (`claude-code`) is the default, and for now the only one;
+`generic` runs any other command with none of that (no status, no resume, no
+first prompt, no assistant).
+
+```toml
+harness = "claude-code"
+```
+
+or, to run something other than the harness's own binary, or to have jeet
+answer the folder-trust prompt:
+
+```toml
+[harness]
+name = "claude-code"
+command = "/opt/bin/claude --model opus"   # program and arguments (default: claude)
+auto_trust = true                          # default: false
+auto_trust_reviews = false                 # default: false
+```
+
+The command is taken from `$JEET_AGENT` first, then `[harness] command`, then
+the older `agent = "…"` key, which keeps working; without a `name`, the
+harness is told by the program (`claude` is Claude Code, anything else
+`generic`).
+
+jeet supports each harness's latest version only. The first time a run of
+jeet starts an agent, it checks `<command> --version` against the version
+jeet was last tested with (Claude Code 2.1.296) and warns, without
+refusing, when yours is older. `JEET_HARNESS_VERSION_CHECK=0` skips the
+check.
+
+**`auto_trust`** has jeet accept Claude Code's "Is this a project you created
+or one you trust?" for task directories under `~/.jeet/tasks`, so a new task
+starts straight into its brief. It selects "Yes, I trust this folder", checks
+that it shows selected, and only then presses Enter (Enter on the default
+"No, exit" would quit). Trusting a folder lets Claude Code act on what is in
+it: its `.claude/settings.json` hooks and `.mcp.json` servers run. In your own
+tasks that is your own code; in a **review task** it is someone else's PR
+branch, so review tasks are left to you unless `auto_trust_reviews` is on as
+well. Some per-folder settings, such as `.claude/settings.local.json` and
+`.mcp.json`, reportedly need the exact folder trusted, not just a parent.
+The assistant's session is never answered for.
+
+To add a harness, see [docs/harnesses.md](docs/harnesses.md).
 
 A `[review]` section sets what `jeet review` runs in the background — see
 [Reviewing](#reviewing).
@@ -980,6 +1040,9 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+[docs/harnesses.md](docs/harnesses.md) says how to add support for another
+coding agent.
 
 ### Maintainer: Homebrew tap auto-update (CI)
 

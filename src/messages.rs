@@ -8,11 +8,12 @@
 //!   over when it finishes, so it carries straight on. Typed into a
 //!   permission prompt, a message would answer it — `1` and Enter is yes —
 //!   and that answer is the user's to give. A turn the user interrupts ends
-//!   with no Stop, so the queue is also typed in when Claude says it has sat
-//!   idle at its prompt (its `idle_prompt` notification, after a minute);
-//! - Claude Code that no hook has reported on yet: queued too. It is still
-//!   showing its startup dialogs (trusting the folder), which typing would
-//!   answer;
+//!   with no Stop, so the queue is also typed in when the agent reports it
+//!   has sat idle at its prompt (Claude Code's `idle_prompt` notification,
+//!   after a minute);
+//! - an agent with hooks that none has reported on yet: queued too. It is
+//!   still showing its startup dialogs (Claude Code's folder trust), which
+//!   typing would answer;
 //! - not running: the agent is started with it as its first prompt.
 //!
 //! Anything still queued when a message is typed in or starts the agent goes
@@ -36,7 +37,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{AgentKind, AgentSpec};
+use crate::agent::AgentSpec;
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
 use crate::runtime;
@@ -230,16 +231,17 @@ impl Inbox {
     }
 }
 
-/// What the Stop hook prints to hand the queue over: Claude reads the
-/// `block` decision as "do not stop yet", and the reason as what to do next.
-pub fn stop_block(queued: &[Queued]) -> String {
+/// What a turn that ends with `queued` waiting carries on with: the
+/// reason given to the harness's [`continue_output`].
+///
+/// [`continue_output`]: crate::harness::Harness::continue_output
+pub fn queued_reason(queued: &[Queued]) -> String {
     let messages: Vec<&str> = queued.iter().map(|q| q.message.as_str()).collect();
-    let reason = format!(
+    format!(
         "Messages were sent to you with `jeet task send` while you were working. \
          Deal with them now:\n\n{}",
         messages.join("\n\n---\n\n")
-    );
-    serde_json::json!({ "decision": "block", "reason": reason }).to_string()
+    )
 }
 
 /// How a message reaches the agent.
@@ -253,15 +255,16 @@ pub enum Route {
     Start,
 }
 
-/// `hooks`: the agent is Claude Code, which reports its status through
-/// jeet's hooks.
+/// `hooks`: the agent's harness reports its status through jeet's hooks.
 pub fn route(activity: &Activity, hooks: bool) -> Route {
     match activity {
         Activity::Idle { .. } => Route::Type,
-        // Running, with no hook having said what it is doing. Claude Code
-        // is like that while it shows its startup dialogs, which typing
-        // would answer; its first idle notification takes the queue.
+        // Running, with no hook having said what it is doing. An agent
+        // with hooks is like that while it shows its startup dialogs (Claude
+        // Code's folder trust), which typing would answer; its first idle
+        // report takes the queue.
         Activity::Live if hooks => Route::Queue,
+        Activity::Starting => Route::Queue,
         // Another agent has no hooks to queue for.
         Activity::Live => Route::Type,
         Activity::Running { .. } | Activity::Waiting { .. } => Route::Queue,
@@ -494,7 +497,7 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn has_hooks(&self) -> bool {
-        AgentSpec::from_config(&self.app.config).is_ok_and(|s| s.kind == AgentKind::ClaudeCode)
+        AgentSpec::from_config(&self.app.config).is_ok_and(|s| s.has_hooks())
     }
 
     fn type_in(&self, text: &str) -> Result<()> {
@@ -621,6 +624,7 @@ mod tests {
         // Claude Code before its first hook is still at its startup
         // dialogs; another agent never says more than that it is running.
         assert_eq!(route(&Activity::Live, true), Route::Queue);
+        assert_eq!(route(&Activity::Starting, true), Route::Queue);
         assert_eq!(route(&Activity::Live, false), Route::Type);
     }
 
@@ -768,9 +772,7 @@ mod tests {
                 to: None,
             },
         ];
-        let value: serde_json::Value = serde_json::from_str(&stop_block(&queued)).unwrap();
-        assert_eq!(value["decision"], "block");
-        let reason = value["reason"].as_str().unwrap();
+        let reason = queued_reason(&queued);
         assert!(reason.contains("add tests\n\n---\n\nand docs"), "{reason}");
     }
 

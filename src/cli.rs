@@ -118,12 +118,25 @@ pub enum Commands {
         command: Option<ProjectCommands>,
     },
 
-    /// Record a Claude Code hook event for a task's status (run by the agent)
+    /// Record an agent's hook event for a task's status (run by the agent)
     #[command(hide = true)]
     TaskHook {
-        /// The hook event, e.g. Stop; the hook's JSON arrives on stdin
+        /// The hook event, e.g. Stop; the hook's payload arrives on stdin
         #[arg(default_value = "")]
         event: String,
+        /// The harness whose hook it is
+        #[arg(long, default_value = "claude-code")]
+        harness: String,
+    },
+
+    /// Watch a task's agent start, for a trust prompt (run by jeet)
+    #[command(hide = true)]
+    TaskStartup {
+        /// The task's id
+        task: String,
+        /// The session jeet started it with
+        #[arg(long)]
+        session: Option<String>,
     },
 
     /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)

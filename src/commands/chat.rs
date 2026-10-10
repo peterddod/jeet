@@ -41,6 +41,9 @@ pub fn run(app: &App, new: Option<Option<String>>, pick: bool) -> Result<()> {
         )?,
         Choice::Session(id) => assistant::open(app, &task, Open::Session(id))?,
     };
+    for warning in &opened.warnings {
+        eprintln!("jeet: {warning}");
+    }
     if opened.started {
         eprintln!(
             "jeet: started the assistant's session {} in tmux session {}",

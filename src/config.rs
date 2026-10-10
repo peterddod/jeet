@@ -12,7 +12,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
 
-    /// Coding agent launched with ctrl-a in the explorer (default: `claude`).
+    /// The coding agent's harness: `harness = "claude-code"`, or a
+    /// `[harness]` table with a `name` and a `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessConfig>,
+
+    /// Coding agent command line (default: the harness's, `claude`). Kept
+    /// for configs from before `harness`; `[harness] command` says the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
@@ -33,6 +39,30 @@ pub struct Config {
     /// has the tasks list poll while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchConfig>,
+}
+
+/// `harness` in config.toml: a name, or a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum HarnessConfig {
+    /// `harness = "claude-code"`.
+    Name(String),
+    /// `[harness]` with `name = "claude-code"` and, to run something other
+    /// than its default binary, `command = "/opt/bin/claude --verbose"`.
+    Table {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// Accept the agent's "trust this folder?" prompt in task
+        /// directories under `$JEET_HOME/tasks` (default: off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_trust: Option<bool>,
+        /// With `auto_trust`, accept it for review tasks too, whose
+        /// checkouts are other people's PR branches (default: off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_trust_reviews: Option<bool>,
+    },
 }
 
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
@@ -179,6 +209,7 @@ impl Default for Config {
         Self {
             scan_roots: default_scan_roots(),
             editor: None,
+            harness: None,
             agent: None,
             review: ReviewConfig::default(),
             sync_interval_secs: None,
@@ -202,9 +233,44 @@ impl Config {
         )
     }
 
-    /// Coding agent command line, honouring `JEET_AGENT`, then config.
-    pub fn agent_command(&self) -> String {
-        first_set([env_non_empty("JEET_AGENT"), self.agent.clone()], "claude")
+    /// The harness config.toml names, if it names one.
+    pub fn harness_name(&self) -> Option<&str> {
+        let name = match &self.harness {
+            Some(HarnessConfig::Name(name)) => Some(name),
+            Some(HarnessConfig::Table { name, .. }) => name.as_ref(),
+            None => None,
+        };
+        name.map(|n| n.trim()).filter(|n| !n.is_empty())
+    }
+
+    /// `[harness] auto_trust` and `auto_trust_reviews`, both off unless
+    /// set.
+    pub fn auto_trust(&self) -> (bool, bool) {
+        match &self.harness {
+            Some(HarnessConfig::Table {
+                auto_trust,
+                auto_trust_reviews,
+                ..
+            }) => (
+                auto_trust.unwrap_or(false),
+                auto_trust.unwrap_or(false) && auto_trust_reviews.unwrap_or(false),
+            ),
+            _ => (false, false),
+        }
+    }
+
+    /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
+    /// command`, then `agent`, then the harness's `default`.
+    pub fn agent_command(&self, default: Option<&str>) -> Option<String> {
+        let command = match &self.harness {
+            Some(HarnessConfig::Table { command, .. }) => command.clone(),
+            _ => None,
+        };
+        [env_non_empty("JEET_AGENT"), command, self.agent.clone()]
+            .into_iter()
+            .flatten()
+            .find(|v| !v.trim().is_empty())
+            .or(default.map(str::to_string))
     }
 
     /// Background sync throttle, honouring `JEET_SYNC_INTERVAL_SECS`, then
@@ -383,6 +449,55 @@ mod tests {
         assert!(!out.contains("editor"), "{out}");
         assert!(!out.contains("review"), "{out}");
         assert!(!out.contains("sync"), "{out}");
+    }
+
+    #[test]
+    fn reads_the_harness_as_a_name_or_a_table() {
+        let config: Config = toml::from_str("harness = \"claude-code\"\n").unwrap();
+        assert_eq!(config.harness_name(), Some("claude-code"));
+        assert_eq!(
+            config.harness,
+            Some(HarnessConfig::Name("claude-code".into()))
+        );
+
+        let text = "[harness]\nname = \"claude-code\"\ncommand = \"/opt/claude --verbose\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.harness_name(), Some("claude-code"));
+        assert_eq!(
+            config.harness,
+            Some(HarnessConfig::Table {
+                name: Some("claude-code".into()),
+                command: Some("/opt/claude --verbose".into()),
+                auto_trust: None,
+                auto_trust_reviews: None,
+            })
+        );
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&out).unwrap().harness,
+            config.harness
+        );
+
+        // A typo is an error, not a silently ignored key.
+        assert!(toml::from_str::<Config>("[harness]\nnmae = \"x\"\n").is_err());
+        assert!(Config::default().harness_name().is_none());
+    }
+
+    #[test]
+    fn auto_trust_is_off_unless_asked_and_reviews_need_their_own_yes() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap().auto_trust();
+        assert_eq!(Config::default().auto_trust(), (false, false));
+        assert_eq!(read("harness = \"claude-code\"\n"), (false, false));
+        assert_eq!(read("[harness]\nauto_trust = true\n"), (true, false));
+        assert_eq!(
+            read("[harness]\nauto_trust = true\nauto_trust_reviews = true\n"),
+            (true, true)
+        );
+        // Reviews only ever on top of tasks.
+        assert_eq!(
+            read("[harness]\nauto_trust_reviews = true\n"),
+            (false, false)
+        );
     }
 
     #[test]

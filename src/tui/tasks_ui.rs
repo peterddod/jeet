@@ -416,7 +416,7 @@ pub fn glyph(row: &TaskRow) -> (&'static str, Color) {
 pub fn activity_glyph(activity: Option<&Activity>) -> (&'static str, Color) {
     match activity {
         None => ("…", Color::DarkGray),
-        Some(Activity::Running { .. } | Activity::Live) => ("●", Color::Green),
+        Some(Activity::Running { .. } | Activity::Live | Activity::Starting) => ("●", Color::Green),
         Some(Activity::Waiting { .. }) => ("◆", Color::Yellow),
         Some(Activity::Idle { .. }) => ("○", Color::Cyan),
         Some(Activity::NotRunning) => ("✕", Color::Red),

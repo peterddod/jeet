@@ -405,6 +405,39 @@ pub fn window_alive(id: &str) -> bool {
     output.status.success() && any_pane_alive(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Press the keys tmux calls `keys` (e.g. `Down`, `Enter`) in session
+/// `name`'s active pane.
+pub fn press(name: &str, keys: &[&str]) -> Result<()> {
+    let pane = format!("{}:", target(name));
+    let mut args = vec!["-t", pane.as_str()];
+    args.extend(keys);
+    send_keys(&args)
+}
+
+/// The text session `name`'s active pane shows.
+pub fn capture(name: &str) -> Result<String> {
+    let output = Command::new(binary())
+        .args(["capture-pane", "-p", "-t", &format!("{}:", target(name))])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        bail!("tmux could not read session {name}'s pane");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether anyone is attached to session `name`.
+pub fn attached(name: &str) -> bool {
+    Command::new(binary())
+        .args(["list-clients", "-t", &target(name)])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
 fn send_keys(args: &[&str]) -> Result<()> {
     let output = Command::new(binary())
         .arg("send-keys")

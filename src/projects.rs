@@ -25,12 +25,10 @@ use serde::Deserialize;
 
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
-use crate::instructions::{self, AGENTS_MD, CLAUDE_MD, CLAUDE_SHIM};
+use crate::instructions::{self, AGENTS_MD, CLAUDE_MD};
 use crate::tasks;
 
 pub const PROJECT_FILE: &str = "project.toml";
-/// The instruction files a task gets, as the project has them.
-const INSTRUCTION_FILES: [&str; 2] = [AGENTS_MD, CLAUDE_MD];
 const SKILLS_DIR: &str = "skills";
 
 /// Where a project's skills land in a task.
@@ -70,7 +68,7 @@ impl Project {
     /// The file holding the agent's instructions: AGENTS.md, or a CLAUDE.md
     /// not yet moved to it.
     pub fn instructions_file(&self) -> Option<&'static str> {
-        INSTRUCTION_FILES
+        instructions::files()
             .into_iter()
             .find(|name| self.dir.join(name).is_file())
     }
@@ -196,8 +194,9 @@ pub fn list(app: &App) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Make a project: `project.toml` listing `repos`, a starter AGENTS.md, the
-/// CLAUDE.md importing it, and an empty `skills/`. Returns its directory.
+/// Make a project: `project.toml` listing `repos`, a starter AGENTS.md, each
+/// harness's file importing it (CLAUDE.md), and an empty `skills/`. Returns
+/// its directory.
 pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
     check_new_name(name)?;
     if repos.iter().any(|r| r.trim().is_empty()) {
@@ -219,7 +218,12 @@ pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
         .and_then(|_| {
             std::fs::write(dir.join(AGENTS_MD), starter_agents_md(name)).context("write AGENTS.md")
         })
-        .and_then(|_| std::fs::write(dir.join(CLAUDE_MD), CLAUDE_SHIM).context("write CLAUDE.md"))
+        .and_then(|_| {
+            instructions::imports().into_iter().try_for_each(|import| {
+                std::fs::write(dir.join(import.file), import.text)
+                    .with_context(|| format!("write {}", import.file))
+            })
+        })
         .and_then(|_| std::fs::create_dir(dir.join(SKILLS_DIR)).context("create skills/"));
     if let Err(e) = written {
         let _ = std::fs::remove_dir_all(&dir);
@@ -248,12 +252,18 @@ fn template(repos: &[String]) -> String {
 }
 
 fn starter_agents_md(name: &str) -> String {
-    format!(
+    let mut text = format!(
         "# {name}\n\n\
          Instructions for the coding agent in every task made from the {name} project.\n\
-         jeet copies this file, and the skills next to it, into each new task.\n\
-         CLAUDE.md only imports this file, for Claude Code.\n"
-    )
+         jeet copies this file, and the skills next to it, into each new task.\n"
+    );
+    for import in instructions::imports() {
+        text.push_str(&format!(
+            "{} only imports this file, for {}.\n",
+            import.file, import.harness
+        ));
+    }
+    text
 }
 
 /// The project's `project.toml`, written from the template first if the
@@ -444,7 +454,7 @@ pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
 /// skill named like the built-in one.
 fn project_files(project: &Path, skipped: &mut Vec<String>) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    for name in INSTRUCTION_FILES {
+    for name in instructions::files() {
         let path = project.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => {
@@ -516,7 +526,7 @@ fn manifest_path(rel: &Path) -> Option<String> {
 fn is_project_path(rel: &str) -> bool {
     let plain = manifest_path(Path::new(rel)).as_deref() == Some(rel);
     plain
-        && (INSTRUCTION_FILES.contains(&rel)
+        && (instructions::files().contains(&rel)
             || rel
                 .strip_prefix(TASK_SKILLS)
                 .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/')))
@@ -589,6 +599,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instructions::CLAUDE_SHIM;
 
     fn project_at(dir: &Path) -> Project {
         Project {

@@ -33,7 +33,7 @@ use crate::cd;
 use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord, TaskState};
-use crate::instructions::{self, CLAUDE_SHIM};
+use crate::instructions;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
 use crate::runtime;
@@ -58,14 +58,21 @@ const WORKLOG: &str = include_str!("templates/worklog.md");
 /// What `todo.md` starts as.
 pub const TODO: &str = include_str!("templates/todo.md");
 
-/// Each template, and where in the home it goes.
-const TEMPLATES: [(&str, &str); 5] = [
-    (instructions::AGENTS_MD, AGENTS_MD),
-    (instructions::CLAUDE_MD, CLAUDE_SHIM),
-    (".claude/skills/jeet-assistant/SKILL.md", SKILL),
-    ("notes/worklog.md", WORKLOG),
-    ("todo.md", TODO),
-];
+/// Each template, and where in the home it goes: AGENTS.md and each
+/// harness's import of it first.
+fn templates() -> Vec<(&'static str, &'static str)> {
+    let imports = instructions::imports()
+        .into_iter()
+        .map(|i| (i.file, i.text));
+    std::iter::once((instructions::AGENTS_MD, AGENTS_MD))
+        .chain(imports)
+        .chain([
+            (".claude/skills/jeet-assistant/SKILL.md", SKILL),
+            ("notes/worklog.md", WORKLOG),
+            ("todo.md", TODO),
+        ])
+        .collect()
+}
 
 /// The longest title tmux shows for a session's window.
 const TITLE_MAX: usize = 30;
@@ -83,7 +90,7 @@ pub fn home_dir(home: &Path) -> PathBuf {
 pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
     instructions::migrate(dir).context("move the assistant's CLAUDE.md to AGENTS.md")?;
     let mut written = Vec::new();
-    for (rel, text) in TEMPLATES {
+    for (rel, text) in templates() {
         let path = dir.join(rel);
         if std::fs::symlink_metadata(&path).is_ok() {
             continue;
@@ -243,6 +250,7 @@ pub struct Opened {
     pub window: String,
     /// False when it was running already.
     pub started: bool,
+    pub warnings: Vec<String>,
 }
 
 /// Make sure the session `how` names is running in its window, starting
@@ -250,10 +258,11 @@ pub struct Opened {
 pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
     tmux::require()?;
     let spec = AgentSpec::from_config(&app.config)?;
-    if !spec.supports_sessions() {
+    if !(spec.supports_sessions() && spec.has_hooks()) {
         bail!(
-            "the assistant runs in Claude Code, whose sessions jeet keeps track of; \
-             `{}` keeps none (set `agent` in config.toml, or $JEET_AGENT)",
+            "the assistant runs in a harness whose sessions and hooks jeet keeps track of, \
+             such as Claude Code; `{}` has neither (set `harness` in config.toml, or \
+             $JEET_AGENT)",
             spec.display()
         );
     }
@@ -294,11 +303,12 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
             name,
             window: window.id.clone(),
             started: false,
+            warnings: Vec::new(),
         });
     }
 
-    let resume = recorded.is_some() && agent::claude_has_transcript(&dir, &id);
-    // Recorded before launch, so it is known even if Claude never gets as
+    let resume = recorded.is_some() && spec.harness.has_session(&dir, &id);
+    // Recorded before launch, so it is known even if the agent never gets as
     // far as its first hook.
     app.db.upsert_task_session(&TaskSessionRecord {
         session_id: id.clone(),
@@ -323,10 +333,11 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         name,
         window,
         started: true,
+        warnings: spec.version_warning().into_iter().collect(),
     })
 }
 
-/// Claude's command line for session `id`: resumed or started under that
+/// The agent's command line for session `id`: resumed or started under that
 /// id, with the assistant's settings and, given one, its first prompt.
 fn launch_argv(
     app: &App,
@@ -338,15 +349,15 @@ fn launch_argv(
 ) -> Result<Vec<String>> {
     let mut argv = spec.argv.clone();
     let args = match resume {
-        true => spec.resume_args(id),
-        false => spec.new_session_args(id, name),
+        true => spec.harness.resume_args(id),
+        false => spec.harness.new_session_args(id, name),
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let settings = runtime::assistant_settings_json(&exe, &app.config.assistant);
-    argv.extend(spec.settings_args(&settings).unwrap_or_default());
+    let hooks = runtime::assistant_hooks(exe, &app.config.assistant);
+    argv.extend(spec.harness.hook_args(&hooks).unwrap_or_default());
     if let Some(prompt) = prompt {
-        argv.extend(spec.prompt_args(prompt).unwrap_or_default());
+        argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
     Ok(argv)
 }
@@ -540,7 +551,7 @@ impl Agent for SessionAgent<'_> {
     }
 
     fn has_hooks(&self) -> bool {
-        // The assistant only runs in Claude Code.
+        // The assistant only runs in a harness with hooks.
         true
     }
 
@@ -894,21 +905,10 @@ fn event_line(logged: &watch::Logged) -> String {
     line
 }
 
-/// What the SessionStart hook prints for Claude to add the summary to the
-/// session's context.
-pub fn session_start_output(context: &str) -> String {
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    })
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instructions::CLAUDE_SHIM;
 
     fn session(id: &str, last: i64, running: bool, primary: bool) -> Session {
         Session {
@@ -948,8 +948,8 @@ mod tests {
     fn templates_are_written_only_where_nothing_is() {
         let dir = tempfile::tempdir().unwrap();
         let written = ensure_files(dir.path()).unwrap();
-        assert_eq!(written.len(), TEMPLATES.len());
-        for (rel, text) in TEMPLATES {
+        assert_eq!(written.len(), templates().len());
+        for (rel, text) in templates() {
             assert_eq!(std::fs::read_to_string(dir.path().join(rel)).unwrap(), text);
         }
         std::fs::write(dir.path().join("todo.md"), "- [ ] mine\n").unwrap();
@@ -1199,17 +1199,6 @@ mod tests {
         // Nothing cached: nothing to add.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(super::watched(empty.path(), &mut [], 0), Watched::default());
-    }
-
-    #[test]
-    fn the_hook_output_carries_the_summary_as_context() {
-        let value: serde_json::Value =
-            serde_json::from_str(&session_start_output("hello\nworld")).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        assert_eq!(
-            value["hookSpecificOutput"]["additionalContext"],
-            "hello\nworld"
-        );
     }
 
     #[test]
