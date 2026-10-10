@@ -280,6 +280,11 @@ pub trait Agent {
     /// Start it with `prompt` as its first; false when it turned out to be
     /// running already, and nothing was started.
     fn start(&self, prompt: &str) -> Result<bool>;
+    /// Whether it may be started here; when not, a message for it while it
+    /// is not running waits in its inbox.
+    fn can_start(&self) -> bool {
+        true
+    }
     /// What its hooks last said, from the task in `task_dir`: the task's
     /// latest status, unless it is one of several sessions there.
     fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
@@ -299,6 +304,9 @@ pub enum Delivered {
     Typed,
     Queued,
     Started,
+    /// Queued for an agent that is not running and could not be started:
+    /// it takes the message when it next runs.
+    Held,
 }
 
 /// `text` as a message: without control characters, not blank and not too
@@ -335,6 +343,10 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     if route == Route::Queue {
         inbox.push_to(&message, me)?;
         return Ok(Delivered::Queued);
+    }
+    if route == Route::Start && !agent.can_start() {
+        inbox.push_to(&message, me)?;
+        return Ok(Delivered::Held);
     }
 
     let earlier = inbox.read_for(me)?;
@@ -489,6 +501,10 @@ impl Agent for TmuxAgent<'_> {
         tmux::send_text(&runtime::session_name(self.task), text)
     }
 
+    fn can_start(&self) -> bool {
+        tmux::may_start_session()
+    }
+
     fn start(&self, prompt: &str) -> Result<bool> {
         let running = runtime::ensure_running(self.app, self.task, None, Some(prompt))?;
         for warning in &running.warnings {
@@ -520,6 +536,8 @@ mod tests {
         hooks: bool,
         running_already: bool,
         fail: bool,
+        /// May not be started here.
+        held: bool,
         typed: RefCell<Vec<String>>,
         started: RefCell<Vec<String>>,
     }
@@ -537,6 +555,9 @@ mod tests {
             }
             self.typed.borrow_mut().push(text.to_string());
             Ok(())
+        }
+        fn can_start(&self) -> bool {
+            !self.held
         }
         fn start(&self, prompt: &str) -> Result<bool> {
             if self.fail {
@@ -669,6 +690,39 @@ mod tests {
             Delivered::Typed
         );
         assert_eq!(*agent.typed.borrow(), ["go"]);
+    }
+
+    #[test]
+    fn an_agent_that_may_not_be_started_has_it_held() {
+        let task = task_in(None);
+        enqueue(task.path(), "earlier").unwrap();
+        let agent = Fake {
+            held: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "now").unwrap(),
+            Delivered::Held
+        );
+        assert!(agent.started.borrow().is_empty());
+        let queued: Vec<String> = drain(task.path())
+            .unwrap()
+            .into_iter()
+            .map(|q| q.message)
+            .collect();
+        assert_eq!(queued, ["earlier", "now"]);
+
+        // One already running is typed to as ever.
+        let idle = task_in(Some(State::Idle));
+        let agent = Fake {
+            alive: true,
+            held: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(idle.path(), &agent, "hi").unwrap(),
+            Delivered::Typed
+        );
     }
 
     #[test]

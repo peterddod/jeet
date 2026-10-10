@@ -40,10 +40,11 @@ use crate::config::{
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
-use crate::messages::{self, TmuxAgent};
+use crate::messages::{self, Delivered, TmuxAgent};
 use crate::notify;
 use crate::store;
 use crate::tasks;
+use crate::tmux;
 use crate::worktrees::now_secs;
 
 /// The launchd job's label, and its plist's name.
@@ -824,9 +825,11 @@ impl Sent {
 }
 
 /// Send each event where `rules` say. An event a task or the assistant
-/// cannot be given is notified instead, so none is lost.
+/// cannot be given is notified instead, so none is lost; so is one left
+/// waiting for an agent that could not be started, so the user knows.
 pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     let mut sent = vec![Sent::Notified; events.len()];
+    let mut held = vec![false; events.len()];
     let mut for_assistant = Vec::new();
     for (i, event) in events.iter().enumerate() {
         match decide(rules, event) {
@@ -837,7 +840,10 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                     let dir = tasks::task_dir(app, &task);
                     let agent = TmuxAgent::new(app, &task);
                     match messages::deliver(&dir, &agent, &task_message(event)) {
-                        Ok(_) => sent[i] = Sent::Task(task.slug.clone()),
+                        Ok(delivered) => {
+                            sent[i] = Sent::Task(task.slug.clone());
+                            held[i] = delivered == Delivered::Held;
+                        }
                         Err(e) => {
                             eprintln!("jeet: could not tell task {}: {e:#}", task.slug);
                             for_assistant.push((i, event));
@@ -857,7 +863,12 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     }
     for (text, carried) in assistant_messages(&for_assistant) {
         match assistant::deliver(app, &text) {
-            Ok(_) => carried.iter().for_each(|&i| sent[i] = Sent::Assistant),
+            Ok((delivered, _)) => {
+                for &i in &carried {
+                    sent[i] = Sent::Assistant;
+                    held[i] = delivered == Delivered::Held;
+                }
+            }
             Err(e) => {
                 eprintln!("jeet: could not hand events to the assistant: {e:#}; notifying instead")
             }
@@ -865,8 +876,8 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     }
     let notified: Vec<&Event> = events
         .iter()
-        .zip(&sent)
-        .filter(|(_, s)| **s == Sent::Notified)
+        .zip(sent.iter().zip(&held))
+        .filter(|(_, (s, held))| **s == Sent::Notified || **held)
         .map(|(e, _)| e)
         .collect();
     notify_events(&notified);
@@ -1125,7 +1136,9 @@ fn xml(text: &str) -> String {
 
 /// The launchd job: `exe watch --once` every `interval` seconds and once at
 /// load, with jeet's home and the `PATH` it was installed from (launchd's
-/// own has no `gh` or `tmux`), logging to `watch.log`.
+/// own has no `gh` or `tmux`), logging to `watch.log`. It is marked as a
+/// background job, so it never starts a tmux server with launchd's bare
+/// environment for the user's own panes to inherit.
 pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
     let log = home.join(LOG_FILE);
     format!(
@@ -1151,6 +1164,8 @@ pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
 	<dict>
 		<key>JEET_HOME</key>
 		<string>{home}</string>
+		<key>{background}</key>
+		<string>1</string>
 		<key>PATH</key>
 		<string>{path}</string>
 	</dict>
@@ -1163,6 +1178,7 @@ pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
 "#,
         exe = xml(&exe.to_string_lossy()),
         home = xml(&home.to_string_lossy()),
+        background = tmux::BACKGROUND_ENV,
         path = xml(path_env),
         log = xml(&log.to_string_lossy()),
     )
@@ -1182,8 +1198,10 @@ fn systemd_word(text: &str) -> String {
 pub fn systemd_units(exe: &Path, home: &Path, interval: u64) -> [(&'static str, String); 2] {
     let service = format!(
         "[Unit]\nDescription=jeet: poll GitHub for the assistant and your tasks\n\n\
-         [Service]\nType=oneshot\nEnvironment={env}\nExecStart={exe} watch --once\n",
+         [Service]\nType=oneshot\nEnvironment={env}\nEnvironment={background}=1\n\
+         ExecStart={exe} watch --once\n",
         env = systemd_word(&format!("JEET_HOME={}", home.display())),
+        background = tmux::BACKGROUND_ENV,
         exe = systemd_word(&exe.to_string_lossy()),
     );
     let timer = format!(
@@ -2026,6 +2044,8 @@ mod tests {
 	<dict>
 		<key>JEET_HOME</key>
 		<string>/Users/me/.jeet</string>
+		<key>JEET_BACKGROUND</key>
+		<string>1</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/bin</string>
 	</dict>
@@ -2051,6 +2071,7 @@ mod tests {
             service,
             "[Unit]\nDescription=jeet: poll GitHub for the assistant and your tasks\n\n\
              [Service]\nType=oneshot\nEnvironment=\"JEET_HOME=/home/me/100%% \\\"j\\\"\"\n\
+             Environment=JEET_BACKGROUND=1\n\
              ExecStart=\"/home/me/bin/jeet\" watch --once\n"
         );
         assert_eq!(timer_name, "jeet-watch.timer");

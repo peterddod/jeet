@@ -544,6 +544,10 @@ impl Agent for SessionAgent<'_> {
         }
     }
 
+    fn can_start(&self) -> bool {
+        tmux::may_start_session()
+    }
+
     fn start(&self, prompt: &str) -> Result<bool> {
         let name = format!("events {}", date(now_secs()));
         open(

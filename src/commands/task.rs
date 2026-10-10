@@ -105,6 +105,11 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             task.name,
             runtime::session_name(&task)
         ),
+        Delivered::Held => eprintln!(
+            "jeet: {}'s agent is not running and cannot be started from here, so the message \
+             is queued; it gets it when it next runs",
+            task.name
+        ),
     }
     Ok(())
 }
@@ -121,6 +126,10 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
         Delivered::Started => eprintln!(
             "jeet: started a session of the assistant's with the message in tmux session {}",
             assistant::TMUX_SESSION
+        ),
+        Delivered::Held => eprintln!(
+            "jeet: no session of the assistant's is running and none can be started from here, \
+             so the message is queued; the next session starts with it"
         ),
     }
     Ok(())

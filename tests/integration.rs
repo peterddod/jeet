@@ -2191,7 +2191,7 @@ echo "$n" > "$here/count"
 printf '%s\0' "$@" > "$here/calls/$(printf %04d "$n")"
 case "$1" in
   -V) echo "tmux 3.4" ;;
-  has-session) [ -e "$here/alive" ] ;;
+  has-session|list-sessions) [ -e "$here/alive" ] ;;
   new-session) touch "$here/alive" ;;
   kill-session)
     rm -f "$here/alive"
@@ -4676,7 +4676,7 @@ done
 windows() { ls "$here/win" 2>/dev/null; }
 case "$1" in
   -V) echo "tmux 3.4" ;;
-  has-session) [ -n "$(windows)" ] ;;
+  has-session|list-sessions) [ -n "$(windows)" ] ;;
   new-session|new-window)
     w=$(cat "$here/next" 2>/dev/null || echo 1)
     echo $((w + 1)) > "$here/next"
@@ -5568,6 +5568,105 @@ action = "task"
     succeeded(&output);
     assert!(stderr_of(&output).contains("nothing new on GitHub"));
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+}
+
+/// Run by launchd, with none of the user's environment: a tmux server it
+/// started would hand that to every pane, so it starts none. What it would
+/// have started an agent with waits in the agent's inbox, and is notified.
+#[cfg(unix)]
+#[test]
+fn watch_in_the_background_never_starts_a_tmux_server() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("rate limit");
+    let id = task_id(&task);
+    let scratch = TempDir::new().unwrap();
+    let gh = stub_watch_gh(scratch.path());
+    let tmux = stub_window_tmux(scratch.path());
+    let notifier = stub_notifier(scratch.path());
+    let path = path_with(&gh);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+        ("JEET_BACKGROUND", "1"),
+    ];
+    std::fs::write(
+        lab.home().join("config.toml"),
+        r#"scan_roots = []
+
+[[assistant.rules]]
+on = ["review_requested"]
+action = "assistant"
+
+[[assistant.rules]]
+on = ["ci_failed"]
+action = "task"
+"#,
+    )
+    .unwrap();
+    lab.index()
+        .execute(
+            "INSERT INTO task_prs (task_id, repo_id, number, title, url, state, updated_at)
+             VALUES (?1, 'github.com/acme/api', 42, 'Add rate limiting',
+                     'https://github.com/acme/api/pull/42', 'OPEN', '2026-10-10T12:00:00Z')",
+            [&id],
+        )
+        .unwrap();
+    std::fs::write(
+        gh.join("notifications"),
+        watch_fixture("notifications_before.json"),
+    )
+    .unwrap();
+    std::fs::write(gh.join("last-modified"), "Sat, 10 Oct 2026 12:00:00 GMT").unwrap();
+    my_pr_42(&gh, "1111111111111111111111111111111111111111", "PENDING");
+    succeeded(&lab.jeet_at(&["watch", "--once"], &lab.home(), &env));
+
+    std::fs::write(
+        gh.join("notifications"),
+        watch_fixture("notifications.json"),
+    )
+    .unwrap();
+    std::fs::write(gh.join("last-modified"), "Sat, 10 Oct 2026 12:05:00 GMT").unwrap();
+    std::fs::write(
+        gh.join("pull-9.json"),
+        r#"{"state":"closed","merged":true}"#,
+    )
+    .unwrap();
+    my_pr_42(&gh, "1111111111111111111111111111111111111111", "FAILURE");
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &env);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("to the assistant"), "{stderr}");
+    assert!(stderr.contains("to task rate-limit"), "{stderr}");
+
+    // Neither the task's agent nor a session of the assistant's started.
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(calls_of(&tmux, "new-window").is_empty());
+
+    // Each waits in its inbox for its agent's next run.
+    let inbox = |dir: &std::path::Path| {
+        std::fs::read_to_string(dir.join(".jeet/inbox.jsonl")).unwrap_or_default()
+    };
+    let for_task = inbox(&task);
+    assert!(for_task.contains("kind: ci_failed"), "{for_task}");
+    let for_assistant = inbox(&lab.home().join("assistant"));
+    assert!(
+        for_assistant.contains("kind: review_requested"),
+        "{for_assistant}"
+    );
+
+    // And the user hears of them now, with the rest.
+    let notes = notes(&notifier);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].starts_with("GitHub: 5 new events|"), "{notes:?}");
+    assert!(
+        notes[0].contains("review requested acme/api #42"),
+        "{notes:?}"
+    );
+    assert!(notes[0].contains("checks failed acme/api #42"), "{notes:?}");
 }
 
 #[cfg(unix)]

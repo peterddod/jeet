@@ -628,8 +628,11 @@ delivered is notified instead. Each event, and where it went, is appended to
 which runs `jeet watch --once` every `interval_secs` with the `PATH` you
 installed it from, logging to `~/.jeet/watch.log`, and loads it with
 `launchctl bootstrap`. Elsewhere it installs nothing, and prints a systemd user
-service and timer to set up instead. With a `[watch]` section, the tasks list
-also polls while it is open. Installing or removing the watcher takes the
+service and timer to set up instead. The job never starts a tmux server: one
+started there would hand launchd's bare environment to every pane it ever
+made, yours included. While no tmux server is running, an event for an agent
+waits in its inbox until the agent next runs, and is notified now. With a
+`[watch]` section, the tasks list also polls while it is open. Installing or removing the watcher takes the
 assistant the `watch.install` capability; polling takes none.
 
 ## Importing

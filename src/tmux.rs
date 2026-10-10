@@ -17,6 +17,13 @@ use anyhow::{bail, Context, Result};
 
 pub const BINARY_ENV: &str = "JEET_TMUX";
 
+/// Set by jeet's launchd job and systemd unit. A tmux server keeps the
+/// environment of whoever started it, and hands it to every pane it makes
+/// from then on, the user's own included; a job runs with almost none of the
+/// user's. So a process with this set never starts a server, only sessions
+/// on one already running.
+pub const BACKGROUND_ENV: &str = "JEET_BACKGROUND";
+
 pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not found; install it \
      (`brew install tmux` on macOS, `sudo apt install tmux` on Debian and Ubuntu)";
 
@@ -59,6 +66,37 @@ pub fn require() -> Result<()> {
     Ok(())
 }
 
+/// Whether this process runs as a background job: see [`BACKGROUND_ENV`].
+fn in_background() -> bool {
+    std::env::var_os(BACKGROUND_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// Whether a tmux server is running, for a new session to join.
+fn server_running() -> bool {
+    quiet()
+        .arg("list-sessions")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether a new tmux session may be started here: always, but in a
+/// background job only on a server that is already running.
+pub fn may_start_session() -> bool {
+    !in_background() || server_running()
+}
+
+/// Fail rather than start a server from a background job.
+fn refuse_new_server(name: &str) -> Result<()> {
+    if !may_start_session() {
+        bail!(
+            "not starting tmux session {name} from a background job: no tmux server is \
+             running, and one started here would have the job's environment, not yours"
+        );
+    }
+    Ok(())
+}
+
 pub fn has_session(name: &str) -> bool {
     quiet()
         .args(["has-session", "-t", &target(name)])
@@ -73,6 +111,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     if argv.is_empty() {
         bail!("nothing to run in tmux session {name}");
     }
+    refuse_new_server(name)?;
     let mut cmd = Command::new(binary());
     cmd.args(["new-session", "-d", "-s", name, "-c"]).arg(cwd);
     for (key, value) in env {
@@ -85,6 +124,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     cmd.env_remove(crate::cd::CD_FILE_ENV)
         .env_remove(crate::tasks::TASK_ID_ENV)
         .env_remove(crate::permissions::ASSISTANT_ENV)
+        .env_remove(BACKGROUND_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null());
     let output = cmd.output().context("run tmux")?;
@@ -198,6 +238,9 @@ pub fn new_window(
         bail!("nothing to run in tmux session {name}");
     }
     let mut creating = !has_session(name);
+    if creating {
+        refuse_new_server(name)?;
+    }
     let mut attempts = 0;
     let output = loop {
         attempts += 1;
@@ -224,6 +267,7 @@ pub fn new_window(
         cmd.env_remove(crate::cd::CD_FILE_ENV)
             .env_remove(crate::tasks::TASK_ID_ENV)
             .env_remove(crate::permissions::ASSISTANT_ENV)
+            .env_remove(BACKGROUND_ENV)
             .stdin(Stdio::null());
         let output = cmd.output().context("run tmux")?;
         // Another jeet made the session between the look and the start:
