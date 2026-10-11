@@ -9,10 +9,11 @@
 //! state file back.
 
 use std::fs::File;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ReviewConfig;
@@ -265,7 +266,8 @@ fn launch(
         .arg("review-job")
         .arg(state)
         .current_dir(worktree)
-        .stdin(Stdio::null())
+        // For the go-ahead: see [`await_go`].
+        .stdin(Stdio::piped())
         .stdout(out.try_clone()?)
         .stderr(out);
     #[cfg(unix)]
@@ -282,7 +284,30 @@ fn launch(
             return Err(e.context("record the review command as its task's"));
         }
     }
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(GO).context("start the review command")?;
+    }
     Ok(())
+}
+
+/// What [`launch`] writes to the runner once it is recorded.
+const GO: &[u8] = b"g";
+
+/// Wait for [`launch`]'s go-ahead, before the runner asks who it is: until
+/// it has one, it is not yet recorded as its task's. Anything else on
+/// stdin, a terminal or nothing at all, means it was not started by
+/// `jeet review`.
+pub fn await_go() -> Result<()> {
+    let mut stdin = std::io::stdin();
+    let refused = "review-job is started only by `jeet review`";
+    if stdin.is_terminal() {
+        bail!(refused);
+    }
+    let mut byte = [0u8; 1];
+    match stdin.read(&mut byte) {
+        Ok(1) if byte == GO => Ok(()),
+        _ => bail!(refused),
+    }
 }
 
 /// `jeet review-job <state>`: run a job's command and record how it ended.

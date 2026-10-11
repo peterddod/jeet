@@ -80,6 +80,22 @@ impl Database {
         Ok(())
     }
 
+    /// The anchors of any of `pids` written at or after `since`.
+    pub fn anchors_for(&self, pids: &[u32], since: i64) -> Result<Vec<Anchor>> {
+        if pids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; pids.len()].join(", ");
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ANCHOR_COLUMNS} FROM task_anchors
+             WHERE created_at >= ? AND pid IN ({marks})"
+        ))?;
+        let values = std::iter::once(since).chain(pids.iter().map(|&p| i64::from(p)));
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), anchor_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn all_anchors(&self) -> Result<Vec<Anchor>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!("SELECT {ANCHOR_COLUMNS} FROM task_anchors"))?;
@@ -154,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn a_process_is_anchored_once() {
+    fn a_process_is_anchored_once_and_found_by_pid() {
         let (_dir, db) = open();
         let pane = anchor(10, 5, "a", AnchorKind::Pane, 100);
         db.insert_anchor(&pane, Some("%1")).unwrap();
@@ -167,7 +183,16 @@ mod tests {
         db.insert_anchor(&anchor(10, 7, "b", AnchorKind::Pane, 200), None)
             .unwrap();
 
-        assert_eq!(db.all_anchors().unwrap().len(), 3);
+        let mut found = db.anchors_for(&[10, 11, 12], 0).unwrap();
+        found.sort_by_key(|a| (a.pid, a.start));
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0], pane);
+        // Rows from before `since` (the last boot) are not.
+        let recent = db.anchors_for(&[10, 11], 100).unwrap();
+        assert!(recent.iter().all(|a| a.created_at >= 100), "{recent:?}");
+        assert_eq!(recent.len(), 2);
+        assert!(db.anchors_for(&[], 0).unwrap().is_empty());
+
         assert_eq!(db.task_anchors("b", AnchorKind::Job).unwrap().len(), 1);
         db.delete_task_anchors("b", AnchorKind::Pane).unwrap();
         assert_eq!(db.task_anchors("b", AnchorKind::Pane).unwrap(), vec![]);

@@ -49,7 +49,13 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // The assistant's own checks, before the command does anything.
+    // Only once `jeet review` has recorded the runner as its task's does the
+    // runner go on to find out who it is.
+    if let Some(Commands::ReviewJob { .. }) = &cli.command {
+        review::await_go()?;
+    }
+    // Who the caller is and what it may do, before the command does
+    // anything.
     let authorized = permissions::authorize(cli.command.as_ref())?;
     let result = run(cli.command);
     if let Some(action) = authorized {

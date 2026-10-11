@@ -30,8 +30,8 @@ use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::db::Database;
+use crate::identity::{self, Refused};
 use crate::notify::{self, Notification};
-use crate::tasks::TASK_ID_ENV;
 use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
@@ -227,7 +227,10 @@ pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
 }
 
-/// Whether this jeet runs for the assistant.
+/// Whether this jeet says it runs for the assistant: a hint, which
+/// [`identity`] checks.
+///
+/// [`identity`]: crate::identity
 pub fn assistant_mode() -> bool {
     std::env::var(ASSISTANT_ENV).is_ok_and(|v| {
         let v = v.trim();
@@ -247,26 +250,22 @@ pub enum Caller {
     Node(TaskRecord),
 }
 
-/// Who `row`, the task `$JEET_TASK_ID` names, makes the caller. A task with
-/// a parent is a Node even under `JEET_ASSISTANT=1`: the narrower reading
-/// wins.
-fn classify(row: Option<TaskRecord>, assistant: bool) -> Caller {
-    match row {
-        Some(task) if task.parent_id.is_some() => Caller::Node(task),
-        _ if assistant => Caller::Root,
+/// Who the task this jeet runs under makes the caller: the assistant is
+/// the Root, a task with a parent a Node, and anything else, or no task,
+/// the user.
+fn classify(task: Option<&TaskRecord>) -> Caller {
+    match task {
+        Some(task) if task.kind == TaskKind::Assistant => Caller::Root,
+        Some(task) if task.parent_id.is_some() => Caller::Node(task.clone()),
         _ => Caller::User,
     }
 }
 
-/// Who runs this jeet: by `$JEET_TASK_ID` and `JEET_ASSISTANT` only, never
-/// the working directory. An id jeet does not know names no Node. A
-/// database error is an error, so what is gated fails closed.
+/// Who runs this jeet, by the task it runs under ([`identity::identify`]),
+/// never the working directory. A claim jeet cannot confirm, or a database
+/// error, is an error, so what is gated fails closed.
 pub fn caller(db: &Database) -> Result<Caller> {
-    let row = match std::env::var(TASK_ID_ENV) {
-        Ok(id) if !id.trim().is_empty() => db.get_task(id.trim())?,
-        _ => None,
-    };
-    Ok(classify(row, assistant_mode()))
+    Ok(classify(identity::identify(db)?.task.as_ref()))
 }
 
 /// What a task with a parent may be allowed, before its parent's list cuts
@@ -638,30 +637,48 @@ pub struct Authorized {
     notify: bool,
 }
 
-/// Check that the assistant may run `command`, before it does anything.
-/// Outside the assistant everything is allowed and nothing is recorded.
-/// Returns the action to [`Authorized::finish`] when it is one the log
-/// keeps.
+/// Check that the caller may run `command`, before it does anything: the
+/// assistant only what `[assistant] allow` lets it, and the agent of a
+/// task with a parent only what [`node`] does. Anyone else may do
+/// anything, and nothing is recorded. Returns the action to
+/// [`Authorized::finish`] when it is one the log keeps.
 ///
-/// The agent of a task with a parent is checked as a Node instead, whether
-/// or not it runs as the assistant: see [`node`].
+/// Who the caller is comes from [`identity::identify`], whatever the
+/// environment says; a caller it refuses is refused here, and one that
+/// claims to be another is logged.
 pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let gate = gate(command, terminal);
-    // Only what a Node may not do opens the index: plumbing like hooks and
-    // `jeet report` never does.
-    let in_task = std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty());
-    if in_task && (gate != Gate::Free || node_only(command).is_some()) {
-        let app = App::open().context("check what this task may do")?;
-        if let Caller::Node(task) = caller(&app.db)? {
-            return node(&app, &task, command, gate, terminal).map(|()| None);
-        }
-    }
-    if !assistant_mode() {
+    // Only what is gated, or only the root may do, opens the index:
+    // plumbing like hooks and `jeet report` never does.
+    if gate == Gate::Free && node_only(command).is_none() {
         return Ok(None);
     }
+    let app = App::open().context("check what this caller may do")?;
+    let me = match identity::identify(&app.db) {
+        Ok(me) => me,
+        Err(e) => {
+            if let Some(Refused::Mismatch(why)) = e.downcast_ref::<Refused>() {
+                let log = actions_log(&app.home);
+                let (capability, tried) = attempt(command, &gate);
+                if let Err(e) = append(&log, capability, &tried, Outcome::Denied, Some(why)) {
+                    eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+                }
+            }
+            return Err(e);
+        }
+    };
     if let Some(Commands::ReviewJob { state }) = command {
-        check_review_job(state)?;
+        check_review_job(&app.home, state)?;
+        // The runner `jeet review` started, as the task it runs for.
+        if me.self_job {
+            return Ok(None);
+        }
+    }
+    match classify(me.task.as_ref()) {
+        Caller::Node(task) => return node(&app, &task, command, gate, terminal).map(|()| None),
+        Caller::User => return Ok(None),
+        Caller::Root => {}
     }
     let (capability, action) = match gate {
         Gate::Free => return Ok(None),
@@ -672,10 +689,9 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         ),
         Gate::Needs { capability, action } => (capability, action),
     };
-    let home = config::jeet_home()?;
-    let settings = config::load_or_create(&home)?.assistant;
-    let log = actions_log(&home);
-    let config_path = config::config_path(&home);
+    let settings = &app.config.assistant;
+    let log = actions_log(&app.home);
+    let config_path = config::config_path(&app.home);
     if let Some(message) = refusal(capability, &settings.allow, &config_path) {
         let about = self::capability(capability).map_or("", |c| c.about);
         let tried = action.unwrap_or_else(|| about.to_string());
@@ -690,6 +706,22 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         log,
         notify: settings.notify(),
     }))
+}
+
+/// What a caller refused for who it is tried, for the log: the capability
+/// and action `gate` says, else what only the root may do.
+fn attempt(command: Option<&Commands>, gate: &Gate) -> (&'static str, String) {
+    match gate {
+        Gate::Needs { capability, action } => {
+            let about = self::capability(capability).map_or("", |c| c.about);
+            let tried = action.clone().unwrap_or_else(|| about.to_string());
+            (capability, tried)
+        }
+        _ => (
+            "identity",
+            node_only(command).unwrap_or("run jeet").to_string(),
+        ),
+    }
 }
 
 /// What `command` does that only the root may, for "task … may not …":
@@ -824,11 +856,10 @@ impl Authorized {
     }
 }
 
-/// A review job runs the command its state file names, so the assistant
-/// may only run the ones `jeet review` wrote, under `$JEET_HOME/reviews` —
-/// not one it wrote itself.
-fn check_review_job(state: &Path) -> Result<()> {
-    let home = config::jeet_home()?;
+/// A review job runs the command its state file names, so only the ones
+/// `jeet review` wrote, under `$JEET_HOME/reviews`, are run — not one an
+/// agent wrote itself.
+fn check_review_job(home: &Path, state: &Path) -> Result<()> {
     let reviews = home.join("reviews");
     let reviews = reviews.canonicalize().unwrap_or(reviews);
     let state = state
@@ -836,7 +867,7 @@ fn check_review_job(state: &Path) -> Result<()> {
         .with_context(|| format!("find {}", state.display()))?;
     if !state.starts_with(&reviews) {
         bail!(
-            "the assistant may only run review jobs jeet started, under {}",
+            "review jobs run only from jeet's reviews dir, {}",
             reviews.display()
         );
     }
@@ -1088,17 +1119,16 @@ mod tests {
     }
 
     #[test]
-    fn a_task_with_a_parent_is_a_node_whatever_else_it_says() {
+    fn the_task_a_caller_runs_under_says_who_it_is() {
         let child = task(Some("a"));
-        assert_eq!(
-            classify(Some(child.clone()), true),
-            Caller::Node(child.clone())
-        );
-        assert_eq!(classify(Some(child.clone()), false), Caller::Node(child));
-        assert_eq!(classify(Some(task(None)), true), Caller::Root);
-        assert_eq!(classify(Some(task(None)), false), Caller::User);
-        assert_eq!(classify(None, true), Caller::Root);
-        assert_eq!(classify(None, false), Caller::User);
+        assert_eq!(classify(Some(&child)), Caller::Node(child.clone()));
+        let root = TaskRecord {
+            kind: TaskKind::Assistant,
+            ..task(None)
+        };
+        assert_eq!(classify(Some(&root)), Caller::Root);
+        assert_eq!(classify(Some(&task(None))), Caller::User);
+        assert_eq!(classify(None), Caller::User);
     }
 
     #[test]

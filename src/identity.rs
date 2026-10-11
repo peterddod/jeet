@@ -1,16 +1,29 @@
-//! The processes jeet launches for a task, recorded so it can later tell
-//! who runs it.
+//! Who runs this jeet: the task whose agent it was started under, found by
+//! walking up the process tree to a process jeet launched for that task.
 //!
 //! The jeet that starts a task's pane, an assistant window or a review job
 //! records the process it started as the task's anchor: its pid and start
 //! time, read from the kernel, never re-bound. A process never records its
-//! own.
+//! own. The caller is the task of the nearest anchor among this process and
+//! its ancestors. `$JEET_TASK_ID` and `$JEET_ASSISTANT` are hints: one that
+//! disagrees with the anchor, or claims a task with a parent or the
+//! assistant with no anchor behind it, is refused.
+//!
+//! This guards against mistakes and casual forging, not an agent set on
+//! escaping: one that orphans a process with its environment stripped, or
+//! starts one through tmux, gets past it. See design §5.7.
 
 use anyhow::{bail, Result};
 
 use crate::db::anchors::{Anchor, AnchorKind};
+use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::db::Database;
+use crate::permissions::{self, ASSISTANT_ENV};
+use crate::tasks::TASK_ID_ENV;
 use crate::worktrees::now_secs;
+
+/// How far up the process tree to look.
+const MAX_DEPTH: usize = 64;
 
 /// What the kernel says of a live process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,9 +112,192 @@ fn boot_floor() -> i64 {
     }
 }
 
+/// This process and its ancestors, nearest first, as (pid, start): up to
+/// init, a process that cannot be read, a loop, or [`MAX_DEPTH`].
+fn ancestry() -> Vec<(u32, i64)> {
+    let mut chain: Vec<(u32, i64)> = Vec::new();
+    let mut pid = std::process::id();
+    while pid > 1 && chain.len() < MAX_DEPTH && !chain.iter().any(|(p, _)| *p == pid) {
+        let Some(info) = proc_info(pid) else {
+            break;
+        };
+        chain.push((pid, info.start));
+        pid = info.ppid;
+    }
+    chain
+}
+
 /// Whether `anchor`'s process is still the one recorded.
 pub fn live(anchor: &Anchor) -> bool {
     proc_info(anchor.pid).is_some_and(|info| info.start == anchor.start)
+}
+
+/// What the environment says the caller is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Hint {
+    /// `$JEET_TASK_ID`.
+    task: Option<String>,
+    /// `$JEET_ASSISTANT`.
+    assistant: bool,
+}
+
+impl Hint {
+    fn from_env() -> Self {
+        Hint {
+            task: std::env::var(TASK_ID_ENV)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            assistant: permissions::assistant_mode(),
+        }
+    }
+}
+
+/// Who the caller is, before the index is asked about the task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    /// This process is the review job runner anchored to the task.
+    SelfJob(String),
+    /// The nearest anchor is the task's, and the hints agree.
+    Anchored(String),
+    /// The nearest anchor is `anchored`'s, but the hints claim `claimed`
+    /// (`None`: the assistant).
+    Mismatch {
+        anchored: String,
+        claimed: Option<String>,
+    },
+    /// The hints claim a task that needs an anchor (`None`: the assistant),
+    /// and there is none.
+    Unconfirmed(Option<String>),
+    Nobody,
+}
+
+/// Who the caller with ancestry `chain` is, given the `anchors` of those
+/// processes and the `hint`. `is_root` says whether a task is the
+/// assistant; `needs_anchor` whether one may only be claimed from under
+/// an anchor (a task with a parent, or the assistant). Both fail closed.
+fn resolve(
+    chain: &[(u32, i64)],
+    anchors: &[Anchor],
+    hint: &Hint,
+    is_root: impl Fn(&str) -> bool,
+    needs_anchor: impl Fn(&str) -> bool,
+) -> Verdict {
+    let nearest = chain.iter().enumerate().find_map(|(depth, (pid, start))| {
+        anchors
+            .iter()
+            .find(|a| a.pid == *pid && a.start == *start)
+            .map(|a| (depth, a))
+    });
+    if let Some((depth, anchor)) = nearest {
+        let anchored = anchor.task_id.clone();
+        // The runner inherits whoever started it's environment: only its
+        // anchor counts.
+        if depth == 0 && anchor.kind == AnchorKind::Job {
+            return Verdict::SelfJob(anchored);
+        }
+        if let Some(claimed) = hint.task.as_ref().filter(|t| **t != anchored) {
+            return Verdict::Mismatch {
+                anchored,
+                claimed: Some(claimed.clone()),
+            };
+        }
+        if hint.assistant && !is_root(&anchored) {
+            return Verdict::Mismatch {
+                anchored,
+                claimed: None,
+            };
+        }
+        return Verdict::Anchored(anchored);
+    }
+    match &hint.task {
+        Some(task) if needs_anchor(task) => Verdict::Unconfirmed(Some(task.clone())),
+        _ if hint.assistant => Verdict::Unconfirmed(None),
+        _ => Verdict::Nobody,
+    }
+}
+
+/// Why a caller is refused whatever it runs.
+#[derive(Debug, thiserror::Error)]
+pub enum Refused {
+    /// Its environment claims another task than the one it runs under:
+    /// logged as a refusal.
+    #[error("{0}")]
+    Mismatch(String),
+    /// Its environment claims a task jeet cannot find it under.
+    #[error("{0}")]
+    Unconfirmed(String),
+}
+
+/// Who runs this jeet.
+pub struct Identity {
+    /// The task it runs under, if any.
+    pub task: Option<TaskRecord>,
+    /// It is the review job runner jeet started for `task`.
+    pub self_job: bool,
+}
+
+/// Who runs this jeet, by its process ancestry: see the module docs. A
+/// claim jeet cannot confirm, or one that disagrees, is an error
+/// ([`Refused`]), as is a database error.
+pub fn identify(db: &Database) -> Result<Identity> {
+    let chain = ancestry();
+    let pids: Vec<u32> = chain.iter().map(|(pid, _)| *pid).collect();
+    let anchors = db.anchors_for(&pids, boot_floor())?;
+    let task = |id: &str| db.get_task(id).ok().flatten();
+    let verdict = resolve(
+        &chain,
+        &anchors,
+        &Hint::from_env(),
+        |id| task(id).is_some_and(|t| t.kind == TaskKind::Assistant),
+        |id| match db.get_task(id) {
+            Ok(Some(t)) => t.parent_id.is_some() || t.kind == TaskKind::Assistant,
+            Ok(None) => false,
+            Err(_) => true,
+        },
+    );
+    let label = |id: &str| match task(id) {
+        Some(t) if t.kind == TaskKind::Assistant => "the assistant".to_string(),
+        Some(t) => format!("task {}", t.slug),
+        None => format!("task {id}"),
+    };
+    let (id, self_job) = match verdict {
+        Verdict::SelfJob(id) => (id, true),
+        Verdict::Anchored(id) => (id, false),
+        Verdict::Nobody => {
+            return Ok(Identity {
+                task: None,
+                self_job: false,
+            })
+        }
+        Verdict::Mismatch { anchored, claimed } => {
+            let claim = match claimed {
+                Some(id) => format!("${TASK_ID_ENV} says it is {} ({id})", label(&id)),
+                None => format!("${ASSISTANT_ENV} says it is the assistant"),
+            };
+            return Err(Refused::Mismatch(format!(
+                "this jeet runs under {}'s agent ({anchored}), but {claim}; jeet refuses a \
+                 caller that claims to be another",
+                label(&anchored)
+            ))
+            .into());
+        }
+        Verdict::Unconfirmed(claimed) => {
+            let who = match claimed {
+                Some(id) => format!("{}'s agent", label(&id)),
+                None => "the assistant".to_string(),
+            };
+            return Err(Refused::Unconfirmed(format!(
+                "jeet can't confirm this is {who}: reopen the task (agents started before this \
+                 jeet must be reopened), or run this outside the agent's tmux session"
+            ))
+            .into());
+        }
+    };
+    Ok(Identity {
+        task: db.get_task(&id)?,
+        self_job,
+    })
 }
 
 /// Record process `pid`, just started for task `task_id`, as its anchor
@@ -148,9 +344,38 @@ pub fn unidentified(name: &str, e: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+    use crate::db::tasks::TaskState;
     use crate::placement::Placement;
     use std::process::{Command, Stdio};
+
+    fn anchor(pid: u32, start: i64, task: &str, kind: AnchorKind) -> Anchor {
+        Anchor {
+            pid,
+            start,
+            task_id: task.into(),
+            kind,
+            created_at: 0,
+        }
+    }
+
+    fn hint(task: Option<&str>, assistant: bool) -> Hint {
+        Hint {
+            task: task.map(Into::into),
+            assistant,
+        }
+    }
+
+    /// `resolve` where `root` is the assistant, `w` has a parent and `top`
+    /// does not.
+    fn verdict(chain: &[(u32, i64)], anchors: &[Anchor], hint: &Hint) -> Verdict {
+        resolve(
+            chain,
+            anchors,
+            hint,
+            |id| id == "root",
+            |id| id == "root" || id == "w",
+        )
+    }
 
     fn sleeper() -> std::process::Child {
         Command::new("sleep")
@@ -158,6 +383,14 @@ mod tests {
             .stdin(Stdio::null())
             .spawn()
             .unwrap()
+    }
+
+    #[test]
+    fn the_walk_starts_here_and_goes_up() {
+        let chain = ancestry();
+        assert_eq!(chain[0].0, std::process::id());
+        assert_eq!(chain[1].0, std::os::unix::process::parent_id());
+        assert_eq!(chain[0].1, proc_info(std::process::id()).unwrap().start);
     }
 
     #[test]
@@ -183,6 +416,101 @@ mod tests {
         let line = "42 (a) b (c) S 7 42 42 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 98765 1 2";
         assert_eq!(parse_stat(line), Some(('S', 7, 98765)));
         assert_eq!(parse_stat("42 (x"), None);
+    }
+
+    #[test]
+    fn the_nearest_anchor_names_the_caller_and_the_hints_must_agree() {
+        let chain = [(30, 3), (20, 2), (10, 1)];
+        let w = anchor(20, 2, "w", AnchorKind::Pane);
+        let root = anchor(10, 1, "root", AnchorKind::Pane);
+        let both = [root.clone(), w.clone()];
+        let anchored = |id: &str| Verdict::Anchored(id.into());
+        assert_eq!(verdict(&chain, &both, &hint(None, false)), anchored("w"));
+        // Another start time is another process.
+        let stale = [anchor(20, 9, "w", AnchorKind::Pane), root.clone()];
+        assert_eq!(
+            verdict(&chain, &stale, &hint(None, false)),
+            anchored("root")
+        );
+        assert_eq!(
+            verdict(&chain, &both, &hint(Some("w"), false)),
+            anchored("w")
+        );
+        assert_eq!(
+            verdict(&chain, &both, &hint(Some("top"), false)),
+            Verdict::Mismatch {
+                anchored: "w".into(),
+                claimed: Some("top".into())
+            }
+        );
+        // A Node, or a top-level task, claiming to be the assistant.
+        assert_eq!(
+            verdict(&chain, &both, &hint(None, true)),
+            Verdict::Mismatch {
+                anchored: "w".into(),
+                claimed: None
+            }
+        );
+        let top = [anchor(20, 2, "top", AnchorKind::Pane)];
+        assert!(matches!(
+            verdict(&chain, &top, &hint(None, true)),
+            Verdict::Mismatch { .. }
+        ));
+        let only_root = [root];
+        assert_eq!(
+            verdict(&chain, &only_root, &hint(Some("root"), true)),
+            anchored("root")
+        );
+    }
+
+    #[test]
+    fn a_review_runner_is_its_own_jobs_whatever_it_inherited() {
+        let chain = [(30, 3), (20, 2), (10, 1)];
+        let root = anchor(10, 1, "root", AnchorKind::Pane);
+        let job = anchor(30, 3, "w", AnchorKind::Job);
+        assert_eq!(
+            verdict(&chain, &[root.clone(), job], &hint(Some("root"), true)),
+            Verdict::SelfJob("w".into())
+        );
+        // Its command, one process down, is the job's task like any other.
+        let job = anchor(20, 2, "w", AnchorKind::Job);
+        assert_eq!(
+            verdict(&chain, &[root, job.clone()], &hint(Some("w"), false)),
+            Verdict::Anchored("w".into())
+        );
+        assert!(matches!(
+            verdict(&chain, &[job], &hint(Some("root"), true)),
+            Verdict::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn a_claim_with_no_anchor_is_unconfirmed_unless_it_needs_none() {
+        let chain = [(30, 3), (20, 2)];
+        let none: [Anchor; 0] = [];
+        assert_eq!(
+            verdict(&chain, &none, &hint(Some("w"), false)),
+            Verdict::Unconfirmed(Some("w".into()))
+        );
+        assert_eq!(
+            verdict(&chain, &none, &hint(Some("root"), false)),
+            Verdict::Unconfirmed(Some("root".into()))
+        );
+        assert_eq!(
+            verdict(&chain, &none, &hint(None, true)),
+            Verdict::Unconfirmed(None)
+        );
+        assert_eq!(
+            verdict(&chain, &none, &hint(Some("top"), true)),
+            Verdict::Unconfirmed(None)
+        );
+        for task in ["top", "unknown"] {
+            assert_eq!(
+                verdict(&chain, &none, &hint(Some(task), false)),
+                Verdict::Nobody
+            );
+        }
+        assert_eq!(verdict(&chain, &none, &hint(None, false)), Verdict::Nobody);
     }
 
     fn db() -> (tempfile::TempDir, Database) {
