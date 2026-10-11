@@ -110,6 +110,14 @@ pub trait Harness: Sync {
         None
     }
 
+    /// [`Harness::hook_args`] read from a file at `path` instead: what to
+    /// write there, and the arguments naming it. jeet launches with this when
+    /// the harness has it, so the hooks and rules, however many, cost the
+    /// command line only the path (see `runtime::hook_args`).
+    fn hook_file(&self, _hooks: &HookSetup, _path: &Path) -> Option<(String, Vec<String>)> {
+        None
+    }
+
     /// How it keeps an agent from running what [`HookSetup::deny`] names.
     /// [`Enforcement::None`]: the deny list is dropped.
     fn enforcement(&self) -> Enforcement {
@@ -485,6 +493,7 @@ mod tests {
             ..Default::default()
         };
         assert!(h.hook_args(&hooks).is_none());
+        assert!(h.hook_file(&hooks, Path::new("/s.json")).is_none());
         assert_eq!(h.enforcement(), Enforcement::None);
         assert!(h.interrupt_keys().is_none());
         assert!(h.parse_hook("Stop", "{}").unwrap().kind.is_none());

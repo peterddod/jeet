@@ -895,13 +895,13 @@ RFC left open, or departed from it:
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch, and capped at
   eight (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
-  repos use, none longer than 16 bytes (`MAX_BRANCH_NAME`; 24 before #33's
-  `--task <id>` on every hook command took about 300 bytes of the budget).
-  Each costs about 240 bytes of the inline settings (three patterns, each rendered
-  for Claude Code as two rules, with and without a trailing ` *`, since
-  its trailing ` *` matches the bare command only in a rule with no other
-  `*`), which share tmux's 16KB command
-  limit with the first prompt (E9). A repo's `default_branch` is
+  repos use. Each costs three patterns, rendered for Claude Code as two
+  rules each, with and without a trailing ` *`, since its trailing ` *`
+  matches the bare command only in a rule with no other `*`. #32 also
+  capped a name at 24 bytes, for tmux's 16KB command limit, which the
+  inline settings shared with the first prompt, and #33's `--task <id>`
+  briefly cut it to 16; with the settings in a file (E9) there is no
+  length cap. A repo's `default_branch` is
   `origin/HEAD` at clone or import, or else the branch then checked out,
   and is not refreshed, so a wrong guess denies pushing to that branch
   name everywhere; harnesses.md says so.
@@ -927,9 +927,15 @@ RFC left open, or departed from it:
   `curl`. `git push --branches` is denied with `--all`, its synonym.
   `jeet pr merge` runs `gh` from jeet's process and is unaffected.
 - **E8** A node's allow list is unchanged; narrowing it is phase 2's.
-- **E9** Settings stay inline on argv; a 0600 settings file is #33's. A
-  test checks the first prompt still fits one tmux command with every
-  capability held and with none, and the most default branches E5 allows.
+- **E9** #32 kept the settings inline on argv; #33 writes them to a 0600
+  file, `$JEET_HOME/run/<task id>/<session>.json` (directory 0700), and
+  passes `--settings <path>` (`Harness::hook_file`, `runtime::hook_args`).
+  It is written to a new file renamed into place at each launch, so a
+  running agent never reads a half-written one, and removed at archive and
+  delete. It is outside the task and every worktree, so an agent editing
+  it still meets a permission prompt; as the same user it can, like
+  `index.db` (5.7). A test checks the first prompt fits one tmux command
+  with only the path on it, where the inline settings no longer would.
 - **E10** `runtime::interrupt` returns `Interrupted { Sent,
   NotWorking(activity), UserTyping, Watched, AtStartup }` and does not fail
   when there is nothing to interrupt, so phase 2's pause can walk a subtree
@@ -1111,8 +1117,10 @@ what this RFC left open, or departed from it:
     whose start differs (on Linux, every row from an earlier boot).
   - The #32 notes' forward references to "#33's sandbox" (E0, E1, E9,
     E15) are superseded: #33 built no sandbox. The boundary is a
-    placement (§11); `Enforcement::Sandbox`, write denies and a 0600
-    settings file wait for `local-sandbox` or phase 2.
+    placement (§11); `Enforcement::Sandbox` and write denies wait for
+    `local-sandbox` or phase 2. The 0600 settings file is built (E9):
+    `--task <id>` on every hook had filled the inline budget and cut the
+    longest default branch denied from 24 bytes to 16.
 
 ## 11. Placement
 

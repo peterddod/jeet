@@ -519,8 +519,10 @@ the agent first if it is not running: Claude Code resumes the task's latest
 session, or starts a new one. Without a terminal, `open` leaves the agent
 running detached and prints the task directory.
 
-jeet starts Claude Code with hooks (passed with `--settings`; nothing is
-written into the task or a repository) that record what the agent is doing in
+jeet starts Claude Code with hooks (passed with `--settings`, as a file
+only you can read under `~/.jeet/run/<task id>/`, replaced at each launch and
+removed when the task is archived or deleted; nothing is written into the
+task or a repository) that record what the agent is doing in
 `.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
 `jeet ls` and `jeet report` without asking. `jeet task ls` shows it: `starting`,
 `running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
@@ -1157,7 +1159,7 @@ with a parent are also denied, even with your approval at the prompt:
 force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the eight in all
-most of them use, none longer than 16 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
+most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr

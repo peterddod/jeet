@@ -193,16 +193,11 @@ const ALWAYS_DENY: &[&str] = &[
 /// Default branches assumed whatever the index says.
 const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
-/// The most default branches denied, `main` and `master` among them. The
-/// rules go inline in the agent's command line, which shares tmux's 16KB
-/// command limit with its first prompt; past this, the branches fewest
-/// repositories use are left out.
+/// The most default branches denied, `main` and `master` among them: each
+/// costs three patterns, six rules in Claude Code's settings, which every
+/// gated agent carries. Past this, the branches fewest repositories use are
+/// left out.
 pub const MAX_DEFAULT_BRANCHES: usize = 8;
-
-/// The longest default branch name denied, in bytes, for the same limit:
-/// each costs three patterns, six rules in Claude Code's settings. A longer
-/// one is left out.
-pub const MAX_BRANCH_NAME: usize = 16;
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
@@ -540,12 +535,11 @@ pub fn default_branches(app: &App) -> Result<Vec<String>> {
     Ok(most_used_branches(indexed))
 }
 
-/// `main`, `master` and the most common of `indexed` no longer than
-/// [`MAX_BRANCH_NAME`], up to [`MAX_DEFAULT_BRANCHES`] (ties by name),
-/// sorted.
+/// `main`, `master` and the most common of `indexed`, up to
+/// [`MAX_DEFAULT_BRANCHES`] (ties by name), sorted.
 fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for branch in indexed.filter(|b| !b.trim().is_empty() && b.len() <= MAX_BRANCH_NAME) {
+    for branch in indexed.filter(|b| !b.trim().is_empty()) {
         match counts.iter_mut().find(|(b, _)| *b == branch) {
             Some((_, n)) => *n += 1,
             None => counts.push((branch, 1)),
@@ -1403,14 +1397,14 @@ mod tests {
             .map(|i| format!("rare-{i:02}"))
             .collect();
         indexed.extend(["develop", "develop", "trunk", "trunk", "main"].map(String::from));
-        // Too long to fit the command line, however common.
-        indexed.extend(vec!["x".repeat(MAX_BRANCH_NAME + 1); 3]);
+        // However long: the settings go in a file, not on the command line.
+        let long = "release/production-integration".to_string();
+        indexed.extend(vec![long.clone(); 2]);
         let branches = most_used_branches(indexed.into_iter());
         assert_eq!(branches.len(), MAX_DEFAULT_BRANCHES);
-        for kept in ["develop", "main", "master", "trunk"] {
+        for kept in ["develop", "main", "master", "trunk", &long] {
             assert!(branches.contains(&kept.to_string()), "{branches:?}");
         }
-        assert!(branches.iter().all(|b| b.len() <= MAX_BRANCH_NAME));
         // Ties among the rare ones go by name.
         assert!(branches.contains(&"rare-00".to_string()), "{branches:?}");
         let last = format!("rare-{:02}", MAX_DEFAULT_BRANCHES - 1);

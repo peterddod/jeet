@@ -2619,7 +2619,11 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
     assert_eq!(agent[5..7], ["-n".to_string(), "Fix login".to_string()]);
     assert_eq!(agent[7], "--settings");
     assert_eq!(agent.len(), 9, "{agent:?}");
-    let settings: serde_json::Value = serde_json::from_str(&agent[8]).unwrap();
+    let settings = settings_file(&lab, &agent[8]);
+    assert!(
+        agent[8].ends_with(&format!("/run/{id}/{session}.json")),
+        "{agent:?}"
+    );
     let stop = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
@@ -5505,6 +5509,22 @@ fn agent_argv(call: &[String]) -> Vec<String> {
     call[dash + 1..].to_vec()
 }
 
+/// The settings jeet launched Claude Code with: the `--settings` file,
+/// which only the user may read, under `$JEET_HOME/run`.
+#[cfg(unix)]
+fn settings_file(lab: &StoreLab, path: &str) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::Path::new(path);
+    assert!(
+        path.starts_with(lab.home().join("run")),
+        "{}",
+        path.display()
+    );
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 #[cfg(unix)]
 fn value_after<'a>(call: &'a [String], flag: &str) -> &'a str {
     let at = call.iter().position(|a| a == flag).unwrap();
@@ -5569,7 +5589,8 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     assert_eq!(agent[3], "-n");
     assert!(agent[4].starts_with("chat "), "{agent:?}");
     assert_eq!(value_after(call, "-n"), agent[4]);
-    let settings: serde_json::Value = serde_json::from_str(&agent[6]).unwrap();
+    assert_eq!(agent[5], "--settings");
+    let settings = settings_file(&lab, &agent[6]);
     let allow = settings["permissions"]["allow"].as_array().unwrap();
     assert!(allow.contains(&"Bash(jeet task new:*)".into()), "{allow:?}");
     assert!(allow.contains(&"Bash(jeet todo:*)".into()), "{allow:?}");
@@ -6953,6 +6974,33 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
 
 #[cfg(unix)]
 #[test]
+fn the_assistant_stripping_its_environment_is_still_the_assistant() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = []\nnotify = false\n",
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    let actions_before = actions(&lab.home()).len();
+    let output = root.run(&format!(
+        r#"cd {} && env -u JEET_ASSISTANT -u JEET_TASK_ID "$JEET" task new q"#,
+        sh_quote(&lab.home().to_string_lossy())
+    ));
+    // Its pane's anchor names it, not the environment it dropped: it is
+    // refused as the assistant, not let through as the user.
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("the assistant may not"), "{stderr}");
+    assert!(stderr.contains("[assistant] allow"), "{stderr}");
+    assert!(!lab.home().join("tasks/q").exists());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), actions_before + 1, "{log:?}");
+    assert_eq!(log[actions_before]["outcome"], "denied");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_review_the_assistant_checks_out_reports_to_it() {
     let lab = StoreLab::new();
     let trunk = lab.clone_repo("widget");
@@ -8121,8 +8169,17 @@ fn a_node_launch_carries_deny_rules() {
         "scan_roots = []\n[assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
     )
     .unwrap();
-    lab.new_task_with("kid", &["--parent", "assistant"]);
+    let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
     index_develop_repo(&lab);
+    // However long its name: the rules go in a file, not on the command line.
+    lab.index()
+        .execute(
+            "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
+             VALUES ('github.com/acme/rel', '/nowhere/rel', 'https://github.com/acme/rel.git',
+                     'release/production-2026', 0)",
+            [],
+        )
+        .unwrap();
     let output = lab.jeet_at(&["task", "open", "kid"], &lab.home(), &env);
     succeeded(&output);
     assert!(
@@ -8132,9 +8189,11 @@ fn a_node_launch_carries_deny_rules() {
     );
     let agent = agent_argv(&calls_of(&tmux, "new-session")[0]);
     let at = agent.iter().position(|a| a == "--settings").unwrap();
-    let settings: serde_json::Value = serde_json::from_str(&agent[at + 1]).unwrap();
+    let settings = settings_file(&lab, &agent[at + 1]);
     let deny = settings["permissions"]["deny"].as_array().unwrap();
     for rule in [
+        "Bash(git push * release/production-2026)",
+        "Bash(git push * *:release/production-2026 *)",
         "Bash(gh pr merge *)",
         "Bash(gh pr comment *)",
         "Bash(gh pr review *)",
@@ -8155,6 +8214,10 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(jeet report:*)"
         ])
     );
+    // Its settings go with it.
+    assert!(lab.home().join("run").join(&kid).is_dir());
+    succeeded(&lab.jeet_at(&["task", "archive", "kid", "--force"], &lab.home(), &env));
+    assert!(!lab.home().join("run").join(&kid).exists());
 }
 
 /// Index a repository whose default branch is `develop`.

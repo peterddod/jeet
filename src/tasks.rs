@@ -1223,6 +1223,9 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     runtime::stop(task).context("end the agent's tmux session")?;
     // An agent that outlives its session is no longer the task's.
     app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
+    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
+    }
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
@@ -1755,6 +1758,9 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     }
     for common in foreign.iter().filter_map(|c| c.common_dir.as_ref()) {
         let _ = git::worktree_prune(common);
+    }
+    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
     app.db.delete_task(&task.id)?;
     Ok(warnings)

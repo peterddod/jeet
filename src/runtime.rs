@@ -4,11 +4,12 @@
 //! An agent whose harness supports it gets a session id chosen by jeet, so
 //! the session is recorded before the agent even runs, and hooks that report
 //! its status and let it run `jeet worktree` and `jeet ls` without asking
-//! (for Claude Code, a `--settings` JSON). Nothing is written into the task
-//! or any repository for this. An agent whose harness supports none of it
+//! (for Claude Code, a `--settings` file under `$JEET_HOME/run`, see
+//! [`hook_args`]). Nothing is written into the task or any repository for
+//! this. An agent whose harness supports none of it
 //! just runs in the session, with no status and no sessions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use uuid::Uuid;
@@ -228,11 +229,8 @@ fn launch_argv(
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    argv.extend(
-        spec.harness
-            .hook_args(&task_hooks(app, task, exe)?)
-            .unwrap_or_default(),
-    );
+    let hooks = task_hooks(app, task, exe)?;
+    argv.extend(hook_args(&app.home, spec.harness, &hooks, &id)?);
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
@@ -313,6 +311,85 @@ pub fn assistant_hooks(
         task_id: task_id.to_string(),
         allow: permissions::allowed_commands(&settings.allow),
         deny: permissions::denied_commands(branches),
+    }
+}
+
+/// Where the settings files of task `task_id`'s launches go: under
+/// `$JEET_HOME/run`, outside the task and every worktree, so nothing is
+/// written where the agent works.
+pub fn settings_dir(home: &Path, task_id: &str) -> PathBuf {
+    home.join("run").join(task_id)
+}
+
+/// jeet's hooks as the arguments of a launch of `session`. A harness that
+/// reads them from a file ([`Harness::hook_file`]) gets one, readable by the
+/// user alone, at `<session>.json` in [`settings_dir`], and the arguments
+/// name it: on the command line they would share tmux's 16KB limit with
+/// the first prompt, and each hook or rule added would push out another.
+/// The file is replaced whole at each launch, never truncated where a
+/// running agent may read it, and goes with the task (archive, delete).
+pub fn hook_args(
+    home: &Path,
+    harness: &dyn harness::Harness,
+    hooks: &HookSetup,
+    session: &str,
+) -> Result<Vec<String>> {
+    if !status::valid_session_id(session) {
+        bail!("{session:?} is not a session id");
+    }
+    if !status::valid_session_id(&hooks.task_id) {
+        bail!("{:?} is not a task id", hooks.task_id);
+    }
+    let path = settings_dir(home, &hooks.task_id).join(format!("{session}.json"));
+    match harness.hook_file(hooks, &path) {
+        Some((contents, args)) => {
+            write_private(&path, &contents)
+                .with_context(|| format!("write the agent's settings to {}", path.display()))?;
+            Ok(args)
+        }
+        None => Ok(harness.hook_args(hooks).unwrap_or_default()),
+    }
+}
+
+/// Write `contents` to `path` with mode 0600, in a directory only the user
+/// can enter, through a new file renamed into place.
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let Some(dir) = path.parent() else {
+        bail!("{} has no directory", path.display());
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let tmp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(written?)
+}
+
+/// Remove the settings files of task `task_id`'s launches, once its agent
+/// is stopped.
+pub fn remove_settings(home: &Path, task_id: &str) -> Result<()> {
+    if !status::valid_session_id(task_id) {
+        bail!("{task_id:?} is not a task id");
+    }
+    let dir = settings_dir(home, task_id);
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("remove {}", dir.display()))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -481,11 +558,6 @@ mod tests {
     use super::*;
     use crate::harness::Harness;
 
-    fn branches(n: usize) -> Vec<String> {
-        let len = crate::permissions::MAX_BRANCH_NAME;
-        (0..n).map(|i| format!("{i:0>len$}")).collect()
-    }
-
     #[test]
     fn the_assistant_is_pre_approved_what_it_is_allowed() {
         let settings = AssistantConfig {
@@ -531,38 +603,75 @@ mod tests {
     }
 
     #[test]
-    fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
-        // tmux refuses a command over 16KB; the prompt shares new-session's
-        // with the settings, a long path to jeet, every capability or none,
-        // and the pushes denied to as many default branches as jeet denies,
-        // each as long as it denies.
+    fn the_settings_go_in_a_private_file_so_a_first_prompt_fits_one_tmux_command() {
+        // tmux refuses a command over 16KB, and the prompt shares
+        // new-session's with the hooks: however many rules they carry, and
+        // however long the default branches, only the file's path is on it.
+        let home = tempfile::tempdir().unwrap();
         let every = crate::permissions::CAPABILITIES
             .iter()
             .map(|c| c.name.to_string())
             .collect();
-        for allow in [every, Vec::new()] {
-            let settings = AssistantConfig {
-                allow,
-                notify: None,
-                rules: Vec::new(),
-            };
-            let exe = format!("/{}/jeet", "d".repeat(200));
-            let hooks = assistant_hooks(
-                exe.into(),
-                &settings,
-                &branches(crate::permissions::MAX_DEFAULT_BRANCHES),
-                &uuid::Uuid::new_v4().to_string(),
-            );
-            let args = crate::harness::claude::ClaudeCode
-                .hook_args(&hooks)
-                .unwrap();
-            let len: usize = args.iter().map(|a| a.len() + 1).sum();
-            let budget = 16 * 1024 - 2048; // the rest of the command
-            assert!(
-                len + crate::messages::MAX_MESSAGE + 16 < budget,
-                "{len} bytes of settings"
-            );
+        let long = format!("release/{}", "p".repeat(200));
+        let branches: Vec<String> = (0..crate::permissions::MAX_DEFAULT_BRANCHES)
+            .map(|i| format!("{long}-{i}"))
+            .collect();
+        let task = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        let settings = AssistantConfig {
+            allow: every,
+            notify: None,
+            rules: Vec::new(),
+        };
+        let exe = format!("/{}/jeet", "d".repeat(200));
+        let hooks = assistant_hooks(exe.into(), &settings, &branches, &task);
+        let claude = &crate::harness::claude::ClaudeCode;
+        let args = hook_args(home.path(), claude, &hooks, &session).unwrap();
+        let path = settings_dir(home.path(), &task).join(format!("{session}.json"));
+        assert_eq!(args, ["--settings".to_string(), path.display().to_string()]);
+        let len: usize = args.iter().map(|a| a.len() + 1).sum();
+        let budget = 16 * 1024 - 2048; // the rest of the command
+        assert!(len + crate::messages::MAX_MESSAGE + 16 < budget, "{len}");
+        let inline: usize = claude
+            .hook_args(&hooks)
+            .unwrap()
+            .iter()
+            .map(String::len)
+            .sum();
+        assert!(inline + crate::messages::MAX_MESSAGE > budget, "{inline}");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+        let deny = read()["permissions"]["deny"].clone();
+        for branch in &branches {
+            let rule = serde_json::json!(format!("Bash(git push * {branch})"));
+            assert!(deny.as_array().unwrap().contains(&rule), "{branch}");
         }
+        // A relaunch replaces it whole, and leaves nothing else behind.
+        let fewer = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task);
+        hook_args(home.path(), claude, &fewer, &session).unwrap();
+        assert!(!read().to_string().contains(&long));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        // Ids name files, so they must not name anything else.
+        assert!(hook_args(home.path(), claude, &fewer, "../x").is_err());
+        assert!(remove_settings(home.path(), "..").is_err());
+        remove_settings(home.path(), &task).unwrap();
+        assert!(!settings_dir(home.path(), &task).exists());
+        remove_settings(home.path(), &task).unwrap();
+        // A harness with no settings file keeps its hooks on the command line.
+        let generic = &crate::harness::Generic;
+        assert!(hook_args(home.path(), generic, &fewer, &session)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

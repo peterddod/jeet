@@ -2,7 +2,7 @@
 //!
 //! jeet picks each session's id (`--session-id`, `-n`), resumes with
 //! `--resume`, and gives a first prompt after `--`. Its hooks arrive in a
-//! `--settings` JSON layered over the user's own, which also pre-approves
+//! `--settings` file layered over the user's own, which also pre-approves
 //! the jeet commands the agent may run and denies what jeet forbids it
 //! (force-pushing, merging…). Claude checks deny rules before any allow
 //! rule from any settings scope, and a denied command cannot be approved at
@@ -115,6 +115,15 @@ impl Harness for ClaudeCode {
 
     fn hook_args(&self, hooks: &HookSetup) -> Option<Vec<String>> {
         Some(vec!["--settings".to_string(), settings_json(hooks)])
+    }
+
+    /// `--settings` takes a file's path as well as the JSON itself.
+    fn hook_file(&self, hooks: &HookSetup, path: &Path) -> Option<(String, Vec<String>)> {
+        let args = vec![
+            "--settings".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        Some((settings_json(hooks), args))
     }
 
     fn enforcement(&self) -> Enforcement {
