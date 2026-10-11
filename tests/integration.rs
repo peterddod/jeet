@@ -3575,6 +3575,8 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
         "wide-store"
     );
     assert!(stderr_of(&output).contains("new task review-widget-7"));
+    // The user's: top level.
+    assert_eq!(lab.parent_of(&task_id(&task)), None);
     // A task like any other, marked as a review, with its PR in the history.
     let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &[]));
     assert!(listed.contains("review-widget-7"), "{listed}");
@@ -6536,6 +6538,25 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_review_the_assistant_checks_out_reports_to_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let env = [("PATH", path.as_str()), ("JEET_ASSISTANT", "1")];
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    succeeded(&output);
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    assert_eq!(lab.parent_of(&task), Some(lab.assistant_id()));
+}
+
 #[test]
 fn a_task_reports_to_its_parent_and_nobody_else_can() {
     let lab = StoreLab::new();
@@ -6567,6 +6588,34 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("2000 bytes"));
     assert_eq!(lab.reports_of(&x).len(), 1);
+
+    // In the foreground, where a session may be started: progress, or what
+    // the hooks say, is not worth one; being blocked is.
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let x_dir = lab.home().join("tasks/x");
+    let fg = [
+        ("JEET_TASK_ID", x.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+    ];
+    let output = lab.jeet_at(&["report", "progress", "half way"], &lab.home(), &fg);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("waits for its next session"),
+        "{}",
+        stderr_of(&output)
+    );
+    let session = "11111111-2222-4333-8444-555555555555";
+    hook_ok(&lab.hook(
+        "Notification",
+        &hook_input("Notification", session, &x_dir),
+        &fg,
+    ));
+    assert_eq!(lab.reports_of(&x).len(), 3);
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    succeeded(&lab.jeet_at(&["report", "blocked", "stuck"], &lab.home(), &fg));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
     let output = lab.jeet_at(
         &["report", "done", "ok"],
@@ -6716,6 +6765,18 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     ));
     assert_eq!(lab.reports_of(&x).len(), 2);
     assert!(lab.reports_of(&y).is_empty());
+    // Nor as a sibling with a parent of its own, and gets no brief of its.
+    let sib = lab.new_task_with("sib", &["--parent", "assistant", "--goal", "other"]);
+    let sib_dir = lab.home().join("tasks/sib");
+    for (event, input) in [
+        ("SessionStart", hook_input("SessionStart", other, &sib_dir)),
+        ("Notification", hook_input("Notification", other, &sib_dir)),
+        ("SessionEnd", hook_input("SessionEnd", other, &sib_dir)),
+    ] {
+        hook_ok(&lab.hook(event, &input, &as_x));
+    }
+    assert_eq!(lab.reports_of(&x).len(), 2);
+    assert!(lab.reports_of(&sib).is_empty());
 
     // A top-level task has nobody to tell, and no brief.
     let as_y = [("JEET_TASK_ID", y.as_str())];

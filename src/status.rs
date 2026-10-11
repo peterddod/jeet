@@ -259,18 +259,18 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
             return Ok(());
         }
     }
+    // The assistant's turn ending is when tasks idle too long are reported
+    // to it, whatever its harness: before its inbox is handed over, so what
+    // this queues comes with it. Its app is open already (by
+    // `$JEET_TASK_ID`); a worker's Stop does no index work.
+    if let (Some(EventKind::Stopped), Some(app)) = (&hook.kind, &app) {
+        if let Err(e) = sweep_if_assistant(app, &task_id, now) {
+            eprintln!("jeet task-hook {event}: {e:#}");
+        }
+    }
     let result = match hook.kind {
         // A harness that cannot carry on past a turn's end is idle at it.
         Some(EventKind::Stopped) if harness.continue_output("").is_some() => {
-            // The assistant's turn ending is when tasks idle too long are
-            // reported to it: before its inbox is handed over, so what this
-            // queues comes with it. Its app is open already (by
-            // `$JEET_TASK_ID`); a worker's Stop does no index work.
-            if let Some(app) = &app {
-                if let Err(e) = sweep_if_assistant(app, &task_id, now) {
-                    eprintln!("jeet task-hook {event}: {e:#}");
-                }
-            }
             stop(harness, &task_dir, &hook, session_id, now)
         }
         Some(EventKind::Stopped | EventKind::Idle) => {
@@ -345,7 +345,8 @@ fn report_step(
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
         StatusEvent::Waiting | StatusEvent::Idle => now,
     };
-    reports::auto_status(&app, &task, event, body, since)
+    reports::auto_status(&app, &task, event, body, since)?;
+    Ok(())
 }
 
 /// Stop: hand over what `jeet task send` queued, else go idle. The inbox

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 
 pub mod tasks;
 
@@ -202,15 +202,7 @@ impl Database {
                  upgrade jeet"
             );
         }
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-            let version = i + 1;
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)
-                .with_context(|| format!("migrate index to v{version}"))?;
-            // PRAGMA takes no bound parameters; `version` is our own integer.
-            tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
-            tx.commit()?;
-        }
+        apply_migrations(&mut conn, current)?;
         // Off by default in SQLite, and the task tables lean on ON DELETE
         // CASCADE.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -291,6 +283,26 @@ impl Database {
 /// one was not written by us: the experimental workspace builds (v0.3) stamped
 /// `user_version` under a numbering of their own, on top of the same `repos`
 /// table. Such an index is migrated as v0 rather than refused as "newer".
+/// Apply each step in [`MIGRATIONS`] after `current`. Another process
+/// opening the index may be migrating it too, as the first hooks after an
+/// upgrade all are: each step takes the write lock first and is skipped if
+/// it turns out to be done already.
+fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let version = i + 1;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if effective_version(&tx)? >= version as i64 {
+            continue;
+        }
+        tx.execute_batch(sql)
+            .with_context(|| format!("migrate index to v{version}"))?;
+        // PRAGMA takes no bound parameters; `version` is our own integer.
+        tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn effective_version(conn: &Connection) -> Result<i64> {
     let stamped: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if stamped == 0 {
@@ -317,6 +329,15 @@ mod tests {
     #[test]
     fn a_fresh_index_is_at_the_latest_version() {
         let (_dir, db) = open();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn a_step_another_process_applied_since_is_skipped() {
+        let (_dir, db) = open();
+        // As a process that read v3 before another took the index to the
+        // latest: v4's ALTER would fail on the column already there.
+        apply_migrations(&mut db.conn(), 3).unwrap();
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
     }
 

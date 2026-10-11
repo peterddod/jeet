@@ -612,7 +612,8 @@ the foreground). No tree helpers and no delete/archive pre-checks yet, since
 only the assistant can be a parent and both already refuse it; FK RESTRICT is
 the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
 (D20). The TUI marks a parented row ` ↳ assistant` and dims its last report
-after the last column (D22).
+in what the name leaves of its column (D22; the columns after it fill the
+row, so past the last column it would never show).
 
 **Gate before phase 2 ships: review the identity model (5.7, #33).** Phase 1 accepts
 the cooperative model. Phase 2 lets managers below the root hold real

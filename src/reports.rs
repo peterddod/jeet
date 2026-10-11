@@ -44,7 +44,8 @@ impl StatusEvent {
 
 /// Record a report about `task` and deliver it to its parent. Returns the
 /// report's id, and how delivery went: the row is kept either way.
-/// Without `may_start` it never starts a session of the parent's.
+/// Without `may_start` it never starts a session of the parent's, and a
+/// progress or status report never does whatever `may_start` says.
 ///
 /// Never called holding `task`'s own inbox lock.
 pub fn send(
@@ -54,6 +55,21 @@ pub fn send(
     body: &str,
     may_start: bool,
 ) -> Result<(i64, Result<Delivered>)> {
+    let (parent_id, body) = checked(app, task, body)?;
+    let id = app
+        .db
+        .insert_report(&task.id, &parent_id, kind, &body, now_secs())?;
+    Ok((id, deliver(app, task, id, kind, &body, may_start)))
+}
+
+/// Whether a report of `kind` may start a session of the parent's: not
+/// progress, nor what jeet says on its own.
+fn wakes(kind: ReportKind) -> bool {
+    !matches!(kind, ReportKind::Progress | ReportKind::Status)
+}
+
+/// `task`'s parent's id and `body` cleaned, or why it cannot report.
+fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)> {
     let Some(parent_id) = &task.parent_id else {
         bail!("task {} has no parent to report to", task.slug);
     };
@@ -78,59 +94,81 @@ pub fn send(
             body.len()
         );
     }
-    let id = app
-        .db
-        .insert_report(&task.id, &parent.id, kind, body, now_secs())?;
+    Ok((parent.id, body.to_string()))
+}
+
+/// Deliver report `id`, recorded already, to `task`'s parent.
+fn deliver(
+    app: &App,
+    task: &TaskRecord,
+    id: i64,
+    kind: ReportKind,
+    body: &str,
+    may_start: bool,
+) -> Result<Delivered> {
     let fenced = assistant::fence_report(id, &task.slug, kind, body);
-    let delivered = assistant::deliver(app, &fenced, may_start).map(|(d, _)| d);
-    Ok((id, delivered))
+    assistant::deliver(app, &fenced, may_start && wakes(kind)).map(|(d, _)| d)
 }
 
 /// Tell `task`'s parent about `event`, once per `since`: the moment it
 /// started waiting, went idle, or the session it ended began idling. Says
 /// nothing for a task with no parent or archived, and nothing of idling or
 /// ending once it reported done. Never starts a session of the parent's.
+/// Returns the report's id and how delivery went, or None when nothing
+/// was said.
 pub fn auto_status(
     app: &App,
     task: &TaskRecord,
     event: StatusEvent,
     body: &str,
     since: i64,
-) -> Result<()> {
+) -> Result<Option<(i64, Result<Delivered>)>> {
     if task.parent_id.is_none() || task.state == TaskState::Archived {
-        return Ok(());
+        return Ok(None);
     }
     if matches!(event, StatusEvent::Idle | StatusEvent::Ended) {
         let own = app.db.last_own_report(&task.id)?;
         if own.is_some_and(|r| r.kind == ReportKind::Done) {
-            return Ok(());
+            return Ok(None);
         }
     }
-    let last = app.db.last_status_report(&task.id)?;
-    if last.is_some_and(|r| r.body.starts_with(event.word()) && r.at >= since) {
-        return Ok(());
-    }
-    let (id, delivered) = send(app, task, ReportKind::Status, body, false)?;
-    if let Err(e) = delivered {
+    let (parent_id, body) = checked(app, task, body)?;
+    // The check and the row in one go: the watch poll and the assistant's
+    // Stop hook may sweep the same idle task at once.
+    let Some(id) = app.db.insert_status_report_unless_told(
+        &task.id,
+        &parent_id,
+        event.word(),
+        &body,
+        since,
+        now_secs(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let delivered = deliver(app, task, id, ReportKind::Status, &body, false);
+    if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
     }
-    Ok(())
+    Ok(Some((id, delivered)))
 }
 
 /// Tell the parents of tasks idle longer than `[managers] idle_report_mins`.
 /// No event fires then, so this runs from `jeet watch` and the assistant's
 /// own Stop hook. One task's failure does not stop the others.
 pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
-    sweep_idle_with(app, now, tmux::available())
+    let tmux_ok = tmux::available();
+    sweep_idle_with(app, now, |task| runtime::activity(app, task, tmux_ok))
 }
 
-fn sweep_idle_with(app: &App, now: i64, tmux_ok: bool) -> Result<()> {
+/// [`sweep_idle`], with what each task is doing from `activity`.
+fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activity) -> Result<()> {
     let mins = app.config.idle_report_mins();
     for task in app.db.list_tasks(Some(TaskState::Active))? {
         if task.parent_id.is_none() {
             continue;
         }
-        let Activity::Idle { since } = runtime::activity(app, &task, tmux_ok) else {
+        let Activity::Idle { since } = activity(&task) else {
             continue;
         };
         let idle = now - since;
@@ -318,8 +356,45 @@ mod tests {
             r#"{"session_id":"s","state":"idle","event":"Stop","at":0}"#,
         )
         .unwrap();
-        sweep_idle_with(&app, 1_000_000, false).unwrap();
+        sweep_idle_with(&app, 1_000_000, |t| runtime::activity(&app, t, false)).unwrap();
         assert!(app.db.last_report("w").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_sweep_tells_of_a_task_idle_past_the_threshold_once() {
+        let (_dir, app, w) = lab();
+        let mins = app.config.idle_report_mins() as i64;
+        let since = 1_000_000;
+        let idle = |_: &TaskRecord| Activity::Idle { since };
+        // Just short of it: nothing.
+        sweep_idle_with(&app, since + mins * 60 - 1, idle).unwrap();
+        assert!(app.db.last_report("w").unwrap().is_none());
+
+        let (_, delivered) = send(&app, &w, ReportKind::Progress, "half way", false).unwrap();
+        delivered.unwrap();
+        let now = since + mins * 60;
+        sweep_idle_with(&app, now, idle).unwrap();
+        sweep_idle_with(&app, now + 600, idle).unwrap();
+        let last = app.db.last_status_report("w").unwrap().unwrap();
+        assert_eq!(last.body, format!("idle {mins}m, last report: half way"));
+        assert_eq!(last.id, 2, "told once for one idle period");
+        // A top-level task idle as long is nobody's to tell of.
+        assert!(app.db.last_report("top").unwrap().is_none());
+    }
+
+    /// Delivery itself is tested with a stand-in tmux, in the integration
+    /// tests: here a regression would reach the real one.
+    #[test]
+    fn progress_and_status_never_start_the_parents_session() {
+        for (kind, wakes_it) in [
+            (ReportKind::Done, true),
+            (ReportKind::Blocked, true),
+            (ReportKind::Question, true),
+            (ReportKind::Progress, false),
+            (ReportKind::Status, false),
+        ] {
+            assert_eq!(wakes(kind), wakes_it, "{kind:?}");
+        }
     }
 
     #[test]

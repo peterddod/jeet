@@ -20,9 +20,9 @@ pub fn run(app: &App, kind: ReportKind, message: &str) -> Result<()> {
             false => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
         },
     };
-    // Progress is not worth a session of the assistant's own.
-    let may_start = kind != ReportKind::Progress;
-    let (id, delivered) = reports::send(app, &task, kind, message, may_start)?;
+    // Progress is not worth a session of the assistant's own: `send` says
+    // which kinds are.
+    let (id, delivered) = reports::send(app, &task, kind, message, true)?;
     eprintln!("jeet: reported {} to the assistant (#{id})", kind.as_str());
     match delivered {
         Ok(Delivered::Typed) => eprintln!("jeet: typed into the assistant's session"),

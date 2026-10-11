@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use super::Database;
 
@@ -657,6 +657,45 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Record a `status` report about `task_id`, unless its last one starts
+    /// with `word` and was sent at or after `since`: the same event told
+    /// already. Checked and written in one write transaction, so two
+    /// processes telling the same event record it once. Returns the new
+    /// report's id, or None when it was told already.
+    pub fn insert_status_report_unless_told(
+        &self,
+        task_id: &str,
+        to_id: &str,
+        word: &str,
+        body: &str,
+        since: i64,
+        at: i64,
+    ) -> Result<Option<i64>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let last = tx
+            .query_row(
+                &format!(
+                    "SELECT {TASK_REPORT_COLUMNS} FROM task_reports
+                     WHERE task_id = ?1 AND kind = 'status' ORDER BY id DESC LIMIT 1"
+                ),
+                params![task_id],
+                task_report_from_row,
+            )
+            .optional()?;
+        if last.is_some_and(|r| r.body.starts_with(word) && r.at >= since) {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO task_reports (task_id, to_id, kind, body, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, to_id, ReportKind::Status.as_str(), body, at],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     /// The latest report about a task matching `filter`, a condition on
     /// `kind`. By id, not `at`: two in the same second keep their order.
     fn last_report_where(&self, task_id: &str, filter: &str) -> Result<Option<TaskReportRecord>> {
@@ -1109,6 +1148,45 @@ mod tests {
                  VALUES ('c', 'a', 'other', 'x', 1);"
             )
             .is_err());
+    }
+
+    #[test]
+    fn an_event_told_at_once_by_many_processes_is_recorded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        parent_and_child(&Database::open(&path).unwrap());
+        let start = std::sync::Barrier::new(8);
+        let told: Vec<Option<i64>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        let db = Database::open(&path).unwrap();
+                        start.wait();
+                        db.insert_status_report_unless_told("c", "a", "idle", "idle 10m", 5, 6)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(told.iter().flatten().count(), 1, "{told:?}");
+
+        let db = Database::open(&path).unwrap();
+        // Told already: the same word since then.
+        assert_eq!(
+            db.insert_status_report_unless_told("c", "a", "idle", "idle 11m", 6, 7)
+                .unwrap(),
+            None
+        );
+        // Another event, or the same one since later, is news.
+        let waiting = db
+            .insert_status_report_unless_told("c", "a", "waiting", "waiting", 6, 7)
+            .unwrap();
+        assert!(waiting.is_some());
+        let idle = db
+            .insert_status_report_unless_told("c", "a", "idle", "idle 1m", 8, 8)
+            .unwrap();
+        assert!(idle > waiting);
     }
 
     #[test]

@@ -454,12 +454,25 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
     if row.task.parent_id.is_some() {
         name.push_str(" ↳ assistant");
     }
+    let name = truncate(&name, columns.name);
+    // The last report, dim, in what the name leaves of its column: the
+    // columns after it fill the row.
+    let report = row.report.as_ref().map(|report| {
+        let body = messages::clean(&report.body).replace('\t', " ");
+        format!(
+            " · {}: {}",
+            report.kind.as_str(),
+            first_line(&body, 120).unwrap_or_default()
+        )
+    });
+    let rest = columns.name.saturating_sub(name.width());
     spans.push(Span::styled(
-        cell(&name, columns.name),
+        name,
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     ));
+    spans.push(dim(cell(report.as_deref().unwrap_or_default(), rest)));
     if columns.worktrees > 0 {
         spans.push(Span::styled(
             format!(" {}", cell(&row.summary(), columns.worktrees)),
@@ -482,15 +495,6 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
             ),
             Style::default().fg(Color::DarkGray),
         ));
-    }
-    // Past the last column: cut off where the row ends.
-    if let Some(report) = &row.report {
-        let body = messages::clean(&report.body).replace('\t', " ");
-        spans.push(dim(format!(
-            " · {}: {}",
-            report.kind.as_str(),
-            first_line(&body, 120).unwrap_or_default()
-        )));
     }
     Line::from(spans)
 }
@@ -1382,6 +1386,10 @@ mod tests {
                 ui.panel = panel;
                 for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
                     let screen = render(&mut ui, w, h);
+                    if (w, ui.panel.is_none()) == (160, true) {
+                        let all = screen.join("\n");
+                        assert!(all.contains("c ↳ assistant · blocked: [2J"), "{all}");
+                    }
                     assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
                 }
             }
