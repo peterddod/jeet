@@ -38,6 +38,11 @@ says everything else on stderr.
 - `jeet task send <task> "<message>"` gets a message to a task's agent:
   typed in when it is idle, queued until it stops when it is busy, its first
   prompt when it is not running.
+- `jeet task interrupt <task>` stops a task's agent's current turn, as Esc
+  would, and keeps its session: for a runaway turn, which `jeet task send`
+  would only queue behind. It presses the key only while the agent is
+  running or waiting on a prompt, and otherwise says why nothing was sent.
+  It needs `task.send`.
 - `jeet task open <task>` starts a task's agent without a brief.
 - `jeet worktree add <repo> [--branch <b>] --task <task>` adds a worktree
   to a task.

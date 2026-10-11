@@ -112,7 +112,9 @@ The list is:
   `heads/main` with or without a source);
 - merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
   (`pulls/*/merge`, and `repos/*/merges`, which merges branches) through
-  `gh api` or `curl`, and the GraphQL `mergePullRequest`,
+  `gh api` or `curl`, matched where the path ends there (followed by a
+  space or nothing, so `repos/acme/mergesort/pulls` or
+  `contents/docs/merges.md` still run), and the GraphQL `mergePullRequest`,
   `enablePullRequestAutoMerge`, `mergeBranch` and `enqueuePullRequest`
   mutations (any `gh api` or `curl` command naming one, flags before
   `graphql` included);
@@ -170,6 +172,11 @@ a gate. They do not catch:
 - a GraphQL merge mutation read from a file
   (`gh api graphql -F query=@merge.graphql`, `--input body.json`):
   denying those would refuse read queries kept in files too;
+- a REST merge endpoint quoted or carrying a query string
+  (`curl -X PUT "https://api.github.com/repos/o/r/pulls/3/merge"`,
+  `gh api 'repos/o/r/merges'`): matching what follows `merge` would refuse
+  `repos/acme/mergesort/pulls` too, and quoted variants would not fit the
+  command line jeet launches the agent with;
 - the default branches of indexed repos past the eight listed, or longer
   than 24 bytes;
 - moving a branch through the REST refs endpoint
