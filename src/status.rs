@@ -345,7 +345,7 @@ fn report_step(
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
         StatusEvent::Waiting | StatusEvent::Idle => now,
     };
-    reports::auto_status(&app, &task, event, body, since)?;
+    reports::auto_status(&app, &task, event, body, since, 0)?;
     Ok(())
 }
 

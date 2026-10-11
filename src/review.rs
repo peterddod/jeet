@@ -328,14 +328,17 @@ pub fn run_job(path: &Path) -> Result<()> {
 }
 
 /// Tell review task `id`'s parent its command exited with `code`, once
-/// for the run that started at `since`.
+/// for the run that started at `since`, unless that run reported done: the
+/// task is reused for every review of its PR, so an earlier run's done
+/// does not count.
 fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
     let Some(task) = app.db.get_task(id)? else {
         return Ok(());
     };
     let body =
         format!("ended without reporting done; the review command exited with status {code}");
-    crate::reports::auto_status(app, &task, crate::reports::StatusEvent::Ended, &body, since)?;
+    let ended = crate::reports::StatusEvent::Ended;
+    crate::reports::auto_status(app, &task, ended, &body, since, since)?;
     Ok(())
 }
 

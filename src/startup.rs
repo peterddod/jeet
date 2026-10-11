@@ -254,7 +254,7 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             if task.parent_id.is_some() {
                 let body = "waiting for the user to trust the folder";
                 let waiting = StatusEvent::Waiting;
-                if let Err(e) = reports::auto_status(app, &task, waiting, body, now_secs()) {
+                if let Err(e) = reports::auto_status(app, &task, waiting, body, now_secs(), 0) {
                     eprintln!("jeet task-startup {}: warning: {e:#}", task.slug);
                 }
             }

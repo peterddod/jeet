@@ -113,7 +113,9 @@ fn deliver(
 /// Tell `task`'s parent about `event`, once per `since`: the moment it
 /// started waiting, went idle, or the session it ended began idling. Says
 /// nothing for a task with no parent or archived, and nothing of idling or
-/// ending once it reported done. Never starts a session of the parent's.
+/// ending once it reported done at or after `done_since`, the start of the
+/// run in question (0 for any done). Never starts a session of the
+/// parent's.
 /// Returns the report's id and how delivery went, or None when nothing
 /// was said.
 pub fn auto_status(
@@ -122,13 +124,14 @@ pub fn auto_status(
     event: StatusEvent,
     body: &str,
     since: i64,
+    done_since: i64,
 ) -> Result<Option<(i64, Result<Delivered>)>> {
     if task.parent_id.is_none() || task.state == TaskState::Archived {
         return Ok(None);
     }
     if matches!(event, StatusEvent::Idle | StatusEvent::Ended) {
         let own = app.db.last_own_report(&task.id)?;
-        if own.is_some_and(|r| r.kind == ReportKind::Done) {
+        if own.is_some_and(|r| r.kind == ReportKind::Done && r.at >= done_since) {
             return Ok(None);
         }
     }
@@ -176,7 +179,7 @@ fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activi
             continue;
         }
         let result = idle_body(app, &task, idle)
-            .and_then(|body| auto_status(app, &task, StatusEvent::Idle, &body, since));
+            .and_then(|body| auto_status(app, &task, StatusEvent::Idle, &body, since, 0));
         if let Err(e) = result {
             eprintln!("jeet: could not report task {} idle: {e:#}", task.slug);
         }
@@ -297,12 +300,12 @@ mod tests {
         let idle = StatusEvent::Idle;
         // Idle since ten minutes ago, said twice: told once.
         let since = now_secs() - 600;
-        auto_status(&app, &w, idle, "idle 10m; last report none", since).unwrap();
-        auto_status(&app, &w, idle, "idle 11m; last report none", since).unwrap();
+        auto_status(&app, &w, idle, "idle 10m; last report none", since, 0).unwrap();
+        auto_status(&app, &w, idle, "idle 11m; last report none", since, 0).unwrap();
         assert_eq!(last_status(&app, "w"), Some(1));
         // Idle again since after that was said: told again.
         let again = now_secs() + 60;
-        auto_status(&app, &w, idle, "idle 10m; last report none", again).unwrap();
+        auto_status(&app, &w, idle, "idle 10m; last report none", again, 0).unwrap();
         assert_eq!(last_status(&app, "w"), Some(2));
 
         let (_, delivered) = send(&app, &w, ReportKind::Done, "shipped", false).unwrap();
@@ -313,6 +316,7 @@ mod tests {
             idle,
             "idle 10m; last report #1 (done)",
             999_999_999_999,
+            0,
         )
         .unwrap();
         auto_status(
@@ -321,6 +325,7 @@ mod tests {
             StatusEvent::Ended,
             "ended without reporting done",
             0,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -328,22 +333,50 @@ mod tests {
             ReportKind::Done
         );
         // Waiting still matters after done.
-        auto_status(&app, &w, StatusEvent::Waiting, "waiting on a prompt", 1).unwrap();
+        auto_status(&app, &w, StatusEvent::Waiting, "waiting on a prompt", 1, 0).unwrap();
         assert_eq!(
             app.db.last_report("w").unwrap().unwrap().kind,
             ReportKind::Status
         );
 
         let top = app.db.get_task("top").unwrap().unwrap();
-        auto_status(&app, &top, StatusEvent::Waiting, "waiting", 1).unwrap();
+        auto_status(&app, &top, StatusEvent::Waiting, "waiting", 1, 0).unwrap();
         assert!(app.db.last_report("top").unwrap().is_none());
         let archived = TaskRecord {
             state: TaskState::Archived,
             ..w.clone()
         };
+        // News the debounce would let through, were it not archived.
         let before = app.db.last_report("w").unwrap();
-        auto_status(&app, &archived, StatusEvent::Waiting, "waiting", 5).unwrap();
+        let later = now_secs() + 60;
+        auto_status(&app, &archived, StatusEvent::Waiting, "waiting", later, 0).unwrap();
+        auto_status(&app, &archived, StatusEvent::Ended, "ended", later, later).unwrap();
         assert_eq!(app.db.last_report("w").unwrap(), before);
+        auto_status(&app, &w, StatusEvent::Waiting, "waiting", later, 0).unwrap();
+        assert_ne!(app.db.last_report("w").unwrap(), before);
+    }
+
+    #[test]
+    fn a_done_from_an_earlier_run_does_not_hide_this_runs_end() {
+        let (_dir, app, w) = lab();
+        // Run one reported done: its end is not news.
+        let (_, delivered) = send(&app, &w, ReportKind::Done, "posted review", false).unwrap();
+        delivered.unwrap();
+        let first = now_secs() - 1;
+        let ended = StatusEvent::Ended;
+        auto_status(&app, &w, ended, "ended; status 0", first, first).unwrap();
+        assert_eq!(
+            app.db.last_report("w").unwrap().unwrap().kind,
+            ReportKind::Done
+        );
+        // Run two, started after that done, ends without one: told.
+        let second = now_secs() + 60;
+        auto_status(&app, &w, ended, "ended; status 1", second, second).unwrap();
+        let last = app.db.last_report("w").unwrap().unwrap();
+        assert_eq!(
+            (last.kind, last.body.as_str()),
+            (ReportKind::Status, "ended; status 1")
+        );
     }
 
     #[test]
