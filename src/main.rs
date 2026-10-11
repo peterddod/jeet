@@ -13,6 +13,7 @@ mod github;
 mod harness;
 mod identity;
 mod instructions;
+mod manager;
 mod messages;
 mod notify;
 mod paths;
