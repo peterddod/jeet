@@ -1195,6 +1195,39 @@ Managers run locally in tmux, as the user, like any other task (I22).
   are errors. `default_budget` takes the parts `--budget` does
   (`"2h,40turns"`). A manager without its own
   `max_children` is held to `[managers] max_children` on unarchive too.
+- **P7** Effective lists (5.1) come from stored grants: a node's grant cut
+  by each ancestor's own list (a manager's grant, the assistant's
+  `[assistant] allow`; a worker passes nothing on), read at every check and
+  never cached. A chain of parents that does not end at the assistant
+  holds nothing, and a broken one is an error. A new child stores its
+  kind's default (`worker_default`) uncut, so widening `[assistant] allow`
+  later reaches existing children, as in phase 1; a grant someone names
+  must be within the parent's list and, for a node granting, its own.
+  New capabilities: `manager.create`, `manager.grant` (grant, and budget
+  when it lands) and `manager.stop` (pause, resume, stop). `git.push` is
+  deferred (§13).
+- **P8** Scope (5.1) is one table, `permissions::node_scope`, saying for
+  each command what a node may name: itself (`worktree add`, `ls`,
+  `path`), itself or below (`task last`, `path`, `prs`), strictly below
+  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`), a
+  manager at or below it as `--parent`, or no task at all (`jeet ls`,
+  `jeet prs`, `report`, hooks, screens). A name is resolved within the
+  node's subtree, so a prefix cannot reach outside it; delete and
+  `--parent` take exact names. A command the table leaves out is refused
+  to every node, reads included (`worktree rm`, `projects`, `clone`, …).
+  `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
+  it lets a node merge. The root keeps D1; the `jeet manager` verbs act
+  only on a task under the assistant, for anyone. `task ls` lists a node's
+  subtree only.
+- **P9** A node's allowed actions go to its own `actions.log`,
+  unannounced. A held capability granted is logged by the granter (the
+  assistant's log, a manager's own, or the assistant's marked `by user`)
+  and announced whatever `[assistant] notify` says, except the user's own.
+  `jeet task last` fences what it prints for any caller but the user: an
+  agent's words may carry text it read (5.5).
+- **P10** A manager's harness settings pre-approve the commands of what it
+  holds (§7 "allow rules from capabilities"), read at each start, since it
+  is started with nobody at its pane. Never `jeet *`.
 
 ## 11. Placement
 

@@ -117,6 +117,12 @@ pub enum Commands {
         command: TaskCommands,
     },
 
+    /// Managers: tasks under the assistant that delegate to tasks under them
+    Manager {
+        #[command(subcommand)]
+        command: ManagerCommands,
+    },
+
     /// Projects: repositories, AGENTS.md and skills a task can start from
     /// (with no subcommand: the projects panel on a terminal, else the list)
     Projects {
@@ -337,6 +343,37 @@ pub enum TaskCommands {
         /// Replace copies the task has changed, too
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ManagerCommands {
+    /// The tree under the assistant
+    Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// A task under the assistant: its brief, grant, budget and children
+    Show {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Replace what a task under the assistant may do (comma-separated
+    /// capabilities)
+    Grant {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        #[arg(value_delimiter = ',', required_unless_present = "none")]
+        caps: Vec<String>,
+        /// Grant nothing
+        #[arg(long, conflicts_with = "caps")]
+        none: bool,
     },
 }
 

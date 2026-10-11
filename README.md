@@ -1132,13 +1132,18 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly. It may run the reads that
-need no capability (`jeet ls`, `jeet task ls`, `jeet prs`, …), run
-`jeet report`, and add worktrees to itself, and only that last when the
+narrowly. It is granted `worktree.add` when made (`[managers]
+worker_default`), and may use what its grant names only while the
 assistant may too: add `worktree.add` to `[assistant] allow` to let such
-tasks add worktrees. Everything else that needs a capability is refused,
-whatever the assistant holds, `project.read` (`jeet projects ls`) included,
-as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask with `jeet report`. The assistant's own
+tasks add worktrees. It reaches only itself: it may run `jeet report`, add
+worktrees to itself and read itself (`jeet task last`, `task path`, `task
+prs`, `worktree ls`/`path`), and `jeet task ls` lists only it. The reads
+that name no task (`jeet ls`, `jeet prs`, …) are free. Anything else is
+refused, whatever the assistant holds, `project.read` (`jeet projects ls`)
+included, as are `jeet notify`, `jeet todo` and review jobs; the refusal
+tells it to ask with `jeet report`. When the assistant reads what a task
+said with `jeet task last`, it gets it fenced as untrusted, as it gets
+reports. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
@@ -1155,8 +1160,9 @@ process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
 disagrees is refused and written to `actions.log`, and one that claims a task
 with a parent, or the assistant, with no recorded agent behind it is refused
 as unconfirmed. So a shell you open inside such a task's or the assistant's
-tmux session is refused for commands that need a capability, and for
-`jeet worktree ls`, `path` and `add` without `--task`; use one outside it. This stops mistakes and casual forging, not an agent that sets
+tmux session is refused for commands that need a capability or name a
+task (`jeet task last`, `jeet worktree ls` and the like); use one outside
+it. This stops mistakes and casual forging, not an agent that sets
 out to escape. Every agent, managers below the assistant included, runs
 locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
 

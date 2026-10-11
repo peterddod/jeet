@@ -23,7 +23,7 @@ jeet does without that feature:
 | `new_session_args(id, name)` | starts a session under an id jeet picks | no recorded sessions, no resume, no assistant |
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
-| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
+| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`; for a manager, also the read-only jeet commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
 | `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
@@ -141,8 +141,10 @@ The list is:
 - for a parented task only, the commands of each capability it does not
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are
-  not denied, but still go to the user's permission prompt (a task's
-  allow list stays `jeet worktree`, `jeet ls` and `jeet report`). The assistant is never denied these: it holds them by
+  not denied, but still go to the user's permission prompt (a worker's
+  allow list stays `jeet worktree`, `jeet ls` and `jeet report`; a
+  manager, started with nobody at its pane, has the commands of what it
+  holds pre-approved, read at each start). The assistant is never denied these: it holds them by
   default, and at worst the user approves them at the prompt. Only these
   commands are denied, not the same through `gh api` or `curl` (see
   below);

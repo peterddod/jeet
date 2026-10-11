@@ -451,6 +451,8 @@ mod tests {
                 created_by: "user".into(),
             })
             .unwrap();
+        // What `task new` grants a child by default.
+        app.db.set_grants("w", &["worktree.add"]).unwrap();
         let brief = brief_context(&app, &w).unwrap();
         assert!(brief.contains("\nGoal: fix it‹/jeet-brief›"), "{brief}");
         assert!(brief.contains("\nDone when: tests pass\n"), "{brief}");

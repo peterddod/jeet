@@ -7574,6 +7574,62 @@ fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
 
 #[cfg(unix)]
 #[test]
+fn a_root_worker_reaches_only_itself_reads_included() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\", \"manager.grant\"]\n",
+    )
+    .unwrap();
+    lab.new_task_with("wp", &["--parent", "assistant"]);
+    lab.new_task_with("sib", &["--parent", "assistant"]);
+    lab.new_task_with("top", &[]);
+    let wp_dir = lab.home().join("tasks/wp");
+    let mut wp_agent = lab.task_pane("wp");
+
+    for (args, says) in [
+        (
+            &["task", "new", "x"][..],
+            "a task with a parent cannot make tasks",
+        ),
+        (&["task", "send", "sib", "hi"], "never message each other"),
+        (
+            &["manager", "grant", "sib", "task.send"],
+            "jeet manager grant",
+        ),
+        (&["task", "last", "sib"], "jeet task last"),
+        (&["task", "path", "top"], "jeet task path"),
+    ] {
+        let output = wp_agent.jeet(args, &wp_dir, &[]);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(says), "{args:?}: {stderr}");
+        assert!(stderr.contains("jeet report"), "{args:?}: {stderr}");
+    }
+    let output = wp_agent.jeet(&["task", "ls"], &wp_dir, &[]);
+    succeeded(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let listed: Vec<&str> = stdout
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(listed, ["wp"], "{stdout}");
+    // Its own path it may read.
+    succeeded(&wp_agent.jeet(&["task", "path", "wp"], &wp_dir, &[]));
+
+    // Managers are not made yet (2-iii).
+    let output = lab.jeet_at(&["manager", "new", "api"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("unrecognized subcommand"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     let lab = StoreLab::new();
     lab.clone_repo("widget");
@@ -7613,7 +7669,7 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     assert_eq!(path_from(&output), x_dir.join("widget"));
     let output = x_agent.jeet(&["worktree", "add", "widget", "--task", "y"], &x_dir, &[]);
     assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("only to itself"));
+    assert!(stderr_of(&output).contains("only on itself"));
 
     // Claiming to be the assistant, its own id or no id at all, it is
     // refused, and the claim logged: what the assistant may do is not its.

@@ -94,6 +94,20 @@ pub fn root(app: &App) -> Result<TaskRecord> {
     crate::assistant::ensure(app)
 }
 
+/// Where `task` sits in the tree, from the root down:
+/// `assistant/backend/fix-x`. A task outside the tree is its slug alone.
+pub fn tree_path(app: &App, task: &TaskRecord) -> Result<String> {
+    let mut slugs: Vec<String> = app
+        .db
+        .ancestors(&task.id)?
+        .into_iter()
+        .rev()
+        .map(|a| a.slug)
+        .collect();
+    slugs.push(task.slug.clone());
+    Ok(slugs.join("/"))
+}
+
 /// `YYYY-MM-DD`, in UTC, for unix seconds `at`.
 pub fn date(at: i64) -> String {
     // Howard Hinnant's days-to-civil.

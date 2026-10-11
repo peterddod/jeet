@@ -253,15 +253,17 @@ fn make_task(
         run_state_by: None,
         max_children: None,
     };
+    // A child gets its kind's default grant (`[managers] worker_default`),
+    // which its ancestors cut down at every check.
+    let grant = match task.parent_id {
+        Some(_) => crate::permissions::default_grant(kind, &app.config.manager_policy()?)?,
+        None => Vec::new(),
+    };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    // A child gets what v6 backfilled for the children before it, so the
-    // grants that phase 2 reads cover every child alike.
     let insert = || match task.parent_id {
-        Some(_) => app
-            .db
-            .insert_child(&task, crate::permissions::NODE_GRANT, None, None, None),
+        Some(_) => app.db.insert_child(&task, &grant, None, None, None),
         None => app.db.insert_task(&task),
     };
     match scaffold(&dir, &task, project).and_then(|notes| insert().map(|_| notes)) {
@@ -326,15 +328,32 @@ fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     if let Some(task) = app.db.get_task(key)?.filter(listed) {
         return Ok(task);
     }
-    let tasks = app.db.list_tasks(None)?;
+    find_in(&app.db.list_tasks(None)?, key, by_prefix)
+}
+
+/// [`find`] (or, not `by_prefix`, [`find_exact`]) among `tasks` alone: by
+/// slug, id, name (any case), then the start of exactly one slug.
+pub fn find_in(tasks: &[TaskRecord], key: &str, by_prefix: bool) -> Result<TaskRecord> {
+    let key = key.trim();
+    // The assistant is no task to open, archive or delete by name.
+    let tasks: Vec<&TaskRecord> = tasks
+        .iter()
+        .filter(|t| t.kind != TaskKind::Assistant)
+        .collect();
+    let by = |same: &dyn Fn(&TaskRecord) -> bool| tasks.iter().find(|t| same(t)).copied();
+    if let Some(task) = by(&|t| t.slug == key).or_else(|| by(&|t| t.id == key)) {
+        return Ok(task.clone());
+    }
     let lower = key.to_lowercase();
     let mut matches: Vec<&TaskRecord> = tasks
         .iter()
+        .copied()
         .filter(|t| t.name.to_lowercase() == lower)
         .collect();
     if matches.is_empty() && !key.is_empty() {
         let prefixed: Vec<&TaskRecord> = tasks
             .iter()
+            .copied()
             .filter(|t| t.slug.starts_with(&lower))
             .collect();
         if !by_prefix && !prefixed.is_empty() {

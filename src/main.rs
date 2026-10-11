@@ -204,6 +204,9 @@ fn run(command: Option<Commands>) -> Result<()> {
             let app = context::App::open()?;
             startup::run(&app, &task, session.as_deref())?;
         }
+        // The verbs are classified and scoped (`permissions`); what they
+        // do lands with the next step of phase 2.
+        Commands::Manager { .. } => anyhow::bail!("`jeet manager` is not built yet"),
         Commands::Task { command } => {
             let app = context::App::open()?;
             match command {
