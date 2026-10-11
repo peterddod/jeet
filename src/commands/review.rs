@@ -31,7 +31,7 @@ pub fn run(
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
     // What the assistant checks out reports to it, like a task it makes.
-    let parent = match permissions::caller(&app.db)? {
+    let parent = match permissions::caller(app)? {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User | Caller::Node(_) => None,
     };

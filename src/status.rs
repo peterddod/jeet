@@ -312,7 +312,7 @@ fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
 /// one naming another task than its own, never reports up.
 fn attributed(task: Option<&str>, located: &str, app: &App) -> bool {
     names_task(task, located)
-        && identity::identify(&app.db).is_ok_and(|me| me.task.is_some_and(|t| t.id == located))
+        && identity::identify(app).is_ok_and(|me| me.task.is_some_and(|t| t.id == located))
 }
 
 /// Whether a hook's `--task` names `located`.

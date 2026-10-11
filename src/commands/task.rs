@@ -51,7 +51,7 @@ pub fn new(
     if done_when.is_some() && goal.is_none() {
         bail!("--done says when --goal is met; give --goal too");
     }
-    let caller = permissions::caller(&app.db)?;
+    let caller = permissions::caller(app)?;
     // Only the assistant can be a parent until managers land.
     let parent = match parent.map(str::trim) {
         Some(assistant::SLUG) => Some(assistant_parent(app)?),
@@ -237,7 +237,7 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
 /// line. Anything can claim to be the command line, so the assistant is
 /// told never to take that for the user.
 fn sender(app: &App) -> String {
-    match identity::identify(&app.db).ok().and_then(|me| me.task) {
+    match identity::identify(app).ok().and_then(|me| me.task) {
         Some(task) if task.kind == TaskKind::Assistant => return "the assistant".to_string(),
         Some(task) => return format!("task {}", task.slug),
         None => {}

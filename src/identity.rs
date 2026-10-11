@@ -15,6 +15,7 @@
 
 use anyhow::{bail, Result};
 
+use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::db::Database;
@@ -39,11 +40,44 @@ pub struct ProcInfo {
 #[cfg(target_os = "linux")]
 fn proc_info(pid: u32) -> Option<ProcInfo> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (state, ppid, start) = parse_stat(&stat)?;
+    let (state, ppid, ticks) = parse_stat(&stat)?;
     match state {
         'Z' | 'X' | 'x' => None,
-        _ => Some(ProcInfo { ppid, start }),
+        _ => Some(ProcInfo {
+            ppid,
+            start: on_boot(boot()?, ticks),
+        }),
     }
+}
+
+/// This boot's id, which the kernel makes afresh at each boot, or nothing
+/// when it cannot be read (and so nobody is identified).
+#[cfg(target_os = "linux")]
+fn boot() -> Option<&'static str> {
+    static BOOT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BOOT.get_or_init(|| {
+        let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        Some(id.trim().to_string()).filter(|id| !id.is_empty())
+    })
+    .as_deref()
+}
+
+/// A start time of `ticks` since boot `boot`, as one number: the low 39
+/// bits the ticks (174 years at the 100 Hz `/proc` counts in), the 24 above
+/// them a hash of the boot id. Linux counts start times from boot, so
+/// without the boot a pid reused after a reboot, started as many ticks in,
+/// would be the old process; with it, a row from an earlier boot matches
+/// nothing (but for a one in 2^24 clash of hashes, which still needs the
+/// same pid and tick). The boot id, unlike the boot time, does not move
+/// when the clock is set.
+#[cfg(any(target_os = "linux", test))]
+fn on_boot(boot: &str, ticks: i64) -> i64 {
+    // FNV-1a: stable across builds, unlike std's hasher.
+    let hash = boot.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let tag = (hash & ((1 << 24) - 1)) as i64;
+    (tag << 39) | (ticks & ((1 << 39) - 1))
 }
 
 /// The state, parent and start time (in clock ticks since boot) of a
@@ -92,24 +126,6 @@ fn proc_info(pid: u32) -> Option<ProcInfo> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn proc_info(_pid: u32) -> Option<ProcInfo> {
     None
-}
-
-/// When the machine last booted, as anchors' `created_at` counts: anchors
-/// from before it name processes that are gone. Linux start times count
-/// from boot, so a pid reused after one could match an old row; macOS start
-/// times are absolute, so none can.
-fn boot_floor() -> i64 {
-    #[cfg(target_os = "linux")]
-    {
-        let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
-        stat.lines()
-            .find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())
-            .unwrap_or(0)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        0
-    }
 }
 
 /// This process and its ancestors, nearest first, as (pid, start): up to
@@ -239,11 +255,14 @@ pub struct Identity {
 
 /// Who runs this jeet, by its process ancestry: see the module docs. A
 /// claim jeet cannot confirm, or one that disagrees, is an error
-/// ([`Refused`]), as is a database error.
-pub fn identify(db: &Database) -> Result<Identity> {
+/// ([`Refused`]), as is a database error. One that disagrees is also
+/// written to `actions.log`, in jeet's words only: the claim is the
+/// caller's, so none of it goes where the assistant reads.
+pub fn identify(app: &App) -> Result<Identity> {
+    let db = &app.db;
     let chain = ancestry();
     let pids: Vec<u32> = chain.iter().map(|(pid, _)| *pid).collect();
-    let anchors = anchors_of(db, &pids)?;
+    let anchors = db.anchors_for(&pids)?;
     let task = |id: &str| db.get_task(id).ok().flatten();
     let verdict = resolve(
         &chain,
@@ -275,10 +294,14 @@ pub fn identify(db: &Database) -> Result<Identity> {
                 Some(id) => format!("${TASK_ID_ENV} says it is {} ({id})", label(&id)),
                 None => format!("${ASSISTANT_ENV} says it is the assistant"),
             };
+            let who = match label(&anchored) {
+                who if who == "the assistant" => who,
+                task => format!("{task}'s agent"),
+            };
+            permissions::log_mismatch(&app.home, &format!("{who} ({anchored})"));
             return Err(Refused::Mismatch(format!(
-                "this jeet runs under {}'s agent ({anchored}), but {claim}; jeet refuses a \
-                 caller that claims to be another",
-                label(&anchored)
+                "this jeet runs under {who} ({anchored}), but {claim}; jeet refuses a caller \
+                 that claims to be another"
             ))
             .into());
         }
@@ -305,18 +328,11 @@ pub fn identify(db: &Database) -> Result<Identity> {
     })
 }
 
-/// The anchors of the processes `pids` that can still be theirs: none
-/// written before the machine last booted.
-fn anchors_of(db: &Database, pids: &[u32]) -> Result<Vec<Anchor>> {
-    db.anchors_for(pids, boot_floor())
-}
-
-/// Forget the anchors of processes that are gone, or from before the
-/// machine last booted.
+/// Forget the anchors of processes that are gone: a pid now another
+/// process's, or one from an earlier boot, starts at another time.
 fn prune(db: &Database) -> Result<()> {
-    let floor = boot_floor();
     for old in db.all_anchors()? {
-        if old.created_at < floor || !live(&old) {
+        if !live(&old) {
             db.delete_anchor(old.pid, old.start)?;
         }
     }
@@ -350,7 +366,8 @@ pub fn record(
         created_at: now_secs(),
     };
     if db.insert_anchor(&anchor, pane_id).is_err() {
-        // A row from before a reboot can hold the same pid and start.
+        // A row of a process that is gone can hold the same pid and start
+        // (an earlier boot's, should its hash clash).
         prune(db)?;
         return db.insert_anchor(&anchor, pane_id);
     }
@@ -588,41 +605,79 @@ mod tests {
         second.wait().unwrap();
     }
 
-    /// A row from before the last boot can match a live process on Linux,
-    /// whose start times count from boot: it is neither matched nor kept.
+    /// A row whose start is not its process's, as one from an earlier boot
+    /// is not on Linux, is neither matched nor kept.
     #[test]
-    fn rows_from_before_the_last_boot_are_neither_matched_nor_kept() {
+    fn a_row_another_process_started_is_neither_matched_nor_kept() {
         let (_dir, db) = db();
         let old = sleeper();
-        let stale = Anchor {
-            created_at: boot_floor() - 1,
-            ..anchor(
-                old.id(),
-                proc_info(old.id()).unwrap().start,
-                "t",
-                AnchorKind::Pane,
-            )
-        };
+        let start = proc_info(old.id()).unwrap().start;
+        let stale = anchor(old.id(), start + 1, "t", AnchorKind::Pane);
         db.insert_anchor(&stale, None).unwrap();
-        assert!(live(&stale));
-        assert!(anchors_of(&db, &[old.id()]).unwrap().is_empty());
+        assert!(!live(&stale));
+        let chain = [(old.id(), start)];
+        let rows = db.anchors_for(&[old.id()]).unwrap();
+        assert_eq!(verdict(&chain, &rows, &hint(None, false)), Verdict::Nobody);
 
         let new = sleeper();
         record(&db, "t", AnchorKind::Pane, None, new.id()).unwrap();
         let rows = db.all_anchors().unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].pid, new.id());
-        assert_eq!(anchors_of(&db, &[new.id()]).unwrap(), rows);
 
-        // One in the way of the process being recorded goes too.
+        // Nor does one under the pid of the process being recorded.
         db.insert_anchor(&stale, None).unwrap();
         record(&db, "t", AnchorKind::Job, None, old.id()).unwrap();
-        let rows = anchors_of(&db, &[old.id()]).unwrap();
+        let rows = db.anchors_for(&[old.id()]).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].kind, AnchorKind::Job);
+        assert_eq!(rows[0].start, start);
         for mut child in [old, new] {
             child.kill().unwrap();
             child.wait().unwrap();
         }
+    }
+
+    /// The same tick count since another boot is another start, and setting
+    /// the clock changes neither.
+    #[test]
+    fn a_start_is_tagged_with_its_boot() {
+        let boot = "6f1c1f0e-3b9a-4c0e-9d7e-2b1f4a5c6d7e";
+        let other = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d";
+        assert_eq!(on_boot(boot, 98765), on_boot(boot, 98765));
+        assert_ne!(on_boot(boot, 98765), on_boot(other, 98765));
+        assert_ne!(on_boot(boot, 98765), on_boot(boot, 98766));
+        assert!(on_boot(boot, 98765) > 0);
+        assert!(on_boot(other, i64::MAX) > 0);
+    }
+
+    /// On Linux a process's start is its ticks since this boot, tagged with
+    /// this boot: a row written with another boot's tag is not its.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_row_from_another_boot_is_not_the_process() {
+        let (_dir, db) = db();
+        let mut child = sleeper();
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let (_, _, ticks) = parse_stat(&stat).unwrap();
+        let start = proc_info(child.id()).unwrap().start;
+        assert_eq!(start, on_boot(boot().unwrap(), ticks));
+        let earlier = anchor(
+            child.id(),
+            on_boot("an-earlier-boot", ticks),
+            "t",
+            AnchorKind::Pane,
+        );
+        db.insert_anchor(&earlier, None).unwrap();
+        assert!(!live(&earlier));
+        let rows = db.anchors_for(&[child.id()]).unwrap();
+        assert_eq!(
+            verdict(&[(child.id(), start)], &rows, &hint(None, false)),
+            Verdict::Nobody
+        );
+        prune(&db).unwrap();
+        assert!(db.all_anchors().unwrap().is_empty());
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }

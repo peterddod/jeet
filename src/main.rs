@@ -50,9 +50,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Only once `jeet review` has recorded the runner as its task's does the
-    // runner go on to find out who it is.
-    if let Some(Commands::ReviewJob { .. }) = &cli.command {
-        review::await_go()?;
+    // runner go on to find out who it is. One that never gets it, its
+    // launcher gone first, ends its job too.
+    if let Some(Commands::ReviewJob { state }) = &cli.command {
+        if let Err(e) = review::await_go() {
+            review::refused(state);
+            return Err(e);
+        }
     }
     // Who the caller is and what it may do, before the command does
     // anything.

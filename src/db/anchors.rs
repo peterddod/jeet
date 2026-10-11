@@ -80,19 +80,17 @@ impl Database {
         Ok(())
     }
 
-    /// The anchors of any of `pids` written at or after `since`.
-    pub fn anchors_for(&self, pids: &[u32], since: i64) -> Result<Vec<Anchor>> {
+    /// The anchors of any of `pids`, whatever their start.
+    pub fn anchors_for(&self, pids: &[u32]) -> Result<Vec<Anchor>> {
         if pids.is_empty() {
             return Ok(Vec::new());
         }
         let marks = vec!["?"; pids.len()].join(", ");
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {ANCHOR_COLUMNS} FROM task_anchors
-             WHERE created_at >= ? AND pid IN ({marks})"
+            "SELECT {ANCHOR_COLUMNS} FROM task_anchors WHERE pid IN ({marks})"
         ))?;
-        let values = std::iter::once(since).chain(pids.iter().map(|&p| i64::from(p)));
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), anchor_from_row)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(pids), anchor_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -183,15 +181,12 @@ mod tests {
         db.insert_anchor(&anchor(10, 7, "b", AnchorKind::Pane, 200), None)
             .unwrap();
 
-        let mut found = db.anchors_for(&[10, 11, 12], 0).unwrap();
+        let mut found = db.anchors_for(&[10, 11, 12]).unwrap();
         found.sort_by_key(|a| (a.pid, a.start));
         assert_eq!(found.len(), 3);
         assert_eq!(found[0], pane);
-        // Rows from before `since` (the last boot) are not.
-        let recent = db.anchors_for(&[10, 11], 100).unwrap();
-        assert!(recent.iter().all(|a| a.created_at >= 100), "{recent:?}");
-        assert_eq!(recent.len(), 2);
-        assert!(db.anchors_for(&[], 0).unwrap().is_empty());
+        assert_eq!(db.anchors_for(&[11]).unwrap().len(), 1);
+        assert!(db.anchors_for(&[]).unwrap().is_empty());
 
         assert_eq!(db.task_anchors("b", AnchorKind::Job).unwrap().len(), 1);
         db.delete_task_anchors("b", AnchorKind::Pane).unwrap();

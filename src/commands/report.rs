@@ -10,7 +10,7 @@ use crate::reports;
 use crate::tasks::TASK_ID_ENV;
 
 pub fn run(app: &App, kind: ReportKind, message: &str) -> Result<()> {
-    let task = match permissions::caller(&app.db)? {
+    let task = match permissions::caller(app)? {
         Caller::Node(task) => task,
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
         Caller::User => match std::env::var(TASK_ID_ENV)

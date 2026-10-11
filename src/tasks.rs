@@ -360,7 +360,7 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
     if let Some(key) = explicit {
         return find(app, key);
     }
-    let own = identity::identify(&app.db)?.task.map(|task| task.id);
+    let own = identity::identify(app)?.task.map(|task| task.id);
     let hinted = || {
         std::env::var(TASK_ID_ENV)
             .ok()

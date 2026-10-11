@@ -21,7 +21,8 @@ keeping goes in a file the next session will read:
   `jeet todo` rather than by hand, so two sessions never lose each other's
   edits.
 - `actions.log`: jeet's record of every action you took. Read it; never
-  edit it.
+  edit it. An `identity` line is not yours: it is jeet refusing the agent
+  it names, which claimed to be another task or you.
 
 Each session starts with a summary of the active tasks, open pull requests
 (the tasks' and your user's own, with their checks), the GitHub events

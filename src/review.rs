@@ -313,8 +313,9 @@ pub fn await_go() -> Result<()> {
     }
 }
 
-/// The runner for the job in `state`, refused before it ran the command:
-/// record that it ended, or the job reads as running forever, refusing
+/// The runner for the job in `state`, refused before it ran the command,
+/// or never given the go-ahead (its `jeet review` died first): record that
+/// it ended, or the job reads as running forever, refusing
 /// every later `jeet review`. Only a state file jeet wrote, for a job no
 /// runner has taken up.
 pub fn refused(state: &Path) {

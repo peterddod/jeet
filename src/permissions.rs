@@ -29,8 +29,7 @@ use crate::cli::{
 use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord};
-use crate::db::Database;
-use crate::identity::{self, Refused};
+use crate::identity;
 use crate::notify::{self, Notification};
 use crate::worktrees::now_secs;
 
@@ -264,8 +263,8 @@ fn classify(task: Option<&TaskRecord>) -> Caller {
 /// Who runs this jeet, by the task it runs under ([`identity::identify`]),
 /// never the working directory. A claim jeet cannot confirm, or a database
 /// error, is an error, so what is gated fails closed.
-pub fn caller(db: &Database) -> Result<Caller> {
-    Ok(classify(identity::identify(db)?.task.as_ref()))
+pub fn caller(app: &App) -> Result<Caller> {
+    Ok(classify(identity::identify(app)?.task.as_ref()))
 }
 
 /// What a task with a parent may be allowed, before its parent's list cuts
@@ -655,19 +654,7 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         return Ok(None);
     }
     let app = App::open().context("check what this caller may do")?;
-    let me = match identity::identify(&app.db) {
-        Ok(me) => me,
-        Err(e) => {
-            if let Some(Refused::Mismatch(why)) = e.downcast_ref::<Refused>() {
-                let log = actions_log(&app.home);
-                let (capability, tried) = attempt(command, &gate);
-                if let Err(e) = append(&log, capability, &tried, Outcome::Denied, Some(why)) {
-                    eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
-                }
-            }
-            return Err(e);
-        }
-    };
+    let me = identity::identify(&app)?;
     if let Some(Commands::ReviewJob { state }) = command {
         check_review_job(&app.home, state)?;
         // The runner `jeet review` started, as the task it runs for.
@@ -706,22 +693,6 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         log,
         notify: settings.notify(),
     }))
-}
-
-/// What a caller refused for who it is tried, for the log: the capability
-/// and action `gate` says, else what only the root may do.
-fn attempt(command: Option<&Commands>, gate: &Gate) -> (&'static str, String) {
-    match gate {
-        Gate::Needs { capability, action } => {
-            let about = self::capability(capability).map_or("", |c| c.about);
-            let tried = action.clone().unwrap_or_else(|| about.to_string());
-            (capability, tried)
-        }
-        _ => (
-            "identity",
-            node_only(command).unwrap_or("run jeet").to_string(),
-        ),
-    }
 }
 
 /// What `command` does that only the root may, for "task … may not …":
@@ -874,6 +845,18 @@ pub fn check_review_job(home: &Path, state: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Log that `who`, the agent jeet identified, claimed to be another
+/// ([`identity::identify`]). Only jeet's own words: what it claimed, and
+/// what it ran, are the agent's, and the assistant reads this log as its
+/// own record.
+pub fn log_mismatch(home: &Path, who: &str) {
+    let log = actions_log(home);
+    let action = format!("{who} claimed to be another task or the assistant");
+    if let Err(e) = append(&log, "identity", &action, Outcome::Denied, None) {
+        eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+    }
+}
+
 pub fn actions_log(home: &Path) -> PathBuf {
     config::assistant_dir(home).join("actions.log")
 }
@@ -933,6 +916,7 @@ fn append(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
     use clap::Parser;
 
     fn gate_of(args: &[&str]) -> Gate {

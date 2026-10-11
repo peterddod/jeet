@@ -578,7 +578,7 @@ local agent that sets out to escape:
 | Forging `JEET_TASK_ID` / `JEET_ASSISTANT` | closed (mismatch / unconfirmed) |
 | Stripping the env inside the pane | closed (the anchor still binds); open for a pane whose anchor could not be recorded (jeet warns at start) |
 | A Node claiming Root | closed (mismatch) |
-| Pid reuse | closed (start time; boot floor on Linux) |
+| Pid reuse | closed (start time; on Linux tagged with the boot id) |
 | A pre-created `jeet-<slug>` session | closed (not adopted; warning) |
 | Calling `review-job` directly | closed (go byte plus job anchor at the process itself) |
 | Forged `task-hook --task <other>` | closed for reports up; status files remain writable |
@@ -993,8 +993,12 @@ what this RFC left open, or departed from it:
   (`PROC_PIDTBSDINFO`) through `libc` on macOS. It stops at pid ≤ 1, a
   failed lookup, a zombie, a cycle or depth 64. Other unix targets find
   nothing and fail closed. jeet never runs `ps` for identity.
-- **I3** Start times are re-read on every check. On Linux, rows older than
-  the boot time are ignored; macOS start times are absolute.
+- **I3** Start times are re-read on every check. On Linux, where they count
+  clock ticks since boot, the start is tagged with a hash of
+  `/proc/sys/kernel/random/boot_id`, so a row from an earlier boot matches
+  no process and is pruned. Not the boot time, which moves when the clock
+  is stepped (deviation: the plan compared rows' `created_at` with
+  `btime`). macOS start times are absolute.
 - **I4** Resolution, nearest anchor first: a job anchor at the process
   itself is that job; an anchor whose task disagrees with `JEET_TASK_ID`,
   or a non-root anchor under `JEET_ASSISTANT`, is a mismatch; an anchor is
@@ -1005,12 +1009,15 @@ what this RFC left open, or departed from it:
   parented task's session is refused for gated commands, not gated as the
   task.
 - **I6** Mismatch and unconfirmed are errors; a mismatch is also logged as
-  Denied in `actions.log`. An index error fails closed.
+  Denied in `actions.log`, wherever identity is resolved. An index error
+  fails closed.
 - **I7** `authorize` resolves identity for every gated or node-only
-  command, whatever the env says. Hooks and free commands never ask.
+  command, whatever the env says, and never opens the index for hooks and
+  other free commands; those that act on who the caller is resolve it
+  themselves (I21).
 - **I8** Anchors are a plain `INSERT`, never re-bound. The process is
   already running when its row goes in, so the insert comes first and
-  dead rows are pruned after it (or before a retry, when a pre-reboot row
+  dead rows are pruned after it (or before a retry, when a dead row
   holds the same pid and start). If a start time cannot be read, nothing is
   recorded and jeet warns that the agent cannot be identified. Archiving a
   task deletes its pane anchors; deleting it cascades.
@@ -1025,7 +1032,8 @@ what this RFC left open, or departed from it:
   top-level review task the root reviews again is never moved under it),
   else nothing (the user). If the anchor cannot be recorded, the runner is
   killed and the job ends with 127. A runner refused after the go byte
-  records its job as ended with 126, so it never reads as running. `review-job` refuses to run on a
+  records its job as ended with 126, so it never reads as running; so does
+  one that gets EOF before the byte, its launcher having died. `review-job` refuses to run on a
   terminal, on EOF or on any other byte ("review-job is started only by
   `jeet review`"), before `authorize`. Every caller of `review-job` is then
   held to the reviews-dir check ("review jobs run only from jeet's reviews
@@ -1069,15 +1077,21 @@ what this RFC left open, or departed from it:
     exit the assistant in its window and run `jeet chat` again …"), and "this jeet runs under task X's agent (<id>), but
     $JEET_TASK_ID says it is task Y (<id>); jeet refuses a caller that
     claims to be another" (or "… $JEET_ASSISTANT says it is the
-    assistant …"). A mismatch is logged as `denied` under the gated
-    capability, or `identity` for a free or interactive command, with the
-    mismatch as the error.
+    assistant …"). `identify` itself logs a mismatch, so every command
+    that resolves identity does (gated and node-only ones through
+    `authorize`, `report`, `task new`, `worktree ls`/`path`/`add` through
+    `tasks::current`, hooks reporting up). The record is `denied` under
+    capability `identity`, in jeet's words only: "task X's agent (<id>)
+    claimed to be another task or the assistant". The claimed id and the
+    command's text are the caller's and stay out of the log the assistant
+    reads as its own.
   - `identify` returns a typed `identity::Refused` (`Mismatch`,
-    `Unconfirmed`) so `authorize` knows which to log.
+    `Unconfirmed`).
   - `notify` and `todo`, which only the root may run, and every gated
-    command open the index and walk the process tree for any caller. Hooks,
-    `task-startup`, `watch --once`, `report` and the other free commands do
-    not.
+    command open the index and walk the process tree for any caller from
+    `authorize`. `report`, `worktree ls`/`path`/`add` without `--task`, and
+    hooks with `--task` walk it themselves. `task-startup`, `watch --once`
+    and the other free commands do not.
   - `tasks::current` (`worktree ls`, `path` and `add` without `--task`)
     takes the identified task first, then `$JEET_TASK_ID`, then the cwd. An
     identity error propagates, so these are refused as unconfirmed in a
@@ -1090,8 +1104,8 @@ what this RFC left open, or departed from it:
     started (I8). A live session with no live anchor warns "tmux session S
     was started by an older jeet or outside jeet, so jeet cannot confirm
     its agent is task X's; stop it and open the task again".
-  - The prune after each insert removes rows of dead processes, rows whose
-    start differs and, on Linux, rows older than the boot time.
+  - The prune after each insert removes rows of dead processes and rows
+    whose start differs (on Linux, every row from an earlier boot).
   - The #32 notes' forward references to "#33's sandbox" (E0, E1, E9,
     E15) are superseded: #33 built no sandbox. The boundary is a
     placement (§11); `Enforcement::Sandbox`, write denies and a 0600
@@ -1154,7 +1168,10 @@ Left off the trait, each for a reason:
   and deletes its local state correctly.
 - **`send`**: `messages::Agent` is already the local abstraction. A message
   to a non-local task finds no pane and routes to Start, which refuses it
-  in the foreground. A background send (`JEET_BACKGROUND=1`, which may not
+  in the foreground. Typing into a live session goes through `runtime_for`
+  too (`TmuxAgent::type_in`), so a session left under the name of a task
+  jeet may not run locally (one from before an upgrade, or one started
+  outside jeet) is never typed into; a send that only queues still queues. A background send (`JEET_BACKGROUND=1`, which may not
   start an agent) holds it in the inbox instead (`Delivered::Held`), as for
   any agent it may not start; nothing ever delivers it until that placement
   is built.
