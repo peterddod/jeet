@@ -704,12 +704,13 @@ turn's end hands it nothing, and nothing starts it; `jeet task open`
 attaches to it while its agent still runs, and otherwise says to resume it.
 Pause interrupts the turn of each of their agents that is working (one
 Escape, never over what you typed), and says, task by task, what it did; an
-agent started or typed a message in the last few seconds, whose turn has
-not begun yet, is waited for and then interrupted. Stop ends their
+agent started with a prompt or typed a message in the last few seconds,
+whose turn has not begun yet, is waited for and then interrupted. Stop ends their
 tmux sessions, and any review job running for them or in their worktrees
 (a review task's agent is its review command, which pause cannot
 interrupt), and their ending is not reported; `jeet review` does not
-start a held review task's job again. Resume is refused while a
+start a held review task's job again (it says so, and still opens the
+review and its worktree). Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once

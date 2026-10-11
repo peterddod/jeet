@@ -8828,14 +8828,23 @@ fn stopping_a_review_task_ends_its_job_until_resumed() {
     assert!(!ran.exists(), "the job outlived its task's stop");
 
     std::fs::remove_file(&started).unwrap();
+    // Only the job is refused: the review and its worktree still open.
     let output = root.jeet(&["review", "7", "--rerun"], &trunk, &env);
-    assert!(!output.status.success());
+    succeeded(&output);
     let said = stderr_of(&output);
     assert!(said.contains("not reviewing"), "{said}");
     assert!(
         said.contains("`jeet manager resume review-widget-7` first"),
         "{said}"
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("review-widget-7"),
+        "the worktree was not handed off"
+    );
+    // The user looking at it, with no rerun, is not refused either.
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("review-widget-7"));
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!started.exists(), "a stopped review task's job started");
 }
@@ -9986,6 +9995,27 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
 #[cfg(unix)]
 #[test]
 fn archiving_a_worker_mid_turn_charges_its_turn_so_far() {
+    charged_mid_turn(&["task", "archive", "w", "--force"]);
+}
+
+/// So does stopping it, before its session ends.
+#[cfg(unix)]
+#[test]
+fn stopping_a_worker_mid_turn_charges_its_turn_so_far() {
+    charged_mid_turn(&["manager", "stop", "w"]);
+}
+
+/// And interrupting its turn, which ends with no Stop hook to charge it.
+#[cfg(unix)]
+#[test]
+fn interrupting_a_worker_mid_turn_charges_its_turn_so_far() {
+    charged_mid_turn(&["task", "interrupt", "w"]);
+}
+
+/// Run `args` on worker `w`, under the assistant with an hour's budget, ten
+/// minutes into a turn no sweep has charged, and check it was charged.
+#[cfg(unix)]
+fn charged_mid_turn(args: &[&str]) {
     let lab = StoreLab::new();
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
@@ -10012,8 +10042,14 @@ fn archiving_a_worker_mid_turn_charges_its_turn_so_far() {
     let at = status["at"].as_i64().unwrap();
     status["busy_since"] = serde_json::json!(at - 600);
     std::fs::write(&path, status.to_string()).unwrap();
+    // A pane with nothing typed in it, for an interrupt to send keys to.
+    let stub = tmux.parent().unwrap();
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
 
-    succeeded(&lab.jeet_at(&["task", "archive", "w", "--force"], &lab.home(), &env));
+    let output = lab.jeet_at(args, &lab.home(), &env);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(!said.contains("not working"), "{said}");
     let used: i64 = lab
         .index()
         .query_row(
@@ -10130,6 +10166,51 @@ fn a_worker_that_uses_its_turns_up_is_paused_and_blocked_on_budget() {
     let reports = budget_reports();
     assert_eq!(reports.len(), 3, "{reports:?}");
     assert!(reports[2].contains("blocked: budget"), "{reports:?}");
+}
+
+/// On an agent that takes no first prompt, a brief or message for a held
+/// task is refused, as it is when its start would be made at once, not
+/// left in its inbox for a start that would not give it.
+#[cfg(unix)]
+#[test]
+fn a_held_start_with_a_prompt_is_refused_on_an_agent_that_takes_none() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "aider")];
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    lab.index()
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    succeeded(&lab.jeet_at(&["manager", "pause", "m"], &lab.home(), &env));
+
+    let output = lab.jeet_at(
+        &["task", "new", "kid", "--parent", "m", "--prompt", "go"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("takes no first prompt"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(lab.home().join("tasks/kid").is_dir());
+    let inbox = lab.home().join("tasks/kid/.jeet/inbox.jsonl");
+    assert!(!inbox.exists());
+
+    let output = lab.jeet_at(&["task", "send", "kid", "hi"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("takes no first prompt"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!inbox.exists());
+    assert!(lab.start_queue().is_empty());
+    assert!(calls_of(&tmux, "new-session").is_empty());
 }
 
 /// A budget is never set past what is left above the task: the change is

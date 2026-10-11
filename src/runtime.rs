@@ -104,6 +104,12 @@ pub fn ensure_running(
     }
     // Its inbox, then the start lock (M22), as a drain takes them. Only for
     // a task directory that is there: a missing one is the start's to refuse.
+    // Refused now, not once a queued or held start comes to be made.
+    if prompt.is_some() {
+        if let Some(why) = first_prompt_refusal(app, task) {
+            bail!(why);
+        }
+    }
     let dir = tasks::task_dir(app, task);
     let inbox = match (prompt, session) {
         (None, None) if dir.is_dir() => Some(Inbox::lock(&dir)?),
@@ -249,7 +255,7 @@ fn start_tmux(
         ));
     }
     let hooks = spec.has_hooks();
-    if let Err(e) = status::mark_launched(&dir, hooks) {
+    if let Err(e) = status::mark_launched(&dir, hooks, prompt.is_some()) {
         warnings.push(format!("could not note the agent's launch: {e:#}"));
     }
     let home = app.home.to_string_lossy();
@@ -318,6 +324,28 @@ fn already_running(
     })
 }
 
+/// Why `task`'s agent cannot be started with a first prompt on `spec`.
+fn no_first_prompt(spec: &AgentSpec, task: &TaskRecord) -> String {
+    format!(
+        "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
+         the message once it is running",
+        spec.display(),
+        task.slug
+    )
+}
+
+/// Why `task`'s agent cannot be started with a first prompt, when its
+/// harness takes none from jeet: asked before a start with one is queued
+/// or held, as well as made, so a brief or message is never left waiting
+/// for a start that would not give it.
+pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
+    let spec = AgentSpec::from_config(&app.config).ok()?;
+    match spec.harness.prompt_args("") {
+        Some(_) => None,
+        None => Some(no_first_prompt(&spec, task)),
+    }
+}
+
 /// The agent's command line. When its harness supports it, it resumes or
 /// starts a recorded session, carries jeet's hooks and, given one, its
 /// first prompt.
@@ -330,11 +358,7 @@ fn launch_argv(
 ) -> Result<(Vec<String>, Option<String>)> {
     let mut argv = spec.argv.clone();
     if prompt.is_some() && spec.harness.prompt_args("").is_none() {
-        bail!(
-            "{} takes no first prompt from jeet; start it with `jeet task open {}` and send              the message once it is running",
-            spec.display(),
-            task.slug
-        );
+        bail!(no_first_prompt(spec, task));
     }
     if !spec.supports_sessions() {
         if let Some(id) = session {

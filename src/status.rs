@@ -142,9 +142,13 @@ fn launched_path(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("launched")
 }
 
+/// What the launch marker holds for a launch given a first prompt.
+const LAUNCHED_WITH_PROMPT: &[u8] = b"prompt";
+
 /// Note that the task's agent was just launched, `hooks` saying whether its
-/// harness reports its status.
-pub fn mark_launched(task_dir: &Path, hooks: bool) -> Result<()> {
+/// harness reports its status, and `prompted` whether it was given a first
+/// prompt.
+pub fn mark_launched(task_dir: &Path, hooks: bool, prompted: bool) -> Result<()> {
     let path = launched_path(task_dir);
     if !hooks {
         return match std::fs::remove_file(&path) {
@@ -153,7 +157,8 @@ pub fn mark_launched(task_dir: &Path, hooks: bool) -> Result<()> {
         };
     }
     std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
-    std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
+    let content = if prompted { LAUNCHED_WITH_PROMPT } else { b"" };
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))
 }
 
 /// When an agent with hooks was last launched in the task.
@@ -175,15 +180,21 @@ pub fn mark_typed(task_dir: &Path) -> Result<()> {
 }
 
 /// Whether the task's agent was handed input in the last [`STARTING_SECS`]
-/// (launched with hooks, its first prompt on its command line, or typed a
-/// message) that no hook has reported on since: a turn that may be about
+/// (launched with hooks and its first prompt on its command line, or typed
+/// a message) that no hook has reported on since: a turn that may be about
 /// to start, though its status does not say so yet. Not one the startup
 /// watcher found held at a startup prompt.
 pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
+    let launched = launched_at(task_dir);
+    // Typed into the agent running now, not one launched before it.
     let typed = std::fs::metadata(typed_path(task_dir))
         .ok()
-        .and_then(|m| crate::agent::mtime_secs(&m));
-    let Some(given) = launched_at(task_dir).max(typed) else {
+        .and_then(|m| crate::agent::mtime_secs(&m))
+        .filter(|t| launched.is_none_or(|l| *t >= l));
+    // A launch with no first prompt hands it nothing to start a turn on.
+    let prompted =
+        std::fs::read(launched_path(task_dir)).is_ok_and(|content| content == LAUNCHED_WITH_PROMPT);
+    let Some(given) = launched.filter(|_| prompted).max(typed) else {
         return false;
     };
     if now - given >= STARTING_SECS {
@@ -1436,7 +1447,7 @@ mod tests {
         // Left running at 100 by an agent that died; one launched since
         // is alive and has not reported yet.
         let dir = busy_w(&app);
-        mark_launched(&dir, true).unwrap();
+        mark_launched(&dir, true, true).unwrap();
         let w = app.db.get_task("w").unwrap().unwrap();
         assert_eq!(
             fold_busy(&app, &w, true, now_secs()).unwrap(),
@@ -1456,8 +1467,11 @@ mod tests {
         let now = now_secs();
         // Nothing handed it: nothing to wait for.
         assert!(!input_unreported(dir, now));
+        // Launched with no first prompt: no turn is coming.
+        mark_launched(dir, true, false).unwrap();
+        assert!(!input_unreported(dir, now));
         // Launched with its first prompt, no hook yet.
-        mark_launched(dir, true).unwrap();
+        mark_launched(dir, true, true).unwrap();
         assert!(input_unreported(dir, now));
         // Long since: whatever it is doing, it would have said.
         assert!(!input_unreported(dir, now + STARTING_SECS));
@@ -1699,11 +1713,11 @@ mod tests {
     fn the_launch_marker_is_kept_only_for_agents_with_hooks() {
         let dir = tempfile::tempdir().unwrap();
         assert!(launched_at(dir.path()).is_none());
-        mark_launched(dir.path(), true).unwrap();
+        mark_launched(dir.path(), true, false).unwrap();
         assert!(launched_at(dir.path()).is_some());
-        mark_launched(dir.path(), false).unwrap();
+        mark_launched(dir.path(), false, false).unwrap();
         assert!(launched_at(dir.path()).is_none());
-        mark_launched(dir.path(), false).unwrap();
+        mark_launched(dir.path(), false, false).unwrap();
         mark_startup_prompt(dir.path(), "s", "trust folder", 7).unwrap();
         let status = current_status(dir.path()).unwrap();
         assert_eq!(

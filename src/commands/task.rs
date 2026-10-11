@@ -98,6 +98,14 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let Some(prompt) = prompt else {
         return Ok(());
     };
+    // A brief its agent could never start with is not left waiting for a
+    // held or queued start.
+    if let Some(why) = runtime::first_prompt_refusal(app, &created.task) {
+        bail!(
+            "task {} was made, but its agent did not start: {why}",
+            created.task.name
+        );
+    }
     // Its inbox, then the start lock (M22): a brief queued on `max_live` is
     // in the inbox before a drain can start the agent with it.
     let inbox = Inbox::lock(&dir)?;

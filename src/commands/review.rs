@@ -3,7 +3,7 @@
 
 use std::io::{self, IsTerminal};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::cd;
 use crate::context::App;
@@ -102,11 +102,13 @@ fn start_review(
         return Ok(());
     };
     // Run as a task, the job is its agent: a paused or stopped task, or
-    // one under a held node, is not started again until resumed.
+    // one under a held node, is not started again until resumed. Only the
+    // job is refused: the review and its worktree still open.
     if let Some(id) = as_task {
         if let Some(task) = app.db.get_task(id)? {
             if let Some((holder, _)) = run::hold(app, &task)? {
-                bail!("not reviewing: {}", run::held_refusal(&task, &holder));
+                eprintln!("jeet: not reviewing: {}", run::held_refusal(&task, &holder));
+                return Ok(());
             }
         }
     }

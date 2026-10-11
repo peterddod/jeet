@@ -1301,9 +1301,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   on, and marks an interrupted node idle (`Paused`), since an interrupted
   turn has no Stop hook. Each node is interrupted under its inbox lock, so
   a delivery that found it not held yet has typed its message in first.
-  A node handed input in the last `STARTING_SECS` (launched with hooks,
-  its brief on its command line, or typed a message: `TmuxAgent::type_in`
-  touches `.jeet/typed` first) that no hook has reported on since
+  A node handed input in the last `STARTING_SECS` (launched with hooks
+  and its brief on its command line, which `.jeet/launched` records, or
+  typed a message since its launch: `TmuxAgent::type_in` touches
+  `.jeet/typed` first; a launch with no first prompt hands it none, and
+  its pause waits for nothing) that no hook has reported on since
   (`status::input_unreported`; a status in the same second does not
   count, nor does a session start's, written before the prompt on its
   command line is submitted however late it boots, and a startup-prompt
@@ -1333,7 +1335,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`run::stop_with`; production: `run::end_agent`). It also ends the
   review jobs running as the node or in its directory, as an archive does
   (a review task's agent is its review command, with no session to end or
-  interrupt), and `jeet review` refuses to start a held review task's job. `max_live` counts the
+  interrupt), and `jeet review` refuses to start a held review task's job, with a note,
+  and still opens the review and hands off its worktree. `max_live` counts the
   active tasks below the assistant whose `jeet-<slug>` session one `tmux
   list-sessions` lists and whose pane is alive; a session the user's
   `remain-on-exit` keeps after its agent exits does not count. The start gate is a
@@ -1366,6 +1369,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   behind by an open that starts it first. Under a harness that takes no
   first prompt from jeet (`prompt_args` is `None`), it starts with none and
   leaves the inbox for a delivery to type in, rather than fail every open.
+  On such a harness a start with a prompt (`task new --prompt`, a delivery
+  to an agent not running) is refused before it is held or queued
+  (`runtime::first_prompt_refusal`), as it is when made at once, so no
+  brief or message waits for a drain that would start it without one.
   A drain skips, unqueues and warns of a queued task whose directory is
   gone, before its inbox lock would make it again. A start made holding the start lock (a drain, or a delivery
   admitted already) goes through `ensure_running_admitted` with the

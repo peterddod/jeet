@@ -303,6 +303,12 @@ pub trait Agent {
     fn can_start(&self) -> bool {
         true
     }
+    /// Why it cannot be started with a message as its first prompt, if it
+    /// cannot: one for it while it is not running is refused, not left
+    /// waiting for a start that would not give it.
+    fn first_prompt_refusal(&self) -> Option<String> {
+        None
+    }
     /// Whether it is paused or stopped, itself or above it (M16): a message
     /// waits in its inbox, neither typed in nor starting it.
     fn held(&self) -> Result<bool> {
@@ -391,7 +397,18 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     // Its start is queued even while it runs, should its agent end before
     // the resume: a drain finding it running leaves it be. Not for what
     // may not start it (a report): that waits for its next start.
+    // Not running, it could only be started with it: refused now, not
+    // once a held or queued start comes to be made.
+    let start_refused = || {
+        if agent.can_start() && !agent.alive() {
+            if let Some(why) = agent.first_prompt_refusal() {
+                bail!(why);
+            }
+        }
+        Ok(())
+    };
     if agent.held()? {
+        start_refused()?;
         inbox.push_to(&message, me)?;
         if agent.can_start() {
             agent.queue_held_start()?;
@@ -411,6 +428,9 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     if route == Route::Start && !agent.can_start() {
         inbox.push_to(&message, me)?;
         return Ok(Delivered::Held);
+    }
+    if route == Route::Start {
+        start_refused()?;
     }
     // The start lock, after the inbox lock (M22), held until it is started.
     let guard = match route {
@@ -671,6 +691,10 @@ impl Agent for TmuxAgent<'_> {
 
     fn can_start(&self) -> bool {
         self.may_start && tmux::may_start_session()
+    }
+
+    fn first_prompt_refusal(&self) -> Option<String> {
+        runtime::first_prompt_refusal(self.app, self.task)
     }
 
     fn held(&self) -> Result<bool> {

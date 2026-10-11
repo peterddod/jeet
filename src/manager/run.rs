@@ -161,8 +161,10 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     let dir = tasks::task_dir(app, node);
     let interrupted = loop {
         // Under its inbox lock: a delivery that found it not held yet has
-        // typed its message in, and is interrupted with the rest.
-        let inbox = Inbox::lock(&dir).ok();
+        // typed its message in, and is interrupted with the rest. Not for a
+        // directory gone: the lock would make it again, and a later start
+        // would run the agent in an empty one.
+        let inbox = dir.is_dir().then(|| Inbox::lock(&dir).ok()).flatten();
         let interrupted = rt(node).and_then(|r| r.interrupt(app, node));
         drop(inbox);
         // Just launched with its brief, or just typed a message, and no
@@ -774,7 +776,7 @@ mod tests {
         let (_dir, app) = lab();
         let w1 = get(&app, "w1");
         // Launched with its brief on its command line, no hook yet.
-        status::mark_launched(&tasks::task_dir(&app, &w1), true).unwrap();
+        status::mark_launched(&tasks::task_dir(&app, &w1), true, true).unwrap();
         let rt = Starting {
             starting: 2,
             calls: std::cell::Cell::new(0),
@@ -890,6 +892,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_leaves_a_missing_task_directory_missing() {
+        let (_dir, app) = lab();
+        let w1 = get(&app, "w1");
+        let dir = tasks::task_dir(&app, &w1);
+        assert!(!dir.exists());
+        let rt = fake(&app, |_| Ok(Interrupted::NotWorking(Activity::NotRunning)));
+        let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+        pause_with(&app, &Caller::User, &w1, &lookup, &nobody).unwrap();
+        // Still interrupted, but its inbox lock did not make it again.
+        assert_eq!(rt.calls.borrow().len(), 1);
+        assert!(!dir.exists());
+    }
+
+    #[test]
     fn a_pause_whose_charge_uses_a_budget_up_reports_it_blocked() {
         let (_dir, app) = lab();
         app.db.set_budget_max("w2", Some(60), None).unwrap();
@@ -990,6 +1006,15 @@ mod tests {
         // A node below may not undo what the node above it set.
         let err = may(Setter::Node("m".into()), &m2).unwrap_err();
         assert!(err.contains("by manager m; only manager m"), "{err}");
+        // A node above undoes what one below it set, however far below;
+        // one beside it does not.
+        assert!(may(Setter::Node("m2".into()), &m).is_ok());
+        assert!(may(Setter::Node("w2".into()), &m).is_ok());
+        assert!(may(Setter::Node("w2".into()), &m2).is_ok());
+        let w1 = Caller::Node(get(&app, "w1"));
+        let err = may(Setter::Node("m2".into()), &w1).unwrap_err();
+        assert!(err.contains("by manager m2; only manager m2"), "{err}");
+        assert!(may(Setter::Node("w2".into()), &w1).is_err());
         // The budget ranks lowest: anyone in scope resumes once it is raised.
         app.db.set_budget_max("m2", None, Some(1)).unwrap();
         app.db.charge("w2", 0, 1).unwrap();
