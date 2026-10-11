@@ -250,7 +250,7 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             Some(Brief {
                 created_by,
                 goal: fence(b.goal),
-                done_when: b.done_when.map(&fence),
+                done_when: b.done_when.map(fence),
             })
         }
         None => None,
