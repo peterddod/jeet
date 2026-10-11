@@ -6,9 +6,6 @@
 //! holds it is the most severe state over it and its ancestors
 //! ([`hold`]). A held node starts nothing and is handed nothing.
 
-// `jeet manager pause|resume|stop|drain` are the callers still to come.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 
@@ -249,11 +246,12 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
             )),
         }
     }
-    if let Err(e) = drain(app) {
-        outcomes.push(NodeOutcome::new(
+    match drain(app) {
+        Ok(warnings) => outcomes.extend(warnings.into_iter().map(|w| NodeOutcome::new(target, w))),
+        Err(e) => outcomes.push(NodeOutcome::new(
             target,
             format!("could not start what waits on max_live: {e:#}"),
-        ));
+        )),
     }
     Ok(outcomes)
 }
@@ -292,8 +290,11 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
             outcomes.push(NodeOutcome::new(&node, line));
         }
     }
-    if let Err(e) = drain(app) {
-        let line = format!("could not start what waits on max_live: {e:#}");
+    let lines = match drain(app) {
+        Ok(warnings) => warnings,
+        Err(e) => vec![format!("could not start what waits on max_live: {e:#}")],
+    };
+    for line in lines {
         match targets.first() {
             Some(first) => outcomes.push(NodeOutcome::new(first, line)),
             None => eprintln!("jeet: {line}"),
@@ -457,12 +458,14 @@ pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32) {
 
 /// Start what waits on `max_live`, oldest first, while slots are free:
 /// each under its inbox lock, then the start lock. A task held or gone
-/// active stays queued or leaves the queue; one that fails to start is
-/// warned of and stays queued. Nothing from a background job with no tmux
-/// server to start on.
-pub fn drain(app: &App) -> Result<()> {
+/// active stays queued or leaves the queue; one that fails to start stays
+/// queued. Nothing from a background job with no tmux server to start on.
+/// Returns what to warn of, for the caller to show where it can (the
+/// TUI's status line, not stderr).
+pub fn drain(app: &App) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
     if !tmux::may_start_session() {
-        return Ok(());
+        return Ok(warnings);
     }
     for task in app.db.queued_starts()? {
         if task.state != TaskState::Active {
@@ -481,25 +484,30 @@ pub fn drain(app: &App) -> Result<()> {
             continue;
         }
         match start_queued(app, &task, &inbox, &guard) {
-            Ok(()) => app.db.unqueue(&task.id)?,
-            Err(e) => eprintln!("jeet: could not start queued task {}: {e:#}", task.slug),
+            Ok(said) => {
+                app.db.unqueue(&task.id)?;
+                warnings.extend(said);
+            }
+            Err(e) => warnings.push(format!("could not start queued task {}: {e:#}", task.slug)),
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// Start `task`, admitted under `guard`, with what queued in its inbox as
-/// its first prompt.
-fn start_queued(app: &App, task: &TaskRecord, inbox: &Inbox, guard: &StartGuard) -> Result<()> {
+/// its first prompt; what the start warns of.
+fn start_queued(
+    app: &App,
+    task: &TaskRecord,
+    inbox: &Inbox,
+    guard: &StartGuard,
+) -> Result<Vec<String>> {
     if inbox.read_for(None)?.is_empty() {
         let running = runtime::ensure_running_admitted(app, task, None, None, guard)?;
-        for warning in &running.warnings {
-            eprintln!("jeet: {warning}");
-        }
-        return Ok(());
+        return Ok(running.warnings);
     }
     messages::start_with_queue(inbox, &TmuxAgent::new(app, task), Some(guard))?;
-    Ok(())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -854,7 +862,9 @@ mod tests {
             .unwrap();
         // One with messages to start with, one without; neither starts with
         // no tmux, so both stay queued, and w1's message waits still.
-        finishes(dir.path(), |app| drain(app).unwrap());
+        finishes(dir.path(), |app| {
+            drain(app).unwrap();
+        });
         let queued: Vec<String> = app
             .db
             .queued_starts()

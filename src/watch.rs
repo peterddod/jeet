@@ -1070,8 +1070,11 @@ pub fn run_once(app: &App) -> Result<()> {
         eprintln!("jeet: warning: {e:#}");
     }
     // Nor when a slot under `max_live` frees up without an `Ended` hook.
-    if let Err(e) = run::drain(app) {
-        eprintln!("jeet: warning: could not start what waits on max_live: {e:#}");
+    match run::drain(app) {
+        Ok(warnings) => warnings
+            .iter()
+            .for_each(|w| eprintln!("jeet: warning: {w}")),
+        Err(e) => eprintln!("jeet: warning: could not start what waits on max_live: {e:#}"),
     }
 
     let logged: Vec<Logged> = polled

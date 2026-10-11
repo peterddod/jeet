@@ -129,15 +129,22 @@ pub const CAPABILITIES: &[Capability] = &[
         "install or remove the background GitHub watcher",
         &["jeet watch install", "jeet watch uninstall"],
     ),
-    // `jeet manager new`, `pause`, `resume` and `stop` are listed here as
-    // their commands land.
+    // `jeet manager new` is listed here once it lands.
     cap("manager.create", "make managers", &[]),
     cap(
         "manager.grant",
-        "change what tasks under it may do",
-        &["jeet manager grant"],
+        "change what tasks under it may do and spend",
+        &["jeet manager grant", "jeet manager budget"],
     ),
-    cap("manager.stop", "pause, resume and stop tasks under it", &[]),
+    cap(
+        "manager.stop",
+        "pause, resume and stop tasks under it",
+        &[
+            "jeet manager pause",
+            "jeet manager resume",
+            "jeet manager stop",
+        ],
+    ),
 ];
 
 const fn cap(
@@ -592,11 +599,32 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         Commands::Manager { command } => match command {
             // Each checks who asks and shows only what it may see.
             ManagerCommands::Ls { .. } | ManagerCommands::Show { .. } => Gate::Free,
+            // Starts only what is queued already, each through the same
+            // start gate; the `Ended` hook runs it with no caller to check.
+            ManagerCommands::Drain { .. } => Gate::Free,
             ManagerCommands::Grant { name, caps, .. } => needs(
                 "manager.grant",
                 match caps.is_empty() {
                     true => format!("set task {name}'s grant to nothing"),
                     false => format!("set task {name}'s grant to {}", caps.join(", ")),
+                },
+            ),
+            ManagerCommands::Budget { name, change } => needs(
+                "manager.grant",
+                format!(
+                    "changed task {name}'s budget by {}",
+                    crate::manager::budget::change_label(*change)
+                ),
+            ),
+            ManagerCommands::Pause { name } => needs("manager.stop", format!("paused task {name}")),
+            ManagerCommands::Resume { name } => {
+                needs("manager.stop", format!("resumed task {name}"))
+            }
+            ManagerCommands::Stop { name, .. } => needs(
+                "manager.stop",
+                match name {
+                    Some(name) => format!("stopped task {name}"),
+                    None => "stopped every task under the assistant".into(),
                 },
             ),
         },
@@ -909,6 +937,12 @@ pub fn authorize_as(
     if let Caller::Node(task) = caller {
         return node(app, task, command, gate, terminal);
     }
+    if *caller == Caller::Root && stops_all(command) {
+        bail!(
+            "only the user stops every task under the assistant; `jeet manager stop <task>` \
+             stops one"
+        );
+    }
     if let Some(Scope::Verb(verb, target)) = node_scope(command) {
         if verb.reach() == Reach::Tree {
             let target = resolve(app, caller, &target)
@@ -955,8 +989,19 @@ fn node_only(command: Option<&Commands>) -> Option<&'static str> {
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         // Only `jeet review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
+        _ if stops_all(command) => Some("stop every task under the assistant"),
         _ => None,
     }
+}
+
+/// Whether `command` is `jeet manager stop --all`, the user's alone (M11).
+fn stops_all(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Manager {
+            command: ManagerCommands::Stop { name: None, .. }
+        })
+    )
 }
 
 /// How to ask instead, ending every refusal a Node gets.
@@ -1112,6 +1157,10 @@ pub enum Verb {
     TaskNew,
     ManagerShow,
     ManagerGrant,
+    ManagerBudget,
+    ManagerPause,
+    ManagerResume,
+    ManagerStop,
 }
 
 /// Which tasks a task with a parent may run a [`Verb`] on.
@@ -1149,6 +1198,10 @@ impl Verb {
             Verb::TaskNew => "task new",
             Verb::ManagerShow => "manager show",
             Verb::ManagerGrant => "manager grant",
+            Verb::ManagerBudget => "manager budget",
+            Verb::ManagerPause => "manager pause",
+            Verb::ManagerResume => "manager resume",
+            Verb::ManagerStop => "manager stop",
         }
     }
 
@@ -1164,7 +1217,12 @@ impl Verb {
             | Verb::TaskDelete
             | Verb::TaskResync => Reach::Below,
             Verb::TaskNew => Reach::Parent,
-            Verb::ManagerShow | Verb::ManagerGrant => Reach::Tree,
+            Verb::ManagerShow
+            | Verb::ManagerGrant
+            | Verb::ManagerBudget
+            | Verb::ManagerPause
+            | Verb::ManagerResume
+            | Verb::ManagerStop => Reach::Tree,
         }
     }
 }
@@ -1253,6 +1311,17 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             ManagerCommands::Ls { .. } => Some(Scope::Listed),
             ManagerCommands::Show { name, .. } => verb(Verb::ManagerShow, key(name)),
             ManagerCommands::Grant { name, .. } => verb(Verb::ManagerGrant, key(name)),
+            ManagerCommands::Budget { name, .. } => verb(Verb::ManagerBudget, key(name)),
+            ManagerCommands::Pause { name } => verb(Verb::ManagerPause, key(name)),
+            ManagerCommands::Resume { name } => verb(Verb::ManagerResume, key(name)),
+            ManagerCommands::Stop {
+                name: Some(name), ..
+            } => verb(Verb::ManagerStop, key(name)),
+            // `--all`: refused to all but the user before this is asked
+            // ([`node_only`]).
+            ManagerCommands::Stop { name: None, .. } => Some(Scope::NoTarget),
+            // Starts only what is queued already.
+            ManagerCommands::Drain { .. } => Some(Scope::NoTarget),
         },
         _ => None,
     }
@@ -1597,6 +1666,28 @@ mod tests {
                 "manager.grant",
                 "set task m's grant to nothing",
             ),
+            (
+                &["manager", "budget", "m", "+1h,20turns"],
+                "manager.grant",
+                "changed task m's budget by +1h,20turns",
+            ),
+            (
+                &["manager", "budget", "m", "=90m"],
+                "manager.grant",
+                "changed task m's budget by =90m",
+            ),
+            (&["manager", "pause", "m"], "manager.stop", "paused task m"),
+            (
+                &["manager", "resume", "m"],
+                "manager.stop",
+                "resumed task m",
+            ),
+            (&["manager", "stop", "m"], "manager.stop", "stopped task m"),
+            (
+                &["manager", "stop", "--all"],
+                "manager.stop",
+                "stopped every task under the assistant",
+            ),
         ];
         for (args, capability, action) in cases {
             assert_eq!(
@@ -1624,6 +1715,7 @@ mod tests {
             &["prs"],
             &["notify", "hi"],
             &["task-hook", "Stop"],
+            &["manager", "drain"],
             &["store-sync"],
             &["todo"],
             &["todo", "add", "x"],
@@ -2047,7 +2139,34 @@ mod tests {
                 Verb::ManagerGrant,
                 line(&["manager", "grant", "{}", "task.send"]),
             ),
+            (
+                Verb::ManagerBudget,
+                line(&["manager", "budget", "{}", "+1h"]),
+            ),
+            (Verb::ManagerPause, line(&["manager", "pause", "{}"])),
+            (Verb::ManagerResume, line(&["manager", "resume", "{}"])),
+            (Verb::ManagerStop, line(&["manager", "stop", "{}"])),
         ]
+    }
+
+    /// `jeet manager stop --all` is the user's alone (M11), whatever the
+    /// others hold.
+    #[test]
+    fn only_the_user_stops_everything() {
+        let (_dir, app) = forest();
+        let all = ["manager", "stop", "--all"];
+        run_as(&app, &Caller::User, &all, false).unwrap();
+        let e = run_as(&app, &Caller::Root, &all, false).unwrap_err();
+        assert!(e.to_string().contains("only the user"), "{e}");
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        let e = node_of(&app, &m, &all, false).unwrap_err().to_string();
+        assert!(
+            e.contains("may not stop every task under the assistant"),
+            "{e}"
+        );
+        assert!(e.contains("jeet report"), "{e}");
+        // One task, the assistant may stop.
+        run_as(&app, &Caller::Root, &["manager", "stop", "m"], false).unwrap();
     }
 
     #[test]
@@ -2096,7 +2215,11 @@ mod tests {
                 | Verb::TaskDelete
                 | Verb::TaskResync
                 | Verb::ManagerShow
-                | Verb::ManagerGrant => below,
+                | Verb::ManagerGrant
+                | Verb::ManagerBudget
+                | Verb::ManagerPause
+                | Verb::ManagerResume
+                | Verb::ManagerStop => below,
                 Verb::TaskNew => (own || below) && manager(target),
             }
         };
@@ -2123,6 +2246,8 @@ mod tests {
             &["task", "archive", "m"],
             &["task", "send", "m", "hi"],
             &["manager", "grant", "m", "--none"],
+            &["manager", "pause", "m"],
+            &["manager", "stop", "m"],
         ] {
             let e = node_of(&app, &row("m"), args, false)
                 .unwrap_err()
@@ -2149,7 +2274,7 @@ mod tests {
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     let result = run_as(&app, &caller, &args, false);
                     let tree_node = !["assistant", "top", "fix"].contains(&target);
-                    let manager_verb = matches!(verb, Verb::ManagerShow | Verb::ManagerGrant);
+                    let manager_verb = verb.name().starts_with("manager ");
                     match !manager_verb || tree_node {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
@@ -2420,6 +2545,13 @@ mod tests {
             (&["manager", "ls"], true),
             (&["manager", "show", "x"], true),
             (&["manager", "grant", "x", "--none"], true),
+            (&["manager", "budget", "x", "+1h"], true),
+            (&["manager", "pause", "x"], true),
+            (&["manager", "resume", "x"], true),
+            (&["manager", "stop", "x"], true),
+            // Refused to a task with a parent before its scope is asked.
+            (&["manager", "stop", "--all"], true),
+            (&["manager", "drain"], true),
             (&["projects"], false),
             (&["projects", "ls"], false),
             (&["projects", "new", "p"], false),
@@ -2511,7 +2643,10 @@ mod tests {
                 // Enough arguments for clap to accept it.
                 match c.name {
                     "task.send" if *command == "jeet task send" => args.extend(["x", "hi"]),
-                    "manager.grant" => args.extend(["x", "task.send"]),
+                    "manager.grant" if *command == "jeet manager grant" => {
+                        args.extend(["x", "task.send"])
+                    }
+                    "manager.grant" => args.extend(["x", "+1h"]),
                     "worktree.add" | "worktree.rm" | "repo.clone" => args.push("x"),
                     "review.start" | "pr.merge" => args.push("1"),
                     "project.read" | "repo.sync" | "repo.import" | "shell.install"

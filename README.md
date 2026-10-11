@@ -91,7 +91,8 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
-jeet manager ls                          # the tree under it; show <task>, grant <task> <caps>
+jeet manager ls                          # the tree under it; show, grant, budget <task> …
+jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 
@@ -678,6 +679,27 @@ with a warning.
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
 its grant (`manager.grant`); what a task loses, the tasks below it lose too.
+`jeet manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
+sets one (`manager.grant`), within what is left above it; the 80% and 100%
+reports start over.
+
+```bash
+jeet manager pause fix-x       # interrupt its turn, and every task's below it
+jeet manager resume fix-x      # hand over what waited, and let it start again
+jeet manager stop fix-x        # end its agent and every one below it
+jeet manager stop --all        # every task under the assistant (only you)
+```
+
+These need `manager.stop`. A paused or stopped task, and every task below
+it, is handed nothing: messages and reports to it wait in its inbox, its
+turn's end hands it nothing, and nothing starts it; `jeet task open`
+attaches to it while its agent still runs, and otherwise says to resume it.
+Pause interrupts the turn of each of their agents that is working (one
+Escape, never over what you typed), and says, task by task, what it did. Stop ends their
+tmux sessions, and their ending is not reported. Resume is refused while a
+task above holds it, while its budget is used up (`manager budget` first),
+and to anyone ranked below whoever paused or stopped it: you, then the
+assistant, then a manager above, so what you stop only you resume.
 
 ### Archiving and deleting
 
@@ -1169,7 +1191,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
-`pr.comment`, `pr.review` and `pr.merge` (`jeet pr merge`). Nothing is
+`pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
+(`jeet manager grant` and `budget`) and `manager.stop` (`jeet manager
+pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
@@ -1261,8 +1285,8 @@ held = []               # added to pr.merge, pr.comment, pr.review, task.delete
 The tree's settings are checked when they are used, not when config.toml
 is read: a mistake in them (an unknown capability, a held one in a default
 you set, a limit of 0, a `$` budget) refuses making tasks under the
-assistant, `jeet manager grant` and unarchiving a task under a manager, and
-nothing else.
+assistant, starting one, `jeet manager grant` and unarchiving a task under
+a manager, and nothing else.
 
 ### Keeping the store fetched
 

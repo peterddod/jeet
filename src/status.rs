@@ -329,7 +329,7 @@ fn handle_hook(
     }
     // A slot under `max_live` may be free now.
     if let Some(EventKind::Ended { cleared: false }) = hook.kind {
-        if let Err(e) = spawn_drain(&ctx.app) {
+        if let Err(e) = spawn_drain(&ctx.app, &task_id) {
             eprintln!("jeet task-hook {event}: {e:#}");
         }
     }
@@ -530,11 +530,12 @@ pub fn fold_busy(app: &App, task: &TaskRecord, now: i64) -> Result<Threshold> {
 /// Where a detached drain's output goes, in jeet's home.
 const DRAIN_LOG: &str = "drain.log";
 
-/// Start what waits on `max_live` now that a session has ended: a detached
-/// `jeet manager drain`, as [`crate::startup::launch`] starts its job, since
-/// a hook has seconds to run and the pane it runs in may be going. Nothing
-/// when nothing waits.
-fn spawn_drain(app: &App) -> Result<()> {
+/// Start what waits on `max_live` now that task `task_id`'s session is
+/// ending: a detached `jeet manager drain --after <task_id>`, as
+/// [`crate::startup::launch`] starts its job, since a hook has seconds to
+/// run and the pane it runs in may be going; the drain waits for it to go.
+/// Nothing when nothing waits.
+fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
     // The test binary is no jeet.
     if cfg!(test) || app.db.queued_starts()?.is_empty() {
         return Ok(());
@@ -548,7 +549,7 @@ fn spawn_drain(app: &App) -> Result<()> {
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let mut cmd = Command::new("nohup");
     cmd.arg(exe)
-        .args(["manager", "drain"])
+        .args(["manager", "drain", "--after", task_id])
         .env("JEET_HOME", &app.home)
         .env_remove(crate::permissions::ASSISTANT_ENV)
         .env_remove(tasks::TASK_ID_ENV)

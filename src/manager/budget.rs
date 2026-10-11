@@ -3,10 +3,6 @@
 //! is `+` or `=` before them (`+1h`, `=2h,40turns`). Cost budgets wait on
 //! #26.
 
-// `manager budget`, which changes a budget, and the Stop hook, which
-// enforces one, are the callers still to come.
-#![allow(dead_code)]
-
 use anyhow::{bail, Result};
 
 use crate::context::App;
@@ -125,6 +121,36 @@ pub fn label(limits: Limits) -> String {
     match parts.is_empty() {
         true => "none".into(),
         false => parts.join(","),
+    }
+}
+
+/// `change` as `jeet manager budget` takes it: `+1h`, `=2h,40turns`.
+pub fn change_label(change: Change) -> String {
+    match change {
+        Change::Add(limits) => format!("+{}", label(limits)),
+        Change::Set(limits) => format!("={}", label(limits)),
+    }
+}
+
+/// `had` once `change` is made: `+` raises each limit it gives, which
+/// must be there to raise, `=` sets each; a unit it does not give is kept.
+pub fn changed(had: Limits, change: Change) -> Result<Limits> {
+    match change {
+        Change::Set(set) => Ok(Limits {
+            secs: set.secs.or(had.secs),
+            turns: set.turns.or(had.turns),
+        }),
+        Change::Add(add) => {
+            let raise = |had: Option<i64>, add: Option<i64>, unit: &str| match (had, add) {
+                (_, None) => Ok(had),
+                (Some(had), Some(add)) => Ok(Some(had.saturating_add(add))),
+                (None, Some(_)) => bail!("there is no {unit} limit to raise; set one with `=`"),
+            };
+            Ok(Limits {
+                secs: raise(had.secs, add.secs, "time")?,
+                turns: raise(had.turns, add.turns, "turn")?,
+            })
+        }
     }
 }
 
@@ -596,6 +622,39 @@ mod tests {
                 turns: Some(20)
             })
         );
+    }
+
+    #[test]
+    fn a_change_raises_or_sets_only_the_units_it_gives() {
+        let had = Limits {
+            secs: Some(3600),
+            turns: None,
+        };
+        let change = |s: &str| changed(had, parse_change(s).unwrap());
+        assert_eq!(
+            change("+30m").unwrap(),
+            Limits {
+                secs: Some(5400),
+                turns: None
+            }
+        );
+        assert_eq!(
+            change("=2h,40turns").unwrap(),
+            Limits {
+                secs: Some(7200),
+                turns: Some(40)
+            }
+        );
+        assert_eq!(
+            change("=10turns").unwrap(),
+            Limits {
+                secs: Some(3600),
+                turns: Some(10)
+            }
+        );
+        // No limit is no cap: there is nothing to raise.
+        let e = change("+5turns").unwrap_err().to_string();
+        assert!(e.contains("no turn limit to raise"), "{e}");
     }
 
     #[test]

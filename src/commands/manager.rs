@@ -3,17 +3,20 @@
 //!
 //! `ls` and `show` are reads, free to every caller, but each checks who
 //! asks itself: a task with a parent sees only itself and the tasks below
-//! it. `grant` is gated by `manager.grant` and scoped before it runs
-//! (`permissions`).
+//! it. `grant` and `budget` are gated by `manager.grant`, `pause`, `resume`
+//! and `stop` by `manager.stop`, and each is scoped before it runs
+//! (`permissions`). `drain`, hidden, starts what is queued already.
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::context::App;
-use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord};
+use crate::db::tasks::{ReportKind, Setter, TaskKind, TaskRecord, TaskReportRecord};
 use crate::manager;
+use crate::manager::budget::{self, Change, Limits};
+use crate::manager::run::{self, NodeOutcome};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::runtime;
 use crate::tmux;
@@ -277,9 +280,18 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             .then_some("review job: no hooks, so nothing is counted"),
     };
     let (effective_run, holder) = app.db.effective_run_state(&task.id)?;
+    // A node that set it by its name, not its id.
+    let by = match &task.run_state_by {
+        Some(Setter::Node(id)) => Some(match app.db.get_task(id)? {
+            Some(t) => t.slug,
+            None => id.clone(),
+        }),
+        Some(setter) => Some(setter.as_str().to_string()),
+        None => None,
+    };
     let run = Run {
         state: task.run_state.as_str(),
-        by: task.run_state_by.as_ref().map(|s| s.as_str().to_string()),
+        by,
         effective: effective_run.as_str(),
         held_by: holder.map(|h| h.slug),
     };
@@ -489,6 +501,134 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
     Ok(())
 }
 
+/// Change what task `name` may spend (M19): `+` raises a limit it has,
+/// `=` sets one, a unit not given is kept. Within what is left above it
+/// and, for a task with a parent changing it, what it has left itself.
+/// The thresholds are told again from scratch. Its run state is left as it
+/// is: a task its budget paused runs again only once resumed.
+pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
+    let (caller, task) = scoped(app, name, Verb::ManagerBudget)?;
+    let row = app.db.budget(&task.id)?;
+    let had = Limits {
+        secs: row.as_ref().and_then(|r| r.max_secs),
+        turns: row.as_ref().and_then(|r| r.max_turns),
+    };
+    let want = budget::changed(had, change)
+        .with_context(|| format!("{}'s budget", manager::label(&task)))?;
+    let want = budget::cap(app, &task, &caller, want)?;
+    app.db.set_budget_max(&task.id, want.secs, want.turns)?;
+    let (secs, turns) = app.db.subtree_used(&task.id)?;
+    eprintln!(
+        "jeet: {}'s budget is {} ({}m and {turns} turns used, with the tasks below it)",
+        manager::label(&task),
+        budget::label(want),
+        secs / 60
+    );
+    if task.kind == TaskKind::Review {
+        eprintln!(
+            "jeet: it is a review job, which runs no hooks, so nothing is counted against it"
+        );
+    }
+    if task.run_state_by == Some(Setter::Budget) {
+        eprintln!(
+            "jeet: its budget paused it; `jeet manager resume {}` lets it run again",
+            task.slug
+        );
+    }
+    Ok(())
+}
+
+/// Pause task `name` and everything below it (M17): what each node's
+/// interrupt came to, one line each.
+pub fn pause(app: &App, name: &str) -> Result<()> {
+    let (caller, task) = scoped(app, name, Verb::ManagerPause)?;
+    let outcomes = run::pause(app, &caller, &task)?;
+    eprintln!(
+        "jeet: paused {}; it and the tasks below it are handed nothing until it is resumed",
+        manager::label(&task)
+    );
+    print_outcomes(&outcomes);
+    Ok(())
+}
+
+/// Let task `name` run again (M15), if `run::check_resume` lets this
+/// caller.
+pub fn resume(app: &App, name: &str) -> Result<()> {
+    let (caller, task) = scoped(app, name, Verb::ManagerResume)?;
+    let outcomes = run::resume(app, &caller, &task)?;
+    print_outcomes(&outcomes);
+    Ok(())
+}
+
+/// Stop task `name` and everything below it, or with `all` every task
+/// under the assistant, the user's alone (M18).
+pub fn stop(app: &App, name: Option<&str>, all: bool) -> Result<()> {
+    let outcomes = match (name, all) {
+        (Some(name), false) => {
+            let (caller, task) = scoped(app, name, Verb::ManagerStop)?;
+            let outcomes = run::stop(app, &caller, Some(&task))?;
+            eprintln!(
+                "jeet: stopped {}; nothing below it starts until it is resumed",
+                manager::label(&task)
+            );
+            outcomes
+        }
+        (None, true) => {
+            let outcomes = run::stop(app, &permissions::caller(app)?, None)?;
+            eprintln!(
+                "jeet: stopped every task under the assistant; each starts again only once \
+                 you resume it"
+            );
+            outcomes
+        }
+        // clap allows exactly one.
+        _ => bail!("give a task, or --all"),
+    };
+    print_outcomes(&outcomes);
+    Ok(())
+}
+
+/// How long a drain waits for the session that is ending to go.
+const ENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Start what waits on `[managers] max_live`, while there is room. Run
+/// `after` task `after`'s `Ended` hook, it first waits a while for that
+/// task's pane to go: the hook runs before its agent exits, and until then
+/// its session still counts.
+pub fn drain(app: &App, after: Option<&str>) -> Result<()> {
+    if let Some(task) = after.map(|id| app.db.get_task(id)).transpose()?.flatten() {
+        let name = runtime::session_name(&task);
+        let until = std::time::Instant::now() + ENDING_WAIT;
+        while tmux::has_session(&name)
+            && tmux::pane_alive(&name)
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    for warning in run::drain(app)? {
+        eprintln!("jeet: warning: {warning}");
+    }
+    Ok(())
+}
+
+/// Task `name`, found and checked for `verb` as `permissions` checked it.
+fn scoped(app: &App, name: &str, verb: Verb) -> Result<(Caller, TaskRecord)> {
+    let target = Target::Key {
+        key: name.to_string(),
+        exact: false,
+    };
+    let (caller, task) = permissions::resolve_target(app, &target)?;
+    permissions::in_scope(app, &caller, verb, &task)?;
+    Ok((caller, task))
+}
+
+fn print_outcomes(outcomes: &[NodeOutcome]) {
+    for outcome in outcomes {
+        eprintln!("jeet:   {}: {}", outcome.slug, outcome.line);
+    }
+}
+
 /// Of the tasks in `before`, each with what it held, those that lost a
 /// capability with commands outside jeet (`gh pr comment`, say), which their
 /// harness denies only from their next start; and what they lost.
@@ -625,6 +765,33 @@ mod tests {
         assert!(
             body.starts_with("<jeet-message from=\"task assistant/api/w\" untrusted=\"true\">"),
             "{body}"
+        );
+    }
+
+    /// A node that paused a task is named by its slug, and a task held
+    /// from above says by whom.
+    #[test]
+    fn show_names_who_holds_a_task() {
+        let (_dir, app, root) = lab();
+        let api = add(&app, "api", TaskKind::Manager, &root, &[]);
+        let w = add(&app, "w", TaskKind::Work, &api, &[]);
+        app.db
+            .set_run_state(&w.id, RunState::Paused, Some(&Setter::Node(api.id.clone())))
+            .unwrap();
+        app.db
+            .set_run_state(&api.id, RunState::Stopped, Some(&Setter::Root))
+            .unwrap();
+        let w = app.db.get_task(&w.id).unwrap().unwrap();
+        let s = shown(&app, &Caller::User, &w).unwrap();
+        let value = serde_json::to_value(&s.run).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"state": "paused", "by": "api", "effective": "stopped", "held_by": "api"})
+        );
+        let text = shown_text(&s);
+        assert!(
+            text.contains("run: paused (set by api); stopped by api\n"),
+            "{text}"
         );
     }
 

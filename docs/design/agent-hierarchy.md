@@ -1203,13 +1203,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   kind's default (`worker_default`) uncut, so widening `[assistant] allow`
   later reaches existing children, as in phase 1; a grant someone names
   must be within the parent's list and, for a node granting, its own.
-  New capabilities: `manager.create`, `manager.grant` (grant, and budget
-  when it lands) and `manager.stop` (pause, resume, stop). `git.push` is
+  New capabilities: `manager.create`, `manager.grant` (grant and budget)
+  and `manager.stop` (pause, resume, stop). `git.push` is
   deferred (§13).
 - **P8** Scope (5.1) is one table, `permissions::node_scope`, saying for
   each command what a node may name: itself (`worktree add`, `ls`,
   `path`), itself or below (`task last`, `path`, `prs`), strictly below
-  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`), a
+  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`,
+  `budget`, `pause`, `resume`, `stop`), a
   manager at or below it as `--parent`, or no task at all (`jeet ls`,
   `jeet prs`, `report`, hooks, screens). A name is resolved within the
   node's subtree, so a prefix cannot reach outside it; delete and
@@ -1217,7 +1218,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   to every node, reads included (`worktree rm`, `projects`, `clone`, …).
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
-  only on a task under the assistant, for anyone. `task ls` lists a node's
+  only on a task under the assistant, for anyone, and `manager stop --all`
+  is refused to all but the user (M11). `task ls` lists a node's
   subtree only. `task send assistant` and `task interrupt assistant` mean
   the assistant to the user and the root only; to a node, `assistant` is a
   name like any other, found in its subtree, so a child named for it is
@@ -1357,6 +1359,24 @@ Managers run locally in tmux, as the user, like any other task (I22).
   drain` (output to `drain.log` in jeet's home) when a start waits on
   `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
   reported to its parent.
+- **P20** `jeet manager budget <task> +…|=…` (`manager.grant`) raises
+  a limit the task has (`+` on a unit with no limit is refused: there is
+  no cap to raise) or sets one, keeping the unit not given; the result
+  must fit what is left above the task and, for a node, what it has left
+  itself, and the 80%/100% reports start over. It leaves the run state
+  alone: a task its budget paused runs again only once resumed, and the
+  command says so. There is no `BRIEF.md` to rewrite yet (2-iii). `jeet
+  manager pause`, `resume` and `stop` (`manager.stop`) print one line per
+  node the walk touched. `stop --all` is the user's alone, refused before
+  any scope check to the assistant and to a node (M11); the assistant may
+  still stop one task. `manager show` names a node that set a run state
+  by its slug. The hidden `jeet manager drain` takes `--after <task id>`:
+  the `Ended` hook runs before its agent exits, so the drain it leaves
+  behind waits up to ten seconds for that task's pane to go before it
+  counts, or the ending session would still fill the slot it frees. A
+  drain returns what it warns of instead of printing it, so the TUI,
+  which drains on a full refresh (opening, and `r`), shows the first in
+  its status line rather than on the screen it draws.
 
 ## 11. Placement
 

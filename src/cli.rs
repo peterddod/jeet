@@ -5,7 +5,7 @@ use crate::completion_candidates::{
     all_branch_candidates, capability_candidates, manager_candidates, parent_candidates,
     project_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
 };
-use crate::manager::budget::BudgetPart;
+use crate::manager::budget::{BudgetPart, Change};
 use crate::permissions::parse_capability;
 
 #[derive(Parser)]
@@ -359,8 +359,7 @@ pub struct Delegation {
     #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
     pub allow: Option<Vec<String>>,
     /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
-    /// comma-separated, within what is left above it (recorded; not yet
-    /// charged or enforced)
+    /// comma-separated, within what is left above it
     #[arg(long, value_delimiter = ',', value_parser = crate::manager::budget::parse_part)]
     pub budget: Vec<BudgetPart>,
 }
@@ -393,6 +392,49 @@ pub enum ManagerCommands {
         /// Grant nothing
         #[arg(long, conflicts_with = "caps")]
         none: bool,
+    },
+
+    /// Change what a task under the assistant may spend: `+` raises it
+    /// (+1h, +20turns), `=` sets it (=2h,40turns), within what is left
+    /// above it
+    Budget {
+        #[arg(add = ArgValueCandidates::new(manager_candidates))]
+        name: String,
+        #[arg(value_parser = crate::manager::budget::parse_change)]
+        change: Change,
+    },
+
+    /// Pause a task under the assistant and everything below it: each
+    /// agent's turn is interrupted, and nothing more is handed to them
+    Pause {
+        #[arg(add = ArgValueCandidates::new(manager_candidates))]
+        name: String,
+    },
+
+    /// Let a paused or stopped task run again, and hand over what waited
+    Resume {
+        #[arg(add = ArgValueCandidates::new(manager_candidates))]
+        name: String,
+    },
+
+    /// Stop a task under the assistant and everything below it: their
+    /// agents end, and none starts again until it is resumed
+    Stop {
+        #[arg(add = ArgValueCandidates::new(manager_candidates), required_unless_present = "all", conflicts_with = "all")]
+        name: Option<String>,
+        /// Every task under the assistant (only the user)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Start what waits on `[managers] max_live`, while there is room (run
+    /// by jeet when a task's session ends)
+    #[command(hide = true)]
+    Drain {
+        /// The task whose session is ending: wait a few seconds for it to
+        /// go first, as its own slot is the one to fill
+        #[arg(long, value_name = "TASK_ID")]
+        after: Option<String>,
     },
 }
 

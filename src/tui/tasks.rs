@@ -52,6 +52,7 @@ use crate::db::tasks::{
 };
 use crate::git;
 use crate::github;
+use crate::manager::run;
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Admission};
@@ -2206,9 +2207,16 @@ impl Screen<'_> {
         let loaded = match reconcile {
             true => self
                 .progress("reading tasks", || {
-                    let warning = tasks::reconcile(app)
+                    let mut warning = tasks::reconcile(app)
                         .err()
                         .map(|e| format!("could not reconcile worktrees: {e:#}"));
+                    // Start what waits on `max_live` and has room now, as
+                    // `jeet watch` does each poll (M22).
+                    let drained = match run::drain(app) {
+                        Ok(warnings) => warnings.into_iter().next(),
+                        Err(e) => Some(format!("could not start what waits on max_live: {e:#}")),
+                    };
+                    warning = warning.or(drained);
                     load_rows(app).map(|rows| (rows, warning))
                 })
                 .and_then(|inner| inner),
