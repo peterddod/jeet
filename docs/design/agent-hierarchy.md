@@ -1019,7 +1019,11 @@ what this RFC left open, or departed from it:
   task the index does not know is unconfirmed; anything else is the user.
   Deviation: the plan took an unknown task for the user, but a review job
   outliving its deleted task would then run ungated; `task delete` also
-  ends the task's review job (its runner's process group).
+  ends the task's review job (its runner's process group), and so does
+  `task archive`: the runner recorded as the task's, and an unfinished one
+  in the task's worktrees whose recorded runner is still live, which is how
+  a job the assistant started for a top-level review task (recorded as the
+  assistant's) is found.
 - **I5** An anchored assistant is Root, an anchored task with a parent is a
   Node, anything else the user. Supersedes D13 and D23: a user shell in a
   parented task's session is refused for gated commands, not gated as the

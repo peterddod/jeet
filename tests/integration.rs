@@ -7957,6 +7957,56 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
     );
 }
 
+/// A job the assistant starts for a top-level review task is recorded as
+/// the assistant's, not the task's: archiving or deleting the task ends it
+/// all the same, and forgets it, so it is no longer taken for the
+/// assistant's either.
+#[cfg(unix)]
+#[test]
+fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
+    for verb in ["delete", "archive"] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let env = [("PATH", path.as_str())];
+        succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+        assert_eq!(lab.parent_of(&task), None);
+
+        let started = lab.home().join("started");
+        let ran = lab.home().join("ran");
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+                 [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+                sh_quote(&started.to_string_lossy()),
+                sh_quote(&ran.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let mut root = lab.assistant_pane();
+        succeeded(&root.jeet(&["review", "7"], &trunk, &env));
+        wait_until("the job to start", || started.exists());
+        let jobs = || -> i64 {
+            lab.index()
+                .query_row(
+                    "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'job'",
+                    [lab.assistant_id()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(jobs(), 1, "{verb}");
+        let flag = if verb == "delete" { "-f" } else { "--force" };
+        succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
+        assert_eq!(jobs(), 0, "{verb}: the job is still the assistant's");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(!ran.exists(), "the job outlived its task's {verb}");
+    }
+}
+
 /// Archiving a task forgets its agent: one that outlives the archive is
 /// no longer taken for the task's.
 #[cfg(unix)]

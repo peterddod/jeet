@@ -129,14 +129,17 @@ pub fn load(app: &App, repo: &RepoRecord, pr: u64) -> Option<Job> {
 
 /// The worktree of every review job ever recorded, under any repository.
 pub fn recorded_worktrees(app: &App) -> Vec<PathBuf> {
+    recorded_jobs(app).map(|job| job.worktree).collect()
+}
+
+/// Every review job ever recorded, under any repository.
+fn recorded_jobs(app: &App) -> impl Iterator<Item = Job> {
     walkdir::WalkDir::new(app.home.join("reviews"))
         .follow_links(false)
         .into_iter()
         .flatten()
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| read(e.path()).ok())
-        .map(|job| job.worktree)
-        .collect()
 }
 
 fn read(path: &Path) -> Result<Job> {
@@ -298,15 +301,43 @@ fn launch(
 /// ([`launch`] gives it one), so the command it runs goes too. Best effort.
 pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
     for anchor in db.task_anchors(task_id, AnchorKind::Job)? {
-        if anchor.pid > 1 && identity::live(&anchor) {
-            let _ = Command::new("kill")
-                .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        end_group(&anchor);
+    }
+    Ok(())
+}
+
+/// End the review jobs still running in a worktree under `dir`, whoever
+/// they run as: one the assistant started for a top-level review task is
+/// recorded as the assistant's, not the task's, so [`stop_jobs`] does not
+/// find it. Only a runner jeet recorded after the job was written, while
+/// it is still that process; its record goes with it. Best effort.
+pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
+    let jobs: Vec<Job> = recorded_jobs(app)
+        .filter(|job| job.exit_code.is_none() && job.worktree.starts_with(dir))
+        .collect();
+    let pids: Vec<u32> = jobs.iter().filter_map(|job| job.pid).collect();
+    for anchor in app.db.anchors_for(&pids)? {
+        let ours = anchor.kind == AnchorKind::Job
+            && jobs
+                .iter()
+                .any(|job| job.pid == Some(anchor.pid) && anchor.created_at >= job.started_at);
+        if ours && identity::live(&anchor) {
+            end_group(&anchor);
+            app.db.delete_anchor(anchor.pid, anchor.start)?;
         }
     }
     Ok(())
+}
+
+/// End `anchor`'s process group, while it is still that process.
+fn end_group(anchor: &crate::db::anchors::Anchor) {
+    if anchor.pid > 1 && identity::live(anchor) {
+        let _ = Command::new("kill")
+            .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 /// What [`launch`] writes to the runner once it is recorded.

@@ -678,7 +678,7 @@ back on its branch (or detached at its commit) with its changes reapplied, then
 drops the refs.
 
 **Delete** removes everything the task owns: its agent and any review job
-running for it, its worktrees, the branches it
+running for it or in its worktrees, its worktrees, the branches it
 created (never ones that existed before), its `refs/jeet` refs and its
 directory, with everything else on its canvas. It first lists what would be
 lost — uncommitted changes, commits that would be left on no branch or remote,
