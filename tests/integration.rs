@@ -6744,6 +6744,69 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
     assert!(lab.reports_of(&y).is_empty());
 }
 
+/// A report that cannot be delivered is still kept, and is no failure: the
+/// row is the record, and the assistant sees it in its next context (D17).
+#[cfg(unix)]
+#[test]
+fn a_report_jeet_cannot_deliver_is_kept() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let assistant = lab.assistant_id();
+    // The assistant's inbox cannot be appended to.
+    std::fs::create_dir_all(lab.home().join("assistant/.jeet/inbox.jsonl")).unwrap();
+    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    let output = lab.jeet_at(&["report", "done", "shipped"], &lab.home(), &as_x);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("report #1 recorded, but not delivered"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        lab.reports_of(&x),
+        [("done".into(), assistant, "shipped".into())]
+    );
+}
+
+/// A task's agent whose index jeet cannot read is refused what a Node is
+/// checked for, rather than let through unchecked (D13); what never needs
+/// the index still runs.
+#[cfg(unix)]
+#[test]
+fn a_task_is_refused_when_jeet_cannot_read_the_index() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    lab.new_task_with("y", &[]);
+    // From a newer jeet than this one.
+    lab.index()
+        .execute_batch("PRAGMA user_version = 100000;")
+        .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TASK_ID", x.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    for args in [&["task", "send", "y", "hi"][..], &["notify", "t"]] {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            stderr_of(&output).contains("check what this task may do"),
+            "{args:?}: {}",
+            stderr_of(&output)
+        );
+    }
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(notes(&notifier).is_empty());
+    let output = lab.jeet_at(&["completions", "zsh"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(!stdout_of(&output).is_empty());
+}
+
 /// Mark the task in `dir` idle, in a session of its own, since `secs` ago.
 fn idle_since(dir: &std::path::Path, secs: u64) {
     let now = std::time::SystemTime::now()
