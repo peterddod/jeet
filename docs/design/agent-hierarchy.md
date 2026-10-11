@@ -1321,9 +1321,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   the target's own subtree has used its budget, and to a caller ranked
   below the setter: the user, the assistant, a node above the caller, the
   caller, a node below it, then `budget`. The resume is written only if
-  the target's run state and setter are still the ones checked
-  (`Database::resume_run_state`), so a pause or stop made meanwhile, by
-  someone who may outrank the caller, stays. It then hands what queued to
+  the target's run state and setter are still the ones checked, and its
+  subtree is still within its budget (`Database::resume_run_state`), so a
+  pause or stop made meanwhile, by someone who may outrank the caller,
+  stays, and so does a budget's pause folded into a row a node holds
+  already (the row is left as it was, so only the budget shows it). It then hands what queued to
   each live, unheld node below that a delivery would type into (idle, or
   running with no hooks: `messages::route` is `Type`), reading the hold
   again under its inbox lock, then runs a drain, which starts each node
@@ -1371,10 +1373,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   caller. Over `max_live` a start is queued (`Started::Queued`, the
   prompt handed back) for whoever asked, except the user's `jeet task
   open` and the TUI's open, which start it anyway and warn "over
-  max_live". A start with no prompt and no session named (`task open`,
-  the TUI's open) takes the task's inbox lock before the start lock and
-  starts it with what waits there, as a drain would
-  (`runtime::start_with_inbox`): a brief queued on `max_live` is not left
+  max_live". A start with no prompt (`task open`, the TUI's open, with a
+  session named or not) takes the task's inbox lock before the start lock
+  and starts it with what waits there, as a drain would, resuming the
+  session named if any (`runtime::start_with_inbox`): a brief queued on `max_live` is not left
   behind by an open that starts it first. Under a harness that takes no
   first prompt from jeet (`prompt_args` is `None`), it starts with none and
   leaves the inbox for a delivery to type in, rather than fail every open.

@@ -631,6 +631,8 @@ pub struct TmuxAgent<'a> {
     /// What its start warns of, kept for the caller rather than printed;
     /// see [`TmuxAgent::keep_warnings`].
     warnings: Option<RefCell<Vec<String>>>,
+    /// The session a start resumes; see [`TmuxAgent::resuming`].
+    resume: Option<&'a str>,
 }
 
 impl<'a> TmuxAgent<'a> {
@@ -640,6 +642,16 @@ impl<'a> TmuxAgent<'a> {
             task,
             may_start: true,
             warnings: None,
+            resume: None,
+        }
+    }
+
+    /// A start resumes `session` rather than the task's latest: a user's
+    /// open of a session they chose.
+    pub fn resuming(self, session: Option<&'a str>) -> Self {
+        Self {
+            resume: session,
+            ..self
         }
     }
 
@@ -728,12 +740,20 @@ impl Agent for TmuxAgent<'_> {
 
     fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
         let running = match guard {
-            Some(guard) => {
-                runtime::ensure_running_admitted(self.app, self.task, None, Some(prompt), guard)?
-            }
-            None => {
-                runtime::ensure_running(self.app, self.task, None, Some(prompt), Admission::Gate)?
-            }
+            Some(guard) => runtime::ensure_running_admitted(
+                self.app,
+                self.task,
+                self.resume,
+                Some(prompt),
+                guard,
+            )?,
+            None => runtime::ensure_running(
+                self.app,
+                self.task,
+                self.resume,
+                Some(prompt),
+                Admission::Gate,
+            )?,
         };
         match &self.warnings {
             Some(kept) => kept.borrow_mut().extend(running.warnings),

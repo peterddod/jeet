@@ -680,8 +680,8 @@ start past it is queued and the task's parent told, and it starts when a
 running one's agent ends (a window you opened in its session does not hold
 the slot) (its session's end hook starts it; on a harness without
 that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
-from your terminal starts it anyway, with a warning, and with its brief and
-whatever waited for it (an agent jeet cannot give a first prompt starts
+from your terminal (or the TUI's open) starts it anyway, with a warning, and
+with its brief and whatever waited for it, in the session you picked if any (an agent jeet cannot give a first prompt starts
 without it, and what waited is typed in with the next message). A queued
 task whose directory has gone is dropped from the queue with a warning.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager

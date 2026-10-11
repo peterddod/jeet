@@ -272,7 +272,8 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         let checked = (target.run_state, target.run_state_by.as_ref());
         if !app.db.resume_run_state(&target.id, checked)? {
             bail!(
-                "{} was paused or stopped again meanwhile; look with `jeet manager show {}`",
+                "{} was paused or stopped again meanwhile, or used its budget; look with \
+                 `jeet manager show {}`",
                 label(target),
                 target.slug
             );
@@ -626,7 +627,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        match runtime::start_with_inbox(app, &task, &inbox, &guard) {
+        match runtime::start_with_inbox(app, &task, None, &inbox, &guard) {
             Ok(running) => {
                 app.db.unqueue(&task.id)?;
                 warnings.extend(running.warnings);

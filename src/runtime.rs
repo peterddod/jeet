@@ -79,9 +79,9 @@ pub enum Admission {
 /// Make sure the task's agent is running where its placement says, starting
 /// it if not: resuming `session` when given, else the task's latest
 /// session, else a new one. An agent this starts gets `prompt` as its first
-/// prompt; one already running does not. Given neither, it starts with what
+/// prompt; one already running does not. Given none, it starts with what
 /// waits in its inbox, as a drain would (a brief queued on `max_live`, a
-/// message held while it could not start). A start is admitted first
+/// message held while it could not start), in `session` when one is named. A start is admitted first
 /// ([`run::admit_start`]): refused while the task is held, and by
 /// `admission` while `max_live` tasks run.
 pub fn ensure_running(
@@ -111,8 +111,8 @@ pub fn ensure_running(
         }
     }
     let dir = tasks::task_dir(app, task);
-    let inbox = match (prompt, session) {
-        (None, None) if dir.is_dir() => Some(Inbox::lock(&dir)?),
+    let inbox = match prompt {
+        None if dir.is_dir() => Some(Inbox::lock(&dir)?),
         _ => None,
     };
     let (guard, over) = match admission {
@@ -134,7 +134,7 @@ pub fn ensure_running(
         Admission::Bypass => run::admit_over(app, task)?,
     };
     let mut running = match &inbox {
-        Some(inbox) => start_with_inbox(app, task, inbox, &guard)?,
+        Some(inbox) => start_with_inbox(app, task, session, inbox, &guard)?,
         None => ensure_running_admitted(app, task, session, prompt, &guard)?,
     };
     if let Some((live, max)) = over {
@@ -166,22 +166,23 @@ pub fn ensure_running_admitted(
     Ok(running)
 }
 
-/// Start `task`, admitted under `guard`, with what waits for it in its
-/// locked `inbox` as its first prompt, as much of it as fits, or with none
+/// Start `task`, admitted under `guard`, resuming `session` when given,
+/// with what waits for it in its locked `inbox` as its first prompt, as much of it as fits, or with none
 /// when nothing does, or when its harness takes no first prompt from jeet
 /// (what waits is left for a delivery to type in once it runs).
 pub fn start_with_inbox(
     app: &App,
     task: &TaskRecord,
+    session: Option<&str>,
     inbox: &Inbox,
     guard: &StartGuard,
 ) -> Result<Running> {
     let takes_prompt = AgentSpec::from_config(&app.config)
         .is_ok_and(|spec| spec.harness.prompt_args("").is_some());
     if !takes_prompt || inbox.read_for(None)?.is_empty() {
-        return ensure_running_admitted(app, task, None, None, guard);
+        return ensure_running_admitted(app, task, session, None, guard);
     }
-    let agent = TmuxAgent::new(app, task).keep_warnings();
+    let agent = TmuxAgent::new(app, task).keep_warnings().resuming(session);
     let started = match messages::start_with_queue(inbox, &agent, Some(guard))? {
         // It came up meanwhile, and was typed the queue.
         Delivered::Typed => Started::AlreadyRunning,

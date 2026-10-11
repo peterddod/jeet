@@ -10486,8 +10486,22 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     assert!(!stub.join("alive/jeet-c").exists());
     assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
 
+    // Opened in a session the user chose, as the TUI's session picker
+    // does: it still starts with what waited.
     let _c_agent = session_pane(&lab, &tmux, "c", &c);
-    let output = lab.jeet_at(&["task", "open", "c"], &lab.home(), &env);
+    let chosen = "22222222-3333-4444-8555-666666666666";
+    lab.index()
+        .execute(
+            "INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
+             VALUES (?1, ?2, 'c', 1, 1)",
+            [chosen, c.as_str()],
+        )
+        .unwrap();
+    let output = lab.jeet_at(
+        &["task", "open", "c", "--session", chosen],
+        &lab.home(),
+        &env,
+    );
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("over max_live (1/1"),
@@ -10499,6 +10513,10 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let started = calls_of(&tmux, "new-session");
     let c_start = started.last().unwrap();
     assert!(c_start.contains(&"jeet-c".to_string()), "{c_start:?}");
+    assert!(
+        c_start.windows(2).any(|w| w == ["--session-id", chosen]),
+        "{c_start:?}"
+    );
     assert!(
         c_start.iter().any(|arg| arg.contains("test it")),
         "{c_start:?}"

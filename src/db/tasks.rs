@@ -1337,8 +1337,11 @@ impl Database {
     }
 
     /// Set `id` running again, if its own run state and setter are still
-    /// `checked`, what the caller's right to resume it was checked against:
-    /// false, and nothing written, when a pause or stop changed them since.
+    /// `checked`, what the caller's right to resume it was checked against,
+    /// and its subtree is still within its budget: false, and nothing
+    /// written, when a pause or stop changed them since, or a charge used
+    /// the budget up (a budget's pause of a row a node holds already leaves
+    /// the row as it was).
     pub fn resume_run_state(&self, id: &str, checked: (RunState, Option<&Setter>)) -> Result<bool> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1347,6 +1350,14 @@ impl Database {
         };
         if (task.run_state, task.run_state_by.as_ref()) != checked {
             return Ok(false);
+        }
+        if let Some(row) = budget_in(&tx, id)? {
+            let (secs, turns) = subtree_used_in(&tx, id)?;
+            if row.max_secs.is_some_and(|max| secs >= max)
+                || row.max_turns.is_some_and(|max| turns >= max)
+            {
+                return Ok(false);
+            }
         }
         tx.execute(
             "UPDATE tasks SET run_state = ?2, run_state_by = NULL WHERE id = ?1",
@@ -2375,6 +2386,31 @@ mod tests {
             .resume_run_state("n", (RunState::Paused, Some(&Setter::User)))
             .unwrap());
         assert_eq!(state("n"), (RunState::Run, None));
+    }
+
+    #[test]
+    fn a_resume_is_refused_once_a_charge_uses_the_budget_up() {
+        let (_dir, db) = open();
+        tree(&db);
+        let by_m = Setter::Node("m".into());
+        db.set_run_state("n", RunState::Paused, Some(&by_m))
+            .unwrap();
+        db.set_budget_max("n", None, Some(2)).unwrap();
+        db.charge("n", 0, 1).unwrap();
+        // Checked under the limit; then a turn below it uses the budget up.
+        // The budget's pause leaves m's row as it was, so only the budget
+        // itself tells the resume.
+        db.charge("n", 0, 1).unwrap();
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        assert!(!db
+            .resume_run_state("n", (RunState::Paused, Some(&by_m)))
+            .unwrap());
+        let n = db.get_task("n").unwrap().unwrap();
+        assert_eq!(
+            (n.run_state, n.run_state_by),
+            (RunState::Paused, Some(by_m))
+        );
     }
 
     #[test]
