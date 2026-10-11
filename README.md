@@ -1087,12 +1087,13 @@ prompt. Every action it takes, and every one refused, is appended to
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly, as soon as `$JEET_TASK_ID` names it. It may read, run
+narrowly, as soon as `$JEET_TASK_ID` names it. It may run the reads that
+need no capability (`jeet ls`, `jeet task ls`, `jeet prs`, …), run
 `jeet report`, and add worktrees to itself, and only that last when the
 assistant may too: add `worktree.add` to `[assistant] allow` to let such
-tasks add worktrees. Everything else that changes something is refused,
-whatever the assistant holds, as are `jeet notify`, `jeet todo` and review
-jobs; the refusal tells it to ask with `jeet report`. The assistant's own
+tasks add worktrees. Everything else that needs a capability is refused,
+whatever the assistant holds, `project.read` (`jeet projects ls`) included,
+as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask with `jeet report`. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it

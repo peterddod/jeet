@@ -7098,22 +7098,41 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     assert!(context.contains("Goal: fix the login\n"), "{context}");
     assert!(context.contains("You may: report\n"), "{context}");
 
+    // Reports sent a while ago, so only the session's own state can keep
+    // a repeated wait from being told twice, not the same-second debounce.
+    let backdate = || {
+        lab.index()
+            .execute(
+                "UPDATE task_reports SET at = at - 120 WHERE task_id = ?1",
+                [x.as_str()],
+            )
+            .unwrap();
+    };
     hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    backdate();
     hook_ok(&lab.hook("Notification", &waiting, &as_x));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].0, "status");
     assert!(reports[0].2.starts_with("waiting"), "{reports:?}");
+    // Running again, then a new wait: told again.
+    let prompt = hook_input("UserPromptSubmit", session, &x_dir);
+    hook_ok(&lab.hook("UserPromptSubmit", &prompt, &as_x));
+    backdate();
+    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    let reports = lab.reports_of(&x);
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(reports[1].2.starts_with("waiting"), "{reports:?}");
 
     // Cleared: another session takes over, so nothing is said.
     let cleared = hook_input("SessionEnd-clear", session, &x_dir);
     hook_ok(&lab.hook("SessionEnd", &cleared, &as_x));
-    assert_eq!(lab.reports_of(&x).len(), 1);
+    assert_eq!(lab.reports_of(&x).len(), 2);
     let ended = hook_input("SessionEnd", session, &x_dir);
     hook_ok(&lab.hook("SessionEnd", &ended, &as_x));
     let reports = lab.reports_of(&x);
-    assert_eq!(reports.len(), 2, "{reports:?}");
-    assert!(reports[1].2.starts_with("ended"), "{reports:?}");
+    assert_eq!(reports.len(), 3, "{reports:?}");
+    assert!(reports[2].2.starts_with("ended"), "{reports:?}");
 
     // A worker in its sibling's directory reports as neither.
     let other = "22222222-2222-4333-8444-555555555555";
@@ -7122,7 +7141,7 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
         &hook_input("Notification", other, &y_dir),
         &as_x,
     ));
-    assert_eq!(lab.reports_of(&x).len(), 2);
+    assert_eq!(lab.reports_of(&x).len(), 3);
     assert!(lab.reports_of(&y).is_empty());
     // Nor as a sibling with a parent of its own, and gets no brief of its.
     let sib = lab.new_task_with("sib", &["--parent", "assistant", "--goal", "other"]);
@@ -7134,7 +7153,7 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     ] {
         hook_ok(&lab.hook(event, &input, &as_x));
     }
-    assert_eq!(lab.reports_of(&x).len(), 2);
+    assert_eq!(lab.reports_of(&x).len(), 3);
     assert!(lab.reports_of(&sib).is_empty());
 
     // A top-level task has nobody to tell, and no brief.
