@@ -19,7 +19,7 @@ use crate::permissions::Caller;
 use crate::placement::{self, NodeRuntime};
 use crate::reports::{self, StatusEvent};
 use crate::runtime::{self, Interrupted};
-use crate::status;
+use crate::status::{self, Activity};
 use crate::tasks;
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -140,6 +140,9 @@ pub fn pause_with(
     Ok(outcomes)
 }
 
+/// How long a pause waits to interrupt again a turn about to start.
+const INTERRUPT_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Interrupt `node`'s turn for a pause, saying what came of it.
 fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession) -> String {
     if node.kind == TaskKind::Assistant {
@@ -151,11 +154,27 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     if own(node) {
         return "this jeet runs in its session; not interrupted".to_string();
     }
-    // Under its inbox lock: a delivery that found it not held yet has
-    // typed its message in, and is interrupted with the rest.
-    let inbox = Inbox::lock(&tasks::task_dir(app, node)).ok();
-    let interrupted = rt(node).and_then(|r| r.interrupt(app, node));
-    drop(inbox);
+    let dir = tasks::task_dir(app, node);
+    let interrupted = loop {
+        // Under its inbox lock: a delivery that found it not held yet has
+        // typed its message in, and is interrupted with the rest.
+        let inbox = Inbox::lock(&dir).ok();
+        let interrupted = rt(node).and_then(|r| r.interrupt(app, node));
+        drop(inbox);
+        // Just launched with its brief, or just typed a message, and no
+        // hook has said its turn began: it is about to, so the interrupt
+        // is tried again until one does, or it would have by now.
+        let not_yet = matches!(
+            interrupted,
+            Ok(Interrupted::NotWorking(
+                Activity::Starting | Activity::Idle { .. }
+            )) | Ok(Interrupted::AtStartup)
+        );
+        if !(not_yet && status::input_unreported(&dir, now_secs())) {
+            break interrupted;
+        }
+        std::thread::sleep(INTERRUPT_RETRY);
+    };
     match interrupted {
         Ok(Interrupted::Sent) => {
             // The turn ends with no Stop hook to charge it, or to report
@@ -522,7 +541,20 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        let inbox = Inbox::lock(&tasks::task_dir(app, &task))?;
+        // Its directory gone: taking its inbox lock would make it again,
+        // and the agent would start in an empty one. Its start is dropped,
+        // its inbox (if the directory comes back) left for its next start.
+        let dir = tasks::task_dir(app, &task);
+        if !dir.is_dir() {
+            app.db.unqueue(&task.id)?;
+            warnings.push(format!(
+                "did not start queued task {}: its directory {} is missing",
+                task.slug,
+                dir.display()
+            ));
+            continue;
+        }
+        let inbox = Inbox::lock(&dir)?;
         let guard = match admit_start(app, &task)? {
             StartGate::Go(guard) => guard,
             StartGate::Held(_) => continue,
@@ -552,7 +584,6 @@ mod tests {
     use crate::config;
     use crate::db::Database;
     use crate::runtime::Running;
-    use crate::status::Activity;
 
     /// An index in a tempdir with the assistant and, under it, manager `m`
     /// with worker `w1` and manager `m2`, which has worker `w2`.
@@ -666,6 +697,67 @@ mod tests {
         assert_eq!(get(&app, "w2").run_state, RunState::Run);
         let (holder, state) = hold(&app, &get(&app, "w2")).unwrap().unwrap();
         assert_eq!((holder.slug.as_str(), state), ("m", RunState::Paused));
+    }
+
+    /// A runtime whose node is starting for its first `starting` asks,
+    /// then working.
+    struct Starting {
+        starting: usize,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl NodeRuntime for Starting {
+        fn start(
+            &self,
+            _: &App,
+            _: &TaskRecord,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Running> {
+            bail!("the fake starts nothing")
+        }
+
+        fn interrupt(&self, _: &App, _: &TaskRecord) -> Result<Interrupted> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            Ok(match n < self.starting {
+                true => Interrupted::NotWorking(Activity::Starting),
+                false => Interrupted::Sent,
+            })
+        }
+    }
+
+    #[test]
+    fn a_pause_waits_for_the_turn_a_just_launched_agent_is_about_to_start() {
+        let (_dir, app) = lab();
+        let w1 = get(&app, "w1");
+        // Launched with its brief on its command line, no hook yet.
+        status::mark_launched(&tasks::task_dir(&app, &w1), true).unwrap();
+        let rt = Starting {
+            starting: 2,
+            calls: std::cell::Cell::new(0),
+        };
+        let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+        let outcomes = pause_with(&app, &Caller::User, &w1, &lookup, &nobody).unwrap();
+        assert_eq!(outcomes, [NodeOutcome::new(&w1, "interrupted")]);
+        assert_eq!(rt.calls.get(), 3);
+
+        // Not just launched: starting, and left so at once.
+        let w2 = get(&app, "w2");
+        let rt = Starting {
+            starting: 2,
+            calls: std::cell::Cell::new(0),
+        };
+        let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+        let outcomes = pause_with(&app, &Caller::User, &w2, &lookup, &nobody).unwrap();
+        assert_eq!(
+            outcomes,
+            [NodeOutcome::new(
+                &w2,
+                "not working (starting); nothing to interrupt"
+            )]
+        );
+        assert_eq!(rt.calls.get(), 1);
     }
 
     #[test]
@@ -917,6 +1009,8 @@ mod tests {
         app.db.queue_start("w1", 1).unwrap();
         app.db.queue_start("w2", 2).unwrap();
         let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
+        let w2_dir = tasks::task_dir(&app, &get(&app, "w2"));
+        std::fs::create_dir_all(&w2_dir).unwrap();
         Inbox::lock(&w1_dir)
             .unwrap()
             .push_to("from m", None)
@@ -937,6 +1031,26 @@ mod tests {
         let left = Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].message, "from m");
+
+        // One whose directory is gone is not started in one made again: it
+        // leaves the queue, with a warning.
+        std::fs::remove_dir_all(&w2_dir).unwrap();
+        let warnings = drain(&app).unwrap();
+        assert!(!w2_dir.exists());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("did not start queued task w2") && w.contains("missing")),
+            "{warnings:?}"
+        );
+        let queued: Vec<String> = app
+            .db
+            .queued_starts()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(queued, ["w1"]);
     }
 
     /// Run `walk` on the index at `home` in a thread of its own while a
@@ -1005,6 +1119,8 @@ mod tests {
             .unwrap();
         // A message held for w1, which queued its start.
         let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
+        let w2_dir = tasks::task_dir(&app, &get(&app, "w2"));
+        std::fs::create_dir_all(&w2_dir).unwrap();
         Inbox::lock(&w1_dir)
             .unwrap()
             .push_to("your report", None)

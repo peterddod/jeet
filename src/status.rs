@@ -157,6 +157,39 @@ pub fn launched_at(task_dir: &Path) -> Option<i64> {
     crate::agent::mtime_secs(&std::fs::metadata(launched_path(task_dir)).ok()?)
 }
 
+/// Touched when jeet types a message into the task's agent, so a pause can
+/// tell a turn about to start from an idle agent.
+fn typed_path(task_dir: &Path) -> PathBuf {
+    task_dir.join(tasks::MARKER_DIR).join("typed")
+}
+
+/// Note that a message was just typed into the task's agent.
+pub fn mark_typed(task_dir: &Path) -> Result<()> {
+    let path = typed_path(task_dir);
+    std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
+    std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
+}
+
+/// Whether the task's agent was handed input in the last [`STARTING_SECS`]
+/// (launched with hooks, its first prompt on its command line, or typed a
+/// message) that no hook has reported on since: a turn that may be about
+/// to start, though its status does not say so yet. Not one the startup
+/// watcher found held at a startup prompt.
+pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
+    let typed = std::fs::metadata(typed_path(task_dir))
+        .ok()
+        .and_then(|m| crate::agent::mtime_secs(&m));
+    let Some(given) = launched_at(task_dir).max(typed) else {
+        return false;
+    };
+    if now - given >= STARTING_SECS {
+        return false;
+    }
+    // In whole seconds: a status from the second it was given may be the
+    // one before it (SessionStart's), so only a later one has seen it.
+    current_status(task_dir).is_none_or(|s| s.event != STARTUP_PROMPT_EVENT && s.at <= given)
+}
+
 /// The event of a status [`mark_startup_prompt`] wrote.
 pub const STARTUP_PROMPT_EVENT: &str = "StartupPrompt";
 
@@ -516,7 +549,9 @@ fn charge_busy(
 /// budget before it ends, and for a pause or a stop, which end a spell with
 /// no hook to say so. Returns the threshold newly crossed. Nothing for an
 /// agent that is not `alive`: a status left running by one that died with
-/// no `Ended` hook (a crash, a reboot, a killed server) is no busy time.
+/// no `Ended` hook (a crash, a reboot, a killed server) is no busy time,
+/// nor is it once a new agent is alive but has not reported yet: a status
+/// older than the latest launch is that dead agent's.
 pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<Threshold> {
     if !alive {
         return Ok(Threshold::None);
@@ -525,6 +560,9 @@ pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<
     let Some(status) = current_status(&task_dir) else {
         return Ok(Threshold::None);
     };
+    if launched_at(&task_dir).is_some_and(|l| status.at < l) {
+        return Ok(Threshold::None);
+    }
     let busy = matches!(status.state, State::Running | State::Waiting);
     let Some(since) = status.busy_since.filter(|_| busy) else {
         return Ok(Threshold::None);
@@ -1372,6 +1410,65 @@ mod tests {
             app.db.get_task("w").unwrap().unwrap().run_state,
             RunState::Run
         );
+    }
+
+    #[test]
+    fn a_dead_agents_stale_status_is_not_charged_once_a_new_one_is_alive() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(10), None).unwrap();
+        // Left running at 100 by an agent that died; one launched since
+        // is alive and has not reported yet.
+        let dir = busy_w(&app);
+        mark_launched(&dir, true).unwrap();
+        let w = app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(
+            fold_busy(&app, &w, true, now_secs()).unwrap(),
+            Threshold::None
+        );
+        assert_eq!(used(&app, "w"), (0, 0));
+        assert_eq!(
+            app.db.get_task("w").unwrap().unwrap().run_state,
+            RunState::Run
+        );
+    }
+
+    #[test]
+    fn input_no_hook_has_reported_on_is_a_turn_about_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let now = now_secs();
+        // Nothing handed it: nothing to wait for.
+        assert!(!input_unreported(dir, now));
+        // Launched with its first prompt, no hook yet.
+        mark_launched(dir, true).unwrap();
+        assert!(input_unreported(dir, now));
+        // Long since: whatever it is doing, it would have said.
+        assert!(!input_unreported(dir, now + STARTING_SECS));
+        let status = |state, event: &str, at| SessionStatus {
+            session_id: "s".into(),
+            state,
+            detail: None,
+            event: event.into(),
+            at,
+            busy_since: None,
+        };
+        // Its SessionStart, in the second it was launched, is from before
+        // its prompt was submitted.
+        write_status(dir, &status(State::Idle, "SessionStart", now)).unwrap();
+        assert!(input_unreported(dir, now));
+        // Its prompt submitted, seconds on.
+        write_status(dir, &status(State::Running, "UserPromptSubmit", now + 3)).unwrap();
+        assert!(!input_unreported(dir, now + 3));
+        // Typed a message since its last hook: not reported on until the
+        // next.
+        std::fs::remove_file(launched_path(dir)).unwrap();
+        write_status(dir, &status(State::Idle, "Stop", now - 1)).unwrap();
+        assert!(!input_unreported(dir, now));
+        mark_typed(dir).unwrap();
+        assert!(input_unreported(dir, now));
+        // Held at a startup prompt the watcher found: no turn is coming.
+        mark_startup_prompt(dir, "s", "trust", now - 1).unwrap();
+        assert!(!input_unreported(dir, now));
     }
 
     #[test]

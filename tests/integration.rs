@@ -5601,6 +5601,25 @@ fn task_new_with_a_prompt_starts_its_agent_on_it() {
     assert!(lab.home().join("tasks/other").is_dir());
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
+    // Opened with a message waiting in its inbox, it starts all the same,
+    // with no first prompt, and the message waits on for a delivery.
+    let inbox = lab.home().join("tasks/other/.jeet/inbox.jsonl");
+    std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+    std::fs::write(&inbox, "{\"at\":1,\"message\":\"while away\"}\n").unwrap();
+    let output = lab.jeet_at(&["task", "open", "other"], &lab.home(), &env);
+    succeeded(&output);
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 2, "{}", stderr_of(&output));
+    assert!(
+        !started[1].iter().any(|arg| arg.contains("while away")),
+        "{:?}",
+        started[1]
+    );
+    assert!(std::fs::read_to_string(&inbox)
+        .unwrap()
+        .contains("while away"));
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).ok();
+
     // A brief too long for tmux to start the agent with makes no task.
     let output = lab.jeet_at(
         &["task", "new", "big", "--prompt", &"x".repeat(9000)],
@@ -9721,7 +9740,7 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"manager.stop\"]\nnotify = false\n",
+        "scan_roots = []\n[assistant]\nallow = [\"manager.stop\", \"task.open\"]\nnotify = false\n",
     )
     .unwrap();
     let scratch = TempDir::new().unwrap();
@@ -9773,6 +9792,24 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     )
     .unwrap();
     assert_eq!(status["detail"], "paused", "{status}");
+
+    // Paused, its live agent is still there to look at (M16): the user's
+    // open attaches to it, and so does the assistant's, starting nothing,
+    // refusing nothing and queueing nothing.
+    let sessions = calls_of(&tmux, "new-session").len();
+    let said = jeet(&["task", "open", "w"]);
+    assert!(said.contains("tmux attach -t jeet-w"), "{said}");
+    let mut opener = lab.assistant_pane();
+    let output = opener.jeet(&["task", "open", "w"], &lab.home(), &env);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(said.contains("tmux attach -t jeet-w"), "{said}");
+    assert!(
+        !said.contains("queued") && !said.contains("resume"),
+        "{said}"
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), sessions);
+    assert!(lab.start_queue().is_empty());
 
     // Held: a message waits in its inbox, typed into nothing, and its turn
     // ending hands it nothing.
@@ -9878,6 +9915,50 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     );
     succeeded(&root.jeet(&["manager", "resume", "x"], &lab.home(), &env));
     assert_eq!(lab.run_state_of(&x).0, "run");
+}
+
+/// Archiving a worker mid-turn charges it the turn's time so far before
+/// its session ends: no hook or sweep charges it after.
+#[cfg(unix)]
+#[test]
+fn archiving_a_worker_mid_turn_charges_its_turn_so_far() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let background = [("JEET_BACKGROUND", "1")];
+    let w = lab.new_task_with("w", &["--parent", "assistant", "--budget", "1h"]);
+    let w_dir = lab.home().join("tasks/w");
+    let mut w_agent = session_pane(&lab, &tmux, "w", &w);
+    succeeded(&lab.jeet_at(&["task", "open", "w"], &lab.home(), &env));
+    let session = "11111111-2222-4333-8444-555555555555";
+    succeeded(&w_agent.hook(
+        &lab,
+        Some(&w),
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", session, &w_dir),
+        &background,
+    ));
+    // Ten minutes into its turn, with no sweep since.
+    let path = w_dir.join(".jeet/status").join(format!("{session}.json"));
+    let mut status: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let at = status["at"].as_i64().unwrap();
+    status["busy_since"] = serde_json::json!(at - 600);
+    std::fs::write(&path, status.to_string()).unwrap();
+
+    succeeded(&lab.jeet_at(&["task", "archive", "w", "--force"], &lab.home(), &env));
+    let used: i64 = lab
+        .index()
+        .query_row(
+            "SELECT used_secs FROM task_budgets WHERE task_id = ?1",
+            [&w],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(used >= 600, "{used}");
 }
 
 /// A worker's own turns use its budget up: at 80% its parent is told and

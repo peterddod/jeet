@@ -162,14 +162,17 @@ pub fn ensure_running_admitted(
 
 /// Start `task`, admitted under `guard`, with what waits for it in its
 /// locked `inbox` as its first prompt, as much of it as fits, or with none
-/// when nothing does.
+/// when nothing does, or when its harness takes no first prompt from jeet
+/// (what waits is left for a delivery to type in once it runs).
 pub fn start_with_inbox(
     app: &App,
     task: &TaskRecord,
     inbox: &Inbox,
     guard: &StartGuard,
 ) -> Result<Running> {
-    if inbox.read_for(None)?.is_empty() {
+    let takes_prompt = AgentSpec::from_config(&app.config)
+        .is_ok_and(|spec| spec.harness.prompt_args("").is_some());
+    if !takes_prompt || inbox.read_for(None)?.is_empty() {
         return ensure_running_admitted(app, task, None, None, guard);
     }
     let agent = TmuxAgent::new(app, task).keep_warnings();

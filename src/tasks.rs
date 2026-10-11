@@ -1534,6 +1534,21 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
     Some((slug, rest.join("/")))
 }
 
+/// Charge a task in the tree the time its agent's turn in progress has run,
+/// before its session is ended for archiving or deleting: no hook charges
+/// it after (its pane is forgotten, or its row gone), and no sweep looks
+/// at it again. A charge that uses a budget up is not reported, as a
+/// stop's is not.
+fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
+    if task.parent_id.is_none() {
+        return;
+    }
+    let alive = crate::tmux::available() && crate::tmux::pane_alive(&runtime::session_name(task));
+    if let Err(e) = crate::status::fold_busy(app, task, alive, now_secs()) {
+        warnings.push(format!("could not charge its budget: {e:#}"));
+    }
+}
+
 /// Archive a task: end its agent and free the disk its worktrees take while
 /// keeping what is needed to bring each back as it was.
 ///
@@ -1559,6 +1574,7 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     runtime::refuse_inside_session(task, "archive")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
+    charge_before_end(app, task, &mut warnings);
     // The agent goes first, and is gone before anything is saved: it works
     // in the worktrees about to be removed, and what it wrote after the
     // snapshot would be lost.
@@ -2086,7 +2102,9 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     // Stopped, and gone, before anything is removed: a running agent would
     // carry on working in worktrees that are about to go, and its exit hook
-    // would write into the task directory as it was being removed.
+    // would write into the task directory as it was being removed. Charged
+    // first, so what its turn ran goes up to its parent with the rest.
+    charge_before_end(app, task, &mut warnings);
     runtime::stop(task).context("end the agent's tmux session")?;
     // Its review job too: with the task's rows gone, its jeet commands
     // would be refused, and its worktree is about to go. That includes one

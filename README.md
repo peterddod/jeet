@@ -668,7 +668,8 @@ worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its pane is alive) and a turn for each turn it ends, and counts toward
-every budget above it too, even once the task is deleted. At 80% the parent is told and the task gets a
+every budget above it too, even once the task is deleted (archiving or
+deleting a task mid-turn charges the turn so far first). At 80% the parent is told and the task gets a
 note; at 100% the task is paused and its parent told `blocked: budget`: its
 turn ends with nothing more handed to it, and messages for it wait in its
 inbox until the budget is raised and it is resumed.
@@ -677,7 +678,9 @@ start past it is queued and the task's parent told, and it starts when a
 running one ends (its session's end hook starts it; on a harness without
 that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
 from your terminal starts it anyway, with a warning, and with its brief and
-whatever waited for it.
+whatever waited for it (an agent jeet cannot give a first prompt starts
+without it, and what waited is typed in with the next message). A queued
+task whose directory has gone is dropped from the queue with a warning.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
@@ -698,7 +701,9 @@ it, is handed nothing: messages and reports to it wait in its inbox, its
 turn's end hands it nothing, and nothing starts it; `jeet task open`
 attaches to it while its agent still runs, and otherwise says to resume it.
 Pause interrupts the turn of each of their agents that is working (one
-Escape, never over what you typed), and says, task by task, what it did. Stop ends their
+Escape, never over what you typed), and says, task by task, what it did; an
+agent started or typed a message in the last few seconds, whose turn has
+not begun yet, is waited for and then interrupted. Stop ends their
 tmux sessions, and their ending is not reported. Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the

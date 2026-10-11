@@ -102,14 +102,17 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let inbox = Inbox::lock(&dir)?;
     // Under a paused or stopped manager: its brief waits in its inbox, and
     // its start for the resume.
-    if let Some((holder, _)) = run::hold(app, &created.task)? {
+    let held = |holder: &TaskRecord| -> Result<()> {
         inbox.push_to(&prompt, None)?;
         app.db.queue_start(&created.task.id, now_secs())?;
         eprintln!(
             "jeet: not started: {}; it starts with its brief then",
-            run::held_refusal(&created.task, &holder)
+            run::held_refusal(&created.task, holder)
         );
-        return Ok(());
+        Ok(())
+    };
+    if let Some((holder, _)) = run::hold(app, &created.task)? {
+        return held(&holder);
     }
     match runtime::ensure_running(app, &created.task, None, Some(&prompt), Admission::Gate) {
         Ok(running) => {
@@ -138,10 +141,15 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => bail!(
-            "task {} was made, but its agent did not start: {e:#}",
-            created.task.name
-        ),
+        Err(e) => match run::hold(app, &created.task)? {
+            // Paused since it was asked above, before the start gate asked
+            // again: held the same way.
+            Some((holder, _)) => held(&holder),
+            None => bail!(
+                "task {} was made, but its agent did not start: {e:#}",
+                created.task.name
+            ),
+        },
     }
 }
 

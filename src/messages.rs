@@ -653,6 +653,11 @@ impl Agent for TmuxAgent<'_> {
         // not its agent: what starting it would refuse, typing into it does
         // too.
         placement::runtime_for(self.task)?;
+        // Before it is typed: a pause that finds it idle in between waits
+        // for the turn this starts, which no hook has reported yet.
+        if let Err(e) = status::mark_typed(&tasks::task_dir(self.app, self.task)) {
+            eprintln!("jeet: warning: could not note the message typed in: {e:#}");
+        }
         tmux::send_text(&runtime::session_name(self.task), text)
     }
 
@@ -740,6 +745,8 @@ mod tests {
         paused: bool,
         /// The start gate queues it, with this many live of this many.
         gate_full: Option<(u32, u32)>,
+        /// The start gate finds it held: paused since `held` was asked.
+        gate_held: bool,
         /// The gate has queued it before.
         gate_queued: std::cell::Cell<bool>,
         /// Whom it reports to was told its start is queued.
@@ -776,6 +783,9 @@ mod tests {
             Ok(self.paused)
         }
         fn admit(&self) -> Result<Option<StartGate>> {
+            if self.gate_held {
+                return Ok(Some(StartGate::Held(paused_holder())));
+            }
             Ok(self.gate_full.map(|(live, max)| StartGate::Queue {
                 live,
                 max,
@@ -969,6 +979,45 @@ mod tests {
         );
         assert_eq!(left(task.path()), ["now", "later"]);
         assert_eq!(agent.told_queued.borrow().len(), 1);
+    }
+
+    /// A manager paused by the user, holding the task.
+    fn paused_holder() -> TaskRecord {
+        TaskRecord {
+            id: "m".into(),
+            slug: "m".into(),
+            name: "m".into(),
+            project: None,
+            kind: TaskKind::Manager,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: None,
+            placement: placement::for_new(),
+            run_state: crate::db::tasks::RunState::Paused,
+            run_state_by: Some(crate::db::tasks::Setter::User),
+            max_children: None,
+        }
+    }
+
+    #[test]
+    fn one_paused_between_its_hold_and_its_start_gate_starts_on_the_resume() {
+        // Not held when asked, held by the time its start is admitted: the
+        // message waits, and its start is queued for the resume's drain.
+        let task = task_in(None);
+        let agent = Fake {
+            gate_held: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "one").unwrap(),
+            Delivered::Paused
+        );
+        assert!(agent.started.borrow().is_empty());
+        assert!(agent.typed.borrow().is_empty());
+        assert_eq!(left(task.path()), ["one"]);
+        assert!(agent.held_start.get());
+        assert!(agent.told_queued.borrow().is_empty());
     }
 
     #[test]
