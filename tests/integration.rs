@@ -2451,11 +2451,21 @@ if [ -d "$here/alive" ]; then
     list-panes)
       s=$(named -t "$@")
       [ -e "$here/alive/$s" ] || exit 1
+      # A session kept after its agent exited (`remain-on-exit`).
+      if [ -e "$here/dead/$s" ]; then dead=1; else dead=0; fi
       case "$*" in
         *pane_pid*) echo "0 $(cat "$here/pid/$s" 2>/dev/null)" ;;
-        # A session kept after its agent exited (`remain-on-exit`).
-        *) if [ -e "$here/dead/$s" ]; then echo 1; else echo 0; fi ;;
+        *pane_id*) echo "$(cat "$here/agent-pane/$s" 2>/dev/null) $dead" ;;
+        *) echo "$dead" ;;
       esac
+      # A window the user opened there, its shell alive.
+      if [ -e "$here/shell/$s" ]; then
+        case "$*" in
+          *pane_pid*) ;;
+          *pane_id*) echo "%999 0" ;;
+          *) echo 0 ;;
+        esac
+      fi
       exit 0 ;;
     show-options)
       case "$*" in
@@ -2487,6 +2497,7 @@ case "$1" in
     [ -e "$here/alive" ] || exit 1
     case "$*" in
       *pane_pid*) echo "0 $(cat "$here/pid" 2>/dev/null)" ;;
+      *pane_id*) echo "$(cat "$here/agent-pane" 2>/dev/null) 0" ;;
       *) echo 0 ;;
     esac ;;
   display-message) cat "$here/current" 2>/dev/null ;;
@@ -2528,13 +2539,14 @@ esac
 /// with the session's name, when the test leaves one) and the agent pane's
 /// options act on the session named, and `list-sessions -F …` prints the live ones, one
 /// per line. A session with a `dead/<name>` file is kept with its pane dead,
-/// as `remain-on-exit` keeps one. The rest (`current`, `client`, the captured pane, the keys)
+/// as `remain-on-exit` keeps one, and one with a `shell/<name>` file has a
+/// live pane besides the agent's, a window the user opened. The rest (`current`, `client`, the captured pane, the keys)
 /// stays shared. Several nodes' panes can then run under one stub, which
 /// every [`PaneShell`] of the test is given as `JEET_TMUX`.
 #[cfg(unix)]
 fn multi_session(tmux: &std::path::Path) {
     let here = tmux.parent().unwrap();
-    for dir in ["alive", "pid", "agent-pane", "dead"] {
+    for dir in ["alive", "pid", "agent-pane", "dead", "shell"] {
         std::fs::create_dir_all(here.join(dir)).unwrap();
     }
 }
@@ -10311,7 +10323,8 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     // a's session ends: the drain its hook leaves behind waits for its
     // pane to go, as the hook runs before its agent exits, then starts b,
     // with its brief. The user's `remain-on-exit` keeps a's session, its
-    // pane dead, which takes no slot.
+    // pane dead, which takes no slot; nor does a shell the user opened in
+    // it, while its agent's pane is dead.
     let session = "11111111-2222-4333-8444-555555555555";
     let a_dir = lab.home().join("tasks/a");
     hook_ok(&a_agent.hook(
@@ -10321,6 +10334,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
         &hook_input("SessionEnd", session, &a_dir),
         &[("JEET_BACKGROUND", "1")],
     ));
+    std::fs::write(stub.join("shell/jeet-a"), "").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!stub.join("alive/jeet-b").exists());
     std::fs::write(stub.join("dead/jeet-a"), "").unwrap();

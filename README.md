@@ -676,7 +676,8 @@ turn ends with nothing more handed to it, and messages for it wait in its
 inbox until the budget is raised and it is resumed.
 At most `[managers] max_live` tasks under the assistant run at once: a
 start past it is queued and the task's parent told, and it starts when a
-running one ends (its session's end hook starts it; on a harness without
+running one's agent ends (a window you opened in its session does not hold
+the slot) (its session's end hook starts it; on a harness without
 that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
 from your terminal starts it anyway, with a warning, and with its brief and
 whatever waited for it (an agent jeet cannot give a first prompt starts
@@ -687,7 +688,8 @@ show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
 its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 `jeet manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
-sets one (`manager.grant`), within what is left above it; the 80% and 100%
+sets one (`manager.grant`), within what is left above it (a unit kept or
+lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
 pauses it at once.
 

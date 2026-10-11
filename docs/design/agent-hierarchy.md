@@ -1338,8 +1338,13 @@ Managers run locally in tmux, as the user, like any other task (I22).
   interrupt), and `jeet review` refuses to start a held review task's job, with a note,
   and still opens the review and hands off its worktree. `max_live` counts the
   active tasks below the assistant whose `jeet-<slug>` session one `tmux
-  list-sessions` lists and whose pane is alive; a session the user's
-  `remain-on-exit` keeps after its agent exits does not count. The start gate is a
+  list-sessions` lists and whose agent's pane (the `@jeet-agent-pane` jeet
+  notes when it starts the session; any pane, for a session with none
+  noted) is alive; a session the user's `remain-on-exit`, or a window
+  the user opened there, keeps after its agent exits does not count.
+  Everywhere else a session with any live pane is still running, so a
+  queued task whose session holds only such a window is left to it, not
+  started. The start gate is a
   blocking lock beside the watch's: a held task is refused before any
   count, and one over the limit is queued, keeping its place. A queued
   task leaves the queue once its agent starts, however it was admitted
@@ -1351,7 +1356,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   parent and a note in the task's inbox; 100% pauses the task with the
   `budget` setter, which leaves anyone else's pause or stop as it is, and
   is reported to the parent for a task above the one charged (the charged
-  node's own Stop hook reports it). A budget change that does not fit what
+  node's own Stop hook reports it). The row and its subtree's use are read,
+  the pause written and the threshold claimed in one IMMEDIATE transaction
+  (`Database::check_budget`), so a limit changed meanwhile is checked as it
+  now is, and of two hooks crossing one threshold at once only one tells
+  it. A budget change that does not fit what
   is left above is refused, not cut.
 - **P17** Every start of a task's agent but the assistant's is admitted by
   `runtime::ensure_running` before `runtime_for` (M22), unless the agent
@@ -1437,7 +1446,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a limit the task has (`+` on a unit with no limit is refused: there is
   no cap to raise) or sets one, keeping the unit not given; the result
   must fit what is left above the task and, for a node, what it has left
-  itself, and the 80%/100% reports start over, then the budgets are
+  itself, in each unit it raises or newly limits (one kept or lowered is
+  not checked: siblings' spend may leave less above than a limit given
+  before), and the 80%/100% reports start over, then the budgets are
   checked at once (`budget::enforce`), so a limit set at or below what
   the task has used pauses it now, not after a turn past it. Otherwise it
   leaves the run state alone: a task its budget paused runs again only once resumed, and the
@@ -1448,7 +1459,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   still stop one task. `manager show` names a node that set a run state
   by its slug. The hidden `jeet manager drain` takes `--after <task id>`:
   the `Ended` hook runs before its agent exits, so the drain it leaves
-  behind waits up to ten seconds for that task's pane to go before it
+  behind waits up to ten seconds for that task's agent's pane to go before it
   counts, or the ending session would still fill the slot it frees. A
   drain returns what it warns of instead of printing it, so the TUI,
   which drains on a full refresh (opening, and `r`), shows the first in

@@ -517,7 +517,7 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
     };
     let want = budget::changed(had, change)
         .with_context(|| format!("{}'s budget", manager::label(&task)))?;
-    let want = budget::cap(app, &task, &caller, want)?;
+    let want = budget::cap(app, &task, &caller, had, want)?;
     app.db.set_budget_max(&task.id, want.secs, want.turns)?;
     let (secs, turns) = app.db.subtree_used(&task.id)?;
     eprintln!(
@@ -610,14 +610,14 @@ const ENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Start what waits on `[managers] max_live`, while there is room. Run
 /// `after` task `after`'s `Ended` hook, it first waits a while for that
-/// task's pane to go: the hook runs before its agent exits, and until then
-/// its session still counts.
+/// task's agent's pane to go: the hook runs before its agent exits, and
+/// until then its session still counts.
 pub fn drain(app: &App, after: Option<&str>) -> Result<()> {
     if let Some(task) = after.map(|id| app.db.get_task(id)).transpose()?.flatten() {
         let name = runtime::session_name(&task);
         let until = std::time::Instant::now() + ENDING_WAIT;
         while tmux::has_session(&name)
-            && tmux::pane_alive(&name)
+            && tmux::agent_alive(&name)
             && std::time::Instant::now() < until
         {
             std::thread::sleep(std::time::Duration::from_millis(200));

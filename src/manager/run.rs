@@ -438,9 +438,10 @@ pub fn end_agent(app: &App, node: &TaskRecord) -> Result<String> {
 
 /// The active tasks in the tree, below the assistant, whose agent's pane
 /// is live: what `max_live` counts, managers included, the assistant and
-/// top-level tasks not. One `tmux list-sessions`, then a look at the panes
-/// of each task's session in it: a session left open after its agent
-/// exited (`remain-on-exit`) does not count.
+/// top-level tasks not. One `tmux list-sessions`, then a look at the agent's
+/// pane of each task's session in it: a session left open after its agent
+/// exited, by `remain-on-exit` or a window the user opened there, does not
+/// count.
 pub fn live_set(app: &App) -> Result<HashSet<String>> {
     let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
     if sessions.is_empty() {
@@ -452,7 +453,7 @@ pub fn live_set(app: &App) -> Result<HashSet<String>> {
         .into_iter()
         .filter(|t| {
             let name = runtime::session_name(t);
-            t.parent_id.is_some() && sessions.contains(&name) && tmux::pane_alive(&name)
+            t.parent_id.is_some() && sessions.contains(&name) && tmux::agent_alive(&name)
         })
         .map(|t| t.id)
         .collect())
@@ -1032,6 +1033,40 @@ mod tests {
             assert!(err.to_string().contains("only the user"), "{err}");
         }
         assert_eq!(get(&app, "m").run_state, RunState::Run);
+    }
+
+    /// `--all` is the assistant's active children and what is below them:
+    /// not a top-level task, nor an archived child.
+    #[test]
+    fn a_stop_of_everything_spares_top_level_tasks_and_archived_children() {
+        let (_dir, app) = lab();
+        let root = super::super::root(&app).unwrap();
+        let mut top = task("t", TaskKind::Work, "");
+        top.parent_id = None;
+        app.db.insert_task(&top).unwrap();
+        let mut old = task("old", TaskKind::Work, &root.id);
+        old.state = TaskState::Archived;
+        app.db.insert_task(&old).unwrap();
+        let ended: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let end = |_: &App, t: &TaskRecord| -> Result<String> {
+            ended.borrow_mut().push(t.slug.clone());
+            Ok(String::new())
+        };
+        let outcomes = stop_with(&app, &Caller::User, None, &end, &nobody).unwrap();
+        let slugs: Vec<&str> = outcomes.iter().map(|o| o.slug.as_str()).collect();
+        assert_eq!(slugs, ["w2", "m2", "w1", "m"]);
+        assert!(
+            ended.borrow().iter().all(|s| s != "t" && s != "old"),
+            "{:?}",
+            ended.borrow()
+        );
+        let m = get(&app, "m");
+        assert_eq!(
+            (m.run_state, m.run_state_by),
+            (RunState::Stopped, Some(Setter::User))
+        );
+        assert_eq!(get(&app, "t"), top);
+        assert_eq!(get(&app, "old"), old);
     }
 
     #[test]

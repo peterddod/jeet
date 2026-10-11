@@ -294,6 +294,19 @@ pub struct BudgetRow {
     pub warned: u8,
 }
 
+/// What [`Database::check_budget`] read and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetCheck {
+    /// The row as it was before this check.
+    pub row: BudgetRow,
+    /// What its subtree has used: (seconds, turns).
+    pub used: (i64, i64),
+    /// The threshold it is at: 0, 80 or 100.
+    pub level: u8,
+    /// Whether this check recorded `level` as told: no other had.
+    pub newly: bool,
+}
+
 const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity, \
      parent_id, placement, run_state, run_state_by, max_children";
 
@@ -522,6 +535,65 @@ pub fn fan_out_full(parent: &str, active: usize, max: u32) -> String {
          archive one first",
         if active == 1 { "task" } else { "tasks" }
     )
+}
+
+/// [`Database::set_run_state`] within `tx`.
+fn set_run_state_in(tx: &Connection, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
+    let Some(task) = get_task_in(tx, id)? else {
+        bail!("task {id} is not in the index");
+    };
+    let (state, by) = match (state, by) {
+        (RunState::Run, None) => (state, None),
+        (RunState::Run, Some(_)) => bail!("a running task has no setter"),
+        (_, None) => bail!("a {} task needs a setter", state.as_str()),
+        (_, Some(by)) => match &task.run_state_by {
+            Some(old) if !outranks_in(tx, by, old)? => (state.max(task.run_state), Some(old)),
+            _ => (state.max(task.run_state), Some(by)),
+        },
+    };
+    if (state, by) != (task.run_state, task.run_state_by.as_ref()) {
+        tx.execute(
+            "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
+            params![id, state.as_str(), by.map(Setter::as_str)],
+        )?;
+    }
+    Ok(())
+}
+
+/// [`Database::budget`] on `conn`.
+fn budget_in(conn: &Connection, id: &str) -> Result<Option<BudgetRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT max_secs, max_turns, used_secs, used_turns, warned
+             FROM task_budgets WHERE task_id = ?1",
+            params![id],
+            |row| {
+                Ok(BudgetRow {
+                    max_secs: row.get(0)?,
+                    max_turns: row.get(1)?,
+                    used_secs: row.get(2)?,
+                    used_turns: row.get(3)?,
+                    warned: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// [`Database::subtree_used`] on `conn`.
+fn subtree_used_in(conn: &Connection, id: &str) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "WITH RECURSIVE sub(id, depth) AS (
+             SELECT ?1, 0
+             UNION
+             SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
+             WHERE sub.depth < ?2
+         )
+         SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
+         FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
+        params![id, MAX_HOPS],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 /// How a run state's setter ranks when two hold a task at the same severity:
@@ -1167,23 +1239,7 @@ impl Database {
 
     /// `id`'s own budget row, if it has a limit or has used anything.
     pub fn budget(&self, id: &str) -> Result<Option<BudgetRow>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT max_secs, max_turns, used_secs, used_turns, warned
-                 FROM task_budgets WHERE task_id = ?1",
-                params![id],
-                |row| {
-                    Ok(BudgetRow {
-                        max_secs: row.get(0)?,
-                        max_turns: row.get(1)?,
-                        used_secs: row.get(2)?,
-                        used_turns: row.get(3)?,
-                        warned: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?)
+        budget_in(&self.conn(), id)
     }
 
     /// Set `id`'s limits, keeping what it has used. The thresholds are told
@@ -1215,18 +1271,45 @@ impl Database {
 
     /// What `id` and everything below it have used: (seconds, turns).
     pub fn subtree_used(&self, id: &str) -> Result<(i64, i64)> {
-        Ok(self.conn().query_row(
-            "WITH RECURSIVE sub(id, depth) AS (
-                 SELECT ?1, 0
-                 UNION
-                 SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
-                 WHERE sub.depth < ?2
-             )
-             SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
-             FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
-            params![id, MAX_HOPS],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?)
+        subtree_used_in(&self.conn(), id)
+    }
+
+    /// The budget threshold `id` is at, by `level` of its row and what its
+    /// subtree has used, both read afresh under one write lock (M21): at
+    /// 100 it is paused, by its budget, and a threshold not told yet is
+    /// recorded as told. With what was read, and whether this call is the
+    /// one that recorded it; `None` with no budget row. So a limit changed
+    /// meanwhile is checked as it now is, and of two checks crossing the
+    /// same threshold at once only one tells it.
+    pub fn check_budget(
+        &self,
+        id: &str,
+        level: impl Fn(&BudgetRow, (i64, i64)) -> u8,
+    ) -> Result<Option<BudgetCheck>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(row) = budget_in(&tx, id)? else {
+            return Ok(None);
+        };
+        let used = subtree_used_in(&tx, id)?;
+        let at = level(&row, used);
+        if at >= 100 {
+            set_run_state_in(&tx, id, RunState::Paused, Some(&Setter::Budget))?;
+        }
+        let newly = at > row.warned;
+        if newly {
+            tx.execute(
+                "UPDATE task_budgets SET warned = ?2 WHERE task_id = ?1",
+                params![id, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(BudgetCheck {
+            row,
+            used,
+            level: at,
+            newly,
+        }))
     }
 
     /// Record the last threshold told about `id`'s budget: 0, 80 or 100.
@@ -1248,24 +1331,7 @@ impl Database {
     pub fn set_run_state(&self, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(task) = get_task_in(&tx, id)? else {
-            bail!("task {id} is not in the index");
-        };
-        let (state, by) = match (state, by) {
-            (RunState::Run, None) => (state, None),
-            (RunState::Run, Some(_)) => bail!("a running task has no setter"),
-            (_, None) => bail!("a {} task needs a setter", state.as_str()),
-            (_, Some(by)) => match &task.run_state_by {
-                Some(old) if !outranks_in(&tx, by, old)? => (state.max(task.run_state), Some(old)),
-                _ => (state.max(task.run_state), Some(by)),
-            },
-        };
-        if (state, by) != (task.run_state, task.run_state_by.as_ref()) {
-            tx.execute(
-                "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
-                params![id, state.as_str(), by.map(Setter::as_str)],
-            )?;
-        }
+        set_run_state_in(&tx, id, state, by)?;
         tx.commit()?;
         Ok(())
     }
