@@ -801,6 +801,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
+ "libc",
  "ratatui",
  "rusqlite",
  "serde",

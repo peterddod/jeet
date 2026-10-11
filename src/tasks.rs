@@ -25,6 +25,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
+use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
 use crate::resolve;
@@ -233,6 +234,13 @@ fn make_task(
     kind: TaskKind,
     parent_id: Option<&str>,
 ) -> Result<(TaskRecord, Vec<String>)> {
+    let parent = match parent_id {
+        Some(id) => match app.db.get_task(id)? {
+            Some(parent) => Some(parent),
+            None => bail!("the parent task {id} is not in the index"),
+        },
+        None => None,
+    };
     let now = now_secs();
     let task = TaskRecord {
         id: Uuid::new_v4().to_string(),
@@ -244,6 +252,7 @@ fn make_task(
         created_at: now,
         last_activity: now,
         parent_id: parent_id.map(str::to_string),
+        placement: placement::for_new(&app.config, parent.as_ref())?,
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;

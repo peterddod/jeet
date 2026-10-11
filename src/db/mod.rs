@@ -109,10 +109,11 @@ const MIGRATIONS: &[&str] = &[
     ",
     // v4: hierarchy, phase 1. A task may have a parent (NULL: top level), what
     // its parent asked of it, and what it reported back. Additive only: the
-    // kind CHECK is unchanged, so `tasks` is not rebuilt. When v5 rebuilds it
-    // (for the manager kind), the rebuild must copy `parent_id` and re-create
-    // `tasks_one_assistant` and `tasks_parent`. `needs_user`, `answer` and
-    // `answered_by` are for questions escalated to the user, not read yet.
+    // kind CHECK is unchanged, so `tasks` is not rebuilt. When v6 rebuilds it
+    // (for the manager kind), the rebuild must copy `parent_id` and
+    // `placement` (v5) and re-create `tasks_one_assistant` and
+    // `tasks_parent`. `needs_user`, `answer` and `answered_by` are for
+    // questions escalated to the user, not read yet.
     "
     ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT;
     CREATE INDEX tasks_parent ON tasks(parent_id);
@@ -137,6 +138,23 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX task_reports_to ON task_reports(to_id, answer);
     CREATE INDEX task_reports_task ON task_reports(task_id, id);
+    ",
+    // v5: where a task's agent runs (`placement`; every existing task ran
+    // in local tmux), and the processes jeet launched for a task, keyed by
+    // pid and start time so a reused pid never matches. Additive only.
+    "
+    ALTER TABLE tasks ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
+        CHECK (placement IN ('local', 'cloud', 'local-sandbox'));
+    CREATE TABLE task_anchors (
+        pid INTEGER NOT NULL,
+        start INTEGER NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('pane', 'job')),
+        pane_id TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (pid, start)
+    );
+    CREATE INDEX task_anchors_task ON task_anchors(task_id);
     ",
 ];
 
@@ -502,7 +520,7 @@ mod tests {
         let path = dir.path().join("index.db");
         v3_index(&path);
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
         // Existing tasks are top level, and still list.
         assert_eq!(db.get_task("w").unwrap().unwrap().parent_id, None);
         assert_eq!(db.list_tasks(None).unwrap().len(), 1);
@@ -534,6 +552,45 @@ mod tests {
             .unwrap();
         assert_eq!(reports, 0);
         db.delete_task("a").unwrap();
+    }
+
+    #[test]
+    fn a_v4_index_runs_every_task_locally_and_knows_no_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        v3_index(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[3]).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version = 4;
+                 INSERT INTO tasks (id, slug, name, parent_id, created_at, last_activity)
+                     VALUES ('c', 'child', 'child', 'a', 1, 1);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 5);
+        for id in ["a", "w", "c"] {
+            let task = db.get_task(id).unwrap().unwrap();
+            assert_eq!(task.placement, crate::placement::Placement::Local, "{id}");
+        }
+        let anchors: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM task_anchors", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(anchors, 0);
+        assert!(db
+            .conn()
+            .execute_batch("UPDATE tasks SET placement = 'moon' WHERE id = 'w';")
+            .is_err());
+        db.conn()
+            .execute_batch("UPDATE tasks SET placement = 'cloud' WHERE id = 'c';")
+            .unwrap();
+        assert_eq!(
+            db.get_task("c").unwrap().unwrap().placement,
+            crate::placement::Placement::Cloud
+        );
     }
 
     #[test]

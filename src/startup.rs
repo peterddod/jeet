@@ -605,6 +605,7 @@ mod tests {
             created_at: 0,
             last_activity: 0,
             parent_id: None,
+            placement: crate::placement::Placement::Local,
         };
         let in_tasks = config::tasks_root(home).join("t");
         let config = |text: &str| toml::from_str::<Config>(text).unwrap();

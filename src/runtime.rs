@@ -20,6 +20,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
 use crate::permissions;
+use crate::placement::{self, NodeRuntime};
 use crate::projects;
 use crate::startup;
 use crate::status::{self, Activity};
@@ -44,10 +45,10 @@ pub struct Running {
     pub warnings: Vec<String>,
 }
 
-/// Make sure the task's agent is running in its tmux session, starting it if
-/// not: resuming `session` when given, else the task's latest session, else
-/// a new one. An agent this starts gets `prompt` as its first prompt; one
-/// already running does not.
+/// Make sure the task's agent is running where its placement says, starting
+/// it if not: resuming `session` when given, else the task's latest
+/// session, else a new one. An agent this starts gets `prompt` as its first
+/// prompt; one already running does not.
 pub fn ensure_running(
     app: &App,
     task: &TaskRecord,
@@ -57,6 +58,36 @@ pub fn ensure_running(
     if task.kind == TaskKind::Assistant {
         bail!("the assistant's sessions are opened with `jeet chat`");
     }
+    placement::runtime_for(app, task)?.start(app, task, session, prompt)
+}
+
+/// A task's agent in a tmux session on this machine: the runtime of
+/// [`placement::Placement::Local`].
+pub struct LocalTmux;
+
+impl NodeRuntime for LocalTmux {
+    fn start(
+        &self,
+        app: &App,
+        task: &TaskRecord,
+        session: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Result<Running> {
+        start_tmux(app, task, session, prompt)
+    }
+
+    fn interrupt(&self, app: &App, task: &TaskRecord) -> Result<Interrupted> {
+        interrupt_tmux(app, task)
+    }
+}
+
+/// [`ensure_running`] in the task's tmux session.
+fn start_tmux(
+    app: &App,
+    task: &TaskRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<Running> {
     tmux::require()?;
     let name = session_name(task);
     let mut warnings = Vec::new();
@@ -314,6 +345,12 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
             task.name
         );
     }
+    placement::runtime_for(app, task)?.interrupt(app, task)
+}
+
+/// [`interrupt`] in the task's tmux session.
+fn interrupt_tmux(app: &App, task: &TaskRecord) -> Result<Interrupted> {
+    let name = session_name(task);
     let spec = AgentSpec::from_config(&app.config)?;
     let Some(keys) = spec.harness.interrupt_keys() else {
         bail!("{} cannot interrupt a turn", spec.harness.name());

@@ -36,6 +36,7 @@ use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskSessionRecord, Task
 use crate::instructions;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
+use crate::placement::Placement;
 use crate::runtime;
 use crate::status::{self, Activity, SessionStatus};
 use crate::tasks;
@@ -155,6 +156,7 @@ fn create_record(app: &App) -> Result<TaskRecord> {
         created_at: now,
         last_activity: now,
         parent_id: None,
+        placement: Placement::Local,
     };
     match app.db.insert_task(&task) {
         Ok(()) => Ok(task),

@@ -3212,6 +3212,7 @@ mod tests {
                 created_at: 0,
                 last_activity: last,
                 parent_id: None,
+                placement: crate::placement::Placement::Local,
             },
             dir: PathBuf::from(format!("/tasks/{}", tasks::slugify(name))),
             worktrees: Vec::new(),

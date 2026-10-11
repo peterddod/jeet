@@ -1083,6 +1083,7 @@ mod tests {
             created_at: 0,
             last_activity: 0,
             parent_id: parent_id.map(Into::into),
+            placement: crate::placement::Placement::Local,
         }
     }
 

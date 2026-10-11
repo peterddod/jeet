@@ -16,6 +16,7 @@ mod messages;
 mod notify;
 mod paths;
 mod permissions;
+mod placement;
 mod pr_history;
 mod projects;
 mod remote;

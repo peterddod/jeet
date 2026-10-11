@@ -1,6 +1,6 @@
-//! The task tables (schema v1, v3, v4): a task, the worktrees it holds, its
-//! agent sessions, its PR history, and what its parent asked of it and heard
-//! back from it.
+//! The task tables (schema v1, v3, v4, v5): a task, where its agent runs,
+//! the worktrees it holds, its agent sessions, its PR history, and what its
+//! parent asked of it and heard back from it.
 
 // The tasks milestone is the first caller; until it lands only the tests here
 // use most of this.
@@ -10,6 +10,7 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use super::Database;
+use crate::placement::Placement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
@@ -126,6 +127,8 @@ pub struct TaskRecord {
     /// The task this one reports to; `None` for a top-level task. Not
     /// [`TaskSessionRecord::parent_id`], which is a session's.
     pub parent_id: Option<String>,
+    /// Where its agent runs; fixed when the task is made.
+    pub placement: Placement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,7 +205,7 @@ pub struct TaskBriefRecord {
 }
 
 const TASK_COLUMNS: &str =
-    "id, slug, name, project, kind, state, created_at, last_activity, parent_id";
+    "id, slug, name, project, kind, state, created_at, last_activity, parent_id, placement";
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
@@ -215,6 +218,10 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         created_at: row.get(6)?,
         last_activity: row.get(7)?,
         parent_id: row.get(8)?,
+        placement: {
+            let value = row.get::<_, String>(9)?;
+            Placement::parse(&value).ok_or_else(|| bad_enum("placement", &value))?
+        },
     })
 }
 
@@ -279,7 +286,7 @@ impl Database {
     pub fn insert_task(&self, task: &TaskRecord) -> Result<()> {
         self.conn().execute(
             &format!(
-                "INSERT INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ),
             params![
                 task.id,
@@ -291,6 +298,7 @@ impl Database {
                 task.created_at,
                 task.last_activity,
                 task.parent_id,
+                task.placement.as_str(),
             ],
         )?;
         Ok(())
@@ -786,6 +794,7 @@ mod tests {
             created_at: 100,
             last_activity,
             parent_id: None,
+            placement: Placement::Local,
         }
     }
 
