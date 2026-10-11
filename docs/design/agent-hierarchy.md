@@ -804,8 +804,9 @@ RFC left open, or departed from it:
   pushes and merging. No `gh api -X/-f/-F` write denies: they would break
   `gh api graphql -f query=` reads.
 - **E7** Merging is denied to the root and nodes: `gh pr merge`, the REST
-  merge endpoint through `gh api` or `curl`, and the GraphQL
-  `mergePullRequest` and `enablePullRequestAutoMerge` mutations.
+  merge endpoints through `gh api` or `curl`, and the GraphQL
+  `mergePullRequest`, `enablePullRequestAutoMerge`, `mergeBranch` and
+  `enqueuePullRequest` mutations, matched anywhere after `gh api`.
   `jeet pr merge` runs `gh` from jeet's process and is unaffected.
 - **E8** A node's allow list is unchanged; narrowing it is phase 2's.
 - **E9** Settings stay inline on argv; a 0600 settings file is #33's. A
