@@ -1006,7 +1006,13 @@ what this RFC left open, or departed from it:
   `/proc/<pid>/stat` on Linux (split after the last `)`), `proc_pidinfo`
   (`PROC_PIDTBSDINFO`) through `libc` on macOS. It stops at pid ≤ 1, a
   failed lookup, a zombie, a cycle or depth 64. Other unix targets find
-  nothing and fail closed. jeet never runs `ps` for identity.
+  nothing and fail closed. jeet never runs `ps` for identity. macOS reads
+  only the caller's own processes in full, so a walk from a terminal stops
+  at the root-owned `login` (or `sshd`) above the shell; a failed lookup of
+  another user's process (its owner read with `PROC_PIDT_SHORTBSDINFO`,
+  which anyone may) ends the chain like init, and only one of the caller's
+  own, or one it cannot even name the owner of, is reported as unreadable
+  (the refusal then blames a sandbox).
 - **I3** Start times are re-read on every check. On Linux, where they count
   clock ticks since boot, the start is tagged with a hash of
   `/proc/sys/kernel/random/boot_id`, so a row from an earlier boot matches

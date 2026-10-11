@@ -121,6 +121,60 @@ fn proc_info(pid: u32) -> Option<ProcInfo> {
     })
 }
 
+/// `proc_bsdshortinfo` from `<sys/proc_info.h>`, which the libc crate
+/// lacks.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcBsdShortInfo {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    status: u32,
+    comm: [libc::c_char; 16],
+    flags: u32,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    ruid: libc::uid_t,
+    rgid: libc::gid_t,
+    svuid: libc::uid_t,
+    svgid: libc::gid_t,
+    rfu: u32,
+}
+
+/// Whether `pid` is another user's process. macOS reads only the caller's
+/// own processes in full (`proc_info` fails for root's, such as the setuid
+/// `login` a terminal starts its shell under), but tells anyone a process's
+/// owner.
+#[cfg(target_os = "macos")]
+fn foreign(pid: u32) -> bool {
+    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+    let Ok(pid) = libc::c_int::try_from(pid) else {
+        return false;
+    };
+    let size = std::mem::size_of::<ProcBsdShortInfo>();
+    // SAFETY: as in `proc_info`: plain integers, written at most `size`
+    // bytes.
+    let mut info: ProcBsdShortInfo = unsafe { std::mem::zeroed() };
+    let wrote = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDT_SHORTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdShortInfo).cast(),
+            size as libc::c_int,
+        )
+    };
+    usize::try_from(wrote).is_ok_and(|wrote| wrote == size)
+        && info.uid != unsafe { libc::geteuid() }
+}
+
+/// Linux's `/proc` shows every user's processes, so one it cannot read is
+/// hidden from it, not another user's.
+#[cfg(not(target_os = "macos"))]
+fn foreign(_pid: u32) -> bool {
+    false
+}
+
 /// Elsewhere no process can be looked up, so nobody is identified and what
 /// needs a caller fails closed.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -129,14 +183,15 @@ fn proc_info(_pid: u32) -> Option<ProcInfo> {
 }
 
 /// This process and its ancestors, nearest first, as (pid, start): up to
-/// init, a process that cannot be read, a loop, or [`MAX_DEPTH`]. With it,
-/// the process that could not be read, if that is where it stopped.
+/// init, another user's process (no agent jeet started runs above one), a
+/// process that cannot be read, a loop, or [`MAX_DEPTH`]. With it, the
+/// process that could not be read, if that is where it stopped.
 fn ancestry() -> (Vec<(u32, i64)>, Option<u32>) {
     let mut chain: Vec<(u32, i64)> = Vec::new();
     let mut pid = std::process::id();
     while pid > 1 && chain.len() < MAX_DEPTH && !chain.iter().any(|(p, _)| *p == pid) {
         let Some(info) = proc_info(pid) else {
-            return (chain, Some(pid));
+            return (chain, (!foreign(pid)).then_some(pid));
         };
         chain.push((pid, info.start));
         pid = info.ppid;
@@ -467,6 +522,22 @@ mod tests {
         assert_eq!(chain[0].0, std::process::id());
         assert_eq!(chain[1].0, std::os::unix::process::parent_id());
         assert_eq!(chain[0].1, proc_info(std::process::id()).unwrap().start);
+    }
+
+    #[test]
+    fn only_another_users_process_is_foreign() {
+        assert!(!foreign(std::process::id()));
+        // Root's launchd, which macOS will not read in full for anyone else.
+        #[cfg(target_os = "macos")]
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(proc_info(1).is_none());
+            assert!(foreign(1));
+        }
+        let mut child = sleeper();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!foreign(pid));
     }
 
     #[test]

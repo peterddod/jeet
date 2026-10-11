@@ -7798,6 +7798,29 @@ fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
         }
     }
 
+    // A runner `jeet review` named in the file before the go-ahead still
+    // ends its own job when refused: the shell writes its pid, then execs
+    // the runner as that pid.
+    let named = lab.home().join("reviews/named.json");
+    let head = lab.home().join("named-head");
+    let text = job.to_string();
+    std::fs::write(&head, &text[..text.len() - 1]).unwrap();
+    let inner = format!(
+        r#"{{ cat {head}; printf ',"pid":%s}}' $$; }} > {named} && exec "$JEET" review-job {named} </dev/null"#,
+        head = sh_quote(&head.to_string_lossy()),
+        named = sh_quote(&named.to_string_lossy()),
+    );
+    assert!(!x_agent
+        .run(&format!("sh -c {}", sh_quote(&inner)))
+        .status
+        .success());
+    assert!(!ran.exists());
+    let ended: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&named).unwrap()).unwrap();
+    assert!(ended["pid"].is_u64(), "{ended}");
+    assert_eq!(ended["exit_code"], 126, "{ended}");
+    assert!(ended["finished_at"].is_i64(), "{ended}");
+
     // A runner whose `jeet review` died before the go-ahead ends its job
     // too, wherever it runs.
     let orphaned = lab.home().join("reviews/orphaned.json");

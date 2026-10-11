@@ -278,7 +278,7 @@ the task already has it, brings that checkout up to date if it is clean, and
 brings an archived task back), opens it in the review viewer, and `cd`s you
 into the worktree when you leave. The review task is a task like any other: it
 shows in the tasks list, where `v` opens the viewer again, and archiving or
-deleting it frees the disk. A PR from a fork is checked out as `pr/<number>`,
+deleting it frees the disk (and stops its review if that is still running). A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -673,7 +673,10 @@ to gc, and only then is the worktree removed. Files git ignores (build output,
 `.env`, local config) are not kept: removing the worktree deletes them. So
 archive names them first and asks — the tasks list in its confirm, the CLI on
 the terminal — and without a terminal it needs `--force`. The task directory itself
-stays, so an agent's sessions still find it. **Unarchive** puts every worktree
+stays, so an agent's sessions still find it. Archive first ends the task's
+agent and any review job running for it or in its worktrees (a `jeet review`
+still running is stopped, its result never written), and is refused from
+inside such a job. **Unarchive** puts every worktree
 back on its branch (or detached at its commit) with its changes reapplied, then
 drops the refs.
 
