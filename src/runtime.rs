@@ -284,7 +284,9 @@ pub enum Interrupted {
     /// of its own ([`Harness::in_dialog`]), while someone is attached to
     /// its session: they may be typing an answer into the
     /// dialog, which [`Harness::has_draft`] does not see and Esc would
-    /// discard, so nothing was pressed.
+    /// discard, so nothing was pressed. A dialog of its own may already be
+    /// answered: for Claude Code no hook reports the answer, so it counts
+    /// until the agent's next tool call or the end of its turn.
     ///
     /// [`Harness::has_draft`]: crate::harness::Harness::has_draft
     /// [`Harness::in_dialog`]: crate::harness::Harness::in_dialog

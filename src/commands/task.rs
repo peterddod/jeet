@@ -196,7 +196,8 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
         }
         Interrupted::UserTyping => "its agent's prompt holds unsent input".to_string(),
         Interrupted::Watched => {
-            "its agent waits on a prompt someone attached may be answering".to_string()
+            "its agent waits on, or has just shown, a prompt someone attached may be answering"
+                .to_string()
         }
         Interrupted::AtStartup => "its agent has no turn yet and may be at a startup prompt, \
                                    which the keys would answer"
