@@ -94,7 +94,15 @@ For a task with a parent (one the assistant made), some events also become
 `status` reports to the parent: `NeedsInput` (once until the prompt is
 answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
-for. The same task's `SessionStarted` prints its brief through
+for. A task with a budget is charged from its own hooks (attributed, as
+these reports are): a turn for each `Stopped`, and the time from the first
+`Working` or `NeedsInput` of a busy spell to the `Stopped` or `Ended` that
+closes it (the status file keeps when the spell began, and `jeet watch`
+charges a long one as it goes). A
+harness with no `Stopped` event is charged no turns. A task that is paused
+or stopped, or that its turn's charge used its budget up, is handed nothing
+at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays
+in its inbox. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
 Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
 descendant of the process jeet starts in the task's pane: jeet reports and

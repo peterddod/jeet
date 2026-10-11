@@ -664,8 +664,12 @@ the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
 worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
-wait). For now a budget is recorded, and checked against what is left above
-when a task is made, but not yet charged or enforced: a task runs past it.
+wait). A budget is charged with the time the task's agent is busy (running,
+or waiting on a prompt) and a turn for each turn it ends, and counts toward
+every budget above it too. At 80% the parent is told and the task gets a
+note; at 100% the task is paused and its parent told `blocked: budget`: its
+turn ends with nothing more handed to it, and messages for it wait in its
+inbox until the budget is raised and it is resumed.
 At most `[managers] max_live` tasks under the assistant run at once: a
 start past it is queued and the task's parent told, and it starts when a
 running one ends. `jeet task open` from your terminal starts it anyway,

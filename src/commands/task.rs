@@ -187,6 +187,16 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
              is queued; it gets it when it next runs",
             task.name
         ),
+        Delivered::Paused => eprintln!(
+            "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
+             resumed",
+            task.name
+        ),
+        Delivered::StartQueued { live, max } => eprintln!(
+            "jeet: task {}'s start waits on max_live ({live}/{max} live), so the message is \
+             queued; it starts with it when a task in the tree ends",
+            task.name
+        ),
     }
     Ok(())
 }
@@ -244,6 +254,10 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
             "jeet: no session of the assistant's is running and none can be started from here, \
              so the message is queued; the next session starts with it"
         ),
+        // The assistant is never held, nor counted by the start gate.
+        Delivered::Paused | Delivered::StartQueued { .. } => {
+            eprintln!("jeet: the message is queued for the assistant")
+        }
     }
     Ok(())
 }

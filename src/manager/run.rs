@@ -154,6 +154,10 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     let interrupted = rt(node).and_then(|r| r.interrupt(app, node));
     match interrupted {
         Ok(Interrupted::Sent) => {
+            // The turn ends with no Stop hook to charge it.
+            if let Err(e) = status::fold_busy(app, node, now_secs()) {
+                eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
+            }
             match status::mark_paused(&tasks::task_dir(app, node), now_secs()) {
                 Ok(()) => "interrupted".to_string(),
                 Err(e) => format!("interrupted, but not marked paused: {e:#}"),
@@ -306,6 +310,10 @@ fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
     }
     if runtime::is_own_session(node) {
         return "this jeet runs in its session; stop it from outside".to_string();
+    }
+    // Before its session ends, whether or not its `Ended` hook gets to.
+    if let Err(e) = status::fold_busy(app, node, now_secs()) {
+        eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
     }
     if let Err(e) = runtime::stop(node) {
         return format!("could not end its agent: {e:#}");
@@ -688,6 +696,7 @@ mod tests {
             detail: None,
             event: "UserPromptSubmit".into(),
             at: 1,
+            busy_since: None,
         };
         let path = status::status_dir(&dir).join("s.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

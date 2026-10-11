@@ -254,6 +254,41 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
     Ok(crossed)
 }
 
+/// Tell `node`'s parent that a budget it counts toward is used up and it
+/// is paused (M21): what [`enforce`] leaves to the node's own Stop hook,
+/// or to the sweep that charged it. `blocked: budget`, naming whose budget
+/// it was, its own or an ancestor's.
+pub fn report_blocked(app: &App, node: &TaskRecord) {
+    match blocked_body(app, node) {
+        Ok(body) => tell_parent(app, node, &body),
+        Err(e) => eprintln!("jeet: could not report task {}'s budget: {e:#}", node.slug),
+    }
+}
+
+/// `budget used up (…); blocked: budget, …`.
+fn blocked_body(app: &App, node: &TaskRecord) -> Result<String> {
+    let mut chain = vec![node.clone()];
+    chain.extend(app.db.ancestors(&node.id)?);
+    let mut whose = String::new();
+    for task in &chain {
+        let Some(row) = app.db.budget(&task.id)? else {
+            continue;
+        };
+        let used = app.db.subtree_used(&task.id)?;
+        if percent(&row, used).is_some_and(|pct| pct >= 100) {
+            whose = match task.id == node.id {
+                true => format!(" ({})", usage(&row, used)),
+                false => format!(" under {} ({})", super::label(task), usage(&row, used)),
+            };
+            break;
+        }
+    }
+    Ok(format!(
+        "budget used up{whose}; blocked: budget. Paused until the budget is raised \
+         (`jeet manager budget`) and it is resumed"
+    ))
+}
+
 /// The most of any limit in `row` that `used` (seconds, turns) is, in per
 /// cent; `None` with no limit.
 fn percent(row: &BudgetRow, (secs, turns): (i64, i64)) -> Option<i64> {

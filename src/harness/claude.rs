@@ -848,6 +848,7 @@ mod tests {
             detail: detail.map(Into::into),
             event: event.into(),
             at: 1,
+            busy_since: None,
         };
         assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("AskUserQuestion"))));
         assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("ExitPlanMode"))));

@@ -1271,8 +1271,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   message does: typed in when it sits idle, queued while it is busy, and,
   when it is not running, started only by a `done`, `blocked` or
   `question` from a caller that may start it; anything else is held in its
-  inbox. A start it makes passes the start gate (P17): refused while the
-  parent is held, queued, with the report in its inbox, over `max_live`.
+  inbox. While the parent is held the report waits in its inbox, typed
+  into nothing (P18); a start it makes passes the start gate (P17), and is
+  queued, with the report in its inbox, over `max_live`.
   `<jeet-report>` names the sender as `task <slug>`
   or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
@@ -1328,6 +1329,34 @@ Managers run locally in tmux, as the user, like any other task (I22).
   inbox and reports `queued, n/max live` to the parent (`StatusEvent::
   Queued`). Unit tests never run tmux: under `cfg(test)`, `tmux::binary`
   names one that does not exist, whatever `$JEET_TMUX` says.
+- **P18** A held task (5.4) is handed nothing. `messages::deliver` asks
+  `Agent::held` first, under the inbox lock, and queues for a held agent
+  whatever it is doing (`Delivered::Paused`); only then, for a start, does
+  it ask `Agent::admit`, which takes the start lock after the inbox lock
+  and is `None` for an agent the gate does not count (the assistant's).
+  Over `max_live` the message is queued with the start
+  (`Delivered::StartQueued { live, max }`, as `Delivered::Queued` already
+  means queued for a busy agent). `jeet watch` notifies the user of a held
+  delivery only when the agent could not be started (`Held`), not when it
+  is paused or waits on `max_live`, and drains the start queue each poll.
+- **P19** Budgets (5.3) are charged in the hook, before it acts on the
+  event, by one helper (`status::hook_ctx`), which opens the index for
+  every hook of a task, found by `--task` or by its directory. A status
+  that is running or waiting keeps `busy_since`, when its busy spell
+  began. An attributed `Stopped` charges a turn and the spell's time, an
+  attributed `Ended` the time left; then the budgets are checked, and only
+  then is the run state read, so a turn that uses a budget up is held at
+  its own end: no `continue_output`, its queue left in the inbox, and its
+  parent told `blocked: budget` from the hook itself, with no `jeet`
+  spawned. How far a session's time is charged is kept beside its status
+  (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
+  assistant's turns), a pause's interrupt and a stop, which each charge a
+  spell still going, never charge the same time as the hook that ends it.
+  A sweep that uses a budget up reports `blocked: budget` itself. An
+  `Ended` that no new session replaces starts a detached `jeet manager
+  drain` (output to `drain.log` in jeet's home) when a start waits on
+  `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
+  reported to its parent.
 
 ## 11. Placement
 

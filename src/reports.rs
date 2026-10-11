@@ -9,11 +9,11 @@ use anyhow::{bail, Result};
 use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskState};
-use crate::manager;
+use crate::manager::{self, budget, budget::Threshold};
 use crate::messages::{self, Agent, Delivered, TmuxAgent};
 use crate::permissions;
 use crate::runtime;
-use crate::status::Activity;
+use crate::status::{self, Activity};
 use crate::tasks;
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -194,10 +194,23 @@ pub fn auto_status(
     Ok(Some((id, delivered)))
 }
 
-/// Tell the parents of tasks idle longer than `[managers] idle_report_mins`.
-/// No event fires then, so this runs from `jeet watch` and the assistant's
-/// own Stop hook. One task's failure does not stop the others.
+/// Tell the parents of tasks idle longer than `[managers] idle_report_mins`,
+/// and charge each task in the tree the time its agent has been busy so
+/// far, holding a long turn to its budget before it ends (M19). No event
+/// fires then, so this runs from `jeet watch` and the assistant's own Stop
+/// hook. One task's failure does not stop the others.
 pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
+    for task in app.db.list_tasks(Some(TaskState::Active))? {
+        if task.parent_id.is_none() {
+            continue;
+        }
+        match status::fold_busy(app, &task, now) {
+            // No Stop hook of its own has said so yet.
+            Ok(Threshold::Hit100) => budget::report_blocked(app, &task),
+            Ok(_) => {}
+            Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug),
+        }
+    }
     let tmux_ok = tmux::available();
     sweep_idle_with(app, now, |task| runtime::activity(app, task, tmux_ok))
 }

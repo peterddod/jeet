@@ -959,6 +959,7 @@ mod tests {
             detail: Some("Bash".into()),
             event: "Notification".into(),
             at: 61,
+            busy_since: None,
         };
         assert!(!at_startup(Some(&hooked), Some(0)));
         assert!(!at_startup(Some(&hooked), Some(61)));

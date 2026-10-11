@@ -16,7 +16,11 @@
 //! - an agent with hooks that none has reported on yet: queued too. It is
 //!   still showing its startup dialogs (Claude Code's folder trust), which
 //!   typing would answer;
-//! - not running: the agent is started with it as its first prompt.
+//! - not running: the agent is started with it as its first prompt, once
+//!   the start gate lets it (`[managers] max_live`); until then it waits in
+//!   the inbox for the start a drain makes;
+//! - paused or stopped, itself or above it: it waits in the inbox, whatever
+//!   the agent is doing, until it is resumed.
 //!
 //! Anything still queued when a message is typed in or starts the agent goes
 //! with it, so nothing waits for a Stop that may never come. What is typed
@@ -42,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentSpec;
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
-use crate::manager::run::StartGuard;
+use crate::manager::run::{self, StartGate, StartGuard};
 use crate::placement;
 use crate::runtime::{self, Admission, Started};
 use crate::status::{self, Activity};
@@ -298,6 +302,17 @@ pub trait Agent {
     fn can_start(&self) -> bool {
         true
     }
+    /// Whether it is paused or stopped, itself or above it (M16): a message
+    /// waits in its inbox, neither typed in nor starting it.
+    fn held(&self) -> Result<bool> {
+        Ok(false)
+    }
+    /// Whether it may start now: what [`run::admit_start`] says, taking the
+    /// start lock, for an agent the start gate counts; `None` for one it
+    /// does not (the assistant's). Asked holding its inbox lock.
+    fn admit(&self) -> Result<Option<StartGate>> {
+        Ok(None)
+    }
     /// What its hooks last said, from the task in `task_dir`: the task's
     /// latest status, unless it is one of several sessions there.
     fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
@@ -320,6 +335,15 @@ pub enum Delivered {
     /// Queued for an agent that is not running and could not be started:
     /// it takes the message when it next runs.
     Held,
+    /// Queued for an agent that is paused or stopped: it takes the message
+    /// once resumed.
+    Paused,
+    /// Queued for an agent whose start waits on `[managers] max_live`, with
+    /// `live` of `max` running: it starts with the message when one ends.
+    StartQueued {
+        live: u32,
+        max: u32,
+    },
 }
 
 /// `text` as a message: without control characters, not blank and not too
@@ -350,13 +374,18 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     // Held until it is delivered: the Stop hook cannot take the queue and go
     // idle between the status being read and the message being queued.
     let inbox = Inbox::lock(task_dir)?;
+    let me = agent.session();
+    // Held: handed nothing, and started by nothing, until it is resumed.
+    if agent.held()? {
+        inbox.push_to(&message, me)?;
+        return Ok(Delivered::Paused);
+    }
     let activity = status::activity(agent.status(task_dir).as_ref(), agent.alive());
     let route = match route(&activity, agent.has_hooks()) {
         // Typed in, it would be joined to what the user has not sent.
         Route::Type if agent.has_draft() => Route::Queue,
         route => route,
     };
-    let me = agent.session();
     if route == Route::Queue {
         inbox.push_to(&message, me)?;
         return Ok(Delivered::Queued);
@@ -365,6 +394,24 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
         inbox.push_to(&message, me)?;
         return Ok(Delivered::Held);
     }
+    // The start lock, after the inbox lock (M22), held until it is started.
+    let guard = match route {
+        Route::Start => match agent.admit()? {
+            None => None,
+            Some(StartGate::Go(guard)) => Some(guard),
+            // Queued to start already: a drain starts it with its inbox.
+            Some(StartGate::Queue { live, max }) => {
+                inbox.push_to(&message, me)?;
+                return Ok(Delivered::StartQueued { live, max });
+            }
+            // Held since it was asked above.
+            Some(StartGate::Held(_)) => {
+                inbox.push_to(&message, me)?;
+                return Ok(Delivered::Paused);
+            }
+        },
+        _ => None,
+    };
 
     let earlier = inbox.read_for(me)?;
     let mut queue = earlier.clone();
@@ -373,7 +420,7 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
         message,
         to: None,
     });
-    let sent = hand_over(&inbox, agent, &queue, route, None);
+    let sent = hand_over(&inbox, agent, &queue, route, guard.as_ref());
     if sent.is_err() {
         // Not delivered, so not taken either.
         if let Err(e) = inbox.replace_for(me, &earlier) {
@@ -454,9 +501,9 @@ fn hand_over(
                 Delivered::Typed
             }
             // Waits on `max_live`: all of it stays queued for its start.
-            Started::Queued { .. } => {
+            Started::Queued { live, max, .. } => {
                 inbox.replace_for(me, queue)?;
-                return Ok(Delivered::Queued);
+                return Ok(Delivered::StartQueued { live, max });
             }
         },
         _ => {
@@ -577,6 +624,14 @@ impl Agent for TmuxAgent<'_> {
         self.may_start && tmux::may_start_session()
     }
 
+    fn held(&self) -> Result<bool> {
+        Ok(run::hold(self.app, self.task)?.is_some())
+    }
+
+    fn admit(&self) -> Result<Option<StartGate>> {
+        run::admit_start(self.app, self.task).map(Some)
+    }
+
     fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
         let running = match guard {
             Some(guard) => {
@@ -619,6 +674,10 @@ mod tests {
         fail: bool,
         /// May not be started here.
         held: bool,
+        /// Paused or stopped.
+        paused: bool,
+        /// The start gate queues it, with this many live of this many.
+        gate_full: Option<(u32, u32)>,
         /// The user has text in its input box.
         draft: bool,
         typed: RefCell<Vec<String>>,
@@ -644,6 +703,14 @@ mod tests {
         }
         fn can_start(&self) -> bool {
             !self.held
+        }
+        fn held(&self) -> Result<bool> {
+            Ok(self.paused)
+        }
+        fn admit(&self) -> Result<Option<StartGate>> {
+            Ok(self
+                .gate_full
+                .map(|(live, max)| StartGate::Queue { live, max }))
         }
         fn start(&self, prompt: &str, _: Option<&StartGuard>) -> Result<Started> {
             if self.fail {
@@ -679,6 +746,7 @@ mod tests {
             detail: None,
             event: "x".into(),
             at: 1,
+            busy_since: None,
         };
         std::fs::write(
             status_dir.join("s.json"),
@@ -797,11 +865,56 @@ mod tests {
         };
         assert_eq!(
             deliver(task.path(), &agent, "now").unwrap(),
-            Delivered::Queued
+            Delivered::StartQueued { live: 1, max: 1 }
         );
         assert!(agent.typed.borrow().is_empty());
         // In order, for the start a drain makes.
         assert_eq!(left(task.path()), ["earlier", "now"]);
+    }
+
+    #[test]
+    fn a_start_the_gate_queues_is_never_tried() {
+        let task = task_in(None);
+        let agent = Fake {
+            gate_full: Some((3, 3)),
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "now").unwrap(),
+            Delivered::StartQueued { live: 3, max: 3 }
+        );
+        assert!(agent.started.borrow().is_empty());
+        assert_eq!(left(task.path()), ["now"]);
+    }
+
+    #[test]
+    fn a_held_agent_gets_nothing_until_it_is_resumed() {
+        // Not running: not started.
+        let task = task_in(None);
+        let agent = Fake {
+            paused: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "one").unwrap(),
+            Delivered::Paused
+        );
+        assert!(agent.started.borrow().is_empty());
+        assert_eq!(left(task.path()), ["one"]);
+
+        // Idle at its prompt: not typed to either.
+        let idle = task_in(Some(State::Idle));
+        let agent = Fake {
+            alive: true,
+            paused: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(idle.path(), &agent, "two").unwrap(),
+            Delivered::Paused
+        );
+        assert!(agent.typed.borrow().is_empty());
+        assert_eq!(left(idle.path()), ["two"]);
     }
 
     #[test]

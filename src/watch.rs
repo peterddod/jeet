@@ -40,6 +40,7 @@ use crate::config::{
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
+use crate::manager::run;
 use crate::messages::{self, Delivered, TmuxAgent};
 use crate::notify;
 use crate::reports;
@@ -843,6 +844,8 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                     match messages::deliver(&dir, &agent, &task_message(event)) {
                         Ok(delivered) => {
                             sent[i] = Sent::Task(task.slug.clone());
+                            // Paused, or waiting on `max_live`: not lost,
+                            // it gets it once resumed or started.
                             held[i] = delivered == Delivered::Held;
                         }
                         Err(e) => {
@@ -1065,6 +1068,10 @@ pub fn run_once(app: &App) -> Result<()> {
     // No event fires when a task has sat idle too long; each poll looks.
     if let Err(e) = reports::sweep_idle(app, now_secs()) {
         eprintln!("jeet: warning: {e:#}");
+    }
+    // Nor when a slot under `max_live` frees up without an `Ended` hook.
+    if let Err(e) = run::drain(app) {
+        eprintln!("jeet: warning: could not start what waits on max_live: {e:#}");
     }
 
     let logged: Vec<Logged> = polled
