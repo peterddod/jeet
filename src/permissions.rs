@@ -190,6 +190,13 @@ const ALWAYS_DENY: &[&str] = &[
     "curl *enqueuePullRequest*",
 ];
 
+/// What a manager is denied besides: making commits and branches to push,
+/// as its worktrees are read-only (`tasks::add_worktree`). Not `git branch`:
+/// a prefix rule would deny `git branch -a` and `--show-current` too, which
+/// a manager reads with, and a branch made in a detached worktree carries
+/// nothing without `git commit`. A lint, as [`ALWAYS_DENY`] is.
+const MANAGER_DENY: &[&str] = &["git commit", "git push", "git checkout -b", "git switch -c"];
+
 /// Default branches assumed whatever the index says.
 const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
@@ -589,13 +596,25 @@ fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str
 
 /// What `task`'s agent is denied: nothing for a top-level task, which jeet
 /// does not gate; for one with a parent, [`denied_commands`] and the
-/// commands outside jeet of every capability it does not hold.
+/// commands outside jeet of every capability it does not hold, and for a
+/// manager [`MANAGER_DENY`] too.
 pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.parent_id.is_none() {
         return Ok(Vec::new());
     }
     let held = effective(app, task)?;
-    Ok(node_deny(&held, &default_branches(app)?))
+    let mut deny = node_deny(&held, &default_branches(app)?);
+    match task.kind {
+        TaskKind::Manager => {
+            for command in MANAGER_DENY {
+                if !deny.iter().any(|d| d == command) {
+                    deny.push(command.to_string());
+                }
+            }
+        }
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {}
+    }
+    Ok(deny)
 }
 
 fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
@@ -1444,6 +1463,56 @@ mod tests {
         ] {
             assert!(deny.contains(&denied.to_string()), "{denied}: {deny:?}");
         }
+    }
+
+    #[test]
+    fn a_manager_is_denied_commits_and_new_branches_but_may_read_branches() {
+        let (_dir, app, w) = tree();
+        let m = TaskRecord {
+            id: "m-id".into(),
+            slug: "m".into(),
+            name: "m".into(),
+            kind: TaskKind::Manager,
+            ..w.clone()
+        };
+        app.db.insert_task(&m).unwrap();
+        let deny = task_deny(&app, &m).unwrap();
+        for denied in MANAGER_DENY {
+            assert!(deny.contains(&denied.to_string()), "{denied}: {deny:?}");
+        }
+        assert!(
+            !deny.iter().any(|d| d.starts_with("git branch")),
+            "{deny:?}"
+        );
+        let mut unique = deny.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), deny.len(), "{deny:?}");
+        let denied = |command: &str| deny.iter().any(|d| claude_match(d, command));
+        for command in [
+            "git commit -m x",
+            "git commit",
+            "git push -u origin HEAD",
+            "git checkout -b x",
+            "git switch -c x",
+        ] {
+            assert!(denied(command), "not denied: {command}");
+        }
+        for command in [
+            "git branch -a",
+            "git branch --show-current",
+            "git log main",
+            "git checkout main",
+            "git switch --detach origin/main",
+        ] {
+            assert!(!denied(command), "denied: {command}");
+        }
+        // A worker still commits and pushes its own branch.
+        let deny = task_deny(&app, &w).unwrap();
+        assert!(!deny.iter().any(|d| claude_match(d, "git commit -m x")));
+        assert!(!deny
+            .iter()
+            .any(|d| claude_match(d, "git push -u origin HEAD")));
     }
 
     /// A model of how Claude Code (2.1) matches the `Bash(…)` deny rules

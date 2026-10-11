@@ -84,6 +84,16 @@ stays small. For a manager, `jeet worktree add`:
 Before #32 lands, read-only is cooperative, like the rest of phase 1
 (5.7).
 
+**Phase 2 (as built).** `tasks::add_worktree` refuses `--branch` for a
+manager ("a manager holds read-only worktrees; delegate the change to a
+worker (`jeet task new`)"), detaches at `origin/<default>` and records
+`read_only`; `reconcile` adopts a worktree a manager made itself as
+read-only and warns, through `task ls` and `worktree ls`, when a read-only
+worktree is on a branch; `worktree ls` shows "(read-only)". A manager's deny
+rules add `git commit`, `git push`, `git checkout -b` and `git switch -c`.
+There is no chmod and no write deny, and managers run unconfined: this is a
+lint that keeps an honest manager from writing code, not a guarantee (5.7).
+
 ### Layout
 
 A manager's home is a task directory, so every task path keeps working:
@@ -1144,6 +1154,35 @@ what this RFC left open, or departed from it:
   requirement: managers run locally in tmux like any other task, the
   placement seam stays (local only), and the cloud design moved to §13 as
   future work, with no probes run and no `hmac`/`sha2`.
+
+### Phase 2 implementation notes
+
+Where phase 2 (#34) settled what this RFC left open, or departed from it.
+Managers run locally in tmux, as the user, like any other task (I22).
+
+- **P1** Schema v6 (§2 "Phase 2 (as built)"): the `manager` kind, run
+  state with its setter, `max_children`, grants, budgets, the start queue
+  and `task_worktrees.read_only`, with the placement `CHECK` still
+  `local` only. The data layer (tree walks, grants, budgets, run state,
+  the queue) lands with it and is used by later steps.
+- **P2** Teardown refusals (§2 "Creation and teardown") land before any
+  manager can be made, and apply to every task with children.
+- **P3** Every `Manager` arm that restricts a manager lands before
+  `jeet manager new` can make one: teardown refusals (P2), read-only
+  worktrees and git denies (P4) and the trust scope (P5). Until then a
+  report to a manager is refused ("reports to managers land in a later
+  version"); no manager row exists for it to reach.
+- **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
+  #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
+  chmod, since a manager runs unconfined anyway. `git branch` is not
+  denied: a prefix rule would also deny `git branch -a`, `-r` and
+  `--show-current`, which a manager reads with, and a branch made in a
+  detached worktree carries nothing without `git commit`, which is
+  denied. `reconcile` now returns its warnings; `task ls` and
+  `worktree ls` print them, the TUI and teardown do not.
+- **P5** A manager follows `[harness] auto_trust` as a worker does (5.7):
+  it is started by its parent with nobody at its pane. The assistant
+  stays excluded.
 
 ## 11. Placement
 

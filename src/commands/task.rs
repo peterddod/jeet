@@ -264,8 +264,13 @@ fn sender(app: &App) -> String {
 }
 
 pub fn ls(app: &App, archived: bool) -> Result<()> {
-    if let Err(e) = tasks::reconcile(app) {
-        eprintln!("jeet: warning: could not reconcile worktrees: {e:#}");
+    match tasks::reconcile(app) {
+        Ok(warnings) => {
+            for warning in warnings {
+                eprintln!("jeet: warning: {warning}");
+            }
+        }
+        Err(e) => eprintln!("jeet: warning: could not reconcile worktrees: {e:#}"),
     }
     let state = if archived {
         TaskState::Archived

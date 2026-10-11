@@ -145,7 +145,10 @@ The list is:
   allow list stays `jeet worktree`, `jeet ls` and `jeet report`). The assistant is never denied these: it holds them by
   default, and at worst the user approves them at the prompt. Only these
   commands are denied, not the same through `gh api` or `curl` (see
-  below).
+  below);
+- for a manager (phase 2) only, `git commit`, `git push`, `git checkout -b`
+  and `git switch -c`: its worktrees are read-only, and workers make the
+  changes. `git branch` is not denied, so `git branch -a` still reads.
 
 A repo's default branch is what jeet recorded when it cloned or imported
 it: `origin/HEAD`, or, without one, the branch checked out then, which may
