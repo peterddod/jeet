@@ -57,8 +57,10 @@ pub trait NodeRuntime {
 }
 
 /// The runtime for `task`'s placement: the one way a node is started or
-/// interrupted. A stored placement this jeet does not know never reaches
-/// here: reading the task from the index refuses it.
+/// interrupted. A placement this jeet does not know never reaches here: the
+/// index's `CHECK` stores only known ones, a later jeet's placement comes
+/// with a newer schema that `Database::migrate` refuses whole, and a row
+/// hand-edited past the `CHECK` fails to read.
 pub fn runtime_for(task: &TaskRecord) -> Result<&'static dyn NodeRuntime> {
     match task.placement {
         Placement::Local => Ok(&runtime::LocalTmux),

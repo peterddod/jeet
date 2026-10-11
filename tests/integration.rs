@@ -8244,8 +8244,8 @@ fn a_node_below_a_manager_runs_locally() {
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 }
 
-/// A placement this jeet does not know (written by a later one) is never
-/// run: the task is refused, not started in tmux.
+/// A placement this jeet does not know, hand-edited past the `CHECK`, is
+/// never run: reading the task fails, nothing is started in tmux.
 #[cfg(unix)]
 #[test]
 fn a_task_jeet_cannot_place_is_refused() {

@@ -539,8 +539,9 @@ on a default branch. Nothing confines a node yet (5.7).
 
 Every node, managers below the root included, runs locally in a tmux pane,
 as the user, with a shell: cooperative and unconfined (§11). An agent that
-sets out to bypass jeet can unset `JEET_TASK_ID`, edit `config.toml`, or
-attach to another tmux session. The gate stops honest mistakes and agents
+sets out to bypass jeet can detach from its pane's process tree with the
+env stripped, spawn through `tmux`, or edit `config.toml` or `index.db`
+(the table below lists what is open and closed). The gate stops honest mistakes and agents
 steered through jeet's own commands. jeet writes no confining rules (no
 write limits outside the node's own directory, no refusal of `tmux`,
 `sqlite3` or edits to `~/.jeet/config.toml`): its deny rules cover only
@@ -1141,11 +1142,14 @@ pub fn runtime_for(task: &TaskRecord) -> Result<&'static dyn NodeRuntime>;
 `runtime_for` returns `LocalTmux` for `local`. It is the one way a node is
 started or interrupted: `runtime::ensure_running` and `runtime::interrupt`
 dispatch through it, and so does typing into a live session
-(`TmuxAgent::type_in`). It fails closed: a stored placement this jeet does
-not know (one a later jeet wrote) is refused when the task is read from the
-index, so nothing reaches tmux for it. The `tasks.placement` `CHECK` allows
-only `local`; a new placement widens it in a migration that rebuilds `tasks`
-(v6 rebuilds it anyway).
+(`TmuxAgent::type_in`). An unknown placement cannot reach it: the
+`tasks.placement` `CHECK` allows only `local`, and a new placement widens it
+in a migration that rebuilds `tasks` (v6 rebuilds it anyway). That raises
+the schema version, so this jeet refuses a later jeet's index as a whole
+("upgrade jeet") before any task is read. Only a hand edit that bypasses the
+`CHECK` stores one, and then reading the task fails, so nothing reaches tmux
+for it; every read of the tasks table fails with it (listing, archive,
+delete) until the row is fixed.
 
 **Plugging in a confined placement later.** A local sandbox (sandvault is
 a candidate) or a cloud runtime (§13) is a new `Placement` variant, a
