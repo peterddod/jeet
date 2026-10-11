@@ -7820,7 +7820,7 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     std::fs::write(
         lab.home().join("config.toml"),
         "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\", \
-         \"manager.grant\"]\n",
+         \"manager.grant\", \"pr.merge\"]\n",
     )
     .unwrap();
     let api = lab.new_task_with("api", &["--parent", "assistant"]);
@@ -7832,7 +7832,7 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     index
         .execute("DELETE FROM task_grants WHERE task_id = ?1", [&api])
         .unwrap();
-    for cap in ["task.create", "task.send", "manager.grant"] {
+    for cap in ["task.create", "task.send", "manager.grant", "pr.merge"] {
         index
             .execute(
                 "INSERT INTO task_grants (task_id, capability) VALUES (?1, ?2)",
@@ -7927,6 +7927,53 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     assert_eq!(slugs, ["api", "w"]);
     let output = mp.jeet(&["manager", "show", "w", "--json"], &api_dir, &[]);
     succeeded(&output);
+    // The brief it wrote it reads back fenced, as an agent reads anything
+    // a manager wrote.
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        shown["brief"]["goal"],
+        "<jeet-message from=\"manager api\" untrusted=\"true\">\ng\n</jeet-message>"
+    );
+
+    // A held capability the manager grants is logged in its own name,
+    // in its own log, and announced as the manager's.
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
+    let output = mp.jeet(
+        &["task", "new", "h", "--goal", "g", "--allow", "pr.merge"],
+        &api_dir,
+        &env,
+    );
+    succeeded(&output);
+    let h = task_id(&path_from(&output));
+    assert_eq!(lab.grants_of(&h), ["pr.merge"]);
+    succeeded(&mp.jeet(&["manager", "grant", "w", "pr.merge"], &api_dir, &env));
+    assert_eq!(lab.grants_of(&w), ["pr.merge"]);
+    let log: Vec<serde_json::Value> = std::fs::read_to_string(api_dir.join("actions.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for slug in ["h", "w"] {
+        let action = format!("granted held `pr.merge` to task {slug}");
+        assert!(log.iter().any(|a| a["action"] == action), "{log:?}");
+        assert!(
+            !actions(&lab.home())
+                .iter()
+                .any(|a| a["action"].as_str().unwrap().starts_with(&action)),
+            "{:?}",
+            actions(&lab.home())
+        );
+        assert!(
+            notes(&notifier)
+                .iter()
+                .any(|n| n.starts_with(&format!("Manager api|{action}|"))),
+            "{:?}",
+            notes(&notifier)
+        );
+    }
 }
 
 /// A manager names a task as anything else does, but only within its

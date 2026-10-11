@@ -682,6 +682,34 @@ mod tests {
         let value = serde_json::to_value(shown(&app, &Caller::User, &sub).unwrap()).unwrap();
         assert_eq!(value["brief"]["goal"], hostile);
 
+        // So does a manager: the brief it reads, and what a child said.
+        let c = add(&app, "c", TaskKind::Work, &sub, &[]);
+        app.db
+            .insert_report(&c.id, &sub.id, ReportKind::Question, hostile, 100)
+            .unwrap();
+        let value =
+            serde_json::to_value(shown(&app, &Caller::Node(api.clone()), &sub).unwrap()).unwrap();
+        let fenced = [
+            ("manager api", &value["brief"]["goal"]),
+            ("manager api", &value["brief"]["done_when"]),
+            (
+                "task assistant/api/sub/c",
+                &value["children"][0]["last_report"]["body"],
+            ),
+            ("task assistant/api/sub/c", &value["open"][0]["body"]),
+        ];
+        for (from, text) in fenced {
+            let text = text.as_str().unwrap();
+            assert!(
+                text.starts_with(&format!(
+                    "<jeet-message from=\"{from}\" untrusted=\"true\">"
+                )),
+                "{text}"
+            );
+            assert_eq!(text.matches("</jeet-message>").count(), 1, "{text}");
+            assert!(!text.contains("<jeet-message from=\"user\">"), "{text}");
+        }
+
         let value = serde_json::to_value(shown(&app, &Caller::Root, &api).unwrap()).unwrap();
         let body = value["children"][0]["last_report"]["body"]
             .as_str()
