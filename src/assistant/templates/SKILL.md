@@ -16,6 +16,11 @@ says everything else on stderr.
   each agent is doing. `--archived` lists archived ones.
 - `jeet task prs [<task>]` asks GitHub about a task's pull requests and
   lists them; `--offline` lists what is recorded without asking.
+- `jeet task last <task> [-n <N>] [--json]` shows what a task's agent last
+  said, how its last turn ended (`finished`, `interrupted`, an API error,
+  or `still running`) and when, and the task's status. Use it to see whether
+  an agent finished, got stuck or hit an error, rather than reading its tmux
+  pane or its transcript.
 - `jeet task path <task>` prints a task's directory.
 - `jeet ls` lists the repositories in the store; `jeet prs <repo>` lists a
   repository's open pull requests.

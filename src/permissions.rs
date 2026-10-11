@@ -123,6 +123,7 @@ const READ_ONLY: &[&str] = &[
     "jeet task ls",
     "jeet task path",
     "jeet task prs",
+    "jeet task last",
     "jeet worktree ls",
     "jeet worktree path",
     "jeet notify",
@@ -266,9 +267,10 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
 
 fn task_gate(command: &TaskCommands) -> Gate {
     match command {
-        TaskCommands::Ls { .. } | TaskCommands::Path { .. } | TaskCommands::Prs { .. } => {
-            Gate::Free
-        }
+        TaskCommands::Ls { .. }
+        | TaskCommands::Path { .. }
+        | TaskCommands::Prs { .. }
+        | TaskCommands::Last { .. } => Gate::Free,
         TaskCommands::New {
             name,
             project,
@@ -649,6 +651,8 @@ mod tests {
             &["task", "ls"],
             &["task", "path", "x"],
             &["task", "prs"],
+            &["task", "last", "x"],
+            &["task", "last", "x", "-n", "3", "--json"],
             &["worktree", "ls"],
             &["prs"],
             &["notify", "hi"],

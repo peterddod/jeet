@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::agent::AgentSession;
 
@@ -144,6 +145,13 @@ pub trait Harness: Sync {
         Ok(Vec::new())
     }
 
+    /// What session `id`, started in `dir`, last said: its last `n`
+    /// messages with text, oldest first, and how its last turn ended.
+    /// `None` when it keeps no record jeet can read.
+    fn last_messages(&self, _dir: &Path, _id: &str, _n: usize) -> Option<Result<LastTurn>> {
+        None
+    }
+
     /// When any of its sessions in `dir` last recorded anything; cheap.
     fn latest_activity(&self, _dir: &Path) -> Option<i64> {
         None
@@ -246,6 +254,50 @@ pub enum EventKind {
     Stopped,
     /// The session is over.
     Ended,
+}
+
+/// What a session last said, from [`Harness::last_messages`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LastTurn {
+    /// Oldest first; empty when it has said nothing yet.
+    pub messages: Vec<AgentMessage>,
+    pub end: TurnEnd,
+    /// Unix seconds the last turn ended, or for one still running, when it
+    /// last recorded anything. `None` when nothing says.
+    pub at: Option<i64>,
+}
+
+/// One reply of the agent's, its text blocks joined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentMessage {
+    pub text: String,
+    /// Unix seconds, when recorded.
+    pub at: Option<i64>,
+}
+
+/// How a session's last turn ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", content = "error", rename_all = "snake_case")]
+pub enum TurnEnd {
+    /// It finished as the agent meant it to.
+    Finished,
+    /// The user interrupted it.
+    Interrupted,
+    /// It stopped on an error from the model's API, as the agent put it.
+    ApiError(String),
+    /// It has not ended, or no turn has started.
+    Running,
+}
+
+impl TurnEnd {
+    pub fn label(&self) -> String {
+        match self {
+            TurnEnd::Finished => "finished".to_string(),
+            TurnEnd::Interrupted => "interrupted".to_string(),
+            TurnEnd::ApiError(error) => format!("API error: {error}"),
+            TurnEnd::Running => "still running".to_string(),
+        }
+    }
 }
 
 /// A prompt an agent shows before its session starts.
@@ -395,6 +447,7 @@ mod tests {
         assert!(h.startup_prompt("Yes, I trust this folder").is_none());
         assert!(h.accept_trust("Yes, I trust this folder").is_none());
         assert!(h.tested_version().is_none());
+        assert!(h.last_messages(Path::new("/"), "x", 1).is_none());
     }
 
     #[test]

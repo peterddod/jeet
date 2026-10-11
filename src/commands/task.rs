@@ -406,6 +406,72 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
     Ok(())
 }
 
+/// What the task's agent last said — its last `count` messages — how its
+/// last turn ended and when, and how the task is doing now, read from its
+/// latest session's record through the harness.
+pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
+    let task = tasks::find(app, name)?;
+    let dir = tasks::task_dir(app, &task);
+    let status = match task.state {
+        TaskState::Active => runtime::activity(app, &task, tmux::available()).label(),
+        TaskState::Archived => "archived".to_string(),
+    };
+    let harness = AgentSpec::from_config(&app.config)?.harness;
+    let known = app.db.list_task_sessions(&task.id)?;
+    let Some(session) = runtime::latest_session(&dir, &known) else {
+        bail!("task {}'s agent has no session yet", task.name);
+    };
+    let Some(turn) = harness.last_messages(&dir, &session, count) else {
+        bail!(
+            "{} keeps no record jeet can read, so there is no telling what task {}'s agent \
+             last said",
+            harness.name(),
+            task.name
+        );
+    };
+    let turn = turn?;
+    if json {
+        let value = serde_json::json!({
+            "task": task.slug,
+            "name": task.name,
+            "status": status,
+            "session": session,
+            "end": turn.end,
+            "ended_at": turn.at,
+            "messages": turn.messages,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let when = turn
+        .at
+        .map(|at| format!(" ({})", agent::age_label(at)))
+        .unwrap_or_default();
+    println!("task:      {} ({status})", task.slug);
+    println!("session:   {session}");
+    println!("last turn: {}{when}", printable(&turn.end.label()));
+    if turn.messages.is_empty() {
+        println!("\n(the agent has said nothing yet)");
+    }
+    let many = turn.messages.len() > 1;
+    for message in &turn.messages {
+        println!();
+        if many {
+            let age = message.at.map(agent::age_label).unwrap_or_default();
+            println!("── {age}");
+        }
+        println!("{}", printable_text(&message.text));
+    }
+    Ok(())
+}
+
+/// [`printable`] for text of several lines: newlines and tabs are kept.
+fn printable_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
 /// `text` with control characters dropped: a PR title is whatever its author
 /// typed, and an escape sequence in it would be played on the terminal.
 pub fn printable(text: &str) -> String {

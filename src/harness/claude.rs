@@ -7,8 +7,10 @@
 //! <Event>` with the event's JSON on stdin.
 //!
 //! Sessions are found by their transcripts, in
-//! `$CLAUDE_CONFIG_DIR/projects/<slug>/<id>.jsonl` (default `~/.claude`).
+//! `$CLAUDE_CONFIG_DIR/projects/<slug>/<id>.jsonl` (default `~/.claude`),
+//! which are also where what a session last said is read from.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -16,7 +18,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use super::{
-    shell_quote, EventKind, Harness, HookEvent, HookSetup, StartSource, StartupPrompt, TrustStep,
+    shell_quote, AgentMessage, EventKind, Harness, HookEvent, HookSetup, LastTurn, StartSource,
+    StartupPrompt, TrustStep, TurnEnd,
 };
 use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
@@ -169,6 +172,15 @@ impl Harness for ClaudeCode {
             copied.push(session);
         }
         Ok(copied)
+    }
+
+    fn last_messages(&self, dir: &Path, id: &str, n: usize) -> Option<Result<LastTurn>> {
+        let Some(sessions) = session_dir(dir) else {
+            return Some(Err(anyhow::anyhow!(
+                "could not locate the Claude Code config directory"
+            )));
+        };
+        Some(last_turn(&sessions.join(format!("{id}.jsonl")), n))
     }
 
     /// Only directory metadata is read, so it is cheap however long the
@@ -435,6 +447,132 @@ fn sessions(root: &Path) -> Result<Vec<AgentSession>> {
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
     Ok(sessions)
+}
+
+/// What Claude writes in place of a reply to a turn the user interrupted,
+/// with ` for tool use]` when it was at a permission prompt.
+const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// User records that are a command typed at the prompt or its output,
+/// which start no turn.
+const LOCAL_COMMAND: [&str; 5] = [
+    "<command-name>",
+    "<local-command-",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+];
+
+/// The last `n` replies with text in the transcript at `path`, and how the
+/// last turn ended.
+///
+/// Claude writes each block of a reply (thinking, text, a tool call) as its
+/// own record, sharing the reply's `message.id`. A turn that finishes is
+/// followed by a `turn_duration` system record; one the user interrupts by
+/// a user record saying so; one that fails on the API by a synthetic reply
+/// marked `isApiErrorMessage`, with the error as its text. Subagents'
+/// records (`isSidechain`) are not the session's own and are skipped.
+fn last_turn(path: &Path, n: usize) -> Result<LastTurn> {
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    // Transcripts run to many megabytes, so only the last `n` replies are
+    // kept, with the id of the one being added to.
+    let mut messages: VecDeque<(Option<String>, AgentMessage)> = VecDeque::new();
+    let mut end = TurnEnd::Running;
+    let mut at = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("read {}", path.display()))?;
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if record["isSidechain"] == true {
+            continue;
+        }
+        let time = record["timestamp"]
+            .as_str()
+            .and_then(crate::github::parse_timestamp);
+        match record["type"].as_str() {
+            Some("assistant") if record["isApiErrorMessage"] == true => {
+                let text = record_text(&record["message"]["content"]);
+                let error = text.strip_prefix("API Error: ").unwrap_or(&text);
+                end = TurnEnd::ApiError(error.trim().to_string());
+                at = time;
+            }
+            Some("assistant") => {
+                end = match record["message"]["stop_reason"].as_str() {
+                    Some("end_turn") => TurnEnd::Finished,
+                    _ => TurnEnd::Running,
+                };
+                at = time;
+                let text = record_text(&record["message"]["content"]);
+                if text.is_empty() {
+                    continue;
+                }
+                let id = record["message"]["id"].as_str().map(str::to_string);
+                match messages.back_mut() {
+                    Some((last, message)) if id.is_some() && *last == id => {
+                        message.text.push_str("\n\n");
+                        message.text.push_str(&text);
+                    }
+                    _ => {
+                        messages.push_back((id, AgentMessage { text, at: time }));
+                        if messages.len() > n {
+                            messages.pop_front();
+                        }
+                    }
+                }
+            }
+            Some("user") => {
+                if record["isMeta"] == true {
+                    continue;
+                }
+                let content = &record["message"]["content"];
+                let text = match content.as_str() {
+                    Some(text) => text.to_string(),
+                    None => record_text(content),
+                };
+                if LOCAL_COMMAND.iter().any(|c| text.starts_with(c)) {
+                    continue;
+                }
+                end = match text.starts_with(INTERRUPTED) {
+                    true => TurnEnd::Interrupted,
+                    false => TurnEnd::Running,
+                };
+                at = time;
+            }
+            // A turn ending, unless an error or the user already ended it.
+            Some("system")
+                if matches!(end, TurnEnd::Running | TurnEnd::Finished)
+                    && matches!(
+                        record["subtype"].as_str(),
+                        Some("turn_duration" | "stop_hook_summary")
+                    ) =>
+            {
+                end = TurnEnd::Finished;
+                at = time;
+            }
+            _ => {}
+        }
+    }
+    Ok(LastTurn {
+        messages: messages.into_iter().map(|(_, m)| m).collect(),
+        end,
+        at,
+    })
+}
+
+/// The text blocks of a record's content, joined.
+fn record_text(content: &serde_json::Value) -> String {
+    let Some(blocks) = content.as_array() else {
+        return String::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Best-effort first prompt (or recorded summary) plus the transcript length.
@@ -732,6 +870,81 @@ mod tests {
             ClaudeCode.prompt_args("--help me").unwrap(),
             ["--", "--help me"]
         );
+    }
+
+    fn transcript(name: &str, n: usize) -> LastTurn {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/transcripts/claude-code")
+            .join(format!("{name}.jsonl"));
+        last_turn(&path, n).unwrap()
+    }
+
+    fn at(time: &str) -> Option<i64> {
+        crate::github::parse_timestamp(&format!("2026-10-10T22:{time}Z"))
+    }
+
+    fn texts(turn: &LastTurn) -> Vec<&str> {
+        turn.messages.iter().map(|m| m.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_finished_turn_ends_on_its_whole_last_reply() {
+        let turn = transcript("finished", 1);
+        assert_eq!(turn.end, TurnEnd::Finished);
+        assert_eq!(turn.at, at("01:02"));
+        // The reply's text blocks are one message; a command typed at the
+        // prompt afterwards starts no turn.
+        assert_eq!(
+            texts(&turn),
+            ["The cookie had no `Max-Age`, so it died with the tab.\n\n\
+              I set it to 30 days and pushed fix/login-cookie; tests pass."]
+        );
+        assert_eq!(turn.messages[0].at, at("01:00"));
+    }
+
+    #[test]
+    fn the_last_n_replies_come_oldest_first_without_subagents() {
+        let turn = transcript("finished", 5);
+        assert_eq!(turn.messages.len(), 2);
+        assert_eq!(texts(&turn)[0], "Looking at how the cookie is set.");
+        assert!(!texts(&turn).iter().any(|t| t.contains("Subagent")));
+    }
+
+    #[test]
+    fn an_api_error_is_the_ending_not_the_last_message() {
+        let turn = transcript("api-error", 1);
+        assert_eq!(
+            turn.end,
+            TurnEnd::ApiError(
+                "Connection lost mid-response. The response above may be incomplete.".into()
+            )
+        );
+        assert_eq!(turn.at, at("02:35"));
+        assert_eq!(
+            texts(&turn),
+            ["Pushed fix/login-cookie; opening the PR next."]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_turn_says_so_with_what_it_had_said() {
+        let turn = transcript("interrupted", 1);
+        assert_eq!(turn.end, TurnEnd::Interrupted);
+        assert_eq!(turn.at, at("03:01"));
+        assert_eq!(texts(&turn), ["Typing \"cl"]);
+    }
+
+    #[test]
+    fn a_turn_mid_way_is_still_running() {
+        let turn = transcript("mid-turn", 1);
+        assert_eq!(turn.end, TurnEnd::Running);
+        assert_eq!(turn.at, at("04:00"));
+        assert_eq!(texts(&turn), ["Running the tests now."]);
+    }
+
+    #[test]
+    fn a_missing_transcript_is_an_error() {
+        assert!(last_turn(Path::new("/nonexistent/x.jsonl"), 1).is_err());
     }
 
     #[test]
