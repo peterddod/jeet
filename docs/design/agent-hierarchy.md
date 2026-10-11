@@ -214,7 +214,9 @@ keeps v5's `CHECK (placement IN ('local'))` unchanged; a confined placement
 widens it in a migration of its own. It adds three columns to `tasks`:
 `run_state`, `run_state_by` (who set a state other than `run`: `user`,
 `root`, `budget` or a task id; NULL exactly while it runs, enforced by a
-`CHECK`; no FK, since a node setter is an ancestor of the row) and
+`CHECK`; no FK, since a node setter is an ancestor of the row; a state
+never drops in severity and keeps its highest-ranked setter even as it
+rises, so a node's stop does not take over a user's pause) and
 `max_children` (a manager's own fan-out limit). `task_grants` and
 `task_budgets` are as above, with `CHECK`s that a limit is positive and a
 `warned` column (0, 80 or 100) recording the last threshold told. A
@@ -239,8 +241,7 @@ is unchanged.
 
 **Phase 2 (as built).** The refusals live in `tasks::{archive, unarchive,
 delete}`, which the CLI, the TUI and import share, and apply to any task
-with children; the CLI also checks before asking, as the TUI does for
-delete. Delete is refused while any child exists, before anything is
+with children; the CLI and the TUI also check before asking. Delete is refused while any child exists, before anything is
 stopped or removed (the `RESTRICT` key would otherwise refuse only the row,
 after the disk work).
 Archive is refused while a child is active, and unarchive under an archived

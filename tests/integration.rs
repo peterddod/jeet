@@ -1625,9 +1625,24 @@ fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
             .unwrap();
         std::fs::create_dir_all(lab.home().join("tasks").join(kid)).unwrap();
     }
+    // Real worktrees, so a refused unarchive shows it restored nothing.
+    let kid_wt = lab.add(&lab.home(), &["widget", "--branch", "kid", "--task", "kid"]);
+    let kid2_wt = lab.add(
+        &lab.home(),
+        &["widget", "--branch", "kid2", "--task", "kid2"],
+    );
     let state = |id: &str| -> String {
         lab.index()
             .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+    let stashed = |id: &str| -> bool {
+        lab.index()
+            .query_row(
+                "SELECT head_oid IS NOT NULL FROM task_worktrees WHERE task_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
             .unwrap()
     };
 
@@ -1649,6 +1664,8 @@ fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
     let stderr = stderr_of(&output);
     assert!(stderr.contains("which is archived"), "{stderr}");
     assert_eq!(state("kid"), "archived");
+    assert!(!kid_wt.exists(), "a refused unarchive restored a worktree");
+    assert!(stashed("kid"));
 
     // Nor past the parent's own limit.
     succeeded(&lab.jeet_at(&["task", "unarchive", "lead"], &lab.home(), &[]));
@@ -1657,6 +1674,7 @@ fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
         .execute("UPDATE tasks SET max_children = 1 WHERE id = ?1", [&id])
         .unwrap();
     succeeded(&lab.jeet_at(&["task", "unarchive", "kid"], &lab.home(), &[]));
+    assert!(kid_wt.is_dir());
     let output = lab.jeet_at(&["task", "unarchive", "kid2"], &lab.home(), &[]);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
@@ -1665,6 +1683,8 @@ fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
         "{stderr}"
     );
     assert_eq!(state("kid2"), "archived");
+    assert!(!kid2_wt.exists(), "a refused unarchive restored a worktree");
+    assert!(stashed("kid2"));
 }
 
 /// A git checkout on the canvas that is none of the task's worktrees — a

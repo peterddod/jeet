@@ -1232,27 +1232,27 @@ impl Database {
 
     /// Set `id`'s own run state. `Run` (a resume) takes no setter and always
     /// applies; whether the caller may is its own check. Otherwise the state
-    /// never drops in severity, and at the same severity the setter changes
-    /// only to one that outranks it: user, then root, then the node nearest
-    /// the root, then budget. So a user's stop outlives a later pause.
+    /// never drops in severity, and the setter changes only to one that
+    /// outranks it: user, then root, then the node nearest the root, then
+    /// budget. So a user's stop outlives a later pause, and a user's pause
+    /// made a stop by a node is still the user's to resume.
     pub fn set_run_state(&self, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(task) = get_task_in(&tx, id)? else {
             bail!("task {id} is not in the index");
         };
-        let write = match (state, by) {
-            (RunState::Run, None) => true,
+        let by = match (state, by) {
+            (RunState::Run, None) => None,
             (RunState::Run, Some(_)) => bail!("a running task has no setter"),
             (_, None) => bail!("a {} task needs a setter", state.as_str()),
-            (_, Some(_)) if state > task.run_state => true,
-            (_, Some(by)) if state == task.run_state => match &task.run_state_by {
-                Some(old) => outranks_in(&tx, by, old)?,
-                None => true,
+            (_, Some(_)) if state < task.run_state => return Ok(()),
+            (_, Some(by)) => match &task.run_state_by {
+                Some(old) if !outranks_in(&tx, by, old)? => Some(old),
+                _ => Some(by),
             },
-            _ => false,
         };
-        if write {
+        if (state, by) != (task.run_state, task.run_state_by.as_ref()) {
             tx.execute(
                 "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
                 params![id, state.as_str(), by.map(Setter::as_str)],
@@ -2185,10 +2185,22 @@ mod tests {
         db.set_run_state("n", RunState::Paused, Some(&Setter::Root))
             .unwrap();
         assert_eq!(state("n"), (RunState::Paused, Some(Setter::Root)));
-        // More severe wins whoever sets it.
+        // More severe wins whoever sets it, but keeps the higher setter.
         db.set_run_state("n", RunState::Stopped, Some(&Setter::Budget))
             .unwrap();
-        assert_eq!(state("n"), (RunState::Stopped, Some(Setter::Budget)));
+        assert_eq!(state("n"), (RunState::Stopped, Some(Setter::Root)));
+        // A user's pause made a stop by a node stays the user's.
+        db.set_run_state("w2", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        db.set_run_state("w2", RunState::Stopped, Some(&Setter::Node("m".into())))
+            .unwrap();
+        assert_eq!(state("w2"), (RunState::Stopped, Some(Setter::User)));
+        // A higher setter raising it takes over.
+        db.set_run_state("w1", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        db.set_run_state("w1", RunState::Stopped, Some(&Setter::User))
+            .unwrap();
+        assert_eq!(state("w1"), (RunState::Stopped, Some(Setter::User)));
 
         // A resume clears it; whether the caller may is not the index's call.
         db.set_run_state("w3", RunState::Run, None).unwrap();

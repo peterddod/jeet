@@ -2479,6 +2479,12 @@ impl Screen<'_> {
                     || (row.activity.is_none()
                         && tmux::pane_alive(&runtime::session_name(&row.task)));
                 let task = row.task;
+                // Before asking, not after: the answer would count for nothing.
+                if let Err(e) = app.db.check_archive(&task.id) {
+                    self.ui
+                        .message("cannot archive", vec![format!("{e:#}")], None);
+                    return Ok(());
+                }
                 let unkept = match confirmed {
                     true => Vec::new(),
                     false => self

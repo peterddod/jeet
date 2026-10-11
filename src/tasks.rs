@@ -1155,9 +1155,11 @@ pub fn reconcile(app: &App) -> Result<Vec<String>> {
                 .as_ref()
                 .map_or(task.kind == TaskKind::Manager, |r| r.read_only);
             if let (true, Some(branch)) = (read_only, &entry.branch) {
+                // The dir name is whatever the agent gave `git worktree add`.
                 warnings.push(format!(
-                    "{}/{dir_name} is read-only but on branch {branch}; {MANAGER_READ_ONLY}",
-                    task.slug
+                    "{}/{} is read-only but on branch {branch}; {MANAGER_READ_ONLY}",
+                    task.slug,
+                    crate::commands::task::printable(&dir_name)
                 ));
             }
             match row {
@@ -2162,6 +2164,93 @@ mod tests {
         assert!(warnings[0].contains(MANAGER_READ_ONLY), "{warnings:?}");
         assert!(row("m-id").read_only);
         assert_eq!(row("m-id").branch.as_deref(), Some("m-branch"));
+
+        // The dir name is the agent's to pick: no escape reaches a terminal.
+        let path = app.tasks_root().join("m").join("e\x1b[31mvil");
+        hermetic_git(
+            &trunk,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "e-branch",
+                path.to_str().unwrap(),
+            ],
+        );
+        let warnings = reconcile(&app).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("m/e[31mvil")),
+            "{warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.chars().any(char::is_control)),
+            "{warnings:?}"
+        );
+    }
+
+    /// `tasks::archive` and `tasks::delete` refuse a parent before touching
+    /// anything: the TUI and import reach them with no check of their own.
+    #[test]
+    fn teardown_with_tasks_under_it_is_refused_before_anything_goes() {
+        let (_dir, app, _trunk) = manager_lab();
+        let assistant = app.db.get_task("m-id").unwrap().unwrap().parent_id;
+        // A slug no real tmux session has, should a regression reach it.
+        let record = |id: &str, slug: &str, kind, parent: Option<String>| TaskRecord {
+            id: id.into(),
+            slug: slug.into(),
+            name: slug.into(),
+            project: None,
+            kind,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: parent,
+            placement: crate::placement::for_new(),
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        let lead = record("lead-id", "jeet-unit-lead", TaskKind::Manager, assistant);
+        app.db.insert_task(&lead).unwrap();
+        let dir = task_dir(&app, &lead);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wt = add_worktree(&app, &lead, "example.com/o/api", None, None)
+            .unwrap()
+            .path;
+        let kid = record(
+            "kid-id",
+            "jeet-unit-kid",
+            TaskKind::Work,
+            Some("lead-id".into()),
+        );
+        app.db.insert_task(&kid).unwrap();
+        // Archive removes the agent's settings long before its row changes.
+        let settings = runtime::settings_dir(&app.home, "lead-id");
+        std::fs::create_dir_all(&settings).unwrap();
+
+        let untouched = |what: &str| {
+            assert!(settings.is_dir(), "{what}: the agent's settings went");
+            assert!(dir.is_dir(), "{what}: the task directory went");
+            assert!(wt.is_dir(), "{what}: the worktree went");
+            assert_eq!(app.db.list_task_worktrees("lead-id").unwrap().len(), 1);
+            let row = app.db.get_task("lead-id").unwrap().unwrap();
+            assert_eq!(row.state, TaskState::Active, "{what}");
+        };
+        let refused = archive(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("1 active task under it"), "{refused}");
+        untouched("archive");
+        let refused = delete(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("1 task under it"), "{refused}");
+        untouched("delete");
+
+        app.db
+            .set_task_state("kid-id", TaskState::Archived)
+            .unwrap();
+        let refused = delete(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("archived ones included"), "{refused}");
+        untouched("delete with the child archived");
     }
 
     #[test]
