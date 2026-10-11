@@ -615,7 +615,9 @@ once, and only while the agent is working or waiting on you
 one starting up or held at a startup prompt such as the trust dialog, one
 whose prompt holds text you have not sent, or one waiting on a prompt, asking
 you a question or showing its plan for approval while someone is attached to
-its session (you may be typing an answer into it) is left alone, since Esc there
+its session (you may be typing an answer into it; once a question or plan is
+answered, this lasts until the agent's next tool call or the end of its turn,
+as Claude reports no answer) is left alone, since Esc there
 would clear your text, rewind the conversation or exit the agent, and the
 command says why nothing was sent. The task's status may read `running`
 for about a minute afterwards, until Claude reports it sits idle, as after a

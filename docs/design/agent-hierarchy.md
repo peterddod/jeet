@@ -807,7 +807,10 @@ RFC left open, or departed from it:
   name everywhere; harnesses.md says so.
 - **E6** `Capability.external` names the `gh` commands a capability
   stands for (`pr.comment`: `gh pr comment`, `gh issue comment`;
-  `pr.review`: `gh pr review`). A held one is allowed. A parented node is
+  `pr.review`: `gh pr review`). A held one is pre-approved for the root
+  (`allowed_commands`); a parented node holding one is only not denied
+  it, and still asks at the user's prompt (node allow lists stay
+  `ALLOWED`, E8). A parented node is
   denied the ones it does not hold. The root is never denied them: it
   holds them by default (5.1), and a deny would refuse them even with the
   user's approval. The root's denies are force pushes, default-branch
@@ -841,7 +844,9 @@ RFC left open, or departed from it:
   dialog's own text field, which `has_draft` does not see. The same goes
   for a `Running` status the harness says is a dialog of its own
   (`Harness::in_dialog`; Claude Code reports `AskUserQuestion` and
-  `ExitPlanMode` only through PreToolUse). Known gap: a permission prompt
+  `ExitPlanMode` only through PreToolUse, and no hook reports the answer,
+  so an answered dialog still counts until the next tool call or the
+  turn's end: a refusal, the safe direction). Known gap: a permission prompt
   reads as `Running` until Claude's notification, which it sends only
   once the user has left the prompt alone for some seconds, so an
   attached user typing feedback into one may still have it discarded. No retry, no confirmation and no status

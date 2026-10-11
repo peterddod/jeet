@@ -232,6 +232,8 @@ impl Harness for ClaudeCode {
     fn in_dialog(&self, status: &crate::status::SessionStatus) -> bool {
         // Reported only by PreToolUse: no Notification says Claude is
         // asking, or not until the user has left the dialog alone a while.
+        // No hook reports the answer either (it is a tool result, not a
+        // prompt), so this lasts until the next tool call or the turn's end.
         status.event == "PreToolUse"
             && status.state == crate::status::State::Running
             && status
