@@ -3,8 +3,11 @@
 //! jeet picks each session's id (`--session-id`, `-n`), resumes with
 //! `--resume`, and gives a first prompt after `--`. Its hooks arrive in a
 //! `--settings` JSON layered over the user's own, which also pre-approves
-//! the jeet commands the agent may run. Each hook runs `jeet task-hook
-//! <Event>` with the event's JSON on stdin.
+//! the jeet commands the agent may run and denies what jeet forbids it
+//! (force-pushing, merging…). Claude checks deny rules before any allow
+//! rule from any settings scope, and a denied command cannot be approved at
+//! the prompt. Each hook runs `jeet task-hook <Event>` with the event's JSON
+//! on stdin. Esc ends a running turn.
 //!
 //! Sessions are found by their transcripts, in
 //! `$CLAUDE_CONFIG_DIR/projects/<slug>/<id>.jsonl` (default `~/.claude`),
@@ -18,8 +21,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use super::{
-    shell_quote, AgentMessage, EventKind, Harness, HookEvent, HookSetup, LastTurn, StartSource,
-    StartupPrompt, TrustStep, TurnEnd,
+    shell_quote, AgentMessage, Enforcement, EventKind, Harness, HookEvent, HookSetup, LastTurn,
+    StartSource, StartupPrompt, TrustStep, TurnEnd,
 };
 use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
@@ -61,6 +64,11 @@ pub const IMPORT_AGENTS_MD: &str = "@AGENTS.md\n";
 
 /// What marks the selected option.
 const CURSOR: char = '❯';
+
+/// The tools by which Claude shows the user a dialog: a question, with a
+/// field to type another answer, and the plan to approve, with one for
+/// feedback.
+const DIALOG_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 
 #[derive(Debug)]
 pub struct ClaudeCode;
@@ -107,6 +115,15 @@ impl Harness for ClaudeCode {
 
     fn hook_args(&self, hooks: &HookSetup) -> Option<Vec<String>> {
         Some(vec!["--settings".to_string(), settings_json(hooks)])
+    }
+
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Rules
+    }
+
+    /// Esc ends the turn, and at a permission prompt refuses the tool call.
+    fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["Escape"])
     }
 
     fn parse_hook(&self, event: &str, raw: &str) -> Result<HookEvent> {
@@ -210,6 +227,19 @@ impl Harness for ClaudeCode {
             TRUST_NO => Some(TrustStep::Select(vec!["Down"])),
             _ => None,
         }
+    }
+
+    fn in_dialog(&self, status: &crate::status::SessionStatus) -> bool {
+        // Reported only by PreToolUse: no Notification says Claude is
+        // asking, or not until the user has left the dialog alone a while.
+        // No hook reports the answer either (it is a tool result, not a
+        // prompt), so this lasts until the next tool call or the turn's end.
+        status.event == "PreToolUse"
+            && status.state == crate::status::State::Running
+            && status
+                .detail
+                .as_deref()
+                .is_some_and(|tool| DIALOG_TOOLS.contains(&tool))
     }
 
     fn has_draft(&self, pane: &str) -> bool {
@@ -390,8 +420,9 @@ fn asks_the_user(input: &HookInput) -> bool {
     )
 }
 
-/// The `--settings` JSON: a hook per event running `jeet task-hook`, and
-/// permission to run the commands `allow` names, as `Bash(…)` rules.
+/// The `--settings` JSON: a hook per event running `jeet task-hook`,
+/// permission to run the commands `allow` names, as `Bash(…)` rules, and,
+/// when there are any, `Bash(…)` rules denying those `deny` names.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
@@ -413,11 +444,30 @@ fn settings_json(hooks: &HookSetup) -> String {
         .iter()
         .map(|command| format!("Bash({command}:*)"))
         .collect();
+    let mut permissions = serde_json::json!({ "allow": allow });
+    if !hooks.deny.is_empty() {
+        let deny: Vec<String> = hooks.deny.iter().flat_map(|p| deny_rules(p)).collect();
+        permissions["deny"] = serde_json::json!(deny);
+    }
     serde_json::json!({
         "hooks": groups,
-        "permissions": { "allow": allow },
+        "permissions": permissions,
     })
     .to_string()
+}
+
+/// The `Bash(…)` rules for a deny pattern (see [`HookSetup::deny`]). A
+/// trailing ` *` lets any further arguments follow; Claude also matches it
+/// against the bare command, but only when it is the rule's one `*`, so a
+/// pattern with a `*` of its own gets a second rule, for the bare command
+/// (`git push * main` and `git push * main *`). A pattern already ending
+/// in `*` needs neither.
+pub(crate) fn deny_rules(pattern: &str) -> Vec<String> {
+    match (pattern.ends_with('*'), pattern.contains('*')) {
+        (true, _) => vec![format!("Bash({pattern})")],
+        (false, false) => vec![format!("Bash({pattern} *)")],
+        (false, true) => vec![format!("Bash({pattern})"), format!("Bash({pattern} *)")],
+    }
 }
 
 /// Root of Claude Code's per-project session store.
@@ -666,7 +716,7 @@ fn one_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{status_for, State};
+    use crate::status::{status_for, SessionStatus, State};
 
     fn raw_fixture(event: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -775,6 +825,23 @@ mod tests {
     }
 
     #[test]
+    fn only_a_question_or_a_plan_is_a_dialog() {
+        let status = |event: &str, detail: Option<&str>| SessionStatus {
+            session_id: "s".into(),
+            state: State::Running,
+            detail: detail.map(Into::into),
+            event: event.into(),
+            at: 1,
+        };
+        assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("AskUserQuestion"))));
+        assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("ExitPlanMode"))));
+        assert!(!ClaudeCode.in_dialog(&status("PreToolUse", Some("Bash"))));
+        assert!(!ClaudeCode.in_dialog(&status("PreToolUse", None)));
+        // A prompt that happens to read as one is no dialog.
+        assert!(!ClaudeCode.in_dialog(&status("UserPromptSubmit", Some("AskUserQuestion"))));
+    }
+
+    #[test]
     fn an_idle_prompt_notification_is_idleness() {
         let mut input = fixture("Notification-idle");
         assert_eq!(event_kind("Notification", &input), Some(EventKind::Idle));
@@ -814,6 +881,7 @@ mod tests {
         let hooks = HookSetup {
             exe: "/opt/it's here/jeet".into(),
             allow: vec!["jeet worktree".into(), "jeet ls".into()],
+            ..Default::default()
         };
         let args = ClaudeCode.hook_args(&hooks).unwrap();
         assert_eq!(args[0], "--settings");
@@ -834,6 +902,43 @@ mod tests {
             value["permissions"]["allow"],
             serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
         );
+        assert!(value["permissions"].get("deny").is_none());
+    }
+
+    #[test]
+    fn settings_carry_deny_rules() {
+        let hooks = HookSetup {
+            exe: "/bin/jeet".into(),
+            allow: vec!["jeet ls".into()],
+            deny: vec![
+                "gh pr merge".into(),
+                "git push --force*".into(),
+                "git push * main".into(),
+            ],
+        };
+        assert_eq!(ClaudeCode.enforcement(), Enforcement::Rules);
+        let args = ClaudeCode.hook_args(&hooks).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(
+            value["permissions"]["deny"],
+            serde_json::json!([
+                "Bash(gh pr merge *)",
+                "Bash(git push --force*)",
+                // Claude's trailing ` *` matches nothing only when it is the
+                // rule's one `*`: `git push origin main` needs the first.
+                "Bash(git push * main)",
+                "Bash(git push * main *)",
+            ])
+        );
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!(["Bash(jeet ls:*)"])
+        );
+    }
+
+    #[test]
+    fn it_interrupts_with_one_escape() {
+        assert_eq!(ClaudeCode.interrupt_keys(), Some(&["Escape"][..]));
     }
 
     #[test]

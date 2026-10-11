@@ -267,6 +267,13 @@ pub enum TaskCommands {
         message: String,
     },
 
+    /// End the task agent's current turn, keeping its session: only while
+    /// it is working or waiting on you, and not over text you have not sent
+    Interrupt {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+
     /// Remove a task's worktrees to free the disk, keeping what restores them
     Archive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]

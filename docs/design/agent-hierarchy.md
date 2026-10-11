@@ -469,8 +469,12 @@ jeet manager stop --all       # the user's panic button: everything below the ro
 ```
 
 `paused` means: `messages::deliver` queues instead of typing, nothing is
-started, and the harness's `interrupt` (new, #32; Esc for Claude Code) ends the
-current turn. `resume` hands the queue over. A manager may pause or stop its
+started, and the harness's `interrupt_keys` (#32; Esc for Claude Code) end the
+current turn. jeet presses them once, and only while the agent is running or
+waiting on a prompt: in a waiting agent Esc refuses the pending tool call and
+ends the turn, while at an idle prompt it would rewind or clear a draft, and
+at the trust dialog it would exit. A node whose pane holds unsent input the
+user is typing is left alone. `resume` hands the queue over. A manager may pause or stop its
 descendants. Only the user may `--all` or act on the root.
 
 ### 5.5 Prompt injection
@@ -496,22 +500,31 @@ power.
 ### 5.6 Merge, push, comment
 
 These go through `git`/`gh`, not jeet, so jeet cannot gate them in-process.
-They are gated by the harness permission rules jeet writes for each node
-(`--settings` for Claude Code):
+They are gated by the harness permission rules jeet writes for the root and
+every parented node (`--settings` for Claude Code). Top-level tasks the user
+made get no deny rules, by design: they stay ungated (D1, D23), and a deny
+would also refuse the user's own `--force-with-lease` with no prompt to
+approve it.
 
 | Action | Default |
 |---|---|
 | push own task branch | workers with `git.push` (needed to open PRs) |
-| `git push --force`, push to a default branch | denied to every agent |
+| `git push --force`, push to a default branch | denied to the root and every parented node |
 | `gh pr create` | workers with `git.push` |
-| `gh pr comment` / `review` | the holder of `pr.comment` / `pr.review` (the root by default) |
-| merge | only through `jeet pr merge` (#25), by the holder of `pr.merge`: the root by default, or a node a parent granted it to by name. `gh pr merge` and the merge API are denied to every node |
+| `gh pr comment` / `review` | the holder of `pr.comment` / `pr.review` (the root by default); denied to a parented node that does not hold it |
+| merge | only through `jeet pr merge` (#25), by the holder of `pr.merge`: the root by default, or a node a parent granted it to by name. `gh pr merge` and the merge API are denied to the root and every parented node |
 
 `jeet pr merge` refuses a PR that is a draft, conflicted, failing or pending
 checks, or awaiting changes or review, and merges only the head it checked
 (#25). So the capability is the only control that needs the hierarchy.
 
 This needs a *deny* rule list from the harness, not just allow rules (§7, #32).
+
+Deny rules are a lint, not a gate. They are matched against the start of a
+command, so `git -C . push -f`, `sh -c '…'`, aliases, scripts, MCP tools and
+`!` commands get past them (`docs/harnesses.md`, "Deny rules"). They stop
+honest mistakes. GitHub branch protection or a ruleset is the real control
+on a default branch, and #33's sandbox is the boundary.
 
 ### 5.7 What this does not protect against
 
@@ -577,8 +590,8 @@ missing piece named. Workers keep #23's degrade-don't-fail rule.
 | add context at session start | yes | no: falls back to `BRIEF.md` + `AGENTS.md` telling it to read it |
 | continue-turn output (to hand the inbox over at Stop) | yes | yes (else reports wait for the idle typing path) |
 | allow rules from capabilities | yes (command prefixes) | yes (else every action prompts the user, which is not autonomous) |
-| **deny rules** | no, **new** (#32) | yes for children (5.6) and read-only worktrees (§1) |
-| **interrupt** a running turn | no, **new** (#32) | yes (pause) |
+| **deny rules** | yes (#32): `enforcement() >= Rules`; Claude Code only; a lint, not a gate (#33 is the boundary) | yes for children (5.6) and read-only worktrees (§1) |
+| **interrupt** a running turn | yes (#32): `interrupt_keys`; Claude Code only (Esc) | yes (pause) |
 | **usage** (tokens/cost) | no, **new** (#26), optional | no; cost budgets wait for it |
 | instructions file | yes (`instructions_file`, #22) | yes (manager role template) |
 
@@ -753,3 +766,110 @@ Where phase 1 (#31) settled what this RFC left open, or departed from it:
   is accepted.
 - **D22** TUI: ` ↳ assistant` and the last report, dimmed.
 - **D23** A user shell in a worker's tmux session is gated as the worker.
+
+### #32 implementation notes
+
+Where #32 (interrupt and deny rules on the harness trait) settled what this
+RFC left open, or departed from it:
+
+- **E0** `Harness::enforcement() -> Enforcement { None, Rules }`, not a
+  `supports_deny()` bool: a bool probe cannot tell a harness that drops
+  `deny` from one that applies it, and #33 only adds `Sandbox`.
+- **E1** `HookSetup.deny: Vec<String>` of neutral command patterns
+  (`HookSetup` derives `Default`). No write denies and no `config.toml`
+  edit deny yet: those wait for phase 2's read-only worktrees and #33's
+  confinement.
+- **E2** Pattern syntax: words from the start of the command, `*` for any
+  run of characters, further arguments implied. Claude Code renders
+  `Bash(<p> *)`, or `Bash(<p>)` when `p` ends in `*`; allow rules keep
+  `Bash(x:*)`. `deny` is left out when empty, so a launch without denies
+  is unchanged.
+- **E3** Patterns are anchored at the start: an unanchored deny would
+  refuse `git commit -m "…gh pr merge…"` with no way to approve it. The
+  gaps this leaves are pinned by a test (`KNOWN_GAPS`).
+- **E4** Deny rules go to the root and every parented node. Top-level
+  tasks get none (D1, D23), so 5.6's "every agent" now reads "the root and
+  every parented node". The exception is a parented review task's
+  `[review] command`: the user's own command, run by `review-job`, not
+  launched through a harness, so jeet has no settings to put the rules in.
+  `jeet review` warns when it starts one, as E13 does.
+- **E5** Default branches are every indexed repo's `default_branch` plus
+  `main` and `master`, deduplicated, snapshot at launch, and capped at
+  eight (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
+  repos use, none longer than 24 bytes (`MAX_BRANCH_NAME`). Each costs
+  about 280 bytes of the inline settings (three patterns, each rendered
+  for Claude Code as two rules, with and without a trailing ` *`, since
+  its trailing ` *` matches the bare command only in a rule with no other
+  `*`), which share tmux's 16KB command
+  limit with the first prompt (E9). A repo's `default_branch` is
+  `origin/HEAD` at clone or import, or else the branch then checked out,
+  and is not refreshed, so a wrong guess denies pushing to that branch
+  name everywhere; harnesses.md says so.
+- **E6** `Capability.external` names the `gh` commands a capability
+  stands for (`pr.comment`: `gh pr comment`, `gh issue comment`;
+  `pr.review`: `gh pr review`). A held one is pre-approved for the root
+  (`allowed_commands`); a parented node holding one is only not denied
+  it, and still asks at the user's prompt (node allow lists stay
+  `ALLOWED`, E8). A parented node is
+  denied the ones it does not hold. The root is never denied them: it
+  holds them by default (5.1), and a deny would refuse them even with the
+  user's approval. The root's denies are force pushes, default-branch
+  pushes and merging. No `gh api -X/-f/-F` write denies: they would break
+  `gh api graphql -f query=` reads. So a node without `pr.comment` or
+  `pr.review` can still ask the user to approve the same through `gh api`
+  (`issues/*/comments`, `pulls/*/reviews`, `addComment`,
+  `addPullRequestReview`): a documented gap, pinned in `KNOWN_GAPS`, as
+  are commits through the contents endpoint and `createCommitOnBranch`.
+- **E7** Merging is denied to the root and nodes: `gh pr merge`, the REST
+  merge endpoints through `gh api` or `curl`, and the GraphQL
+  `mergePullRequest`, `enablePullRequestAutoMerge`, `mergeBranch` and
+  `enqueuePullRequest` mutations, matched anywhere after `gh api` or
+  `curl`. `git push --branches` is denied with `--all`, its synonym.
+  `jeet pr merge` runs `gh` from jeet's process and is unaffected.
+- **E8** A node's allow list is unchanged; narrowing it is phase 2's.
+- **E9** Settings stay inline on argv; a 0600 settings file is #33's. A
+  test checks the first prompt still fits one tmux command with every
+  capability held and with none, and the most default branches E5 allows.
+- **E10** `runtime::interrupt` returns `Interrupted { Sent,
+  NotWorking(activity), UserTyping, Watched, AtStartup }` and does not fail
+  when there is nothing to interrupt, so phase 2's pause can walk a subtree
+  with idle nodes. Under the assistant, an interrupt that sent nothing is
+  logged as `skipped` (with why) and not announced, rather than as done.
+- **E11** Keys are pressed once, only while `Running` or `Waiting`, and
+  never over the user's draft. Not at a startup prompt either (Esc at the
+  trust dialog exits): a Waiting no hook reported, synthesised for an agent
+  with no status or written by the startup watcher, returns
+  `Interrupted::AtStartup`. Nor at `Waiting` while a client is attached to
+  the session (`Interrupted::Watched`): the user may be typing into the
+  dialog's own text field, which `has_draft` does not see. The same goes
+  for a `Running` status the harness says is a dialog of its own
+  (`Harness::in_dialog`; Claude Code reports `AskUserQuestion` and
+  `ExitPlanMode` only through PreToolUse, and no hook reports the answer,
+  so an answered dialog still counts until the next tool call or the
+  turn's end: a refusal, the safe direction). Known gap: a permission prompt
+  reads as `Running` until Claude's notification, which it sends only
+  once the user has left the prompt alone for some seconds, so an
+  attached user typing feedback into one may still have it discarded. No retry, no confirmation and no status
+  repair yet (the status reads `running` until the next hook, as after a
+  manual Esc); those come with pause. The assistant is refused (5.4).
+  The draft check and the keys aim at the agent's own pane, by the id
+  (`%3`) jeet notes in the session option `@jeet-agent-pane` when it
+  starts the session, not the session's active pane, which may be a pane
+  the user split off the agent's window or a window they opened there; a
+  session started before the id was noted falls back to the active pane
+  of its first window (`=<session>:^`). `jeet task send` and the startup
+  watcher aim there too.
+- **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`
+  (whose pre-approved commands include it, so an allowed interrupt does
+  not prompt);
+  nodes are refused because it is not in their grant.
+- **E13** A parented task launched on a harness with `Enforcement::None`
+  gets a warning that its agent is not stopped from force-pushing or
+  merging, and only jeet's own commands are gated (§7, degrade, don't
+  fail).
+- **E14** The manager refusal, `missing(h, &[Feature]) -> Vec<Feature>`
+  with `Feature::label` naming the piece ("deny rules", "interrupt"),
+  lands with phase 2's `manager new`; it has no caller in #32.
+- **E15** Deny rules are a lint, not a gate (5.6). They cover only the
+  agent's Bash and file tools, not MCP tools, `!` commands or scripts.
+  Branch protection is the real control; #33 is the boundary.

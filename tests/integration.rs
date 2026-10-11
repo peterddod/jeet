@@ -2234,7 +2234,8 @@ fn resync_updates_what_the_task_left_alone() {
 /// ends it, and `has-session` and `list-panes` report it. The pane's pid is
 /// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
 /// does. `display-message` prints the `current` file: the session the
-/// caller runs in.
+/// caller runs in. `list-clients` reports a client while a `client` file
+/// exists.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -2264,9 +2265,12 @@ fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
-  new-session) touch "$here/alive" ;;
+  new-session) touch "$here/alive"; rm -f "$here/agent-pane" ;;
+  # The agent's pane id, noted in its session, is `%1`.
+  set-option)
+    case "$*" in *@jeet-agent-pane*) echo %1 > "$here/agent-pane" ;; esac ;;
   kill-session)
-    rm -f "$here/alive"
+    rm -f "$here/alive" "$here/agent-pane"
     if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
   list-panes)
     [ -e "$here/alive" ] || exit 1
@@ -2275,7 +2279,13 @@ case "$1" in
       *) echo 0 ;;
     esac ;;
   display-message) cat "$here/current" 2>/dev/null ;;
-  show-options) echo C-b ;;
+  # Someone is attached while the test leaves a `client` file.
+  list-clients) [ -e "$here/client" ] && echo /dev/ttys001 ;;
+  show-options)
+    case "$*" in
+      *@jeet-agent-pane*) cat "$here/agent-pane" 2>/dev/null ;;
+      *) echo C-b ;;
+    esac ;;
   # A pane to look at, which Down and Enter change when the test says how:
   # Down shows `pane-down`, after `down-lag` more captures if that is set.
   capture-pane)
@@ -2609,6 +2619,8 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "Bash(jeet report:*)"
         ])
     );
+    // A top-level task is not gated, so nothing is denied it.
+    assert!(settings["permissions"].get("deny").is_none(), "{settings}");
     // Known before the agent ever ran.
     assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
     let hint = calls_of(&tmux, "set-option");
@@ -3132,6 +3144,36 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         assert_eq!(features.matches("xterm*:extkeys").count(), 1, "{features}");
         succeeded(&lab.jeet_at(&["task", "archive", "again"], &lab.home(), &env));
     }
+    // The agent's pane is noted by id, and stays the one noted when the
+    // user splits its window and works in the new pane.
+    let agent_pane =
+        stdout_of(&server.tmux(&["display-message", "-p", "-t", "=jeet-real:^", "#{pane_id}"]))
+            .trim()
+            .to_string();
+    assert!(agent_pane.starts_with('%'), "{agent_pane}");
+    let noted = || {
+        stdout_of(&server.tmux(&[
+            "show-options",
+            "-qv",
+            "-t",
+            "=jeet-real:",
+            "@jeet-agent-pane",
+        ]))
+        .trim()
+        .to_string()
+    };
+    assert_eq!(noted(), agent_pane);
+    assert!(server
+        .tmux(&["split-window", "-t", "=jeet-real:^", "--", "sleep", "300"])
+        .status
+        .success());
+    let active =
+        stdout_of(&server.tmux(&["display-message", "-p", "-t", "=jeet-real:^", "#{pane_id}"]))
+            .trim()
+            .to_string();
+    assert_ne!(active, agent_pane);
+    assert_eq!(noted(), agent_pane);
+
     let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
     assert!(
         stdout_of(&output).contains("running"),
@@ -5123,10 +5165,8 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     succeeded(&output);
     assert_eq!(
         pasted(&tmux),
-        [(
-            "=jeet-fix-x:".to_string(),
-            "also add tests; thanks".to_string()
-        )]
+        // The agent's own pane, by the id noted when it started.
+        [("%1".to_string(), "also add tests; thanks".to_string())]
     );
     assert_eq!(
         calls_of(&tmux, "paste-buffer")[0][..3],
@@ -5134,7 +5174,7 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     );
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:", "Enter"]]
+        [["send-keys", "-t", "%1", "Enter"]]
     );
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
@@ -5241,7 +5281,8 @@ fn task_send_pastes_long_messages_whole_but_never_onto_a_draft() {
     assert!(long.len() > 5_000);
     std::fs::write(stub.join("pane"), fixture("input-placeholder")).unwrap();
     succeeded(&lab.jeet_at(&["task", "send", "fix-x", &long], &lab.home(), &env));
-    assert_eq!(pasted(&tmux), [("=jeet-fix-x:".to_string(), long.clone())]);
+    // Started before jeet noted its pane: the agent's window.
+    assert_eq!(pasted(&tmux), [("=jeet-fix-x:^".to_string(), long.clone())]);
     // The buffer is the message's own, and gone once pasted.
     let load = &calls_of(&tmux, "load-buffer")[0];
     assert_eq!(load[..2], ["load-buffer", "-b"]);
@@ -5447,9 +5488,11 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\n",
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"pr.comment\"]\n",
     )
     .unwrap();
+    succeeded(&lab.jeet(&["ls"]));
+    index_develop_repo(&lab);
 
     // First run: the home is set up, and a session started detached.
     let output = lab.jeet_at(&["chat"], &lab.home(), &env);
@@ -5500,6 +5543,22 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     assert!(
         !allow.contains(&"Bash(jeet task delete:*)".into()),
         "{allow:?}"
+    );
+    // Commenting, held, needs no prompt; merging outside `jeet pr merge`
+    // and force-pushing are denied whatever is held.
+    assert!(allow.contains(&"Bash(gh pr comment:*)".into()), "{allow:?}");
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    for rule in [
+        "Bash(gh pr merge *)",
+        "Bash(git push --force*)",
+        "Bash(git push * main *)",
+        "Bash(git push * develop *)",
+    ] {
+        assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
+    }
+    assert!(
+        !deny.iter().any(|d| d.as_str().unwrap().contains("comment")),
+        "{deny:?}"
     );
     assert!(settings["hooks"]["SessionStart"].is_array());
     // The window is keyed by the session it runs.
@@ -6698,7 +6757,14 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
         ("JEET_ASSISTANT", "1"),
         ("JEET_TASK_ID", assistant.as_str()),
     ];
-    succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    // No harness launches it, so it gets no deny rules, and says so.
+    assert!(
+        stderr_of(&output).contains("review command runs outside a harness launch"),
+        "{}",
+        stderr_of(&output)
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !seen.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -7246,4 +7312,346 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
         &as_y,
     ));
     assert!(lab.reports_of(&y).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_node_launch_carries_deny_rules() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    // The root may comment and review; its node still may not.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
+    )
+    .unwrap();
+    lab.new_task_with("kid", &["--parent", "assistant"]);
+    index_develop_repo(&lab);
+    let output = lab.jeet_at(&["task", "open", "kid"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("deny rules"),
+        "{}",
+        stderr_of(&output)
+    );
+    let agent = agent_argv(&calls_of(&tmux, "new-session")[0]);
+    let at = agent.iter().position(|a| a == "--settings").unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&agent[at + 1]).unwrap();
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    for rule in [
+        "Bash(gh pr merge *)",
+        "Bash(gh pr comment *)",
+        "Bash(gh pr review *)",
+        "Bash(git push * main *)",
+        "Bash(git push * master *)",
+        // An indexed repository's own default branch, pushed bare too.
+        "Bash(git push * develop)",
+        "Bash(git push * develop *)",
+    ] {
+        assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
+    }
+    // Its allow list is a task's own.
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!([
+            "Bash(jeet worktree:*)",
+            "Bash(jeet ls:*)",
+            "Bash(jeet report:*)"
+        ])
+    );
+}
+
+/// Index a repository whose default branch is `develop`.
+fn index_develop_repo(lab: &StoreLab) {
+    lab.index()
+        .execute(
+            "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
+             VALUES ('github.com/acme/dev', '/nowhere/dev', 'https://github.com/acme/dev.git',
+                     'develop', 0)",
+            [],
+        )
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_node_on_a_harness_without_deny_rules_launches_with_a_warning() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+    ];
+    lab.new_task("top");
+    let output = lab.jeet_at(&["task", "open", "top"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("deny rules"),
+        "{}",
+        stderr_of(&output)
+    );
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    lab.new_task_with("kid", &["--parent", "assistant"]);
+    let output = lab.jeet_at(&["task", "open", "kid"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains(
+            "the agent has no deny rules, so task kid's agent is not stopped from \
+             force-pushing or merging"
+        ),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupt_presses_escape_once_and_only_while_working() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("fix-x");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-x"], &lab.home(), &env));
+    let session = lab.sessions(&task_id(&task))[0].0.clone();
+    let interrupt = || {
+        let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output).to_string()
+    };
+
+    // Starting: no turn to end.
+    let said = interrupt();
+    assert!(
+        said.contains("not working (starting); nothing sent"),
+        "{said}"
+    );
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+
+    // Still no hook a minute after launch: likely held at the trust dialog,
+    // where Esc would exit the agent.
+    let launched = task.join(".jeet").join("launched");
+    std::fs::File::options()
+        .write(true)
+        .open(&launched)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .unwrap();
+    let said = interrupt();
+    assert!(said.contains("may be at a startup prompt"), "{said}");
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+
+    // Running: one Escape, never repeated, even with someone attached.
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
+    std::fs::write(stub.join("client"), "").unwrap();
+    let said = interrupt();
+    assert!(said.contains("interrupted task fix-x's turn"), "{said}");
+    // The agent's own pane, by the id noted when it started, gets the key
+    // and is the one checked for a draft: not a pane the user split off.
+    assert_eq!(
+        tmux_calls(&tmux)
+            .iter()
+            .filter(|c| c[0] == "set-option" && c.contains(&"@jeet-agent-pane".to_string()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls_of(&tmux, "send-keys"),
+        [["send-keys", "-t", "%1", "Escape"]]
+    );
+    let captures = calls_of(&tmux, "capture-pane");
+    assert!(!captures.is_empty());
+    assert!(
+        captures
+            .iter()
+            .all(|c| c.ends_with(&["-t".to_string(), "%1".to_string()])),
+        "{captures:?}"
+    );
+    std::fs::remove_file(stub.join("client")).unwrap();
+
+    // Running with text the user has not sent: left alone.
+    std::fs::copy(pane_fixture("input-draft"), stub.join("pane")).unwrap();
+    let said = interrupt();
+    assert!(said.contains("unsent input"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+
+    // Asking the user a question, which reads as running: someone attached
+    // may be typing an answer into it, which Esc would throw away.
+    let mut asking: serde_json::Value =
+        serde_json::from_str(&hook_input("PreToolUse", &session, &task)).unwrap();
+    asking["tool_name"] = "AskUserQuestion".into();
+    hook_ok(&lab.hook("PreToolUse", &asking.to_string(), &[]));
+    std::fs::write(stub.join("client"), "").unwrap();
+    let said = interrupt();
+    assert!(said.contains("someone attached"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    std::fs::remove_file(stub.join("client")).unwrap();
+
+    // Waiting at a permission prompt a hook reported: Esc refuses the call.
+    hook_ok(&lab.hook(
+        "Notification",
+        &hook_input("Notification", &session, &task),
+        &[],
+    ));
+    // Someone attached to that prompt may be typing an answer into it,
+    // which Esc would throw away.
+    std::fs::write(stub.join("client"), "").unwrap();
+    let said = interrupt();
+    assert!(said.contains("someone attached"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    std::fs::remove_file(stub.join("client")).unwrap();
+    let said = interrupt();
+    assert!(said.contains("interrupted task fix-x's turn"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+
+    // Idle: nothing to interrupt, and Esc there would clear or rewind.
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", &session, &task), &[]));
+    let said = interrupt();
+    assert!(said.contains("is not working (idle"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("fix-x");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.send\"]\n",
+    )
+    .unwrap();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("nothing sent"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["outcome"], "skipped");
+    assert_eq!(log[0]["action"], "interrupted task fix-x");
+    let why = log[0]["error"].as_str().unwrap();
+    assert!(
+        why.starts_with("nothing sent: its agent is not working"),
+        "{why}"
+    );
+    assert!(notes(&notifier).is_empty());
+
+    // Opened by the user and working: one Escape, logged done, announced.
+    let user = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-x"], &lab.home(), &user));
+    let session = lab.sessions(&task_id(&task))[0].0.clone();
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
+    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(
+        calls_of(&tmux, "send-keys"),
+        [["send-keys", "-t", "%1", "Escape"]]
+    );
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[1]["outcome"], "done");
+    assert_eq!(log[1]["action"], "interrupted task fix-x");
+    assert!(log[1].get("error").is_none_or(|e| e.is_null()), "{log:?}");
+    assert_eq!(notes(&notifier).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupt_refuses_the_assistant_a_harness_that_cannot_and_a_node() {
+    let lab = StoreLab::new();
+    let fix = task_id(&lab.new_task("fix-x"));
+    let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let failed_with = |args: &[&str], env: &[(&str, &str)], says: &str| {
+        let output = lab.jeet_at(args, &lab.home(), env);
+        assert!(!output.status.success(), "{args:?} succeeded");
+        assert!(stderr_of(&output).contains(says), "{}", stderr_of(&output));
+    };
+
+    failed_with(
+        &["task", "interrupt", "assistant"],
+        &claude,
+        "only the user interrupts the assistant",
+    );
+    let generic = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &generic,
+        "cannot interrupt a turn",
+    );
+    let node = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_TASK_ID", kid.as_str()),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &node,
+        "never message each other",
+    );
+    // Its own agent, which is no node, or a window in its session: the
+    // press would end the turn running this jeet.
+    let own = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_TASK_ID", fix.as_str()),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &own,
+        "interrupt it from outside that session",
+    );
+    std::fs::write(tmux.parent().unwrap().join("current"), "jeet-fix-x\n").unwrap();
+    let in_tmux = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("TMUX", "/tmp/tmux-1/default,1,0"),
+        ("TMUX_PANE", "%3"),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &in_tmux,
+        "interrupt it from outside that session",
+    );
+    assert!(calls_of(&tmux, "send-keys").is_empty());
 }

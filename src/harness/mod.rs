@@ -110,6 +110,22 @@ pub trait Harness: Sync {
         None
     }
 
+    /// How it keeps an agent from running what [`HookSetup::deny`] names.
+    /// [`Enforcement::None`]: the deny list is dropped.
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::None
+    }
+
+    /// The tmux key names that end the turn it is running, keeping the
+    /// session; jeet presses them once, only while it is working or waiting
+    /// on the user. `None`: it cannot be interrupted. A harness returning
+    /// keys needs [`Harness::hook_args`] too, since jeet presses nothing
+    /// until a hook has reported since the launch, and
+    /// [`Harness::has_draft`], or the keys are pressed over unsent text.
+    fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
     /// What a hook installed by [`Harness::hook_args`] reported: `event`
     /// as the hook command named it (may be empty), `raw` its stdin.
     fn parse_hook(&self, _event: &str, _raw: &str) -> Result<HookEvent> {
@@ -178,6 +194,14 @@ pub trait Harness: Sync {
         false
     }
 
+    /// Whether `status`, though it reads as working, is the agent showing
+    /// the user a dialog of its own, such as a question: one an attached
+    /// user may be typing an answer into, which [`Harness::has_draft`]
+    /// does not see and its interrupt keys would discard.
+    fn in_dialog(&self, _status: &crate::status::SessionStatus) -> bool {
+        false
+    }
+
     /// The file in a session's directory it reads its instructions from:
     /// `AGENTS.md`, or a file of its own that imports it (see
     /// [`Harness::instructions_import`]).
@@ -217,13 +241,30 @@ impl Harness for Generic {
     }
 }
 
+/// How a harness keeps its agent from running what jeet denies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Enforcement {
+    /// It cannot: deny rules are dropped.
+    None,
+    /// It refuses commands that match a deny rule, before any allow rule
+    /// and without asking. A lint against mistakes, not a sandbox.
+    Rules,
+}
+
 /// What jeet's hooks need to know, for [`Harness::hook_args`].
+#[derive(Debug, Clone, Default)]
 pub struct HookSetup {
     /// The jeet binary the hooks run, as `jeet task-hook`.
     pub exe: PathBuf,
     /// Command prefixes the agent may run without asking, e.g.
     /// `jeet worktree`.
     pub allow: Vec<String>,
+    /// Commands the agent may not run, even with the user's approval: words
+    /// from the start of the command, where `*` matches any run of
+    /// characters, each followed by any further arguments, e.g.
+    /// `git push --force*`. Kept only by a harness with
+    /// [`Enforcement::Rules`].
+    pub deny: Vec<String>,
 }
 
 /// One hook report, in jeet's terms.
@@ -438,9 +479,11 @@ mod tests {
         assert!(h.prompt_args("go").is_none());
         let hooks = HookSetup {
             exe: "/bin/jeet".into(),
-            allow: Vec::new(),
+            ..Default::default()
         };
         assert!(h.hook_args(&hooks).is_none());
+        assert_eq!(h.enforcement(), Enforcement::None);
+        assert!(h.interrupt_keys().is_none());
         assert!(h.parse_hook("Stop", "{}").unwrap().kind.is_none());
         assert!(h.continue_output("x").is_none());
         assert!(h.session_context_output("x").is_none());

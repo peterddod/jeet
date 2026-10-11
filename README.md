@@ -77,6 +77,7 @@ jeet task ls [--archived]                # with what each task's agent is doing
 jeet task open fix-login                 # the task's agent, in tmux (started if need be)
 jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
 jeet task send fix-login "add tests too" # message the task's agent
+jeet task interrupt fix-login            # end the agent's current turn, keeping its session
 jeet task last fix-login [-n 3] [--json] # what the task's agent last said, and how its turn ended
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
@@ -599,6 +600,33 @@ tmux's limit on a command; queued messages that do not fit with it wait for
 the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
 as a shell command, a slash command or a memory, is sent as `Message: …`.
 
+### Interrupting an agent
+
+```bash
+jeet task interrupt fix-login
+```
+
+`jeet task interrupt` ends the turn the task's agent is running, as Esc in
+its window would, and leaves its session open for the next message. The key
+goes to the agent's own pane, never to a pane you split off its window or a
+window you opened in its session (as `jeet task send` types into it). It presses the key
+once, and only while the agent is working or waiting on you
+(at a permission prompt, Esc refuses the pending tool call): an idle agent,
+one starting up or held at a startup prompt such as the trust dialog, one
+whose prompt holds text you have not sent, or one waiting on a prompt, asking
+you a question or showing its plan for approval while someone is attached to
+its session (you may be typing an answer into it; once a question or plan is
+answered, this lasts until the agent's next tool call or the end of its turn,
+as Claude reports no answer) is left alone, since Esc there
+would clear your text, rewind the conversation or exit the agent, and the
+command says why nothing was sent. The task's status may read `running`
+for about a minute afterwards, until Claude reports it sits idle, as after a
+manual Esc. The assistant is yours to interrupt in its own window, and a
+harness that cannot be interrupted is refused. Under the assistant it needs
+`task.send` (which pre-approves it, as it does `jeet task send`), and an
+interrupt that sent nothing is logged as `skipped`, with why, and not
+announced; a task with a parent may not interrupt another.
+
 ### Reporting to the assistant
 
 ```bash
@@ -1007,7 +1035,11 @@ jeet runs your coding agent through a *harness*: what it knows about that
 agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
-first prompt, no assistant).
+first prompt, no assistant, no deny rules, no interrupt). Without deny rules,
+tasks with a parent are not stopped from force-pushing, pushing to a default
+branch or merging (see the deny rules under the assistant's permissions below,
+and [docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
+interrupt` refuses.
 
 ```toml
 harness = "claude-code"
@@ -1081,8 +1113,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review` and `pr.merge` (`jeet pr merge`). Nothing is
 allowed until listed. The assistant's Claude settings
-pre-approve exactly the matching `jeet` commands, so allowed actions do not
-prompt. Every action it takes, and every one refused, is appended to
+pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
+`pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
+review`), so allowed actions do not prompt. Every action it takes, and every one refused, is appended to
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
@@ -1101,6 +1134,28 @@ exits without reporting done. The gating is cooperative, like the rest: a
 shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
 and is gated as that task, so use one outside it. After upgrading, an older
 jeet refuses the index.
+
+On a harness with deny rules (Claude Code), the assistant and every task
+with a parent are also denied, even with your approval at the prompt:
+force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
+--all` (and its synonym `--branches`), pushes naming a default branch
+(`main`, `master` and those of your indexed repositories, the eight in all
+most of them use, none longer than 24 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
+the branch then checked out, so that branch name is denied everywhere), and merging
+other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
+merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr
+comment`, `gh issue comment` and `gh pr review` unless it holds
+`pr.comment`/`pr.review` (only those commands: the same through `gh api`
+still reaches your prompt); the assistant holding them runs them without a
+prompt. Top-level tasks get no deny rules. The rules match the start of a
+command only (`git -C . push -f` or `sh -c '…'` get past them), and a push
+whose destination is implied (`git push origin HEAD` while on `main`), a
+commit through the API (the contents endpoint, `createCommitOnBranch`) or a
+merge mutation read from a file gets past them too: they catch
+mistakes, and branch protection on GitHub is the real control. A task with
+a parent on a harness without deny rules starts with a warning, as does the
+`[review] command` of a review task the assistant starts: no harness
+launches it, so it gets no deny rules.
 
 ```toml
 [managers]

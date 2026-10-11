@@ -16,7 +16,7 @@ use crate::messages::{self, Delivered};
 use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::projects;
-use crate::runtime;
+use crate::runtime::{self, Interrupted};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -177,6 +177,35 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             task.name
         ),
     }
+    Ok(())
+}
+
+/// End the turn task `name`'s agent is running, if it is running one.
+pub fn interrupt(app: &App, name: &str) -> Result<()> {
+    if name.trim() == assistant::SLUG {
+        bail!("only the user interrupts the assistant, in its own window");
+    }
+    let task = tasks::find(app, name)?;
+    let why = match runtime::interrupt(app, &task)? {
+        Interrupted::Sent => {
+            eprintln!("jeet: interrupted task {}'s turn", task.name);
+            return Ok(());
+        }
+        Interrupted::NotWorking(activity) => {
+            format!("its agent is not working ({})", activity.label())
+        }
+        Interrupted::UserTyping => "its agent's prompt holds unsent input".to_string(),
+        Interrupted::Watched => {
+            "its agent waits on, or has just shown, a prompt someone attached may be answering"
+                .to_string()
+        }
+        Interrupted::AtStartup => "its agent has no turn yet and may be at a startup prompt, \
+                                   which the keys would answer"
+            .to_string(),
+    };
+    eprintln!("jeet: task {}: {why}; nothing sent", task.name);
+    // Under the assistant, logged as nothing done rather than as done.
+    permissions::skipped(format!("nothing sent: {why}"));
     Ok(())
 }
 

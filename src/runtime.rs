@@ -92,6 +92,14 @@ pub fn ensure_running(
     }
     let (argv, session_id) = launch_argv(app, task, &spec, session, prompt)?;
     warnings.extend(spec.version_warning());
+    if task.parent_id.is_some() && spec.harness.enforcement() == harness::Enforcement::None {
+        warnings.push(format!(
+            "{} has no deny rules, so task {}'s agent is not stopped from force-pushing or \
+             merging; only jeet's own commands are gated",
+            spec.harness.name(),
+            task.slug
+        ));
+    }
     let hooks = spec.has_hooks();
     if let Err(e) = status::mark_launched(&dir, hooks) {
         warnings.push(format!("could not note the agent's launch: {e:#}"));
@@ -168,7 +176,11 @@ fn launch_argv(
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    argv.extend(spec.harness.hook_args(&task_hooks(exe)).unwrap_or_default());
+    argv.extend(
+        spec.harness
+            .hook_args(&task_hooks(app, task, exe)?)
+            .unwrap_or_default(),
+    );
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
@@ -223,21 +235,29 @@ pub fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String>
         .map(|s| s.session_id.clone())
 }
 
-/// jeet's hooks for a task's agent.
-fn task_hooks(exe: std::path::PathBuf) -> HookSetup {
-    HookSetup {
+/// jeet's hooks for a task's agent, with what it is denied (nothing for a
+/// top-level task).
+fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<HookSetup> {
+    Ok(HookSetup {
         exe,
         allow: ALLOWED.map(str::to_string).to_vec(),
-    }
+        deny: permissions::task_deny(app, task)?,
+    })
 }
 
 /// jeet's hooks for the assistant, pre-approving the read-only jeet
 /// commands and those of each capability `[assistant] allow` lists, so
-/// allowed actions do not prompt.
-pub fn assistant_hooks(exe: std::path::PathBuf, settings: &AssistantConfig) -> HookSetup {
+/// allowed actions do not prompt, and denying force-pushes, merges outside
+/// `jeet pr merge` and pushes to any of `branches`.
+pub fn assistant_hooks(
+    exe: std::path::PathBuf,
+    settings: &AssistantConfig,
+    branches: &[String],
+) -> HookSetup {
     HookSetup {
         exe,
         allow: permissions::allowed_commands(&settings.allow),
+        deny: permissions::denied_commands(branches),
     }
 }
 
@@ -248,6 +268,96 @@ pub fn stop(task: &TaskRecord) -> Result<()> {
         return Ok(());
     }
     tmux::kill(&session_name(task))
+}
+
+/// What [`interrupt`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interrupted {
+    /// The keys were pressed: the agent's turn ends, its session goes on.
+    Sent,
+    /// It was doing this, not working on a turn, so nothing was pressed.
+    NotWorking(Activity),
+    /// Its input box holds what the user typed and has not sent, which a
+    /// key could clear, so nothing was pressed.
+    UserTyping,
+    /// It waits on a prompt, such as a permission dialog, or shows a dialog
+    /// of its own ([`Harness::in_dialog`]), while someone is attached to
+    /// its session: they may be typing an answer into the
+    /// dialog, which [`Harness::has_draft`] does not see and Esc would
+    /// discard, so nothing was pressed. A dialog of its own may already be
+    /// answered: for Claude Code no hook reports the answer, so it counts
+    /// until the agent's next tool call or the end of its turn.
+    ///
+    /// [`Harness::has_draft`]: crate::harness::Harness::has_draft
+    /// [`Harness::in_dialog`]: crate::harness::Harness::in_dialog
+    Watched,
+    /// It is held at a startup prompt, such as the trust dialog, where the
+    /// keys would answer the prompt (Esc exits), so nothing was pressed.
+    AtStartup,
+}
+
+/// End the turn the task's agent is running, keeping its session: its
+/// harness's interrupt keys, pressed once, only while it is working or
+/// waiting on the user (and then only with no one attached to answer).
+/// One with nothing to interrupt is not an error, so a caller can go over
+/// many tasks.
+pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
+    if task.kind == TaskKind::Assistant {
+        bail!("only the user interrupts the assistant, in its own window");
+    }
+    let name = session_name(task);
+    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
+    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+        bail!(
+            "this jeet runs inside tmux session {name}, task {}'s agent session; interrupt it \
+             from outside that session",
+            task.name
+        );
+    }
+    let spec = AgentSpec::from_config(&app.config)?;
+    let Some(keys) = spec.harness.interrupt_keys() else {
+        bail!("{} cannot interrupt a turn", spec.harness.name());
+    };
+    let activity = activity(app, task, tmux::available());
+    if !interruptible(&activity) {
+        return Ok(Interrupted::NotWorking(activity));
+    }
+    let dir = tasks::task_dir(app, task);
+    let current = status::current_status(&dir);
+    if at_startup(current.as_ref(), status::launched_at(&dir)) {
+        return Ok(Interrupted::AtStartup);
+    }
+    if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
+        return Ok(Interrupted::UserTyping);
+    }
+    let asking = matches!(activity, Activity::Waiting { .. })
+        || current.as_ref().is_some_and(|s| spec.harness.in_dialog(s));
+    if asking && tmux::attached(&name) {
+        return Ok(Interrupted::Watched);
+    }
+    tmux::press(&name, keys)?;
+    Ok(Interrupted::Sent)
+}
+
+/// Whether an agent doing `activity` may have a turn to interrupt; one
+/// Waiting is still [`at_startup`] when no hook has said so.
+fn interruptible(activity: &Activity) -> bool {
+    matches!(
+        activity,
+        Activity::Running { .. } | Activity::Waiting { .. }
+    )
+}
+
+/// Whether the agent whose latest status is `current`, last launched at
+/// `launched`, may be at a startup prompt rather than in a turn: no hook
+/// has reported yet (a live agent with no status shows as Waiting once it
+/// has been starting a while), none has since this launch (the status is
+/// left from an agent that died without its SessionEnd hook, and still
+/// reads as it did then), or the startup watcher marked it at one.
+fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) -> bool {
+    current.is_none_or(|s| {
+        s.event == status::STARTUP_PROMPT_EVENT || launched.is_some_and(|l| s.at < l)
+    })
 }
 
 /// Fail when this jeet runs inside the task's agent session, whether as the
@@ -310,6 +420,11 @@ mod tests {
     use super::*;
     use crate::harness::Harness;
 
+    fn branches(n: usize) -> Vec<String> {
+        let len = crate::permissions::MAX_BRANCH_NAME;
+        (0..n).map(|i| format!("{i:0>len$}")).collect()
+    }
+
     #[test]
     fn the_assistant_is_pre_approved_what_it_is_allowed() {
         let settings = AssistantConfig {
@@ -317,7 +432,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings);
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()]);
         assert!(
             hooks.allow.contains(&"jeet task send".into()),
             "{:?}",
@@ -333,34 +448,123 @@ mod tests {
             "{:?}",
             hooks.allow
         );
-        assert_eq!(task_hooks("/bin/jeet".into()).allow, ALLOWED);
         // A task with a parent reports to it without a prompt.
         assert!(ALLOWED.contains(&"jeet report"));
     }
 
     #[test]
-    fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
-        // tmux refuses a command over 16KB; the prompt shares new-session's
-        // with the settings, a long path to jeet, and every capability.
+    fn the_assistant_is_denied_merging_and_force_pushes_but_may_comment() {
         let settings = AssistantConfig {
-            allow: crate::permissions::CAPABILITIES
-                .iter()
-                .map(|c| c.name.to_string())
-                .collect(),
+            allow: Vec::new(),
             notify: None,
             rules: Vec::new(),
         };
-        let exe = format!("/{}/jeet", "d".repeat(200));
-        let hooks = assistant_hooks(exe.into(), &settings);
-        let args = crate::harness::claude::ClaudeCode
-            .hook_args(&hooks)
-            .unwrap();
-        let len: usize = args.iter().map(|a| a.len() + 1).sum();
-        let budget = 16 * 1024 - 2048; // the rest of the command
-        assert!(
-            len + crate::messages::MAX_MESSAGE + 16 < budget,
-            "{len} bytes of settings"
-        );
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()]);
+        for denied in ["gh pr merge", "git push --force*", "git push * main"] {
+            assert!(hooks.deny.contains(&denied.into()), "{:?}", hooks.deny);
+        }
+        // Commenting and reviewing are the user's to approve at the prompt.
+        assert!(!hooks.deny.iter().any(|d| d.starts_with("gh pr comment")
+            || d.starts_with("gh issue comment")
+            || d.starts_with("gh pr review")));
+    }
+
+    #[test]
+    fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
+        // tmux refuses a command over 16KB; the prompt shares new-session's
+        // with the settings, a long path to jeet, every capability or none,
+        // and the pushes denied to as many default branches as jeet denies,
+        // each as long as it denies.
+        let every = crate::permissions::CAPABILITIES
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect();
+        for allow in [every, Vec::new()] {
+            let settings = AssistantConfig {
+                allow,
+                notify: None,
+                rules: Vec::new(),
+            };
+            let exe = format!("/{}/jeet", "d".repeat(200));
+            let hooks = assistant_hooks(
+                exe.into(),
+                &settings,
+                &branches(crate::permissions::MAX_DEFAULT_BRANCHES),
+            );
+            let args = crate::harness::claude::ClaudeCode
+                .hook_args(&hooks)
+                .unwrap();
+            let len: usize = args.iter().map(|a| a.len() + 1).sum();
+            let budget = 16 * 1024 - 2048; // the rest of the command
+            assert!(
+                len + crate::messages::MAX_MESSAGE + 16 < budget,
+                "{len} bytes of settings"
+            );
+        }
+    }
+
+    #[test]
+    fn interruptible_only_while_working() {
+        let working = [
+            Activity::Running { detail: None },
+            Activity::Waiting {
+                detail: Some("Bash".into()),
+            },
+        ];
+        let not = [
+            Activity::NotStarted,
+            Activity::NotRunning,
+            Activity::Live,
+            Activity::Starting,
+            Activity::Idle { since: 0 },
+            Activity::Ended,
+        ];
+        assert!(working.iter().all(interruptible));
+        assert!(!not.iter().any(interruptible));
+    }
+
+    #[test]
+    fn a_startup_prompt_is_never_interrupted() {
+        // No hook yet: a live agent past its start reads as Waiting.
+        assert!(matches!(
+            status::activity_since(None, true, Some(0), 60),
+            Activity::Waiting { .. }
+        ));
+        assert!(at_startup(None, Some(0)));
+        // The startup watcher marked it at the trust dialog: Waiting too.
+        let dir = tempfile::tempdir().unwrap();
+        status::mark_startup_prompt(dir.path(), "s", "trust folder", 60).unwrap();
+        let marked = status::current_status(dir.path());
+        assert!(matches!(
+            status::activity_since(marked.as_ref(), true, Some(0), 60),
+            Activity::Waiting { .. }
+        ));
+        assert!(at_startup(marked.as_ref(), Some(0)));
+        // A hook reported: past the startup.
+        let hooked = status::SessionStatus {
+            session_id: "s".into(),
+            state: status::State::Waiting,
+            detail: Some("Bash".into()),
+            event: "Notification".into(),
+            at: 61,
+        };
+        assert!(!at_startup(Some(&hooked), Some(0)));
+        assert!(!at_startup(Some(&hooked), Some(61)));
+        assert!(!at_startup(Some(&hooked), None));
+        // A status left from an earlier launch, whose agent died mid-turn
+        // without its SessionEnd hook: the relaunched one may be at a
+        // startup prompt, though the status still reads Running.
+        let stale = status::SessionStatus {
+            state: status::State::Running,
+            event: "UserPromptSubmit".into(),
+            at: 50,
+            ..hooked
+        };
+        assert!(matches!(
+            status::activity_since(Some(&stale), true, Some(60), 70),
+            Activity::Running { .. }
+        ));
+        assert!(at_startup(Some(&stale), Some(60)));
     }
 
     #[test]

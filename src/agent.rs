@@ -71,10 +71,7 @@ impl AgentSpec {
     /// Whether the agent reports what it is doing through jeet's hooks.
     pub fn has_hooks(&self) -> bool {
         self.harness
-            .hook_args(&harness::HookSetup {
-                exe: Default::default(),
-                allow: Vec::new(),
-            })
+            .hook_args(&harness::HookSetup::default())
             .is_some()
     }
 
