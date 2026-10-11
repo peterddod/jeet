@@ -104,8 +104,8 @@ The list is:
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
   branch: `main`, `master` and the default branches of the repos jeet has
-  indexed, up to twelve in all, the ones most repos use first, and none
-  longer than 40 bytes (the list goes inline on the agent's command line,
+  indexed, up to eight in all, the ones most repos use first, and none
+  longer than 24 bytes (the list goes inline on the agent's command line,
   which shares tmux's 16KB limit with the first prompt), as a destination (`git push *
   main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
   `heads/main` with or without a source);
@@ -136,10 +136,14 @@ not touch it.
 syntax: words matched from the start of the command, where `*` matches any
 run of characters, and the command may carry further arguments after the
 pattern. A harness renders each entry in its own syntax. Claude Code's is
-`Bash(<pattern> *)` (a trailing ` *` also matches the bare command), or
-`Bash(<pattern>)` when the pattern already ends in `*`; so `gh pr merge`
-becomes `Bash(gh pr merge *)` and `git push --force*` stays
-`Bash(git push --force*)`. Allow rules keep the `Bash(<prefix>:*)` form.
+`Bash(<pattern> *)`, or `Bash(<pattern>)` when the pattern already ends in
+`*`. Claude Code lets a trailing ` *` match the bare command too, but only
+when it is the rule's one `*`, so a pattern with a `*` of its own also gets
+`Bash(<pattern>)`, for the bare command. So `gh pr merge` becomes
+`Bash(gh pr merge *)`, `git push --force*` stays `Bash(git push --force*)`,
+and `git push * main` becomes `Bash(git push * main)` and
+`Bash(git push * main *)`: with only the second, `git push origin main`
+would get through. Allow rules keep the `Bash(<prefix>:*)` form.
 Claude Code checks deny rules from `--settings` before any allow rule from
 any scope, and a denied command cannot be approved at the prompt. jeet
 leaves the `deny` key out when the list is empty.
@@ -164,8 +168,8 @@ a gate. They do not catch:
 - a GraphQL merge mutation read from a file
   (`gh api graphql -F query=@merge.graphql`, `--input body.json`):
   denying those would refuse read queries kept in files too;
-- the default branches of indexed repos past the twelve listed, or longer
-  than 40 bytes;
+- the default branches of indexed repos past the eight listed, or longer
+  than 24 bytes;
 - moving a branch through the REST refs endpoint
   (`gh api -X PATCH repos/o/r/git/refs/heads/main`): denying it would also
   refuse reading the ref;
@@ -198,6 +202,10 @@ itself, so check these by hand when you raise `tested_version` (last done
 for Claude Code 2.1.296):
 
 - a rule ending in ` *` matches the bare command (`gh pr merge`);
+- a rule with another `*` before its trailing ` *` does not match the bare
+  command (`Bash(git push * main *)` lets `git push origin main` through),
+  and the extra `Bash(git push * main)` denies it, while
+  `git push origin main-fix` still runs;
 - a `*` in the middle of a rule matches (`gh api repos/o/r/pulls/3/merge`);
 - `gh pr merge` is refused outright, with no prompt to approve it;
 - Esc while the agent is running ends the turn, and the transcript records

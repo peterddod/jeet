@@ -607,8 +607,10 @@ jeet task interrupt fix-login
 ```
 
 `jeet task interrupt` ends the turn the task's agent is running, as Esc in
-its window would, and leaves its session open for the next message. It
-presses the key once, and only while the agent is working or waiting on you
+its window would, and leaves its session open for the next message. The key
+goes to the agent's window, the first of its session, never to a window you
+opened there yourself (as `jeet task send` types into it). It presses the key
+once, and only while the agent is working or waiting on you
 (at a permission prompt, Esc refuses the pending tool call): an idle agent,
 one starting up or held at a startup prompt such as the trust dialog, one
 whose prompt holds text you have not sent, or one waiting on a prompt while
@@ -1030,7 +1032,11 @@ jeet runs your coding agent through a *harness*: what it knows about that
 agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
-first prompt, no assistant).
+first prompt, no assistant, no deny rules, no interrupt). Without deny rules,
+tasks with a parent are not stopped from force-pushing, pushing to a default
+branch or merging (see the deny rules under the assistant's permissions below,
+and [docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
+interrupt` refuses.
 
 ```toml
 harness = "claude-code"
@@ -1129,8 +1135,8 @@ On a harness with deny rules (Claude Code), the assistant and every task
 with a parent are also denied, even with your approval at the prompt:
 force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
-(`main`, `master` and those of your indexed repositories, the twelve in all
-most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
+(`main`, `master` and those of your indexed repositories, the eight in all
+most of them use, none longer than 24 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr

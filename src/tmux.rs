@@ -144,14 +144,23 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     Ok(())
 }
 
-/// Type `text` into the active pane of session `name`, then press Enter.
+/// The pane of session `name` its agent runs in: the active pane of the
+/// session's first window, the one [`new_session`] started it in. The
+/// session's active pane may be in a window the user opened there, for a
+/// shell or an editor, which must not get the agent's keys.
+fn agent_pane(name: &str) -> String {
+    format!("{}:^", target(name))
+}
+
+/// Type `text` into the agent's pane of session `name` (see
+/// [`agent_pane`]), then press Enter.
 ///
 /// The text goes in as one paste, not as keystrokes: Claude Code takes a
 /// long burst of keys for several pastes and keeps only the end of it. The
 /// caller removes control characters: pasted, they would still drive the
 /// pane.
 pub fn send_text(name: &str, text: &str) -> Result<()> {
-    type_into(&format!("{}:", target(name)), text)
+    type_into(&agent_pane(name), text)
 }
 
 /// [`send_text`] for the window with tmux id `window` (`@3`).
@@ -457,24 +466,24 @@ pub fn window_alive(id: &str) -> bool {
     output.status.success() && any_pane_alive(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Press the keys tmux calls `keys` (e.g. `Down`, `Enter`) in session
-/// `name`'s active pane.
+/// Press the keys tmux calls `keys` (e.g. `Down`, `Enter`) in the agent's
+/// pane of session `name` (see [`agent_pane`]).
 pub fn press(name: &str, keys: &[&str]) -> Result<()> {
-    let pane = format!("{}:", target(name));
+    let pane = agent_pane(name);
     let mut args = vec!["-t", pane.as_str()];
     args.extend(keys);
     send_keys(&args)
 }
 
-/// The text session `name`'s active pane shows.
+/// The text the agent's pane of session `name` shows (see [`agent_pane`]).
 pub fn capture(name: &str) -> Result<String> {
-    capture_pane(&format!("{}:", target(name)), false)
+    capture_pane(&agent_pane(name), false)
 }
 
 /// [`capture`], with the text's colours and styles kept as escape
 /// sequences: to tell a dimmed placeholder from what was typed.
 pub fn capture_styled(name: &str) -> Result<String> {
-    capture_pane(&format!("{}:", target(name)), true)
+    capture_pane(&agent_pane(name), true)
 }
 
 /// [`capture_styled`] for the window with tmux id `window` (`@3`).
@@ -878,6 +887,8 @@ mod tests {
     #[test]
     fn targets_match_exactly() {
         assert_eq!(target("jeet-api"), "=jeet-api");
+        // The agent's window, not whichever window of its session is active.
+        assert_eq!(agent_pane("jeet-api"), "=jeet-api:^");
     }
 
     #[test]

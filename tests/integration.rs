@@ -5057,7 +5057,7 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     assert_eq!(
         pasted(&tmux),
         [(
-            "=jeet-fix-x:".to_string(),
+            "=jeet-fix-x:^".to_string(),
             "also add tests; thanks".to_string()
         )]
     );
@@ -5067,7 +5067,7 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     );
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:", "Enter"]]
+        [["send-keys", "-t", "=jeet-fix-x:^", "Enter"]]
     );
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
@@ -5174,7 +5174,7 @@ fn task_send_pastes_long_messages_whole_but_never_onto_a_draft() {
     assert!(long.len() > 5_000);
     std::fs::write(stub.join("pane"), fixture("input-placeholder")).unwrap();
     succeeded(&lab.jeet_at(&["task", "send", "fix-x", &long], &lab.home(), &env));
-    assert_eq!(pasted(&tmux), [("=jeet-fix-x:".to_string(), long.clone())]);
+    assert_eq!(pasted(&tmux), [("=jeet-fix-x:^".to_string(), long.clone())]);
     // The buffer is the message's own, and gone once pasted.
     let load = &calls_of(&tmux, "load-buffer")[0];
     assert_eq!(load[..2], ["load-buffer", "-b"]);
@@ -5383,6 +5383,8 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"pr.comment\"]\n",
     )
     .unwrap();
+    succeeded(&lab.jeet(&["ls"]));
+    index_develop_repo(&lab);
 
     // First run: the home is set up, and a session started detached.
     let output = lab.jeet_at(&["chat"], &lab.home(), &env);
@@ -5442,6 +5444,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         "Bash(gh pr merge *)",
         "Bash(git push --force*)",
         "Bash(git push * main *)",
+        "Bash(git push * develop *)",
     ] {
         assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
     }
@@ -7211,7 +7214,14 @@ fn a_node_launch_carries_deny_rules() {
     let tmux = stub_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
     let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    // The root may comment and review; its node still may not.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
+    )
+    .unwrap();
     lab.new_task_with("kid", &["--parent", "assistant"]);
+    index_develop_repo(&lab);
     let output = lab.jeet_at(&["task", "open", "kid"], &lab.home(), &env);
     succeeded(&output);
     assert!(
@@ -7229,6 +7239,9 @@ fn a_node_launch_carries_deny_rules() {
         "Bash(gh pr review *)",
         "Bash(git push * main *)",
         "Bash(git push * master *)",
+        // An indexed repository's own default branch, pushed bare too.
+        "Bash(git push * develop)",
+        "Bash(git push * develop *)",
     ] {
         assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
     }
@@ -7241,6 +7254,18 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(jeet report:*)"
         ])
     );
+}
+
+/// Index a repository whose default branch is `develop`.
+fn index_develop_repo(lab: &StoreLab) {
+    lab.index()
+        .execute(
+            "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
+             VALUES ('github.com/acme/dev', '/nowhere/dev', 'https://github.com/acme/dev.git',
+                     'develop', 0)",
+            [],
+        )
+        .unwrap();
 }
 
 #[cfg(unix)]
@@ -7326,7 +7351,7 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     assert!(said.contains("interrupted task fix-x's turn"), "{said}");
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:", "Escape"]]
+        [["send-keys", "-t", "=jeet-fix-x:^", "Escape"]]
     );
 
     // Running with text the user has not sent: left alone.
@@ -7415,7 +7440,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
     succeeded(&output);
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:", "Escape"]]
+        [["send-keys", "-t", "=jeet-fix-x:^", "Escape"]]
     );
     let log = actions(&lab.home());
     assert_eq!(log.len(), 2, "{log:?}");
