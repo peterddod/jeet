@@ -280,12 +280,14 @@ pub enum Interrupted {
     /// Its input box holds what the user typed and has not sent, which a
     /// key could clear, so nothing was pressed.
     UserTyping,
-    /// It waits on a prompt, such as a permission dialog, while someone is
-    /// attached to its session: they may be typing an answer into the
+    /// It waits on a prompt, such as a permission dialog, or shows a dialog
+    /// of its own ([`Harness::in_dialog`]), while someone is attached to
+    /// its session: they may be typing an answer into the
     /// dialog, which [`Harness::has_draft`] does not see and Esc would
     /// discard, so nothing was pressed.
     ///
     /// [`Harness::has_draft`]: crate::harness::Harness::has_draft
+    /// [`Harness::in_dialog`]: crate::harness::Harness::in_dialog
     Watched,
     /// It is held at a startup prompt, such as the trust dialog, where the
     /// keys would answer the prompt (Esc exits), so nothing was pressed.
@@ -319,16 +321,16 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
         return Ok(Interrupted::NotWorking(activity));
     }
     let dir = tasks::task_dir(app, task);
-    if at_startup(
-        status::current_status(&dir).as_ref(),
-        status::launched_at(&dir),
-    ) {
+    let current = status::current_status(&dir);
+    if at_startup(current.as_ref(), status::launched_at(&dir)) {
         return Ok(Interrupted::AtStartup);
     }
     if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
         return Ok(Interrupted::UserTyping);
     }
-    if matches!(activity, Activity::Waiting { .. }) && tmux::attached(&name) {
+    let asking = matches!(activity, Activity::Waiting { .. })
+        || current.as_ref().is_some_and(|s| spec.harness.in_dialog(s));
+    if asking && tmux::attached(&name) {
         return Ok(Interrupted::Watched);
     }
     tmux::press(&name, keys)?;

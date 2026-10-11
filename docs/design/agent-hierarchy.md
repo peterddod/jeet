@@ -838,13 +838,22 @@ RFC left open, or departed from it:
   with no status or written by the startup watcher, returns
   `Interrupted::AtStartup`. Nor at `Waiting` while a client is attached to
   the session (`Interrupted::Watched`): the user may be typing into the
-  dialog's own text field, which `has_draft` does not see. No retry, no confirmation and no status
+  dialog's own text field, which `has_draft` does not see. The same goes
+  for a `Running` status the harness says is a dialog of its own
+  (`Harness::in_dialog`; Claude Code reports `AskUserQuestion` and
+  `ExitPlanMode` only through PreToolUse). Known gap: a permission prompt
+  reads as `Running` until Claude's notification, which it sends only
+  once the user has left the prompt alone for some seconds, so an
+  attached user typing feedback into one may still have it discarded. No retry, no confirmation and no status
   repair yet (the status reads `running` until the next hook, as after a
   manual Esc); those come with pause. The assistant is refused (5.4).
-  The draft check and the keys aim at the agent's pane, the session's
-  first window (`=<session>:^`), not its active pane, which may be a
-  window the user opened there; `jeet task send` and the startup watcher
-  aim there too.
+  The draft check and the keys aim at the agent's own pane, by the id
+  (`%3`) jeet notes in the session option `@jeet-agent-pane` when it
+  starts the session, not the session's active pane, which may be a pane
+  the user split off the agent's window or a window they opened there; a
+  session started before the id was noted falls back to the active pane
+  of its first window (`=<session>:^`). `jeet task send` and the startup
+  watcher aim there too.
 - **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`
   (whose pre-approved commands include it, so an allowed interrupt does
   not prompt);

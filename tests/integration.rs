@@ -2265,9 +2265,12 @@ fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
-  new-session) touch "$here/alive" ;;
+  new-session) touch "$here/alive"; rm -f "$here/agent-pane" ;;
+  # The agent's pane id, noted in its session, is `%1`.
+  set-option)
+    case "$*" in *@jeet-agent-pane*) echo %1 > "$here/agent-pane" ;; esac ;;
   kill-session)
-    rm -f "$here/alive"
+    rm -f "$here/alive" "$here/agent-pane"
     if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
   list-panes)
     [ -e "$here/alive" ] || exit 1
@@ -2278,7 +2281,11 @@ case "$1" in
   display-message) cat "$here/current" 2>/dev/null ;;
   # Someone is attached while the test leaves a `client` file.
   list-clients) [ -e "$here/client" ] && echo /dev/ttys001 ;;
-  show-options) echo C-b ;;
+  show-options)
+    case "$*" in
+      *@jeet-agent-pane*) cat "$here/agent-pane" 2>/dev/null ;;
+      *) echo C-b ;;
+    esac ;;
   # A pane to look at, which Down and Enter change when the test says how.
   capture-pane) cat "$here/pane" 2>/dev/null ;;
   send-keys)
@@ -3065,6 +3072,36 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         assert_eq!(features.matches("xterm*:extkeys").count(), 1, "{features}");
         succeeded(&lab.jeet_at(&["task", "archive", "again"], &lab.home(), &env));
     }
+    // The agent's pane is noted by id, and stays the one noted when the
+    // user splits its window and works in the new pane.
+    let agent_pane =
+        stdout_of(&server.tmux(&["display-message", "-p", "-t", "=jeet-real:^", "#{pane_id}"]))
+            .trim()
+            .to_string();
+    assert!(agent_pane.starts_with('%'), "{agent_pane}");
+    let noted = || {
+        stdout_of(&server.tmux(&[
+            "show-options",
+            "-qv",
+            "-t",
+            "=jeet-real:",
+            "@jeet-agent-pane",
+        ]))
+        .trim()
+        .to_string()
+    };
+    assert_eq!(noted(), agent_pane);
+    assert!(server
+        .tmux(&["split-window", "-t", "=jeet-real:^", "--", "sleep", "300"])
+        .status
+        .success());
+    let active =
+        stdout_of(&server.tmux(&["display-message", "-p", "-t", "=jeet-real:^", "#{pane_id}"]))
+            .trim()
+            .to_string();
+    assert_ne!(active, agent_pane);
+    assert_eq!(noted(), agent_pane);
+
     let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
     assert!(
         stdout_of(&output).contains("running"),
@@ -5056,10 +5093,8 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     succeeded(&output);
     assert_eq!(
         pasted(&tmux),
-        [(
-            "=jeet-fix-x:^".to_string(),
-            "also add tests; thanks".to_string()
-        )]
+        // The agent's own pane, by the id noted when it started.
+        [("%1".to_string(), "also add tests; thanks".to_string())]
     );
     assert_eq!(
         calls_of(&tmux, "paste-buffer")[0][..3],
@@ -5067,7 +5102,7 @@ fn task_send_types_queues_or_starts_by_what_the_agent_is_doing() {
     );
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:^", "Enter"]]
+        [["send-keys", "-t", "%1", "Enter"]]
     );
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
@@ -5174,6 +5209,7 @@ fn task_send_pastes_long_messages_whole_but_never_onto_a_draft() {
     assert!(long.len() > 5_000);
     std::fs::write(stub.join("pane"), fixture("input-placeholder")).unwrap();
     succeeded(&lab.jeet_at(&["task", "send", "fix-x", &long], &lab.home(), &env));
+    // Started before jeet noted its pane: the agent's window.
     assert_eq!(pasted(&tmux), [("=jeet-fix-x:^".to_string(), long.clone())]);
     // The buffer is the message's own, and gone once pasted.
     let load = &calls_of(&tmux, "load-buffer")[0];
@@ -7350,9 +7386,26 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     std::fs::write(stub.join("client"), "").unwrap();
     let said = interrupt();
     assert!(said.contains("interrupted task fix-x's turn"), "{said}");
+    // The agent's own pane, by the id noted when it started, gets the key
+    // and is the one checked for a draft: not a pane the user split off.
+    assert_eq!(
+        tmux_calls(&tmux)
+            .iter()
+            .filter(|c| c[0] == "set-option" && c.contains(&"@jeet-agent-pane".to_string()))
+            .count(),
+        1
+    );
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:^", "Escape"]]
+        [["send-keys", "-t", "%1", "Escape"]]
+    );
+    let captures = calls_of(&tmux, "capture-pane");
+    assert!(!captures.is_empty());
+    assert!(
+        captures
+            .iter()
+            .all(|c| c.ends_with(&["-t".to_string(), "%1".to_string()])),
+        "{captures:?}"
     );
     std::fs::remove_file(stub.join("client")).unwrap();
 
@@ -7362,6 +7415,18 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     assert!(said.contains("unsent input"), "{said}");
     assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
     std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+
+    // Asking the user a question, which reads as running: someone attached
+    // may be typing an answer into it, which Esc would throw away.
+    let mut asking: serde_json::Value =
+        serde_json::from_str(&hook_input("PreToolUse", &session, &task)).unwrap();
+    asking["tool_name"] = "AskUserQuestion".into();
+    hook_ok(&lab.hook("PreToolUse", &asking.to_string(), &[]));
+    std::fs::write(stub.join("client"), "").unwrap();
+    let said = interrupt();
+    assert!(said.contains("someone attached"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    std::fs::remove_file(stub.join("client")).unwrap();
 
     // Waiting at a permission prompt a hook reported: Esc refuses the call.
     hook_ok(&lab.hook(
@@ -7442,7 +7507,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
     succeeded(&output);
     assert_eq!(
         calls_of(&tmux, "send-keys"),
-        [["send-keys", "-t", "=jeet-fix-x:^", "Escape"]]
+        [["send-keys", "-t", "%1", "Escape"]]
     );
     let log = actions(&lab.home());
     assert_eq!(log.len(), 2, "{log:?}");
