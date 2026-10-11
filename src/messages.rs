@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentSpec;
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
+use crate::placement;
 use crate::runtime;
 use crate::status::{self, Activity};
 use crate::tasks;
@@ -513,6 +514,10 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn type_in(&self, text: &str) -> Result<()> {
+        // A live session under the name of a task jeet may not run here is
+        // not its agent: what starting it would refuse, typing into it does
+        // too.
+        placement::runtime_for(self.task)?;
         tmux::send_text(&runtime::session_name(self.task), text)
     }
 

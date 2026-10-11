@@ -1289,6 +1289,7 @@ mod tests {
                 created_at: 0,
                 last_activity: crate::worktrees::now_secs() - 120,
                 parent_id: None,
+                placement: crate::placement::Placement::Local,
             },
             dir: PathBuf::from("/t"),
             worktrees: vec![TaskWorktreeRecord {

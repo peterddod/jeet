@@ -69,10 +69,14 @@ impl AgentSpec {
     }
 
     /// Whether the agent reports what it is doing through jeet's hooks.
+    /// Either way of installing them counts (see `runtime::hook_args`).
     pub fn has_hooks(&self) -> bool {
-        self.harness
-            .hook_args(&harness::HookSetup::default())
-            .is_some()
+        let hooks = harness::HookSetup::default();
+        self.harness.hook_args(&hooks).is_some()
+            || self
+                .harness
+                .hook_file(&hooks, Path::new("/hooks.json"))
+                .is_some()
     }
 
     /// A warning when the agent is older than its harness was tested with;
@@ -159,5 +163,36 @@ mod tests {
         assert_eq!(spec.harness.id(), "generic");
         assert!(!spec.supports_sessions());
         assert!(!spec.has_hooks());
+    }
+
+    /// Hooks only from a file, as for a CLI that takes nothing but a path.
+    struct FileHooksOnly;
+
+    impl Harness for FileHooksOnly {
+        fn id(&self) -> &'static str {
+            "file-hooks"
+        }
+        fn name(&self) -> &'static str {
+            "File hooks"
+        }
+        fn default_command(&self) -> Option<&'static str> {
+            None
+        }
+        fn hook_file(
+            &self,
+            _hooks: &harness::HookSetup,
+            path: &Path,
+        ) -> Option<(String, Vec<String>)> {
+            Some((String::new(), vec![path.display().to_string()]))
+        }
+    }
+
+    #[test]
+    fn hooks_from_a_file_alone_count_as_hooks() {
+        let spec = AgentSpec {
+            argv: vec!["file-hooks".to_string()],
+            harness: &FileHooksOnly,
+        };
+        assert!(spec.has_hooks());
     }
 }

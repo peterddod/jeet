@@ -32,10 +32,13 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::config;
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskSessionRecord, TaskState};
+use crate::identity;
 use crate::instructions;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
+use crate::placement::Placement;
 use crate::runtime;
 use crate::status::{self, Activity, SessionStatus};
 use crate::tasks;
@@ -155,6 +158,7 @@ fn create_record(app: &App) -> Result<TaskRecord> {
         created_at: now,
         last_activity: now,
         parent_id: None,
+        placement: Placement::Local,
     };
     match app.db.insert_task(&task) {
         Ok(()) => Ok(task),
@@ -300,11 +304,27 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         .iter()
         .find(|w| w.alive && w.key.as_deref() == Some(id.as_str()))
     {
+        // Only a window jeet started is the assistant's: one from a jeet
+        // before anchors has none, and every jeet command it runs is refused.
+        let pids = tmux::window_pane_pids(&window.id);
+        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
+        let mut warnings = Vec::new();
+        if !anchors
+            .iter()
+            .any(|a| pids.contains(&a.pid) && identity::live(a))
+        {
+            warnings.push(
+                "the assistant's window was started by an older jeet or outside jeet, so jeet \
+                 cannot confirm it is the assistant and refuses its jeet commands; exit the \
+                 assistant there and run `jeet chat` again"
+                    .to_string(),
+            );
+        }
         return Ok(Opened {
             name,
             window: window.id.clone(),
             started: false,
-            warnings: Vec::new(),
+            warnings,
         });
     }
 
@@ -319,7 +339,15 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         created_at: now,
         last_activity: now,
     })?;
-    let argv = launch_argv(app, &spec, &id, &name, resume, prompt)?;
+    // Settings files are named for the session a window was launched as:
+    // after a `/clear` its key is another, but its Claude still reads that.
+    let running: Vec<String> = windows
+        .iter()
+        .filter(|w| w.alive)
+        .flat_map(|w| [w.key.clone(), w.launch.clone()])
+        .flatten()
+        .collect();
+    let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt, &running)?;
     let home = app.home.to_string_lossy();
     let env = [
         // Its hooks find it by this even after it `cd`s into a task.
@@ -328,25 +356,39 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         (permissions::ASSISTANT_ENV, "1"),
         (cd::CD_FILE_ENV, ""),
     ];
-    let window = tmux::new_window(TMUX_SESSION, &id, &title(&name), &dir, &env, &argv)?;
+    let (window, pane) = tmux::new_window(TMUX_SESSION, &id, &title(&name), &dir, &env, &argv)?;
+    let mut warnings: Vec<String> = spec.version_warning().into_iter().collect();
+    if let Err(e) = identity::record(
+        &app.db,
+        &task.id,
+        AnchorKind::Pane,
+        Some(&pane.id),
+        pane.pid,
+    ) {
+        warnings.push(identity::unidentified(&task.name, &e));
+    }
     let _ = app.db.touch_task(&task.id, now);
     Ok(Opened {
         name,
         window,
         started: true,
-        warnings: spec.version_warning().into_iter().collect(),
+        warnings,
     })
 }
 
 /// The agent's command line for session `id`: resumed or started under that
-/// id, with the assistant's settings and, given one, its first prompt.
+/// id, with the assistant's settings and, given one, its first prompt. The
+/// settings files of sessions not `running` go.
+#[allow(clippy::too_many_arguments)]
 fn launch_argv(
     app: &App,
+    task: &TaskRecord,
     spec: &AgentSpec,
     id: &str,
     name: &str,
     resume: bool,
     prompt: Option<&str>,
+    running: &[String],
 ) -> Result<Vec<String>> {
     let mut argv = spec.argv.clone();
     let args = match resume {
@@ -356,8 +398,14 @@ fn launch_argv(
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let branches = permissions::default_branches(app)?;
-    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches);
-    argv.extend(spec.harness.hook_args(&hooks).unwrap_or_default());
+    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id);
+    argv.extend(runtime::hook_args(
+        &app.home,
+        spec.harness,
+        &hooks,
+        id,
+        running,
+    )?);
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }

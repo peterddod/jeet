@@ -22,12 +22,16 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
+use crate::identity;
+use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
 use crate::resolve;
+use crate::review;
 use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
@@ -244,6 +248,7 @@ fn make_task(
         created_at: now,
         last_activity: now,
         parent_id: parent_id.map(str::to_string),
+        placement: placement::for_new(),
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
@@ -341,18 +346,23 @@ fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     }
 }
 
-/// The task a command run here is about: the one named, else the one in
-/// `$JEET_TASK_ID` (set inside a task's agent session), else the task whose
-/// directory holds the current directory.
+/// The task a command run here is about: the one named, else the one whose
+/// agent runs this jeet ([`identity::identify`]), else the one in
+/// `$JEET_TASK_ID` (set inside a task's agent session), else the task
+/// whose directory holds the current directory.
 pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
     if let Some(key) = explicit {
         return find(app, key);
     }
-    if let Some(id) = std::env::var(TASK_ID_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        let id = id.trim();
+    let own = identity::identify(app)?.task.map(|task| task.id);
+    let hinted = || {
+        std::env::var(TASK_ID_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(id) = own.or_else(hinted) {
+        let id = id.as_str();
         return match app.db.get_task(id)? {
             Some(task) if task.kind == TaskKind::Assistant => bail!(
                 "the assistant's home is no task to work in; pick one with --task <name> \
@@ -1191,7 +1201,8 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
 /// finishes the job. It is refused from inside the agent's tmux session,
-/// which ending the agent would end too.
+/// which ending the agent would end too, and from under the task's review
+/// job, likewise.
 ///
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
@@ -1200,11 +1211,22 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         bail!("the assistant cannot be archived");
     }
     runtime::refuse_inside_session(task, "archive")?;
+    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
     // The agent goes first, and is gone before anything is saved: it works
     // in the worktrees about to be removed, and what it wrote after the
     // snapshot would be lost.
     runtime::stop(task).context("end the agent's tmux session")?;
+    // Its review job too, for the same reason: one recorded as the task's,
+    // or one the assistant started in its worktree.
+    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
+    review::stop_jobs_in(app, &task_dir(app, task)).context("end the task's review job")?;
+    // An agent or job that outlives its session is no longer the task's.
+    app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
+    app.db.delete_task_anchors(&task.id, AnchorKind::Job)?;
+    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
+    }
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
@@ -1679,11 +1701,17 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         );
     }
     runtime::refuse_inside_session(task, "delete")?;
+    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "delete")?;
     let mut warnings = Vec::new();
     // Stopped, and gone, before anything is removed: a running agent would
     // carry on working in worktrees that are about to go, and its exit hook
     // would write into the task directory as it was being removed.
     runtime::stop(task).context("end the agent's tmux session")?;
+    // Its review job too: with the task's rows gone, its jeet commands
+    // would be refused, and its worktree is about to go. That includes one
+    // the assistant started in its worktree, recorded as the assistant's.
+    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
+    review::stop_jobs_in(app, &task_dir(app, task)).context("end the task's review job")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
@@ -1737,6 +1765,9 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     }
     for common in foreign.iter().filter_map(|c| c.common_dir.as_ref()) {
         let _ = git::worktree_prune(common);
+    }
+    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
     app.db.delete_task(&task.id)?;
     Ok(warnings)

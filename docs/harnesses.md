@@ -24,8 +24,9 @@ jeet does without that feature:
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
-| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (#33 adds `Sandbox`) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
+| `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
+| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
@@ -35,23 +36,29 @@ jeet does without that feature:
 | `startup_prompt(pane)`, `accept_trust(pane)` | spot a prompt that blocks the agent before its first hook, and accept a trust prompt one key at a time | the task shows `needs input – startup prompt?` after 15s |
 | `instructions_file`, `instructions_import` | the file the agent reads its instructions from, and, when that is not `AGENTS.md`, what jeet writes in it to import `AGENTS.md` (Claude Code: `CLAUDE.md` holding `@AGENTS.md`) | none of jeet's instruction files is written for it |
 
-`AgentSpec::supports_sessions` and `AgentSpec::has_hooks` check whether these
-methods return `Some`, so they must return `Some` for any arguments, empty
+`AgentSpec::supports_sessions` and `AgentSpec::has_hooks` (`hook_args` or
+`hook_file`) check whether these methods return `Some`, so they must return `Some` for any arguments, empty
 ones included.
 
 ### Hooks
 
-jeet's hook command is `jeet task-hook <Event>`, with the event's payload on
-stdin. For any harness except Claude Code, add `--harness <id>` so that
-`task-hook` hands the payload to your `parse_hook`. A hook has to be quick,
+jeet's hook command is `jeet task-hook --task <id> <Event>`, with the event's
+payload on stdin; `<id>` is `HookSetup::task_id`, the task jeet launched the
+agent for, and only a hook that names it, and runs as a descendant of the
+process jeet starts in the task's pane, reports to the task's parent (jeet
+identifies callers by process ancestry; the agent's own `jeet` commands are
+held to the same, so a harness that runs hooks or shell tools from a
+separate daemon gets status but no reports, and gated commands refused). For
+any harness except Claude Code, add `--harness <id>` so that `task-hook`
+hands the payload to your `parse_hook`. A hook has to be quick,
 must print nothing on stdout except the outputs above, and always exits 0.
 `task-hook` takes care of that: `parse_hook` only reads the payload.
 
 If the agent can take hooks only from a file, not a flag or an environment
-variable, the launch arguments alone cannot install them. Likewise, if it
-cannot start a session under an id jeet picks, jeet has to learn the id
-from the first hook instead of recording it before launch. Both need a
-change to the trait, so raise them in the PR.
+variable, implement `hook_file` instead of `hook_args`. If it cannot start
+a session under an id jeet picks, jeet has to learn the id from the first
+hook instead of recording it before launch. That needs a change to the
+trait, so raise it in the PR.
 
 ### Mapping hook payloads to events
 
@@ -82,13 +89,27 @@ answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
 for. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
-Both need the hook to run with the agent's environment: jeet reports and
-briefs only when the hook's `$JEET_TASK_ID` names the task its cwd found.
-Status needs only the cwd, so a hook run by a plugin host or server that
-does not inherit the agent's environment still shows status, and idle
-reports (swept from status) still go out, but it silently never sends the
-other reports or briefs; run hooks as children of the agent, or pass
-`$JEET_TASK_ID` on. Only what the harness knows (the `clear` reason, say) belongs in its module:
+Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
+descendant of the process jeet starts in the task's pane: jeet reports and
+briefs only when `--task` names the task found and jeet confirms, by walking
+the hook's process ancestry up to that recorded process, that it is that
+task's agent. The environment is only a hint. Status needs only `--task` or
+the cwd, so a hook run by a plugin host, daemon or server outside the
+pane's process tree still shows status, and idle reports (swept from
+status) still go out, but it silently never sends the other reports or
+briefs; run hooks as children of the agent. The same holds for the agent's
+shell tool: its `jeet report`, `jeet worktree add` and other gated jeet
+commands are refused ("jeet can't confirm this is task X's agent") unless
+they run under the pane's process. So a harness that runs shell tools in a
+sandbox with its own process ids, as Claude Code's sandbox does on Linux
+(bubblewrap with a pid namespace), must run `jeet` outside it. jeet also
+writes under `$JEET_HOME` (its index, the repository store, task
+directories), which a sandbox confining writes to the working directory
+refuses on any platform. So Claude Code's settings from jeet list `jeet` in
+`sandbox.excludedCommands`, for every launch. The cost, when the user turns
+the sandbox on: jeet runs unconfined, and Claude Code decides per Bash
+command, so a command that chains other commands with `jeet` may run them
+unconfined too. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 
 ## Deny rules
@@ -105,9 +126,8 @@ The list is:
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
   branch: `main`, `master` and the default branches of the repos jeet has
-  indexed, up to eight in all, the ones most repos use first, and none
-  longer than 24 bytes (the list goes inline on the agent's command line,
-  which shares tmux's 16KB limit with the first prompt), as a destination (`git push *
+  indexed, up to eight in all, the ones most repos use first, as a
+  destination (`git push *
   main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
   `heads/main` with or without a source);
 - merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
@@ -175,10 +195,8 @@ a gate. They do not catch:
 - a REST merge endpoint quoted or carrying a query string
   (`curl -X PUT "https://api.github.com/repos/o/r/pulls/3/merge"`,
   `gh api 'repos/o/r/merges'`): matching what follows `merge` would refuse
-  `repos/acme/mergesort/pulls` too, and quoted variants would not fit the
-  command line jeet launches the agent with;
-- the default branches of indexed repos past the eight listed, or longer
-  than 24 bytes;
+  `repos/acme/mergesort/pulls` too, and quoted variants are not listed;
+- the default branches of indexed repos past the eight listed;
 - moving a branch through the REST refs endpoint
   (`gh api -X PATCH repos/o/r/git/refs/heads/main`): denying it would also
   refuse reading the ref;
@@ -201,8 +219,10 @@ a gate. They do not catch:
 The rules are a snapshot taken at launch: a repo indexed later, or a
 capability granted later, takes effect the next time the agent starts. The
 real control on a default branch is GitHub branch protection or a ruleset;
-set one. A hard boundary (writes confined to the task's directory, no
-`tmux` or `sqlite3`) is the harness sandbox in #33.
+set one. Agents run locally and unconfined: a hard boundary (writes
+confined to the task's directory, no `tmux` or `sqlite3`) would need a
+confined placement, which is future work
+([agent-hierarchy.md §11](design/agent-hierarchy.md#11-placement)).
 
 `permissions.rs` has a table of commands that must and must not be denied,
 checked against a model of Claude Code's matching (`claude_match`), and a

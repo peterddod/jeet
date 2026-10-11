@@ -253,6 +253,7 @@ mod tests {
             created_at: 0,
             last_activity: 0,
             parent_id,
+            placement: crate::placement::Placement::Local,
         }
     }
 

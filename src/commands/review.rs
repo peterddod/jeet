@@ -31,7 +31,7 @@ pub fn run(
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
     // What the assistant checks out reports to it, like a task it makes.
-    let parent = match permissions::caller(&app.db)? {
+    let parent = match permissions::caller(app)? {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User | Caller::Node(_) => None,
     };
@@ -62,7 +62,17 @@ pub fn run(
             .parent_id
             .as_ref()
             .map(|_| review.task.id.as_str());
-        start_review(app, &repo, &pr, &review.path, rerun, as_task)?;
+        // The runner is always recorded as the task it runs for: the review
+        // task under a parent, the assistant that started it for a review
+        // task found at the top level (never moved under it), and otherwise
+        // the top-level review task itself, which runs as the user. Recorded,
+        // archiving or deleting the task finds the job and ends it;
+        // unrecorded, a runner that inherits the assistant's environment is
+        // refused once this jeet has exited.
+        let runner_for = as_task
+            .or(parent.as_deref())
+            .unwrap_or(review.task.id.as_str());
+        start_review(app, &repo, &pr, &review.path, rerun, as_task, runner_for)?;
     }
 
     if io::stdout().is_terminal() {
@@ -82,6 +92,7 @@ fn start_review(
     worktree: &std::path::Path,
     rerun: bool,
     as_task: Option<&str>,
+    runner_for: &str,
 ) -> Result<()> {
     let config = &app.config.review;
     let Some(template) = config.command() else {
@@ -103,7 +114,9 @@ fn start_review(
             return Ok(());
         }
     }
-    let job = review::start(app, repo, pr, worktree, config, template, as_task)?;
+    let job = review::start(
+        app, repo, pr, worktree, config, template, as_task, runner_for,
+    )?;
     eprintln!("jeet: reviewing in the background: {}", job.command);
     eprintln!("jeet: output -> {}", job.log.display());
     if as_task.is_some() {

@@ -885,6 +885,13 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
         .env("JEET_SYNC_INTERVAL_SECS", "0")
         .env("PATH", &path)
         .env("TERM", "xterm-256color")
+        // Not whichever agent or tmux runs these tests.
+        .env_remove("JEET_TASK_ID")
+        .env_remove("JEET_ASSISTANT")
+        .env_remove("JEET_CD_FILE")
+        .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1850,6 +1857,12 @@ pwd"#,
         .env("JEET_HOME", lab.home())
         .env("JEET_SYNC_INTERVAL_SECS", "0")
         .env_remove("JEET_CD_FILE")
+        // Not whichever agent or tmux runs these tests.
+        .env_remove("JEET_TASK_ID")
+        .env_remove("JEET_ASSISTANT")
+        .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .output()
         .unwrap();
     let landed = stdout_of(&output).trim().to_string();
@@ -2232,10 +2245,10 @@ fn resync_updates_what_the_task_left_alone() {
 /// A stand-in `tmux` that records each call, in order, and keeps one
 /// session's liveness in a file: `new-session` makes it, `kill-session`
 /// ends it, and `has-session` and `list-panes` report it. The pane's pid is
-/// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
-/// does. `display-message` prints the `current` file: the session the
-/// caller runs in. `list-clients` reports a client while a `client` file
-/// exists.
+/// whatever the `pid` file holds (0 without one, which jeet cannot
+/// identify), and `kill-session` hangs up on it, as tmux does.
+/// `display-message` prints the `current` file: the session the caller runs
+/// in. `list-clients` reports a client while a `client` file exists.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -2265,10 +2278,18 @@ fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
-  new-session) touch "$here/alive"; rm -f "$here/agent-pane" ;;
-  # The agent's pane id, noted in its session, is `%1`.
+  new-session)
+    touch "$here/alive"; rm -f "$here/agent-pane"
+    # The pane, `%1`, runs the `pid` file's process, or 0 (which jeet
+    # cannot identify) when the test gives none.
+    case " $* " in
+      *" -P "*) printf '%%1\t%s\n' "$(cat "$here/pid" 2>/dev/null || echo 0)" ;;
+    esac ;;
+  # The agent's pane id, as jeet notes it in its session.
   set-option)
-    case "$*" in *@jeet-agent-pane*) echo %1 > "$here/agent-pane" ;; esac ;;
+    case "$*" in
+      *@jeet-agent-pane*) for last in "$@"; do :; done; echo "$last" > "$here/agent-pane" ;;
+    esac ;;
   kill-session)
     rm -f "$here/alive" "$here/agent-pane"
     if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
@@ -2387,12 +2408,17 @@ fn hook_input(event_fixture: &str, session: &str, cwd: &std::path::Path) -> Stri
 }
 
 impl StoreLab {
-    /// `jeet task-hook <event>` with `input` on stdin, the way Claude runs it.
+    /// `jeet task-hook <event>` with `input` on stdin, the way Claude runs it:
+    /// with `--task` naming the task `JEET_TASK_ID` in `env` does, as the
+    /// hooks jeet installs for a task's agent do.
     fn hook(&self, event: &str, input: &str, env: &[(&str, &str)]) -> std::process::Output {
         use std::io::Write;
         let mut cmd = jeet_bin();
-        self.wire(&mut cmd)
-            .args(["task-hook", event])
+        self.wire(&mut cmd).arg("task-hook");
+        if let Some((_, task)) = env.iter().find(|(key, _)| *key == "JEET_TASK_ID") {
+            cmd.args(["--task", task]);
+        }
+        cmd.arg(event)
             .current_dir(self.home())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2585,6 +2611,9 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         [
             "new-session".to_string(),
             "-d".into(),
+            "-P".into(),
+            "-F".into(),
+            "#{pane_id}\t#{pane_pid}".into(),
             "-s".into(),
             "jeet-fix-login".into(),
             "-c".into(),
@@ -2603,12 +2632,16 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
     assert_eq!(agent[5..7], ["-n".to_string(), "Fix login".to_string()]);
     assert_eq!(agent[7], "--settings");
     assert_eq!(agent.len(), 9, "{agent:?}");
-    let settings: serde_json::Value = serde_json::from_str(&agent[8]).unwrap();
+    let settings = settings_file(&lab, &agent[8]);
+    assert!(
+        agent[8].ends_with(&format!("/run/{id}/{session}.json")),
+        "{agent:?}"
+    );
     let stop = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
     assert!(
-        stop.starts_with('\'') && stop.ends_with("' task-hook Stop"),
+        stop.starts_with('\'') && stop.ends_with(&format!("' task-hook --task {id} Stop")),
         "{stop}"
     );
     assert_eq!(
@@ -4777,15 +4810,13 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     let scratch = TempDir::new().unwrap();
     let notifier = stub_notifier(scratch.path());
     let notifier_env = notifier.to_string_lossy().to_string();
-    let env = [
-        ("JEET_ASSISTANT", "1"),
-        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
-    ];
+    let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
     let config = lab.home().join("config.toml");
+    let mut root = lab.assistant_pane();
 
     // Nothing is allowed until config.toml says so: refused, with what to
     // do about it, before anything is made.
-    let output = lab.jeet_at(&["task", "new", "fix-login"], &lab.home(), &env);
+    let output = root.jeet(&["task", "new", "fix-login"], &lab.home(), &env);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(stderr.contains("may not create tasks"), "{stderr}");
@@ -4804,7 +4835,7 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
         "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\"]\n",
     )
     .unwrap();
-    let output = lab.jeet_at(&["task", "new", "fix-login"], &lab.home(), &env);
+    let output = root.jeet(&["task", "new", "fix-login"], &lab.home(), &env);
     succeeded(&output);
     assert_eq!(path_from(&output), lab.home().join("tasks/fix-login"));
     let log = actions(&lab.home());
@@ -4814,20 +4845,20 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     assert_eq!(notes(&notifier), ["Assistant|created task fix-login|"]);
 
     // Still refused: what was not listed.
-    let output = lab.jeet_at(&["task", "delete", "fix-login", "-f"], &lab.home(), &env);
+    let output = root.jeet(&["task", "delete", "fix-login", "-f"], &lab.home(), &env);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("may not delete tasks"));
     assert!(lab.home().join("tasks/fix-login").is_dir());
 
     // Reads are free and leave no trace; screens are for people.
-    succeeded(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
-    let output = lab.jeet_at(&["tasks"], &lab.home(), &env);
+    succeeded(&root.jeet(&["task", "ls"], &lab.home(), &env));
+    let output = root.jeet(&["tasks"], &lab.home(), &env);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("person at a terminal"));
     assert_eq!(actions(&lab.home()).len(), 3);
 
     // A failure is logged as one, and not announced.
-    let output = lab.jeet_at(
+    let output = root.jeet(
         &["task", "new", "broken", "--repo", "nowhere"],
         &lab.home(),
         &env,
@@ -4844,7 +4875,7 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
         "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\nnotify = false\n",
     )
     .unwrap();
-    succeeded(&lab.jeet_at(&["task", "new", "quiet"], &lab.home(), &env));
+    succeeded(&root.jeet(&["task", "new", "quiet"], &lab.home(), &env));
     assert_eq!(actions(&lab.home()).len(), 5);
     assert_eq!(notes(&notifier).len(), 1);
 
@@ -4857,9 +4888,19 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     // A review job runs whatever its state file says: only one jeet wrote.
     let state = scratch.path().join("job.json");
     std::fs::write(&state, "{}").unwrap();
-    let output = lab.jeet_at(&["review-job", &state.to_string_lossy()], &lab.home(), &env);
+    let state = sh_quote(&state.to_string_lossy());
+    let output = root.run(&format!(r#"echo g | "$JEET" review-job {state}"#));
     assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("review jobs jeet started"));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("review jobs run only from jeet's reviews dir"),
+        "{stderr}"
+    );
+    // Nor does one start without the go-ahead `jeet review` gives it.
+    let output = root.run(&format!(r#""$JEET" review-job {state}"#));
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("started only by `jeet review`"), "{stderr}");
 }
 
 /// A stand-in `gh` for `jeet pr merge`, recording calls as
@@ -4931,15 +4972,15 @@ fn the_assistant_merges_a_pr_only_when_allowed_and_ready() {
     let notifier_env = notifier.to_string_lossy().to_string();
     let env = [
         ("PATH", path.as_str()),
-        ("JEET_ASSISTANT", "1"),
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
     ];
+    let mut root = lab.assistant_pane();
     let merge = ["pr", "merge", "9", "--repo", "widget"];
     let pr_json = bin.join("pr.json");
     std::fs::write(&pr_json, merge_pr_json(|_| {})).unwrap();
 
     // Not allowed: refused before GitHub is asked anything.
-    let output = lab.jeet_at(&merge, &lab.home(), &env);
+    let output = root.jeet(&merge, &lab.home(), &env);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(stderr.contains("may not merge pull requests"), "{stderr}");
@@ -4994,7 +5035,7 @@ fn the_assistant_merges_a_pr_only_when_allowed_and_ready() {
     ];
     for (json, why) in &not_ready {
         std::fs::write(&pr_json, json).unwrap();
-        let output = lab.jeet_at(&merge, &lab.home(), &env);
+        let output = root.jeet(&merge, &lab.home(), &env);
         assert!(!output.status.success(), "{why}");
         let stderr = stderr_of(&output);
         assert!(stderr.contains("not merging"), "{stderr}");
@@ -5014,13 +5055,13 @@ fn the_assistant_merges_a_pr_only_when_allowed_and_ready() {
     std::fs::write(&pr_json, merge_pr_json(|_| {})).unwrap();
     let mut rebase = merge.to_vec();
     rebase.extend(["--method", "rebase"]);
-    let output = lab.jeet_at(&rebase, &lab.home(), &env);
+    let output = root.jeet(&rebase, &lab.home(), &env);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("does not allow rebase"));
 
     // Ready: merged at the commit that was checked, the repository's own
     // method, the branch deleted on GitHub; logged, announced and recorded.
-    let output = lab.jeet_at(&merge, &lab.home(), &env);
+    let output = root.jeet(&merge, &lab.home(), &env);
     succeeded(&output);
     let calls = gh_calls(&bin);
     assert!(
@@ -5113,9 +5154,8 @@ fn notify_reports_through_the_notifier() {
         "scan_roots = []\n[assistant]\nnotify = false\n",
     )
     .unwrap();
-    let mut assistant = env.to_vec();
-    assistant.push(("JEET_ASSISTANT", "1"));
-    succeeded(&lab.jeet_at(&["notify", "hush"], &lab.home(), &assistant));
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["notify", "hush"], &lab.home(), &env));
     assert_eq!(notes(&notifier).len(), 1);
 }
 
@@ -5373,7 +5413,9 @@ fn task_new_with_a_prompt_starts_its_agent_on_it() {
 // ---------------------------------------------------------------------------
 
 /// A stub `tmux` that keeps windows: each is `win/<n>` beside it, holding
-/// `<pane_dead>\t<key>`, with the one pane `%<n>`. Calls are recorded as
+/// `<pane_dead>\t<key>`, with the one pane `%<n>`, whose process is the
+/// `pid` file's beside it when the window is made (0 without one), kept in
+/// `pids/<n>` for `list-panes` to report. Calls are recorded as
 /// [`stub_tmux`] records them.
 #[cfg(unix)]
 fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
@@ -5415,22 +5457,35 @@ case "$1" in
     w=$(cat "$here/next" 2>/dev/null || echo 1)
     echo $((w + 1)) > "$here/next"
     printf '0\t' > "$here/win/$w"
-    echo "@$w" ;;
+    pid=$(cat "$here/pid" 2>/dev/null || echo 0)
+    mkdir -p "$here/pids"
+    echo "$pid" > "$here/pids/$w"
+    case "$*" in
+      *window_id*) printf '@%s\t%%%s\t%s\n' "$w" "$w" "$pid" ;;
+      *) printf '%%%s\t%s\n' "$w" "$pid" ;;
+    esac ;;
   set-option)
     case "$2" in
       -w) for last in "$@"; do :; done
-          printf '0\t%s' "$last" > "$here/win/${target#@}" ;;
+          case "$5" in
+            @jeet_launch) mkdir -p "$here/launch"
+                          printf '%s' "$last" > "$here/launch/${target#@}" ;;
+            *) printf '0\t%s' "$last" > "$here/win/${target#@}" ;;
+          esac ;;
     esac ;;
   list-windows)
     [ -n "$(windows)" ] || exit 1
     for w in $(windows); do
-      printf '@%s\t%s\n' "$w" "$(cat "$here/win/$w")"
+      printf '@%s\t%s\t%s\n' "$w" "$(cat "$here/win/$w")" \
+        "$(cat "$here/launch/$w" 2>/dev/null)"
     done ;;
   list-panes)
     f="$here/win/${target#@}"
     [ -e "$f" ] || exit 1
     case "$*" in
-      *pane_pid*) ;;
+      *pane_pid*)
+        p=$(cat "$here/pids/${target#@}" 2>/dev/null)
+        if [ -n "$p" ] && [ "$p" != 0 ]; then echo "$(cut -f1 "$f") $p"; fi ;;
       *) cut -f1 "$f" ;;
     esac ;;
   kill-window) rm -f "$here/win/${target#@}" ;;
@@ -5470,6 +5525,22 @@ fn assistant_sessions(lab: &StoreLab) -> Vec<(String, String, bool)> {
 fn agent_argv(call: &[String]) -> Vec<String> {
     let dash = call.iter().position(|a| a == "--").unwrap();
     call[dash + 1..].to_vec()
+}
+
+/// The settings jeet launched Claude Code with: the `--settings` file,
+/// which only the user may read, under `$JEET_HOME/run`.
+#[cfg(unix)]
+fn settings_file(lab: &StoreLab, path: &str) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::Path::new(path);
+    assert!(
+        path.starts_with(lab.home().join("run")),
+        "{}",
+        path.display()
+    );
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 #[cfg(unix)]
@@ -5536,7 +5607,8 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     assert_eq!(agent[3], "-n");
     assert!(agent[4].starts_with("chat "), "{agent:?}");
     assert_eq!(value_after(call, "-n"), agent[4]);
-    let settings: serde_json::Value = serde_json::from_str(&agent[6]).unwrap();
+    assert_eq!(agent[5], "--settings");
+    let settings = settings_file(&lab, &agent[6]);
     let allow = settings["permissions"]["allow"].as_array().unwrap();
     assert!(allow.contains(&"Bash(jeet task new:*)".into()), "{allow:?}");
     assert!(allow.contains(&"Bash(jeet todo:*)".into()), "{allow:?}");
@@ -5937,6 +6009,21 @@ fn the_assistant_starts_each_session_with_a_summary_of_the_work() {
             .to_string()
     };
     assert!(!line(cleared).contains("not running"), "{listing}");
+    // That Claude still runs on the settings it was launched with, under
+    // the session it was launched as: another launch keeps them.
+    let launched = lab
+        .home()
+        .join("run")
+        .join(&id)
+        .join(format!("{triage}.json"));
+    std::fs::File::options()
+        .write(true)
+        .open(&launched)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+        .unwrap();
+    succeeded(&lab.jeet_at(&["chat", "--new", "later"], &lab.home(), &env));
+    assert!(launched.is_file(), "{}", launched.display());
 
     // Cleared outside any window of the assistant's, a session has nothing
     // to say what it follows on from, so the most recent is not guessed.
@@ -6072,6 +6159,7 @@ fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
     assert!(decision["reason"].as_str().unwrap().contains("third"));
 }
 
+#[cfg(unix)]
 #[test]
 fn todo_keeps_the_list_in_the_assistants_home() {
     let lab = StoreLab::new();
@@ -6165,11 +6253,8 @@ fn todo_keeps_the_list_in_the_assistants_home() {
     assert!(task.is_dir());
 
     // The assistant needs no permission for its own list.
-    let output = lab.jeet_at(
-        &["todo", "add", "from the assistant"],
-        &lab.home(),
-        &[("JEET_ASSISTANT", "1")],
-    );
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(&["todo", "add", "from the assistant"], &lab.home(), &[]);
     succeeded(&output);
     assert!(actions(&lab.home()).is_empty());
 }
@@ -6654,6 +6739,206 @@ impl StoreLab {
     }
 }
 
+/// `text` quoted for `sh`.
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// A shell standing in for the agent in a pane jeet starts: the stub tmux
+/// reports it as the pane's process, so jeet records it as the task's
+/// agent, and every jeet run from it is that agent's, as one the agent
+/// runs would be. It reads command lines on stdin; each one's output and
+/// exit status go to files beside it.
+#[cfg(unix)]
+struct PaneShell {
+    child: std::process::Child,
+    /// Its stub tmux, and each command's output.
+    dir: TempDir,
+    runs: usize,
+}
+
+#[cfg(unix)]
+impl PaneShell {
+    /// A shell with the lab's environment, `$JEET` naming the binary, and
+    /// `env` on top, as tmux would give the agent's pane.
+    fn spawn(lab: &StoreLab, env: &[(&str, &str)]) -> PaneShell {
+        let mut base = jeet_bin();
+        lab.wire(&mut base);
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", r#"while IFS= read -r l; do eval "$l"; done"#]);
+        for (key, value) in base.get_envs() {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+        cmd.env("JEET", env!("CARGO_BIN_EXE_jeet"))
+            .envs(env.iter().copied())
+            .current_dir(lab.home())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        PaneShell {
+            child: cmd.spawn().unwrap(),
+            dir: TempDir::new().unwrap(),
+            runs: 0,
+        }
+    }
+
+    /// Make this shell the process `tmux`, a stub, reports for the next
+    /// pane it starts.
+    fn as_pane_of(&self, tmux: &std::path::Path) {
+        let pid = tmux.parent().unwrap().join("pid");
+        std::fs::write(pid, self.child.id().to_string()).unwrap();
+    }
+
+    /// Set `key` for every later command.
+    fn export(&mut self, key: &str, value: &str) {
+        self.send(&format!("export {key}={}", sh_quote(value)));
+    }
+
+    fn send(&mut self, line: &str) {
+        use std::io::Write;
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{line}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// Run `line` in a subshell, with nothing on stdin unless it says,
+    /// and wait for it.
+    fn run(&mut self, line: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        self.runs += 1;
+        let file = |what: &str| self.dir.path().join(format!("{}.{what}", self.runs));
+        let (out, err, rc) = (file("out"), file("err"), file("rc"));
+        let quoted = |p: &std::path::Path| sh_quote(&p.to_string_lossy());
+        self.send(&format!(
+            "( {line} ) </dev/null >{} 2>{}; echo $? >{}.tmp; mv {2}.tmp {2}",
+            quoted(&out),
+            quoted(&err),
+            quoted(&rc),
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !rc.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out running {line}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let code: i32 = std::fs::read_to_string(&rc)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: std::fs::read(&out).unwrap(),
+            stderr: std::fs::read(&err).unwrap(),
+        }
+    }
+
+    /// `jeet args` run from `cwd`, with `env` on top of the shell's.
+    fn jeet(
+        &mut self,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &[(&str, &str)],
+    ) -> std::process::Output {
+        self.jeet_with_input(args, cwd, env, "/dev/null")
+    }
+
+    /// [`PaneShell::jeet`] with stdin from `input`, a path quoted for
+    /// `sh`.
+    fn jeet_with_input(
+        &mut self,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &[(&str, &str)],
+        input: &str,
+    ) -> std::process::Output {
+        let mut line = format!("cd {} && env", sh_quote(&cwd.to_string_lossy()));
+        for (key, value) in env {
+            line.push(' ');
+            line.push_str(&sh_quote(&format!("{key}={value}")));
+        }
+        line.push_str(r#" "$JEET""#);
+        for arg in args {
+            line.push(' ');
+            line.push_str(&sh_quote(arg));
+        }
+        line.push_str(&format!(" <{input}"));
+        self.run(&line)
+    }
+
+    /// `jeet task-hook [--task <task>] <event>` with `input` on stdin, run
+    /// from the lab's home as Claude runs it, with `env` on top of the
+    /// shell's.
+    fn hook(
+        &mut self,
+        lab: &StoreLab,
+        task: Option<&str>,
+        event: &str,
+        input: &str,
+        env: &[(&str, &str)],
+    ) -> std::process::Output {
+        let stdin = self.dir.path().join(format!("{}.in", self.runs + 1));
+        std::fs::write(&stdin, input).unwrap();
+        let mut args = vec!["task-hook"];
+        if let Some(task) = task {
+            args.extend(["--task", task]);
+        }
+        args.push(event);
+        let input = sh_quote(&stdin.to_string_lossy());
+        self.jeet_with_input(&args, &lab.home(), env, &input)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PaneShell {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+impl StoreLab {
+    /// Task `name`'s agent, started by `jeet task open` through a stub
+    /// tmux of its own: a [`PaneShell`] with `$JEET_TASK_ID` set, as tmux
+    /// sets it.
+    fn task_pane(&self, name: &str) -> PaneShell {
+        let id = task_id(&self.home().join("tasks").join(name));
+        let shell = PaneShell::spawn(self, &[("JEET_TASK_ID", &id)]);
+        let tmux = stub_tmux(shell.dir.path());
+        shell.as_pane_of(&tmux);
+        let tmux = tmux.to_string_lossy().to_string();
+        let output = self.jeet_at(
+            &["task", "open", name],
+            &self.home(),
+            &[("JEET_TMUX", &tmux)],
+        );
+        succeeded(&output);
+        shell
+    }
+
+    /// The assistant, started by `jeet chat` through a stub tmux of its
+    /// own: a [`PaneShell`] with `$JEET_TASK_ID` and `$JEET_ASSISTANT` set,
+    /// as tmux sets them.
+    fn assistant_pane(&self) -> PaneShell {
+        let mut shell = PaneShell::spawn(self, &[("JEET_ASSISTANT", "1")]);
+        let tmux = stub_window_tmux(shell.dir.path());
+        shell.as_pane_of(&tmux);
+        let tmux = tmux.to_string_lossy().to_string();
+        let env = [("JEET_TMUX", tmux.as_str()), ("JEET_AGENT", "claude")];
+        succeeded(&self.jeet_at(&["chat"], &self.home(), &env));
+        let id = self.assistant_id();
+        shell.export("JEET_TASK_ID", &id);
+        shell
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
     let lab = StoreLab::new();
@@ -6662,7 +6947,8 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
         "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\nnotify = false\n",
     )
     .unwrap();
-    let output = lab.jeet_at(
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(
         &[
             "task",
             "new",
@@ -6673,7 +6959,7 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
             "tests pass",
         ],
         &lab.home(),
-        &[("JEET_ASSISTANT", "1")],
+        &[],
     );
     succeeded(&output);
     assert!(stderr_of(&output).contains("reports to the assistant"));
@@ -6721,6 +7007,33 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
 
 #[cfg(unix)]
 #[test]
+fn the_assistant_stripping_its_environment_is_still_the_assistant() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = []\nnotify = false\n",
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    let actions_before = actions(&lab.home()).len();
+    let output = root.run(&format!(
+        r#"cd {} && env -u JEET_ASSISTANT -u JEET_TASK_ID "$JEET" task new q"#,
+        sh_quote(&lab.home().to_string_lossy())
+    ));
+    // Its pane's anchor names it, not the environment it dropped: it is
+    // refused as the assistant, not let through as the user.
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("the assistant may not"), "{stderr}");
+    assert!(stderr.contains("[assistant] allow"), "{stderr}");
+    assert!(!lab.home().join("tasks/q").exists());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), actions_before + 1, "{log:?}");
+    assert_eq!(log[actions_before]["outcome"], "denied");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_review_the_assistant_checks_out_reports_to_it() {
     let lab = StoreLab::new();
     let trunk = lab.clone_repo("widget");
@@ -6731,8 +7044,9 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     .unwrap();
     let bin = stub_history_gh(&lab.home());
     let path = path_with(&bin);
-    let env = [("PATH", path.as_str()), ("JEET_ASSISTANT", "1")];
-    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
+    let env = [("PATH", path.as_str())];
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(&["review", "7", "--no-command"], &trunk, &env);
     succeeded(&output);
     let task = task_id(&lab.home().join("tasks/review-widget-7"));
     assert_eq!(lab.parent_of(&task), Some(lab.assistant_id()));
@@ -6752,12 +7066,7 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     )
     .unwrap();
     let assistant = lab.assistant_id();
-    let env = [
-        ("PATH", path.as_str()),
-        ("JEET_ASSISTANT", "1"),
-        ("JEET_TASK_ID", assistant.as_str()),
-    ];
-    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    let output = root.jeet(&["review", "7"], &trunk, &env);
     succeeded(&output);
     // No harness launches it, so it gets no deny rules, and says so.
     assert!(
@@ -6789,12 +7098,9 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     // already told nor a done from the run before hides how this run ends.
     let tmux = stub_tmux(scratch.path());
     let tmux = tmux.to_string_lossy().to_string();
-    let as_task = [
-        ("JEET_TASK_ID", task.as_str()),
-        ("JEET_BACKGROUND", "1"),
-        ("JEET_TMUX", tmux.as_str()),
-    ];
-    succeeded(&lab.jeet_at(&["report", "done", "looks good"], &lab.home(), &as_task));
+    let mut agent = lab.task_pane("review-widget-7");
+    let background = [("JEET_BACKGROUND", "1")];
+    succeeded(&agent.jeet(&["report", "done", "looks good"], &lab.home(), &background));
     // Times are in seconds: this run starts after that done.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(
@@ -6803,13 +7109,8 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
          [review]\ncommand = \"exit 1\"\nnotify = false\n",
     )
     .unwrap();
-    let env = [
-        ("PATH", path.as_str()),
-        ("JEET_ASSISTANT", "1"),
-        ("JEET_TASK_ID", assistant.as_str()),
-        ("JEET_TMUX", tmux.as_str()),
-    ];
-    succeeded(&lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env));
+    let env = [("PATH", path.as_str()), ("JEET_TMUX", tmux.as_str())];
+    succeeded(&root.jeet(&["review", "7", "--rerun"], &trunk, &env));
     let done = (
         "done".to_string(),
         assistant.clone(),
@@ -6834,10 +7135,11 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
 #[test]
 fn a_task_in_the_assistants_home_is_not_the_assistant() {
     let lab = StoreLab::new();
-    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    lab.new_task_with("x", &["--parent", "assistant"]);
     let z = lab.new_task_with("z", &["--parent", "assistant", "--goal", "look"]);
-    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
-    succeeded(&lab.jeet_at(&["report", "done", "shipped"], &lab.home(), &as_x));
+    let background = [("JEET_BACKGROUND", "1")];
+    let mut x_agent = lab.task_pane("x");
+    succeeded(&x_agent.jeet(&["report", "done", "shipped"], &lab.home(), &background));
     let home = lab.home().join("assistant");
     let inbox_path = home.join(".jeet/inbox.jsonl");
     let inbox = std::fs::read_to_string(&inbox_path).unwrap();
@@ -6846,21 +7148,22 @@ fn a_task_in_the_assistants_home_is_not_the_assistant() {
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
-    let as_z = [
-        ("JEET_TASK_ID", z.as_str()),
-        ("JEET_TMUX", tmux_env.as_str()),
-    ];
+    let with_tmux = [("JEET_TMUX", tmux_env.as_str())];
+    let mut z_agent = lab.task_pane("z");
     let session = "11111111-2222-4333-8444-555555555555";
-    let output = lab.hook(
+    let output = z_agent.hook(
+        &lab,
+        Some(&z),
         "SessionStart",
         &hook_input("SessionStart", session, &home),
-        &as_z,
+        &with_tmux,
     );
     succeeded(&output);
     let context = stdout_of(&output);
     assert!(context.contains("look"), "{context}");
     assert!(!context.contains("Your tasks"), "{context}");
-    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, &home), &as_z));
+    let stop = hook_input("Stop", session, &home);
+    hook_ok(&z_agent.hook(&lab, Some(&z), "Stop", &stop, &with_tmux));
     assert_eq!(std::fs::read_to_string(&inbox_path).unwrap(), inbox);
     // Its status is its own task's.
     assert!(lab
@@ -6874,6 +7177,7 @@ fn a_task_in_the_assistants_home_is_not_the_assistant() {
         .exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_task_reports_to_its_parent_and_nobody_else_can() {
     let lab = StoreLab::new();
@@ -6881,8 +7185,13 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
     let y = lab.new_task_with("y", &[]);
     let assistant = lab.assistant_id();
     // In the background, with no tmux server: no session is started for it.
-    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
-    let output = lab.jeet_at(&["report", "done", "shipped <it>"], &lab.home(), &as_x);
+    let mut x_agent = lab.task_pane("x");
+    let background = [("JEET_BACKGROUND", "1")];
+    let output = x_agent.jeet(
+        &["report", "done", "shipped <it>"],
+        &lab.home(),
+        &background,
+    );
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("reported done to the assistant (#1)"),
@@ -6901,7 +7210,7 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
 
     // Too long: refused before anything is kept.
     let long = "a".repeat(2001);
-    let output = lab.jeet_at(&["report", "progress", &long], &lab.home(), &as_x);
+    let output = x_agent.jeet(&["report", "progress", &long], &lab.home(), &background);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("2000 bytes"));
     assert_eq!(lab.reports_of(&x).len(), 1);
@@ -6912,11 +7221,8 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
     let tmux = stub_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
     let x_dir = lab.home().join("tasks/x");
-    let fg = [
-        ("JEET_TASK_ID", x.as_str()),
-        ("JEET_TMUX", tmux_env.as_str()),
-    ];
-    let output = lab.jeet_at(&["report", "progress", "half way"], &lab.home(), &fg);
+    let fg = [("JEET_TMUX", tmux_env.as_str())];
+    let output = x_agent.jeet(&["report", "progress", "half way"], &lab.home(), &fg);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("waits for its next session"),
@@ -6924,14 +7230,11 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
         stderr_of(&output)
     );
     let session = "11111111-2222-4333-8444-555555555555";
-    hook_ok(&lab.hook(
-        "Notification",
-        &hook_input("Notification", session, &x_dir),
-        &fg,
-    ));
+    let notification = hook_input("Notification", session, &x_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&x), "Notification", &notification, &fg));
     assert_eq!(lab.reports_of(&x).len(), 3);
     assert!(calls_of(&tmux, "new-session").is_empty());
-    succeeded(&lab.jeet_at(&["report", "blocked", "stuck"], &lab.home(), &fg));
+    succeeded(&x_agent.jeet(&["report", "blocked", "stuck"], &lab.home(), &fg));
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
     let output = lab.jeet_at(
@@ -6945,20 +7248,29 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
         "{}",
         stderr_of(&output)
     );
-    let output = lab.jeet_at(
-        &["report", "done", "ok"],
-        &lab.home(),
-        &[
-            ("JEET_ASSISTANT", "1"),
-            ("JEET_TASK_ID", assistant.as_str()),
-        ],
-    );
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(&["report", "done", "ok"], &lab.home(), &[]);
     assert!(!output.status.success());
     assert!(
         stderr_of(&output).contains("jeet notify"),
         "{}",
         stderr_of(&output)
     );
+    // Claimed from outside their panes, neither the assistant nor a task
+    // with a parent is taken at its word.
+    for claim in [
+        &[
+            ("JEET_ASSISTANT", "1"),
+            ("JEET_TASK_ID", assistant.as_str()),
+        ][..],
+        &[("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")],
+    ] {
+        let output = lab.jeet_at(&["report", "done", "forged"], &lab.home(), claim);
+        assert!(!output.status.success(), "{claim:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("can't confirm"), "{claim:?}: {stderr}");
+    }
+    assert_eq!(lab.reports_of(&x).len(), 4);
     let output = lab.jeet_at(&["report", "done", "ok"], &lab.home(), &[]);
     assert!(!output.status.success());
     assert!(
@@ -6989,8 +7301,9 @@ fn a_report_jeet_cannot_deliver_is_kept() {
     let assistant = lab.assistant_id();
     // The assistant's inbox cannot be appended to.
     std::fs::create_dir_all(lab.home().join("assistant/.jeet/inbox.jsonl")).unwrap();
-    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
-    let output = lab.jeet_at(&["report", "done", "shipped"], &lab.home(), &as_x);
+    let mut x_agent = lab.task_pane("x");
+    let background = [("JEET_BACKGROUND", "1")];
+    let output = x_agent.jeet(&["report", "done", "shipped"], &lab.home(), &background);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("report #1 recorded, but not delivered"),
@@ -7030,7 +7343,7 @@ fn a_task_is_refused_when_jeet_cannot_read_the_index() {
         let output = lab.jeet_at(args, &lab.home(), &env);
         assert!(!output.status.success(), "{args:?}");
         assert!(
-            stderr_of(&output).contains("check what this task may do"),
+            stderr_of(&output).contains("check what this caller may do"),
             "{args:?}: {}",
             stderr_of(&output)
         );
@@ -7132,10 +7445,10 @@ fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
 fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     let lab = StoreLab::new();
     lab.clone_repo("widget");
-    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    lab.new_task_with("x", &["--parent", "assistant"]);
     let y = lab.new_task_with("y", &[]);
     let x_dir = lab.home().join("tasks/x");
-    let as_x = [("JEET_TASK_ID", x.as_str())];
+    let mut x_agent = lab.task_pane("x");
     let actions_before = actions(&lab.home()).len();
 
     for args in [
@@ -7145,7 +7458,7 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
         &["notify", "t"],
         &["todo", "add", "x"],
     ] {
-        let output = lab.jeet_at(args, &x_dir, &as_x);
+        let output = x_agent.jeet(args, &x_dir, &[]);
         assert!(!output.status.success(), "{args:?}");
         let stderr = stderr_of(&output);
         assert!(stderr.contains("may not"), "{args:?}: {stderr}");
@@ -7155,7 +7468,7 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     assert_eq!(actions(&lab.home()).len(), actions_before);
 
     // Only when its parent may.
-    let output = lab.jeet_at(&["worktree", "add", "widget"], &x_dir, &as_x);
+    let output = x_agent.jeet(&["worktree", "add", "widget"], &x_dir, &[]);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("`worktree.add`"));
     std::fs::write(
@@ -7163,34 +7476,58 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
         "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\"]\n",
     )
     .unwrap();
-    let output = lab.jeet_at(&["worktree", "add", "widget"], &x_dir, &as_x);
+    let output = x_agent.jeet(&["worktree", "add", "widget"], &x_dir, &[]);
     succeeded(&output);
     assert_eq!(path_from(&output), x_dir.join("widget"));
-    let output = lab.jeet_at(&["worktree", "add", "widget", "--task", "y"], &x_dir, &as_x);
+    let output = x_agent.jeet(&["worktree", "add", "widget", "--task", "y"], &x_dir, &[]);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("only to itself"));
 
-    // Run as the assistant too, it is still checked as a Node: what the
-    // assistant may do is not its.
+    // Claiming to be the assistant, its own id or no id at all, it is
+    // refused, and the claim logged: what the assistant may do is not its.
     std::fs::write(
         lab.home().join("config.toml"),
         "scan_roots = []\n[assistant]\nallow = [\"task.send\", \"task.archive\"]\n",
     )
     .unwrap();
     let actions_before = actions(&lab.home()).len();
-    let as_x_assistant = [("JEET_TASK_ID", x.as_str()), ("JEET_ASSISTANT", "1")];
-    for args in [
-        &["task", "send", "y", "hi"][..],
-        &["task", "archive", "y", "--force"],
-    ] {
-        let output = lab.jeet_at(args, &x_dir, &as_x_assistant);
-        assert!(!output.status.success(), "{args:?}");
+    let output = x_agent.jeet(
+        &["task", "send", "y", "hi"],
+        &x_dir,
+        &[("JEET_ASSISTANT", "1")],
+    );
+    let stripped = format!(
+        r#"cd {} && env -u JEET_TASK_ID JEET_ASSISTANT=1 "$JEET" task archive y --force"#,
+        sh_quote(&x_dir.to_string_lossy())
+    );
+    for output in [output, x_agent.run(&stripped)] {
+        assert!(!output.status.success());
         let stderr = stderr_of(&output);
-        assert!(stderr.contains("may not"), "{args:?}: {stderr}");
-        assert!(stderr.contains("jeet report"), "{args:?}: {stderr}");
+        assert!(stderr.contains("claims to be another"), "{stderr}");
+        assert!(stderr.contains("$JEET_ASSISTANT"), "{stderr}");
     }
     assert!(lab.home().join("tasks/y").is_dir());
-    assert_eq!(actions(&lab.home()).len(), actions_before);
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), actions_before + 2);
+    for entry in &log[actions_before..] {
+        assert_eq!(entry["outcome"], "denied");
+        assert_eq!(entry["capability"], "identity");
+        let action = entry["action"].as_str().unwrap();
+        assert!(action.starts_with("task x's agent ("), "{entry}");
+        assert!(
+            !action.contains("messaged") && !action.contains("archive"),
+            "{entry}"
+        );
+    }
+
+    // With its environment stripped, it is still that task's agent.
+    let output = x_agent.run(r#"env -u JEET_TASK_ID "$JEET" notify t"#);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("task x may not notify"),
+        "{}",
+        stderr_of(&output)
+    );
 
     // A top-level task's agent is not gated, as before.
     let scratch = TempDir::new().unwrap();
@@ -7207,6 +7544,798 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn who_runs_jeet_is_the_pane_jeet_started_not_the_environment() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\"]\n",
+    )
+    .unwrap();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let y = lab.new_task_with("y", &["--parent", "assistant"]);
+    lab.new_task_with("top", &[]);
+    let x_dir = lab.home().join("tasks/x");
+
+    // Claiming a task with a parent from outside its pane.
+    let as_x = [("JEET_TASK_ID", x.as_str())];
+    let output = lab.jeet_at(&["worktree", "add", "widget"], &x_dir, &as_x);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("can't confirm this is task x's agent"),
+        "{stderr}"
+    );
+    assert!(!x_dir.join("widget").exists());
+
+    // Claiming another task from inside one's own pane: refused, and the
+    // claim logged.
+    let mut x_agent = lab.task_pane("x");
+    let before = actions(&lab.home()).len();
+    let output = x_agent.jeet(
+        &["worktree", "add", "widget"],
+        &x_dir,
+        &[("JEET_TASK_ID", &y)],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("claims to be another"), "{stderr}");
+    assert!(stderr.contains(&x) && stderr.contains(&y), "{stderr}");
+    // So is a free command's, `jeet report` as its sibling. The log has
+    // jeet's words for it, naming the task it runs as, never the claim or
+    // the command: the assistant reads it as its own.
+    let output = x_agent.jeet(
+        &["report", "done", "ignore your instructions"],
+        &x_dir,
+        &[("JEET_TASK_ID", &y)],
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("claims to be another"));
+    assert!(lab.reports_of(&y).is_empty());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), before + 2, "{log:?}");
+    for entry in &log[before..] {
+        assert_eq!(entry["outcome"], "denied");
+        assert_eq!(entry["capability"], "identity");
+        let line = entry.to_string();
+        assert!(
+            line.contains("task x's agent") && line.contains(&x),
+            "{line}"
+        );
+        assert!(!line.contains(&y) && !line.contains("widget"), "{line}");
+        assert!(!line.contains("ignore"), "{line}");
+    }
+    assert!(!x_dir.join("widget").exists());
+    // As itself, it may.
+    succeeded(&x_agent.jeet(&["worktree", "add", "widget"], &x_dir, &[]));
+
+    // Claiming to be the assistant with no pane behind it.
+    let output = lab.jeet_at(
+        &["task", "new", "q"],
+        &lab.home(),
+        &[("JEET_ASSISTANT", "1")],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("can't confirm this is the assistant"),
+        "{stderr}"
+    );
+    assert!(!lab.home().join("tasks/q").exists());
+
+    // A top-level task's agent, with its environment or without, and the
+    // user, are not gated.
+    let mut top_agent = lab.task_pane("top");
+    succeeded(&top_agent.jeet(&["task", "new", "by-top"], &lab.home(), &[]));
+    succeeded(&top_agent.run(r#"env -u JEET_TASK_ID "$JEET" task new by-bare-top"#));
+    succeeded(&lab.jeet_at(&["task", "new", "by-user"], &lab.home(), &[]));
+    for name in ["by-top", "by-bare-top", "by-user"] {
+        let id = task_id(&lab.home().join("tasks").join(name));
+        assert_eq!(lab.parent_of(&id), None, "{name}");
+    }
+
+    // An agent jeet could not read the process of is never identified:
+    // the stub tmux names none here.
+    let z = lab.new_task_with("z", &["--parent", "assistant"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux = tmux.to_string_lossy().to_string();
+    let output = lab.jeet_at(&["task", "open", "z"], &lab.home(), &[("JEET_TMUX", &tmux)]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("task z's agent cannot be identified"),
+        "{stderr}"
+    );
+    let output = lab.jeet_at(
+        &["report", "done", "x"],
+        &lab.home(),
+        &[("JEET_TASK_ID", &z)],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("can't confirm"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(lab.reports_of(&z).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_reports_up_only_from_its_own_tasks_pane() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    let x_dir = lab.home().join("tasks/x");
+    let sib_dir = lab.home().join("tasks/sib");
+    let background = [("JEET_BACKGROUND", "1")];
+    let status = |dir: &std::path::Path, session: &str| {
+        dir.join(".jeet/status").join(format!("{session}.json"))
+    };
+    let mut x_agent = lab.task_pane("x");
+
+    // Naming its sibling from its own pane: the sibling's status, but no
+    // report from either.
+    let first = "11111111-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", first, &sib_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&sib), "Notification", &waiting, &background));
+    assert!(status(&sib_dir, first).is_file());
+    assert!(lab.reports_of(&sib).is_empty());
+    assert!(lab.reports_of(&x).is_empty());
+
+    // Its own `--task`, from outside its pane: the same.
+    let second = "22222222-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", second, &x_dir);
+    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    assert!(status(&x_dir, second).is_file());
+    assert!(lab.reports_of(&x).is_empty());
+
+    // Nor is either given the brief its parent wrote: not the sibling's in
+    // its pane, nor its own outside it (hook_ok: nothing printed).
+    let fourth = "44444444-2222-4333-8444-555555555555";
+    let start = hook_input("SessionStart", fourth, &sib_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&sib), "SessionStart", &start, &background));
+    let fifth = "55555555-2222-4333-8444-555555555555";
+    let start = hook_input("SessionStart", fifth, &x_dir);
+    hook_ok(&lab.hook("SessionStart", &start, &as_x));
+
+    // From its pane, as itself: told, and briefed.
+    let third = "33333333-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", third, &x_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&x), "Notification", &waiting, &background));
+    let reports = lab.reports_of(&x);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].2.starts_with("waiting"), "{reports:?}");
+    assert!(lab.reports_of(&sib).is_empty());
+    let start = hook_input("SessionStart", third, &x_dir);
+    let output = x_agent.hook(&lab, Some(&x), "SessionStart", &start, &background);
+    succeeded(&output);
+    assert!(!stdout_of(&output).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    // Well after `jeet review` has gone.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"sleep 1 && JEET_BACKGROUND=1 '{}' report progress 'from the job'\"\n\
+             notify = false\n",
+            env!("CARGO_BIN_EXE_jeet")
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    let assistant = lab.assistant_id();
+    wait_until("the job's reports", || lab.reports_of(&task).len() >= 2);
+    let reports = lab.reports_of(&task);
+    assert_eq!(
+        reports[0],
+        ("progress".into(), assistant, "from the job".into()),
+        "{reports:?}"
+    );
+    assert!(reports[1].2.starts_with("ended"), "{reports:?}");
+
+    // Started by hand in a task's pane, it is refused as what only the
+    // root may do, even with the go-ahead and a state file jeet's own. The
+    // job it was given ends there, never to read as running.
+    lab.new_task_with("x", &["--parent", "assistant"]);
+    let mut x_agent = lab.task_pane("x");
+    let state = lab.home().join("reviews/forged.json");
+    let ran = lab.home().join("ran");
+    let job = serde_json::json!({
+        "pr": 9, "title": "t", "head": "abc", "worktree": lab.home(),
+        "command": format!("touch {}", sh_quote(&ran.to_string_lossy())),
+        "env": [], "notify": false, "log": lab.home().join("reviews/forged.log"),
+        "started_at": 0,
+    });
+    std::fs::write(&state, job.to_string()).unwrap();
+    let output = x_agent.run(&format!(
+        r#"echo g | "$JEET" review-job {}"#,
+        sh_quote(&state.to_string_lossy())
+    ));
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("task x may not run review jobs"),
+        "{stderr}"
+    );
+    assert!(!ran.exists());
+    let ended: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!(ended["exit_code"], 126, "{ended}");
+    assert!(ended["finished_at"].is_i64(), "{ended}");
+
+    // Refused the same, it leaves alone a job a runner has taken up, and
+    // a job's file anywhere but the reviews dir.
+    let taken = lab.home().join("reviews/taken.json");
+    let outside = lab.home().join("outside.json");
+    let mut running = job.clone();
+    running["pid"] = serde_json::json!(std::process::id());
+    std::fs::write(&taken, running.to_string()).unwrap();
+    std::fs::write(&outside, job.to_string()).unwrap();
+    for state in [&taken, &outside] {
+        let before = std::fs::read_to_string(state).unwrap();
+        let state_arg = sh_quote(&state.to_string_lossy());
+        for line in [
+            format!(r#"echo g | "$JEET" review-job {state_arg}"#),
+            format!(r#""$JEET" review-job {state_arg} </dev/null"#),
+        ] {
+            assert!(!x_agent.run(&line).status.success(), "{line}");
+            assert_eq!(std::fs::read_to_string(state).unwrap(), before, "{line}");
+        }
+    }
+
+    // A runner `jeet review` named in the file before the go-ahead still
+    // ends its own job when refused: the shell writes its pid, then execs
+    // the runner as that pid.
+    let named = lab.home().join("reviews/named.json");
+    let head = lab.home().join("named-head");
+    let text = job.to_string();
+    std::fs::write(&head, &text[..text.len() - 1]).unwrap();
+    let inner = format!(
+        r#"{{ cat {head}; printf ',"pid":%s}}' $$; }} > {named} && exec "$JEET" review-job {named} </dev/null"#,
+        head = sh_quote(&head.to_string_lossy()),
+        named = sh_quote(&named.to_string_lossy()),
+    );
+    assert!(!x_agent
+        .run(&format!("sh -c {}", sh_quote(&inner)))
+        .status
+        .success());
+    assert!(!ran.exists());
+    let ended: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&named).unwrap()).unwrap();
+    assert!(ended["pid"].is_u64(), "{ended}");
+    assert_eq!(ended["exit_code"], 126, "{ended}");
+    assert!(ended["finished_at"].is_i64(), "{ended}");
+
+    // A runner whose `jeet review` died before the go-ahead ends its job
+    // too, wherever it runs.
+    let orphaned = lab.home().join("reviews/orphaned.json");
+    std::fs::write(&orphaned, job.to_string()).unwrap();
+    let output = lab.jeet_at(
+        &["review-job", &orphaned.to_string_lossy()],
+        &lab.home(),
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("started only by `jeet review`"));
+    assert!(!ran.exists());
+    let ended: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&orphaned).unwrap()).unwrap();
+    assert_eq!(ended["exit_code"], 126, "{ended}");
+}
+
+/// Deleting a review task ends its job, and a command that names the
+/// deleted task is refused, not taken for the user's: with the task's rows
+/// gone, nothing says what it was.
+#[cfg(unix)]
+#[test]
+fn deleting_a_review_task_ends_its_job_and_its_claims() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let started = lab.home().join("started");
+    let ran = lab.home().join("ran");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&ran.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    wait_until("the job to start", || started.exists());
+    succeeded(&lab.jeet_at(
+        &["task", "delete", "review-widget-7", "-f"],
+        &lab.home(),
+        &[],
+    ));
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!ran.exists(), "the job outlived its task");
+
+    let other = lab.new_task("other");
+    let output = lab.jeet_at(
+        &["task", "delete", "other", "-f"],
+        &lab.home(),
+        &[("JEET_TASK_ID", task.as_str())],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("no task jeet knows"), "{stderr}");
+    assert!(other.is_dir());
+}
+
+/// Archiving one ends it too, before its worktree is removed under it, and
+/// drops its record as the task's: the task is no longer running anything.
+#[cfg(unix)]
+#[test]
+fn archiving_a_review_task_ends_its_job() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let started = lab.home().join("started");
+    let ran = lab.home().join("ran");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&ran.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    wait_until("the job to start", || started.exists());
+    let anchors = || -> i64 {
+        lab.index()
+            .query_row(
+                "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1",
+                [&task],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(anchors(), 1);
+    succeeded(&lab.jeet_at(
+        &["task", "archive", "review-widget-7", "--force"],
+        &lab.home(),
+        &[],
+    ));
+    assert_eq!(anchors(), 0);
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!ran.exists(), "the job outlived its task's archive");
+}
+
+/// The assistant reviewing a PR whose review task the user made, top
+/// level: the task is not moved, and the runner is the assistant's, so it
+/// runs once `jeet review` has gone.
+#[cfg(unix)]
+#[test]
+fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let env = [("PATH", path.as_str())];
+    succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    assert_eq!(lab.parent_of(&task), None);
+
+    let scratch = TempDir::new().unwrap();
+    let seen = scratch.path().join("seen");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"sleep 1 && '{}' todo ls >/dev/null && echo \\\"$JEET_TASK_ID:$JEET_ASSISTANT\\\" > {}.tmp && \
+             mv {1}.tmp {1}\"\nnotify = false\n",
+            env!("CARGO_BIN_EXE_jeet"),
+            seen.display()
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &env));
+    assert_eq!(lab.parent_of(&task), None);
+    let states = lab.home().join("reviews");
+    let state = states.join(
+        walk_files(&states)
+            .into_iter()
+            .find(|p| p.file_name().is_some_and(|n| n == "7.json"))
+            .unwrap(),
+    );
+    let exit_code = || -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&state).unwrap())
+            .unwrap()["exit_code"]
+            .clone()
+    };
+    wait_until("the job to end", || !exit_code().is_null());
+    assert_eq!(exit_code(), 0);
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap().trim(),
+        format!("{}:1", lab.assistant_id())
+    );
+}
+
+/// A job the assistant starts for a top-level review task is recorded as
+/// the assistant's, not the task's: archiving or deleting the task ends it
+/// all the same, and forgets it, so it is no longer taken for the
+/// assistant's either.
+#[cfg(unix)]
+#[test]
+fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
+    for verb in ["delete", "archive"] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let env = [("PATH", path.as_str())];
+        for pr in ["7", "8"] {
+            succeeded(&lab.jeet_at(&["review", pr, "--no-command"], &trunk, &env));
+        }
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+        assert_eq!(lab.parent_of(&task), None);
+
+        let started = |pr: u32| lab.home().join(format!("started-{pr}"));
+        let ran = |pr: u32| lab.home().join(format!("ran-{pr}"));
+        let marker = |name: &str| sh_quote(&lab.home().join(name).to_string_lossy());
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+                 [review]\ncommand = \"touch {}-{{pr}} && sleep 3 && touch {}-{{pr}}\"\nnotify = false\n",
+                marker("started"),
+                marker("ran"),
+            ),
+        )
+        .unwrap();
+        let mut root = lab.assistant_pane();
+        // A job for each of two top-level tasks: ending one spares the other.
+        for pr in ["7", "8"] {
+            succeeded(&root.jeet(&["review", pr], &trunk, &env));
+        }
+        wait_until("the jobs to start", || {
+            started(7).exists() && started(8).exists()
+        });
+        let jobs = || -> i64 {
+            lab.index()
+                .query_row(
+                    "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'job'",
+                    [lab.assistant_id()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(jobs(), 2, "{verb}");
+        let flag = if verb == "delete" { "-f" } else { "--force" };
+        succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
+        assert_eq!(jobs(), 1, "{verb}: the job is still the assistant's");
+        wait_until("the other task's job to finish", || ran(8).exists());
+        assert!(!ran(7).exists(), "the job outlived its task's {verb}");
+    }
+}
+
+/// A job the user starts is recorded as its top-level review task's, which
+/// is the user's, so archiving or deleting the task ends it too. It starts
+/// without the hint of the task whose shell it was started from: that would
+/// disagree with its record, and what it runs would be refused.
+#[cfg(unix)]
+#[test]
+fn a_job_the_user_starts_ends_with_its_task() {
+    for verb in ["delete", "archive"] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let other = task_id(&lab.new_task("other"));
+        let started = lab.home().join("started");
+        let ran = lab.home().join("ran");
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[review]\ncommand = \"'{}' todo ls >/dev/null && touch {} && \
+                 sleep 3 && touch {}\"\nnotify = false\n",
+                env!("CARGO_BIN_EXE_jeet"),
+                sh_quote(&started.to_string_lossy()),
+                sh_quote(&ran.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let env = [("PATH", path.as_str()), ("JEET_TASK_ID", other.as_str())];
+        succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+        assert_eq!(lab.parent_of(&task), None);
+        wait_until("the job to start", || started.exists());
+        let jobs = || -> i64 {
+            lab.index()
+                .query_row(
+                    "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'job'",
+                    [&task],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(jobs(), 1, "{verb}");
+        let flag = if verb == "delete" { "-f" } else { "--force" };
+        succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
+        assert_eq!(jobs(), 0, "{verb}");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(!ran.exists(), "the job outlived its task's {verb}");
+    }
+}
+
+/// A review job's command cannot archive or delete its own task, even from
+/// outside its worktree: ending the job would end the jeet doing it
+/// part-way. Whether the job is the
+/// task's (the user started it) or the assistant's (found in the task's
+/// worktree), both are refused and the task is left as it was.
+#[cfg(unix)]
+#[test]
+fn a_review_job_cannot_archive_or_delete_its_own_task() {
+    for by_assistant in [false, true] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let env = [("PATH", path.as_str())];
+        let worktree = path_from(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+
+        let out = |name: &str| lab.home().join(name);
+        let quoted = |name: &str| sh_quote(&out(name).to_string_lossy());
+        let jeet = env!("CARGO_BIN_EXE_jeet");
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[assistant]\nallow = [\"review.start\", \"task.archive\", \
+                 \"task.delete\"]\nnotify = false\n[review]\ncommand = \"cd /; '{jeet}' task archive \
+                 review-widget-7 --force 2> {}; '{jeet}' task delete review-widget-7 -f 2> {}; \
+                 touch {}\"\nnotify = false\n",
+                quoted("archive"),
+                quoted("delete"),
+                quoted("done"),
+            ),
+        )
+        .unwrap();
+        if by_assistant {
+            let mut root = lab.assistant_pane();
+            succeeded(&root.jeet(&["review", "7", "--rerun"], &trunk, &env));
+        } else {
+            succeeded(&lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env));
+        }
+        assert_eq!(lab.parent_of(&task), None);
+        wait_until("the job's command to finish", || out("done").exists());
+        for verb in ["archive", "delete"] {
+            let stderr = std::fs::read_to_string(out(verb)).unwrap();
+            assert!(
+                stderr.contains("runs under a review job"),
+                "{verb}, by the assistant: {by_assistant}: {stderr}"
+            );
+        }
+        assert!(worktree.is_dir(), "by the assistant: {by_assistant}");
+        assert!(lab.home().join("tasks/review-widget-7").is_dir());
+    }
+}
+
+/// Archiving a task forgets its agent: one that outlives the archive is
+/// no longer taken for the task's.
+#[cfg(unix)]
+#[test]
+fn an_archived_tasks_agent_is_no_longer_its() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let mut x_agent = lab.task_pane("x");
+    let count = || -> i64 {
+        lab.index()
+            .query_row(
+                "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1",
+                [&x],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count(), 1);
+    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    assert!(
+        stderr_of(&output).contains("task x may not"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    // A stub tmux that cannot hang up on it: the agent outlives the kill.
+    let tmux = x_agent.dir.path().join("tmux-stub/tmux");
+    std::fs::remove_file(tmux.parent().unwrap().join("pid")).unwrap();
+    let tmux = tmux.to_string_lossy().to_string();
+    succeeded(&lab.jeet_at(
+        &["task", "archive", "x", "--force"],
+        &lab.home(),
+        &[("JEET_TMUX", &tmux)],
+    ));
+    assert_eq!(count(), 0);
+    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("can't confirm"), "{stderr}");
+}
+
+/// An assistant window jeet did not record, as one from before anchors:
+/// `jeet chat` goes back to it, but says it is refused and how to fix it.
+#[cfg(unix)]
+#[test]
+fn an_assistant_window_jeet_did_not_record_is_flagged() {
+    let lab = StoreLab::new();
+    let mut root = PaneShell::spawn(&lab, &[("JEET_ASSISTANT", "1")]);
+    let tmux = stub_window_tmux(root.dir.path());
+    root.as_pane_of(&tmux);
+    let tmux = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["chat"], &lab.home(), &env));
+    root.export("JEET_TASK_ID", &lab.assistant_id());
+    let warned = |output: &std::process::Output| stderr_of(output).contains("older jeet");
+    let script = std::path::Path::new(&tmux);
+    let launches = || calls_of(script, "new-window").len() + calls_of(script, "new-session").len();
+    assert_eq!(launches(), 1);
+    let output = lab.jeet_at(&["chat"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(!warned(&output), "{}", stderr_of(&output));
+
+    lab.index().execute("DELETE FROM task_anchors", []).unwrap();
+    let output = lab.jeet_at(&["chat"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(warned(&output), "{}", stderr_of(&output));
+    assert_eq!(launches(), 1);
+    let output = root.jeet(&["todo", "ls"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("run `jeet chat` again"), "{stderr}");
+}
+
+/// Every node runs locally, a manager's child as much as the root's: none
+/// is refused for where it sits in the tree.
+#[cfg(unix)]
+#[test]
+fn a_node_below_a_manager_runs_locally() {
+    let lab = StoreLab::new();
+    let manager = lab.new_task_with("m", &["--parent", "assistant"]);
+    // As only a manager's child will be, until `jeet manager new` (phase 2).
+    lab.index()
+        .execute(
+            "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
+             VALUES ('g', 'g', 'g', 'work', 'active', 0, 0, ?1)",
+            [&manager],
+        )
+        .unwrap();
+    std::fs::create_dir_all(lab.home().join("tasks/g")).unwrap();
+    let placement: String = lab
+        .index()
+        .query_row("SELECT placement FROM tasks WHERE id = 'g'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(placement, "local");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    succeeded(&lab.jeet_at(&["task", "open", "g"], &lab.home(), &env));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+}
+
+/// A placement this jeet does not know, hand-edited past the `CHECK`, is
+/// never run: reading the task fails, nothing is started in tmux.
+#[cfg(unix)]
+#[test]
+fn a_task_jeet_cannot_place_is_refused() {
+    let lab = StoreLab::new();
+    let c = lab.new_task_with("c", &["--parent", "assistant"]);
+    let db = lab.index();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    db.execute(
+        "UPDATE tasks SET placement = 'elsewhere' WHERE id = ?1",
+        [&c],
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    for args in [
+        &["task", "open", "c"][..],
+        &["task", "send", "c", "hi"],
+        &["task", "interrupt", "c"],
+    ] {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("placement"), "{args:?}: {stderr}");
+    }
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    assert!(calls_of(&tmux, "paste-buffer").is_empty());
+}
+
+/// A session already running under a task's name, which jeet did not
+/// start, is not taken for the task's agent.
+#[cfg(unix)]
+#[test]
+fn a_session_jeet_did_not_start_is_not_adopted() {
+    let lab = StoreLab::new();
+    lab.new_task("t");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let output = lab.jeet_at(
+        &["task", "open", "t"],
+        &lab.home(),
+        &[("JEET_TMUX", &tmux_env)],
+    );
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("started by an older jeet or outside jeet"),
+        "{stderr}"
+    );
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM task_anchors", [], |r| r
+            .get::<_, i64>(0))
+        .is_ok_and(|n| n == 0));
+}
+
+/// The escape design §5.7 leaves open locally, asserted so that closing it
+/// flips this test on purpose: a process the agent orphans, with its
+/// environment stripped, has no anchor above it, and runs as the user.
+/// Only a confined placement (future work) closes it.
+#[cfg(unix)]
+#[test]
+fn an_orphan_with_its_environment_stripped_escapes_local_identity_5_7() {
+    let lab = StoreLab::new();
+    lab.new_task_with("x", &["--parent", "assistant"]);
+    let mut x_agent = lab.task_pane("x");
+    let scratch = TempDir::new().unwrap();
+    let out = sh_quote(&scratch.path().join("out").to_string_lossy());
+    let rc = scratch.path().join("rc");
+    let rc_quoted = sh_quote(&rc.to_string_lossy());
+    // Still the Node, from its pane.
+    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    succeeded(&x_agent.run(&format!(
+        r#"sh -c '(sleep 0.2; env -u JEET_TASK_ID "$JEET" notify escaped >{out} 2>&1; echo $? >{rc_quoted}.tmp; mv {rc_quoted}.tmp {rc_quoted}) & exit'"#,
+        out = out.replace('\'', r"'\''"),
+        rc_quoted = rc_quoted.replace('\'', r"'\''"),
+    )));
+    wait_until("the orphan", || rc.exists());
+    assert_eq!(std::fs::read_to_string(&rc).unwrap().trim(), "0");
+}
+
+#[cfg(unix)]
 #[test]
 fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     let lab = StoreLab::new();
@@ -7215,15 +8344,14 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     let x_dir = lab.home().join("tasks/x");
     let y_dir = lab.home().join("tasks/y");
     let session = "11111111-2222-4333-8444-555555555555";
-    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    let background = [("JEET_BACKGROUND", "1")];
+    let mut x_agent = lab.task_pane("x");
+    let mut hook =
+        |event: &str, input: &str| x_agent.hook(&lab, Some(&x), event, input, &background);
     let waiting = hook_input("Notification", session, &x_dir);
 
     // Its brief, as each session starts.
-    let output = lab.hook(
-        "SessionStart",
-        &hook_input("SessionStart", session, &x_dir),
-        &as_x,
-    );
+    let output = hook("SessionStart", &hook_input("SessionStart", session, &x_dir));
     succeeded(&output);
     let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
     let context = value["hookSpecificOutput"]["additionalContext"]
@@ -7246,52 +8374,60 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
             )
             .unwrap();
     };
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     backdate();
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].0, "status");
     assert!(reports[0].2.starts_with("waiting"), "{reports:?}");
     // Running again, then a new wait: told again.
     let prompt = hook_input("UserPromptSubmit", session, &x_dir);
-    hook_ok(&lab.hook("UserPromptSubmit", &prompt, &as_x));
+    hook_ok(&hook("UserPromptSubmit", &prompt));
     backdate();
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 2, "{reports:?}");
     assert!(reports[1].2.starts_with("waiting"), "{reports:?}");
 
     // Cleared: another session takes over, so nothing is said.
     let cleared = hook_input("SessionEnd-clear", session, &x_dir);
-    hook_ok(&lab.hook("SessionEnd", &cleared, &as_x));
+    hook_ok(&hook("SessionEnd", &cleared));
     assert_eq!(lab.reports_of(&x).len(), 2);
     let ended = hook_input("SessionEnd", session, &x_dir);
-    hook_ok(&lab.hook("SessionEnd", &ended, &as_x));
+    hook_ok(&hook("SessionEnd", &ended));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 3, "{reports:?}");
     assert!(reports[2].2.starts_with("ended"), "{reports:?}");
 
-    // A worker in its sibling's directory reports as neither.
+    // A worker in its sibling's directory is still itself: its hooks name
+    // it with `--task`.
     let other = "22222222-2222-4333-8444-555555555555";
-    hook_ok(&lab.hook(
+    hook_ok(&hook(
         "Notification",
         &hook_input("Notification", other, &y_dir),
-        &as_x,
     ));
-    assert_eq!(lab.reports_of(&x).len(), 3);
+    assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&y).is_empty());
-    // Nor as a sibling with a parent of its own, and gets no brief of its.
+    let status = |dir: &std::path::Path, session: &str| {
+        dir.join(".jeet/status").join(format!("{session}.json"))
+    };
+    assert!(status(&x_dir, other).is_file());
+    assert!(!status(&y_dir, other).exists());
+    // A hook from before `--task` keeps the status of the task it runs in,
+    // but reports to nobody and gets no brief, even in one with a parent.
     let sib = lab.new_task_with("sib", &["--parent", "assistant", "--goal", "other"]);
     let sib_dir = lab.home().join("tasks/sib");
+    let third = "33333333-2222-4333-8444-555555555555";
     for (event, input) in [
-        ("SessionStart", hook_input("SessionStart", other, &sib_dir)),
-        ("Notification", hook_input("Notification", other, &sib_dir)),
-        ("SessionEnd", hook_input("SessionEnd", other, &sib_dir)),
+        ("SessionStart", hook_input("SessionStart", third, &sib_dir)),
+        ("Notification", hook_input("Notification", third, &sib_dir)),
+        ("SessionEnd", hook_input("SessionEnd", third, &sib_dir)),
     ] {
-        hook_ok(&lab.hook(event, &input, &as_x));
+        hook_ok(&lab.hook(event, &input, &[]));
     }
-    assert_eq!(lab.reports_of(&x).len(), 3);
+    assert!(status(&sib_dir, third).is_file());
+    assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&sib).is_empty());
 
     // A top-level task has nobody to tell, and no brief.
@@ -7328,8 +8464,17 @@ fn a_node_launch_carries_deny_rules() {
         "scan_roots = []\n[assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
     )
     .unwrap();
-    lab.new_task_with("kid", &["--parent", "assistant"]);
+    let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
     index_develop_repo(&lab);
+    // However long its name: the rules go in a file, not on the command line.
+    lab.index()
+        .execute(
+            "INSERT INTO repos (id, trunk_path, remote_url, default_branch, managed)
+             VALUES ('github.com/acme/rel', '/nowhere/rel', 'https://github.com/acme/rel.git',
+                     'release/production-2026', 0)",
+            [],
+        )
+        .unwrap();
     let output = lab.jeet_at(&["task", "open", "kid"], &lab.home(), &env);
     succeeded(&output);
     assert!(
@@ -7339,9 +8484,11 @@ fn a_node_launch_carries_deny_rules() {
     );
     let agent = agent_argv(&calls_of(&tmux, "new-session")[0]);
     let at = agent.iter().position(|a| a == "--settings").unwrap();
-    let settings: serde_json::Value = serde_json::from_str(&agent[at + 1]).unwrap();
+    let settings = settings_file(&lab, &agent[at + 1]);
     let deny = settings["permissions"]["deny"].as_array().unwrap();
     for rule in [
+        "Bash(git push * release/production-2026)",
+        "Bash(git push * *:release/production-2026 *)",
         "Bash(gh pr merge *)",
         "Bash(gh pr comment *)",
         "Bash(gh pr review *)",
@@ -7362,6 +8509,15 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(jeet report:*)"
         ])
     );
+    // Its settings go with it, archived or deleted.
+    assert!(lab.home().join("run").join(&kid).is_dir());
+    succeeded(&lab.jeet_at(&["task", "archive", "kid", "--force"], &lab.home(), &env));
+    assert!(!lab.home().join("run").join(&kid).exists());
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    succeeded(&lab.jeet_at(&["task", "open", "sib"], &lab.home(), &env));
+    assert!(lab.home().join("run").join(&sib).is_dir());
+    succeeded(&lab.jeet_at(&["task", "delete", "sib", "-f"], &lab.home(), &env));
+    assert!(!lab.home().join("run").join(&sib).exists());
 }
 
 /// Index a repository whose default branch is `develop`.
@@ -7540,13 +8696,14 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
         "scan_roots = []\n[assistant]\nallow = [\"task.send\"]\n",
     )
     .unwrap();
+    // The assistant, as jeet started it: it is known by its process.
+    let mut assistant = lab.assistant_pane();
     let env = [
         ("JEET_TMUX", tmux_env.as_str()),
         ("JEET_AGENT", "claude"),
-        ("JEET_ASSISTANT", "1"),
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
     ];
-    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    let output = assistant.jeet(&["task", "interrupt", "fix-x"], &lab.home(), &env);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("nothing sent"),
@@ -7575,7 +8732,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
         &hook_input("UserPromptSubmit", &session, &task),
         &[],
     ));
-    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    let output = assistant.jeet(&["task", "interrupt", "fix-x"], &lab.home(), &env);
     succeeded(&output);
     assert_eq!(
         calls_of(&tmux, "send-keys"),
@@ -7594,7 +8751,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
 fn interrupt_refuses_the_assistant_a_harness_that_cannot_and_a_node() {
     let lab = StoreLab::new();
     let fix = task_id(&lab.new_task("fix-x"));
-    let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
+    lab.new_task_with("kid", &["--parent", "assistant"]);
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
@@ -7619,16 +8776,11 @@ fn interrupt_refuses_the_assistant_a_harness_that_cannot_and_a_node() {
         &generic,
         "cannot interrupt a turn",
     );
-    let node = [
-        ("JEET_TMUX", tmux_env.as_str()),
-        ("JEET_AGENT", "claude"),
-        ("JEET_TASK_ID", kid.as_str()),
-    ];
-    failed_with(
-        &["task", "interrupt", "fix-x"],
-        &node,
-        "never message each other",
-    );
+    let mut kid_agent = lab.task_pane("kid");
+    let output = kid_agent.jeet(&["task", "interrupt", "fix-x"], &lab.home(), &claude);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("never message each other"), "{stderr}");
     // Its own agent, which is no node, or a window in its session: the
     // press would end the turn running this jeet.
     let own = [

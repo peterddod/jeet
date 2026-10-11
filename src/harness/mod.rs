@@ -110,6 +110,16 @@ pub trait Harness: Sync {
         None
     }
 
+    /// [`Harness::hook_args`] read from a file at `path` instead: what to
+    /// write there, and the arguments naming it. jeet launches with this when
+    /// the harness has it, so the hooks and rules, however many, cost the
+    /// command line only the path (see `runtime::hook_args`). A harness may
+    /// have this alone; either counts as having hooks. The file is
+    /// `<session>.json`, whatever its contents.
+    fn hook_file(&self, _hooks: &HookSetup, _path: &Path) -> Option<(String, Vec<String>)> {
+        None
+    }
+
     /// How it keeps an agent from running what [`HookSetup::deny`] names.
     /// [`Enforcement::None`]: the deny list is dropped.
     fn enforcement(&self) -> Enforcement {
@@ -119,7 +129,8 @@ pub trait Harness: Sync {
     /// The tmux key names that end the turn it is running, keeping the
     /// session; jeet presses them once, only while it is working or waiting
     /// on the user. `None`: it cannot be interrupted. A harness returning
-    /// keys needs [`Harness::hook_args`] too, since jeet presses nothing
+    /// keys needs [`Harness::hook_args`] or [`Harness::hook_file`] too,
+    /// since jeet presses nothing
     /// until a hook has reported since the launch, and
     /// [`Harness::has_draft`], or the keys are pressed over unsent text.
     fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
@@ -256,6 +267,9 @@ pub enum Enforcement {
 pub struct HookSetup {
     /// The jeet binary the hooks run, as `jeet task-hook`.
     pub exe: PathBuf,
+    /// The task the agent is launched for, which each hook names with
+    /// `--task`.
+    pub task_id: String,
     /// Command prefixes the agent may run without asking, e.g.
     /// `jeet worktree`.
     pub allow: Vec<String>,
@@ -482,6 +496,7 @@ mod tests {
             ..Default::default()
         };
         assert!(h.hook_args(&hooks).is_none());
+        assert!(h.hook_file(&hooks, Path::new("/s.json")).is_none());
         assert_eq!(h.enforcement(), Enforcement::None);
         assert!(h.interrupt_keys().is_none());
         assert!(h.parse_hook("Stop", "{}").unwrap().kind.is_none());

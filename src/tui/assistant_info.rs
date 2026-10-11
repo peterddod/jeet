@@ -446,6 +446,7 @@ mod tests {
             id: "@1".into(),
             alive: true,
             key: Some("a".into()),
+            launch: Some("a".into()),
         }];
         let info = gather(&probe, &windows);
 

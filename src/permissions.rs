@@ -29,9 +29,8 @@ use crate::cli::{
 use crate::config;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord};
-use crate::db::Database;
+use crate::identity;
 use crate::notify::{self, Notification};
-use crate::tasks::TASK_ID_ENV;
 use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
@@ -194,16 +193,11 @@ const ALWAYS_DENY: &[&str] = &[
 /// Default branches assumed whatever the index says.
 const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
-/// The most default branches denied, `main` and `master` among them. The
-/// rules go inline in the agent's command line, which shares tmux's 16KB
-/// command limit with its first prompt; past this, the branches fewest
-/// repositories use are left out.
+/// The most default branches denied, `main` and `master` among them: each
+/// costs three patterns, six rules in Claude Code's settings, which every
+/// gated agent carries. Past this, the branches fewest repositories use are
+/// left out.
 pub const MAX_DEFAULT_BRANCHES: usize = 8;
-
-/// The longest default branch name denied, in bytes, for the same limit:
-/// each costs three patterns, six rules in Claude Code's settings. A longer
-/// one is left out.
-pub const MAX_BRANCH_NAME: usize = 24;
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
@@ -227,7 +221,10 @@ pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
 }
 
-/// Whether this jeet runs for the assistant.
+/// Whether this jeet says it runs for the assistant: a hint, which
+/// [`identity`] checks.
+///
+/// [`identity`]: crate::identity
 pub fn assistant_mode() -> bool {
     std::env::var(ASSISTANT_ENV).is_ok_and(|v| {
         let v = v.trim();
@@ -247,26 +244,22 @@ pub enum Caller {
     Node(TaskRecord),
 }
 
-/// Who `row`, the task `$JEET_TASK_ID` names, makes the caller. A task with
-/// a parent is a Node even under `JEET_ASSISTANT=1`: the narrower reading
-/// wins.
-fn classify(row: Option<TaskRecord>, assistant: bool) -> Caller {
-    match row {
-        Some(task) if task.parent_id.is_some() => Caller::Node(task),
-        _ if assistant => Caller::Root,
+/// Who the task this jeet runs under makes the caller: the assistant is
+/// the Root, a task with a parent a Node, and anything else, or no task,
+/// the user.
+fn classify(task: Option<&TaskRecord>) -> Caller {
+    match task {
+        Some(task) if task.kind == TaskKind::Assistant => Caller::Root,
+        Some(task) if task.parent_id.is_some() => Caller::Node(task.clone()),
         _ => Caller::User,
     }
 }
 
-/// Who runs this jeet: by `$JEET_TASK_ID` and `JEET_ASSISTANT` only, never
-/// the working directory. An id jeet does not know names no Node. A
-/// database error is an error, so what is gated fails closed.
-pub fn caller(db: &Database) -> Result<Caller> {
-    let row = match std::env::var(TASK_ID_ENV) {
-        Ok(id) if !id.trim().is_empty() => db.get_task(id.trim())?,
-        _ => None,
-    };
-    Ok(classify(row, assistant_mode()))
+/// Who runs this jeet, by the task it runs under ([`identity::identify`]),
+/// never the working directory. A claim jeet cannot confirm, or a database
+/// error, is an error, so what is gated fails closed.
+pub fn caller(app: &App) -> Result<Caller> {
+    Ok(classify(identity::identify(app)?.task.as_ref()))
 }
 
 /// What a task with a parent may be allowed, before its parent's list cuts
@@ -542,12 +535,11 @@ pub fn default_branches(app: &App) -> Result<Vec<String>> {
     Ok(most_used_branches(indexed))
 }
 
-/// `main`, `master` and the most common of `indexed` no longer than
-/// [`MAX_BRANCH_NAME`], up to [`MAX_DEFAULT_BRANCHES`] (ties by name),
-/// sorted.
+/// `main`, `master` and the most common of `indexed`, up to
+/// [`MAX_DEFAULT_BRANCHES`] (ties by name), sorted.
 fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for branch in indexed.filter(|b| !b.trim().is_empty() && b.len() <= MAX_BRANCH_NAME) {
+    for branch in indexed.filter(|b| !b.trim().is_empty()) {
         match counts.iter_mut().find(|(b, _)| *b == branch) {
             Some((_, n)) => *n += 1,
             None => counts.push((branch, 1)),
@@ -638,30 +630,36 @@ pub struct Authorized {
     notify: bool,
 }
 
-/// Check that the assistant may run `command`, before it does anything.
-/// Outside the assistant everything is allowed and nothing is recorded.
-/// Returns the action to [`Authorized::finish`] when it is one the log
-/// keeps.
+/// Check that the caller may run `command`, before it does anything: the
+/// assistant only what `[assistant] allow` lets it, and the agent of a
+/// task with a parent only what [`node`] does. Anyone else may do
+/// anything, and nothing is recorded. Returns the action to
+/// [`Authorized::finish`] when it is one the log keeps.
 ///
-/// The agent of a task with a parent is checked as a Node instead, whether
-/// or not it runs as the assistant: see [`node`].
+/// Who the caller is comes from [`identity::identify`], whatever the
+/// environment says; a caller it refuses is refused here, and one that
+/// claims to be another is logged.
 pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let gate = gate(command, terminal);
-    // Only what a Node may not do opens the index: plumbing like hooks and
-    // `jeet report` never does.
-    let in_task = std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty());
-    if in_task && (gate != Gate::Free || node_only(command).is_some()) {
-        let app = App::open().context("check what this task may do")?;
-        if let Caller::Node(task) = caller(&app.db)? {
-            return node(&app, &task, command, gate, terminal).map(|()| None);
-        }
-    }
-    if !assistant_mode() {
+    // Only what is gated, or only the root may do, opens the index:
+    // plumbing like hooks and `jeet report` never does.
+    if gate == Gate::Free && node_only(command).is_none() {
         return Ok(None);
     }
+    let app = App::open().context("check what this caller may do")?;
+    let me = identity::identify(&app)?;
     if let Some(Commands::ReviewJob { state }) = command {
-        check_review_job(state)?;
+        check_review_job(&app.home, state)?;
+        // The runner `jeet review` started, as the task it runs for.
+        if me.self_job {
+            return Ok(None);
+        }
+    }
+    match classify(me.task.as_ref()) {
+        Caller::Node(task) => return node(&app, &task, command, gate, terminal).map(|()| None),
+        Caller::User => return Ok(None),
+        Caller::Root => {}
     }
     let (capability, action) = match gate {
         Gate::Free => return Ok(None),
@@ -672,10 +670,9 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         ),
         Gate::Needs { capability, action } => (capability, action),
     };
-    let home = config::jeet_home()?;
-    let settings = config::load_or_create(&home)?.assistant;
-    let log = actions_log(&home);
-    let config_path = config::config_path(&home);
+    let settings = &app.config.assistant;
+    let log = actions_log(&app.home);
+    let config_path = config::config_path(&app.home);
     if let Some(message) = refusal(capability, &settings.allow, &config_path) {
         let about = self::capability(capability).map_or("", |c| c.about);
         let tried = action.unwrap_or_else(|| about.to_string());
@@ -824,11 +821,10 @@ impl Authorized {
     }
 }
 
-/// A review job runs the command its state file names, so the assistant
-/// may only run the ones `jeet review` wrote, under `$JEET_HOME/reviews` —
-/// not one it wrote itself.
-fn check_review_job(state: &Path) -> Result<()> {
-    let home = config::jeet_home()?;
+/// A review job runs the command its state file names, so only the ones
+/// `jeet review` wrote, under `$JEET_HOME/reviews`, are run — not one an
+/// agent wrote itself.
+pub fn check_review_job(home: &Path, state: &Path) -> Result<()> {
     let reviews = home.join("reviews");
     let reviews = reviews.canonicalize().unwrap_or(reviews);
     let state = state
@@ -836,11 +832,23 @@ fn check_review_job(state: &Path) -> Result<()> {
         .with_context(|| format!("find {}", state.display()))?;
     if !state.starts_with(&reviews) {
         bail!(
-            "the assistant may only run review jobs jeet started, under {}",
+            "review jobs run only from jeet's reviews dir, {}",
             reviews.display()
         );
     }
     Ok(())
+}
+
+/// Log that `who`, the agent jeet identified, claimed to be another
+/// ([`identity::identify`]). Only jeet's own words: what it claimed, and
+/// what it ran, are the agent's, and the assistant reads this log as its
+/// own record.
+pub fn log_mismatch(home: &Path, who: &str) {
+    let log = actions_log(home);
+    let action = format!("{who} claimed to be another task or the assistant");
+    if let Err(e) = append(&log, "identity", &action, Outcome::Denied, None) {
+        eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+    }
 }
 
 pub fn actions_log(home: &Path) -> PathBuf {
@@ -902,6 +910,7 @@ fn append(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
     use clap::Parser;
 
     fn gate_of(args: &[&str]) -> Gate {
@@ -1083,21 +1092,21 @@ mod tests {
             created_at: 0,
             last_activity: 0,
             parent_id: parent_id.map(Into::into),
+            placement: crate::placement::Placement::Local,
         }
     }
 
     #[test]
-    fn a_task_with_a_parent_is_a_node_whatever_else_it_says() {
+    fn the_task_a_caller_runs_under_says_who_it_is() {
         let child = task(Some("a"));
-        assert_eq!(
-            classify(Some(child.clone()), true),
-            Caller::Node(child.clone())
-        );
-        assert_eq!(classify(Some(child.clone()), false), Caller::Node(child));
-        assert_eq!(classify(Some(task(None)), true), Caller::Root);
-        assert_eq!(classify(Some(task(None)), false), Caller::User);
-        assert_eq!(classify(None, true), Caller::Root);
-        assert_eq!(classify(None, false), Caller::User);
+        assert_eq!(classify(Some(&child)), Caller::Node(child.clone()));
+        let root = TaskRecord {
+            kind: TaskKind::Assistant,
+            ..task(None)
+        };
+        assert_eq!(classify(Some(&root)), Caller::Root);
+        assert_eq!(classify(Some(&task(None))), Caller::User);
+        assert_eq!(classify(None), Caller::User);
     }
 
     #[test]
@@ -1388,14 +1397,14 @@ mod tests {
             .map(|i| format!("rare-{i:02}"))
             .collect();
         indexed.extend(["develop", "develop", "trunk", "trunk", "main"].map(String::from));
-        // Too long to fit the command line, however common.
-        indexed.extend(vec!["x".repeat(MAX_BRANCH_NAME + 1); 3]);
+        // However long: the settings go in a file, not on the command line.
+        let long = "release/production-integration".to_string();
+        indexed.extend(vec![long.clone(); 2]);
         let branches = most_used_branches(indexed.into_iter());
         assert_eq!(branches.len(), MAX_DEFAULT_BRANCHES);
-        for kept in ["develop", "main", "master", "trunk"] {
+        for kept in ["develop", "main", "master", "trunk", &long] {
             assert!(branches.contains(&kept.to_string()), "{branches:?}");
         }
-        assert!(branches.iter().all(|b| b.len() <= MAX_BRANCH_NAME));
         // Ties among the rare ones go by name.
         assert!(branches.contains(&"rare-00".to_string()), "{branches:?}");
         let last = format!("rare-{:02}", MAX_DEFAULT_BRANCHES - 1);
@@ -1534,7 +1543,7 @@ mod tests {
             assert!(!denied(command), "denied: {command}");
         }
         // Gaps an anchored pattern leaves, pinned so a change is noticed.
-        // Branch protection, and #33's sandbox, are the real control.
+        // Branch protection is the real control.
         const KNOWN_GAPS: &[&str] = &[
             "git -C . push -f",
             "git -c a=b push --force",

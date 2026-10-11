@@ -30,6 +30,7 @@ use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
+use crate::identity;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
@@ -165,11 +166,12 @@ pub fn mark_startup_prompt(
     )
 }
 
-/// `jeet task-hook <event>`: record what the hook on stdin says, as the
-/// harness called `harness` reports it. Never fails, never prints to
-/// stdout; what goes wrong is noted on stderr, which the agent keeps out of
-/// the conversation.
-pub fn run_hook(harness: &str, event: &str) {
+/// `jeet task-hook [--task <id>] <event>`: record what the hook on stdin
+/// says, as the harness called `harness` reports it, for `task`, the one
+/// jeet launched the agent for (none from hooks older than `--task`).
+/// Never fails, never prints to stdout; what goes wrong is noted on stderr,
+/// which the agent keeps out of the conversation.
+pub fn run_hook(harness: &str, event: &str, task: Option<&str>) {
     let Some(found) = harness::by_id(harness) else {
         eprintln!("jeet task-hook {event}: no harness {harness:?}");
         return;
@@ -178,12 +180,18 @@ pub fn run_hook(harness: &str, event: &str) {
     if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(MAX_INPUT).read_to_string(&mut raw);
     }
-    if let Err(e) = handle_hook(found, event, &raw, now_secs()) {
+    if let Err(e) = handle_hook(found, event, task, &raw, now_secs()) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
 }
 
-fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Result<()> {
+fn handle_hook(
+    harness: &dyn Harness,
+    event: &str,
+    task: Option<&str>,
+    raw: &str,
+    now: i64,
+) -> Result<()> {
     let hook = harness.parse_hook(event, raw)?;
     let event = hook.name.as_str();
     let Some(session_id) = hook.session_id.as_deref() else {
@@ -192,12 +200,12 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
     if !valid_session_id(session_id) {
         anyhow::bail!("{session_id:?} is not a session id");
     }
+    let launched_for = task.map(str::trim).filter(|t| !t.is_empty());
     let mut app = None;
-    let Some((task_dir, task_id)) = locate_task(&hook, &mut app)? else {
+    let Some((task_dir, task_id)) = locate_task(launched_for, &hook, &mut app)? else {
         // Not a jeet task: nothing to report to.
         return Ok(());
     };
-    let env = std::env::var(tasks::TASK_ID_ENV).ok();
     // What the session was doing before this event, for what to tell a
     // parent about it.
     let prev = match hook.kind {
@@ -241,8 +249,8 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
                     Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
                 }
             } else if task.parent_id.is_some()
-                && attributed(env.as_deref(), &task.id)
                 && harness.session_context_output("").is_some()
+                && attributed(launched_for, &task.id, &app)
             {
                 // What its parent asked of it, each time a session starts,
                 // /clear included.
@@ -264,8 +272,8 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
     }
     // The assistant's turn ending is when tasks idle too long are reported
     // to it, whatever its harness: before its inbox is handed over, so what
-    // this queues comes with it. Its app is open already (by
-    // `$JEET_TASK_ID`); a worker's Stop does no index work.
+    // this queues comes with it. Its app is open already (by `--task`, or
+    // by `$JEET_TASK_ID` from an older hook).
     if let (Some(EventKind::Stopped), Some(app)) = (&hook.kind, &app) {
         if let Err(e) = sweep_if_assistant(app, &task_id, now) {
             eprintln!("jeet task-hook {event}: {e:#}");
@@ -285,7 +293,7 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
         },
     };
     // Only now, with the task's inbox no longer locked.
-    if let Err(e) = report_step(&hook, &task_id, env.as_deref(), prev, now) {
+    if let Err(e) = report_step(&hook, &task_id, launched_for, prev, now) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
     result
@@ -299,10 +307,17 @@ fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
 }
 
 /// Whether a hook's task, `located`, is the one this agent was launched
-/// for: a worker that `cd`s into a sibling's directory must not report as
-/// it.
-fn attributed(env: Option<&str>, located: &str) -> bool {
-    env.map(str::trim) == Some(located)
+/// for, as its `--task` says, and the one it runs under
+/// ([`identity::identify`]): a hook without `--task`, from before it, or
+/// one naming another task than its own, never reports up.
+fn attributed(task: Option<&str>, located: &str, app: &App) -> bool {
+    names_task(task, located)
+        && identity::identify(app).is_ok_and(|me| me.task.is_some_and(|t| t.id == located))
+}
+
+/// Whether a hook's `--task` names `located`.
+fn names_task(task: Option<&str>, located: &str) -> bool {
+    task.map(str::trim) == Some(located)
 }
 
 /// What to tell a task's parent about `kind`, given the session's status
@@ -330,17 +345,21 @@ fn auto_body(
 fn report_step(
     hook: &HookEvent,
     task_id: &str,
-    env: Option<&str>,
+    task: Option<&str>,
     prev: Option<SessionStatus>,
     now: i64,
 ) -> Result<()> {
-    if !attributed(env, task_id) {
+    // A hook from before `--task` is never attributed: no need to look.
+    if task.is_none() {
         return Ok(());
     }
     let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev.as_ref())) else {
         return Ok(());
     };
     let app = App::open()?;
+    if !attributed(task, task_id, &app) {
+        return Ok(());
+    }
     let Some(task) = app.db.get_task(task_id)? else {
         return Ok(());
     };
@@ -454,13 +473,28 @@ fn idle_prompt(
     .map(|_| ())
 }
 
-/// The task the hook ran for: found by walking up from the session's
-/// directory, which needs no index, else by `$JEET_TASK_ID`. The assistant
-/// goes by `$JEET_TASK_ID` first: it may well `cd` into a task's directory,
-/// and its sessions must not report as that task's. Nor does another task's
-/// agent that `cd`s into the assistant's home go as the assistant: its
-/// inbox holds the reports of every task the assistant made.
-fn locate_task(hook: &HookEvent, app: &mut Option<App>) -> Result<Option<(PathBuf, String)>> {
+/// The task the hook ran for: the one its `--task` names, wherever the
+/// session has `cd`ed. A hook from before `--task` finds it by walking up
+/// from the session's directory, which needs no index, else by
+/// `$JEET_TASK_ID`. The assistant goes by `$JEET_TASK_ID` first: it may
+/// well `cd` into a task's directory, and its sessions must not report as
+/// that task's. Nor does another task's agent that `cd`s into the
+/// assistant's home go as the assistant: its inbox holds the reports of
+/// every task the assistant made.
+fn locate_task(
+    task: Option<&str>,
+    hook: &HookEvent,
+    app: &mut Option<App>,
+) -> Result<Option<(PathBuf, String)>> {
+    if let Some(id) = task {
+        let opened = App::open()?;
+        let found = opened
+            .db
+            .get_task(id)?
+            .map(|task| (tasks::task_dir(&opened, &task), task.id));
+        *app = Some(opened);
+        return Ok(found);
+    }
     let env_id = std::env::var(tasks::TASK_ID_ENV)
         .ok()
         .map(|v| v.trim().to_string())
@@ -794,9 +828,10 @@ mod tests {
 
     #[test]
     fn only_the_task_an_agent_was_launched_for_reports() {
-        assert!(!attributed(None, "t"));
-        assert!(!attributed(Some("u"), "t"));
-        assert!(attributed(Some(" t\n"), "t"));
+        // A hook from before `--task` never reports up.
+        assert!(!names_task(None, "t"));
+        assert!(!names_task(Some("u"), "t"));
+        assert!(names_task(Some(" t\n"), "t"));
     }
 
     #[test]

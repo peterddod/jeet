@@ -109,16 +109,45 @@ pub fn has_session(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The pane tmux started a program in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    /// tmux's id for it (`%3`).
+    pub id: String,
+    /// The process tmux started in it: the program itself, or the shell
+    /// that runs it.
+    pub pid: u32,
+}
+
+/// A pane from tmux's `#{pane_id}` and `#{pane_pid}`.
+fn parse_pane(fields: &[&str]) -> Result<Pane> {
+    match fields {
+        [id, pid] if id.starts_with('%') => Ok(Pane {
+            id: id.to_string(),
+            pid: pid
+                .trim()
+                .parse()
+                .with_context(|| format!("tmux gave {pid:?} for a pane's process"))?,
+        }),
+        _ => bail!(
+            "tmux did not say which pane it started ({:?})",
+            fields.join("\t")
+        ),
+    }
+}
+
 /// Start `argv` in a new detached session `name`, in `cwd`, with `env` set
-/// in it. `argv` is run directly, never through a shell.
-pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<()> {
+/// in it, returning its pane. `argv` is run directly, never through a
+/// shell.
+pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<Pane> {
     if argv.is_empty() {
         bail!("nothing to run in tmux session {name}");
     }
     refuse_new_server(name)?;
     let mut cmd = Command::new(binary());
     cmd.args(extended_keys_first())
-        .args(["new-session", "-d", "-s", name, "-c"])
+        .args(["new-session", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}"])
+        .args(["-s", name, "-c"])
         .arg(cwd);
     for (key, value) in env {
         cmd.arg("-e").arg(format!("{key}={value}"));
@@ -131,8 +160,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         .env_remove(crate::tasks::TASK_ID_ENV)
         .env_remove(crate::permissions::ASSISTANT_ENV)
         .env_remove(BACKGROUND_ENV)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
+        .stdin(Stdio::null());
     let output = cmd.output().context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -141,21 +169,25 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         );
     }
     set_detach_hint(name);
-    record_agent_pane(name);
-    Ok(())
+    let line = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = line.trim().split('\t').collect();
+    let pane = parse_pane(&fields).with_context(|| format!("start tmux session {name}"))?;
+    record_agent_pane(name, &pane.id);
+    Ok(pane)
 }
 
 /// The session option that holds the tmux id (`%3`) of the pane
 /// [`new_session`] started the agent in.
 const AGENT_PANE_OPTION: &str = "@jeet-agent-pane";
 
-/// Note in session `name`, just started, the id of the pane its agent runs
-/// in: its only pane yet. An id names that pane for as long as the server
-/// runs, wherever the user splits or moves it, and goes with the session.
-fn record_agent_pane(name: &str) {
+/// Note in session `name`, just started, the id `pane` of the pane its
+/// agent runs in, as tmux reported it when it started the session. An id
+/// names that pane for as long as the server runs, wherever the user splits
+/// or moves it, and goes with the session.
+fn record_agent_pane(name: &str, pane: &str) {
     let _ = quiet()
-        .args(["set-option", "-t", &format!("{}:", target(name)), "-F"])
-        .args([AGENT_PANE_OPTION, "#{pane_id}"])
+        .args(["set-option", "-t", &format!("{}:", target(name))])
+        .args([AGENT_PANE_OPTION, pane])
         .status();
 }
 
@@ -262,6 +294,11 @@ fn paste(pane: &str, text: &str) -> Result<()> {
 /// The window option a window made by [`new_window`] is keyed by.
 const KEY_OPTION: &str = "@jeet_key";
 
+/// The window option holding the key a window made by [`new_window`] was
+/// first given, which [`set_window_key`] never changes: what its program was
+/// launched as, whatever it has gone on to since.
+const LAUNCH_OPTION: &str = "@jeet_launch";
+
 /// One window of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
@@ -270,8 +307,10 @@ pub struct Window {
     pub id: String,
     /// Whether its program is still running.
     pub alive: bool,
-    /// What [`new_window`] keyed it by, if it made it.
+    /// What it is keyed by now, if [`new_window`] made it.
     pub key: Option<String>,
+    /// What [`new_window`] first keyed it by, if it made it.
+    pub launch: Option<String>,
 }
 
 /// The windows of session `name`: none when it is not running.
@@ -282,7 +321,7 @@ pub fn windows(name: &str) -> Vec<Window> {
             "-t",
             &target(name),
             "-F",
-            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}"),
+            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}\t#{{{LAUNCH_OPTION}}}"),
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -306,15 +345,20 @@ fn parse_windows(listing: &str) -> Vec<Window> {
                 return None;
             }
             let alive = fields.next()?.trim() == "0";
-            let key = fields
-                .next()
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(str::to_string);
+            let mut next = || {
+                fields
+                    .next()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string)
+            };
+            let key = next();
+            let launch = next();
             Some(Window {
                 id: id.to_string(),
                 alive,
                 key,
+                launch,
             })
         })
         .collect()
@@ -322,7 +366,8 @@ fn parse_windows(listing: &str) -> Vec<Window> {
 
 /// Start `argv` in a new window of session `name`, making the session if it
 /// is not running, and key the window by `key` so [`windows`] can tell it
-/// apart. `title` is what tmux shows for it. Returns the window's id.
+/// apart (and, for good, note it as what the window was launched as). `title` is what tmux shows for it. Returns the window's id and
+/// its pane.
 /// `argv` is run directly, never through a shell; the session's environment
 /// is kept clean the way [`new_session`]'s is.
 pub fn new_window(
@@ -332,7 +377,7 @@ pub fn new_window(
     cwd: &Path,
     env: &[(&str, &str)],
     argv: &[String],
-) -> Result<String> {
+) -> Result<(String, Pane)> {
     if argv.is_empty() {
         bail!("nothing to run in tmux session {name}");
     }
@@ -347,13 +392,13 @@ pub fn new_window(
         let mut cmd = Command::new(binary());
         cmd.args(&first);
         match creating {
-            true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
+            true => cmd.args(["new-session", "-d", "-P", "-F", WINDOW_FORMAT, "-s", name]),
             false => cmd.args([
                 "new-window",
                 "-d",
                 "-P",
                 "-F",
-                "#{window_id}",
+                WINDOW_FORMAT,
                 "-t",
                 &format!("{}:", target(name)),
             ]),
@@ -385,25 +430,42 @@ pub fn new_window(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !id.starts_with('@') {
-        bail!("tmux started a window in session {name} but did not say which ({id:?})");
-    }
-    if !set_window_key(&id, key) {
+    let line = String::from_utf8_lossy(&output.stdout);
+    let Some((id, pane)) = parse_window(line.trim()) else {
+        bail!("tmux started a window in session {name} but did not say which ({line:?})");
+    };
+    if !(set_window_key(&id, key) && set_window_option(&id, LAUNCH_OPTION, key)) {
         let _ = kill_window(&id);
         bail!("tmux could not label its new window in session {name}");
     }
     if creating {
         set_detach_hint(name);
     }
-    Ok(id)
+    Ok((id, pane))
+}
+
+/// What [`new_window`] has tmux print of the window it starts.
+const WINDOW_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{pane_pid}";
+
+/// The window and pane of a [`WINDOW_FORMAT`] line.
+fn parse_window(line: &str) -> Option<(String, Pane)> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let (id, pane) = fields.split_first()?;
+    if !id.starts_with('@') {
+        return None;
+    }
+    Some((id.to_string(), parse_pane(pane).ok()?))
 }
 
 /// Key window `id` by `key`, as [`new_window`] does: for a window whose
 /// program has gone on to something else to be known by.
 pub fn set_window_key(id: &str, key: &str) -> bool {
+    set_window_option(id, KEY_OPTION, key)
+}
+
+fn set_window_option(id: &str, option: &str, value: &str) -> bool {
     quiet()
-        .args(["set-option", "-w", "-t", id, KEY_OPTION, key])
+        .args(["set-option", "-w", "-t", id, option, value])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -731,6 +793,11 @@ fn live_pane_pids(name: &str) -> Vec<u32> {
     pane_pids(&["-s", "-t", &target(name)])
 }
 
+/// The processes tmux started in window `id`'s live panes.
+pub fn window_pane_pids(id: &str) -> Vec<u32> {
+    pane_pids(&["-t", id])
+}
+
 /// The pids of the live panes `list-panes` with `args` lists.
 fn pane_pids(args: &[&str]) -> Vec<u32> {
     let Ok(output) = Command::new(binary())
@@ -801,7 +868,7 @@ fn parse_processes(listing: &str) -> Vec<Proc> {
 
 /// `roots` and all their descendants that are running now. This process is
 /// never among them: waiting for itself would never end.
-fn process_tree(roots: &[u32]) -> Vec<u32> {
+pub fn process_tree(roots: &[u32]) -> Vec<u32> {
     if roots.is_empty() {
         return Vec::new();
     }
@@ -848,7 +915,7 @@ fn wait_for_exit(pids: &[u32], limit: Duration) -> Vec<u32> {
 }
 
 /// Let `pids` exit within `grace`, then kill whatever has not.
-fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
+pub fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
     if pids.is_empty() {
         return Ok(());
     }
@@ -922,6 +989,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_started_pane_is_read_with_its_process() {
+        let pane = |id: &str, pid| Pane { id: id.into(), pid };
+        assert_eq!(parse_pane(&["%1", "4242"]).unwrap(), pane("%1", 4242));
+        assert_eq!(
+            parse_window("@3\t%7\t99"),
+            Some(("@3".to_string(), pane("%7", 99)))
+        );
+        for garbage in [
+            &["%1"][..],
+            &["@1", "5"],
+            &["%1", "x"],
+            &["%1", "5", "6"],
+            &[],
+        ] {
+            assert!(parse_pane(garbage).is_err(), "{garbage:?}");
+        }
+        for garbage in ["", "@3", "%7\t99", "@3\t%7", "@3\t%7\tx", "x\t%7\t9"] {
+            assert_eq!(parse_window(garbage), None, "{garbage:?}");
+        }
+    }
+
+    #[test]
     fn targets_match_exactly() {
         assert_eq!(target("jeet-api"), "=jeet-api");
         // The agent's pane, by its id, not whichever pane is active.
@@ -934,7 +1023,7 @@ mod tests {
 
     #[test]
     fn windows_are_read_with_their_keys() {
-        let listing = "@1\t0\tabc\n@2\t1\t\n@3\t0\n%junk\t0\tx\n";
+        let listing = "@1\t0\tabc\tabc\n@2\t1\t\t\n@3\t0\n@4\t0\tnew\told\n%junk\t0\tx\n";
         assert_eq!(
             parse_windows(listing),
             [
@@ -942,16 +1031,25 @@ mod tests {
                     id: "@1".into(),
                     alive: true,
                     key: Some("abc".into()),
+                    launch: Some("abc".into()),
                 },
                 Window {
                     id: "@2".into(),
                     alive: false,
                     key: None,
+                    launch: None,
                 },
                 Window {
                     id: "@3".into(),
                     alive: true,
                     key: None,
+                    launch: None,
+                },
+                Window {
+                    id: "@4".into(),
+                    alive: true,
+                    key: Some("new".into()),
+                    launch: Some("old".into()),
                 },
             ]
         );

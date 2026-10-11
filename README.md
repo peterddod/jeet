@@ -278,7 +278,7 @@ the task already has it, brings that checkout up to date if it is clean, and
 brings an archived task back), opens it in the review viewer, and `cd`s you
 into the worktree when you leave. The review task is a task like any other: it
 shows in the tasks list, where `v` opens the viewer again, and archiving or
-deleting it frees the disk. A PR from a fork is checked out as `pr/<number>`,
+deleting it frees the disk (and stops its review if that is still running). A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -519,10 +519,18 @@ the agent first if it is not running: Claude Code resumes the task's latest
 session, or starts a new one. Without a terminal, `open` leaves the agent
 running detached and prints the task directory.
 
-jeet starts Claude Code with hooks (passed with `--settings`; nothing is
-written into the task or a repository) that record what the agent is doing in
+jeet starts Claude Code with hooks (passed with `--settings`, as a file
+only you can read under `~/.jeet/run/<task id>/<session>.json`, replaced at
+each launch, removed by a later launch once its session is no longer running,
+and removed with the rest when the task is archived or deleted; nothing is written into the
+task or a repository) that record what the agent is doing in
 `.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
-`jeet ls` and `jeet report` without asking. `jeet task ls` shows it: `starting`,
+`jeet ls` and `jeet report` without asking. Those settings also exclude
+`jeet` from Claude Code's sandbox, should you turn it on: jeet writes under
+`~/.jeet`, which the sandbox does not allow, and on Linux the sandbox hides
+the processes jeet identifies its caller by. So jeet runs unconfined, and a
+Bash command that chains other commands with `jeet` may run them unconfined
+too. `jeet task ls` shows what the agent is doing: `starting`,
 `running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
 once the tmux session is gone. An agent with hooks that has said nothing 15
 seconds after starting is most likely held up at a startup prompt, and shows
@@ -665,11 +673,15 @@ to gc, and only then is the worktree removed. Files git ignores (build output,
 `.env`, local config) are not kept: removing the worktree deletes them. So
 archive names them first and asks — the tasks list in its confirm, the CLI on
 the terminal — and without a terminal it needs `--force`. The task directory itself
-stays, so an agent's sessions still find it. **Unarchive** puts every worktree
+stays, so an agent's sessions still find it. Archive first ends the task's
+agent and any review job running for it or in its worktrees (a `jeet review`
+still running is stopped, its result never written), and is refused from
+inside such a job. **Unarchive** puts every worktree
 back on its branch (or detached at its commit) with its changes reapplied, then
 drops the refs.
 
-**Delete** removes everything the task owns: its worktrees, the branches it
+**Delete** removes everything the task owns: its agent and any review job
+running for it or in its worktrees, its worktrees, the branches it
 created (never ones that existed before), its `refs/jeet` refs and its
 directory, with everything else on its canvas. It first lists what would be
 lost — uncommitted changes, commits that would be left on no branch or remote,
@@ -1095,8 +1107,8 @@ command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
 
 ### The assistant's permissions
 
-jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
-do what `[assistant] allow` lists; anything else fails with a message saying
+jeet commands run by the assistant's agent may only do what `[assistant]
+allow` lists; anything else fails with a message saying
 what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet task last`, `jeet prs`, …),
 `jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
 `jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
@@ -1120,7 +1132,7 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly, as soon as `$JEET_TASK_ID` names it. It may run the reads that
+narrowly. It may run the reads that
 need no capability (`jeet ls`, `jeet task ls`, `jeet prs`, …), run
 `jeet report`, and add worktrees to itself, and only that last when the
 assistant may too: add `worktree.add` to `[assistant] allow` to let such
@@ -1130,17 +1142,37 @@ as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask w
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
-exits without reporting done. The gating is cooperative, like the rest: a
-shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
-and is gated as that task, so use one outside it. After upgrading, an older
-jeet refuses the index.
+exits without reporting done. No harness launches that command, so it gets none of
+the settings jeet gives Claude Code: if it runs Claude Code with its sandbox
+on, exclude `jeet` from the sandbox yourself (`--settings
+'{"sandbox":{"excludedCommands":["jeet"]}}'`), or its `jeet report` and
+`jeet worktree add` are refused as unconfirmed.
+
+jeet knows which agent is calling by the process it launched: each task's
+agent, each assistant window and each review job is recorded when jeet
+starts it, and a jeet command is that agent's when it runs below that
+process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
+disagrees is refused and written to `actions.log`, and one that claims a task
+with a parent, or the assistant, with no recorded agent behind it is refused
+as unconfirmed. So a shell you open inside such a task's or the assistant's
+tmux session is refused for commands that need a capability, and for
+`jeet worktree ls`, `path` and `add` without `--task`; use one outside it. This stops mistakes and casual forging, not an agent that sets
+out to escape. Every agent, managers below the assistant included, runs
+locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
+
+**Upgrading to this version:** reopen running tasks (stop them and `jeet
+task open` again) and assistant windows (close them and `jeet chat`). Agents started by an older jeet were
+never recorded, so their `jeet report` and `jeet worktree add` are refused,
+and their hooks still write status but no longer report to the assistant.
+`jeet task open` on such a task warns instead of adopting it. After
+upgrading, an older jeet refuses the index.
 
 On a harness with deny rules (Claude Code), the assistant and every task
 with a parent are also denied, even with your approval at the prompt:
 force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the eight in all
-most of them use, none longer than 24 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
+most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr

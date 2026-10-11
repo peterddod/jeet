@@ -11,11 +11,13 @@ mod db;
 mod git;
 mod github;
 mod harness;
+mod identity;
 mod instructions;
 mod messages;
 mod notify;
 mod paths;
 mod permissions;
+mod placement;
 mod pr_history;
 mod projects;
 mod remote;
@@ -47,8 +49,26 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // The assistant's own checks, before the command does anything.
-    let authorized = permissions::authorize(cli.command.as_ref())?;
+    // Only once `jeet review` has recorded the runner as its task's does the
+    // runner go on to find out who it is. One that never gets it, its
+    // launcher gone first, ends its job too.
+    if let Some(Commands::ReviewJob { state }) = &cli.command {
+        if let Err(e) = review::await_go() {
+            review::refused(state);
+            return Err(e);
+        }
+    }
+    // Who the caller is and what it may do, before the command does
+    // anything.
+    let authorized = match permissions::authorize(cli.command.as_ref()) {
+        Ok(authorized) => authorized,
+        Err(e) => {
+            if let Some(Commands::ReviewJob { state }) = &cli.command {
+                review::refused(state);
+            }
+            return Err(e);
+        }
+    };
     let result = run(cli.command);
     if let Some(action) = authorized {
         action.finish(&result);
@@ -170,8 +190,13 @@ fn run(command: Option<Commands>) -> Result<()> {
         }
         // Run by the agent on every tool call: quick, silent on stdout, and
         // never a failure, whatever goes wrong.
-        Commands::TaskHook { event, harness } => {
-            let _ = std::panic::catch_unwind(|| status::run_hook(&harness, &event));
+        Commands::TaskHook {
+            event,
+            harness,
+            task,
+        } => {
+            let _ =
+                std::panic::catch_unwind(|| status::run_hook(&harness, &event, task.as_deref()));
         }
         // Launched in the background with a task's agent; says nothing.
         Commands::TaskStartup { task, session } => {
