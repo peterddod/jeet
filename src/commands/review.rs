@@ -106,5 +106,14 @@ fn start_review(
     let job = review::start(app, repo, pr, worktree, config, template, as_task)?;
     eprintln!("jeet: reviewing in the background: {}", job.command);
     eprintln!("jeet: output -> {}", job.log.display());
+    if as_task.is_some() {
+        // No harness launches it, so no deny rules reach it (as for a task
+        // on a harness without them).
+        eprintln!(
+            "jeet: warning: the review command runs outside a harness launch, so it has no \
+             deny rules and is not stopped from force-pushing or merging; only jeet's own \
+             commands are gated"
+        );
+    }
     Ok(())
 }

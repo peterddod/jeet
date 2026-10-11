@@ -197,6 +197,11 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
             "jeet: task {} has unsent input in its agent's prompt; nothing sent",
             task.name
         ),
+        Interrupted::AtStartup => eprintln!(
+            "jeet: task {}'s agent has no turn yet and may be at a startup prompt, which the \
+             keys would answer; nothing sent",
+            task.name
+        ),
     }
     Ok(())
 }

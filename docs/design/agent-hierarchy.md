@@ -789,7 +789,10 @@ RFC left open, or departed from it:
   gaps this leaves are pinned by a test (`KNOWN_GAPS`).
 - **E4** Deny rules go to the root and every parented node. Top-level
   tasks get none (D1, D23), so 5.6's "every agent" now reads "the root and
-  every parented node".
+  every parented node". The exception is a parented review task's
+  `[review] command`: the user's own command, run by `review-job`, not
+  launched through a harness, so jeet has no settings to put the rules in.
+  `jeet review` warns when it starts one, as E13 does.
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch.
 - **E6** `Capability.external` names the `gh` commands a capability
@@ -809,11 +812,14 @@ RFC left open, or departed from it:
   test checks the first prompt still fits one tmux command with every
   capability held and with none.
 - **E10** `runtime::interrupt` returns `Interrupted { Sent,
-  NotWorking(activity), UserTyping }` and does not fail when there is
+  NotWorking(activity), UserTyping, AtStartup }` and does not fail when there is
   nothing to interrupt, so phase 2's pause can walk a subtree with idle
   nodes.
 - **E11** Keys are pressed once, only while `Running` or `Waiting`, and
-  never over the user's draft. No retry, no confirmation and no status
+  never over the user's draft. Not at a startup prompt either (Esc at the
+  trust dialog exits): a Waiting no hook reported, synthesised for an agent
+  with no status or written by the startup watcher, returns
+  `Interrupted::AtStartup`. No retry, no confirmation and no status
   repair yet (the status reads `running` until the next hook, as after a
   manual Esc); those come with pause. The assistant is refused (5.4).
 - **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`;
