@@ -7861,6 +7861,51 @@ fn deleting_a_review_task_ends_its_job_and_its_claims() {
     assert!(other.is_dir());
 }
 
+/// Archiving one ends it too, before its worktree is removed under it, and
+/// drops its record as the task's: the task is no longer running anything.
+#[cfg(unix)]
+#[test]
+fn archiving_a_review_task_ends_its_job() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let started = lab.home().join("started");
+    let ran = lab.home().join("ran");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&ran.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    wait_until("the job to start", || started.exists());
+    let anchors = || -> i64 {
+        lab.index()
+            .query_row(
+                "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1",
+                [&task],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(anchors(), 1);
+    succeeded(&lab.jeet_at(
+        &["task", "archive", "review-widget-7", "--force"],
+        &lab.home(),
+        &[],
+    ));
+    assert_eq!(anchors(), 0);
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!ran.exists(), "the job outlived its task's archive");
+}
+
 /// The assistant reviewing a PR whose review task the user made, top
 /// level: the task is not moved, and the runner is the assistant's, so it
 /// runs once `jeet review` has gone.
@@ -8293,10 +8338,15 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(jeet report:*)"
         ])
     );
-    // Its settings go with it.
+    // Its settings go with it, archived or deleted.
     assert!(lab.home().join("run").join(&kid).is_dir());
     succeeded(&lab.jeet_at(&["task", "archive", "kid", "--force"], &lab.home(), &env));
     assert!(!lab.home().join("run").join(&kid).exists());
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    succeeded(&lab.jeet_at(&["task", "open", "sib"], &lab.home(), &env));
+    assert!(lab.home().join("run").join(&sib).is_dir());
+    succeeded(&lab.jeet_at(&["task", "delete", "sib", "-f"], &lab.home(), &env));
+    assert!(!lab.home().join("run").join(&sib).exists());
 }
 
 /// Index a repository whose default branch is `develop`.

@@ -525,7 +525,12 @@ each launch, removed by a later launch once its session is no longer running,
 and removed with the rest when the task is archived or deleted; nothing is written into the
 task or a repository) that record what the agent is doing in
 `.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
-`jeet ls` and `jeet report` without asking. `jeet task ls` shows it: `starting`,
+`jeet ls` and `jeet report` without asking. Those settings also exclude
+`jeet` from Claude Code's sandbox, should you turn it on: jeet writes under
+`~/.jeet`, which the sandbox does not allow, and on Linux the sandbox hides
+the processes jeet identifies its caller by. So jeet runs unconfined, and a
+Bash command that chains other commands with `jeet` may run them unconfined
+too. `jeet task ls` shows what the agent is doing: `starting`,
 `running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
 once the tmux session is gone. An agent with hooks that has said nothing 15
 seconds after starting is most likely held up at a startup prompt, and shows

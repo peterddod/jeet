@@ -113,7 +113,9 @@ pub trait Harness: Sync {
     /// [`Harness::hook_args`] read from a file at `path` instead: what to
     /// write there, and the arguments naming it. jeet launches with this when
     /// the harness has it, so the hooks and rules, however many, cost the
-    /// command line only the path (see `runtime::hook_args`).
+    /// command line only the path (see `runtime::hook_args`). A harness may
+    /// have this alone; either counts as having hooks. The file is
+    /// `<session>.json`, whatever its contents.
     fn hook_file(&self, _hooks: &HookSetup, _path: &Path) -> Option<(String, Vec<String>)> {
         None
     }

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ReviewConfig;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::RepoRecord;
+use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
 use crate::remote;
@@ -296,8 +296,8 @@ fn launch(
 /// End the review jobs running for task `task_id`: each runner jeet
 /// recorded for it, while it is still that process, with its process group
 /// ([`launch`] gives it one), so the command it runs goes too. Best effort.
-pub fn stop_jobs(app: &App, task_id: &str) -> Result<()> {
-    for anchor in app.db.task_anchors(task_id, AnchorKind::Job)? {
+pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
+    for anchor in db.task_anchors(task_id, AnchorKind::Job)? {
         if anchor.pid > 1 && identity::live(&anchor) {
             let _ = Command::new("kill")
                 .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
@@ -511,5 +511,56 @@ mod tests {
             "the runner records itself"
         );
         assert!(done.finished_at.is_some());
+    }
+
+    /// A job row whose pid is now another process's: its group is spared;
+    /// the job's own is ended.
+    #[cfg(unix)]
+    #[test]
+    fn stop_jobs_spares_a_group_whose_pid_was_reused() {
+        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::placement::Placement;
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("index.db")).unwrap();
+        db.insert_task(&TaskRecord {
+            id: "t".into(),
+            slug: "t".into(),
+            name: "t".into(),
+            project: None,
+            kind: TaskKind::Review,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: None,
+            placement: Placement::Local,
+        })
+        .unwrap();
+        // An unrelated process group, as a job's would be.
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        identity::record(&db, "t", AnchorKind::Job, None, other.id()).unwrap();
+        let mut row = db.task_anchors("t", AnchorKind::Job).unwrap().remove(0);
+        db.delete_anchor(row.pid, row.start).unwrap();
+        row.start += 1;
+        db.insert_anchor(&row, None).unwrap();
+
+        stop_jobs(&db, "t").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "an unrelated group was ended"
+        );
+
+        db.delete_anchor(row.pid, row.start).unwrap();
+        identity::record(&db, "t", AnchorKind::Job, None, other.id()).unwrap();
+        stop_jobs(&db, "t").unwrap();
+        let status = other.wait().unwrap();
+        assert!(!status.success(), "the job's group was not ended");
     }
 }

@@ -543,7 +543,11 @@ commands. A hard boundary needs the harness's sandbox and deny rules: no
 writes outside the node's own directory, and no `tmux`, `sqlite3` or edits to
 `~/.jeet/config.toml`. jeet writes none of those rules today (its deny rules
 cover only pushes and merges, §5.6); they are what a `local-sandbox`
-placement would provide (§11). The `auto_trust` scope from #23 must exclude manager homes, as it
+placement would provide (§11). It goes the other way for jeet itself: the
+settings jeet gives Claude Code list `jeet` in `sandbox.excludedCommands`,
+since the ancestry walk cannot see past a sandbox's pid namespace (Linux)
+and jeet writes under `~/.jeet`, so with the user's sandbox on, jeet, and
+possibly whatever a Bash command chains with it, runs unconfined. The `auto_trust` scope from #23 must exclude manager homes, as it
 already excludes the assistant's, unless the user opts in.
 
 **Decision (#33).** Where and how a node runs is its *placement*, chosen

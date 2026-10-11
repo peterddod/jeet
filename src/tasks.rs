@@ -1222,8 +1222,11 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // in the worktrees about to be removed, and what it wrote after the
     // snapshot would be lost.
     runtime::stop(task).context("end the agent's tmux session")?;
-    // An agent that outlives its session is no longer the task's.
+    // Its review job too, for the same reason.
+    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
+    // An agent or job that outlives its session is no longer the task's.
     app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
+    app.db.delete_task_anchors(&task.id, AnchorKind::Job)?;
     if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
@@ -1708,7 +1711,7 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     runtime::stop(task).context("end the agent's tmux session")?;
     // Its review job too: with the task's rows gone, its jeet commands
     // would be refused, and its worktree is about to go.
-    review::stop_jobs(app, &task.id).context("end the task's review job")?;
+    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));

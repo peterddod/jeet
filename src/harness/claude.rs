@@ -434,7 +434,10 @@ fn asks_the_user(input: &HookInput) -> bool {
 /// and, when there are any, `Bash(…)` rules denying those `deny` names.
 /// `jeet` runs outside Claude's sandbox, should the user turn it on: jeet
 /// knows its caller by the processes above it, which a sandbox with its own
-/// process ids (bubblewrap's, on Linux) hides, and it is the gate itself.
+/// process ids (bubblewrap's, on Linux) hides, and on every platform it
+/// writes under `$JEET_HOME`, outside the writes a sandbox allows. The
+/// cost, documented in the README: Claude decides per Bash command, so
+/// what a command chains with `jeet` may run unsandboxed too.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
