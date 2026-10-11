@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{CrosstermBackend, IntoCrossterm};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event;
@@ -20,7 +20,7 @@ use ratatui::crossterm::style::{
     Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{execute, queue};
 use ratatui::style::Modifier;
@@ -47,8 +47,21 @@ pub fn init_terminal() -> Result<Tui> {
     // `jeet review` talks on stderr right up to this point, and a terminal
     // that does not blank its alternate screen would leave that showing
     // through every cell the first frame leaves empty.
-    terminal.clear().context("clear terminal")?;
+    blank(&mut terminal).context("clear terminal")?;
     Ok(terminal)
+}
+
+/// Blank the screen and make the next draw paint every cell.
+///
+/// Not `Terminal::clear`: since ratatui 0.30 that first asks the terminal
+/// where its cursor is and waits for an answer some terminals never give.
+/// The alternate screen has no cursor position worth keeping.
+fn blank(terminal: &mut Tui) -> io::Result<()> {
+    execute!(terminal.backend_mut(), Clear(ClearType::All))?;
+    // Each swap resets the buffer it leaves, so two reset both.
+    terminal.swap_buffers();
+    terminal.swap_buffers();
+    Ok(())
 }
 
 /// Put the terminal back however we leave: panic, or a signal from outside.
@@ -115,7 +128,7 @@ pub fn suspended<T>(terminal: &mut Tui, f: impl FnOnce() -> T) -> Result<T> {
         Print(MOUSE_ON)
     )
     .context("enter alternate screen")?;
-    terminal.clear().context("clear terminal")?;
+    blank(terminal).context("clear terminal")?;
     Ok(out)
 }
 
@@ -218,8 +231,8 @@ pub fn write_links(out: &mut impl Write, buffer: &Buffer, links: &[Link]) -> io:
             queue!(
                 out,
                 SetAttribute(Attribute::Reset),
-                SetForegroundColor(cell.fg.into()),
-                SetBackgroundColor(cell.bg.into())
+                SetForegroundColor(cell.fg.into_crossterm()),
+                SetBackgroundColor(cell.bg.into_crossterm())
             )?;
             for attribute in attributes(cell.modifier) {
                 queue!(out, SetAttribute(attribute))?;
