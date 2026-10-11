@@ -17,7 +17,7 @@ jobs:
   apt-repo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release debs
         env:
@@ -39,17 +39,17 @@ jobs:
           cp packaging/apt/deb-install.sh apt-out/deb-install.sh
 
       - name: Upload apt repo to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: apt-out
 
       - name: Deploy GitHub Pages
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   homebrew-tap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release tarballs
         env:
