@@ -91,6 +91,7 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+jeet manager ls                          # the tree under it; show <task>, grant <task> <caps>
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 
@@ -655,7 +656,14 @@ only you can answer, sits idle longer than `[managers] idle_report_mins`
 (default 10; `jeet watch` and the assistant's own turns look), or ends without
 reporting done. These never start an assistant session. `--goal` and `--done`
 on `jeet task new` give the task a definition of done, shown to its agent at
-the start of each session with what it may do and how to report.
+the start of each session with what it may do and how to report. `--allow
+task.create,worktree.add` names what it may do instead of `[managers]
+worker_default`, refused unless its parent holds each one, and `--budget
+1h,20turns` caps its busy time and turns (no `$`: cost budgets wait).
+`jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
+show <task> [--json]` a task's brief, grant (and what cut it), budget, run
+state and children, and `jeet manager grant <task> <caps>|--none` replaces
+its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 
 ### Archiving and deleting
 
@@ -1131,11 +1139,15 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
-assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly. It is granted `worktree.add` when made (`[managers]
-worker_default`), and may use what its grant names only while the
-assistant may too: add `worktree.add` to `[assistant] allow` to let such
-tasks add worktrees. It reaches only itself: it may run `jeet report`, add
+assistant`; `--parent` also takes a manager by its exact name, once
+managers can be made) is gated more narrowly. It is granted `worktree.add`
+when made (`[managers] worker_default`, or what `--allow` names), and may
+use what its grant names only while the assistant may too: add
+`worktree.add` to `[assistant] allow` to let such tasks add worktrees.
+Granting a held capability (`pr.merge`, `pr.comment`, `pr.review`,
+`task.delete` and `[managers] held`) is written to `actions.log` and
+announced, whatever `[assistant] notify` says, unless you grant it
+yourself. It reaches only itself: it may run `jeet report`, add
 worktrees to itself and read itself (`jeet task last`, `task path`, `task
 prs`, `worktree ls`/`path`), and `jeet task ls` lists only it. The reads
 that name no task (`jeet ls`, `jeet prs`, …) are free. Anything else is

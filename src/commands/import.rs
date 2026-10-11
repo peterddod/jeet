@@ -956,7 +956,7 @@ fn execute(app: &App, plan: &Plan, groups: &[Group]) -> Outcome {
                 project: None,
                 repos: &[],
                 branch: None,
-                parent_id: None,
+                child: None,
             },
         );
         let task = match created {

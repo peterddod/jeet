@@ -10,11 +10,12 @@ use anyhow::{bail, Result};
 use crate::agent::{self, AgentSpec};
 use crate::assistant;
 use crate::cd;
+use crate::cli::Delegation;
 use crate::context::App;
-use crate::db::tasks::{TaskBriefRecord, TaskKind, TaskRecord, TaskState};
+use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
 use crate::messages::{self, Delivered};
-use crate::permissions::{self, Caller};
+use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Interrupted};
@@ -22,89 +23,73 @@ use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
 
-#[allow(clippy::too_many_arguments)]
-pub fn new(
-    app: &App,
-    name: &str,
-    project: Option<&str>,
-    repos: &[String],
-    branch: Option<&str>,
-    prompt: Option<&str>,
-    parent: Option<&str>,
-    goal: Option<&str>,
-    done_when: Option<&str>,
-) -> Result<()> {
+/// What `jeet task new` was given.
+pub struct NewTaskArgs<'a> {
+    pub name: &'a str,
+    pub project: Option<&'a str>,
+    pub repos: &'a [String],
+    pub branch: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    pub delegation: &'a Delegation,
+}
+
+pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     // Checked before the task is made, so a brief that cannot be given
     // makes nothing.
-    let prompt = match prompt.map(messages::brief).transpose() {
+    let prompt = match args.prompt.map(messages::brief).transpose() {
         Ok(prompt) => prompt,
         Err(e) => bail!("--prompt: {e:#}"),
     };
-    let goal = match goal.map(messages::checked).transpose() {
-        Ok(goal) => goal,
-        Err(e) => bail!("--goal: {e:#}"),
-    };
-    let done_when = match done_when.map(messages::checked).transpose() {
-        Ok(done_when) => done_when,
-        Err(e) => bail!("--done: {e:#}"),
-    };
-    if done_when.is_some() && goal.is_none() {
-        bail!("--done says when --goal is met; give --goal too");
-    }
+    let d = args.delegation;
     let caller = permissions::caller(app)?;
-    // Only the assistant can be a parent until managers land.
-    let parent = match parent.map(str::trim) {
-        Some(assistant::SLUG) => Some(assistant_parent(app)?),
-        Some(other) => bail!(
-            "--parent {other}: only the assistant can have tasks under it until managers land \
-             (phase 2); use --parent {}",
-            assistant::SLUG
-        ),
-        None => match &caller {
-            // What the assistant makes reports to it.
-            Caller::Root => Some(assistant_parent(app)?),
-            Caller::User => None,
-            Caller::Node(_) => bail!("a task with a parent cannot make tasks"),
-        },
+    // The user's task is top-level unless given a parent; what the
+    // assistant or a manager makes reports to it (M12).
+    let plan = match (&caller, &d.parent) {
+        (Caller::User, None) => {
+            if d.goal.is_some()
+                || d.done_when.is_some()
+                || d.allow.is_some()
+                || !d.budget.is_empty()
+            {
+                bail!(
+                    "--goal/--done/--allow/--budget are for a task with a parent; add --parent {}",
+                    assistant::SLUG
+                );
+            }
+            None
+        }
+        _ => Some(tasks::plan_child(
+            app,
+            &caller,
+            TaskKind::Work,
+            args.name,
+            d,
+            None,
+        )?),
     };
-    if goal.is_some() && parent.is_none() {
-        bail!(
-            "--goal/--done are for a task with a parent; add --parent {}",
-            assistant::SLUG
-        );
-    }
+    let parent = match plan.as_ref().and_then(|p| p.record.parent_id.as_deref()) {
+        Some(id) => app.db.get_task(id)?,
+        None => None,
+    };
     let created = tasks::create(
         app,
         &NewTask {
-            name,
-            project,
-            repos,
-            branch,
-            parent_id: parent.as_ref().map(|p| p.id.as_str()),
+            name: args.name,
+            project: args.project,
+            repos: args.repos,
+            branch: args.branch,
+            child: plan.as_ref().map(|plan| (&caller, plan)),
         },
     )?;
     warn_all(&created.warnings);
-    if let (Some(parent), Some(goal)) = (&parent, goal) {
-        let brief = TaskBriefRecord {
-            task_id: created.task.id.clone(),
-            goal,
-            done_when,
-            created_by: match caller {
-                Caller::Root => parent.id.clone(),
-                _ => "user".into(),
-            },
-        };
-        if let Err(e) = app.db.insert_brief(&brief) {
-            bail!(
-                "task {} was made, but its brief was not saved: {e:#}",
-                created.task.name
-            );
-        }
-    }
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("jeet: task {} -> {}", created.task.name, dir.display());
-    if parent.is_some() {
-        eprintln!("jeet: task {} reports to the assistant", created.task.name);
+    if let Some(parent) = &parent {
+        let to = match parent.kind {
+            TaskKind::Assistant => "the assistant".to_string(),
+            _ => format!("task {}", parent.slug),
+        };
+        eprintln!("jeet: task {} reports to {to}", created.task.name);
     }
     println!("{}", dir.display());
     cd::request(&dir)?;
@@ -149,7 +134,14 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     if name.trim() == assistant::SLUG {
         return send_to_assistant(app, message);
     }
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskSend,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
@@ -186,7 +178,14 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
     if name.trim() == assistant::SLUG {
         bail!("only the user interrupts the assistant, in its own window");
     }
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskInterrupt,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     let why = match runtime::interrupt(app, &task)? {
         Interrupted::Sent => {
             eprintln!("jeet: interrupted task {}'s turn", task.name);
@@ -320,7 +319,14 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
 /// if it is not running. Without a terminal there is nobody to attach, so
 /// the agent is left running detached and the directory is printed instead.
 pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskOpen,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
@@ -357,7 +363,14 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
 /// its worktrees and agreed — or passed --force. Without a terminal there is
 /// no agreeing, only --force.
 pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskArchive,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     // Before asking, not after: the answer would count for nothing.
     app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(&task, "archive")?;
@@ -371,7 +384,14 @@ pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
 }
 
 pub fn unarchive(app: &App, name: &str) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskUnarchive,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     if task.state == TaskState::Active {
         eprintln!("jeet: task {} is not archived", task.name);
         return Ok(());
@@ -391,7 +411,14 @@ pub fn unarchive(app: &App, name: &str) -> Result<()> {
 pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
     // By exact name only: with --force nothing asks, so a stale name must not
     // land on whichever task it happens to be a prefix of.
-    let task = tasks::find_exact(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskDelete,
+        Target::Key {
+            key: name.to_string(),
+            exact: true,
+        },
+    )?;
     let dir = tasks::task_dir(app, &task);
     if standing_in(&dir) {
         bail!(
@@ -466,7 +493,14 @@ fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
 /// Copy the task's project files again: those the task left alone are
 /// brought up to date, those it changed are kept unless `force`.
 pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskResync,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     let sync = projects::resync(app, &task, force)?;
     for rel in &sync.written {
         eprintln!("jeet: updated {rel}");
@@ -487,7 +521,11 @@ pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
 /// The task's PR history, after asking GitHub for news of it — unless
 /// `offline`, or there is no `gh`, when it is what was last recorded.
 pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
-    let task = tasks::current(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskPrs,
+        Target::Current(name.map(str::to_string)),
+    )?;
     if !offline {
         let found = pr_history::refresh(app, &task)?;
         for error in &found.errors {
@@ -615,7 +653,14 @@ pub fn printable(text: &str) -> String {
 }
 
 pub fn path(app: &App, name: &str) -> Result<()> {
-    let task = tasks::find(app, name)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskPath,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
     println!("{}", tasks::task_dir(app, &task).display());
     Ok(())
 }

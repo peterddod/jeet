@@ -21,12 +21,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
+use crate::agent::AgentSpec;
+use crate::cli::Delegation;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
+use crate::db::tasks::{
+    RunState, TaskBriefRecord, TaskKind, TaskRecord, TaskState, TaskWorktreeRecord,
+};
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
+use crate::manager::budget::{self, Limits};
+use crate::messages;
+use crate::permissions::{self, Caller, Grant, Target, Verb};
 use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
@@ -172,8 +179,9 @@ pub struct NewTask<'a> {
     /// Branch for the worktree of the single repository in `repos`; the
     /// project's worktrees start detached.
     pub branch: Option<&'a str>,
-    /// The task it reports to, by id; `None` for a top-level task.
-    pub parent_id: Option<&'a str>,
+    /// Its place under a parent, planned by [`plan_child`] for the caller
+    /// making it; `None` for a top-level task.
+    pub child: Option<(&'a Caller, &'a NewNode)>,
 }
 
 /// A task that was just made, plus anything worth telling the user.
@@ -201,8 +209,10 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         None => None,
     };
 
-    let (task, mut warnings) =
-        make_task(app, name, project.as_ref(), TaskKind::Work, spec.parent_id)?;
+    let (task, mut warnings) = match spec.child {
+        Some((by, plan)) => commit_child(app, by, plan, project.as_ref())?,
+        None => make_task(app, name, project.as_ref(), TaskKind::Work)?,
+    };
 
     let preset = project
         .iter()
@@ -228,21 +238,37 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     Ok(Created { task, warnings })
 }
 
-/// A task with no worktrees yet: its row, its directory, marker and skill,
-/// and the project's files. Returns notes on project files not copied.
+/// A top-level task with no worktrees yet: its row, its directory, marker
+/// and skill, and the project's files. Returns notes on project files not
+/// copied.
 fn make_task(
     app: &App,
     name: &str,
     project: Option<&Project>,
     kind: TaskKind,
-    parent_id: Option<&str>,
 ) -> Result<(TaskRecord, Vec<String>)> {
-    let now = now_secs();
     let task = TaskRecord {
+        project: project.map(|p| p.name.clone()),
+        ..new_record(app, name, kind, None)?
+    };
+    let notes = write_task(app, &task, project, || app.db.insert_task(&task))?;
+    Ok((task, notes))
+}
+
+/// The row of a new task called `name`, under `parent_id`, with a slug of
+/// its own.
+fn new_record(
+    app: &App,
+    name: &str,
+    kind: TaskKind,
+    parent_id: Option<&str>,
+) -> Result<TaskRecord> {
+    let now = now_secs();
+    Ok(TaskRecord {
         id: Uuid::new_v4().to_string(),
         slug: unique_slug(app, &slugify(name))?,
         name: name.to_string(),
-        project: project.map(|p| p.name.clone()),
+        project: None,
         kind,
         state: TaskState::Active,
         created_at: now,
@@ -252,27 +278,243 @@ fn make_task(
         run_state: RunState::Run,
         run_state_by: None,
         max_children: None,
-    };
-    // A child gets its kind's default grant (`[managers] worker_default`),
-    // which its ancestors cut down at every check.
-    let grant = match task.parent_id {
-        Some(_) => crate::permissions::default_grant(kind, &app.config.manager_policy()?)?,
-        None => Vec::new(),
-    };
-    let dir = task_dir(app, &task);
+    })
+}
+
+/// Make `task`'s directory and fill it, then write its row with `insert`;
+/// if either fails the directory goes again. Returns notes on project
+/// files not copied.
+fn write_task(
+    app: &App,
+    task: &TaskRecord,
+    project: Option<&Project>,
+    insert: impl FnOnce() -> Result<()>,
+) -> Result<Vec<String>> {
+    let dir = task_dir(app, task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let insert = || match task.parent_id {
-        Some(_) => app.db.insert_child(&task, &grant, None, None, None),
-        None => app.db.insert_task(&task),
-    };
-    match scaffold(&dir, &task, project).and_then(|notes| insert().map(|_| notes)) {
-        Ok(notes) => Ok((task, notes)),
+    match scaffold(&dir, task, project).and_then(|notes| insert().map(|_| notes)) {
+        Ok(notes) => Ok(notes),
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);
             Err(e)
         }
     }
+}
+
+/// A task to make under a parent: checked by [`plan_child`], made by
+/// [`commit_child`].
+#[derive(Debug, Clone)]
+pub struct NewNode {
+    /// Its row; the project is filled in as it is made.
+    pub record: TaskRecord,
+    pub brief: Option<TaskBriefRecord>,
+    pub grant: Grant,
+    pub budget: Option<Limits>,
+    /// How many active tasks its parent may hold, checked again as the row
+    /// is written; `None` under the assistant.
+    pub fan_out: Option<u32>,
+}
+
+/// Plan task `name` of `kind`, which `caller` makes under the parent `d`
+/// names (by default: the assistant, for the assistant and for a manager
+/// the user makes; itself, for a manager). Checks, in this order (M2), and
+/// writes
+/// nothing: the parent (within the caller's subtree, for a task with a
+/// parent), that the caller may make tasks under it, that it is active and
+/// the assistant or a manager, the depth, its fan-out, the grant
+/// ([`permissions::check_grant`]), the budget and, for a manager, the
+/// harness. `max_children` is a manager's own fan-out limit.
+pub fn plan_child(
+    app: &App,
+    caller: &Caller,
+    kind: TaskKind,
+    name: &str,
+    d: &Delegation,
+    max_children: Option<u32>,
+) -> Result<NewNode> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("a task needs a name");
+    }
+    let goal = match d.goal.as_deref().map(messages::checked).transpose() {
+        Ok(goal) => goal,
+        Err(e) => bail!("--goal: {e:#}"),
+    };
+    let done_when = match d.done_when.as_deref().map(messages::checked).transpose() {
+        Ok(done_when) => done_when,
+        Err(e) => bail!("--done: {e:#}"),
+    };
+    if done_when.is_some() && goal.is_none() {
+        bail!("--done says when --goal is met; give --goal too");
+    }
+    let policy = app.config.manager_policy()?;
+    if let Some(n) = max_children.filter(|n| *n > policy.max_children) {
+        bail!(
+            "--max-children {n} is above `[managers] max_children` ({})",
+            policy.max_children
+        );
+    }
+
+    let target = match (&d.parent, caller, kind) {
+        // A manager the user makes goes under the assistant.
+        (None, Caller::User, TaskKind::Manager) => {
+            Target::Parent(Some(crate::assistant::SLUG.to_string()))
+        }
+        (parent, _, _) => Target::Parent(parent.clone()),
+    };
+    let parent = match permissions::resolve(app, caller, &target) {
+        Ok(parent) => parent,
+        Err(e) => bail!("--parent: {e:#}"),
+    };
+    permissions::in_scope(app, caller, Verb::TaskNew, &parent)?;
+    if parent.state != TaskState::Active {
+        bail!("task {} is archived; it takes no new tasks", parent.slug);
+    }
+    if !matches!(parent.kind, TaskKind::Assistant | TaskKind::Manager) {
+        bail!(
+            "task {} is not a manager: only the assistant and managers have tasks under them",
+            parent.slug
+        );
+    }
+    let depth = app.db.depth(&parent.id)? + 1;
+    let deepest = match kind {
+        TaskKind::Manager => policy.max_depth.saturating_sub(1),
+        _ => policy.max_depth,
+    };
+    if depth > deepest {
+        bail!(
+            "task {name} would sit {depth} levels below the assistant, under task {}; a {} \
+             sits at most {deepest} below it (`[managers] max_depth` is {})",
+            parent.slug,
+            kind.as_str(),
+            policy.max_depth
+        );
+    }
+    let fan_out = fan_out_of(app, &parent)?;
+    if let Some(max) = fan_out {
+        let active = app.db.child_count(&parent.id, true)?;
+        if active >= max as usize {
+            bail!(crate::db::tasks::fan_out_full(&parent.slug, active, max));
+        }
+    }
+    let grant = permissions::check_grant(app, caller, &parent, kind, d.allow.as_deref(), &policy)?;
+    let budget = child_budget(app, &parent, kind, d, &policy)?;
+    if kind == TaskKind::Manager {
+        let spec = AgentSpec::from_config(&app.config)?;
+        let missing = crate::harness::manager_missing(spec.harness);
+        if !missing.is_empty() {
+            bail!(
+                "a manager needs what {} lacks: {}; configure a harness that has them \
+                 (see docs/harnesses.md)",
+                spec.harness.name(),
+                missing.join(", ")
+            );
+        }
+    }
+
+    let created_by = match caller {
+        Caller::User => "user".to_string(),
+        Caller::Root => crate::manager::root(app)?.id,
+        Caller::Node(node) => node.id.clone(),
+    };
+    let record = TaskRecord {
+        max_children,
+        ..new_record(app, name, kind, Some(&parent.id))?
+    };
+    let brief = goal.map(|goal| TaskBriefRecord {
+        task_id: record.id.clone(),
+        goal,
+        done_when,
+        created_by,
+    });
+    Ok(NewNode {
+        record,
+        brief,
+        grant,
+        budget,
+        fan_out,
+    })
+}
+
+/// A new child's budget: what `--budget` asks for, which must fit in what
+/// is left above it, else `[managers] default_budget` for a manager or a
+/// manager's child (M20), cut to what is left. A child of the assistant
+/// gets none unless asked.
+fn child_budget(
+    app: &App,
+    parent: &TaskRecord,
+    kind: TaskKind,
+    d: &Delegation,
+    policy: &crate::config::ManagerPolicy,
+) -> Result<Option<Limits>> {
+    let left = budget::remaining(app, parent)?;
+    let fits = |want: Option<i64>, left: Option<i64>| match (want, left) {
+        (Some(want), Some(left)) => want <= left,
+        _ => true,
+    };
+    if !d.budget.is_empty() {
+        let want = budget::limits(&d.budget)?;
+        if !fits(want.secs, left.secs) || !fits(want.turns, left.turns) {
+            bail!(
+                "--budget {} is more than is left under task {} ({})",
+                budget::label(want),
+                parent.slug,
+                budget::label(left)
+            );
+        }
+        return Ok(Some(want));
+    }
+    if kind != TaskKind::Manager && parent.kind != TaskKind::Manager {
+        return Ok(None);
+    }
+    let cut = |want: Option<i64>, left: Option<i64>| match (want, left) {
+        (Some(want), Some(left)) => Some(want.min(left)),
+        (want, _) => want,
+    };
+    let given = Limits {
+        secs: cut(policy.default_budget.secs, left.secs),
+        turns: cut(policy.default_budget.turns, left.turns),
+    };
+    if given.secs == Some(0) || given.turns == Some(0) {
+        bail!("nothing is left of the budget under task {}", parent.slug);
+    }
+    Ok((given != Limits::default()).then_some(given))
+}
+
+/// Make the task [`plan_child`] planned, with `project`'s files: its
+/// directory, then its row, grant, budget and brief in one transaction
+/// that refuses should the parent have been archived or filled up since;
+/// the directory goes again if that fails. The held capabilities its grant
+/// names are logged, and announced, once it is made
+/// ([`permissions::record_held`]). Returns notes as [`make_task`] does.
+pub fn commit_child(
+    app: &App,
+    caller: &Caller,
+    plan: &NewNode,
+    project: Option<&Project>,
+) -> Result<(TaskRecord, Vec<String>)> {
+    let task = TaskRecord {
+        project: project.map(|p| p.name.clone()),
+        ..plan.record.clone()
+    };
+    let budget = plan.budget.map(|b| (b.secs, b.turns));
+    let mut notes = write_task(app, &task, project, || {
+        app.db.insert_child(
+            &task,
+            &plan.grant.caps,
+            budget,
+            plan.brief.as_ref(),
+            plan.fan_out,
+        )
+    })?;
+    if let Err(e) = permissions::record_held(app, caller, &task, &plan.grant.held) {
+        notes.push(format!(
+            "could not log the held capabilities granted to task {}: {e:#}",
+            task.slug
+        ));
+    }
+    Ok((task, notes))
 }
 
 /// The marker, the project's files and the jeet skill. Returns notes on
@@ -641,19 +883,33 @@ pub struct ReviewCheckout {
 /// brought up to date with the PR when clean. A task made here for a PR
 /// that cannot be checked out is undone — it holds nothing yet.
 ///
-/// A task made here reports to `parent_id`; one found is never moved.
+/// A task made here for `by` reports to its default parent (the assistant,
+/// for the assistant); one found is never moved.
 pub fn review_task(
     app: &App,
     repo: &RepoRecord,
     pr: &crate::github::PullRequest,
-    parent_id: Option<&str>,
+    by: Option<&Caller>,
 ) -> Result<ReviewCheckout> {
     let mut warnings = Vec::new();
     let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
         Some(task) => (task, false),
         None => {
             let name = review_task_name(repo, pr.number);
-            let (task, notes) = make_task(app, &name, None, TaskKind::Review, parent_id)?;
+            let (task, notes) = match by {
+                Some(by) => {
+                    let plan = plan_child(
+                        app,
+                        by,
+                        TaskKind::Review,
+                        &name,
+                        &Delegation::default(),
+                        None,
+                    )?;
+                    commit_child(app, by, &plan, None)?
+                }
+                None => make_task(app, &name, None, TaskKind::Review)?,
+            };
             warnings.extend(notes);
             (task, true)
         }
@@ -1624,9 +1880,15 @@ fn fan_out_of_parent(app: &App, task: &TaskRecord) -> Result<Option<u32>> {
         return Ok(None);
     };
     // A parent that is gone is refused by the check that follows.
-    let Some(parent) = app.db.get_task(parent_id)? else {
-        return Ok(None);
-    };
+    match app.db.get_task(parent_id)? {
+        Some(parent) => fan_out_of(app, &parent),
+        None => Ok(None),
+    }
+}
+
+/// How many active tasks `parent` may hold: its own `max_children`, else,
+/// for a manager, `[managers] max_children`. The assistant has no limit.
+fn fan_out_of(app: &App, parent: &TaskRecord) -> Result<Option<u32>> {
     match parent.kind {
         TaskKind::Assistant => Ok(None),
         TaskKind::Manager => match parent.max_children {
@@ -2224,13 +2486,13 @@ mod tests {
         );
     }
 
-    /// A child made the phase-1 way gets the `worktree.add` row that v6
-    /// gave the children before it; a top-level task gets none.
+    /// A child gets `[managers] worker_default`, the `worktree.add` row
+    /// that v6 gave the children before it, and its brief names who made
+    /// it; a top-level task gets neither.
     #[test]
     fn a_new_child_is_granted_what_the_backfill_gave_the_rest() {
         let (_dir, app, _trunk) = manager_lab();
-        let assistant = app.db.get_task("m-id").unwrap().unwrap().parent_id;
-        let make = |name: &str, parent_id: Option<&str>| {
+        let make = |name: &str, child: Option<(&Caller, &NewNode)>| {
             create(
                 &app,
                 &NewTask {
@@ -2238,16 +2500,212 @@ mod tests {
                     project: None,
                     repos: &[],
                     branch: None,
-                    parent_id,
+                    child,
                 },
             )
             .unwrap()
             .task
         };
-        let child = make("kid", assistant.as_deref());
+        let d = Delegation {
+            parent: Some("assistant".into()),
+            goal: Some("fix it".into()),
+            ..Default::default()
+        };
+        let plan = plan_child(&app, &Caller::User, TaskKind::Work, "kid", &d, None).unwrap();
+        let child = make("kid", Some((&Caller::User, &plan)));
         assert_eq!(app.db.grants(&child.id).unwrap(), vec!["worktree.add"]);
+        assert_eq!(
+            app.db.get_brief(&child.id).unwrap().unwrap().created_by,
+            "user"
+        );
+        assert!(app.db.budget(&child.id).unwrap().is_none());
         let top = make("top", None);
         assert!(app.db.grants(&top.id).unwrap().is_empty());
+    }
+
+    /// Insert `slug` of `kind` under `parent`, with its directory.
+    fn insert(app: &App, slug: &str, kind: TaskKind, parent: &str) -> TaskRecord {
+        let task = TaskRecord {
+            id: format!("{slug}-id"),
+            slug: slug.into(),
+            name: slug.into(),
+            project: None,
+            kind,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: Some(parent.into()),
+            placement: crate::placement::for_new(),
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        app.db.insert_task(&task).unwrap();
+        std::fs::create_dir_all(task_dir(app, &task)).unwrap();
+        task
+    }
+
+    fn under(parent: &str) -> Delegation {
+        Delegation {
+            parent: Some(parent.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Each check `plan_child` makes refuses on its own, in the order M2
+    /// gives, and a refusal writes nothing.
+    #[test]
+    fn plan_child_refuses_each_thing_in_order_and_writes_nothing() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        app.config.assistant.allow = vec!["task.create".into(), "worktree.add".into()];
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        app.db.set_grants(&m.id, &["task.create"]).unwrap();
+        let m2 = insert(&app, "m2", TaskKind::Manager, &m.id);
+        let m3 = insert(&app, "m3", TaskKind::Manager, &m2.id);
+        let gone = insert(&app, "gone", TaskKind::Manager, &m.id);
+        app.db
+            .set_task_state(&gone.id, TaskState::Archived)
+            .unwrap();
+        let rows = || app.db.list_tasks(None).unwrap().len();
+        let dirs = || std::fs::read_dir(app.tasks_root()).unwrap().count();
+        let (before, before_dirs) = (rows(), dirs());
+        let user = Caller::User;
+        let as_m2 = Caller::Node(m2.clone());
+        let refused = |by: &Caller, kind, d: &Delegation, says: &str| {
+            let err = plan_child(&app, by, kind, "x", d, None).unwrap_err();
+            assert!(format!("{err:#}").contains(says), "{says}: {err:#}");
+        };
+
+        // Outside the caller's subtree: its parent's sibling is not found.
+        refused(&as_m2, TaskKind::Work, &under("w"), "--parent:");
+        // Below it, but no manager.
+        let w3 = insert(&app, "w3", TaskKind::Work, &m3.id);
+        refused(&as_m2, TaskKind::Work, &under("w3"), "only a manager");
+        refused(&user, TaskKind::Work, &under("gone"), "archived");
+        refused(&user, TaskKind::Work, &under("w"), "not a manager");
+        // Depth: a worker sits at most 3 below the assistant, a manager 2.
+        refused(&user, TaskKind::Work, &under("m3"), "4 levels below");
+        refused(&user, TaskKind::Manager, &under("m2"), "3 levels below");
+        plan_child(&app, &user, TaskKind::Work, "x", &under("m2"), None).unwrap();
+        // Fan-out: m holds m2 and four more, then a sixth is too many.
+        for n in 0..4 {
+            insert(&app, &format!("k{n}"), TaskKind::Work, &m.id);
+        }
+        plan_child(&app, &user, TaskKind::Work, "x", &under("m"), None).unwrap();
+        insert(&app, "k4", TaskKind::Work, &m.id);
+        refused(&user, TaskKind::Work, &under("m"), "its limit of 6");
+        app.db.set_task_state("k4-id", TaskState::Archived).unwrap();
+        // The grant: within m's list.
+        let allow = |caps: &[&str]| Delegation {
+            allow: Some(caps.iter().map(|c| c.to_string()).collect()),
+            ..under("m")
+        };
+        refused(&user, TaskKind::Work, &allow(&["task.send"]), "`task.send`");
+        let plan = plan_child(
+            &app,
+            &user,
+            TaskKind::Work,
+            "x",
+            &allow(&["task.create"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.grant.caps, ["task.create"]);
+        // The budget: m has 30 minutes left of its hour.
+        app.db.set_budget_max(&m.id, Some(3600), None).unwrap();
+        app.db.charge(&m.id, 1800, 0).unwrap();
+        let budget = |b: &str| Delegation {
+            budget: vec![crate::manager::budget::parse_part(b).unwrap()],
+            ..under("m")
+        };
+        refused(&user, TaskKind::Work, &budget("1h"), "more than is left");
+        let plan = plan_child(&app, &user, TaskKind::Work, "x", &budget("30m"), None).unwrap();
+        assert_eq!(plan.budget.unwrap().secs, Some(1800));
+        // Unasked, a manager's child gets `default_budget`, cut to what is left.
+        let plan = plan_child(&app, &user, TaskKind::Work, "x", &under("m"), None).unwrap();
+        assert_eq!(plan.budget.unwrap().secs, Some(1800));
+        app.db.charge(&w3.id, 1800, 0).unwrap();
+        refused(&user, TaskKind::Work, &under("m"), "nothing is left");
+
+        assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
+    }
+
+    /// Last of the checks: a manager needs a harness with hooks and the
+    /// rest (M36); a worker does without.
+    #[test]
+    fn plan_child_refuses_a_manager_on_a_harness_without_hooks() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        app.config.agent = Some("aider".into());
+        let d = under("assistant");
+        let err = plan_child(&app, &Caller::User, TaskKind::Manager, "x", &d, None).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("hook events"), "{err}");
+        assert!(err.contains("deny rules"), "{err}");
+        plan_child(&app, &Caller::User, TaskKind::Work, "x", &d, None).unwrap();
+    }
+
+    /// The parent defaults to the assistant for the assistant, and to
+    /// itself for a manager; `created_by` is whoever made it.
+    #[test]
+    fn a_child_reports_to_its_makers_default_and_names_it() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        app.config.assistant.allow = vec!["task.create".into()];
+        let root = crate::manager::root(&app).unwrap();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        let goal = Delegation {
+            goal: Some("g".into()),
+            ..Default::default()
+        };
+        let plan = plan_child(&app, &Caller::Root, TaskKind::Work, "a", &goal, None).unwrap();
+        assert_eq!(plan.record.parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(plan.brief.unwrap().created_by, root.id);
+        let plan = plan_child(
+            &app,
+            &Caller::Node(m.clone()),
+            TaskKind::Work,
+            "b",
+            &goal,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.record.parent_id.as_deref(), Some("m-id"));
+        assert_eq!(plan.brief.unwrap().created_by, "m-id");
+        // A worker makes nothing; the user's task without --parent is not
+        // planned at all.
+        let w = app.db.get_task("w-id").unwrap().unwrap();
+        let err = plan_child(&app, &Caller::Node(w), TaskKind::Work, "c", &goal, None).unwrap_err();
+        assert!(err.to_string().contains("cannot make tasks"), "{err:#}");
+        let err = plan_child(
+            &app,
+            &Caller::User,
+            TaskKind::Work,
+            "c",
+            &Delegation::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--parent"), "{err:#}");
+    }
+
+    /// The parent archived between plan and commit: the row is refused and
+    /// the directory made for it goes again.
+    #[test]
+    fn commit_child_rechecks_the_parent_and_cleans_up() {
+        let (_dir, app, _trunk) = manager_lab();
+        let plan = plan_child(
+            &app,
+            &Caller::User,
+            TaskKind::Work,
+            "late",
+            &under("m"),
+            None,
+        )
+        .unwrap();
+        app.db.set_task_state("m-id", TaskState::Archived).unwrap();
+        let err = commit_child(&app, &Caller::User, &plan, None).unwrap_err();
+        assert!(err.to_string().contains("archived"), "{err:#}");
+        assert!(!task_dir(&app, &plan.record).exists());
+        assert!(app.db.get_task(&plan.record.id).unwrap().is_none());
     }
 
     /// `tasks::archive` and `tasks::delete` refuse a parent before touching

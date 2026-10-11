@@ -31,11 +31,13 @@ pub fn run(
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
     // What the assistant checks out reports to it, like a task it makes.
-    let parent = match permissions::caller(app)? {
+    let caller = permissions::caller(app)?;
+    let parent = match caller {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User | Caller::Node(_) => None,
     };
-    let review = tasks::review_task(app, &repo, &pr, parent.as_deref())?;
+    let by = parent.as_ref().map(|_| &caller);
+    let review = tasks::review_task(app, &repo, &pr, by)?;
     // Only now: a sync started before the checkout would be fetching this
     // repo just as `gh pr checkout` does. The checkout waits out one already
     // running, but there is no need to start one in its way.

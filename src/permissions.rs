@@ -245,6 +245,22 @@ pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
 }
 
+/// A capability on the command line (`--allow`, `manager grant`): one jeet
+/// knows, so a typo fails before anything is made.
+pub fn parse_capability(s: &str) -> Result<String, String> {
+    match capability(s.trim()) {
+        Some(c) => Ok(c.name.to_string()),
+        None => Err(format!(
+            "{s:?} is not a capability; jeet knows {}",
+            CAPABILITIES
+                .iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Whether this jeet says it runs for the assistant: a hint, which
 /// [`identity`] checks.
 ///
@@ -391,8 +407,6 @@ pub fn default_grant(kind: TaskKind, policy: &ManagerPolicy) -> Result<Vec<&'sta
 /// asks for (`requested`), else the kind's default. Each name it asks for
 /// must be a capability `parent` holds, and, for a task with a parent
 /// asking, one it holds itself. Changes nothing.
-// Read by `task new --allow` and `manager grant`, which land next.
-#[allow(dead_code)]
 pub fn check_grant(
     app: &App,
     by: &Caller,
@@ -452,8 +466,6 @@ pub fn check_grant(
 /// granter's `actions.log` with a notification (whatever `[assistant]
 /// notify` says), or, for the user, in the assistant's log marked
 /// `by user`, without one.
-// Called once a grant is made, by the commands that land next.
-#[allow(dead_code)]
 pub fn record_held(app: &App, by: &Caller, target: &TaskRecord, held: &[&str]) -> Result<()> {
     record_held_with(app, by, target, held, &|n: &Notification| notify::notify(n))
 }
@@ -1070,6 +1082,14 @@ pub fn resolve_target(app: &App, target: &Target) -> Result<(Caller, TaskRecord)
     Ok((caller, task))
 }
 
+/// The task a command runs `verb` on, found and checked as [`authorize`]
+/// found and checked it: by [`resolve_target`], then [`in_scope`].
+pub fn scoped_target(app: &App, verb: Verb, target: Target) -> Result<TaskRecord> {
+    let (caller, task) = resolve_target(app, &target)?;
+    in_scope(app, &caller, verb, &task)?;
+    Ok(task)
+}
+
 /// A command that names a task, by what a task with a parent may name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -1221,7 +1241,10 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
                 },
             ),
             TaskCommands::Resync { name, .. } => verb(Verb::TaskResync, key(name)),
-            TaskCommands::New { parent, .. } => verb(Verb::TaskNew, Target::Parent(parent.clone())),
+            TaskCommands::New { delegation, .. } => verb(
+                Verb::TaskNew,
+                Target::Parent(delegation.parent.clone()),
+            ),
         },
         Commands::Manager { command } => match command {
             ManagerCommands::Ls { .. } => Some(Scope::Listed),

@@ -1228,6 +1228,32 @@ Managers run locally in tmux, as the user, like any other task (I22).
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
+- **P11** Making a child (§3, 5.1) is planned, then made: the plan checks,
+  writing nothing, the parent (`assistant` or an exact name, within a
+  node's subtree), that the caller may make tasks under it, that it is
+  active and the assistant or a manager, the depth (a worker at most
+  `max_depth` below the assistant, a manager one less), the fan-out (the
+  assistant has none), the grant, the budget and, for a manager, the
+  harness. Making it writes the row, grant, budget and brief in one
+  transaction that refuses a parent archived or filled meanwhile. The
+  parent defaults to the assistant for the assistant and to itself for a
+  manager; the user's task has none unless given. A brief names who made
+  the task, not its parent. `--budget` must fit what is left under the
+  parent and every ancestor; `[managers] default_budget`, given to a
+  manager and to a manager's child when unasked, is cut to what is left
+  rather than refused. A worker of the assistant's gets no budget unless
+  asked. Every command naming a task finds it as the permission check did,
+  then checks its reach again.
+- **P12** A manager needs a harness with hook events, continue-turn
+  output, `interrupt_keys` and deny rules (§7), and is refused, naming what
+  is missing, on one without; a worker starts with a warning, as before.
+  There is no `--harness` flag: the configured harness is checked.
+- **P13** `jeet manager ls [--json]` is the tree (a flat list with each
+  task's parent and depth), in place of `manager tree --json`. `jeet
+  manager show` lists, as open, the children's last reports that are
+  `blocked` or `question`. `jeet manager grant` warns of each running task
+  below that lost a capability with commands outside jeet: jeet refuses it
+  at once, but its harness deny rules change only when it next starts.
 
 ## 11. Placement
 

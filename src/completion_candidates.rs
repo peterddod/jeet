@@ -1,6 +1,7 @@
 use clap_complete::CompletionCandidate;
 
 use crate::context::App;
+use crate::db::tasks::{TaskKind, TaskRecord};
 
 pub fn repo_filter_candidates() -> Vec<CompletionCandidate> {
     repo_filters()
@@ -26,6 +27,40 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
     tasks
         .into_iter()
         .map(|t| CompletionCandidate::new(t.slug))
+        .collect()
+}
+
+/// Tasks under the assistant, for the `jeet manager` verbs.
+pub fn manager_candidates() -> Vec<CompletionCandidate> {
+    tree_candidates(|_| true)
+}
+
+/// What `--parent` takes: `assistant`, and the managers under it.
+pub fn parent_candidates() -> Vec<CompletionCandidate> {
+    let mut out = vec![CompletionCandidate::new(crate::assistant::SLUG)];
+    out.extend(tree_candidates(|t| t.kind == TaskKind::Manager));
+    out
+}
+
+/// The tasks under the assistant that `keep` keeps.
+fn tree_candidates(keep: impl Fn(&TaskRecord) -> bool) -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    let Ok(tasks) = app.db.list_tasks(None) else {
+        return Vec::new();
+    };
+    tasks
+        .into_iter()
+        .filter(|t| t.parent_id.is_some() && t.kind != TaskKind::Assistant && keep(t))
+        .map(|t| CompletionCandidate::new(t.slug))
+        .collect()
+}
+
+pub fn capability_candidates() -> Vec<CompletionCandidate> {
+    crate::permissions::CAPABILITIES
+        .iter()
+        .map(|c| CompletionCandidate::new(c.name).help(Some(c.about.into())))
         .collect()
 }
 

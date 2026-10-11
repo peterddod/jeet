@@ -15,6 +15,7 @@ use crate::commands::task::standing_in;
 use crate::context::App;
 use crate::db::tasks::TaskState;
 use crate::git;
+use crate::permissions::{self, Target, Verb};
 use crate::tasks;
 use crate::worktrees::{self, WorktreeEntry, WorktreeKind};
 
@@ -25,7 +26,11 @@ pub fn add(
     branch: Option<&str>,
     name: Option<&str>,
 ) -> Result<()> {
-    let task = tasks::current(app, task)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::WorktreeAdd,
+        Target::Current(task.map(str::to_string)),
+    )?;
     let added = tasks::add_worktree(app, &task, repo, branch, name)?;
     for warning in &added.warnings {
         eprintln!("jeet: {warning}");
@@ -46,7 +51,11 @@ pub fn add(
 }
 
 pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
-    let task = tasks::current(app, task)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::WorktreeLs,
+        Target::Current(task.map(str::to_string)),
+    )?;
     if task.state == TaskState::Active {
         match tasks::reconcile(app) {
             Ok(warnings) => {
@@ -142,7 +151,11 @@ pub fn rm(app: &App, task: Option<&str>, name: &str, force: bool) -> Result<()> 
 }
 
 pub fn path(app: &App, task: Option<&str>, name: &str) -> Result<()> {
-    let task = tasks::current(app, task)?;
+    let task = permissions::scoped_target(
+        app,
+        Verb::WorktreePath,
+        Target::Current(task.map(str::to_string)),
+    )?;
     if app.db.get_task_worktree(&task.id, name)?.is_none() {
         bail!(
             "task {} has no worktree named {name}; `jeet worktree ls` lists them",

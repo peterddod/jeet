@@ -7572,6 +7572,279 @@ fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
     assert_eq!(lab.reports_of(&x).len(), 1);
 }
 
+impl StoreLab {
+    /// What task `id`'s grant names, as the index has it.
+    fn grants_of(&self, id: &str) -> Vec<String> {
+        let index = self.index();
+        let mut stmt = index
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1 ORDER BY capability")
+            .unwrap();
+        let rows = stmt.query_map([id], |r| r.get(0)).unwrap();
+        rows.collect::<Result<_, _>>().unwrap()
+    }
+
+    /// Task `id`'s budget limits: (seconds, turns), if it has a row.
+    fn budget_of(&self, id: &str) -> Option<(Option<i64>, Option<i64>)> {
+        self.index()
+            .query_row(
+                "SELECT max_secs, max_turns FROM task_budgets WHERE task_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\", \
+         \"manager.grant\", \"pr.merge\"]\n",
+    )
+    .unwrap();
+    let parent = ["--parent", "assistant"];
+
+    // Refused by name, before anything is made: a capability the assistant
+    // lacks, one jeet does not know, a cost budget, a worker as parent.
+    for (args, says) in [
+        (&["--allow", "worktree.add,task.send"][..], "`task.send`"),
+        (&["--allow", "bogus"], "\"bogus\" is not a capability"),
+        (&["--budget", "$5"], "#26"),
+        (&["--budget", "1h,30m"], "time twice"),
+    ] {
+        let mut full = vec!["task", "new", "w"];
+        full.extend_from_slice(&parent);
+        full.extend_from_slice(args);
+        let output = lab.jeet_at(&full, &lab.home(), &[]);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            stderr_of(&output).contains(says),
+            "{args:?}: {}",
+            stderr_of(&output)
+        );
+        assert!(!lab.home().join("tasks/w").exists(), "{args:?}");
+    }
+    let output = lab.jeet_at(
+        &["task", "new", "w", "--allow", "worktree.add"],
+        &lab.home(),
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(stderr_of(&output).contains("for a task with a parent"));
+
+    let w = lab.new_task_with(
+        "w",
+        &[
+            "--parent",
+            "assistant",
+            "--allow",
+            "worktree.add,task.create",
+            "--budget",
+            "1h,20turns",
+        ],
+    );
+    assert_eq!(lab.grants_of(&w), ["task.create", "worktree.add"]);
+    assert_eq!(lab.budget_of(&w), Some((Some(3600), Some(20))));
+    // Unasked, a worker of the assistant's gets `worker_default` and no
+    // budget (M20).
+    let v = lab.new_task_with("v", &parent);
+    assert_eq!(lab.grants_of(&v), ["worktree.add"]);
+    assert_eq!(lab.budget_of(&v), None);
+    let output = lab.jeet_at(&["task", "new", "x", "--parent", "w"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("not a manager"),
+        "{}",
+        stderr_of(&output)
+    );
+    lab.new_task_with("top", &[]);
+
+    // The user's held grant is logged as theirs, and not announced.
+    let output = lab.jeet_at(&["manager", "grant", "w", "pr.merge"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(lab.grants_of(&w), ["pr.merge"]);
+    let log = actions(&lab.home());
+    assert!(
+        log.iter()
+            .any(|a| a["action"] == "granted held `pr.merge` to task w by user"),
+        "{log:?}"
+    );
+    assert!(notes(&notifier).is_empty(), "{:?}", notes(&notifier));
+    let output = lab.jeet_at(&["manager", "grant", "w", "--none"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(lab.grants_of(&w).is_empty());
+    let output = lab.jeet_at(&["manager", "grant", "top", "pr.merge"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("has no parent"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    // The assistant's is logged in its own name and announced.
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(&["manager", "grant", "w", "pr.merge"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(lab.grants_of(&w), ["pr.merge"]);
+    assert!(
+        actions(&lab.home())
+            .iter()
+            .any(|a| a["action"] == "granted held `pr.merge` to task w"),
+        "{:?}",
+        actions(&lab.home())
+    );
+    assert!(
+        notes(&notifier)
+            .iter()
+            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task w|")),
+        "{:?}",
+        notes(&notifier)
+    );
+    // What the assistant makes is its, and names it.
+    let output = root.jeet(&["task", "new", "r", "--goal", "g"], &lab.home(), &[]);
+    succeeded(&output);
+    let r = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&r), Some(lab.assistant_id()));
+    let by: String = lab
+        .index()
+        .query_row(
+            "SELECT created_by FROM task_briefs WHERE task_id = ?1",
+            [&r],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(by, lab.assistant_id());
+
+    let output = lab.jeet_at(&["manager", "show", "w", "--json"], &lab.home(), &[]);
+    succeeded(&output);
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["path"], "assistant/w");
+    assert_eq!(shown["effective"], serde_json::json!(["pr.merge"]));
+    let output = lab.jeet_at(&["manager", "ls", "--json"], &lab.home(), &[]);
+    succeeded(&output);
+    let listed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let slugs: Vec<&str> = listed.iter().map(|r| r["task"].as_str().unwrap()).collect();
+    assert_eq!(slugs, ["r", "v", "w"]);
+}
+
+/// A manager (made by hand here: `jeet manager new` comes later) makes
+/// tasks under itself only, within its own grant and budget, and reaches
+/// only its subtree.
+#[cfg(unix)]
+#[test]
+fn a_manager_makes_and_reaches_only_its_own_subtree() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\", \
+         \"manager.grant\"]\n",
+    )
+    .unwrap();
+    let api = lab.new_task_with("api", &["--parent", "assistant"]);
+    lab.new_task_with("sib", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&api])
+        .unwrap();
+    index
+        .execute("DELETE FROM task_grants WHERE task_id = ?1", [&api])
+        .unwrap();
+    for cap in ["task.create", "task.send", "manager.grant"] {
+        index
+            .execute(
+                "INSERT INTO task_grants (task_id, capability) VALUES (?1, ?2)",
+                [&api, cap],
+            )
+            .unwrap();
+    }
+    index
+        .execute(
+            "INSERT INTO task_budgets (task_id, max_secs) VALUES (?1, 3600)",
+            [&api],
+        )
+        .unwrap();
+    let api_dir = lab.home().join("tasks/api");
+    let mut mp = lab.task_pane("api");
+
+    // Under itself by default, with `worker_default` and the budget left.
+    let output = mp.jeet(&["task", "new", "w", "--goal", "g"], &api_dir, &[]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("reports to task api"),
+        "{}",
+        stderr_of(&output)
+    );
+    let w = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&w), Some(api.clone()));
+    assert_eq!(lab.grants_of(&w), ["worktree.add"]);
+    assert_eq!(lab.budget_of(&w), Some((Some(3600), None)));
+    let by: String = index
+        .query_row(
+            "SELECT created_by FROM task_briefs WHERE task_id = ?1",
+            [&w],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(by, api);
+
+    for (args, says) in [
+        (
+            &["task", "new", "x", "--parent", "sib"][..],
+            "may not run `jeet task new` on \"sib\"",
+        ),
+        (
+            &["task", "new", "x", "--parent", "assistant"],
+            "may not run `jeet task new` on \"assistant\"",
+        ),
+        (&["task", "new", "x", "--parent", "w"], "only a manager"),
+        // Cut by the assistant's list above it.
+        (&["task", "new", "x", "--allow", "task.send"], "`task.send`"),
+        (&["task", "new", "x", "--budget", "2h"], "more than is left"),
+        (&["task", "send", "sib", "hi"], "never message each other"),
+        (&["task", "last", "sib"], "jeet task last"),
+        (&["task", "archive", "sib", "--force"], "jeet task archive"),
+        (&["manager", "show", "sib"], "jeet manager show"),
+        (
+            &["manager", "grant", "sib", "worktree.add"],
+            "jeet manager grant",
+        ),
+        (&["manager", "grant", "w", "task.send"], "`task.send`"),
+    ] {
+        let output = mp.jeet(args, &api_dir, &[]);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(says), "{args:?}: {stderr}");
+    }
+    assert!(!lab.home().join("tasks/x").exists());
+
+    succeeded(&mp.jeet(&["manager", "grant", "w", "task.create"], &api_dir, &[]));
+    assert_eq!(lab.grants_of(&w), ["task.create"]);
+    let output = mp.jeet(&["task", "ls"], &api_dir, &[]);
+    succeeded(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut listed: Vec<&str> = stdout
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["api", "w"], "{stdout}");
+    let output = mp.jeet(&["manager", "ls", "--json"], &api_dir, &[]);
+    succeeded(&output);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let slugs: Vec<&str> = rows.iter().map(|r| r["task"].as_str().unwrap()).collect();
+    assert_eq!(slugs, ["api", "w"]);
+    let output = mp.jeet(&["manager", "show", "w", "--json"], &api_dir, &[]);
+    succeeded(&output);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_root_worker_reaches_only_itself_reads_included() {

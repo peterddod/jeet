@@ -3,11 +3,13 @@
 //! is `+` or `=` before them (`+1h`, `=2h,40turns`). Cost budgets wait on
 //! #26.
 
-// Parsed for `[managers] default_budget` now; `--budget` and `manager
-// budget` are the callers still to come.
+// `manager budget`, which changes a budget, is the caller still to come.
 #![allow(dead_code)]
 
 use anyhow::{bail, Result};
+
+use crate::context::App;
+use crate::db::tasks::TaskRecord;
 
 /// A node's caps; `None` is no cap on that unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -100,6 +102,54 @@ pub fn parse_change(s: &str) -> Result<Change, String> {
     Err(format!(
         "{s}: start a change with + to raise the budget (+1h) or = to set it (=2h)"
     ))
+}
+
+/// `limits` as `--budget` takes them: `2h,40turns`; `none` for no cap.
+pub fn label(limits: Limits) -> String {
+    let mut parts = Vec::new();
+    if let Some(secs) = limits.secs {
+        parts.push(match secs {
+            s if s % 3600 == 0 => format!("{}h", s / 3600),
+            s if s % 60 == 0 => format!("{}m", s / 60),
+            s => format!("{s}s"),
+        });
+    }
+    if let Some(turns) = limits.turns {
+        parts.push(format!("{turns}turns"));
+    }
+    match parts.is_empty() {
+        true => "none".into(),
+        false => parts.join(","),
+    }
+}
+
+/// What is left to spend under `under` (M19): for each unit, the least,
+/// over it and each ancestor with a limit, of that limit less what its
+/// subtree has used, never below 0. `None` where nothing above limits that
+/// unit; the assistant has no budget of its own.
+pub fn remaining(app: &App, under: &TaskRecord) -> Result<Limits> {
+    let mut left = Limits::default();
+    let mut chain = vec![under.clone()];
+    chain.extend(app.db.ancestors(&under.id)?);
+    for node in chain {
+        let Some(row) = app.db.budget(&node.id)? else {
+            continue;
+        };
+        if row.max_secs.is_none() && row.max_turns.is_none() {
+            continue;
+        }
+        let (secs, turns) = app.db.subtree_used(&node.id)?;
+        left.secs = least(left.secs, row.max_secs.map(|max| (max - secs).max(0)));
+        left.turns = least(left.turns, row.max_turns.map(|max| (max - turns).max(0)));
+    }
+    Ok(left)
+}
+
+fn least(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 #[cfg(test)]
