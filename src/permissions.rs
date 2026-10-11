@@ -1565,7 +1565,7 @@ mod tests {
             assert!(!denied(command), "denied: {command}");
         }
         // Gaps an anchored pattern leaves, pinned so a change is noticed.
-        // Branch protection, and #33's sandbox, are the real control.
+        // Branch protection, and a boundary placement, are the real control.
         const KNOWN_GAPS: &[&str] = &[
             "git -C . push -f",
             "git -c a=b push --force",

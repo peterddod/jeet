@@ -24,7 +24,7 @@ jeet does without that feature:
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
-| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (#33 adds `Sandbox`) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
+| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for the `local-sandbox` placement) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
 | `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
@@ -204,7 +204,8 @@ The rules are a snapshot taken at launch: a repo indexed later, or a
 capability granted later, takes effect the next time the agent starts. The
 real control on a default branch is GitHub branch protection or a ruleset;
 set one. A hard boundary (writes confined to the task's directory, no
-`tmux` or `sqlite3`) is the harness sandbox in #33.
+`tmux` or `sqlite3`) is a placement with a boundary: a cloud or local
+sandbox, designed but not built ([agent-hierarchy.md §11](design/agent-hierarchy.md#11-placement)).
 
 `permissions.rs` has a table of commands that must and must not be denied,
 checked against a model of Claude Code's matching (`claude_match`), and a

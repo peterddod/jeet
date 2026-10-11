@@ -640,7 +640,7 @@ missing piece named. Workers keep #23's degrade-don't-fail rule.
 | add context at session start | yes | no: falls back to `BRIEF.md` + `AGENTS.md` telling it to read it |
 | continue-turn output (to hand the inbox over at Stop) | yes | yes (else reports wait for the idle typing path) |
 | allow rules from capabilities | yes (command prefixes) | yes (else every action prompts the user, which is not autonomous) |
-| **deny rules** | yes (#32): `enforcement() >= Rules`; Claude Code only; a lint, not a gate (#33 is the boundary) | yes for children (5.6) and read-only worktrees (§1) |
+| **deny rules** | yes (#32): `enforcement() >= Rules`; Claude Code only; a lint, not a gate (a boundary placement is the boundary, 5.7) | yes for children (5.6) and read-only worktrees (§1) |
 | **interrupt** a running turn | yes (#32): `interrupt_keys`; Claude Code only (Esc) | yes (pause) |
 | **usage** (tokens/cost) | no, **new** (#26), optional | no; cost budgets wait for it |
 | instructions file | yes (`instructions_file`, #22) | yes (manager role template) |
@@ -1016,8 +1016,13 @@ what this RFC left open, or departed from it:
   it. **Reopen running tasks after upgrading:** older agents are refused for
   `report` and `worktree add`, and old hooks no longer report up.
 - **I10** `jeet review` starts the runner with stdin piped, records its job
-  anchor when the caller is the root, then writes one go byte. `review-job`
-  refuses to run on a terminal, on EOF or on any other byte.
+  anchor when the review task has a parent (the caller is the root), then
+  writes one go byte `g`. If the anchor cannot be recorded, the runner is
+  killed and the job ends with 127. `review-job` refuses to run on a
+  terminal, on EOF or on any other byte ("review-job is started only by
+  `jeet review`"), before `authorize`. Every caller of `review-job` is then
+  held to the reviews-dir check ("review jobs run only from jeet's reviews
+  dir"), and a Node is refused it by `node_only` even with the go byte.
 - **I11** Hooks run `jeet task-hook --task <id> <event>`. `--task` locates
   the task first; a `--task` the index does not know writes nothing and does
   not fall back. Without `--task`, today's env-then-cwd lookup still writes
@@ -1042,13 +1047,46 @@ what this RFC left open, or departed from it:
   where it is used, not at load. `local-sandbox` parses and is refused at
   start as not built.
 - **I17** The env stays the source for self-protection (not killing the
-  session you are in), the `[assistant] notify` opt-out and message sender
-  labels, where a wrong hint cannot widen anything.
+  session you are in) and the `[assistant] notify` opt-out, where a wrong
+  hint cannot widen anything. Message sender labels use the identified
+  task and fall back to the env, then the cwd; they never fail a send.
 - **I18** No `TMUX` or `jeet-` session check: jeet uses the user's default
   tmux server, and an orphan can unset `TMUX`.
 - **I19** v5 is additive; the `tasks` rebuild is v6 (§2).
 - **I20** `libc` is a macOS-only direct dependency, already in the lock
   file as a transitive one.
+- **I21** As built, beyond the decisions above:
+  - The refusals read "jeet can't confirm this is task X's agent: reopen
+    the task (agents started before this jeet must be reopened), or run
+    this outside the agent's tmux session" (or "… this is the assistant:
+    …"), and "this jeet runs under task X's agent (<id>), but
+    $JEET_TASK_ID says it is task Y (<id>); jeet refuses a caller that
+    claims to be another" (or "… $JEET_ASSISTANT says it is the
+    assistant …"). A mismatch is logged as `denied` under the gated
+    capability, or `identity` for a free or interactive command, with the
+    mismatch as the error.
+  - `identify` returns a typed `identity::Refused` (`Mismatch`,
+    `Unconfirmed`) so `authorize` knows which to log.
+  - `notify` and `todo`, which only the root may run, and every gated
+    command open the index and walk the process tree for any caller. Hooks,
+    `task-startup`, `watch --once`, `report` and the other free commands do
+    not.
+  - `tasks::current` (`worktree ls`, `path` and `add` without `--task`)
+    takes the identified task first, then `$JEET_TASK_ID`, then the cwd. An
+    identity error propagates, so these are refused as unconfirmed in a
+    user window inside a parented task's or the assistant's session.
+  - `tmux::new_session` reads `#{pane_id}\t#{pane_pid}` back and fails if
+    tmux reports no pane; a failed record warns "task X's agent cannot be
+    identified (<cause>); its gated jeet commands will be refused until it
+    is reopened". A live session with no live anchor warns "tmux session S
+    was started by an older jeet or outside jeet, so jeet cannot confirm
+    its agent is task X's; stop it and open the task again".
+  - The prune on each insert removes rows of dead processes, rows whose
+    start differs and, on Linux, rows older than the boot time.
+  - The #32 notes' forward references to "#33's sandbox" (E0, E1, E9,
+    E15) are superseded: #33 built no sandbox. The boundary is a
+    placement (§11); `Enforcement::Sandbox`, write denies and a 0600
+    settings file wait for `local-sandbox` or phase 2.
 
 ## 11. Placement
 
@@ -1106,7 +1144,11 @@ Left off the trait, each for a reason:
   already a no-op when there is no session, so a non-local task archives
   and deletes its local state correctly.
 - **`send`**: `messages::Agent` is already the local abstraction. A message
-  to a non-local task finds no pane, routes to Start and is refused there.
+  to a non-local task finds no pane and routes to Start, which refuses it
+  in the foreground. A background send (`JEET_BACKGROUND=1`, which may not
+  start an agent) holds it in the inbox instead (`Delivered::Held`), as for
+  any agent it may not start; nothing ever delivers it until that placement
+  is built.
 - **`activity`, `attach`, `collect`**: no caller until phase 2. With no pane
   and no status files, a non-local task reads as not running.
 

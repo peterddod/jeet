@@ -1139,14 +1139,14 @@ process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
 disagrees is refused and written to `actions.log`, and one that claims a task
 with a parent, or the assistant, with no recorded agent behind it is refused
 as unconfirmed. So a shell you open inside such a task's or the assistant's
-tmux session is refused for commands that need a capability; use one
-outside it. This stops mistakes and casual forging, not an agent that sets
+tmux session is refused for commands that need a capability, and for
+`jeet worktree ls`, `path` and `add` without `--task`; use one outside it. This stops mistakes and casual forging, not an agent that sets
 out to escape: only a placement with a boundary does that, which is why
 managers below the assistant will run behind one (`[managers] placement`,
 `cloud` by default; not built yet).
 
-**Upgrading to this version:** reopen running tasks and assistant windows
-(stop them and `jeet task open` again). Agents started by an older jeet were
+**Upgrading to this version:** reopen running tasks (stop them and `jeet
+task open` again) and assistant windows (close them and `jeet chat`). Agents started by an older jeet were
 never recorded, so their `jeet report` and `jeet worktree add` are refused,
 and their hooks still write status but no longer report to the assistant.
 `jeet task open` on such a task warns instead of adopting it. After
