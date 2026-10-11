@@ -293,6 +293,22 @@ fn launch(
     Ok(())
 }
 
+/// End the review jobs running for task `task_id`: each runner jeet
+/// recorded for it, while it is still that process, with its process group
+/// ([`launch`] gives it one), so the command it runs goes too. Best effort.
+pub fn stop_jobs(app: &App, task_id: &str) -> Result<()> {
+    for anchor in app.db.task_anchors(task_id, AnchorKind::Job)? {
+        if anchor.pid > 1 && identity::live(&anchor) {
+            let _ = Command::new("kill")
+                .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    Ok(())
+}
+
 /// What [`launch`] writes to the runner once it is recorded.
 const GO: &[u8] = b"g";
 

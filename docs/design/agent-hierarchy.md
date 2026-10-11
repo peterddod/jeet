@@ -1011,8 +1011,11 @@ what this RFC left open, or departed from it:
 - **I4** Resolution, nearest anchor first: a job anchor at the process
   itself is that job; an anchor whose task disagrees with `JEET_TASK_ID`,
   or a non-root anchor under `JEET_ASSISTANT`, is a mismatch; an anchor is
-  that task; no anchor but a hint naming a parented task or the root is
-  unconfirmed; anything else is the user.
+  that task; no anchor but a hint naming a parented task, the root or a
+  task the index does not know is unconfirmed; anything else is the user.
+  Deviation: the plan took an unknown task for the user, but a review job
+  outliving its deleted task would then run ungated; `task delete` also
+  ends the task's review job (its runner's process group).
 - **I5** An anchored assistant is Root, an anchored task with a parent is a
   Node, anything else the user. Supersedes D13 and D23: a user shell in a
   parented task's session is refused for gated commands, not gated as the
@@ -1029,7 +1032,9 @@ what this RFC left open, or departed from it:
   dead rows are pruned after it (or before a retry, when a dead row
   holds the same pid and start). If a start time cannot be read, nothing is
   recorded and jeet warns that the agent cannot be identified. Archiving a
-  task deletes its pane anchors; deleting it cascades.
+  task deletes its pane anchors; deleting it cascades. A launch's
+  settings file is kept while a window launched as that session runs,
+  whatever session the window has gone on to (`@jeet_launch`).
 - **I9** No backfill: matching sessions by name is spoofable. A live session
   with no live anchor is not adopted; `task open` warns to stop and reopen
   it. `jeet chat` going back to an assistant window whose pane has no live

@@ -294,6 +294,11 @@ fn paste(pane: &str, text: &str) -> Result<()> {
 /// The window option a window made by [`new_window`] is keyed by.
 const KEY_OPTION: &str = "@jeet_key";
 
+/// The window option holding the key a window made by [`new_window`] was
+/// first given, which [`set_window_key`] never changes: what its program was
+/// launched as, whatever it has gone on to since.
+const LAUNCH_OPTION: &str = "@jeet_launch";
+
 /// One window of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
@@ -302,8 +307,10 @@ pub struct Window {
     pub id: String,
     /// Whether its program is still running.
     pub alive: bool,
-    /// What [`new_window`] keyed it by, if it made it.
+    /// What it is keyed by now, if [`new_window`] made it.
     pub key: Option<String>,
+    /// What [`new_window`] first keyed it by, if it made it.
+    pub launch: Option<String>,
 }
 
 /// The windows of session `name`: none when it is not running.
@@ -314,7 +321,7 @@ pub fn windows(name: &str) -> Vec<Window> {
             "-t",
             &target(name),
             "-F",
-            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}"),
+            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}\t#{{{LAUNCH_OPTION}}}"),
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -338,15 +345,20 @@ fn parse_windows(listing: &str) -> Vec<Window> {
                 return None;
             }
             let alive = fields.next()?.trim() == "0";
-            let key = fields
-                .next()
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(str::to_string);
+            let mut next = || {
+                fields
+                    .next()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string)
+            };
+            let key = next();
+            let launch = next();
             Some(Window {
                 id: id.to_string(),
                 alive,
                 key,
+                launch,
             })
         })
         .collect()
@@ -354,7 +366,7 @@ fn parse_windows(listing: &str) -> Vec<Window> {
 
 /// Start `argv` in a new window of session `name`, making the session if it
 /// is not running, and key the window by `key` so [`windows`] can tell it
-/// apart. `title` is what tmux shows for it. Returns the window's id and
+/// apart (and, for good, note it as what the window was launched as). `title` is what tmux shows for it. Returns the window's id and
 /// its pane.
 /// `argv` is run directly, never through a shell; the session's environment
 /// is kept clean the way [`new_session`]'s is.
@@ -422,7 +434,7 @@ pub fn new_window(
     let Some((id, pane)) = parse_window(line.trim()) else {
         bail!("tmux started a window in session {name} but did not say which ({line:?})");
     };
-    if !set_window_key(&id, key) {
+    if !(set_window_key(&id, key) && set_window_option(&id, LAUNCH_OPTION, key)) {
         let _ = kill_window(&id);
         bail!("tmux could not label its new window in session {name}");
     }
@@ -448,8 +460,12 @@ fn parse_window(line: &str) -> Option<(String, Pane)> {
 /// Key window `id` by `key`, as [`new_window`] does: for a window whose
 /// program has gone on to something else to be known by.
 pub fn set_window_key(id: &str, key: &str) -> bool {
+    set_window_option(id, KEY_OPTION, key)
+}
+
+fn set_window_option(id: &str, option: &str, value: &str) -> bool {
     quiet()
-        .args(["set-option", "-w", "-t", id, KEY_OPTION, key])
+        .args(["set-option", "-w", "-t", id, option, value])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -1007,7 +1023,7 @@ mod tests {
 
     #[test]
     fn windows_are_read_with_their_keys() {
-        let listing = "@1\t0\tabc\n@2\t1\t\n@3\t0\n%junk\t0\tx\n";
+        let listing = "@1\t0\tabc\tabc\n@2\t1\t\t\n@3\t0\n@4\t0\tnew\told\n%junk\t0\tx\n";
         assert_eq!(
             parse_windows(listing),
             [
@@ -1015,16 +1031,25 @@ mod tests {
                     id: "@1".into(),
                     alive: true,
                     key: Some("abc".into()),
+                    launch: Some("abc".into()),
                 },
                 Window {
                     id: "@2".into(),
                     alive: false,
                     key: None,
+                    launch: None,
                 },
                 Window {
                     id: "@3".into(),
                     alive: true,
                     key: None,
+                    launch: None,
+                },
+                Window {
+                    id: "@4".into(),
+                    alive: true,
+                    key: Some("new".into()),
+                    launch: Some("old".into()),
                 },
             ]
         );

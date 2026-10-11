@@ -100,7 +100,10 @@ status) still go out, but it silently never sends the other reports or
 briefs; run hooks as children of the agent. The same holds for the agent's
 shell tool: its `jeet report`, `jeet worktree add` and other gated jeet
 commands are refused ("jeet can't confirm this is task X's agent") unless
-they run under the pane's process. Only what the harness knows (the `clear` reason, say) belongs in its module:
+they run under the pane's process. So a harness that runs shell tools in a
+sandbox with its own process ids, as Claude Code's sandbox does on Linux
+(bubblewrap with a pid namespace), must run `jeet` outside it: Claude Code's
+settings from jeet list `jeet` in `sandbox.excludedCommands`. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 
 ## Deny rules

@@ -432,6 +432,9 @@ fn asks_the_user(input: &HookInput) -> bool {
 /// The `--settings` JSON: a hook per event running `jeet task-hook` for the
 /// task, permission to run the commands `allow` names, as `Bash(…)` rules,
 /// and, when there are any, `Bash(…)` rules denying those `deny` names.
+/// `jeet` runs outside Claude's sandbox, should the user turn it on: jeet
+/// knows its caller by the processes above it, which a sandbox with its own
+/// process ids (bubblewrap's, on Linux) hides, and it is the gate itself.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
@@ -461,6 +464,7 @@ fn settings_json(hooks: &HookSetup) -> String {
     serde_json::json!({
         "hooks": groups,
         "permissions": permissions,
+        "sandbox": { "excludedCommands": ["jeet"] },
     })
     .to_string()
 }
@@ -913,6 +917,11 @@ mod tests {
             serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
         );
         assert!(value["permissions"].get("deny").is_none());
+        // Inside Claude's sandbox jeet could not see the agent's process.
+        assert_eq!(
+            value["sandbox"]["excludedCommands"],
+            serde_json::json!(["jeet"])
+        );
     }
 
     #[test]

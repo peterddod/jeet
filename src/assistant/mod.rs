@@ -339,10 +339,13 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         created_at: now,
         last_activity: now,
     })?;
+    // Settings files are named for the session a window was launched as:
+    // after a `/clear` its key is another, but its Claude still reads that.
     let running: Vec<String> = windows
         .iter()
         .filter(|w| w.alive)
-        .filter_map(|w| w.key.clone())
+        .flat_map(|w| [w.key.clone(), w.launch.clone()])
+        .flatten()
         .collect();
     let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt, &running)?;
     let home = app.home.to_string_lossy();

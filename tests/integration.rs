@@ -885,6 +885,13 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
         .env("JEET_SYNC_INTERVAL_SECS", "0")
         .env("PATH", &path)
         .env("TERM", "xterm-256color")
+        // Not whichever agent or tmux runs these tests.
+        .env_remove("JEET_TASK_ID")
+        .env_remove("JEET_ASSISTANT")
+        .env_remove("JEET_CD_FILE")
+        .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1850,6 +1857,12 @@ pwd"#,
         .env("JEET_HOME", lab.home())
         .env("JEET_SYNC_INTERVAL_SECS", "0")
         .env_remove("JEET_CD_FILE")
+        // Not whichever agent or tmux runs these tests.
+        .env_remove("JEET_TASK_ID")
+        .env_remove("JEET_ASSISTANT")
+        .env("JEET_TMUX", "/nonexistent/jeet-test-tmux")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .output()
         .unwrap();
     let landed = stdout_of(&output).trim().to_string();
@@ -5454,12 +5467,17 @@ case "$1" in
   set-option)
     case "$2" in
       -w) for last in "$@"; do :; done
-          printf '0\t%s' "$last" > "$here/win/${target#@}" ;;
+          case "$5" in
+            @jeet_launch) mkdir -p "$here/launch"
+                          printf '%s' "$last" > "$here/launch/${target#@}" ;;
+            *) printf '0\t%s' "$last" > "$here/win/${target#@}" ;;
+          esac ;;
     esac ;;
   list-windows)
     [ -n "$(windows)" ] || exit 1
     for w in $(windows); do
-      printf '@%s\t%s\n' "$w" "$(cat "$here/win/$w")"
+      printf '@%s\t%s\t%s\n' "$w" "$(cat "$here/win/$w")" \
+        "$(cat "$here/launch/$w" 2>/dev/null)"
     done ;;
   list-panes)
     f="$here/win/${target#@}"
@@ -5991,6 +6009,21 @@ fn the_assistant_starts_each_session_with_a_summary_of_the_work() {
             .to_string()
     };
     assert!(!line(cleared).contains("not running"), "{listing}");
+    // That Claude still runs on the settings it was launched with, under
+    // the session it was launched as: another launch keeps them.
+    let launched = lab
+        .home()
+        .join("run")
+        .join(&id)
+        .join(format!("{triage}.json"));
+    std::fs::File::options()
+        .write(true)
+        .open(&launched)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+        .unwrap();
+    succeeded(&lab.jeet_at(&["chat", "--new", "later"], &lab.home(), &env));
+    assert!(launched.is_file(), "{}", launched.display());
 
     // Cleared outside any window of the assistant's, a session has nothing
     // to say what it follows on from, so the most recent is not guessed.
@@ -7780,6 +7813,52 @@ fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
     let ended: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&orphaned).unwrap()).unwrap();
     assert_eq!(ended["exit_code"], 126, "{ended}");
+}
+
+/// Deleting a review task ends its job, and a command that names the
+/// deleted task is refused, not taken for the user's: with the task's rows
+/// gone, nothing says what it was.
+#[cfg(unix)]
+#[test]
+fn deleting_a_review_task_ends_its_job_and_its_claims() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let started = lab.home().join("started");
+    let ran = lab.home().join("ran");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&ran.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    wait_until("the job to start", || started.exists());
+    succeeded(&lab.jeet_at(
+        &["task", "delete", "review-widget-7", "-f"],
+        &lab.home(),
+        &[],
+    ));
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!ran.exists(), "the job outlived its task");
+
+    let other = lab.new_task("other");
+    let output = lab.jeet_at(
+        &["task", "delete", "other", "-f"],
+        &lab.home(),
+        &[("JEET_TASK_ID", task.as_str())],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("no task jeet knows"), "{stderr}");
+    assert!(other.is_dir());
 }
 
 /// The assistant reviewing a PR whose review task the user made, top

@@ -31,6 +31,7 @@ use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
 use crate::resolve;
+use crate::review;
 use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
@@ -1705,6 +1706,9 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // carry on working in worktrees that are about to go, and its exit hook
     // would write into the task directory as it was being removed.
     runtime::stop(task).context("end the agent's tmux session")?;
+    // Its review job too: with the task's rows gone, its jeet commands
+    // would be refused, and its worktree is about to go.
+    review::stop_jobs(app, &task.id).context("end the task's review job")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));

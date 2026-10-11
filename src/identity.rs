@@ -129,18 +129,19 @@ fn proc_info(_pid: u32) -> Option<ProcInfo> {
 }
 
 /// This process and its ancestors, nearest first, as (pid, start): up to
-/// init, a process that cannot be read, a loop, or [`MAX_DEPTH`].
-fn ancestry() -> Vec<(u32, i64)> {
+/// init, a process that cannot be read, a loop, or [`MAX_DEPTH`]. With it,
+/// the process that could not be read, if that is where it stopped.
+fn ancestry() -> (Vec<(u32, i64)>, Option<u32>) {
     let mut chain: Vec<(u32, i64)> = Vec::new();
     let mut pid = std::process::id();
     while pid > 1 && chain.len() < MAX_DEPTH && !chain.iter().any(|(p, _)| *p == pid) {
         let Some(info) = proc_info(pid) else {
-            break;
+            return (chain, Some(pid));
         };
         chain.push((pid, info.start));
         pid = info.ppid;
     }
-    chain
+    (chain, None)
 }
 
 /// Whether `anchor`'s process is still the one recorded.
@@ -260,7 +261,7 @@ pub struct Identity {
 /// caller's, so none of it goes where the assistant reads.
 pub fn identify(app: &App) -> Result<Identity> {
     let db = &app.db;
-    let chain = ancestry();
+    let (chain, unreadable) = ancestry();
     let pids: Vec<u32> = chain.iter().map(|(pid, _)| *pid).collect();
     let anchors = db.anchors_for(&pids)?;
     let task = |id: &str| db.get_task(id).ok().flatten();
@@ -271,8 +272,9 @@ pub fn identify(app: &App) -> Result<Identity> {
         |id| task(id).is_some_and(|t| t.kind == TaskKind::Assistant),
         |id| match db.get_task(id) {
             Ok(Some(t)) => t.parent_id.is_some() || t.kind == TaskKind::Assistant,
-            Ok(None) => false,
-            Err(_) => true,
+            // An unknown task (deleted, say, under a review job still
+            // running for it) is not taken for the user.
+            Ok(None) | Err(_) => true,
         },
     );
     let label = |id: &str| match task(id) {
@@ -306,18 +308,39 @@ pub fn identify(app: &App) -> Result<Identity> {
             .into());
         }
         Verdict::Unconfirmed(claimed) => {
-            let is_assistant =
-                |id: &String| task(id).is_some_and(|t| t.kind == TaskKind::Assistant);
-            let (who, reopen) = match claimed.filter(|id| !is_assistant(id)) {
-                Some(id) => (format!("{}'s agent", label(&id)), "reopen the task"),
-                None => (
+            let found = claimed.as_deref().map(task);
+            let (who, reopen) = match (claimed, found) {
+                (Some(id), Some(None)) => {
+                    return Err(Refused::Unconfirmed(format!(
+                        "${TASK_ID_ENV} is {id}, which is no task jeet knows (was it deleted?); \
+                         jeet refuses a claim it cannot confirm, so run this outside that \
+                         task's agent"
+                    ))
+                    .into())
+                }
+                (Some(id), Some(Some(t))) if t.kind != TaskKind::Assistant => {
+                    (format!("{}'s agent", label(&id)), "reopen the task")
+                }
+                _ => (
                     "the assistant".to_string(),
                     "exit the assistant in its window and run `jeet chat` again",
                 ),
             };
+            let advice = match unreadable {
+                // A sandbox that hides the processes outside it, say.
+                Some(pid) => format!(
+                    "it cannot read process {pid} above this jeet, so cannot reach the agent's; \
+                     if the agent runs its commands in a sandbox, exclude jeet from it"
+                ),
+                None => format!(
+                    "{reopen} (agents started before this jeet must be restarted), or run this \
+                     outside the agent's tmux session; if the agent runs its commands in a \
+                     sandbox with its own process ids (Claude Code's on Linux), exclude jeet \
+                     from it"
+                ),
+            };
             return Err(Refused::Unconfirmed(format!(
-                "jeet can't confirm this is {who}: {reopen} (agents started before this jeet \
-                 must be restarted), or run this outside the agent's tmux session"
+                "jeet can't confirm this is {who}: {advice}"
             ))
             .into());
         }
@@ -411,16 +434,10 @@ mod tests {
         }
     }
 
-    /// `resolve` where `root` is the assistant, `w` has a parent and `top`
-    /// does not.
+    /// `resolve` where `root` is the assistant, `w` has a parent, `top`
+    /// does not, and any other task is unknown.
     fn verdict(chain: &[(u32, i64)], anchors: &[Anchor], hint: &Hint) -> Verdict {
-        resolve(
-            chain,
-            anchors,
-            hint,
-            |id| id == "root",
-            |id| id == "root" || id == "w",
-        )
+        resolve(chain, anchors, hint, |id| id == "root", |id| id != "top")
     }
 
     fn sleeper() -> std::process::Child {
@@ -433,7 +450,7 @@ mod tests {
 
     #[test]
     fn the_walk_starts_here_and_goes_up() {
-        let chain = ancestry();
+        let (chain, _) = ancestry();
         assert_eq!(chain[0].0, std::process::id());
         assert_eq!(chain[1].0, std::os::unix::process::parent_id());
         assert_eq!(chain[0].1, proc_info(std::process::id()).unwrap().start);
@@ -550,12 +567,16 @@ mod tests {
             verdict(&chain, &none, &hint(Some("top"), true)),
             Verdict::Unconfirmed(None)
         );
-        for task in ["top", "unknown"] {
-            assert_eq!(
-                verdict(&chain, &none, &hint(Some(task), false)),
-                Verdict::Nobody
-            );
-        }
+        assert_eq!(
+            verdict(&chain, &none, &hint(Some("top"), false)),
+            Verdict::Nobody
+        );
+        // A task jeet does not know, deleted under a job still running for
+        // it say, is no claim to take for the user's.
+        assert_eq!(
+            verdict(&chain, &none, &hint(Some("unknown"), false)),
+            Verdict::Unconfirmed(Some("unknown".into()))
+        );
         assert_eq!(verdict(&chain, &none, &hint(None, false)), Verdict::Nobody);
     }
 
