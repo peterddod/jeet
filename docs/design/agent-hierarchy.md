@@ -1305,15 +1305,24 @@ Managers run locally in tmux, as the user, like any other task (I22).
   severe than the state it finds (which stays). `resume` is refused under a held ancestor, while
   the target's own subtree has used its budget, and to a caller ranked
   below the setter: the user, the assistant, a node above the caller, the
-  caller, a node below it, then `budget`. A stop ends every node's session
-  in the subtree, live or not, and forgets its pane. `max_live` counts the
+  caller, a node below it, then `budget`. The resume is written only if
+  the target's run state and setter are still the ones checked
+  (`Database::resume_run_state`), so a pause or stop made meanwhile, by
+  someone who may outrank the caller, stays. It then hands what queued to
+  each live, unheld node below that a delivery would type into (idle, or
+  running with no hooks: `messages::route` is `Type`), and queues the
+  start of each not running with messages waiting, its agent having
+  ended while held, for the drain it runs. A stop ends every node's
+  session in the subtree, live or not, and forgets its pane. `max_live` counts the
   active tasks below the assistant whose `jeet-<slug>` session one `tmux
   list-sessions` lists and whose pane is alive; a session the user's
   `remain-on-exit` keeps after its agent exits does not count. The start gate is a
   blocking lock beside the watch's: a held task is refused before any
   count, and one over the limit is queued, keeping its place. A queued
-  task leaves the queue once a drain has started it, so one that fails to
-  start stays queued, and a drain from a background job with no tmux
+  task leaves the queue once its agent starts, however it was admitted
+  (`ensure_running_admitted` unqueues on `Started::Now`), so one that
+  fails to start stays queued, one the user opened past the gate is not
+  started again by a drain after it ends, and a drain from a background job with no tmux
   server starts nothing. A budget check tells each threshold once, by
   `task_budgets.warned` alone: 80% as a `budget` status report to the
   parent and a note in the task's inbox; 100% pauses the task with the
@@ -1323,7 +1332,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   is left above is refused, not cut.
 - **P17** Every start of a task's agent but the assistant's is admitted by
   `runtime::ensure_running` before `runtime_for` (M22), unless the agent
-  is running already: a live pane is attached to, held or not. A held
+  is running already: a live pane is attached to, held or not, and
+  nothing is started from that path (one gone meanwhile is not restarted
+  unadmitted). A held
   task is refused ("`jeet manager resume <holder>` first") for every
   caller. Over `max_live` a start is queued (`Started::Queued`, the
   prompt handed back) for whoever asked, except the user's `jeet task
@@ -1339,7 +1350,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   start for the resume's drain and succeeds. A drain returns what a start
   warns of rather than print it (the TUI drains too). Unit tests never run tmux: under `cfg(test)`, `tmux::binary`
   names one that does not exist, whatever `$JEET_TMUX` says.
-- **P18** A held task (5.4) is handed nothing. `messages::deliver` asks
+- **P18** A held task (5.4) is handed nothing, and `jeet task-startup`
+  accepts no trust prompt for it (asked before each key), which would let
+  a brief given before the pause run: the prompt is left for the user. `messages::deliver` asks
   `Agent::held` first, under the inbox lock, and queues for a held agent
   whatever it is doing (`Delivered::Paused`), queueing its start
   (`Agent::queue_held_start`) when the message would have started it, so

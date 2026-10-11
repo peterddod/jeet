@@ -8,8 +8,8 @@
 //! agent exits, or [`WATCH_SECS`] pass. On a trust prompt it:
 //!
 //! - accepts it, when `[harness] auto_trust` is on and the task is in scope
-//!   (see [`may_auto_trust`]), one key at a time, looking at the pane before
-//!   each, and checks that a hook then reports;
+//!   (see [`may_auto_trust`]) and not paused or stopped, one key at a time,
+//!   looking at the pane before each, and checks that a hook then reports;
 //! - otherwise marks the task "needs input – trust folder" and tells the
 //!   user with a notification, unless someone is attached to look at it.
 //!
@@ -29,6 +29,7 @@ use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::harness::{Harness, StartupPrompt, TrustStep};
+use crate::manager::run;
 use crate::notify::{self, Notification};
 use crate::reports::{self, StatusEvent};
 use crate::runtime;
@@ -138,13 +139,13 @@ pub enum Outcome {
 
 /// Watch `pane` until `reported` (a hook has said something since the
 /// launch), the agent is gone, or a prompt is found, accepting a trust
-/// prompt when `auto`. What accepting did, and why it gave up if it did,
-/// goes to `log`.
+/// prompt while `auto` says so, asked before each key. What accepting did,
+/// and why it gave up if it did, goes to `log`.
 pub fn watch(
     harness: &dyn Harness,
     pane: &dyn Pane,
     reported: &dyn Fn() -> bool,
-    auto: bool,
+    auto: &dyn Fn() -> bool,
     limits: Limits,
     log: &dyn Fn(&str),
 ) -> Result<Outcome> {
@@ -157,8 +158,8 @@ pub fn watch(
             return Ok(Outcome::Gone);
         }
         if harness.startup_prompt(&pane.capture()?) == Some(StartupPrompt::Trust) {
-            return match auto {
-                true => accept(harness, pane, reported, limits, log),
+            return match auto() {
+                true => accept(harness, pane, reported, auto, limits, log),
                 false => Ok(Outcome::NeedsUser),
             };
         }
@@ -177,6 +178,7 @@ fn accept(
     harness: &dyn Harness,
     pane: &dyn Pane,
     reported: &dyn Fn() -> bool,
+    auto: &dyn Fn() -> bool,
     limits: Limits,
     log: &dyn Fn(&str),
 ) -> Result<Outcome> {
@@ -193,7 +195,15 @@ fn accept(
         }
         Outcome::CouldNotAccept
     };
+    // No longer to accept, a task paused since, say: the user answers.
+    let withdrawn = || -> Result<Outcome> {
+        log("no longer to accept: left for the user");
+        Ok(Outcome::NeedsUser)
+    };
     let (step, screen) = settle(harness, pane, limits, |step| step.is_some())?;
+    if step.is_some() && !auto() {
+        return withdrawn();
+    }
     match step {
         Some(TrustStep::Confirm(keys)) => return confirm(pane, &keys, reported, limits, log),
         Some(TrustStep::Select(keys)) => {
@@ -207,6 +217,7 @@ fn accept(
         matches!(step, Some(TrustStep::Confirm(_)))
     })?;
     match step {
+        Some(TrustStep::Confirm(_)) if !auto() => withdrawn(),
         Some(TrustStep::Confirm(keys)) => {
             log(&format!(
                 "accepting seen selected after {}ms",
@@ -305,12 +316,14 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         latest.is_some_and(|s| s.at >= since)
     };
     let name = runtime::session_name(&task);
-    let auto = may_auto_trust(&app.config, &app.home, &task, &dir);
+    let in_scope = may_auto_trust(&app.config, &app.home, &task, &dir);
+    // Not while it is paused or stopped: accepting would let its brief run.
+    let auto = || in_scope && matches!(run::hold(app, &task), Ok(None));
     let outcome = watch(
         spec.harness,
         &TmuxPane(name.clone()),
         &reported,
-        auto,
+        &auto,
         Limits::default(),
         &|line| eprintln!("jeet task-startup {}: {line}", task.slug),
     )?;
@@ -487,7 +500,7 @@ mod tests {
             &ClaudeCode,
             pane,
             &|| pane.hooked.get(),
-            auto,
+            &|| auto,
             limits,
             &|line| log.borrow_mut().push(line.to_string()),
         )
@@ -575,6 +588,21 @@ mod tests {
     }
 
     #[test]
+    fn a_task_held_while_its_prompt_is_accepted_gets_no_more_keys() {
+        let pane = FakeClaude::new("trust-no-selected", 0);
+        // Allowed when the prompt is seen and at the select key; paused
+        // before the confirming one.
+        let asked = Cell::new(0);
+        let auto = || {
+            asked.set(asked.get() + 1);
+            asked.get() <= 2
+        };
+        let outcome = watch(&ClaudeCode, &pane, &|| false, &auto, quick(), &|_| {}).unwrap();
+        assert_eq!(outcome, Outcome::NeedsUser);
+        assert_eq!(*pane.pressed.borrow(), ["Down"]);
+    }
+
+    #[test]
     fn no_prompt_and_a_hook_or_an_exit_leave_the_pane_alone() {
         let pane = FakeClaude::new("no-prompt", 0);
         assert_eq!(run_watch(&pane, true), Outcome::NoPrompt);
@@ -590,7 +618,7 @@ mod tests {
     #[test]
     fn accepted_but_silent_is_reported() {
         let pane = FakeClaude::new("trust-yes-selected", 0);
-        let outcome = watch(&ClaudeCode, &pane, &|| false, true, quick(), &|_| {}).unwrap();
+        let outcome = watch(&ClaudeCode, &pane, &|| false, &|| true, quick(), &|_| {}).unwrap();
         assert_eq!(outcome, Outcome::AcceptedNoHook);
     }
 

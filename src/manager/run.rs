@@ -14,12 +14,12 @@ use anyhow::{bail, Context, Result};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskState};
-use crate::messages::{self, Inbox, TmuxAgent};
+use crate::messages::{self, Agent, Inbox, Route, TmuxAgent};
 use crate::permissions::Caller;
 use crate::placement::{self, NodeRuntime};
 use crate::reports::{self, StatusEvent};
 use crate::runtime::{self, Interrupted};
-use crate::status::{self, Activity};
+use crate::status;
 use crate::tasks;
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -222,27 +222,57 @@ pub fn check_resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<()> {
 }
 
 /// Resume `target` for `by`, if [`check_resume`] lets it: set it running,
-/// hand each idle agent below it that runs again what queued for it while
-/// held, then start what waits on `max_live` or waited on the resume.
+/// unless its row changed since it was read; hand each agent below it that
+/// runs again, and would take a message typed in now, what queued for it
+/// while held; queue the start of each that ended while held with messages
+/// waiting; then start what waits on `max_live` or waited on the resume.
 pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOutcome>> {
     check_resume(app, by, target)?;
     let mut outcomes = Vec::new();
     if target.run_state == RunState::Run {
         outcomes.push(NodeOutcome::new(target, "was not paused or stopped"));
     } else {
-        app.db.set_run_state(&target.id, RunState::Run, None)?;
+        // What was checked is what is undone: a pause or stop written
+        // since, by someone who may outrank `by`, stays.
+        let checked = (target.run_state, target.run_state_by.as_ref());
+        if !app.db.resume_run_state(&target.id, checked)? {
+            bail!(
+                "{} was paused or stopped again meanwhile; look with `jeet manager show {}`",
+                label(target),
+                target.slug
+            );
+        }
         outcomes.push(NodeOutcome::new(target, "resumed"));
     }
     let live = live_set(app)?;
     for node in subtree_leaves_first(app, target)?.into_iter().rev() {
-        if !live.contains(&node.id) || hold(app, &node)?.is_some() {
+        if node.kind == TaskKind::Assistant || node.state != TaskState::Active {
             continue;
         }
-        if !matches!(runtime::activity(app, &node, true), Activity::Idle { .. }) {
+        if hold(app, &node)?.is_some() {
+            continue;
+        }
+        let agent = TmuxAgent::new(app, &node);
+        if !live.contains(&node.id) {
+            // Its agent ended while held: what waits for it starts it, as
+            // its senders were told.
+            match queue_waiting_start(app, &node) {
+                Ok(()) => {}
+                Err(e) => outcomes.push(NodeOutcome::new(
+                    &node,
+                    format!("could not queue its start: {e:#}"),
+                )),
+            }
+            continue;
+        }
+        // As a delivery would type it in: to an idle agent, or to a running
+        // one with no hooks to queue for.
+        let activity = runtime::activity(app, &node, true);
+        if messages::route(&activity, agent.has_hooks()) != Route::Type {
             continue;
         }
         let handed = Inbox::lock(&tasks::task_dir(app, &node))
-            .and_then(|inbox| messages::hand_over_queue(&inbox, &TmuxAgent::new(app, &node)));
+            .and_then(|inbox| messages::hand_over_queue(&inbox, &agent));
         match handed {
             Ok(true) => outcomes.push(NodeOutcome::new(&node, "handed what queued while held")),
             Ok(false) => {}
@@ -260,6 +290,19 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         )),
     }
     Ok(outcomes)
+}
+
+/// Queue the start of `node`, not running, when messages wait in its
+/// inbox: the drain a resume runs starts it with them.
+fn queue_waiting_start(app: &App, node: &TaskRecord) -> Result<()> {
+    let dir = tasks::task_dir(app, node);
+    if !messages::inbox_path(&dir).exists() {
+        return Ok(());
+    }
+    if !Inbox::lock(&dir)?.read()?.is_empty() {
+        app.db.queue_start(&node.id, now_secs())?;
+    }
+    Ok(())
 }
 
 /// Stop `target` for `by`, or with `None` (`--all`, the user's alone) every
@@ -534,6 +577,7 @@ mod tests {
     use crate::config;
     use crate::db::Database;
     use crate::runtime::Running;
+    use crate::status::Activity;
 
     /// An index in a tempdir with the assistant and, under it, manager `m`
     /// with worker `w1` and manager `m2`, which has worker `w2`.
@@ -926,6 +970,40 @@ mod tests {
             admit_start(&app, &get(&app, "w1")).unwrap(),
             StartGate::Held(_)
         ));
+    }
+
+    #[test]
+    fn a_resume_queues_the_start_of_what_ended_held_with_messages_waiting() {
+        let (_dir, app) = lab();
+        app.db
+            .set_run_state("m", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        // Queued for w1 while it ran, held; its agent has ended since.
+        let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
+        Inbox::lock(&w1_dir)
+            .unwrap()
+            .push_to("your report", None)
+            .unwrap();
+        let outcomes = resume(&app, &Caller::User, &get(&app, "m")).unwrap();
+        assert_eq!(get(&app, "m").run_state, RunState::Run);
+        // Its start is queued, for the drain; with no tmux here it stays
+        // queued, its message still waiting. Nothing else waited.
+        let queued: Vec<String> = app
+            .db
+            .queued_starts()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(queued, ["w1"]);
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| o.line.contains("could not start queued task w1")),
+            "{outcomes:?}"
+        );
+        let left = Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap();
+        assert_eq!(left.len(), 1);
     }
 
     #[test]

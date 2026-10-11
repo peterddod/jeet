@@ -92,10 +92,12 @@ pub fn ensure_running(
         bail!("the assistant's sessions are opened with `jeet chat`");
     }
     // Running already: nothing starts, so there is nothing to admit, and a
-    // held task's live pane is still there to attach to (M16).
+    // held task's live pane is still there to attach to (M16). Attached to
+    // only: one gone meanwhile is not started here, unadmitted.
     let name = session_name(task);
     if tmux::has_session(&name) && tmux::pane_alive(&name) {
-        return placement::runtime_for(task)?.start(app, task, session, prompt);
+        placement::runtime_for(task)?;
+        return already_running(app, task, &name, session);
     }
     let (guard, over) = match admission {
         Admission::Gate => match run::admit_start(app, task)? {
@@ -136,7 +138,13 @@ pub fn ensure_running_admitted(
     if task.kind == TaskKind::Assistant {
         bail!("the assistant's sessions are opened with `jeet chat`");
     }
-    placement::runtime_for(task)?.start(app, task, session, prompt)
+    let running = placement::runtime_for(task)?.start(app, task, session, prompt)?;
+    // Started, however it was admitted: no longer waits on `max_live` or a
+    // resume, or a drain would start it again once it ends.
+    if running.started == Started::Now {
+        app.db.unqueue(&task.id)?;
+    }
+    Ok(running)
 }
 
 /// A task's agent in a tmux session on this machine: the runtime of
@@ -175,27 +183,7 @@ fn start_tmux(
         tmux::kill(&name)?;
     }
     if tmux::has_session(&name) {
-        // Only a pane jeet started is the task's agent: one made some other
-        // way, or by a jeet from before anchors, is never adopted as it.
-        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
-        if !anchors.iter().any(identity::live) {
-            warnings.push(format!(
-                "tmux session {name} was started by an older jeet or outside jeet, so jeet \
-                 cannot confirm its agent is task {}'s; stop it and open the task again",
-                task.name
-            ));
-        }
-        if let Some(id) = session {
-            warnings.push(format!(
-                "the agent is already running in tmux session {name}, so session {id} was not \
-                 resumed; end it there and open the task again to switch"
-            ));
-        }
-        return Ok(Running {
-            tmux_session: name,
-            started: Started::AlreadyRunning,
-            warnings,
-        });
+        return already_running(app, task, &name, session);
     }
 
     let mut spec = AgentSpec::from_config(&app.config)?;
@@ -253,6 +241,38 @@ fn start_tmux(
     Ok(Running {
         tmux_session: name,
         started: Started::Now,
+        warnings,
+    })
+}
+
+/// The task's agent, running already in tmux session `name`: attached to,
+/// not started, with what to warn of.
+fn already_running(
+    app: &App,
+    task: &TaskRecord,
+    name: &str,
+    session: Option<&str>,
+) -> Result<Running> {
+    let mut warnings = Vec::new();
+    // Only a pane jeet started is the task's agent: one made some other
+    // way, or by a jeet from before anchors, is never adopted as it.
+    let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
+    if !anchors.iter().any(identity::live) {
+        warnings.push(format!(
+            "tmux session {name} was started by an older jeet or outside jeet, so jeet \
+             cannot confirm its agent is task {}'s; stop it and open the task again",
+            task.name
+        ));
+    }
+    if let Some(id) = session {
+        warnings.push(format!(
+            "the agent is already running in tmux session {name}, so session {id} was not \
+             resumed; end it there and open the task again to switch"
+        ));
+    }
+    Ok(Running {
+        tmux_session: name.to_string(),
+        started: Started::AlreadyRunning,
         warnings,
     })
 }

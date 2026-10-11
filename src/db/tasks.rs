@@ -1262,6 +1262,26 @@ impl Database {
         Ok(())
     }
 
+    /// Set `id` running again, if its own run state and setter are still
+    /// `checked`, what the caller's right to resume it was checked against:
+    /// false, and nothing written, when a pause or stop changed them since.
+    pub fn resume_run_state(&self, id: &str, checked: (RunState, Option<&Setter>)) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(task) = get_task_in(&tx, id)? else {
+            bail!("task {id} is not in the index");
+        };
+        if (task.run_state, task.run_state_by.as_ref()) != checked {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE tasks SET run_state = ?2, run_state_by = NULL WHERE id = ?1",
+            params![id, RunState::Run.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The run state that applies to `id`: the most severe over it and its
     /// ancestors, with the nearest task holding it (`None` while it runs).
     pub fn effective_run_state(&self, id: &str) -> Result<(RunState, Option<TaskRecord>)> {
@@ -2219,6 +2239,30 @@ mod tests {
         assert!(db
             .set_run_state("missing", RunState::Paused, Some(&Setter::User))
             .is_err());
+    }
+
+    #[test]
+    fn a_resume_applies_only_to_the_run_state_it_checked() {
+        let (_dir, db) = open();
+        tree(&db);
+        let state = |id: &str| {
+            let t = db.get_task(id).unwrap().unwrap();
+            (t.run_state, t.run_state_by)
+        };
+        let by_m = Setter::Node("m".into());
+        db.set_run_state("n", RunState::Paused, Some(&by_m))
+            .unwrap();
+        // The user paused it again after m's right to resume was checked.
+        db.set_run_state("n", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        assert!(!db
+            .resume_run_state("n", (RunState::Paused, Some(&by_m)))
+            .unwrap());
+        assert_eq!(state("n"), (RunState::Paused, Some(Setter::User)));
+        assert!(db
+            .resume_run_state("n", (RunState::Paused, Some(&Setter::User)))
+            .unwrap());
+        assert_eq!(state("n"), (RunState::Run, None));
     }
 
     #[test]

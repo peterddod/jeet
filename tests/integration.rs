@@ -10105,7 +10105,69 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
         stderr_of(&output)
     );
     assert!(stub.join("alive/jeet-c").exists());
+    // Started, it waits no longer: a drain after it ends must not start it
+    // again.
+    assert_eq!(lab.start_queue(), [d.as_str()]);
+
+    // b and c go with no SessionEnd to drain after them: the watch's poll
+    // starts d, with the message that waited for it.
+    std::fs::write(stub.join("dead/jeet-b"), "").unwrap();
+    std::fs::write(stub.join("dead/jeet-c"), "").unwrap();
+    let _d_agent = session_pane(&lab, &tmux, "d", &d);
+    let gh = stub_watch_gh(scratch.path());
+    let path = path_with(&gh);
+    let watch_env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+    ];
+    succeeded(&lab.jeet_at(&["watch", "--once"], &lab.home(), &watch_env));
+    assert!(stub.join("alive/jeet-d").exists());
+    assert!(lab.start_queue().is_empty());
+    let started = calls_of(&tmux, "new-session");
+    let d_start = started.last().unwrap();
+    assert!(d_start.contains(&"jeet-d".to_string()), "{d_start:?}");
+    assert!(d_start.iter().any(|arg| arg.contains("go")), "{d_start:?}");
     drop(b_agent);
+}
+
+/// A worker on a harness with no hooks, paused while its agent runs, is
+/// typed what waited for it once resumed, as an unheld message would be.
+#[cfg(unix)]
+#[test]
+fn a_hookless_worker_is_typed_what_waited_once_resumed() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+    ];
+    let jeet = |args: &[&str]| {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output)
+    };
+    lab.new_task_with("w", &["--parent", "assistant"]);
+    jeet(&["task", "open", "w"]);
+    assert!(stub.join("alive/jeet-w").exists());
+
+    // It cannot be interrupted, so its turn runs on; a message waits.
+    let said = jeet(&["manager", "pause", "w"]);
+    assert!(said.contains("w: not interrupted"), "{said}");
+    let said = jeet(&["task", "send", "w", "carry on"]);
+    assert!(said.contains("paused or stopped"), "{said}");
+    assert!(pasted(&tmux).is_empty());
+
+    let said = jeet(&["manager", "resume", "w"]);
+    assert!(said.contains("handed what queued while held"), "{said}");
+    let typed = pasted(&tmux);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(typed[0].1.contains("carry on"), "{typed:?}");
+    assert!(!lab.home().join("tasks/w/.jeet/inbox.jsonl").exists());
 }
 
 /// A child made with a brief under a paused manager is made, not started:
@@ -10150,7 +10212,16 @@ fn a_brief_under_a_paused_manager_starts_once_it_is_resumed() {
     assert!(!stub.join("alive/jeet-kid").exists());
     assert_eq!(lab.start_queue(), [kid.as_str()]);
 
+    // A drain, which anyone may run and every session's end leaves behind,
+    // starts nothing held: kid waits for the resume, queued still.
     let _kid_agent = session_pane(&lab, &tmux, "kid", &kid);
+    succeeded(&lab.jeet_at(&["manager", "drain"], &lab.home(), &env));
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["manager", "drain"], &lab.home(), &env));
+    assert!(!stub.join("alive/jeet-kid").exists());
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert_eq!(lab.start_queue(), [kid.as_str()]);
+
     succeeded(&lab.jeet_at(&["manager", "resume", "m"], &lab.home(), &env));
     assert!(stub.join("alive/jeet-kid").exists());
     let started = calls_of(&tmux, "new-session");
@@ -10163,4 +10234,27 @@ fn a_brief_under_a_paused_manager_starts_once_it_is_resumed() {
     assert!(lab.start_queue().is_empty());
     // Nothing waited for the manager itself: it is not started.
     assert!(!stub.join("alive/jeet-m").exists());
+
+    // A message held for kid while it runs, whose agent then ends, starts
+    // it once resumed, as its sender was told.
+    succeeded(&lab.jeet_at(&["manager", "pause", "m"], &lab.home(), &env));
+    let output = lab.jeet_at(&["task", "send", "kid", "second job"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("paused or stopped"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(lab.start_queue().is_empty());
+    std::fs::write(stub.join("dead/jeet-kid"), "").unwrap();
+    let _kid_again = session_pane(&lab, &tmux, "kid", &kid);
+    succeeded(&lab.jeet_at(&["manager", "resume", "m"], &lab.home(), &env));
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(
+        started[1].iter().any(|arg| arg.contains("second job")),
+        "{:?}",
+        started[1]
+    );
+    assert!(lab.start_queue().is_empty());
 }

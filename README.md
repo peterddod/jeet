@@ -582,7 +582,8 @@ trusting `~/.jeet/tasks` once, by running `claude` there, covers every task
 to come. Until then, jeet watches each agent it starts for the question for
 about 30 seconds: the task shows `needs input – trust folder`, with a
 notification unless you are attached to it, or, with
-[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you.
+[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you
+(never for a task paused or stopped).
 
 ### Messaging an agent
 
@@ -700,8 +701,8 @@ tmux sessions, and their ending is not reported. Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once
-resumed, a task whose agent is not running starts with what waited for it,
-as it would have when it was sent; `task new --prompt` under a paused
+resumed, a task whose agent is not running, or ended while held, starts
+with what waited for it, and one still running is handed it; `task new --prompt` under a paused
 manager makes the task and keeps its brief for then.
 
 ### Archiving and deleting
