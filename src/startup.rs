@@ -51,15 +51,16 @@ const LOG_FILE: &str = "startup.log";
 
 /// Whether jeet may accept the trust prompt by itself for `task`, in
 /// `dir`: only with `auto_trust` on, only under `$JEET_HOME/tasks`, and for
-/// a review task only with `auto_trust_reviews` on too. Never the
-/// assistant's.
+/// a review task only with `auto_trust_reviews` on too. A manager follows
+/// `auto_trust` as a worker does: its parent starts it with nobody at its
+/// pane. Never the assistant's.
 pub fn may_auto_trust(config: &Config, home: &Path, task: &TaskRecord, dir: &Path) -> bool {
     let (tasks, reviews) = config.auto_trust();
     let in_tasks = dir.starts_with(config::tasks_root(home));
     match task.kind {
-        TaskKind::Work => tasks && in_tasks,
+        TaskKind::Work | TaskKind::Manager => tasks && in_tasks,
         TaskKind::Review => reviews && in_tasks,
-        TaskKind::Assistant | TaskKind::Manager => false,
+        TaskKind::Assistant => false,
     }
 }
 
@@ -636,11 +637,30 @@ mod tests {
             &task(TaskKind::Review),
             &in_tasks
         ));
+        // A manager follows `auto_trust` as a worker does.
+        assert!(!may_auto_trust(
+            &off,
+            home,
+            &task(TaskKind::Manager),
+            &in_tasks
+        ));
+        assert!(may_auto_trust(
+            &on,
+            home,
+            &task(TaskKind::Manager),
+            &in_tasks
+        ));
         // Never outside the tasks, nor for the assistant.
         assert!(!may_auto_trust(
             &on,
             home,
             &task(TaskKind::Work),
+            Path::new("/elsewhere")
+        ));
+        assert!(!may_auto_trust(
+            &on,
+            home,
+            &task(TaskKind::Manager),
             Path::new("/elsewhere")
         ));
         assert!(!may_auto_trust(

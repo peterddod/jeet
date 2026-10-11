@@ -227,6 +227,19 @@ children keep what they could do; nothing else is granted by default.
 A manager can archive or delete only its own descendants. Archiving a worker
 is unchanged.
 
+**Phase 2 (as built).** The refusals live in `tasks::{archive, unarchive,
+delete}`, which the CLI, the TUI and import share, and apply to any task
+with children; the CLI also checks before asking, as the TUI does for
+delete. Delete is refused while any child exists, before anything is
+stopped or removed (the `RESTRICT` key would otherwise refuse only the row,
+after the disk work).
+Archive is refused while a child is active, and unarchive under an archived
+parent or when the parent already has its `max_children` active children
+(the root has no limit). Each of these two checks once before any work and
+again with the state change, in one IMMEDIATE transaction, so a child made
+meanwhile cannot slip past. `--recursive` comes later in phase 2;
+`--reparent` is phase 4.
+
 ## 3. Delegation
 
 ### Commands
@@ -565,8 +578,10 @@ settings jeet gives Claude Code list `jeet` in `sandbox.excludedCommands`,
 since the ancestry walk cannot see past a sandbox's pid namespace (Linux)
 and jeet writes under `~/.jeet`, so with the user's sandbox on, jeet, and
 possibly whatever a Bash command chains with it, runs unconfined. The
-`auto_trust` scope from #23 must exclude manager homes, as it already
-excludes the assistant's, unless the user opts in.
+`auto_trust` scope from #23 covers managers as it covers workers: a manager
+is started by its parent with nobody at its pane, so a trust prompt would
+stall it, and `[harness] auto_trust` is the user's opt-in. The assistant's
+home stays excluded.
 
 **Placement (#33).** Where a node runs is its *placement*, recorded per node
 in the index (`tasks.placement`). There is one, `local`: tmux panes on the
@@ -719,7 +734,7 @@ row, so past the last column it would never show).
   `permissions.rs`, `config.rs` (`[managers]`), `tasks.rs`
   (archive/delete/unarchive cascade), `worktrees.rs` and `db/tasks.rs`
   (`read_only`), `harness/` (`interrupt`, deny rules),
-  `startup.rs` (#23 trust scope excludes manager homes), `cli.rs`.
+  `startup.rs` (#23 trust scope: managers follow `auto_trust` as workers do), `cli.rs`.
 
 **Phase 3: the agents pane.** (#35)
 - The agents tab, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with

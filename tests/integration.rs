@@ -1555,6 +1555,115 @@ fn delete_takes_everything_the_task_owns_and_nothing_else() {
     assert!(!stdout_of(&output).contains("doomed"));
 }
 
+/// A task with a task under it, active or archived, is not deleted, and
+/// nothing of it goes first: its directory, worktree and branch stay.
+#[test]
+fn delete_refuses_a_task_with_tasks_under_it() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let task = lab.new_task("boss");
+    let id = task_id(&task);
+    let made = lab.add(&task, &["widget", "--branch", "made"]);
+    // As only a manager's child will be, until `jeet manager new`.
+    lab.index()
+        .execute(
+            "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
+             VALUES ('kid', 'kid', 'kid', 'work', 'active', 0, 0, ?1)",
+            [&id],
+        )
+        .unwrap();
+
+    for state in ["active", "archived"] {
+        lab.index()
+            .execute("UPDATE tasks SET state = ?1 WHERE id = 'kid'", [state])
+            .unwrap();
+        let output = lab.jeet_at(&["task", "delete", "boss", "--force"], &lab.home(), &[]);
+        assert!(!output.status.success(), "deleted with an {state} child");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("1 task under it"), "{stderr}");
+        assert!(task.is_dir(), "the task directory went ({state} child)");
+        assert!(made.is_dir(), "the worktree went ({state} child)");
+        assert_eq!(
+            git_stdout(
+                &["branch", "--list", "--format=%(refname:short)", "made"],
+                &trunk
+            ),
+            "made"
+        );
+        let rows: i64 = lab
+            .index()
+            .query_row("SELECT COUNT(*) FROM tasks WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    // With the child gone, it goes.
+    succeeded(&lab.jeet_at(&["task", "delete", "kid", "--force"], &lab.home(), &[]));
+    succeeded(&lab.jeet_at(&["task", "delete", "boss", "--force"], &lab.home(), &[]));
+    assert!(!task.exists());
+}
+
+/// Archive is refused while a task under it is active, and unarchive under
+/// an archived parent or one already at its limit of active tasks.
+#[test]
+fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let task = lab.new_task("lead");
+    let id = task_id(&task);
+    let wt = lab.add(&task, &["widget"]);
+    for kid in ["kid", "kid2"] {
+        lab.index()
+            .execute(
+                "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity,
+                                    parent_id)
+                 VALUES (?1, ?1, ?1, 'work', 'active', 0, 0, ?2)",
+                [kid, id.as_str()],
+            )
+            .unwrap();
+        std::fs::create_dir_all(lab.home().join("tasks").join(kid)).unwrap();
+    }
+    let state = |id: &str| -> String {
+        lab.index()
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+
+    let output = lab.jeet_at(&["task", "archive", "lead", "--force"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("2 active tasks under it"), "{stderr}");
+    assert_eq!(state(&id), "active");
+    assert!(wt.is_dir(), "the worktree went");
+
+    for kid in ["kid", "kid2"] {
+        succeeded(&lab.jeet_at(&["task", "archive", kid, "--force"], &lab.home(), &[]));
+    }
+    succeeded(&lab.jeet_at(&["task", "archive", "lead", "--force"], &lab.home(), &[]));
+
+    // Not back under an archived parent.
+    let output = lab.jeet_at(&["task", "unarchive", "kid"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("which is archived"), "{stderr}");
+    assert_eq!(state("kid"), "archived");
+
+    // Nor past the parent's own limit.
+    succeeded(&lab.jeet_at(&["task", "unarchive", "lead"], &lab.home(), &[]));
+    assert!(wt.is_dir());
+    lab.index()
+        .execute("UPDATE tasks SET max_children = 1 WHERE id = ?1", [&id])
+        .unwrap();
+    succeeded(&lab.jeet_at(&["task", "unarchive", "kid"], &lab.home(), &[]));
+    let output = lab.jeet_at(&["task", "unarchive", "kid2"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("its limit of 1"), "{stderr}");
+    assert_eq!(state("kid2"), "archived");
+}
+
 /// A git checkout on the canvas that is none of the task's worktrees — a
 /// clone made there, or a worktree of a repository jeet has not indexed —
 /// goes with the task directory, so delete names it before it goes.

@@ -462,6 +462,62 @@ fn child_count_in(conn: &Connection, id: &str, active_only: bool) -> Result<usiz
     Ok(n as usize)
 }
 
+/// Why `id` cannot be archived: it has an active child.
+fn archive_refusal_in(conn: &Connection, id: &str) -> Result<()> {
+    let Some(task) = get_task_in(conn, id)? else {
+        bail!("task {id} is not in the index");
+    };
+    let active = child_count_in(conn, id, true)?;
+    if active > 0 {
+        bail!(
+            "{} has {active} active {} under it; archive or delete {} first",
+            task.slug,
+            if active == 1 { "task" } else { "tasks" },
+            if active == 1 { "it" } else { "them" }
+        );
+    }
+    Ok(())
+}
+
+/// Why `id` cannot be made active again: its parent is archived, or already
+/// has `fan_out` active children besides it.
+fn unarchive_refusal_in(conn: &Connection, id: &str, fan_out: Option<u32>) -> Result<()> {
+    let Some(task) = get_task_in(conn, id)? else {
+        bail!("task {id} is not in the index");
+    };
+    let Some(parent_id) = &task.parent_id else {
+        return Ok(());
+    };
+    let Some(parent) = get_task_in(conn, parent_id)? else {
+        bail!("the parent of task {} is gone", task.slug);
+    };
+    if parent.state != TaskState::Active {
+        bail!(
+            "{} is under {}, which is archived; unarchive {} first",
+            task.slug,
+            parent.slug,
+            parent.slug
+        );
+    }
+    let Some(max) = fan_out else {
+        return Ok(());
+    };
+    let active: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks
+         WHERE parent_id = ?1 AND state = 'active' AND id != ?2",
+        params![parent_id, id],
+        |row| row.get(0),
+    )?;
+    if active >= i64::from(max) {
+        bail!(
+            "{} already has {active} active tasks under it, its limit of {max}; \
+             archive one first",
+            parent.slug
+        );
+    }
+    Ok(())
+}
+
 /// How a run state's setter ranks when two hold a task at the same severity:
 /// whether `new` outranks `old`. Both are the task or its ancestors, so of two
 /// nodes the one nearer the root ranks higher.
@@ -1055,21 +1111,19 @@ impl Database {
         Ok(())
     }
 
+    /// Why `id` cannot be archived now, if it cannot: it has an active
+    /// child. [`Database::archive_task`] checks again as it writes; this is
+    /// for refusing before any work.
+    pub fn check_archive(&self, id: &str) -> Result<()> {
+        archive_refusal_in(&self.conn(), id)
+    }
+
     /// Archive `id`'s row, unless it has an active child: checked and written
     /// under one write lock, so no child slips in between.
     pub fn archive_task(&self, id: &str) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(task) = get_task_in(&tx, id)? else {
-            bail!("task {id} is not in the index");
-        };
-        let active = child_count_in(&tx, id, true)?;
-        if active > 0 {
-            bail!(
-                "{} has {active} active tasks under it; archive or delete them first",
-                task.slug
-            );
-        }
+        archive_refusal_in(&tx, id)?;
         tx.execute(
             "UPDATE tasks SET state = 'archived' WHERE id = ?1",
             params![id],
@@ -1078,43 +1132,21 @@ impl Database {
         Ok(())
     }
 
+    /// Why `id` cannot be made active again now, if it cannot: its parent is
+    /// archived, or already has `fan_out` active children.
+    /// [`Database::unarchive_task`] checks again as it writes; this is for
+    /// refusing before any work.
+    pub fn check_unarchive(&self, id: &str, fan_out: Option<u32>) -> Result<()> {
+        unarchive_refusal_in(&self.conn(), id, fan_out)
+    }
+
     /// Make `id`'s row active again, unless its parent is archived or already
     /// has `fan_out` active children; checked and written under one write
     /// lock.
     pub fn unarchive_task(&self, id: &str, fan_out: Option<u32>) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(task) = get_task_in(&tx, id)? else {
-            bail!("task {id} is not in the index");
-        };
-        if let Some(parent_id) = &task.parent_id {
-            let Some(parent) = get_task_in(&tx, parent_id)? else {
-                bail!("the parent of task {} is gone", task.slug);
-            };
-            if parent.state != TaskState::Active {
-                bail!(
-                    "{} is under {}, which is archived; unarchive {} first",
-                    task.slug,
-                    parent.slug,
-                    parent.slug
-                );
-            }
-            if let Some(max) = fan_out {
-                let active: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM tasks
-                     WHERE parent_id = ?1 AND state = 'active' AND id != ?2",
-                    params![parent_id, id],
-                    |row| row.get(0),
-                )?;
-                if active >= i64::from(max) {
-                    bail!(
-                        "{} already has {active} active tasks under it, its limit of {max}; \
-                         archive one first",
-                        parent.slug
-                    );
-                }
-            }
-        }
+        unarchive_refusal_in(&tx, id, fan_out)?;
         tx.execute(
             "UPDATE tasks SET state = 'active' WHERE id = ?1",
             params![id],
@@ -2002,6 +2034,9 @@ mod tests {
         tree(&db);
         let err = db.archive_task("n").unwrap_err();
         assert!(err.to_string().contains("active"), "{err}");
+        // The check alone refuses alike, and writes nothing.
+        let err = db.check_archive("n").unwrap_err();
+        assert!(err.to_string().contains("1 active task under it"), "{err}");
         db.archive_task("w3").unwrap();
         db.archive_task("n").unwrap();
         assert_eq!(
@@ -2012,6 +2047,7 @@ mod tests {
         // Not back under an archived parent.
         let err = db.unarchive_task("w3", None).unwrap_err();
         assert!(err.to_string().contains("archived"), "{err}");
+        assert!(db.check_unarchive("w3", None).is_err());
         db.unarchive_task("n", None).unwrap();
         db.unarchive_task("w3", None).unwrap();
         assert_eq!(db.get_task("w3").unwrap().unwrap().state, TaskState::Active);
@@ -2023,6 +2059,8 @@ mod tests {
             .unwrap();
         let err = db.unarchive_task("w2", Some(2)).unwrap_err();
         assert!(err.to_string().contains("limit of 2"), "{err}");
+        assert!(db.check_unarchive("w2", Some(2)).is_err());
+        db.check_unarchive("w2", Some(3)).unwrap();
         assert_eq!(
             db.get_task("w2").unwrap().unwrap().state,
             TaskState::Archived

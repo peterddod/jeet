@@ -78,7 +78,8 @@ fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)>
     };
     match parent.kind {
         TaskKind::Assistant => {}
-        TaskKind::Work | TaskKind::Review | TaskKind::Manager => {
+        TaskKind::Manager => bail!("reports to managers land in a later version"),
+        TaskKind::Work | TaskKind::Review => {
             bail!("only the assistant takes reports in this version")
         }
     }

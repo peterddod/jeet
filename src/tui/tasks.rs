@@ -2974,7 +2974,9 @@ impl Screen<'_> {
             return Ok(());
         }
         // Before asking, not after: the answer would count for nothing.
-        if let Err(e) = runtime::refuse_inside_session(&task, "delete") {
+        let refused = tasks::refuse_delete_with_children(app, &task)
+            .and_then(|()| runtime::refuse_inside_session(&task, "delete"));
+        if let Err(e) = refused {
             self.ui
                 .message("cannot delete", vec![format!("{e:#}")], None);
             return Ok(());

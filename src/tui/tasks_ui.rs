@@ -448,7 +448,8 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
     ];
     let name = match row.task.kind {
         TaskKind::Review => format!("{} (review)", row.task.name),
-        TaskKind::Work | TaskKind::Assistant | TaskKind::Manager => row.task.name.clone(),
+        TaskKind::Manager => format!("{} (manager)", row.task.name),
+        TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
     // The assistant is the only parent there is for now. The name gives way
     // before the marker does: a cut-off marker would pass for a top-level task.

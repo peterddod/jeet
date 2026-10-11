@@ -1212,10 +1212,14 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 ///
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
+///
+/// It is refused while a task under it is active, before anything is done,
+/// and checked again as it is marked archived.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.kind == TaskKind::Assistant {
         bail!("the assistant cannot be archived");
     }
+    app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(task, "archive")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
@@ -1238,7 +1242,7 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
         }
     }
-    app.db.set_task_state(&task.id, TaskState::Archived)?;
+    app.db.archive_task(&task.id)?;
     let task_root = task_dir(app, task);
 
     for mut row in app.db.list_task_worktrees(&task.id)? {
@@ -1446,7 +1450,13 @@ fn describe_foreign(dir: &Path, checkout: &ForeignCheckout) -> String {
 /// Worktrees already present are left as they are, so running it again after
 /// a failure picks up where it stopped. The task becomes active only once
 /// every worktree is back.
+///
+/// It is refused under an archived parent, and when the parent already has
+/// as many active tasks under it as it may, before anything is done, and
+/// checked again as it is marked active.
 pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    let fan_out = fan_out_of_parent(app, task)?;
+    app.db.check_unarchive(&task.id, fan_out)?;
     let dir = task_dir(app, task);
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
@@ -1544,9 +1554,25 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         app.db.update_task_worktree(&row)?;
     }
 
-    app.db.set_task_state(&task.id, TaskState::Active)?;
+    app.db.unarchive_task(&task.id, fan_out)?;
     app.db.touch_task(&task.id, now_secs())?;
     Ok(warnings)
+}
+
+/// How many active tasks `task`'s parent may hold: its own `max_children`.
+/// The assistant has no limit, nor does a task with no parent.
+fn fan_out_of_parent(app: &App, task: &TaskRecord) -> Result<Option<u32>> {
+    let Some(parent_id) = &task.parent_id else {
+        return Ok(None);
+    };
+    // A parent that is gone is refused by the check that follows.
+    let Some(parent) = app.db.get_task(parent_id)? else {
+        return Ok(None);
+    };
+    match parent.kind {
+        TaskKind::Assistant => Ok(None),
+        TaskKind::Work | TaskKind::Review | TaskKind::Manager => Ok(parent.max_children),
+    }
 }
 
 /// What deleting `task` would destroy, one line per problem: uncommitted
@@ -1694,7 +1720,8 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// confirmed what [`losses`] lists.
 ///
 /// The rows go last, so a failure part-way leaves a task that can be deleted
-/// again.
+/// again. It is refused, before anything is done, while any task sits under
+/// it (see [`refuse_delete_with_children`]).
 pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // Its directory is the assistant's home: its notes, its todo list.
     if task.kind == TaskKind::Assistant {
@@ -1706,6 +1733,7 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             task.slug
         );
     }
+    refuse_delete_with_children(app, task)?;
     runtime::refuse_inside_session(task, "delete")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "delete")?;
     let mut warnings = Vec::new();
@@ -1777,6 +1805,21 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     }
     app.db.delete_task(&task.id)?;
     Ok(warnings)
+}
+
+/// Refuse to delete `task` while any task sits under it, archived ones
+/// included: its row cannot go before theirs, so nothing of it on disk may
+/// go first either.
+pub fn refuse_delete_with_children(app: &App, task: &TaskRecord) -> Result<()> {
+    let n = app.db.child_count(&task.id, false)?;
+    if n > 0 {
+        bail!(
+            "{} has {} under it, archived ones included; delete them first",
+            task.slug,
+            plural(n, "task")
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
