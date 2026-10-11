@@ -104,9 +104,9 @@ The list is:
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
   branch: `main`, `master` and the default branches of the repos jeet has
-  indexed, up to twelve in all, the ones most repos use first (the list
-  goes inline on the agent's command line, which shares tmux's 16KB limit
-  with the first prompt), as a destination (`git push *
+  indexed, up to twelve in all, the ones most repos use first, and none
+  longer than 40 bytes (the list goes inline on the agent's command line,
+  which shares tmux's 16KB limit with the first prompt), as a destination (`git push *
   main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
   `heads/main` with or without a source);
 - merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
@@ -119,7 +119,15 @@ The list is:
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are
   allowed instead. The assistant is never denied these: it holds them by
-  default, and at worst the user approves them at the prompt.
+  default, and at worst the user approves them at the prompt. Only these
+  commands are denied, not the same through `gh api` or `curl` (see
+  below).
+
+A repo's default branch is what jeet recorded when it cloned or imported
+it: `origin/HEAD`, or, without one, the branch checked out then, which may
+be a feature branch. That name is then denied as a push destination in
+every repo, to the assistant and every parented task; a push the agent
+cannot make, say so, and push it yourself.
 
 `jeet pr merge` runs `gh` from jeet's own process, so the merge denies do
 not touch it.
@@ -156,10 +164,22 @@ a gate. They do not catch:
 - a GraphQL merge mutation read from a file
   (`gh api graphql -F query=@merge.graphql`, `--input body.json`):
   denying those would refuse read queries kept in files too;
-- the default branches of indexed repos past the twelve listed;
+- the default branches of indexed repos past the twelve listed, or longer
+  than 40 bytes;
 - moving a branch through the REST refs endpoint
   (`gh api -X PATCH repos/o/r/git/refs/heads/main`): denying it would also
   refuse reading the ref;
+- committing through the API: the REST contents endpoint
+  (`gh api -X PUT repos/o/r/contents/README.md`, which commits to the
+  default branch when no `branch` is given) and the GraphQL
+  `createCommitOnBranch` mutation: denying them would refuse reading files,
+  or committing to the task's own branch;
+- commenting and reviewing through the API, for a parented task without
+  `pr.comment` or `pr.review`: `gh api repos/o/r/issues/3/comments -f
+  body=…`, `gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE`, and
+  the GraphQL `addComment` and `addPullRequestReview` mutations: denying
+  them would refuse reading comments and reviews too, so these still reach
+  the user's prompt;
 - scripts the agent writes and runs, MCP tools, and `!` commands typed in
   the session (only the agent's Bash tool is checked);
 - anything outside the agent's own tools: a deny on `Edit` covers Claude

@@ -7362,11 +7362,12 @@ fn interrupt_presses_escape_once_and_only_while_working() {
 
 #[cfg(unix)]
 #[test]
-fn an_interrupt_that_sends_nothing_is_logged_as_skipped_and_not_announced() {
+fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
     let lab = StoreLab::new();
-    lab.new_task("fix-x");
+    let task = lab.new_task("fix-x");
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
+    let stub = tmux.parent().unwrap().to_path_buf();
     let tmux_env = tmux.to_string_lossy().to_string();
     let notifier = stub_notifier(scratch.path());
     let notifier_env = notifier.to_string_lossy().to_string();
@@ -7399,6 +7400,29 @@ fn an_interrupt_that_sends_nothing_is_logged_as_skipped_and_not_announced() {
         "{why}"
     );
     assert!(notes(&notifier).is_empty());
+
+    // Opened by the user and working: one Escape, logged done, announced.
+    let user = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-x"], &lab.home(), &user));
+    let session = lab.sessions(&task_id(&task))[0].0.clone();
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
+    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(
+        calls_of(&tmux, "send-keys"),
+        [["send-keys", "-t", "=jeet-fix-x:", "Escape"]]
+    );
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[1]["outcome"], "done");
+    assert_eq!(log[1]["action"], "interrupted task fix-x");
+    assert!(log[1].get("error").is_none_or(|e| e.is_null()), "{log:?}");
+    assert_eq!(notes(&notifier).len(), 1);
 }
 
 #[cfg(unix)]

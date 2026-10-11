@@ -1130,14 +1130,17 @@ with a parent are also denied, even with your approval at the prompt:
 force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the twelve in all
-most of them use), and merging
+most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
+the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr
 comment`, `gh issue comment` and `gh pr review` unless it holds
-`pr.comment`/`pr.review`; the assistant holding them runs them without a
+`pr.comment`/`pr.review` (only those commands: the same through `gh api`
+still reaches your prompt); the assistant holding them runs them without a
 prompt. Top-level tasks get no deny rules. The rules match the start of a
 command only (`git -C . push -f` or `sh -c '…'` get past them), and a push
-whose destination is implied (`git push origin HEAD` while on `main`) or a
+whose destination is implied (`git push origin HEAD` while on `main`), a
+commit through the API (the contents endpoint, `createCommitOnBranch`) or a
 merge mutation read from a file gets past them too: they catch
 mistakes, and branch protection on GitHub is the real control. A task with
 a parent on a harness without deny rules starts with a warning, as does the

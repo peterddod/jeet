@@ -194,6 +194,10 @@ const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 /// repositories use are left out.
 pub const MAX_DEFAULT_BRANCHES: usize = 12;
 
+/// The longest default branch name denied, in bytes, for the same limit:
+/// each costs three patterns. A longer one is left out.
+pub const MAX_BRANCH_NAME: usize = 40;
+
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
     "jeet ls",
@@ -531,11 +535,12 @@ pub fn default_branches(app: &App) -> Result<Vec<String>> {
     Ok(most_used_branches(indexed))
 }
 
-/// `main`, `master` and the most common of `indexed`, up to
-/// [`MAX_DEFAULT_BRANCHES`] (ties by name), sorted.
+/// `main`, `master` and the most common of `indexed` no longer than
+/// [`MAX_BRANCH_NAME`], up to [`MAX_DEFAULT_BRANCHES`] (ties by name),
+/// sorted.
 fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for branch in indexed.filter(|b| !b.trim().is_empty()) {
+    for branch in indexed.filter(|b| !b.trim().is_empty() && b.len() <= MAX_BRANCH_NAME) {
         match counts.iter_mut().find(|(b, _)| *b == branch) {
             Some((_, n)) => *n += 1,
             None => counts.push((branch, 1)),
@@ -1375,11 +1380,14 @@ mod tests {
             .map(|i| format!("rare-{i:02}"))
             .collect();
         indexed.extend(["develop", "develop", "trunk", "trunk", "main"].map(String::from));
+        // Too long to fit the command line, however common.
+        indexed.extend(vec!["x".repeat(MAX_BRANCH_NAME + 1); 3]);
         let branches = most_used_branches(indexed.into_iter());
         assert_eq!(branches.len(), MAX_DEFAULT_BRANCHES);
         for kept in ["develop", "main", "master", "trunk"] {
             assert!(branches.contains(&kept.to_string()), "{branches:?}");
         }
+        assert!(branches.iter().all(|b| b.len() <= MAX_BRANCH_NAME));
         // Ties among the rare ones go by name.
         assert!(branches.contains(&"rare-00".to_string()), "{branches:?}");
         assert!(!branches.contains(&"rare-11".to_string()), "{branches:?}");
@@ -1497,6 +1505,17 @@ mod tests {
             "git push origin 'refs/heads/*:refs/heads/*'",
             "gh pr --repo o/r merge 3",
             "gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc",
+            // Commits through the API, to the default branch when none is
+            // named: denying them would refuse reads, or commits to the
+            // task's own branch.
+            "gh api -X PUT repos/o/r/contents/README.md -f message=x -f content=eA==",
+            "gh api graphql -f query='mutation{createCommitOnBranch(input:{})}'",
+            // Withheld commenting and reviewing, through the API rather than
+            // `gh pr comment`/`gh pr review`: denying the endpoints would
+            // refuse reading comments and reviews too.
+            "gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE",
+            "gh api repos/o/r/issues/3/comments -f body=x",
+            "gh api graphql -f query='mutation{addPullRequestReview(input:{})}'",
             // The destination implied, not named: on main, these push it.
             "git push origin HEAD",
             "git push origin @",
