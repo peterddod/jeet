@@ -210,7 +210,7 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     };
 
     let (task, mut warnings) = match spec.child {
-        Some((by, plan)) => commit_child(app, by, plan, project.as_ref())?,
+        Some((_, plan)) => commit_child(app, plan, project.as_ref())?,
         None => make_task(app, name, project.as_ref(), TaskKind::Work)?,
     };
 
@@ -234,6 +234,9 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
                 });
             }
         }
+    }
+    if let Some((by, plan)) = spec.child {
+        record_child_held(app, by, &task, &plan.grant.held, &mut warnings);
     }
     Ok(Created { task, warnings })
 }
@@ -449,6 +452,10 @@ fn child_budget(
     policy: &crate::config::ManagerPolicy,
 ) -> Result<Option<Limits>> {
     let left = budget::remaining(app, parent)?;
+    // Spent in either unit, whatever is asked: nothing more is born there.
+    if left.secs == Some(0) || left.turns == Some(0) {
+        bail!("nothing is left of the budget under task {}", parent.slug);
+    }
     let fits = |want: Option<i64>, left: Option<i64>| match (want, left) {
         (Some(want), Some(left)) => want <= left,
         _ => true,
@@ -476,21 +483,17 @@ fn child_budget(
         secs: cut(policy.default_budget.secs, left.secs),
         turns: cut(policy.default_budget.turns, left.turns),
     };
-    if given.secs == Some(0) || given.turns == Some(0) {
-        bail!("nothing is left of the budget under task {}", parent.slug);
-    }
     Ok((given != Limits::default()).then_some(given))
 }
 
 /// Make the task [`plan_child`] planned, with `project`'s files: its
 /// directory, then its row, grant, budget and brief in one transaction
 /// that refuses should the parent have been archived or filled up since;
-/// the directory goes again if that fails. The held capabilities its grant
-/// names are logged, and announced, once it is made
-/// ([`permissions::record_held`]). Returns notes as [`make_task`] does.
+/// the directory goes again if that fails. Returns notes as [`make_task`]
+/// does. The held capabilities its grant names are for the caller to log,
+/// once nothing can undo the task any more ([`record_child_held`]).
 pub fn commit_child(
     app: &App,
-    caller: &Caller,
     plan: &NewNode,
     project: Option<&Project>,
 ) -> Result<(TaskRecord, Vec<String>)> {
@@ -499,7 +502,7 @@ pub fn commit_child(
         ..plan.record.clone()
     };
     let budget = plan.budget.map(|b| (b.secs, b.turns));
-    let mut notes = write_task(app, &task, project, || {
+    let notes = write_task(app, &task, project, || {
         app.db.insert_child(
             &task,
             &plan.grant.caps,
@@ -508,13 +511,25 @@ pub fn commit_child(
             plan.fan_out,
         )
     })?;
-    if let Err(e) = permissions::record_held(app, caller, &task, &plan.grant.held) {
+    Ok((task, notes))
+}
+
+/// Log, and announce, the held capabilities `held` grants the task just
+/// made ([`permissions::record_held`]): only once it is fully made, so no
+/// entry names a task that was undone. A failure is a note, not an error.
+fn record_child_held(
+    app: &App,
+    caller: &Caller,
+    task: &TaskRecord,
+    held: &[&str],
+    notes: &mut Vec<String>,
+) {
+    if let Err(e) = permissions::record_held(app, caller, task, held) {
         notes.push(format!(
             "could not log the held capabilities granted to task {}: {e:#}",
             task.slug
         ));
     }
-    Ok((task, notes))
 }
 
 /// The marker, the project's files and the jeet skill. Returns notes on
@@ -892,6 +907,9 @@ pub fn review_task(
     by: Option<&Caller>,
 ) -> Result<ReviewCheckout> {
     let mut warnings = Vec::new();
+    // Who made it and the held capabilities it was granted, to log once
+    // its checkout is there.
+    let mut held = None;
     let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
         Some(task) => (task, false),
         None => {
@@ -906,7 +924,9 @@ pub fn review_task(
                         &Delegation::default(),
                         None,
                     )?;
-                    commit_child(app, by, &plan, None)?
+                    let made = commit_child(app, &plan, None)?;
+                    held = Some((by, plan.grant.held));
+                    made
                 }
                 None => make_task(app, &name, None, TaskKind::Review)?,
             };
@@ -922,6 +942,9 @@ pub fn review_task(
     match review_worktree(app, &task, repo, pr) {
         Ok((path, more)) => {
             warnings.extend(more);
+            if let Some((by, held)) = held {
+                record_child_held(app, by, &task, &held, &mut warnings);
+            }
             let _ = app.db.touch_task(&task.id, now_secs());
             Ok(ReviewCheckout {
                 task,
@@ -2661,6 +2684,16 @@ mod tests {
         // `default_budget` (4h) is cut to what m has left.
         let plan = plan_child(&app, &user, TaskKind::Work, "x", &under("m2"), None).unwrap();
         assert_eq!(plan.budget.unwrap().secs, Some(1800));
+        // Turns spent: refused whatever is asked, a unit it names or not.
+        app.db.charge(&m.id, 0, 5).unwrap();
+        for d in [budget("30m"), under("m2")] {
+            let err = plan_child(&app, &user, TaskKind::Work, "x", &d, None).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("nothing is left of the budget under task m2"),
+                "{err}"
+            );
+        }
     }
 
     /// Last of the checks: a manager needs a harness with hooks and the
@@ -2735,7 +2768,7 @@ mod tests {
         )
         .unwrap();
         app.db.set_task_state("m-id", TaskState::Archived).unwrap();
-        let err = commit_child(&app, &Caller::User, &plan, None).unwrap_err();
+        let err = commit_child(&app, &plan, None).unwrap_err();
         assert!(err.to_string().contains("archived"), "{err:#}");
         assert!(!task_dir(&app, &plan.record).exists());
         assert!(app.db.get_task(&plan.record.id).unwrap().is_none());
@@ -2759,7 +2792,7 @@ mod tests {
         )
         .unwrap();
         insert(&app, "k5", TaskKind::Work, "m-id");
-        let err = commit_child(&app, &Caller::User, &plan, None).unwrap_err();
+        let err = commit_child(&app, &plan, None).unwrap_err();
         assert!(err.to_string().contains("its limit of 6"), "{err:#}");
         assert!(!task_dir(&app, &plan.record).exists());
         assert!(app.db.get_task(&plan.record.id).unwrap().is_none());

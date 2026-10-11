@@ -359,7 +359,8 @@ pub struct Delegation {
     #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
     pub allow: Option<Vec<String>>,
     /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
-    /// comma-separated, within what is left above it
+    /// comma-separated, within what is left above it (recorded; not yet
+    /// charged or enforced)
     #[arg(long, value_delimiter = ',', value_parser = crate::manager::budget::parse_part)]
     pub budget: Vec<BudgetPart>,
 }

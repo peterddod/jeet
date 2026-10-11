@@ -663,7 +663,9 @@ on `jeet task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
 worker_default`, refused unless its parent holds each one, and `--budget
-1h,20turns` caps its busy time and turns (no `$`: cost budgets wait).
+1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
+wait). For now a budget is recorded, and checked against what is left above
+when a task is made, but not yet charged or enforced: a task runs past it.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces

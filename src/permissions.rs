@@ -2604,6 +2604,27 @@ mod tests {
         }
     }
 
+    /// A capability with commands jeet never sees run is lifted from the
+    /// deny list only while the task's grant holds it cut by every list
+    /// above it, not by its own grant alone.
+    #[test]
+    fn a_granted_comment_is_lifted_only_while_every_list_above_holds_it() {
+        let (_dir, mut app, _w) = tree();
+        app.config.assistant.allow = vec!["pr.comment".into()];
+        let root = crate::assistant::ensure(&app).unwrap();
+        let m = add(&app, "m", TaskKind::Manager, Some(&root), &["pr.comment"]);
+        let w = add(&app, "w2", TaskKind::Work, Some(&m), &["pr.comment"]);
+        let comment = "gh pr comment".to_string();
+        assert!(!task_deny(&app, &w).unwrap().contains(&comment));
+        // Its parent's grant no longer holds it.
+        app.db.set_grants(&m.id, &[]).unwrap();
+        assert!(task_deny(&app, &w).unwrap().contains(&comment));
+        // Nor the root's list.
+        app.db.set_grants(&m.id, &["pr.comment"]).unwrap();
+        app.config.assistant.allow = Vec::new();
+        assert!(task_deny(&app, &w).unwrap().contains(&comment));
+    }
+
     #[test]
     fn a_manager_is_denied_commits_and_new_branches_but_may_read_branches() {
         let (_dir, app, w) = tree();

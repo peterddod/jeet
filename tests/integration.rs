@@ -7753,6 +7753,33 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{:?}",
         notes(&notifier)
     );
+    // A task undone after its row was made (a repository it cannot add)
+    // leaves no entry and no notification naming it.
+    let output = root.jeet(
+        &[
+            "task", "new", "u", "--allow", "pr.merge", "--repo", "nosuch",
+        ],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("could not add nosuch"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(
+        !actions(&lab.home())
+            .iter()
+            .any(|a| a["action"] == "granted held `pr.merge` to task u"),
+        "{:?}",
+        actions(&lab.home())
+    );
+    assert!(
+        !notes(&notifier).iter().any(|n| n.contains("to task u|")),
+        "{:?}",
+        notes(&notifier)
+    );
     // What the assistant makes is its, and names it.
     let output = root.jeet(&["task", "new", "r", "--goal", "g"], &lab.home(), &[]);
     succeeded(&output);
@@ -7949,12 +7976,12 @@ fn a_manager_acts_on_the_task_its_check_resolved() {
     assert!(!stderr.contains("the assistant"), "{stderr}");
     assert!(!lab.home().join(".jeet/inbox.jsonl").exists());
     assert!(!lab.home().join("assistant/.jeet/inbox.jsonl").exists());
-    let output = mp.jeet(&["task", "interrupt", "assistant"], &api_dir, &[]);
-    assert!(
-        !stderr_of(&output).contains("only the user interrupts"),
-        "{}",
-        stderr_of(&output)
-    );
+    // An interrupt reaches the child too: it names the task it acted on.
+    let output = mp.jeet(&["task", "interrupt", "assistant"], &api_dir, &env);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("task assistant"), "{stderr}");
+    assert!(!stderr.contains("only the user interrupts"), "{stderr}");
 
     // Named for a task outside: the child, not that task.
     let output = mp.jeet(&["task", "new", "sib", "--goal", "g"], &api_dir, &[]);
@@ -9114,6 +9141,21 @@ fn a_node_launch_carries_deny_rules() {
     assert!(lab.home().join("run").join(&sib).is_dir());
     succeeded(&lab.jeet_at(&["task", "delete", "sib", "-f"], &lab.home(), &env));
     assert!(!lab.home().join("run").join(&sib).exists());
+
+    // Granted what the root holds, the rule for it is lifted, and only it.
+    lab.new_task_with(
+        "talker",
+        &["--parent", "assistant", "--allow", "pr.comment"],
+    );
+    let output = lab.jeet_at(&["task", "open", "talker"], &lab.home(), &env);
+    succeeded(&output);
+    let calls = calls_of(&tmux, "new-session");
+    let agent = agent_argv(calls.last().unwrap());
+    let at = agent.iter().position(|a| a == "--settings").unwrap();
+    let settings = settings_file(&lab, &agent[at + 1]);
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    assert!(!deny.contains(&"Bash(gh pr comment *)".into()), "{deny:?}");
+    assert!(deny.contains(&"Bash(gh pr review *)".into()), "{deny:?}");
 }
 
 /// Index a repository whose default branch is `develop`.

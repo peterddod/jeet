@@ -1224,7 +1224,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
 - **P9** A node's allowed actions go to its own `actions.log`,
   unannounced. A held capability granted is logged by the granter (the
   assistant's log, a manager's own, or the assistant's marked `by user`)
-  and announced whatever `[assistant] notify` says, except the user's own.
+  and announced whatever `[assistant] notify` says, except the user's own,
+  once the task is fully made (its worktrees added), so no entry names a
+  task that was undone.
   `jeet task last` fences what it prints for any caller but the user: an
   agent's words may carry text it read (5.5). So does `jeet manager show`,
   for the children's reports and for the brief's goal and done-when, which
@@ -1245,12 +1247,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   the task, not its parent. `--budget` must fit what is left under the
   parent and every ancestor; `[managers] default_budget`, given to a
   manager and to a manager's child when unasked, is cut to what is left
-  rather than refused. A worker of the assistant's gets no budget unless
+  rather than refused. Nothing is made under a parent with either unit
+  used up, whatever `--budget` names. A worker of the assistant's gets no budget unless
   asked. Every command naming a task finds it as the permission check did,
   then checks its reach again.
 - **P12** A manager needs a harness with hook events, continue-turn
   output, `interrupt_keys` and deny rules (§7), and is refused, naming what
-  is missing, on one without; a worker starts with a warning, as before.
+  is missing, on one without. A worker starts without them; only a
+  worker with a parent is warned, and only of missing deny rules.
   There is no `--harness` flag: the configured harness is checked.
 - **P13** `jeet manager ls [--json]` is the tree (a flat list with each
   task's parent and depth), in place of `manager tree --json`. `jeet

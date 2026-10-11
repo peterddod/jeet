@@ -40,7 +40,8 @@ A manager (phase 2) needs four of these: `hook_args` or `hook_file`,
 `continue_output`, `interrupt_keys` and `Enforcement::Rules`. Making one
 on a harness without them all is refused, naming each that is missing
 ("hook events", "continue-turn output", "interrupt_keys", "deny rules");
-a worker starts without them, with a warning.
+a worker starts without them. Only a worker with a parent is warned, and
+only when the harness has no deny rules.
 
 `AgentSpec::supports_sessions` and `AgentSpec::has_hooks` (`hook_args` or
 `hook_file`) check whether these methods return `Some`, so they must return `Some` for any arguments, empty
