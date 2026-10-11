@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::cd;
 use crate::context::App;
 use crate::github;
+use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::resolve::repo_from_filter_or_cwd;
 use crate::review;
@@ -29,7 +30,12 @@ pub fn run(
     let pr = found.pr.clone();
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
-    let review = tasks::review_task(app, &repo, &pr)?;
+    // What the assistant checks out reports to it, like a task it makes.
+    let parent = match permissions::caller(&app.db)? {
+        Caller::Root => Some(super::task::assistant_parent(app)?.id),
+        Caller::User | Caller::Node(_) => None,
+    };
+    let review = tasks::review_task(app, &repo, &pr, parent.as_deref())?;
     // Only now: a sync started before the checkout would be fetching this
     // repo just as `gh pr checkout` does. The checkout waits out one already
     // running, but there is no need to start one in its way.
@@ -50,7 +56,13 @@ pub fn run(
     );
 
     if start_command {
-        start_review(app, &repo, &pr, &review.path, rerun)?;
+        // Under a parent, the review command is the task's agent and reports.
+        let as_task = review
+            .task
+            .parent_id
+            .as_ref()
+            .map(|_| review.task.id.as_str());
+        start_review(app, &repo, &pr, &review.path, rerun, as_task)?;
     }
 
     if io::stdout().is_terminal() {
@@ -69,6 +81,7 @@ fn start_review(
     pr: &github::PullRequest,
     worktree: &std::path::Path,
     rerun: bool,
+    as_task: Option<&str>,
 ) -> Result<()> {
     let config = &app.config.review;
     let Some(template) = config.command() else {
@@ -90,7 +103,7 @@ fn start_review(
             return Ok(());
         }
     }
-    let job = review::start(app, repo, pr, worktree, config, template)?;
+    let job = review::start(app, repo, pr, worktree, config, template, as_task)?;
     eprintln!("jeet: reviewing in the background: {}", job.command);
     eprintln!("jeet: output -> {}", job.log.display());
     Ok(())

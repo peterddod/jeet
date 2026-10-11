@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 
 pub mod tasks;
 
@@ -107,6 +107,37 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
     ALTER TABLE task_sessions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0;
     ",
+    // v4: hierarchy, phase 1. A task may have a parent (NULL: top level), what
+    // its parent asked of it, and what it reported back. Additive only: the
+    // kind CHECK is unchanged, so `tasks` is not rebuilt. When v5 rebuilds it
+    // (for the manager kind), the rebuild must copy `parent_id` and re-create
+    // `tasks_one_assistant` and `tasks_parent`. `needs_user`, `answer` and
+    // `answered_by` are for questions escalated to the user, not read yet.
+    "
+    ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT;
+    CREATE INDEX tasks_parent ON tasks(parent_id);
+    CREATE TABLE task_briefs (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        goal TEXT NOT NULL,
+        done_when TEXT,
+        brief TEXT,
+        created_by TEXT NOT NULL
+    );
+    CREATE TABLE task_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        to_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL
+            CHECK (kind IN ('progress', 'done', 'blocked', 'question', 'status')),
+        body TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        needs_user INTEGER NOT NULL DEFAULT 0,
+        answer TEXT,
+        answered_by TEXT
+    );
+    CREATE INDEX task_reports_to ON task_reports(to_id, answer);
+    CREATE INDEX task_reports_task ON task_reports(task_id, id);
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
@@ -171,15 +202,7 @@ impl Database {
                  upgrade jeet"
             );
         }
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-            let version = i + 1;
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)
-                .with_context(|| format!("migrate index to v{version}"))?;
-            // PRAGMA takes no bound parameters; `version` is our own integer.
-            tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
-            tx.commit()?;
-        }
+        apply_migrations(&mut conn, current)?;
         // Off by default in SQLite, and the task tables lean on ON DELETE
         // CASCADE.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -260,6 +283,26 @@ impl Database {
 /// one was not written by us: the experimental workspace builds (v0.3) stamped
 /// `user_version` under a numbering of their own, on top of the same `repos`
 /// table. Such an index is migrated as v0 rather than refused as "newer".
+/// Apply each step in [`MIGRATIONS`] after `current`. Another process
+/// opening the index may be migrating it too, as the first hooks after an
+/// upgrade all are: each step takes the write lock first and is skipped if
+/// it turns out to be done already.
+fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let version = i + 1;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if effective_version(&tx)? >= version as i64 {
+            continue;
+        }
+        tx.execute_batch(sql)
+            .with_context(|| format!("migrate index to v{version}"))?;
+        // PRAGMA takes no bound parameters; `version` is our own integer.
+        tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn effective_version(conn: &Connection) -> Result<i64> {
     let stamped: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if stamped == 0 {
@@ -286,6 +329,15 @@ mod tests {
     #[test]
     fn a_fresh_index_is_at_the_latest_version() {
         let (_dir, db) = open();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn a_step_another_process_applied_since_is_skipped() {
+        let (_dir, db) = open();
+        // As a process that read v3 before another took the index to the
+        // latest: v4's ALTER would fail on the column already there.
+        apply_migrations(&mut db.conn(), 3).unwrap();
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
     }
 
@@ -403,6 +455,85 @@ mod tests {
         db.delete_task("t1").unwrap();
         assert!(db.list_task_worktrees("t1").unwrap().is_empty());
         assert!(db.list_task_sessions("t1").unwrap().is_empty());
+    }
+
+    /// An index as v3 left it, with the assistant `a` and a task `w`.
+    fn v3_index(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(BASELINE).unwrap();
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "PRAGMA user_version = 3;
+             PRAGMA foreign_keys = ON;
+             INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('a', 'assistant', 'assistant', 'assistant', 1, 1);
+             INSERT INTO tasks (id, slug, name, created_at, last_activity)
+                 VALUES ('w', 'work', 'work', 1, 1);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn many_processes_opening_an_old_index_at_once_all_migrate_it() {
+        // As the first hooks after an upgrade: each step must take the write
+        // lock before it reads the version, or one of them is refused.
+        for _ in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.db");
+            v3_index(&path);
+            let start = std::sync::Barrier::new(8);
+            std::thread::scope(|s| {
+                for _ in 0..8 {
+                    s.spawn(|| {
+                        start.wait();
+                        let db = Database::open(&path).unwrap();
+                        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+                    });
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_v3_index_gains_parents_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        v3_index(&path);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 4);
+        // Existing tasks are top level, and still list.
+        assert_eq!(db.get_task("w").unwrap().unwrap().parent_id, None);
+        assert_eq!(db.list_tasks(None).unwrap().len(), 1);
+        assert!(has_table(&db, "task_briefs"));
+        assert!(has_table(&db, "task_reports"));
+        // Not rebuilt, so the one-assistant index is still there.
+        assert!(db
+            .conn()
+            .execute_batch(
+                "INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('b', 'assistant-2', 'x', 'assistant', 1, 1);"
+            )
+            .is_err());
+
+        // A child's reports go with it; a parent with a child cannot go.
+        db.conn()
+            .execute_batch(
+                "INSERT INTO tasks (id, slug, name, parent_id, created_at, last_activity)
+                     VALUES ('c', 'child', 'child', 'a', 1, 1);
+                 INSERT INTO task_reports (task_id, to_id, kind, body, at)
+                     VALUES ('c', 'a', 'done', 'ok', 1);",
+            )
+            .unwrap();
+        assert!(db.delete_task("a").is_err());
+        db.delete_task("c").unwrap();
+        let reports: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM task_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(reports, 0);
+        db.delete_task("a").unwrap();
     }
 
     #[test]

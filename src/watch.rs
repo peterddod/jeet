@@ -42,6 +42,7 @@ use crate::db::tasks::{TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::messages::{self, Delivered, TmuxAgent};
 use crate::notify;
+use crate::reports;
 use crate::store;
 use crate::tasks;
 use crate::tmux;
@@ -862,7 +863,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         }
     }
     for (text, carried) in assistant_messages(&for_assistant) {
-        match assistant::deliver(app, &text) {
+        match assistant::deliver(app, &text, true) {
             Ok((delivered, _)) => {
                 for &i in &carried {
                     sent[i] = Sent::Assistant;
@@ -1061,6 +1062,10 @@ pub fn run_once(app: &App) -> Result<()> {
     let sent = dispatch(app, &app.config.assistant.rules, &polled.events);
     state.last_run = Some(now_secs());
     save_state(&path, &state)?;
+    // No event fires when a task has sat idle too long; each poll looks.
+    if let Err(e) = reports::sweep_idle(app, now_secs()) {
+        eprintln!("jeet: warning: {e:#}");
+    }
 
     let logged: Vec<Logged> = polled
         .events
@@ -1141,13 +1146,8 @@ fn launch(home: &Path) -> Result<()> {
         .open(&log)
         .with_context(|| format!("open {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let mut cmd = Command::new("nohup");
-    cmd.arg(exe)
-        .args(["watch", "--once"])
-        .env("JEET_HOME", home)
-        .env_remove(crate::permissions::ASSISTANT_ENV)
-        .current_dir(home)
-        .stdin(Stdio::null())
+    let mut cmd = once_command(home, &exe);
+    cmd.stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
     #[cfg(unix)]
@@ -1157,6 +1157,19 @@ fn launch(home: &Path) -> Result<()> {
     }
     cmd.spawn().context("start jeet watch")?;
     Ok(())
+}
+
+/// `nohup <exe> watch --once` for `home`, as no one in particular: not the
+/// assistant, nor the task whose terminal opened the tasks list.
+fn once_command(home: &Path, exe: &Path) -> Command {
+    let mut cmd = Command::new("nohup");
+    cmd.arg(exe)
+        .args(["watch", "--once"])
+        .env("JEET_HOME", home)
+        .env_remove(crate::permissions::ASSISTANT_ENV)
+        .env_remove(crate::tasks::TASK_ID_ENV)
+        .current_dir(home);
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -1438,6 +1451,24 @@ mod tests {
             .join("tests/fixtures/watch")
             .join(name);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The tasks list may be opened in a task's terminal (D23): the poll it
+    /// starts must not run as that task, nor as the assistant (D20).
+    #[test]
+    fn the_background_poll_runs_as_no_task() {
+        let home = Path::new("/jeet-home");
+        let cmd = once_command(home, Path::new("/bin/jeet"));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        for name in [crate::tasks::TASK_ID_ENV, crate::permissions::ASSISTANT_ENV] {
+            assert!(
+                envs.contains(&(std::ffi::OsStr::new(name), None)),
+                "{name} is not removed: {envs:?}"
+            );
+        }
+        assert!(envs.contains(&(std::ffi::OsStr::new("JEET_HOME"), Some(home.as_os_str()))));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["/bin/jeet", "watch", "--once"]);
     }
 
     /// GitHub as fixtures say, noting what it was asked.

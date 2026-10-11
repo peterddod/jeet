@@ -47,7 +47,9 @@ use crate::agent::{self, AgentSpec};
 use crate::assistant::{self, Open};
 use crate::commands::task::printable;
 use crate::context::App;
-use crate::db::tasks::{TaskKind, TaskPrRecord, TaskRecord, TaskState, TaskWorktreeRecord};
+use crate::db::tasks::{
+    TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
+};
 use crate::git;
 use crate::github;
 use crate::pr_history;
@@ -98,6 +100,8 @@ pub struct TaskRow {
     pub last_activity: i64,
     /// Bytes on disk, once the size walker has been through the task.
     pub size: Option<u64>,
+    /// What a task with a parent last told it, or jeet did for it.
+    pub report: Option<TaskReportRecord>,
 }
 
 impl TaskRow {
@@ -2444,6 +2448,7 @@ impl Screen<'_> {
                                 project: spec.project.as_deref(),
                                 repos: &spec.repos,
                                 branch: spec.branch.as_deref(),
+                                parent_id: None,
                             },
                         )
                     })
@@ -3063,6 +3068,10 @@ fn load_rows(app: &App) -> Result<Vec<TaskRow>> {
                 activity: None,
                 last_activity: task.last_activity,
                 size: None,
+                report: match task.parent_id {
+                    Some(_) => app.db.last_report(&task.id)?,
+                    None => None,
+                },
                 task,
             })
         })
@@ -3202,12 +3211,14 @@ mod tests {
                 state,
                 created_at: 0,
                 last_activity: last,
+                parent_id: None,
             },
             dir: PathBuf::from(format!("/tasks/{}", tasks::slugify(name))),
             worktrees: Vec::new(),
             activity: None,
             last_activity: last,
             size: None,
+            report: None,
         }
     }
 

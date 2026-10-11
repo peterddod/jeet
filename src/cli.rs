@@ -185,6 +185,14 @@ pub enum Commands {
         url: Option<String>,
     },
 
+    /// Tell this task's parent how it is going (progress, done, blocked, question)
+    Report {
+        #[arg(value_enum)]
+        kind: crate::db::tasks::ReportKind,
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+
     /// Print shell integration snippet for native cd command
     InitShell,
 
@@ -219,6 +227,17 @@ pub enum TaskCommands {
         /// Start the task's agent straight away, with this as its first prompt
         #[arg(long, allow_hyphen_values = true)]
         prompt: Option<String>,
+        /// The task it reports to: `assistant`, the only one for now. Made by
+        /// the assistant, a task reports to it without this
+        #[arg(long)]
+        parent: Option<String>,
+        /// What its parent wants of it, shown to its agent as each session
+        /// starts (needs a parent)
+        #[arg(long, allow_hyphen_values = true)]
+        goal: Option<String>,
+        /// When it is done, alongside --goal
+        #[arg(long = "done", allow_hyphen_values = true)]
+        done_when: Option<String>,
     },
 
     /// List tasks, most recently active first

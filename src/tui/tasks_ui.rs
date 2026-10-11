@@ -19,8 +19,9 @@ use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate
 use crate::agent::age_label;
 use crate::commands::task::printable;
 use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
+use crate::messages;
 use crate::pr_history;
-use crate::status::Activity;
+use crate::status::{first_line, Activity};
 use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
@@ -449,12 +450,34 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
         TaskKind::Review => format!("{} (review)", row.task.name),
         TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
+    // The assistant is the only parent there is for now. The name gives way
+    // before the marker does: a cut-off marker would pass for a top-level task.
+    const MARKER: &str = " ↳ assistant";
+    let name = match row.task.parent_id.is_some() {
+        true if columns.name > MARKER.width() => {
+            format!("{}{MARKER}", truncate(&name, columns.name - MARKER.width()))
+        }
+        true => truncate(&format!("{name}{MARKER}"), columns.name),
+        false => truncate(&name, columns.name),
+    };
+    // The last report, dim, in what the name leaves of its column: the
+    // columns after it fill the row.
+    let report = row.report.as_ref().map(|report| {
+        let body = messages::clean(&report.body).replace('\t', " ");
+        format!(
+            " · {}: {}",
+            report.kind.as_str(),
+            first_line(&body, 120).unwrap_or_default()
+        )
+    });
+    let rest = columns.name.saturating_sub(name.width());
     spans.push(Span::styled(
-        cell(&name, columns.name),
+        name,
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     ));
+    spans.push(dim(cell(report.as_deref().unwrap_or_default(), rest)));
     if columns.worktrees > 0 {
         spans.push(Span::styled(
             format!(" {}", cell(&row.summary(), columns.worktrees)),
@@ -1248,7 +1271,7 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::{TaskRecord, TaskWorktreeRecord};
+    use crate::db::tasks::{ReportKind, TaskRecord, TaskReportRecord, TaskWorktreeRecord};
     use crate::tui::tasks::{NewTaskForm, Panel};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1265,6 +1288,7 @@ mod tests {
                 state: TaskState::Active,
                 created_at: 0,
                 last_activity: crate::worktrees::now_secs() - 120,
+                parent_id: None,
             },
             dir: PathBuf::from("/t"),
             worktrees: vec![TaskWorktreeRecord {
@@ -1282,6 +1306,7 @@ mod tests {
             activity,
             last_activity: crate::worktrees::now_secs() - 120,
             size: Some(3 * 1024 * 1024),
+            report: None,
         }
     }
 
@@ -1317,9 +1342,20 @@ mod tests {
 
     #[test]
     fn every_width_and_panel_draws_without_panicking() {
+        let mut child = row("c", Some(Activity::Idle { since: 0 }));
+        child.task.parent_id = Some("assistant-id".into());
+        child.report = Some(TaskReportRecord {
+            id: 1,
+            task_id: "c".into(),
+            to_id: "assistant-id".into(),
+            kind: ReportKind::Blocked,
+            body: format!("\u{1b}[2J{}\twide\u{1b}]8;;x\u{7}", "漢字".repeat(200)),
+            at: 0,
+        });
         let mut ui = TasksUi::new(vec![
             row("a", Some(Activity::Waiting { detail: None })),
             row("b", None),
+            child,
         ]);
         let panels = vec![
             None,
@@ -1354,10 +1390,27 @@ mod tests {
             for panel in panels.clone() {
                 ui.panel = panel;
                 for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
-                    render(&mut ui, w, h);
+                    let screen = render(&mut ui, w, h);
+                    if (w, ui.panel.is_none()) == (160, true) {
+                        let all = screen.join("\n");
+                        assert!(all.contains("c ↳ assistant · blocked: [2J"), "{all}");
+                    }
+                    assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_long_name_gives_way_before_the_parent_marker() {
+        let mut child = row(
+            "fix-the-login-redirect-loop-on-safari",
+            Some(Activity::Idle { since: 0 }),
+        );
+        child.task.parent_id = Some("assistant-id".into());
+        let mut ui = TasksUi::new(vec![child]);
+        let screen = render(&mut ui, 80, 12).join("\n");
+        assert!(screen.contains("fix… ↳ assistant"), "{screen}");
     }
 
     fn session(id: &str, primary: bool, running: bool) -> crate::assistant::Session {

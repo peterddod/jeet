@@ -26,7 +26,11 @@ use crate::cli::{
     WorktreeCommands,
 };
 use crate::config;
+use crate::context::App;
+use crate::db::tasks::{TaskKind, TaskRecord};
+use crate::db::Database;
 use crate::notify::{self, Notification};
+use crate::tasks::TASK_ID_ENV;
 use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
@@ -145,6 +149,69 @@ pub fn assistant_mode() -> bool {
     })
 }
 
+/// Who runs this jeet, as far as what it may do goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// A person, or an agent of a top-level task: not gated.
+    User,
+    /// The assistant, the root of the tree: gated by `[assistant] allow`.
+    Root,
+    /// The agent of a task with a parent: gated by [`effective`], and only
+    /// over itself.
+    Node(TaskRecord),
+}
+
+/// Who `row`, the task `$JEET_TASK_ID` names, makes the caller. A task with
+/// a parent is a Node even under `JEET_ASSISTANT=1`: the narrower reading
+/// wins.
+fn classify(row: Option<TaskRecord>, assistant: bool) -> Caller {
+    match row {
+        Some(task) if task.parent_id.is_some() => Caller::Node(task),
+        _ if assistant => Caller::Root,
+        _ => Caller::User,
+    }
+}
+
+/// Who runs this jeet: by `$JEET_TASK_ID` and `JEET_ASSISTANT` only, never
+/// the working directory. An id jeet does not know names no Node. A
+/// database error is an error, so what is gated fails closed.
+pub fn caller(db: &Database) -> Result<Caller> {
+    let row = match std::env::var(TASK_ID_ENV) {
+        Ok(id) if !id.trim().is_empty() => db.get_task(id.trim())?,
+        _ => None,
+    };
+    Ok(classify(row, assistant_mode()))
+}
+
+/// What a task with a parent may be allowed, before its parent's list cuts
+/// it down. Phase 2 keeps a grant per task instead (`task_grants`).
+pub const NODE_GRANT: &[&str] = &["worktree.add"];
+
+/// The capabilities of `grant` that `allow` lists.
+fn intersect(grant: &[&'static str], allow: &[String]) -> Vec<&'static str> {
+    grant
+        .iter()
+        .copied()
+        .filter(|g| allow.iter().any(|a| a.trim() == *g))
+        .collect()
+}
+
+/// What `node` may do: [`NODE_GRANT`] ∩ `[assistant] allow`, so a child
+/// never holds what its parent lacks. Nothing when its parent is not the
+/// assistant, the only parent there is for now.
+pub fn effective(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
+    let parent = match &node.parent_id {
+        Some(id) => app.db.get_task(id)?,
+        None => None,
+    };
+    Ok(match parent {
+        Some(parent) if parent.kind == TaskKind::Assistant => {
+            intersect(NODE_GRANT, &app.config.assistant.allow)
+        }
+        _ => Vec::new(),
+    })
+}
+
 /// What running a command takes, for the assistant.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Gate {
@@ -181,6 +248,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { .. }
+        // Only ever to the caller's own parent; the command checks who that is.
+        | Commands::Report { .. }
         // Its own todo list.
         | Commands::Todo { .. }
         // Started by jeet itself, under the command that was checked.
@@ -384,15 +453,28 @@ pub struct Authorized {
 /// Outside the assistant everything is allowed and nothing is recorded.
 /// Returns the action to [`Authorized::finish`] when it is one the log
 /// keeps.
+///
+/// The agent of a task with a parent is checked as a Node instead, whether
+/// or not it runs as the assistant: see [`node`].
 pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let gate = gate(command, terminal);
+    // Only what a Node may not do opens the index: plumbing like hooks and
+    // `jeet report` never does.
+    let in_task = std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty());
+    if in_task && (gate != Gate::Free || node_only(command).is_some()) {
+        let app = App::open().context("check what this task may do")?;
+        if let Caller::Node(task) = caller(&app.db)? {
+            return node(&app, &task, command, gate, terminal).map(|()| None);
+        }
+    }
     if !assistant_mode() {
         return Ok(None);
     }
-    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if let Some(Commands::ReviewJob { state }) = command {
         check_review_job(state)?;
     }
-    let (capability, action) = match gate(command, terminal) {
+    let (capability, action) = match gate {
         Gate::Free => return Ok(None),
         Gate::Interactive if terminal => return Ok(None),
         Gate::Interactive => bail!(
@@ -419,6 +501,106 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
         log,
         notify: settings.notify(),
     }))
+}
+
+/// What `command` does that only the root may, for "task … may not …":
+/// reaching the user, and the assistant's own list.
+fn node_only(command: Option<&Commands>) -> Option<&'static str> {
+    match command? {
+        Commands::Notify { .. } => Some("notify the user"),
+        Commands::Todo { .. } => Some("keep the assistant's todo list"),
+        // Only `jeet review` starts one, and a Node may not review.
+        Commands::ReviewJob { .. } => Some("run review jobs"),
+        _ => None,
+    }
+}
+
+/// Check that `node`, a task with a parent, may run `command`: only what
+/// its parent may too ([`effective`]), and only over itself. Nothing is
+/// logged or announced; a refusal says to ask the parent.
+fn node(
+    app: &App,
+    node: &TaskRecord,
+    command: Option<&Commands>,
+    gate: Gate,
+    terminal: bool,
+) -> Result<()> {
+    let slug = &node.slug;
+    if let Some(about) = node_only(command) {
+        bail!(
+            "task {slug} may not {about}: a task with a parent tells its parent with \
+             `jeet report progress|done|blocked|question \"…\"`"
+        );
+    }
+    let capability = match gate {
+        Gate::Free => return Ok(()),
+        Gate::Interactive if terminal => return Ok(()),
+        Gate::Interactive => bail!(
+            "that opens a screen or shell for a person at a terminal, which task {slug}'s \
+             agent cannot use; ask with `jeet report blocked \"…\"`"
+        ),
+        Gate::Needs { capability, .. } => capability,
+    };
+    let about = self::capability(capability).map_or("do that", |c| c.about);
+    if !NODE_GRANT.contains(&capability) {
+        let mut message = node_refusal(slug, about, None);
+        if let Some(Commands::Task {
+            command: TaskCommands::Send { .. },
+        }) = command
+        {
+            message.push_str(" (tasks never message each other)");
+        }
+        bail!(message);
+    }
+    if !effective(app, node)?.contains(&capability) {
+        let path = config::config_path(&app.home);
+        bail!(node_refusal(slug, about, Some((capability, &path))));
+    }
+    node_scope(app, node, command)
+}
+
+/// What a Node may change: only itself, and only by adding worktrees.
+/// Anything else that gets this far is refused, so a new command fails
+/// closed until it says.
+fn node_scope(app: &App, node: &TaskRecord, command: Option<&Commands>) -> Result<()> {
+    match command {
+        Some(Commands::Worktree(WorktreeArgs {
+            task,
+            command: WorktreeCommands::Add { .. },
+        })) => {
+            // As the command resolves it, so neither a prefix nor the
+            // working directory can name another task.
+            let target = crate::tasks::current(app, task.as_deref())?;
+            if target.id != node.id {
+                bail!(
+                    "task {} may add worktrees only to itself, not to task {}; no task may \
+                     change another's work",
+                    node.slug,
+                    target.slug
+                );
+            }
+            Ok(())
+        }
+        _ => bail!("jeet has no scope rule for that command for a task with a parent"),
+    }
+}
+
+/// Why `slug` may not do `about`: outside what any task with a parent may
+/// (`parent_lacks` None), or because its parent lacks the capability, set
+/// in the config file at the path.
+fn node_refusal(slug: &str, about: &str, parent_lacks: Option<(&str, &Path)>) -> String {
+    match parent_lacks {
+        None => format!(
+            "task {slug} may not {about}: a task with a parent may only add worktrees to \
+             itself (when its parent may) and report; ask with \
+             `jeet report blocked|question \"…\"`"
+        ),
+        Some((capability, path)) => format!(
+            "task {slug} may not {about}: its parent, the assistant, does not hold \
+             `{capability}` ([assistant] allow in {}); ask with `jeet report blocked \"…\"`",
+            path.display()
+        ),
+    }
 }
 
 impl Authorized {
@@ -680,6 +862,176 @@ mod tests {
         assert_eq!(gate(None, false), Gate::Interactive);
         let cli = crate::cli::Cli::try_parse_from(["jeet", "projects"]).unwrap();
         assert_eq!(gate(cli.command.as_ref(), true), Gate::Interactive);
+    }
+
+    #[test]
+    fn reporting_is_free() {
+        for kind in ["progress", "done", "blocked", "question"] {
+            assert_eq!(gate_of(&["report", kind, "x"]), Gate::Free, "{kind}");
+        }
+        // jeet's own kind is not the task's to send.
+        assert!(crate::cli::Cli::try_parse_from(["jeet", "report", "status", "x"]).is_err());
+    }
+
+    fn task(parent_id: Option<&str>) -> TaskRecord {
+        TaskRecord {
+            id: "t".into(),
+            slug: "t".into(),
+            name: "t".into(),
+            project: None,
+            kind: TaskKind::Work,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: parent_id.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_task_with_a_parent_is_a_node_whatever_else_it_says() {
+        let child = task(Some("a"));
+        assert_eq!(
+            classify(Some(child.clone()), true),
+            Caller::Node(child.clone())
+        );
+        assert_eq!(classify(Some(child.clone()), false), Caller::Node(child));
+        assert_eq!(classify(Some(task(None)), true), Caller::Root);
+        assert_eq!(classify(Some(task(None)), false), Caller::User);
+        assert_eq!(classify(None, true), Caller::Root);
+        assert_eq!(classify(None, false), Caller::User);
+    }
+
+    #[test]
+    fn a_node_holds_only_what_its_grant_and_its_parent_both_do() {
+        assert!(intersect(&["worktree.add"], &[]).is_empty());
+        assert_eq!(
+            intersect(
+                &["worktree.add"],
+                &[" worktree.add ".into(), "task.send".into()]
+            ),
+            ["worktree.add"]
+        );
+        // Never anything outside the grant, whatever the parent holds.
+        let every: Vec<String> = CAPABILITIES.iter().map(|c| c.name.to_string()).collect();
+        assert_eq!(intersect(NODE_GRANT, &every), NODE_GRANT);
+    }
+
+    /// An index in a tempdir with the assistant, `w` and `sib` under it, and
+    /// `top` with no parent.
+    fn tree() -> (tempfile::TempDir, App, TaskRecord) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: config::load_or_create(&home).unwrap(),
+            db: Database::open(&config::index_path(&home)).unwrap(),
+            home,
+        };
+        let assistant = crate::assistant::ensure(&app).unwrap();
+        for (slug, parent) in [("w", Some(&assistant.id)), ("sib", Some(&assistant.id))]
+            .into_iter()
+            .chain([("top", None)])
+        {
+            let task = TaskRecord {
+                id: format!("{slug}-id"),
+                slug: slug.into(),
+                name: slug.into(),
+                ..task(parent.map(String::as_str))
+            };
+            app.db.insert_task(&task).unwrap();
+        }
+        let w = app.db.get_task("w-id").unwrap().unwrap();
+        (dir, app, w)
+    }
+
+    fn node_of(app: &App, w: &TaskRecord, args: &[&str], terminal: bool) -> Result<()> {
+        let cli =
+            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+                .unwrap();
+        let command = cli.command.as_ref();
+        node(app, w, command, gate(command, terminal), terminal)
+    }
+
+    #[test]
+    fn a_node_adds_worktrees_to_itself_only_when_its_parent_may() {
+        let (_dir, mut app, w) = tree();
+        let add = ["worktree", "add", "r", "--task", "w"];
+        let refused = node_of(&app, &w, &add, false).unwrap_err().to_string();
+        assert!(refused.contains("`worktree.add`"), "{refused}");
+        assert!(refused.contains("[assistant] allow"), "{refused}");
+
+        app.config.assistant.allow = vec!["worktree.add".into()];
+        node_of(&app, &w, &add, false).unwrap();
+        for other in ["sib", "top"] {
+            let refused = node_of(&app, &w, &["worktree", "add", "r", "--task", other], false)
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains("only to itself"), "{other}: {refused}");
+        }
+        // Scope is checked directly too, and anything without a rule fails.
+        let cli = crate::cli::Cli::try_parse_from(["jeet", "task", "archive", "sib"]).unwrap();
+        assert!(node_scope(&app, &w, cli.command.as_ref()).is_err());
+
+        // A parent that is not the assistant passes on nothing.
+        let under_top = TaskRecord {
+            id: "u-id".into(),
+            slug: "u".into(),
+            name: "u".into(),
+            ..task(Some("top-id"))
+        };
+        app.db.insert_task(&under_top).unwrap();
+        let add = ["worktree", "add", "r", "--task", "u"];
+        assert!(node_of(&app, &under_top, &add, false).is_err());
+    }
+
+    #[test]
+    fn a_node_may_not_change_anything_else_whatever_its_parent_holds() {
+        let (_dir, mut app, w) = tree();
+        app.config.assistant.allow = CAPABILITIES.iter().map(|c| c.name.into()).collect();
+        let refused: &[&[&str]] = &[
+            &["worktree", "rm", "r", "--task", "w"],
+            &["task", "send", "sib", "x"],
+            &["task", "send", "assistant", "x"],
+            &["task", "archive", "sib"],
+            &["task", "unarchive", "sib"],
+            &["task", "delete", "sib"],
+            &["task", "open", "sib"],
+            &["task", "resync", "sib"],
+            &["task", "new", "x"],
+            &["clone", "https://example.com/a/b"],
+            &["sync"],
+            &["review", "42"],
+            &["pr", "merge", "42"],
+            &["projects", "new", "p"],
+            &["import"],
+            &["watch", "install"],
+            &["notify", "t"],
+            &["todo", "add", "x"],
+            &["todo", "ls"],
+            &["review-job", "s"],
+            &["tasks"],
+        ];
+        for args in refused {
+            let message = node_of(&app, &w, args, false).unwrap_err().to_string();
+            assert!(message.contains("jeet report"), "{args:?}: {message}");
+        }
+        let send = node_of(&app, &w, &["task", "send", "sib", "x"], false).unwrap_err();
+        assert!(
+            send.to_string().contains("never message each other"),
+            "{send}"
+        );
+
+        let allowed: &[&[&str]] = &[
+            &["ls"],
+            &["task", "ls"],
+            &["task", "last", "sib"],
+            &["worktree", "ls"],
+            &["report", "done", "x"],
+        ];
+        for args in allowed {
+            node_of(&app, &w, args, false).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        }
+        // A person at the worker's terminal still gets the screen.
+        node_of(&app, &w, &["tasks"], true).unwrap();
     }
 
     #[test]

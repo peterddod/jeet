@@ -47,7 +47,7 @@ const SLUG_MAX: usize = 48;
 /// the agent gets at code from inside a blank-canvas task.
 const SKILL: &str = r#"---
 name: jeet
-description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, and open pull requests. Use whenever you need code from a repository.
+description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, open pull requests, and report to the task's parent with `jeet report`. Use whenever you need code from a repository, or to say how the task is going.
 ---
 
 # Working in a jeet task
@@ -71,6 +71,24 @@ worktrees inside this directory.
 - Open pull requests from inside a worktree with `gh pr create`.
 - Never touch `$JEET_HOME/store` (the canonical clones) directly. Prefer
   `jeet worktree add` over running `git worktree add` yourself.
+
+## Reporting to your parent (when this task has one)
+
+A task made by the assistant reports to it; its brief, shown as each session
+starts, says so. Tell it how the task is going:
+
+- `jeet report done "…"` when the work is finished, saying where it is (a
+  pull request, a file).
+- `jeet report blocked "…"` or `jeet report question "…"` when you are
+  stuck or need a decision, rather than waiting.
+- `jeet report progress "…"` for a milestone worth knowing about.
+
+Keep reports short; put detail in the pull request or a file and say where.
+jeet tells the parent itself when you wait on a prompt, sit idle or end.
+
+Such a task may only add worktrees to itself (when its parent may) and
+report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
+are refused. Ask your parent instead.
 "#;
 
 /// A task's directory; the assistant's is its home, outside `tasks/`.
@@ -150,6 +168,8 @@ pub struct NewTask<'a> {
     /// Branch for the worktree of the single repository in `repos`; the
     /// project's worktrees start detached.
     pub branch: Option<&'a str>,
+    /// The task it reports to, by id; `None` for a top-level task.
+    pub parent_id: Option<&'a str>,
 }
 
 /// A task that was just made, plus anything worth telling the user.
@@ -177,7 +197,8 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         None => None,
     };
 
-    let (task, mut warnings) = make_task(app, name, project.as_ref(), TaskKind::Work)?;
+    let (task, mut warnings) =
+        make_task(app, name, project.as_ref(), TaskKind::Work, spec.parent_id)?;
 
     let preset = project
         .iter()
@@ -210,6 +231,7 @@ fn make_task(
     name: &str,
     project: Option<&Project>,
     kind: TaskKind,
+    parent_id: Option<&str>,
 ) -> Result<(TaskRecord, Vec<String>)> {
     let now = now_secs();
     let task = TaskRecord {
@@ -221,6 +243,7 @@ fn make_task(
         state: TaskState::Active,
         created_at: now,
         last_activity: now,
+        parent_id: parent_id.map(str::to_string),
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
@@ -564,17 +587,20 @@ pub struct ReviewCheckout {
 /// archived one is brought back; one whose checkout is there already is
 /// brought up to date with the PR when clean. A task made here for a PR
 /// that cannot be checked out is undone — it holds nothing yet.
+///
+/// A task made here reports to `parent_id`; one found is never moved.
 pub fn review_task(
     app: &App,
     repo: &RepoRecord,
     pr: &crate::github::PullRequest,
+    parent_id: Option<&str>,
 ) -> Result<ReviewCheckout> {
     let mut warnings = Vec::new();
     let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
         Some(task) => (task, false),
         None => {
             let name = review_task_name(repo, pr.number);
-            let (task, notes) = make_task(app, &name, None, TaskKind::Review)?;
+            let (task, notes) = make_task(app, &name, None, TaskKind::Review, parent_id)?;
             warnings.extend(notes);
             (task, true)
         }
@@ -638,7 +664,7 @@ pub fn browse_pr(
             }
         }
     }
-    review_task(app, repo, pr)
+    review_task(app, repo, pr, None)
 }
 
 /// The review task's checkout of `pr`: the one it has, refreshed, or a new
@@ -1904,6 +1930,8 @@ mod tests {
             "jeet ls",
             "gh pr create",
             "$JEET_HOME/store",
+            "jeet report done",
+            "jeet report question",
         ] {
             assert!(skill.contains(needle), "skill does not mention {needle}");
         }

@@ -328,6 +328,9 @@ struct HookInput {
     source: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
+    /// SessionEnd's: why it ended (`clear`, `logout`, `prompt_input_exit`…).
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
@@ -352,14 +355,16 @@ fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
         })),
         "SubagentStop" => EventKind::Working(None),
         "Notification" if is_idle_prompt(input) => EventKind::Idle,
-        "Notification" => EventKind::NeedsInput(
+        "Notification" if asks_the_user(input) => EventKind::NeedsInput(
             input
                 .message
                 .as_deref()
                 .and_then(|m| first_line(m, DETAIL_MAX)),
         ),
         "Stop" => EventKind::Stopped,
-        "SessionEnd" => EventKind::Ended,
+        "SessionEnd" => EventKind::Ended {
+            cleared: input.reason.as_deref() == Some("clear"),
+        },
         _ => return None,
     })
 }
@@ -373,6 +378,16 @@ fn is_idle_prompt(input: &HookInput) -> bool {
             .message
             .as_deref()
             .is_some_and(|m| m.contains("waiting for your input"))
+}
+
+/// A notification that leaves Claude stuck until the user answers: a
+/// permission prompt or an MCP elicitation, or an untyped one from a
+/// Claude too old to say. Others (`auth_success`…) are only news.
+fn asks_the_user(input: &HookInput) -> bool {
+    matches!(
+        input.notification_type.as_deref(),
+        None | Some("permission_prompt") | Some("elicitation_dialog")
+    )
 }
 
 /// The `--settings` JSON: a hook per event running `jeet task-hook`, and
@@ -697,6 +712,23 @@ mod tests {
         }
         // Every installed event is covered.
         assert_eq!(cases.map(|c| c.0), HOOK_EVENTS);
+        // A session /clear ends is over too, though another replaces it.
+        let cleared = status_for(
+            &parsed("SessionEnd", &raw_fixture("SessionEnd-clear")),
+            1000,
+        );
+        assert_eq!(cleared.unwrap().state, State::Ended);
+    }
+
+    #[test]
+    fn a_session_ended_by_clear_says_so() {
+        for (fixture, cleared) in [("SessionEnd", false), ("SessionEnd-clear", true)] {
+            assert_eq!(
+                parsed("SessionEnd", &raw_fixture(fixture)).kind,
+                Some(EventKind::Ended { cleared }),
+                "{fixture}"
+            );
+        }
     }
 
     #[test]
@@ -748,6 +780,24 @@ mod tests {
         assert_eq!(event_kind("Notification", &input), Some(EventKind::Idle));
         input.notification_type = None;
         assert_eq!(event_kind("Notification", &input), Some(EventKind::Idle));
+    }
+
+    #[test]
+    fn only_notifications_that_ask_the_user_need_input() {
+        let mut input = fixture("Notification");
+        for kind in [None, Some("permission_prompt"), Some("elicitation_dialog")] {
+            input.notification_type = kind.map(Into::into);
+            assert!(
+                matches!(
+                    event_kind("Notification", &input),
+                    Some(EventKind::NeedsInput(_))
+                ),
+                "{kind:?}"
+            );
+        }
+        let auth = parsed("Notification", &raw_fixture("Notification-auth"));
+        assert_eq!(auth.kind, None);
+        assert!(status_for(&auth, 1000).is_none());
     }
 
     #[test]

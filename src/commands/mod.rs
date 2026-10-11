@@ -11,6 +11,7 @@ pub mod path;
 pub mod pr;
 pub mod projects;
 pub mod prs;
+pub mod report;
 pub mod review;
 pub mod shell;
 pub mod sync;
