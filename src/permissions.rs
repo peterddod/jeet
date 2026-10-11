@@ -437,16 +437,19 @@ pub fn check_grant(
                     "the assistant does not hold it (`[assistant] allow` in {})",
                     config::config_path(&app.home).display()
                 ),
-                _ => format!("its parent, task {}, does not hold it", parent.slug),
+                _ => format!(
+                    "its parent, {}, does not hold it",
+                    crate::manager::label(parent)
+                ),
             };
             bail!("cannot grant `{}`: {whose}", c.name);
         }
         if let Some((node, held)) = &own {
             if !held.contains(&c.name) {
                 bail!(
-                    "cannot grant `{}`: task {} does not hold it itself",
+                    "cannot grant `{}`: {} does not hold it itself",
                     c.name,
-                    node.slug
+                    crate::manager::label(node)
                 );
             }
         }
@@ -1888,7 +1891,7 @@ mod tests {
         assert!(message.contains("[assistant] allow"), "{message}");
         let message = refused(&Caller::User, &m, &["task.send"]);
         assert!(
-            message.contains("`task.send`") && message.contains("task m"),
+            message.contains("`task.send`") && message.contains("its parent, manager m,"),
             "{message}"
         );
         // A task with a parent grants nothing above its own list.

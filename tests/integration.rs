@@ -7182,6 +7182,8 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     succeeded(&output);
     let task = task_id(&lab.home().join("tasks/review-widget-7"));
     assert_eq!(lab.parent_of(&task), Some(lab.assistant_id()));
+    // Made as a child of the assistant's, it gets the worker default.
+    assert_eq!(lab.grants_of(&task), ["worktree.add"]);
 
     // The review command it starts runs as that task's agent, not as the
     // assistant, so what it reports reaches the assistant.
@@ -7734,6 +7736,38 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{:?}",
         notes(&notifier)
     );
+    // Granted again while still held, it is neither logged nor announced
+    // a second time.
+    let held_w = |log: &[serde_json::Value]| {
+        log.iter()
+            .filter(|a| a["action"] == "granted held `pr.merge` to task w")
+            .count()
+    };
+    let noted_w = || {
+        notes(&notifier)
+            .iter()
+            .filter(|n| n.starts_with("Assistant|granted held `pr.merge` to task w|"))
+            .count()
+    };
+    let (logged, noted) = (held_w(&actions(&lab.home())), noted_w());
+    let output = root.jeet(
+        &["manager", "grant", "w", "pr.merge,task.create"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(lab.grants_of(&w), ["pr.merge", "task.create"]);
+    assert!(
+        stderr_of(&output).contains("task w is granted pr.merge, task.create"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(held_w(&actions(&lab.home())), logged);
+    assert_eq!(noted_w(), noted);
+    let output = root.jeet(&["manager", "grant", "w", "pr.merge"], &lab.home(), &env);
+    succeeded(&output);
+    assert_eq!(lab.grants_of(&w), ["pr.merge"]);
+    assert_eq!(held_w(&actions(&lab.home())), logged);
     let output = root.jeet(
         &["task", "new", "z", "--allow", "pr.merge"],
         &lab.home(),

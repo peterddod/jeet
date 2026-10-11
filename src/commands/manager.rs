@@ -447,8 +447,12 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
     }
     let names: Vec<String> = grant.caps.iter().map(|c| c.to_string()).collect();
     match names.is_empty() {
-        true => eprintln!("jeet: task {} is granted nothing", task.slug),
-        false => eprintln!("jeet: task {} is granted {}", task.slug, names.join(", ")),
+        true => eprintln!("jeet: {} is granted nothing", manager::label(&task)),
+        false => eprintln!(
+            "jeet: {} is granted {}",
+            manager::label(&task),
+            names.join(", ")
+        ),
     }
     let effective = permissions::effective(app, &task)?;
     let cut: Vec<&str> = grant
@@ -469,10 +473,10 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
             continue;
         }
         eprintln!(
-            "jeet: warning: task {} is running and lost {}: its agent may still run what \
+            "jeet: warning: {} is running and lost {}: its agent may still run what \
              that covers outside jeet (`gh`, say) until it starts again, as only then do its \
              harness deny rules change",
-            node.slug,
+            manager::label(&node),
             lost.join(", ")
         );
     }
