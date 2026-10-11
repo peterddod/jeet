@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ReviewConfig;
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::RepoRecord;
 use crate::github::PullRequest;
+use crate::identity;
 use crate::remote;
 use crate::worktrees::now_secs;
 
@@ -234,7 +236,7 @@ pub fn start(
     // over with a stale copy. So launching records nothing — except when it
     // fails, which would otherwise leave a job that reads as running forever,
     // refusing every later `jeet review`, `--rerun` included.
-    if let Err(e) = launch(&path, &log, worktree) {
+    if let Err(e) = launch(app, &path, &log, worktree, as_task) {
         job.finished_at = Some(now_secs());
         job.exit_code = Some(127);
         let _ = write(&path, &job);
@@ -243,7 +245,16 @@ pub fn start(
     Ok(job)
 }
 
-fn launch(state: &Path, log: &Path, worktree: &Path) -> Result<()> {
+/// Launch the runner for the job in `state`. Run as task `as_task`, the
+/// runner is recorded as that task's, so what its command runs is known
+/// for the task's.
+fn launch(
+    app: &App,
+    state: &Path,
+    log: &Path,
+    worktree: &Path,
+    as_task: Option<&str>,
+) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     // `nohup` so closing the terminal does not take the review with it — the
@@ -262,7 +273,15 @@ fn launch(state: &Path, log: &Path, worktree: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn().context("start the review command")?;
+    let mut child = cmd.spawn().context("start the review command")?;
+    if let Some(task) = as_task {
+        // `nohup` execs the runner, so this is its pid.
+        if let Err(e) = identity::record(&app.db, task, AnchorKind::Job, None, child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.context("record the review command as its task's"));
+        }
+    }
     Ok(())
 }
 

@@ -109,16 +109,45 @@ pub fn has_session(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The pane tmux started a program in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    /// tmux's id for it (`%3`).
+    pub id: String,
+    /// The process tmux started in it: the program itself, or the shell
+    /// that runs it.
+    pub pid: u32,
+}
+
+/// A pane from tmux's `#{pane_id}` and `#{pane_pid}`.
+fn parse_pane(fields: &[&str]) -> Result<Pane> {
+    match fields {
+        [id, pid] if id.starts_with('%') => Ok(Pane {
+            id: id.to_string(),
+            pid: pid
+                .trim()
+                .parse()
+                .with_context(|| format!("tmux gave {pid:?} for a pane's process"))?,
+        }),
+        _ => bail!(
+            "tmux did not say which pane it started ({:?})",
+            fields.join("\t")
+        ),
+    }
+}
+
 /// Start `argv` in a new detached session `name`, in `cwd`, with `env` set
-/// in it. `argv` is run directly, never through a shell.
-pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<()> {
+/// in it, returning its pane. `argv` is run directly, never through a
+/// shell.
+pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<Pane> {
     if argv.is_empty() {
         bail!("nothing to run in tmux session {name}");
     }
     refuse_new_server(name)?;
     let mut cmd = Command::new(binary());
     cmd.args(extended_keys_first())
-        .args(["new-session", "-d", "-s", name, "-c"])
+        .args(["new-session", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}"])
+        .args(["-s", name, "-c"])
         .arg(cwd);
     for (key, value) in env {
         cmd.arg("-e").arg(format!("{key}={value}"));
@@ -131,8 +160,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         .env_remove(crate::tasks::TASK_ID_ENV)
         .env_remove(crate::permissions::ASSISTANT_ENV)
         .env_remove(BACKGROUND_ENV)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
+        .stdin(Stdio::null());
     let output = cmd.output().context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -141,21 +169,25 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         );
     }
     set_detach_hint(name);
-    record_agent_pane(name);
-    Ok(())
+    let line = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = line.trim().split('\t').collect();
+    let pane = parse_pane(&fields).with_context(|| format!("start tmux session {name}"))?;
+    record_agent_pane(name, &pane.id);
+    Ok(pane)
 }
 
 /// The session option that holds the tmux id (`%3`) of the pane
 /// [`new_session`] started the agent in.
 const AGENT_PANE_OPTION: &str = "@jeet-agent-pane";
 
-/// Note in session `name`, just started, the id of the pane its agent runs
-/// in: its only pane yet. An id names that pane for as long as the server
-/// runs, wherever the user splits or moves it, and goes with the session.
-fn record_agent_pane(name: &str) {
+/// Note in session `name`, just started, the id `pane` of the pane its
+/// agent runs in, as tmux reported it when it started the session. An id
+/// names that pane for as long as the server runs, wherever the user splits
+/// or moves it, and goes with the session.
+fn record_agent_pane(name: &str, pane: &str) {
     let _ = quiet()
-        .args(["set-option", "-t", &format!("{}:", target(name)), "-F"])
-        .args([AGENT_PANE_OPTION, "#{pane_id}"])
+        .args(["set-option", "-t", &format!("{}:", target(name))])
+        .args([AGENT_PANE_OPTION, pane])
         .status();
 }
 
@@ -322,7 +354,8 @@ fn parse_windows(listing: &str) -> Vec<Window> {
 
 /// Start `argv` in a new window of session `name`, making the session if it
 /// is not running, and key the window by `key` so [`windows`] can tell it
-/// apart. `title` is what tmux shows for it. Returns the window's id.
+/// apart. `title` is what tmux shows for it. Returns the window's id and
+/// its pane.
 /// `argv` is run directly, never through a shell; the session's environment
 /// is kept clean the way [`new_session`]'s is.
 pub fn new_window(
@@ -332,7 +365,7 @@ pub fn new_window(
     cwd: &Path,
     env: &[(&str, &str)],
     argv: &[String],
-) -> Result<String> {
+) -> Result<(String, Pane)> {
     if argv.is_empty() {
         bail!("nothing to run in tmux session {name}");
     }
@@ -347,13 +380,13 @@ pub fn new_window(
         let mut cmd = Command::new(binary());
         cmd.args(&first);
         match creating {
-            true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
+            true => cmd.args(["new-session", "-d", "-P", "-F", WINDOW_FORMAT, "-s", name]),
             false => cmd.args([
                 "new-window",
                 "-d",
                 "-P",
                 "-F",
-                "#{window_id}",
+                WINDOW_FORMAT,
                 "-t",
                 &format!("{}:", target(name)),
             ]),
@@ -385,10 +418,10 @@ pub fn new_window(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !id.starts_with('@') {
-        bail!("tmux started a window in session {name} but did not say which ({id:?})");
-    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    let Some((id, pane)) = parse_window(line.trim()) else {
+        bail!("tmux started a window in session {name} but did not say which ({line:?})");
+    };
     if !set_window_key(&id, key) {
         let _ = kill_window(&id);
         bail!("tmux could not label its new window in session {name}");
@@ -396,7 +429,20 @@ pub fn new_window(
     if creating {
         set_detach_hint(name);
     }
-    Ok(id)
+    Ok((id, pane))
+}
+
+/// What [`new_window`] has tmux print of the window it starts.
+const WINDOW_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{pane_pid}";
+
+/// The window and pane of a [`WINDOW_FORMAT`] line.
+fn parse_window(line: &str) -> Option<(String, Pane)> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let (id, pane) = fields.split_first()?;
+    if !id.starts_with('@') {
+        return None;
+    }
+    Some((id.to_string(), parse_pane(pane).ok()?))
 }
 
 /// Key window `id` by `key`, as [`new_window`] does: for a window whose
@@ -920,6 +966,28 @@ fn any_pane_alive(listing: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_started_pane_is_read_with_its_process() {
+        let pane = |id: &str, pid| Pane { id: id.into(), pid };
+        assert_eq!(parse_pane(&["%1", "4242"]).unwrap(), pane("%1", 4242));
+        assert_eq!(
+            parse_window("@3\t%7\t99"),
+            Some(("@3".to_string(), pane("%7", 99)))
+        );
+        for garbage in [
+            &["%1"][..],
+            &["@1", "5"],
+            &["%1", "x"],
+            &["%1", "5", "6"],
+            &[],
+        ] {
+            assert!(parse_pane(garbage).is_err(), "{garbage:?}");
+        }
+        for garbage in ["", "@3", "%7\t99", "@3\t%7", "@3\t%7\tx", "x\t%7\t9"] {
+            assert_eq!(parse_window(garbage), None, "{garbage:?}");
+        }
+    }
 
     #[test]
     fn targets_match_exactly() {

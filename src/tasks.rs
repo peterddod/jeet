@@ -22,6 +22,7 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
@@ -1214,6 +1215,8 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // in the worktrees about to be removed, and what it wrote after the
     // snapshot would be lost.
     runtime::stop(task).context("end the agent's tmux session")?;
+    // An agent that outlives its session is no longer the task's.
+    app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));

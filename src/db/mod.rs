@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, TransactionBehavior};
 
+pub mod anchors;
 pub mod tasks;
 
 /// The schema as it stood before versioning: v0. Idempotent, so it runs on

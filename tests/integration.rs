@@ -2232,10 +2232,10 @@ fn resync_updates_what_the_task_left_alone() {
 /// A stand-in `tmux` that records each call, in order, and keeps one
 /// session's liveness in a file: `new-session` makes it, `kill-session`
 /// ends it, and `has-session` and `list-panes` report it. The pane's pid is
-/// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
-/// does. `display-message` prints the `current` file: the session the
-/// caller runs in. `list-clients` reports a client while a `client` file
-/// exists.
+/// whatever the `pid` file holds (0 without one, which jeet cannot
+/// identify), and `kill-session` hangs up on it, as tmux does.
+/// `display-message` prints the `current` file: the session the caller runs
+/// in. `list-clients` reports a client while a `client` file exists.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -2265,10 +2265,18 @@ fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session|list-sessions) [ -e "$here/alive" ] ;;
-  new-session) touch "$here/alive"; rm -f "$here/agent-pane" ;;
-  # The agent's pane id, noted in its session, is `%1`.
+  new-session)
+    touch "$here/alive"; rm -f "$here/agent-pane"
+    # The pane, `%1`, runs the `pid` file's process, or 0 (which jeet
+    # cannot identify) when the test gives none.
+    case " $* " in
+      *" -P "*) printf '%%1\t%s\n' "$(cat "$here/pid" 2>/dev/null || echo 0)" ;;
+    esac ;;
+  # The agent's pane id, as jeet notes it in its session.
   set-option)
-    case "$*" in *@jeet-agent-pane*) echo %1 > "$here/agent-pane" ;; esac ;;
+    case "$*" in
+      *@jeet-agent-pane*) for last in "$@"; do :; done; echo "$last" > "$here/agent-pane" ;;
+    esac ;;
   kill-session)
     rm -f "$here/alive" "$here/agent-pane"
     if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
@@ -2590,6 +2598,9 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         [
             "new-session".to_string(),
             "-d".into(),
+            "-P".into(),
+            "-F".into(),
+            "#{pane_id}\t#{pane_pid}".into(),
             "-s".into(),
             "jeet-fix-login".into(),
             "-c".into(),
@@ -5378,7 +5389,8 @@ fn task_new_with_a_prompt_starts_its_agent_on_it() {
 // ---------------------------------------------------------------------------
 
 /// A stub `tmux` that keeps windows: each is `win/<n>` beside it, holding
-/// `<pane_dead>\t<key>`, with the one pane `%<n>`. Calls are recorded as
+/// `<pane_dead>\t<key>`, with the one pane `%<n>`, whose process is the
+/// `pid` file's beside it (0 without one). Calls are recorded as
 /// [`stub_tmux`] records them.
 #[cfg(unix)]
 fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
@@ -5420,7 +5432,7 @@ case "$1" in
     w=$(cat "$here/next" 2>/dev/null || echo 1)
     echo $((w + 1)) > "$here/next"
     printf '0\t' > "$here/win/$w"
-    echo "@$w" ;;
+    printf '@%s\t%%%s\t%s\n' "$w" "$w" "$(cat "$here/pid" 2>/dev/null || echo 0)" ;;
   set-option)
     case "$2" in
       -w) for last in "$@"; do :; done

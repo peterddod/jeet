@@ -11,6 +11,7 @@ mod db;
 mod git;
 mod github;
 mod harness;
+mod identity;
 mod instructions;
 mod messages;
 mod notify;

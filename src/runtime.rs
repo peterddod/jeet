@@ -17,8 +17,10 @@ use crate::agent::AgentSpec;
 use crate::cd;
 use crate::config::AssistantConfig;
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
+use crate::identity;
 use crate::permissions;
 use crate::placement::{self, NodeRuntime};
 use crate::projects;
@@ -97,6 +99,16 @@ fn start_tmux(
         tmux::kill(&name)?;
     }
     if tmux::has_session(&name) {
+        // Only a pane jeet started is the task's agent: one made some other
+        // way, or by a jeet from before anchors, is never adopted as it.
+        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
+        if !anchors.iter().any(identity::live) {
+            warnings.push(format!(
+                "tmux session {name} was started by an older jeet or outside jeet, so jeet \
+                 cannot confirm its agent is task {}'s; stop it and open the task again",
+                task.name
+            ));
+        }
         if let Some(id) = session {
             warnings.push(format!(
                 "the agent is already running in tmux session {name}, so session {id} was not \
@@ -145,7 +157,16 @@ fn start_tmux(
         // `jeet worktree add` must not move the user's shell.
         (cd::CD_FILE_ENV, ""),
     ];
-    tmux::new_session(&name, &dir, &env, &argv)?;
+    let pane = tmux::new_session(&name, &dir, &env, &argv)?;
+    if let Err(e) = identity::record(
+        &app.db,
+        &task.id,
+        AnchorKind::Pane,
+        Some(&pane.id),
+        pane.pid,
+    ) {
+        warnings.push(identity::unidentified(&task.name, &e));
+    }
     // Something to see it through a startup prompt, which no hook reports.
     if hooks {
         if let Err(e) = startup::launch(app, task, session_id.as_deref()) {

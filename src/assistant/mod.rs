@@ -32,7 +32,9 @@ use crate::agent::{self, AgentSpec};
 use crate::cd;
 use crate::config;
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskSessionRecord, TaskState};
+use crate::identity;
 use crate::instructions;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
@@ -330,13 +332,23 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         (permissions::ASSISTANT_ENV, "1"),
         (cd::CD_FILE_ENV, ""),
     ];
-    let window = tmux::new_window(TMUX_SESSION, &id, &title(&name), &dir, &env, &argv)?;
+    let (window, pane) = tmux::new_window(TMUX_SESSION, &id, &title(&name), &dir, &env, &argv)?;
+    let mut warnings: Vec<String> = spec.version_warning().into_iter().collect();
+    if let Err(e) = identity::record(
+        &app.db,
+        &task.id,
+        AnchorKind::Pane,
+        Some(&pane.id),
+        pane.pid,
+    ) {
+        warnings.push(identity::unidentified(&task.name, &e));
+    }
     let _ = app.db.touch_task(&task.id, now);
     Ok(Opened {
         name,
         window,
         started: true,
-        warnings: spec.version_warning().into_iter().collect(),
+        warnings,
     })
 }
 
