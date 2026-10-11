@@ -6565,10 +6565,19 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
     assert_eq!(lab.parent_of(&z), Some(assistant));
     assert_eq!(lab.brief_of(&z), Some(("g".into(), None, "user".into())));
 
+    let long = "x".repeat(8001);
     for (args, says) in [
         (&["--parent", "y"][..], "only the assistant"),
         (&["--goal", "g"][..], "--parent assistant"),
         (&["--parent", "assistant", "--done", "d"][..], "give --goal"),
+        (
+            &["--parent", "assistant", "--goal", "  "][..],
+            "--goal: there is no",
+        ),
+        (
+            &["--parent", "assistant", "--goal", "g", "--done", &long][..],
+            "--done: the message is too long",
+        ),
     ] {
         let mut full = vec!["task", "new", "q"];
         full.extend_from_slice(args);
@@ -6637,6 +6646,53 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(lab.reports_of(&task), [ended]);
+}
+
+/// A task's agent that `cd`s into the assistant's home is still that
+/// task's: it gets neither the assistant's context nor what waits in its
+/// inbox, a sibling's report among it.
+#[cfg(unix)]
+#[test]
+fn a_task_in_the_assistants_home_is_not_the_assistant() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let z = lab.new_task_with("z", &["--parent", "assistant", "--goal", "look"]);
+    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    succeeded(&lab.jeet_at(&["report", "done", "shipped"], &lab.home(), &as_x));
+    let home = lab.home().join("assistant");
+    let inbox_path = home.join(".jeet/inbox.jsonl");
+    let inbox = std::fs::read_to_string(&inbox_path).unwrap();
+    assert!(inbox.contains("shipped"), "{inbox}");
+
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let as_z = [
+        ("JEET_TASK_ID", z.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+    ];
+    let session = "11111111-2222-4333-8444-555555555555";
+    let output = lab.hook(
+        "SessionStart",
+        &hook_input("SessionStart", session, &home),
+        &as_z,
+    );
+    succeeded(&output);
+    let context = stdout_of(&output);
+    assert!(context.contains("look"), "{context}");
+    assert!(!context.contains("Your tasks"), "{context}");
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, &home), &as_z));
+    assert_eq!(std::fs::read_to_string(&inbox_path).unwrap(), inbox);
+    // Its status is its own task's.
+    assert!(lab
+        .home()
+        .join("tasks/z/.jeet/status")
+        .join(format!("{session}.json"))
+        .is_file());
+    assert!(!home
+        .join(".jeet/status")
+        .join(format!("{session}.json"))
+        .exists());
 }
 
 #[test]

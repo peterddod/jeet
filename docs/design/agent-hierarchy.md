@@ -739,6 +739,9 @@ Where phase 1 (#31) settled what this RFC left open, or departed from it:
 - **D13** Caller is User, Root or Node, by `$JEET_TASK_ID` and
   `JEET_ASSISTANT` only; the narrower reading wins; errors fail closed.
 - **D14** Hooks report only when `$JEET_TASK_ID` is the located task.
+  A hook whose cwd is the assistant's home but whose `$JEET_TASK_ID`
+  names another task is that task's: no assistant context, no handover
+  of the assistant's inbox.
 - **D15** `--goal`/`--done` are stored in `task_briefs` and shown as
   `<jeet-brief>` at session start; no `BRIEF.md` yet.
 - **D16** Reports are capped at 2000 bytes.

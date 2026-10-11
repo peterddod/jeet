@@ -454,7 +454,9 @@ fn idle_prompt(
 /// The task the hook ran for: found by walking up from the session's
 /// directory, which needs no index, else by `$JEET_TASK_ID`. The assistant
 /// goes by `$JEET_TASK_ID` first: it may well `cd` into a task's directory,
-/// and its sessions must not report as that task's.
+/// and its sessions must not report as that task's. Nor does another task's
+/// agent that `cd`s into the assistant's home go as the assistant: its
+/// inbox holds the reports of every task the assistant made.
 fn locate_task(hook: &HookEvent, app: &mut Option<App>) -> Result<Option<(PathBuf, String)>> {
     let env_id = std::env::var(tasks::TASK_ID_ENV)
         .ok()
@@ -467,13 +469,27 @@ fn locate_task(hook: &HookEvent, app: &mut Option<App>) -> Result<Option<(PathBu
     let by_env_first = env_id.is_some() && crate::permissions::assistant_mode();
     if !by_env_first {
         if let Some(found) = tasks::find_task_root(&cwd) {
-            return Ok(Some(found));
+            if env_id.as_deref().is_none_or(|id| id == found.1) {
+                return Ok(Some(found));
+            }
+            let opened = App::open()?;
+            let assistant = opened
+                .db
+                .get_task(&found.1)?
+                .is_some_and(|task| task.kind == TaskKind::Assistant);
+            *app = Some(opened);
+            if !assistant {
+                return Ok(Some(found));
+            }
         }
     }
     let Some(id) = env_id else {
         return Ok(None);
     };
-    let opened = App::open()?;
+    let opened = match app.take() {
+        Some(opened) => opened,
+        None => App::open()?,
+    };
     let found = opened
         .db
         .get_task(&id)?
