@@ -57,7 +57,11 @@ pub struct Capability {
 pub const CAPABILITIES: &[Capability] = &[
     cap("task.create", "create tasks", &["jeet task new"]),
     cap("task.open", "start task agents", &["jeet task open"]),
-    cap("task.send", "message task agents", &["jeet task send"]),
+    cap(
+        "task.send",
+        "message and interrupt task agents",
+        &["jeet task send", "jeet task interrupt"],
+    ),
     cap("task.archive", "archive tasks", &["jeet task archive"]),
     cap(
         "task.unarchive",
@@ -1256,6 +1260,7 @@ mod tests {
         let rules = allowed_commands(&["task.create".into(), "task.send".into(), "bogus".into()]);
         assert!(rules.contains(&"jeet task new".to_string()));
         assert!(rules.contains(&"jeet task send".to_string()));
+        assert!(rules.contains(&"jeet task interrupt".to_string()));
         assert!(rules.contains(&"jeet task ls".to_string()));
         assert!(rules.contains(&"jeet notify".to_string()));
         assert!(!rules
@@ -1277,7 +1282,7 @@ mod tests {
                 let mut args: Vec<&str> = command.split(' ').skip(1).collect();
                 // Enough arguments for clap to accept it.
                 match c.name {
-                    "task.send" => args.extend(["x", "hi"]),
+                    "task.send" if *command == "jeet task send" => args.extend(["x", "hi"]),
                     "worktree.add" | "worktree.rm" | "repo.clone" => args.push("x"),
                     "review.start" | "pr.merge" => args.push("1"),
                     "project.read" | "repo.sync" | "repo.import" | "shell.install"

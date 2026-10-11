@@ -845,7 +845,9 @@ RFC left open, or departed from it:
   first window (`=<session>:^`), not its active pane, which may be a
   window the user opened there; `jeet task send` and the startup watcher
   aim there too.
-- **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`;
+- **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`
+  (whose pre-approved commands include it, so an allowed interrupt does
+  not prompt);
   nodes are refused because it is not in their grant.
 - **E13** A parented task launched on a harness with `Enforcement::None`
   gets a warning that its agent is not stopped from force-pushing or

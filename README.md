@@ -621,8 +621,9 @@ command says why nothing was sent. The task's status may read `running`
 for about a minute afterwards, until Claude reports it sits idle, as after a
 manual Esc. The assistant is yours to interrupt in its own window, and a
 harness that cannot be interrupted is refused. Under the assistant it needs
-`task.send`, and an interrupt that sent nothing is logged as `skipped`, with
-why, and not announced; a task with a parent may not interrupt another.
+`task.send` (which pre-approves it, as it does `jeet task send`), and an
+interrupt that sent nothing is logged as `skipped`, with why, and not
+announced; a task with a parent may not interrupt another.
 
 ### Reporting to the assistant
 
