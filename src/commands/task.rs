@@ -186,23 +186,25 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
         bail!("only the user interrupts the assistant, in its own window");
     }
     let task = tasks::find(app, name)?;
-    match runtime::interrupt(app, &task)? {
-        Interrupted::Sent => eprintln!("jeet: interrupted task {}'s turn", task.name),
-        Interrupted::NotWorking(activity) => eprintln!(
-            "jeet: task {}'s agent is not working ({}); nothing sent",
-            task.name,
-            activity.label()
-        ),
-        Interrupted::UserTyping => eprintln!(
-            "jeet: task {} has unsent input in its agent's prompt; nothing sent",
-            task.name
-        ),
-        Interrupted::AtStartup => eprintln!(
-            "jeet: task {}'s agent has no turn yet and may be at a startup prompt, which the \
-             keys would answer; nothing sent",
-            task.name
-        ),
-    }
+    let why = match runtime::interrupt(app, &task)? {
+        Interrupted::Sent => {
+            eprintln!("jeet: interrupted task {}'s turn", task.name);
+            return Ok(());
+        }
+        Interrupted::NotWorking(activity) => {
+            format!("its agent is not working ({})", activity.label())
+        }
+        Interrupted::UserTyping => "its agent's prompt holds unsent input".to_string(),
+        Interrupted::Watched => {
+            "its agent waits on a prompt someone attached may be answering".to_string()
+        }
+        Interrupted::AtStartup => "its agent has no turn yet and may be at a startup prompt, \
+                                   which the keys would answer"
+            .to_string(),
+    };
+    eprintln!("jeet: task {}: {why}; nothing sent", task.name);
+    // Under the assistant, logged as nothing done rather than as done.
+    permissions::skipped(format!("nothing sent: {why}"));
     Ok(())
 }
 

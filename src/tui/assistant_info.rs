@@ -192,6 +192,7 @@ fn action_entry(record: ActionRecord) -> FeedEntry {
         Outcome::Done => "done",
         Outcome::Failed => "failed",
         Outcome::Denied => "refused",
+        Outcome::Skipped => "skipped",
     };
     let text = match &record.error {
         Some(error) => format!("{}: {error}", record.action),

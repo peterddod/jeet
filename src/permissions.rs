@@ -10,7 +10,8 @@
 //! Each mutating action it is allowed is appended to
 //! `$JEET_HOME/assistant/actions.log` (one JSON object per line) and, unless
 //! `[assistant] notify = false`, announced with a desktop notification.
-//! Refusals are logged too.
+//! Refusals are logged too, and an action that ran but did nothing is
+//! logged as skipped and not announced.
 //!
 //! Every command must be classified: [`gate`] matches them exhaustively, so a
 //! new one does not compile until it says what it needs.
@@ -166,6 +167,9 @@ const ALWAYS_DENY: &[&str] = &[
     "git push * --mirror",
     "git push --all",
     "git push * --all",
+    // `--branches` is git 2.46's name for `--all`.
+    "git push --branches",
+    "git push * --branches",
     "gh pr merge",
     "gh api *pulls/*/merge*",
     "gh api *repos/*/merges*",
@@ -175,10 +179,20 @@ const ALWAYS_DENY: &[&str] = &[
     "gh api *enqueuePullRequest*",
     "curl *pulls/*/merge*",
     "curl *repos/*/merges*",
+    "curl *mergePullRequest*",
+    "curl *enablePullRequestAutoMerge*",
+    "curl *mergeBranch*",
+    "curl *enqueuePullRequest*",
 ];
 
 /// Default branches assumed whatever the index says.
 const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// The most default branches denied, `main` and `master` among them. The
+/// rules go inline in the agent's command line, which shares tmux's 16KB
+/// command limit with its first prompt; past this, the branches fewest
+/// repositories use are left out.
+pub const MAX_DEFAULT_BRANCHES: usize = 12;
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
@@ -504,21 +518,41 @@ pub fn allowed_commands(allow: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The branches no gated agent may push to: every indexed repository's
-/// default branch, and `main` and `master`, sorted. Read at launch, so a
-/// repository cloned later is covered from the next launch.
+/// The branches no gated agent may push to: `main`, `master` and the
+/// default branch of each indexed repository, sorted, at most
+/// [`MAX_DEFAULT_BRANCHES`] of them. Read at launch, so a repository cloned
+/// later is covered from the next launch.
 pub fn default_branches(app: &App) -> Result<Vec<String>> {
-    let mut branches: Vec<String> = app
+    let indexed = app
         .db
         .list_repos(None)?
         .into_iter()
-        .map(|r| r.default_branch)
-        .chain(FALLBACK_BRANCHES.map(str::to_string))
-        .filter(|b| !b.trim().is_empty())
-        .collect();
+        .map(|r| r.default_branch);
+    Ok(most_used_branches(indexed))
+}
+
+/// `main`, `master` and the most common of `indexed`, up to
+/// [`MAX_DEFAULT_BRANCHES`] (ties by name), sorted.
+fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for branch in indexed.filter(|b| !b.trim().is_empty()) {
+        match counts.iter_mut().find(|(b, _)| *b == branch) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((branch, 1)),
+        }
+    }
+    counts.sort_by(|(a, m), (b, n)| n.cmp(m).then(a.cmp(b)));
+    let mut branches: Vec<String> = FALLBACK_BRANCHES.map(str::to_string).to_vec();
+    for (branch, _) in counts {
+        if branches.len() == MAX_DEFAULT_BRANCHES {
+            break;
+        }
+        if !branches.contains(&branch) {
+            branches.push(branch);
+        }
+    }
     branches.sort();
-    branches.dedup();
-    Ok(branches)
+    branches
 }
 
 /// What every agent jeet gates (the assistant, and tasks with a parent) is
@@ -568,6 +602,20 @@ fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
         }
     }
     deny
+}
+
+/// Why the command the assistant was allowed did nothing, when it ran
+/// without error but did not do what its action says: set by the command
+/// through [`skipped`], read by [`Authorized::finish`].
+static SKIPPED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Note that the command running did nothing, and why, so the assistant's
+/// log says so rather than that it was done. Outside the assistant nothing
+/// reads it.
+pub fn skipped(why: String) {
+    if let Ok(mut skipped) = SKIPPED.lock() {
+        *skipped = Some(why);
+    }
 }
 
 /// An action the assistant was allowed, to record once it has run.
@@ -735,9 +783,11 @@ fn node_refusal(slug: &str, about: &str, parent_lacks: Option<(&str, &Path)>) ->
 impl Authorized {
     /// Record how the action went, and announce it when it was done.
     pub fn finish(self, result: &Result<()>) {
-        let (outcome, error) = match result {
-            Ok(()) => (Outcome::Done, None),
-            Err(e) => (Outcome::Failed, Some(format!("{e:#}"))),
+        let skipped = SKIPPED.lock().ok().and_then(|mut s| s.take());
+        let (outcome, error) = match (result, skipped) {
+            (Ok(()), None) => (Outcome::Done, None),
+            (Ok(()), Some(why)) => (Outcome::Skipped, Some(why)),
+            (Err(e), _) => (Outcome::Failed, Some(format!("{e:#}"))),
         };
         if let Err(e) = append(
             &self.log,
@@ -791,6 +841,8 @@ pub enum Outcome {
     Done,
     Failed,
     Denied,
+    /// It ran without error but did nothing: `error` says why.
+    Skipped,
 }
 
 /// One line of `actions.log`.
@@ -800,6 +852,7 @@ pub struct ActionRecord {
     pub capability: String,
     pub action: String,
     pub outcome: Outcome,
+    /// Why it failed, or why it did nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1317,6 +1370,25 @@ mod tests {
     }
 
     #[test]
+    fn default_branches_keep_main_master_and_the_most_used_up_to_the_cap() {
+        let mut indexed: Vec<String> = (0..MAX_DEFAULT_BRANCHES)
+            .map(|i| format!("rare-{i:02}"))
+            .collect();
+        indexed.extend(["develop", "develop", "trunk", "trunk", "main"].map(String::from));
+        let branches = most_used_branches(indexed.into_iter());
+        assert_eq!(branches.len(), MAX_DEFAULT_BRANCHES);
+        for kept in ["develop", "main", "master", "trunk"] {
+            assert!(branches.contains(&kept.to_string()), "{branches:?}");
+        }
+        // Ties among the rare ones go by name.
+        assert!(branches.contains(&"rare-00".to_string()), "{branches:?}");
+        assert!(!branches.contains(&"rare-11".to_string()), "{branches:?}");
+        let mut sorted = branches.clone();
+        sorted.sort();
+        assert_eq!(branches, sorted);
+    }
+
+    #[test]
     fn a_top_level_task_gets_no_deny_and_a_node_gets_the_list() {
         let (_dir, app, w) = tree();
         let top = app.db.get_task("top-id").unwrap().unwrap();
@@ -1370,6 +1442,8 @@ mod tests {
             "git push --all",
             "git push --all origin",
             "git push origin --all",
+            "git push --branches origin",
+            "git push origin --branches",
             "gh pr merge",
             "gh pr merge 3 --squash",
             "gh api -X PUT repos/o/r/pulls/3/merge",
@@ -1382,6 +1456,10 @@ mod tests {
             "curl -X PUT https://api.github.com/repos/o/r/pulls/3/merge",
             "gh api -X POST repos/o/r/merges -f base=main -f head=task-x",
             "curl -X POST https://api.github.com/repos/o/r/merges -d '{}'",
+            "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{mergePullRequest(input:{})}\"}'",
+            "curl https://api.github.com/graphql -d 'mutation{enablePullRequestAutoMerge(input:{})}'",
+            "curl https://api.github.com/graphql -d 'mutation{mergeBranch(input:{})}'",
+            "curl https://api.github.com/graphql -d 'mutation{enqueuePullRequest(input:{})}'",
             "gh pr comment 3 -b hi",
             "gh pr review 3 --approve",
         ] {
@@ -1403,6 +1481,7 @@ mod tests {
             "rg 'gh pr merge'",
             "git stash push",
             "gh api graphql -f query='{viewer{login}}'",
+            "curl https://api.github.com/graphql -d '{\"query\":\"{viewer{login}}\"}'",
         ] {
             assert!(!denied(command), "denied: {command}");
         }
@@ -1418,6 +1497,12 @@ mod tests {
             "git push origin 'refs/heads/*:refs/heads/*'",
             "gh pr --repo o/r merge 3",
             "gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc",
+            // The destination implied, not named: on main, these push it.
+            "git push origin HEAD",
+            "git push origin @",
+            // The mutation in a file, not on the command line.
+            "gh api graphql -F query=@merge.graphql -F id=PR_x",
+            "gh api graphql --input body.json",
         ];
         for command in KNOWN_GAPS {
             assert!(!denied(command), "now denied, update the docs: {command}");

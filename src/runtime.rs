@@ -280,6 +280,13 @@ pub enum Interrupted {
     /// Its input box holds what the user typed and has not sent, which a
     /// key could clear, so nothing was pressed.
     UserTyping,
+    /// It waits on a prompt, such as a permission dialog, while someone is
+    /// attached to its session: they may be typing an answer into the
+    /// dialog, which [`Harness::has_draft`] does not see and Esc would
+    /// discard, so nothing was pressed.
+    ///
+    /// [`Harness::has_draft`]: crate::harness::Harness::has_draft
+    Watched,
     /// It is held at a startup prompt, such as the trust dialog, where the
     /// keys would answer the prompt (Esc exits), so nothing was pressed.
     AtStartup,
@@ -287,8 +294,9 @@ pub enum Interrupted {
 
 /// End the turn the task's agent is running, keeping its session: its
 /// harness's interrupt keys, pressed once, only while it is working or
-/// waiting on the user. One with nothing to interrupt is not an error, so
-/// a caller can go over many tasks.
+/// waiting on the user (and then only with no one attached to answer).
+/// One with nothing to interrupt is not an error, so a caller can go over
+/// many tasks.
 pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if task.kind == TaskKind::Assistant {
         bail!("only the user interrupts the assistant, in its own window");
@@ -319,6 +327,9 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     }
     if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
         return Ok(Interrupted::UserTyping);
+    }
+    if matches!(activity, Activity::Waiting { .. }) && tmux::attached(&name) {
+        return Ok(Interrupted::Watched);
     }
     tmux::press(&name, keys)?;
     Ok(Interrupted::Sent)
@@ -457,7 +468,8 @@ mod tests {
     fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
         // tmux refuses a command over 16KB; the prompt shares new-session's
         // with the settings, a long path to jeet, every capability or none,
-        // and the pushes denied to ten long default branches.
+        // and the pushes denied to as many long default branches as jeet
+        // denies.
         let every = crate::permissions::CAPABILITIES
             .iter()
             .map(|c| c.name.to_string())
@@ -469,7 +481,11 @@ mod tests {
                 rules: Vec::new(),
             };
             let exe = format!("/{}/jeet", "d".repeat(200));
-            let hooks = assistant_hooks(exe.into(), &settings, &branches(10));
+            let hooks = assistant_hooks(
+                exe.into(),
+                &settings,
+                &branches(crate::permissions::MAX_DEFAULT_BRANCHES),
+            );
             let args = crate::harness::claude::ClaudeCode
                 .hook_args(&hooks)
                 .unwrap();
