@@ -288,24 +288,49 @@ fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str
     // inherited (the shell of another task's agent, say) would be taken for
     // a claim to be that task, and what its command runs refused.
     let task = app.db.get_task(runner_for)?;
-    if task.is_some_and(|t| t.parent_id.is_none() && t.kind != TaskKind::Assistant) {
+    let users = task.is_some_and(|t| t.parent_id.is_none() && t.kind != TaskKind::Assistant);
+    if users {
         cmd.env_remove(crate::tasks::TASK_ID_ENV)
             .env_remove(crate::permissions::ASSISTANT_ENV);
     }
     let mut child = cmd.spawn().context("start the review command")?;
+    hand_over(app, state, runner_for, users, &mut child)
+}
+
+/// Record `child`, the runner [`launch`] just started for the job in
+/// `state`, as task `runner_for`'s, name it in the job's file, then give it
+/// the go-ahead. When it cannot be recorded it is killed, unless it is the
+/// user's (`users`): the user needs no anchor to be let through, so its
+/// job runs on, with a warning that archive and delete cannot find it.
+fn hand_over(
+    app: &App,
+    state: &Path,
+    runner_for: &str,
+    users: bool,
+    child: &mut std::process::Child,
+) -> Result<()> {
     // `nohup` execs the runner, so this is its pid. Its pid and start go in
     // the job's file before it has the go-ahead, so a job is matched to its
     // runner from the first: archiving the task in the moments before the
     // runner gets going ends it all the same.
     let pid = child.id();
-    let recorded = identity::record(&app.db, runner_for, AnchorKind::Job, None, pid)
+    let recorded = match identity::record(&app.db, runner_for, AnchorKind::Job, None, pid)
         .context("record the review command as its task's")
-        .and_then(|()| {
-            let mut job = read(state)?;
-            job.pid = Some(pid);
-            job.runner_start = identity::start_of(pid);
-            write(state, &job)
-        });
+    {
+        Err(e) if users => {
+            eprintln!(
+                "jeet: warning: {e:#}; archiving or deleting the task will not end this review"
+            );
+            Ok(())
+        }
+        recorded => recorded,
+    };
+    let recorded = recorded.and_then(|()| {
+        let mut job = read(state)?;
+        job.pid = Some(pid);
+        job.runner_start = identity::start_of(pid);
+        write(state, &job)
+    });
     if let Err(e) = recorded {
         let _ = child.kill();
         let _ = child.wait();
@@ -849,5 +874,89 @@ mod tests {
 
         let _ = other.kill();
         let _ = other.wait();
+    }
+
+    /// The runner is named in the job's file, and recorded, before it has
+    /// the go-ahead: archiving or deleting the task in the moments before
+    /// the runner writes itself ends the job all the same.
+    #[cfg(unix)]
+    #[test]
+    fn the_runner_is_named_before_the_go_ahead() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let reviews = home.join("reviews/widget");
+        std::fs::create_dir_all(&reviews).unwrap();
+        let state = reviews.join("7.json");
+        let mut j = job(None, "abc");
+        j.worktree = home.join("tasks/t/widget");
+        write(&state, &j).unwrap();
+        // A runner that, given the go-ahead, copies the job's file as it
+        // then reads, and keeps running as a job would.
+        let seen = home.join("seen.json");
+        let mut runner = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "head -c1 >/dev/null; cp {} {}; exec sleep 30",
+                state.display(),
+                seen.display()
+            ))
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        hand_over(&app, &state, "a", false, &mut runner).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !seen.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let at_go = read(&seen).unwrap();
+        assert_eq!(at_go.pid, Some(runner.id()));
+        assert!(at_go.runner_start.is_some());
+        assert_eq!(at_go.runner_start, identity::start_of(runner.id()));
+        let found = jobs_in(&app, &home.join("tasks/t")).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pid, runner.id());
+        assert_eq!(found[0].task_id, "a");
+
+        stop_jobs_in(&app, &home.join("tasks/t")).unwrap();
+        assert!(!runner.wait().unwrap().success());
+    }
+
+    /// A runner that cannot be recorded is killed, and its job left for
+    /// [`start`] to end, unless it is the user's: the user needs no anchor,
+    /// so that job runs on.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_users_runner_runs_on_unrecorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let state = home.join("7.json");
+        // A runner gone before it is recorded: its process cannot be read.
+        let gone = || {
+            let mut runner = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
+            drop(runner.stdin.take());
+            runner.wait().unwrap();
+            runner
+        };
+
+        write(&state, &job(None, "abc")).unwrap();
+        let mut runner = gone();
+        let err = hand_over(&app, &state, "a", false, &mut runner).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be read"), "{err:#}");
+        assert_eq!(read(&state).unwrap().pid, None);
+
+        let mut runner = gone();
+        hand_over(&app, &state, "t", true, &mut runner).unwrap();
+        assert_eq!(read(&state).unwrap().pid, Some(runner.id()));
+        assert!(app
+            .db
+            .task_anchors("t", AnchorKind::Job)
+            .unwrap()
+            .is_empty());
     }
 }

@@ -1069,8 +1069,11 @@ what this RFC left open, or departed from it:
   `JEET_TASK_ID` and `JEET_ASSISTANT` it would inherit, which would
   otherwise disagree with its anchor. Deviation: the plan recorded nothing
   for the user, which left a job the user started running after its task's
-  archive or delete. If the anchor cannot be recorded, the runner is
-  killed and the job ends with 127. A runner refused after the go byte
+  archive or delete. The runner's pid and start go in the job file before
+  the go byte, so archive and delete match it from the first. If the anchor
+  cannot be recorded, the runner is killed and the job ends with 127, except
+  the user's runner (top-level review task): the user needs no anchor, so
+  its job runs on with a warning that archive and delete cannot end it. A runner refused after the go byte
   records its job as ended with 126, so it never reads as running; so does
   one that gets EOF before the byte, its launcher having died. `review-job` refuses to run on a
   terminal, on EOF or on any other byte ("review-job is started only by
