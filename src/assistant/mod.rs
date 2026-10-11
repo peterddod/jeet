@@ -339,7 +339,12 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         created_at: now,
         last_activity: now,
     })?;
-    let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt)?;
+    let running: Vec<String> = windows
+        .iter()
+        .filter(|w| w.alive)
+        .filter_map(|w| w.key.clone())
+        .collect();
+    let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt, &running)?;
     let home = app.home.to_string_lossy();
     let env = [
         // Its hooks find it by this even after it `cd`s into a task.
@@ -369,7 +374,9 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
 }
 
 /// The agent's command line for session `id`: resumed or started under that
-/// id, with the assistant's settings and, given one, its first prompt.
+/// id, with the assistant's settings and, given one, its first prompt. The
+/// settings files of sessions not `running` go.
+#[allow(clippy::too_many_arguments)]
 fn launch_argv(
     app: &App,
     task: &TaskRecord,
@@ -378,6 +385,7 @@ fn launch_argv(
     name: &str,
     resume: bool,
     prompt: Option<&str>,
+    running: &[String],
 ) -> Result<Vec<String>> {
     let mut argv = spec.argv.clone();
     let args = match resume {
@@ -388,7 +396,13 @@ fn launch_argv(
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let branches = permissions::default_branches(app)?;
     let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id);
-    argv.extend(runtime::hook_args(&app.home, spec.harness, &hooks, id)?);
+    argv.extend(runtime::hook_args(
+        &app.home,
+        spec.harness,
+        &hooks,
+        id,
+        running,
+    )?);
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }

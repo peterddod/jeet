@@ -931,8 +931,10 @@ RFC left open, or departed from it:
   file, `$JEET_HOME/run/<task id>/<session>.json` (directory 0700), and
   passes `--settings <path>` (`Harness::hook_file`, `runtime::hook_args`).
   It is written to a new file renamed into place at each launch, so a
-  running agent never reads a half-written one, and removed at archive and
-  delete. It is outside the task and every worktree, so an agent editing
+  running agent never reads a half-written one. Each launch removes the
+  task's other session files but for running sessions' (the assistant's
+  live windows) and any written in the last minute, so the assistant's
+  chats do not pile them up; the rest go at archive and delete. It is outside the task and every worktree, so an agent editing
   it still meets a permission prompt; as the same user it can, like
   `index.db` (5.7). A test checks the first prompt fits one tmux command
   with only the path on it, where the inline settings no longer would.

@@ -230,7 +230,8 @@ fn launch_argv(
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let hooks = task_hooks(app, task, exe)?;
-    argv.extend(hook_args(&app.home, spec.harness, &hooks, &id)?);
+    // The task's agent is not running, so no other session's file is in use.
+    argv.extend(hook_args(&app.home, spec.harness, &hooks, &id, &[])?);
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
@@ -328,11 +329,16 @@ pub fn settings_dir(home: &Path, task_id: &str) -> PathBuf {
 /// the first prompt, and each hook or rule added would push out another.
 /// The file is replaced whole at each launch, never truncated where a
 /// running agent may read it, and goes with the task (archive, delete).
+/// The launch also removes the files of the task's other sessions, but for
+/// those in `running` and any written in the last [`SETTINGS_GRACE`] (a
+/// launch racing this one), so a task whose sessions come and go, like the
+/// assistant's chats, keeps no more than it runs.
 pub fn hook_args(
     home: &Path,
     harness: &dyn harness::Harness,
     hooks: &HookSetup,
     session: &str,
+    running: &[String],
 ) -> Result<Vec<String>> {
     if !status::valid_session_id(session) {
         bail!("{session:?} is not a session id");
@@ -345,9 +351,46 @@ pub fn hook_args(
         Some((contents, args)) => {
             write_private(&path, &contents)
                 .with_context(|| format!("write the agent's settings to {}", path.display()))?;
+            prune_settings(&path, running);
             Ok(args)
         }
         None => Ok(harness.hook_args(hooks).unwrap_or_default()),
+    }
+}
+
+/// How recently written a settings file is left alone when another launch
+/// prunes: long enough for its agent to have read it.
+const SETTINGS_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Remove the `<session>.json` files beside `kept` but for `kept` itself,
+/// those of the `running` sessions and those written within
+/// [`SETTINGS_GRACE`]. Best effort: a file left behind goes with the task.
+fn prune_settings(kept: &Path, running: &[String]) {
+    let Some(dir) = kept.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == kept || path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if running.iter().any(|r| r == session) {
+            continue;
+        }
+        let recent = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map_or(true, |age| age < SETTINGS_GRACE))
+            .unwrap_or(true);
+        if !recent {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -626,7 +669,7 @@ mod tests {
         let exe = format!("/{}/jeet", "d".repeat(200));
         let hooks = assistant_hooks(exe.into(), &settings, &branches, &task);
         let claude = &crate::harness::claude::ClaudeCode;
-        let args = hook_args(home.path(), claude, &hooks, &session).unwrap();
+        let args = hook_args(home.path(), claude, &hooks, &session, &[]).unwrap();
         let path = settings_dir(home.path(), &task).join(format!("{session}.json"));
         assert_eq!(args, ["--settings".to_string(), path.display().to_string()]);
         let len: usize = args.iter().map(|a| a.len() + 1).sum();
@@ -654,7 +697,7 @@ mod tests {
         }
         // A relaunch replaces it whole, and leaves nothing else behind.
         let fewer = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task);
-        hook_args(home.path(), claude, &fewer, &session).unwrap();
+        hook_args(home.path(), claude, &fewer, &session, &[]).unwrap();
         assert!(!read().to_string().contains(&long));
         assert_eq!(mode(&path), 0o600);
         assert_eq!(
@@ -662,16 +705,68 @@ mod tests {
             1
         );
         // Ids name files, so they must not name anything else.
-        assert!(hook_args(home.path(), claude, &fewer, "../x").is_err());
+        assert!(hook_args(home.path(), claude, &fewer, "../x", &[]).is_err());
         assert!(remove_settings(home.path(), "..").is_err());
         remove_settings(home.path(), &task).unwrap();
         assert!(!settings_dir(home.path(), &task).exists());
         remove_settings(home.path(), &task).unwrap();
         // A harness with no settings file keeps its hooks on the command line.
         let generic = &crate::harness::Generic;
-        assert!(hook_args(home.path(), generic, &fewer, &session)
+        assert!(hook_args(home.path(), generic, &fewer, &session, &[])
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_launch_removes_the_settings_of_sessions_no_longer_running() {
+        // The assistant starts a session per chat and is never archived:
+        // without this, every chat would leave its file behind for good.
+        let home = tempfile::tempdir().unwrap();
+        let task = uuid::Uuid::new_v4().to_string();
+        let settings = AssistantConfig {
+            allow: Vec::new(),
+            notify: None,
+            rules: Vec::new(),
+        };
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task);
+        let claude = &crate::harness::claude::ClaudeCode;
+        let dir = settings_dir(home.path(), &task);
+        let launch = |session: &str, running: &[String]| {
+            hook_args(home.path(), claude, &hooks, session, running).unwrap();
+        };
+        let age = |session: &str| {
+            let old = std::time::SystemTime::now() - 2 * SETTINGS_GRACE;
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(format!("{session}.json")))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        let [ended, live, fresh, new] = std::array::from_fn(|_| uuid::Uuid::new_v4().to_string());
+        for session in [&ended, &live] {
+            launch(session, &[]);
+        }
+        age(&ended);
+        age(&live);
+        let running = std::slice::from_ref(&live);
+        launch(&fresh, running);
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        launch(&new, running);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // `ended` is gone; `live`'s window still runs; `fresh` is too new.
+        let mut want = vec![
+            format!("{live}.json"),
+            format!("{fresh}.json"),
+            format!("{new}.json"),
+            "notes.txt".to_string(),
+        ];
+        want.sort();
+        assert_eq!(left, want);
     }
 
     #[test]

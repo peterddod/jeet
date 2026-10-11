@@ -520,8 +520,9 @@ session, or starts a new one. Without a terminal, `open` leaves the agent
 running detached and prints the task directory.
 
 jeet starts Claude Code with hooks (passed with `--settings`, as a file
-only you can read under `~/.jeet/run/<task id>/`, replaced at each launch and
-removed when the task is archived or deleted; nothing is written into the
+only you can read under `~/.jeet/run/<task id>/<session>.json`, replaced at
+each launch, removed by a later launch once its session is no longer running,
+and removed with the rest when the task is archived or deleted; nothing is written into the
 task or a repository) that record what the agent is doing in
 `.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
 `jeet ls` and `jeet report` without asking. `jeet task ls` shows it: `starting`,
