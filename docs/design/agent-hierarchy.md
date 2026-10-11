@@ -1024,7 +1024,9 @@ what this RFC left open, or departed from it:
   `task archive`: the runner recorded as the task's, and an unfinished one
   in the task's worktrees whose recorded runner is still live, which is how
   a job the assistant started for a top-level review task (recorded as the
-  assistant's) is found. Both wait for the job's processes to exit
+  assistant's) is found. `jeet review` writes the runner's pid and start
+  into the job's file before the go byte, so the job is found from the
+  moment it is launched. Both wait for the job's processes to exit
   (killing what outlives the grace period) before anything is saved or
   removed, and both are refused from a jeet running under that job, which
   ending it would end part-way.
@@ -1056,7 +1058,12 @@ what this RFC left open, or departed from it:
   anchor, then writes one go byte `g`. The anchor names the review task when
   it has a parent, else the assistant when the caller is the root (a
   top-level review task the root reviews again is never moved under it),
-  else nothing (the user). If the anchor cannot be recorded, the runner is
+  else the top-level review task itself, which classifies as the user (I5)
+  and lets archive and delete find the job; that runner starts without the
+  `JEET_TASK_ID` and `JEET_ASSISTANT` it would inherit, which would
+  otherwise disagree with its anchor. Deviation: the plan recorded nothing
+  for the user, which left a job the user started running after its task's
+  archive or delete. If the anchor cannot be recorded, the runner is
   killed and the job ends with 127. A runner refused after the go byte
   records its job as ended with 126, so it never reads as running; so does
   one that gets EOF before the byte, its launcher having died. `review-job` refuses to run on a

@@ -63,11 +63,15 @@ pub fn run(
             .as_ref()
             .map(|_| review.task.id.as_str());
         // The runner is always recorded as the task it runs for: the review
-        // task, else the assistant that started it (a review task it found
-        // at the top level is never moved under it). Unrecorded, a runner
-        // that inherits the assistant's environment is refused once this
-        // jeet has exited.
-        let runner_for = as_task.or(parent.as_deref());
+        // task under a parent, the assistant that started it for a review
+        // task found at the top level (never moved under it), and otherwise
+        // the top-level review task itself, which runs as the user. Recorded,
+        // archiving or deleting the task finds the job and ends it;
+        // unrecorded, a runner that inherits the assistant's environment is
+        // refused once this jeet has exited.
+        let runner_for = as_task
+            .or(parent.as_deref())
+            .unwrap_or(review.task.id.as_str());
         start_review(app, &repo, &pr, &review.path, rerun, as_task, runner_for)?;
     }
 
@@ -88,7 +92,7 @@ fn start_review(
     worktree: &std::path::Path,
     rerun: bool,
     as_task: Option<&str>,
-    runner_for: Option<&str>,
+    runner_for: &str,
 ) -> Result<()> {
     let config = &app.config.review;
     let Some(template) = config.command() else {

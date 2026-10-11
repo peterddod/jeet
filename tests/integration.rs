@@ -8015,6 +8015,108 @@ fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
     }
 }
 
+/// A job the user starts is recorded as its top-level review task's, which
+/// is the user's, so archiving or deleting the task ends it too. It starts
+/// without the hint of the task whose shell it was started from: that would
+/// disagree with its record, and what it runs would be refused.
+#[cfg(unix)]
+#[test]
+fn a_job_the_user_starts_ends_with_its_task() {
+    for verb in ["delete", "archive"] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let other = task_id(&lab.new_task("other"));
+        let started = lab.home().join("started");
+        let ran = lab.home().join("ran");
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[review]\ncommand = \"'{}' todo ls >/dev/null && touch {} && \
+                 sleep 3 && touch {}\"\nnotify = false\n",
+                env!("CARGO_BIN_EXE_jeet"),
+                sh_quote(&started.to_string_lossy()),
+                sh_quote(&ran.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let env = [("PATH", path.as_str()), ("JEET_TASK_ID", other.as_str())];
+        succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+        assert_eq!(lab.parent_of(&task), None);
+        wait_until("the job to start", || started.exists());
+        let jobs = || -> i64 {
+            lab.index()
+                .query_row(
+                    "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'job'",
+                    [&task],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(jobs(), 1, "{verb}");
+        let flag = if verb == "delete" { "-f" } else { "--force" };
+        succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
+        assert_eq!(jobs(), 0, "{verb}");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(!ran.exists(), "the job outlived its task's {verb}");
+    }
+}
+
+/// A review job's command cannot archive or delete its own task, even from
+/// outside its worktree: ending the job would end the jeet doing it
+/// part-way. Whether the job is the
+/// task's (the user started it) or the assistant's (found in the task's
+/// worktree), both are refused and the task is left as it was.
+#[cfg(unix)]
+#[test]
+fn a_review_job_cannot_archive_or_delete_its_own_task() {
+    for by_assistant in [false, true] {
+        let lab = StoreLab::new();
+        let trunk = lab.clone_repo("widget");
+        let bin = stub_history_gh(&lab.home());
+        let path = path_with(&bin);
+        let env = [("PATH", path.as_str())];
+        let worktree = path_from(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
+        let task = task_id(&lab.home().join("tasks/review-widget-7"));
+
+        let out = |name: &str| lab.home().join(name);
+        let quoted = |name: &str| sh_quote(&out(name).to_string_lossy());
+        let jeet = env!("CARGO_BIN_EXE_jeet");
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!(
+                "scan_roots = []\n[assistant]\nallow = [\"review.start\", \"task.archive\", \
+                 \"task.delete\"]\nnotify = false\n[review]\ncommand = \"cd /; '{jeet}' task archive \
+                 review-widget-7 --force 2> {}; '{jeet}' task delete review-widget-7 -f 2> {}; \
+                 touch {}\"\nnotify = false\n",
+                quoted("archive"),
+                quoted("delete"),
+                quoted("done"),
+            ),
+        )
+        .unwrap();
+        if by_assistant {
+            let mut root = lab.assistant_pane();
+            succeeded(&root.jeet(&["review", "7", "--rerun"], &trunk, &env));
+        } else {
+            succeeded(&lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env));
+        }
+        assert_eq!(lab.parent_of(&task), None);
+        wait_until("the job's command to finish", || out("done").exists());
+        for verb in ["archive", "delete"] {
+            let stderr = std::fs::read_to_string(out(verb)).unwrap();
+            assert!(
+                stderr.contains("runs under a review job"),
+                "{verb}, by the assistant: {by_assistant}: {stderr}"
+            );
+        }
+        assert!(worktree.is_dir(), "by the assistant: {by_assistant}");
+        assert!(lab.home().join("tasks/review-widget-7").is_dir());
+    }
+}
+
 /// Archiving a task forgets its agent: one that outlives the archive is
 /// no longer taken for the task's.
 #[cfg(unix)]

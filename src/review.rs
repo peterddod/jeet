@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ReviewConfig;
 use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
+use crate::db::tasks::TaskKind;
 use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
@@ -205,7 +206,8 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
 /// `as_task` is the review task when it has a parent: the command then runs
 /// as that task's agent, a Node that reports to it, not as whoever started
 /// the review. `runner_for` is the task the runner is recorded as: that
-/// one, else the assistant that started it, or none for the user.
+/// one, else the assistant that started it, else the top-level review task
+/// itself, which runs as the user.
 #[allow(clippy::too_many_arguments)]
 pub fn start(
     app: &App,
@@ -215,7 +217,7 @@ pub fn start(
     config: &ReviewConfig,
     template: &str,
     as_task: Option<&str>,
-    runner_for: Option<&str>,
+    runner_for: &str,
 ) -> Result<Job> {
     let dir = jobs_dir(app, repo)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -244,11 +246,12 @@ pub fn start(
     };
     write(&path, &job)?;
 
-    // Once the runner is launched it is the only writer of the state file:
-    // two writers is how a quick-failing command's exit status got papered
-    // over with a stale copy. So launching records nothing — except when it
-    // fails, which would otherwise leave a job that reads as running forever,
-    // refusing every later `jeet review`, `--rerun` included.
+    // Once the runner has the go-ahead it is the only writer of the state
+    // file: two writers is how a quick-failing command's exit status got
+    // papered over with a stale copy. So launching records only the runner,
+    // before the go-ahead — and that launching failed, which would otherwise
+    // leave a job that reads as running forever, refusing every later
+    // `jeet review`, `--rerun` included.
     if let Err(e) = launch(app, &path, &log, worktree, runner_for) {
         job.finished_at = Some(now_secs());
         job.exit_code = Some(127);
@@ -258,16 +261,10 @@ pub fn start(
     Ok(job)
 }
 
-/// Launch the runner for the job in `state`. Run for task `runner_for`,
-/// the runner is recorded as that task's, so what its command runs is known
-/// for the task's.
-fn launch(
-    app: &App,
-    state: &Path,
-    log: &Path,
-    worktree: &Path,
-    runner_for: Option<&str>,
-) -> Result<()> {
+/// Launch the runner for the job in `state`, recorded as task
+/// `runner_for`'s, so what its command runs is known for the task's, and
+/// archiving or deleting the task finds it to end.
+fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     // `nohup` so closing the terminal does not take the review with it — the
@@ -287,14 +284,32 @@ fn launch(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // Recorded as a top-level task, the runner is the user's: a hint it
+    // inherited (the shell of another task's agent, say) would be taken for
+    // a claim to be that task, and what its command runs refused.
+    let task = app.db.get_task(runner_for)?;
+    if task.is_some_and(|t| t.parent_id.is_none() && t.kind != TaskKind::Assistant) {
+        cmd.env_remove(crate::tasks::TASK_ID_ENV)
+            .env_remove(crate::permissions::ASSISTANT_ENV);
+    }
     let mut child = cmd.spawn().context("start the review command")?;
-    if let Some(task) = runner_for {
-        // `nohup` execs the runner, so this is its pid.
-        if let Err(e) = identity::record(&app.db, task, AnchorKind::Job, None, child.id()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e.context("record the review command as its task's"));
-        }
+    // `nohup` execs the runner, so this is its pid. Its pid and start go in
+    // the job's file before it has the go-ahead, so a job is matched to its
+    // runner from the first: archiving the task in the moments before the
+    // runner gets going ends it all the same.
+    let pid = child.id();
+    let recorded = identity::record(&app.db, runner_for, AnchorKind::Job, None, pid)
+        .context("record the review command as its task's")
+        .and_then(|()| {
+            let mut job = read(state)?;
+            job.pid = Some(pid);
+            job.runner_start = identity::start_of(pid);
+            write(state, &job)
+        });
+    if let Err(e) = recorded {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
     }
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(GO).context("start the review command")?;
@@ -407,8 +422,8 @@ pub fn await_go() -> Result<()> {
 /// The runner for the job in `state`, refused before it ran the command,
 /// or never given the go-ahead (its `jeet review` died first): record that
 /// it ended, or the job reads as running forever, refusing
-/// every later `jeet review`. Only a state file jeet wrote, for a job no
-/// runner has taken up.
+/// every later `jeet review`. Only a state file jeet wrote, for a job not
+/// yet ended and no other runner's.
 pub fn refused(state: &Path) {
     let Ok(app) = App::open() else {
         return;
@@ -419,7 +434,8 @@ pub fn refused(state: &Path) {
     let Ok(mut job) = read(state) else {
         return;
     };
-    if job.pid.is_some() || job.exit_code.is_some() {
+    // `jeet review` names the runner in the file before the go-ahead.
+    if job.exit_code.is_some() || job.pid.is_some_and(|pid| pid != std::process::id()) {
         return;
     }
     job.finished_at = Some(now_secs());
