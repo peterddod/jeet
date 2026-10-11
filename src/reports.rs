@@ -12,7 +12,7 @@ use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskState};
 use crate::messages::{self, Delivered};
 use crate::permissions;
 use crate::runtime;
-use crate::status::{self, Activity};
+use crate::status::Activity;
 use crate::tmux;
 use crate::worktrees::now_secs;
 
@@ -184,14 +184,14 @@ fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activi
     Ok(())
 }
 
-/// `idle 12m, last report: …`.
+/// `idle 12m; last report #3 (progress)`. Only jeet's own words: a status
+/// report is jeet's, so the task's text stays in its own report.
 fn idle_body(app: &App, task: &TaskRecord, idle: i64) -> Result<String> {
-    let last = app
-        .db
-        .last_own_report(&task.id)?
-        .and_then(|r| status::first_line(&r.body, 80))
-        .unwrap_or_else(|| "none".into());
-    Ok(format!("idle {}m, last report: {last}", idle / 60))
+    let last = app.db.last_own_report(&task.id)?.map_or_else(
+        || "none".into(),
+        |r| format!("#{} ({})", r.id, r.kind.as_str()),
+    );
+    Ok(format!("idle {}m; last report {last}", idle / 60))
 }
 
 /// What `task`'s parent asked of it, fenced, for its agent's session
@@ -297,12 +297,12 @@ mod tests {
         let idle = StatusEvent::Idle;
         // Idle since ten minutes ago, said twice: told once.
         let since = now_secs() - 600;
-        auto_status(&app, &w, idle, "idle 10m, last report: none", since).unwrap();
-        auto_status(&app, &w, idle, "idle 11m, last report: none", since).unwrap();
+        auto_status(&app, &w, idle, "idle 10m; last report none", since).unwrap();
+        auto_status(&app, &w, idle, "idle 11m; last report none", since).unwrap();
         assert_eq!(last_status(&app, "w"), Some(1));
         // Idle again since after that was said: told again.
         let again = now_secs() + 60;
-        auto_status(&app, &w, idle, "idle 10m, last report: none", again).unwrap();
+        auto_status(&app, &w, idle, "idle 10m; last report none", again).unwrap();
         assert_eq!(last_status(&app, "w"), Some(2));
 
         let (_, delivered) = send(&app, &w, ReportKind::Done, "shipped", false).unwrap();
@@ -311,7 +311,7 @@ mod tests {
             &app,
             &w,
             idle,
-            "idle 10m, last report: shipped",
+            "idle 10m; last report #1 (done)",
             999_999_999_999,
         )
         .unwrap();
@@ -350,9 +350,9 @@ mod tests {
     fn without_tmux_nobody_is_idle() {
         let (_dir, app, w) = lab();
         let dir = crate::tasks::task_dir(&app, &w);
-        std::fs::create_dir_all(status::status_dir(&dir)).unwrap();
+        std::fs::create_dir_all(crate::status::status_dir(&dir)).unwrap();
         std::fs::write(
-            status::status_dir(&dir).join("s.json"),
+            crate::status::status_dir(&dir).join("s.json"),
             r#"{"session_id":"s","state":"idle","event":"Stop","at":0}"#,
         )
         .unwrap();
@@ -376,7 +376,11 @@ mod tests {
         sweep_idle_with(&app, now, idle).unwrap();
         sweep_idle_with(&app, now + 600, idle).unwrap();
         let last = app.db.last_status_report("w").unwrap().unwrap();
-        assert_eq!(last.body, format!("idle {mins}m, last report: half way"));
+        assert_eq!(
+            last.body,
+            format!("idle {mins}m; last report #1 (progress)")
+        );
+        assert!(!last.body.contains("half way"), "no text of the task's own");
         assert_eq!(last.id, 2, "told once for one idle period");
         // A top-level task idle as long is nobody's to tell of.
         assert!(app.db.last_report("top").unwrap().is_none());

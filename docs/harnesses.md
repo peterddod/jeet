@@ -77,7 +77,12 @@ answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
 for. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
-Only what the harness knows (the `clear` reason, say) belongs in its module:
+Both need the hook to run with the agent's environment: jeet reports and
+briefs only when the hook's `$JEET_TASK_ID` names the task its cwd found.
+Status needs only the cwd, so a hook run by a plugin host or server that
+does not inherit the agent's environment still shows status but silently
+never reports or briefs; run hooks as children of the agent, or pass
+`$JEET_TASK_ID` on. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 
 ## Fixtures and tests

@@ -457,26 +457,50 @@ mod tests {
         assert!(db.list_task_sessions("t1").unwrap().is_empty());
     }
 
+    /// An index as v3 left it, with the assistant `a` and a task `w`.
+    fn v3_index(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(BASELINE).unwrap();
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "PRAGMA user_version = 3;
+             PRAGMA foreign_keys = ON;
+             INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('a', 'assistant', 'assistant', 'assistant', 1, 1);
+             INSERT INTO tasks (id, slug, name, created_at, last_activity)
+                 VALUES ('w', 'work', 'work', 1, 1);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn many_processes_opening_an_old_index_at_once_all_migrate_it() {
+        // As the first hooks after an upgrade: each step must take the write
+        // lock before it reads the version, or one of them is refused.
+        for _ in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.db");
+            v3_index(&path);
+            let start = std::sync::Barrier::new(8);
+            std::thread::scope(|s| {
+                for _ in 0..8 {
+                    s.spawn(|| {
+                        start.wait();
+                        let db = Database::open(&path).unwrap();
+                        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+                    });
+                }
+            });
+        }
+    }
+
     #[test]
     fn a_v3_index_gains_parents_and_reports() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(BASELINE).unwrap();
-            for sql in &MIGRATIONS[..3] {
-                conn.execute_batch(sql).unwrap();
-            }
-            conn.execute_batch(
-                "PRAGMA user_version = 3;
-                 PRAGMA foreign_keys = ON;
-                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
-                     VALUES ('a', 'assistant', 'assistant', 'assistant', 1, 1);
-                 INSERT INTO tasks (id, slug, name, created_at, last_activity)
-                     VALUES ('w', 'work', 'work', 1, 1);",
-            )
-            .unwrap();
-        }
+        v3_index(&path);
         let db = Database::open(&path).unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         // Existing tasks are top level, and still list.

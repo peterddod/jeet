@@ -439,7 +439,9 @@ jeet          # or `jeet tasks`
 ```
 
 A task under the assistant shows ` ↳ assistant` after its name, and its last
-report, dimmed, after the row's last column (` · done: PR #12 is up`).
+report, dimmed, in what the name leaves of its column, before the worktrees
+(` · done: PR #12 is up`); a name that fills the column cuts the report short
+or hides it.
 
 Every task, most recently active first: what its agent is doing, its name, the
 worktrees it holds (as of the last look at the disk, since the agent adds them
@@ -1092,7 +1094,8 @@ tasks add worktrees. Everything else that changes something is refused,
 whatever the assistant holds, as are `jeet notify`, `jeet todo` and review
 jobs; the refusal tells it to ask with `jeet report`. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
-`jeet review` report to it too. The gating is cooperative, like the rest: a
+`jeet review` report to it too: their `[review] command` runs as the review
+task, gated like any task under it. The gating is cooperative, like the rest: a
 shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
 and is gated as that task, so use one outside it. After upgrading, an older
 jeet refuses the index.

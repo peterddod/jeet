@@ -56,7 +56,13 @@ pub fn run(
     );
 
     if start_command {
-        start_review(app, &repo, &pr, &review.path, rerun)?;
+        // Under a parent, the review command is the task's agent and reports.
+        let as_task = review
+            .task
+            .parent_id
+            .as_ref()
+            .map(|_| review.task.id.as_str());
+        start_review(app, &repo, &pr, &review.path, rerun, as_task)?;
     }
 
     if io::stdout().is_terminal() {
@@ -75,6 +81,7 @@ fn start_review(
     pr: &github::PullRequest,
     worktree: &std::path::Path,
     rerun: bool,
+    as_task: Option<&str>,
 ) -> Result<()> {
     let config = &app.config.review;
     let Some(template) = config.command() else {
@@ -96,7 +103,7 @@ fn start_review(
             return Ok(());
         }
     }
-    let job = review::start(app, repo, pr, worktree, config, template)?;
+    let job = review::start(app, repo, pr, worktree, config, template, as_task)?;
     eprintln!("jeet: reviewing in the background: {}", job.command);
     eprintln!("jeet: output -> {}", job.log.display());
     Ok(())

@@ -190,6 +190,10 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
 
 /// Start the review command for `pr` in `worktree`, detached from this
 /// terminal so it outlives both jeet and the shell it was started from.
+///
+/// `as_task` is the review task when it has a parent: the command then runs
+/// as that task's agent, a Node that reports to it, not as whoever started
+/// the review.
 pub fn start(
     app: &App,
     repo: &RepoRecord,
@@ -197,19 +201,24 @@ pub fn start(
     worktree: &Path,
     config: &ReviewConfig,
     template: &str,
+    as_task: Option<&str>,
 ) -> Result<Job> {
     let dir = jobs_dir(app, repo)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{}.json", pr.number));
     let log = dir.join(format!("{}.log", pr.number));
 
+    let mut env = job_env(pr, &log);
+    if let Some(id) = as_task {
+        env.push((crate::tasks::TASK_ID_ENV.into(), id.into()));
+    }
     let mut job = Job {
         pr: pr.number,
         title: pr.title.clone(),
         head: pr.head_ref_oid.clone(),
         worktree: worktree.to_path_buf(),
         command: expand(template, pr),
-        env: job_env(pr, &log),
+        env,
         notify: config.notify(),
         log: log.clone(),
         started_at: now_secs(),
@@ -266,10 +275,15 @@ pub fn run_job(path: &Path) -> Result<()> {
     job.pid = Some(std::process::id());
     write(path, &job)?;
     println!("$ {}", job.command);
-    let code = match Command::new("sh")
-        .arg("-c")
-        .arg(&job.command)
-        .current_dir(&job.worktree)
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(&job.command).current_dir(&job.worktree);
+    // Run as a task, the command is that task's agent, never the assistant
+    // that started it: the runner itself stays the assistant's, so the
+    // check on its state file still applies.
+    if job.env.iter().any(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
+        cmd.env_remove(crate::permissions::ASSISTANT_ENV);
+    }
+    let code = match cmd
         .envs(job.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .status()

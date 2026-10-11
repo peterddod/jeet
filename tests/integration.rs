@@ -6555,6 +6555,36 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     succeeded(&output);
     let task = task_id(&lab.home().join("tasks/review-widget-7"));
     assert_eq!(lab.parent_of(&task), Some(lab.assistant_id()));
+
+    // The review command it starts runs as that task's agent, not as the
+    // assistant, so what it reports reaches the assistant.
+    let scratch = TempDir::new().unwrap();
+    let seen = scratch.path().join("seen");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"echo \\\"$JEET_TASK_ID:$JEET_ASSISTANT\\\" > {}.tmp && \
+             mv {0}.tmp {0}\"\nnotify = false\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    let assistant = lab.assistant_id();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_TASK_ID", assistant.as_str()),
+    ];
+    succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap().trim(),
+        format!("{task}:")
+    );
 }
 
 #[test]
@@ -6649,6 +6679,16 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
         "{}",
         stderr_of(&output)
     );
+    // A task since deleted is no task, not one without a parent.
+    let output = lab.jeet_at(
+        &["report", "done", "ok"],
+        &lab.home(),
+        &[("JEET_TASK_ID", "gone")],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("no task jeet knows"), "{stderr}");
+    assert!(!stderr.contains("no parent"), "{stderr}");
     assert!(lab.reports_of(&y).is_empty());
 }
 
@@ -6694,6 +6734,28 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     let output = lab.jeet_at(&["worktree", "add", "widget", "--task", "y"], &x_dir, &as_x);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("only to itself"));
+
+    // Run as the assistant too, it is still checked as a Node: what the
+    // assistant may do is not its.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.send\", \"task.archive\"]\n",
+    )
+    .unwrap();
+    let actions_before = actions(&lab.home()).len();
+    let as_x_assistant = [("JEET_TASK_ID", x.as_str()), ("JEET_ASSISTANT", "1")];
+    for args in [
+        &["task", "send", "y", "hi"][..],
+        &["task", "archive", "y", "--force"],
+    ] {
+        let output = lab.jeet_at(args, &x_dir, &as_x_assistant);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("may not"), "{args:?}: {stderr}");
+        assert!(stderr.contains("jeet report"), "{args:?}: {stderr}");
+    }
+    assert!(lab.home().join("tasks/y").is_dir());
+    assert_eq!(actions(&lab.home()).len(), actions_before);
 
     // A top-level task's agent is not gated, as before.
     let scratch = TempDir::new().unwrap();

@@ -13,11 +13,20 @@ pub fn run(app: &App, kind: ReportKind, message: &str) -> Result<()> {
     let task = match permissions::caller(&app.db)? {
         Caller::Node(task) => task,
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
-        Caller::User => match std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
-            true => bail!(
-                "this task has no parent; `jeet report` is for tasks made under the assistant"
-            ),
-            false => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
+        Caller::User => match std::env::var(TASK_ID_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            Some(id) => match app.db.get_task(id.trim())? {
+                Some(_) => bail!(
+                    "this task has no parent; `jeet report` is for tasks made under the assistant"
+                ),
+                None => bail!(
+                    "${TASK_ID_ENV} is {}, which is no task jeet knows; was it deleted?",
+                    id.trim()
+                ),
+            },
+            None => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
         },
     };
     // Progress is not worth a session of the assistant's own: `send` says

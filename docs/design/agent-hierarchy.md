@@ -326,7 +326,7 @@ change:
 | Child event | Parent gets |
 |---|---|
 | `Stopped`, after a turn with no report since the last hand-over | nothing (avoids chatter); it counts one turn toward the budget |
-| `Idle` for longer than `[managers] idle_report_mins` (10), with no `done` | `status: idle 10m, last report: …` |
+| `Idle` for longer than `[managers] idle_report_mins` (10), with no `done` | `status: idle 10m; last report #N (kind)` (jeet's words only, not the task's text) |
 | `NeedsInput` (a permission prompt, or #23's `trust folder`) | `status: waiting on a prompt only the user can answer`, which also rolls up as **needs you** (no agent may type into a prompt; `messages.rs` already refuses to) |
 | `Ended` without `done` | `status: ended without reporting done` |
 | budget at 80% / 100% | `status: budget …` (5.3) |
@@ -608,7 +608,9 @@ it is acceptable only as a worker until then.
 
 Phase 1 as built: review tasks the root makes with `jeet review` are
 parented; the TUI's `browse_pr` stays top level (D5; both call sites run in
-the foreground). No tree helpers and no delete/archive pre-checks yet, since
+the foreground). The `[review] command` of a parented review task runs with
+that task's `JEET_TASK_ID` and without `JEET_ASSISTANT`, so it is the task's
+Node and reports; the `review-job` runner around it stays the assistant's. No tree helpers and no delete/archive pre-checks yet, since
 only the assistant can be a parent and both already refuse it; FK RESTRICT is
 the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
 (D20). The TUI marks a parented row ` ↳ assistant` and dims its last report
