@@ -7412,19 +7412,21 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     assert!(said.contains("may be at a startup prompt"), "{said}");
     assert!(calls_of(&tmux, "send-keys").is_empty());
 
-    // Running: one Escape, never repeated.
+    // Running: one Escape, never repeated, even with someone attached.
     std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
     hook_ok(&lab.hook(
         "UserPromptSubmit",
         &hook_input("UserPromptSubmit", &session, &task),
         &[],
     ));
+    std::fs::write(stub.join("client"), "").unwrap();
     let said = interrupt();
     assert!(said.contains("interrupted task fix-x's turn"), "{said}");
     assert_eq!(
         calls_of(&tmux, "send-keys"),
         [["send-keys", "-t", "=jeet-fix-x:^", "Escape"]]
     );
+    std::fs::remove_file(stub.join("client")).unwrap();
 
     // Running with text the user has not sent: left alone.
     std::fs::copy(pane_fixture("input-draft"), stub.join("pane")).unwrap();
