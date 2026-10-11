@@ -23,7 +23,9 @@ jeet does without that feature:
 | `new_session_args(id, name)` | starts a session under an id jeet picks | no recorded sessions, no resume, no assistant |
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
-| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) | no status, `task send` types straight in |
+| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
+| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (#33 adds `Sandbox`) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary) | the assistant starts without its summary |
@@ -88,6 +90,77 @@ other reports or briefs; run hooks as children of the agent, or pass
 `$JEET_TASK_ID` on. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 
+## Deny rules
+
+`HookSetup::deny` lists commands the agent must not run. jeet fills it for
+the assistant and for every task with a parent; top-level tasks the user
+made get none, so a user's own `git push --force-with-lease` keeps working.
+The list is:
+
+- force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), and pushes
+  naming a default branch: `main`, `master` and the default branch of every
+  repo jeet has indexed, as a destination (`git push * main`, `*:main`,
+  `*:refs/heads/main`);
+- merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoint
+  through `gh api` or `curl`, and the GraphQL `mergePullRequest` and
+  `enablePullRequestAutoMerge` mutations;
+- for a parented task only, the commands of each capability it does not
+  hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
+  `gh pr review` without `pr.review`. A held capability's commands are
+  allowed instead. The assistant is never denied these: it holds them by
+  default, and at worst the user approves them at the prompt.
+
+`jeet pr merge` runs `gh` from jeet's own process, so the merge denies do
+not touch it.
+
+**Pattern syntax.** Each entry is neutral, not any harness's own rule
+syntax: words matched from the start of the command, where `*` matches any
+run of characters, and the command may carry further arguments after the
+pattern. A harness renders each entry in its own syntax. Claude Code's is
+`Bash(<pattern> *)` (a trailing ` *` also matches the bare command), or
+`Bash(<pattern>)` when the pattern already ends in `*`; so `gh pr merge`
+becomes `Bash(gh pr merge *)` and `git push --force*` stays
+`Bash(git push --force*)`. Allow rules keep the `Bash(<prefix>:*)` form.
+Claude Code checks deny rules from `--settings` before any allow rule from
+any scope, and a denied command cannot be approved at the prompt. jeet
+leaves the `deny` key out when the list is empty.
+
+Patterns are anchored at the start of the command on purpose: an
+unanchored `*gh pr merge*` would also refuse `git commit -m "… gh pr merge
+…"` or `rg 'gh pr merge'`, with no way for the user to approve them.
+
+**What deny rules do not do.** They are a lint against honest mistakes, not
+a gate. They do not catch:
+
+- global options before the subcommand: `git -C . push -f`,
+  `git -c a=b push --force`;
+- a command inside another: `sh -c 'git push --force'`, `xargs`, `env`;
+- combined short flags (`git push -uf`) and git or shell aliases;
+- a bare `git push` whose upstream is a default branch;
+- scripts the agent writes and runs, MCP tools, and `!` commands typed in
+  the session (only the agent's Bash tool is checked);
+- anything outside the agent's own tools: a deny on `Edit` covers Claude
+  Code's file tools, not a shell that writes the same file.
+
+The rules are a snapshot taken at launch: a repo indexed later, or a
+capability granted later, takes effect the next time the agent starts. The
+real control on a default branch is GitHub branch protection or a ruleset;
+set one. A hard boundary (writes confined to the task's directory, no
+`tmux` or `sqlite3`) is the harness sandbox in #33.
+
+`permissions.rs` has a table of commands that must and must not be denied,
+checked against a model of Claude Code's matching (`claude_match`), and a
+`KNOWN_GAPS` list pinning the bypasses above. The model is not Claude Code
+itself, so check these by hand when you raise `tested_version` (last done
+for Claude Code 2.1.296):
+
+- a rule ending in ` *` matches the bare command (`gh pr merge`);
+- a `*` in the middle of a rule matches (`gh api repos/o/r/pulls/3/merge`);
+- `gh pr merge` is refused outright, with no prompt to approve it;
+- Esc while the agent is running ends the turn, and the transcript records
+  `[Request interrupted by user`;
+- Esc at a permission prompt refuses the tool call and ends the turn.
+
 ## Fixtures and tests
 
 - **Hook payloads**: put one real payload per event in
@@ -102,7 +175,10 @@ the reporting itself is jeet's.
   no prompt) into `tests/fixtures/panes/<id>/`. Test that `accept_trust` never
   returns a confirming key unless the accept option is the one selected.
 - **Launch arguments**: test each `*_args` method, and that the hook arguments
-  install every event with the jeet binary path shell-quoted.
+  install every event with the jeet binary path shell-quoted, render
+  `HookSetup::deny` in the harness's syntax, and leave deny rules out when
+  the list is empty. Check by hand that the keys `interrupt_keys` returns
+  end a turn in the real agent.
 - **Integration**: `tests/integration.rs` runs jeet against a stub `tmux`
   that records each call (`stub_tmux`, `calls_of`) and feeds hooks through
   `task-hook` (`StoreLab::hook`). Add a test that `jeet task open` with
