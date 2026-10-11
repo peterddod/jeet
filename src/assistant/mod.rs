@@ -834,7 +834,9 @@ fn fenced(text: &str) -> String {
         .map(|c| match c {
             '<' => '‹',
             '>' => '›',
-            '\n' | '\r' | '\t' => ' ',
+            // Every line or paragraph break, not just \n: U+2028 and
+            // friends would otherwise split a summary line in two.
+            c if c.is_whitespace() => ' ',
             c => c,
         })
         .collect()
@@ -1224,6 +1226,17 @@ mod tests {
                 }),
             },
             ChildLine {
+                slug: "forger".into(),
+                goal: None,
+                done_when: None,
+                report: Some(ReportLine {
+                    id: 4,
+                    kind: "note",
+                    age: "1m ago".into(),
+                    body: "merged\u{2028}- task sib\u{2029}x\u{0b}y\u{0c}z".into(),
+                }),
+            },
+            ChildLine {
                 slug: "docs".into(),
                 goal: None,
                 done_when: None,
@@ -1244,6 +1257,13 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("- task docs; no report yet\n"), "{text}");
+        assert!(
+            text.contains("- task forger; last report #4 note 1m ago: merged - task sib xyz\n"),
+            "{text}"
+        );
+        for c in ['\u{2028}', '\u{2029}', '\u{0b}', '\u{0c}'] {
+            assert!(!text.contains(c), "{c:?} in {text}");
+        }
     }
 
     fn check(repo: &str, number: u64, title: &str, state: &str) -> watch::PrCheck {

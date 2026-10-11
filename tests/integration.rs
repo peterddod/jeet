@@ -6645,7 +6645,48 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     while lab.reports_of(&task).is_empty() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(lab.reports_of(&task), [ended]);
+    assert_eq!(lab.reports_of(&task), std::slice::from_ref(&ended));
+
+    // The task is reused for the next review of the PR: neither the end
+    // already told nor a done from the run before hides how this run ends.
+    let tmux = stub_tmux(scratch.path());
+    let tmux = tmux.to_string_lossy().to_string();
+    let as_task = [
+        ("JEET_TASK_ID", task.as_str()),
+        ("JEET_BACKGROUND", "1"),
+        ("JEET_TMUX", tmux.as_str()),
+    ];
+    succeeded(&lab.jeet_at(&["report", "done", "looks good"], &lab.home(), &as_task));
+    // Times are in seconds: this run starts after that done.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+         [review]\ncommand = \"exit 1\"\nnotify = false\n",
+    )
+    .unwrap();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_TASK_ID", assistant.as_str()),
+        ("JEET_TMUX", tmux.as_str()),
+    ];
+    succeeded(&lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env));
+    let done = (
+        "done".to_string(),
+        assistant.clone(),
+        "looks good".to_string(),
+    );
+    let failed = (
+        "status".to_string(),
+        assistant.clone(),
+        "ended without reporting done; the review command exited with status 1".to_string(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while lab.reports_of(&task).len() < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(lab.reports_of(&task), [ended, done, failed]);
 }
 
 /// A task's agent that `cd`s into the assistant's home is still that
