@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::cd;
 use crate::context::App;
 use crate::github;
+use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::resolve::repo_from_filter_or_cwd;
 use crate::review;
@@ -29,7 +30,12 @@ pub fn run(
     let pr = found.pr.clone();
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
-    let review = tasks::review_task(app, &repo, &pr, None)?;
+    // What the assistant checks out reports to it, like a task it makes.
+    let parent = match permissions::caller(&app.db)? {
+        Caller::Root => Some(super::task::assistant_parent(app)?.id),
+        Caller::User | Caller::Node(_) => None,
+    };
+    let review = tasks::review_task(app, &repo, &pr, parent.as_deref())?;
     // Only now: a sync started before the checkout would be fetching this
     // repo just as `gh pr checkout` does. The checkout waits out one already
     // running, but there is no need to start one in its way.

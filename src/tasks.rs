@@ -47,7 +47,7 @@ const SLUG_MAX: usize = 48;
 /// the agent gets at code from inside a blank-canvas task.
 const SKILL: &str = r#"---
 name: jeet
-description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, and open pull requests. Use whenever you need code from a repository.
+description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, open pull requests, and report to the task's parent with `jeet report`. Use whenever you need code from a repository, or to say how the task is going.
 ---
 
 # Working in a jeet task
@@ -71,6 +71,24 @@ worktrees inside this directory.
 - Open pull requests from inside a worktree with `gh pr create`.
 - Never touch `$JEET_HOME/store` (the canonical clones) directly. Prefer
   `jeet worktree add` over running `git worktree add` yourself.
+
+## Reporting to your parent (when this task has one)
+
+A task made by the assistant reports to it; its brief, shown as each session
+starts, says so. Tell it how the task is going:
+
+- `jeet report done "…"` when the work is finished, saying where it is (a
+  pull request, a file).
+- `jeet report blocked "…"` or `jeet report question "…"` when you are
+  stuck or need a decision, rather than waiting.
+- `jeet report progress "…"` for a milestone worth knowing about.
+
+Keep reports short; put detail in the pull request or a file and say where.
+jeet tells the parent itself when you wait on a prompt, sit idle or end.
+
+Such a task may only add worktrees to itself (when its parent may) and
+report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
+are refused. Ask your parent instead.
 "#;
 
 /// A task's directory; the assistant's is its home, outside `tasks/`.
@@ -1912,6 +1930,8 @@ mod tests {
             "jeet ls",
             "gh pr create",
             "$JEET_HOME/store",
+            "jeet report done",
+            "jeet report question",
         ] {
             assert!(skill.contains(needle), "skill does not mention {needle}");
         }

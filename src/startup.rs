@@ -30,6 +30,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::harness::{Harness, StartupPrompt, TrustStep};
 use crate::notify::{self, Notification};
+use crate::reports::{self, StatusEvent};
 use crate::runtime;
 use crate::status;
 use crate::tasks;
@@ -248,6 +249,14 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         Outcome::NeedsUser | Outcome::CouldNotAccept => {
             if let Some(id) = session {
                 status::mark_startup_prompt(&dir, id, "trust folder", now_secs())?;
+            }
+            // No hook fires for this prompt, so its parent hears of it here.
+            if task.parent_id.is_some() {
+                let body = "waiting for the user to trust the folder";
+                let waiting = StatusEvent::Waiting;
+                if let Err(e) = reports::auto_status(app, &task, waiting, body, now_secs()) {
+                    eprintln!("jeet task-startup {}: warning: {e:#}", task.slug);
+                }
             }
             tell(&format!(
                 "{} asks whether to trust the task's folder; `jeet task open {}` to answer",

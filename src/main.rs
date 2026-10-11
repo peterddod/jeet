@@ -187,9 +187,9 @@ fn run(command: Option<Commands>) -> Result<()> {
                     repos,
                     branch,
                     prompt,
-                    parent: _,
-                    goal: _,
-                    done_when: _,
+                    parent,
+                    goal,
+                    done_when,
                 } => commands::task::new(
                     &app,
                     &name,
@@ -197,6 +197,9 @@ fn run(command: Option<Commands>) -> Result<()> {
                     &repos,
                     branch.as_deref(),
                     prompt.as_deref(),
+                    parent.as_deref(),
+                    goal.as_deref(),
+                    done_when.as_deref(),
                 )?,
                 TaskCommands::Send { name, message } => {
                     commands::task::send(&app, &name, &message)?

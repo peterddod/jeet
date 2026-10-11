@@ -184,6 +184,14 @@ The inbox stays the delivery mechanism, and `task_reports` is the record: the
 pane, a manager's session context and `jeet report ls` read it, and they need
 it to survive a hand-over that empties the inbox.
 
+**Phase 1 (as built, D0).** v4 is additive only: `ALTER TABLE tasks ADD
+COLUMN parent_id … REFERENCES tasks(id) ON DELETE RESTRICT`, the
+`tasks_parent` index, `task_briefs`, and `task_reports` as above (with the
+phase-4 columns `needs_user`/`answer`/`answered_by`, unread for now). The
+`manager` kind, `run_state`, `task_grants`, `task_budgets` and `read_only`
+move to v5, whose rebuild of `tasks` must copy `parent_id` and re-create
+`tasks_one_assistant` and `tasks_parent`.
+
 ### Creation and teardown
 
 | Operation on a manager | Children |
@@ -269,6 +277,16 @@ child must act on it. Its **authority** comes from the allow-list, not from
 the text. A brief written by a parent that read something hostile can at most
 ask for what the parent itself could do.
 
+**Phase 1 (as built).** `--parent` accepts only `assistant` (D12); the
+assistant's tasks get it without asking, the user's only when they pass it.
+`--goal`/`--done` need a resulting parent, and `--done` needs `--goal`. The
+brief is not a `BRIEF.md` (that is a manager file, phase 2): at each
+`SessionStarted`, `/clear` included, a parented task gets `<jeet-brief
+from="the assistant" path="assistant/<slug>">` with Goal, Done when, `You
+may: <effective>, report` and how to report, through
+`session_context_output`. A harness without context injection gets no brief
+(D15).
+
 ## 4. Reporting
 
 ### Up: `jeet report`
@@ -341,6 +359,18 @@ root's behalf:
 
 Managers and workers below the root lose `jeet notify`. For them it becomes a report.
 
+**Phase 1 (as built).** `jeet report` takes no `--link`/`--option` (D18).
+A report holds at most 2000 bytes once cleaned, so even fenced it fits a
+message (D16). The row is kept when delivery fails, and the command says so
+and exits 0 (D17). `progress` and `status` reports never start an assistant
+session: typed into an idle one, queued for a busy one, held otherwise (D4).
+No event fires at N minutes idle and jeet has no daemon, so the idle report
+is a sweep from `jeet watch` and the assistant's own Stop hook, debounced in
+the index (D9). An end by `/clear` is not reported (D10), nor one of a task
+archived or deleted; the race with `runtime::stop` before archiving is
+accepted (D21). A hook reports only when `$JEET_TASK_ID` is the task it
+located, so a worker in its sibling's directory reports as neither (D14).
+
 ## 5. Permissions and safety
 
 ### 5.1 Allow-lists
@@ -376,6 +406,18 @@ Managers and workers below the root lose `jeet notify`. For them it becomes a re
 - **New capabilities:** `manager.create`, `manager.stop`, `manager.grant` and
   `git.push`. `pr.merge` comes from #25 (below). `bash_allow` emits each
   node's harness rules from its effective list.
+
+**Phase 1 (as built).** The root keeps today's reach: any task, the user's
+top-level ones included, limited only by `[assistant] allow` (D1). A Node's
+effective list is `{worktree.add} ∩ [assistant] allow`, computed at each
+check, and empty when its parent is not the assistant (D2); `report` is free,
+not a capability (D7). A Node's scope is itself: `worktree add` resolves its
+target the way the command does and compares ids (D3). Nodes lose `notify`,
+`todo` and `review-job` (D6). Identity: a task with a parent named by
+`$JEET_TASK_ID` is a Node even under `JEET_ASSISTANT=1`; otherwise the
+assistant is the root and anyone else the user; the working directory never
+decides, and an index error fails closed (D13). A user's shell inside a
+worker's tmux session inherits its id and is gated as it (D23).
 
 ### 5.2 Depth, fan-out, concurrency
 
@@ -564,6 +606,14 @@ it is acceptable only as a worker until then.
   `tasks.rs` (teach `jeet report`), and `tui/tasks_ui.rs` (a `↳ assistant`
   marker and the last report in the row).
 
+Phase 1 as built: review tasks the root makes with `jeet review` are
+parented; the TUI's `browse_pr` stays top level (D5; both call sites run in
+the foreground). No tree helpers and no delete/archive pre-checks yet, since
+only the assistant can be a parent and both already refuse it; FK RESTRICT is
+the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
+(D20). The TUI marks a parented row ` ↳ assistant` and dims its last report
+after the last column (D22).
+
 **Gate before phase 2 ships: review the identity model (5.7, #33).** Phase 1 accepts
 the cooperative model. Phase 2 lets managers below the root hold real
 capabilities, so before it ships, decide whether the cooperative model is
@@ -653,3 +703,45 @@ None of the questions this RFC raised are still open. The user decided
    goes through the common parent (5.1).
 10. **The cooperative identity model is accepted for phase 1.** It must be
     reviewed again before phase 2 ships, which is a gate in §8 (5.7, #33).
+
+### Phase 1 implementation notes
+
+Where phase 1 (#31) settled what this RFC left open, or departed from it:
+
+- **D0** v4 is additive (ADD COLUMN `parent_id`, `task_briefs`,
+  `task_reports`); the rest moves to v5, whose rebuild keeps `parent_id`.
+  A rebuild gained nothing and put `tasks_one_assistant` at risk.
+- **D1** The root's scope is all tasks, as today: narrowing it would break
+  the assistant's work and watch routing.
+- **D2** Node effective = `{worktree.add}` ∩ `[assistant] allow`, checked
+  each time; empty under a non-assistant parent. A child never exceeds its
+  parent.
+- **D3** A Node may `worktree add` only to itself, resolved as the command
+  does and compared by id.
+- **D4** `deliver(.., may_start)`: progress and status reports never start
+  an assistant session.
+- **D5** Review tasks the root starts are parented; the TUI's stay top level.
+- **D6** Nodes may not `notify`, `todo` or run `review-job`.
+- **D7** `report` is free, not a capability, so an empty allow list still
+  hears from its tasks.
+- **D8** `[managers] idle_report_mins` (default 10) in `config.rs`.
+- **D9** Idle reports come from a sweep in `jeet watch` and the assistant's
+  Stop hook, debounced in the index; idle `since` holds still.
+- **D10** `Ended { cleared }`: a `/clear` is not reported.
+- **D11** Fencing stays in `assistant/mod.rs` (`fence_body`, `attr`,
+  `fence_report`, `fence_brief`).
+- **D12** `--parent` takes only `assistant`.
+- **D13** Caller is User, Root or Node, by `$JEET_TASK_ID` and
+  `JEET_ASSISTANT` only; the narrower reading wins; errors fail closed.
+- **D14** Hooks report only when `$JEET_TASK_ID` is the located task.
+- **D15** `--goal`/`--done` are stored in `task_briefs` and shown as
+  `<jeet-brief>` at session start; no `BRIEF.md` yet.
+- **D16** Reports are capped at 2000 bytes.
+- **D17** A report is kept even when it cannot be delivered.
+- **D18** No `--link`/`--option` yet.
+- **D19** No tree helpers or delete/archive pre-checks yet.
+- **D20** Only `jeet watch`'s background job drops `JEET_TASK_ID`.
+- **D21** No ended report for an archived or missing task; the archive race
+  is accepted.
+- **D22** TUI: ` ↳ assistant` and the last report, dimmed.
+- **D23** A user shell in a worker's tmux session is gated as the worker.

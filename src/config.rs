@@ -321,7 +321,6 @@ impl Config {
     }
 
     /// `[managers] idle_report_mins`, else the default.
-    #[allow(dead_code)]
     pub fn idle_report_mins(&self) -> u64 {
         self.managers
             .as_ref()

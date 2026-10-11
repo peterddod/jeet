@@ -19,8 +19,9 @@ use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate
 use crate::agent::age_label;
 use crate::commands::task::printable;
 use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
+use crate::messages;
 use crate::pr_history;
-use crate::status::Activity;
+use crate::status::{first_line, Activity};
 use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
@@ -445,10 +446,14 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
             Style::default().fg(color),
         ),
     ];
-    let name = match row.task.kind {
+    let mut name = match row.task.kind {
         TaskKind::Review => format!("{} (review)", row.task.name),
         TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
+    // The assistant is the only parent there is for now.
+    if row.task.parent_id.is_some() {
+        name.push_str(" ↳ assistant");
+    }
     spans.push(Span::styled(
         cell(&name, columns.name),
         Style::default()
@@ -477,6 +482,15 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
             ),
             Style::default().fg(Color::DarkGray),
         ));
+    }
+    // Past the last column: cut off where the row ends.
+    if let Some(report) = &row.report {
+        let body = messages::clean(&report.body).replace('\t', " ");
+        spans.push(dim(format!(
+            " · {}: {}",
+            report.kind.as_str(),
+            first_line(&body, 120).unwrap_or_default()
+        )));
     }
     Line::from(spans)
 }
@@ -1248,7 +1262,7 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::{TaskRecord, TaskWorktreeRecord};
+    use crate::db::tasks::{ReportKind, TaskRecord, TaskReportRecord, TaskWorktreeRecord};
     use crate::tui::tasks::{NewTaskForm, Panel};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1283,6 +1297,7 @@ mod tests {
             activity,
             last_activity: crate::worktrees::now_secs() - 120,
             size: Some(3 * 1024 * 1024),
+            report: None,
         }
     }
 
@@ -1318,9 +1333,20 @@ mod tests {
 
     #[test]
     fn every_width_and_panel_draws_without_panicking() {
+        let mut child = row("c", Some(Activity::Idle { since: 0 }));
+        child.task.parent_id = Some("assistant-id".into());
+        child.report = Some(TaskReportRecord {
+            id: 1,
+            task_id: "c".into(),
+            to_id: "assistant-id".into(),
+            kind: ReportKind::Blocked,
+            body: format!("\u{1b}[2J{}\twide\u{1b}]8;;x\u{7}", "漢字".repeat(200)),
+            at: 0,
+        });
         let mut ui = TasksUi::new(vec![
             row("a", Some(Activity::Waiting { detail: None })),
             row("b", None),
+            child,
         ]);
         let panels = vec![
             None,
@@ -1355,7 +1381,8 @@ mod tests {
             for panel in panels.clone() {
                 ui.panel = panel;
                 for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
-                    render(&mut ui, w, h);
+                    let screen = render(&mut ui, w, h);
+                    assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
                 }
             }
         }

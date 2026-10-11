@@ -31,6 +31,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::messages;
+use crate::reports::{self, StatusEvent};
 use crate::tasks;
 use crate::worktrees::now_secs;
 
@@ -193,6 +194,15 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
         // Not a jeet task: nothing to report to.
         return Ok(());
     };
+    let env = std::env::var(tasks::TASK_ID_ENV).ok();
+    // What the session was doing before this event, for what to tell a
+    // parent about it.
+    let prev = match hook.kind {
+        Some(EventKind::NeedsInput(_) | EventKind::Ended { .. }) => {
+            read_status(&task_dir, session_id)
+        }
+        _ => None,
+    };
 
     if let Some(EventKind::SessionStarted(source)) = hook.kind {
         let app = match app.take() {
@@ -227,6 +237,20 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
                     }
                     Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
                 }
+            } else if task.parent_id.is_some()
+                && attributed(env.as_deref(), &task.id)
+                && harness.session_context_output("").is_some()
+            {
+                // What its parent asked of it, each time a session starts,
+                // /clear included.
+                match reports::brief_context(&app, &task) {
+                    Ok(brief) => {
+                        if let Some(output) = harness.session_context_output(&brief) {
+                            println!("{output}");
+                        }
+                    }
+                    Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
+                }
             }
         }
         // A compaction can happen mid-prompt; the session carries on in
@@ -235,9 +259,18 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
             return Ok(());
         }
     }
-    match hook.kind {
+    let result = match hook.kind {
         // A harness that cannot carry on past a turn's end is idle at it.
         Some(EventKind::Stopped) if harness.continue_output("").is_some() => {
+            // The assistant's turn ending is when tasks idle too long are
+            // reported to it: before its inbox is handed over, so what this
+            // queues comes with it. Its app is open already (by
+            // `$JEET_TASK_ID`); a worker's Stop does no index work.
+            if let Some(app) = &app {
+                if let Err(e) = sweep_if_assistant(app, &task_id, now) {
+                    eprintln!("jeet task-hook {event}: {e:#}");
+                }
+            }
             stop(harness, &task_dir, &hook, session_id, now)
         }
         Some(EventKind::Stopped | EventKind::Idle) => {
@@ -247,7 +280,72 @@ fn handle_hook(harness: &dyn Harness, event: &str, raw: &str, now: i64) -> Resul
             Some(status) => write_status(&task_dir, &status),
             None => Ok(()),
         },
+    };
+    // Only now, with the task's inbox no longer locked.
+    if let Err(e) = report_step(&hook, &task_id, env.as_deref(), prev, now) {
+        eprintln!("jeet task-hook {event}: {e:#}");
     }
+    result
+}
+
+fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
+    match app.db.get_task(task_id)? {
+        Some(task) if task.kind == TaskKind::Assistant => reports::sweep_idle(app, now),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a hook's task, `located`, is the one this agent was launched
+/// for: a worker that `cd`s into a sibling's directory must not report as
+/// it.
+fn attributed(env: Option<&str>, located: &str) -> bool {
+    env.map(str::trim) == Some(located)
+}
+
+/// What to tell a task's parent about `kind`, given the session's status
+/// before it: waiting on a prompt, once until it is answered, or an end
+/// that no new session replaces in the same window.
+fn auto_body(
+    kind: &EventKind,
+    prev: Option<&SessionStatus>,
+) -> Option<(StatusEvent, &'static str)> {
+    match kind {
+        EventKind::NeedsInput(_) if prev.is_none_or(|p| p.state != State::Waiting) => Some((
+            StatusEvent::Waiting,
+            "waiting on a prompt only the user can answer",
+        )),
+        EventKind::Ended { cleared: false } => {
+            Some((StatusEvent::Ended, "ended without reporting done"))
+        }
+        _ => None,
+    }
+}
+
+/// Tell the task's parent what this hook means for it, if anything.
+/// Nothing for a task jeet stopped itself (archived or deleted) and, as
+/// ever, nothing on stdout.
+fn report_step(
+    hook: &HookEvent,
+    task_id: &str,
+    env: Option<&str>,
+    prev: Option<SessionStatus>,
+    now: i64,
+) -> Result<()> {
+    if !attributed(env, task_id) {
+        return Ok(());
+    }
+    let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev.as_ref())) else {
+        return Ok(());
+    };
+    let app = App::open()?;
+    let Some(task) = app.db.get_task(task_id)? else {
+        return Ok(());
+    };
+    let since = match event {
+        StatusEvent::Ended => prev.map_or(now, |p| p.at),
+        StatusEvent::Waiting | StatusEvent::Idle => now,
+    };
+    reports::auto_status(&app, &task, event, body, since)
 }
 
 /// Stop: hand over what `jeet task send` queued, else go idle. The inbox
@@ -314,8 +412,13 @@ fn idle_prompt(
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
         .ok();
     // Idle before anything is typed in, so the prompt it submits is what
-    // marks it running again.
-    if let Some(status) = status_for(hook, now) {
+    // marks it running again. Idle since the turn ended, not since it was
+    // last said so, so how long it has been idle holds still.
+    if let Some(mut status) = status_for(hook, now) {
+        let before = read_status(task_dir, &status.session_id);
+        if let Some(before) = before.filter(|b| b.state == State::Idle) {
+            status.at = before.at;
+        }
         write_status(task_dir, &status)?;
     }
     let Some(inbox) = inbox else {
@@ -667,6 +770,63 @@ mod tests {
         assert_eq!(read_status(task, "old").unwrap().state, State::Running);
         assert!(latest_status_mtime(task).is_some());
         assert!(current_status(&task.join("nowhere")).is_none());
+    }
+
+    #[test]
+    fn only_the_task_an_agent_was_launched_for_reports() {
+        assert!(!attributed(None, "t"));
+        assert!(!attributed(Some("u"), "t"));
+        assert!(attributed(Some(" t\n"), "t"));
+    }
+
+    #[test]
+    fn a_parent_hears_of_a_new_wait_and_of_an_end_nothing_replaces() {
+        let prev = |state: State| SessionStatus {
+            session_id: "s".into(),
+            state,
+            detail: None,
+            event: "x".into(),
+            at: 1,
+        };
+        let waiting = EventKind::NeedsInput(None);
+        let word = |kind: &EventKind, before: Option<&SessionStatus>| {
+            auto_body(kind, before).map(|(event, _)| event.word())
+        };
+        assert_eq!(word(&waiting, None), Some("waiting"));
+        assert_eq!(word(&waiting, Some(&prev(State::Running))), Some("waiting"));
+        assert_eq!(word(&waiting, Some(&prev(State::Waiting))), None);
+        let ended = EventKind::Ended { cleared: false };
+        assert_eq!(word(&ended, Some(&prev(State::Idle))), Some("ended"));
+        assert_eq!(word(&EventKind::Ended { cleared: true }, None), None);
+        assert_eq!(word(&EventKind::Stopped, None), None);
+        assert_eq!(word(&EventKind::Idle, None), None);
+        // Each body starts with its word, which debouncing goes by.
+        for kind in [ended, waiting] {
+            let (event, body) = auto_body(&kind, None).unwrap();
+            assert!(body.starts_with(event.word()), "{body}");
+        }
+    }
+
+    #[test]
+    fn idle_is_since_the_turn_ended_however_often_it_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = |name: &str, kind: EventKind| HookEvent {
+            name: name.into(),
+            session_id: Some("s".into()),
+            cwd: None,
+            kind: Some(kind),
+        };
+        let stop = hook("Stop", EventKind::Stopped);
+        write_status(dir.path(), &status_for(&stop, 100).unwrap()).unwrap();
+        let idle = hook("Notification", EventKind::Idle);
+        idle_prompt(dir.path(), "t", &idle, None, 160).unwrap();
+        let status = read_status(dir.path(), "s").unwrap();
+        assert_eq!((status.state, status.at), (State::Idle, 100));
+        // A turn since starts the clock again.
+        let run = hook("UserPromptSubmit", EventKind::Working(None));
+        write_status(dir.path(), &status_for(&run, 200).unwrap()).unwrap();
+        idle_prompt(dir.path(), "t", &idle, None, 300).unwrap();
+        assert_eq!(read_status(dir.path(), "s").unwrap().at, 300);
     }
 
     #[test]

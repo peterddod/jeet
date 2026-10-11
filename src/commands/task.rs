@@ -11,9 +11,9 @@ use crate::agent::{self, AgentSpec};
 use crate::assistant;
 use crate::cd;
 use crate::context::App;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+use crate::db::tasks::{TaskBriefRecord, TaskKind, TaskRecord, TaskState};
 use crate::messages::{self, Delivered};
-use crate::permissions;
+use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime;
@@ -21,6 +21,7 @@ use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
 
+#[allow(clippy::too_many_arguments)]
 pub fn new(
     app: &App,
     name: &str,
@@ -28,6 +29,9 @@ pub fn new(
     repos: &[String],
     branch: Option<&str>,
     prompt: Option<&str>,
+    parent: Option<&str>,
+    goal: Option<&str>,
+    done_when: Option<&str>,
 ) -> Result<()> {
     // Checked before the task is made, so a brief that cannot be given
     // makes nothing.
@@ -35,6 +39,39 @@ pub fn new(
         Ok(prompt) => prompt,
         Err(e) => bail!("--prompt: {e:#}"),
     };
+    let goal = match goal.map(messages::checked).transpose() {
+        Ok(goal) => goal,
+        Err(e) => bail!("--goal: {e:#}"),
+    };
+    let done_when = match done_when.map(messages::checked).transpose() {
+        Ok(done_when) => done_when,
+        Err(e) => bail!("--done: {e:#}"),
+    };
+    if done_when.is_some() && goal.is_none() {
+        bail!("--done says when --goal is met; give --goal too");
+    }
+    let caller = permissions::caller(&app.db)?;
+    // Only the assistant can be a parent until managers land.
+    let parent = match parent.map(str::trim) {
+        Some(assistant::SLUG) => Some(assistant_parent(app)?),
+        Some(other) => bail!(
+            "--parent {other}: only the assistant can have tasks under it until managers land \
+             (phase 2); use --parent {}",
+            assistant::SLUG
+        ),
+        None => match &caller {
+            // What the assistant makes reports to it.
+            Caller::Root => Some(assistant_parent(app)?),
+            Caller::User => None,
+            Caller::Node(_) => bail!("a task with a parent cannot make tasks"),
+        },
+    };
+    if goal.is_some() && parent.is_none() {
+        bail!(
+            "--goal/--done are for a task with a parent; add --parent {}",
+            assistant::SLUG
+        );
+    }
     let created = tasks::create(
         app,
         &NewTask {
@@ -42,12 +79,32 @@ pub fn new(
             project,
             repos,
             branch,
-            parent_id: None,
+            parent_id: parent.as_ref().map(|p| p.id.as_str()),
         },
     )?;
     warn_all(&created.warnings);
+    if let (Some(parent), Some(goal)) = (&parent, goal) {
+        let brief = TaskBriefRecord {
+            task_id: created.task.id.clone(),
+            goal,
+            done_when,
+            created_by: match caller {
+                Caller::Root => parent.id.clone(),
+                _ => "user".into(),
+            },
+        };
+        if let Err(e) = app.db.insert_brief(&brief) {
+            bail!(
+                "task {} was made, but its brief was not saved: {e:#}",
+                created.task.name
+            );
+        }
+    }
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("jeet: task {} -> {}", created.task.name, dir.display());
+    if parent.is_some() {
+        eprintln!("jeet: task {} reports to the assistant", created.task.name);
+    }
     println!("{}", dir.display());
     cd::request(&dir)?;
     let Some(prompt) = prompt else {
@@ -73,6 +130,14 @@ pub fn new(
             "task {} was made, but its agent did not start: {e:#}",
             created.task.name
         ),
+    }
+}
+
+/// The assistant, as a parent: made now if it never was.
+pub(crate) fn assistant_parent(app: &App) -> Result<TaskRecord> {
+    match app.db.get_assistant_task()? {
+        Some(task) => Ok(task),
+        None => assistant::ensure(app),
     }
 }
 

@@ -30,8 +30,11 @@ says everything else on stderr.
 ## Starting and steering work
 
 - `jeet task new <name> [--project <p>] [--repo <r>]… [--branch <b>]
-  [--prompt "<brief>"]` makes a task. With `--prompt` its agent starts
-  straight away with the brief as its first prompt.
+  [--prompt "<brief>"] [--goal "<goal>" [--done "<when>"]]` makes a task.
+  With `--prompt` its agent starts straight away with the brief as its first
+  prompt. A task you make reports back to you (see "Your tasks"); `--goal`
+  and `--done` give it a definition of done, shown to its agent each time a
+  session starts.
 - `jeet task send <task> "<message>"` gets a message to a task's agent:
   typed in when it is idle, queued until it stops when it is busy, its first
   prompt when it is not running.
@@ -40,6 +43,17 @@ says everything else on stderr.
   to a task.
 - `jeet review <pr> --repo <repo>` checks a pull request out into its review
   task and starts the configured review.
+
+## Your tasks
+
+A task you make, or a review you start, reports to you: its agent runs
+`jeet report progress|done|blocked|question "…"`, and jeet reports on its
+own when the agent waits on a prompt only the user can answer, sits idle a
+while, or ends without reporting done. Reports reach you fenced in
+`<jeet-report>`, and your session context lists each task's last one. Such
+a task is gated: it may only report and, when you may, add worktrees to
+itself; it cannot message other tasks, notify the user or touch your todo
+list. Answer it with `jeet task send <task> "<message>"`.
 
 ## Merging pull requests
 

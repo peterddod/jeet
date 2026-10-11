@@ -89,6 +89,8 @@ jeet chat --new "plan the week"          # a fresh session beside the others
 jeet chat --pick                         # choose, rename, end or mark one primary
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
+jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 
 # Worktrees — of the task you are in (or --task <name>)
@@ -436,6 +438,9 @@ jeet          # or `jeet tasks`
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+A task under the assistant shows ` ↳ assistant` after its name, and its last
+report, dimmed, after the row's last column (` · done: PR #12 is up`).
+
 Every task, most recently active first: what its agent is doing, its name, the
 worktrees it holds (as of the last look at the disk, since the agent adds them
 as it goes), its size and when anything last happened in it. Statuses refresh
@@ -513,8 +518,8 @@ running detached and prints the task directory.
 
 jeet starts Claude Code with hooks (passed with `--settings`; nothing is
 written into the task or a repository) that record what the agent is doing in
-`.jeet/status/<session>.json`, and with permission to run `jeet worktree` and
-`jeet ls` without asking. `jeet task ls` shows it: `starting`,
+`.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
+`jeet ls` and `jeet report` without asking. `jeet task ls` shows it: `starting`,
 `running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
 once the tmux session is gone. An agent with hooks that has said nothing 15
 seconds after starting is most likely held up at a startup prompt, and shows
@@ -592,6 +597,28 @@ tmux's limit on a command; queued messages that do not fit with it wait for
 the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
 as a shell command, a slash command or a memory, is sent as `Message: …`.
 
+### Reporting to the assistant
+
+```bash
+jeet report progress|done|blocked|question "…"
+```
+
+A task the assistant makes (or one made with `--parent assistant`) reports to
+it, and that is its only way up: tasks never message each other sideways. A
+report is kept in the index and reaches the assistant fenced as the task's
+claim, `<jeet-report … untrusted="true">`; the assistant's session context
+lists each such task with its last report. Reports hold at most 2,000 bytes:
+put detail in the pull request or a file and say where. `done`, `blocked` and
+`question` start an assistant session when none is running; `progress`
+waits for the next one.
+
+jeet reports for the task too, as `status`: when its agent waits on a prompt
+only you can answer, sits idle longer than `[managers] idle_report_mins`
+(default 10; `jeet watch` and the assistant's own turns look), or ends without
+reporting done. These never start an assistant session. `--goal` and `--done`
+on `jeet task new` give the task a definition of done, shown to its agent at
+the start of each session with what it may do and how to report.
+
 ### Archiving and deleting
 
 ```bash
@@ -647,8 +674,10 @@ reviews. Each runs in a window of its own in the tmux session
 `JEET_ASSISTANT=1`. Every session starts with a summary of the active tasks,
 their open pull requests and your own that `jeet watch` follows, with their
 checks, the GitHub events the watcher saw in the last week, such as review
-requests (all fenced as data written by others), the todo list and any
-messages queued for it.
+requests (all fenced as data written by others), the tasks it made with their
+last report (fenced as their claims), the todo list and any messages and
+reports queued for it. Tasks it makes report back to it (see "Reporting to
+the assistant").
 
 Messages for the assistant go to the session you marked primary (`*` in the
 picker) while it runs, else to the most recently active running one, by the
@@ -1053,6 +1082,25 @@ allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, so allowed actions do not
 prompt. Every action it takes, and every one refused, is appended to
 `~/.jeet/assistant/actions.log`.
+
+A task with a parent (one the assistant made, or one made with `--parent
+assistant`; `--parent` takes only `assistant` for now) is gated more
+narrowly, as soon as `$JEET_TASK_ID` names it. It may read, run
+`jeet report`, and add worktrees to itself, and only that last when the
+assistant may too: add `worktree.add` to `[assistant] allow` to let such
+tasks add worktrees. Everything else that changes something is refused,
+whatever the assistant holds, as are `jeet notify`, `jeet todo` and review
+jobs; the refusal tells it to ask with `jeet report`. The assistant's own
+reach is unchanged: all tasks, yours included. Review tasks it starts with
+`jeet review` report to it too. The gating is cooperative, like the rest: a
+shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
+and is gated as that task, so use one outside it. After upgrading, an older
+jeet refuses the index.
+
+```toml
+[managers]
+idle_report_mins = 10   # tell the assistant when a task of its sits idle this long
+```
 
 ### Keeping the store fetched
 

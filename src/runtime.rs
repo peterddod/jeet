@@ -29,7 +29,7 @@ use crate::worktrees::now_secs;
 
 /// What the agent may run without a permission prompt: the commands the
 /// built-in jeet skill tells it to use.
-const ALLOWED: [&str; 2] = ["jeet worktree", "jeet ls"];
+const ALLOWED: [&str; 3] = ["jeet worktree", "jeet ls", "jeet report"];
 
 /// The task's tmux session.
 pub fn session_name(task: &TaskRecord) -> String {
@@ -334,6 +334,8 @@ mod tests {
             hooks.allow
         );
         assert_eq!(task_hooks("/bin/jeet".into()).allow, ALLOWED);
+        // A task with a parent reports to it without a prompt.
+        assert!(ALLOWED.contains(&"jeet report"));
     }
 
     #[test]

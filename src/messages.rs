@@ -240,8 +240,8 @@ impl Inbox {
 pub fn queued_reason(queued: &[Queued]) -> String {
     let messages: Vec<&str> = queued.iter().map(|q| q.message.as_str()).collect();
     format!(
-        "Messages were sent to you with `jeet task send` while you were working. \
-         Deal with them now:\n\n{}",
+        "Messages and reports were sent to you (with `jeet task send` or `jeet report`) \
+         while you were working. Deal with them now:\n\n{}",
         messages.join("\n\n---\n\n")
     )
 }

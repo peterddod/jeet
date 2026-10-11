@@ -4,7 +4,39 @@ use anyhow::{bail, Result};
 
 use crate::context::App;
 use crate::db::tasks::ReportKind;
+use crate::messages::Delivered;
+use crate::permissions::{self, Caller};
+use crate::reports;
+use crate::tasks::TASK_ID_ENV;
 
-pub fn run(_app: &App, _kind: ReportKind, _message: &str) -> Result<()> {
-    bail!("not yet")
+pub fn run(app: &App, kind: ReportKind, message: &str) -> Result<()> {
+    let task = match permissions::caller(&app.db)? {
+        Caller::Node(task) => task,
+        Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
+        Caller::User => match std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+            true => bail!(
+                "this task has no parent; `jeet report` is for tasks made under the assistant"
+            ),
+            false => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
+        },
+    };
+    // Progress is not worth a session of the assistant's own.
+    let may_start = kind != ReportKind::Progress;
+    let (id, delivered) = reports::send(app, &task, kind, message, may_start)?;
+    eprintln!("jeet: reported {} to the assistant (#{id})", kind.as_str());
+    match delivered {
+        Ok(Delivered::Typed) => eprintln!("jeet: typed into the assistant's session"),
+        Ok(Delivered::Queued) => eprintln!(
+            "jeet: the assistant is busy, so the report is queued; it gets it when it finishes \
+             or sits idle"
+        ),
+        Ok(Delivered::Started) => {
+            eprintln!("jeet: started a session of the assistant's with the report")
+        }
+        Ok(Delivered::Held) => eprintln!(
+            "jeet: the assistant is not running, so the report waits for its next session"
+        ),
+        Err(e) => eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}"),
+    }
+    Ok(())
 }

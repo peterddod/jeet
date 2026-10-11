@@ -42,6 +42,7 @@ use crate::db::tasks::{TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::messages::{self, Delivered, TmuxAgent};
 use crate::notify;
+use crate::reports;
 use crate::store;
 use crate::tasks;
 use crate::tmux;
@@ -1061,6 +1062,10 @@ pub fn run_once(app: &App) -> Result<()> {
     let sent = dispatch(app, &app.config.assistant.rules, &polled.events);
     state.last_run = Some(now_secs());
     save_state(&path, &state)?;
+    // No event fires when a task has sat idle too long; each poll looks.
+    if let Err(e) = reports::sweep_idle(app, now_secs()) {
+        eprintln!("jeet: warning: {e:#}");
+    }
 
     let logged: Vec<Logged> = polled
         .events
@@ -1146,6 +1151,7 @@ fn launch(home: &Path) -> Result<()> {
         .args(["watch", "--once"])
         .env("JEET_HOME", home)
         .env_remove(crate::permissions::ASSISTANT_ENV)
+        .env_remove(crate::tasks::TASK_ID_ENV)
         .current_dir(home)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
