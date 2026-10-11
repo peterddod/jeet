@@ -36,6 +36,7 @@
 //!
 //! tmux sits behind [`Agent`], so the routing is tested without it.
 
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentSpec;
 use crate::context::App;
-use crate::db::tasks::TaskRecord;
+use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::manager::run::{self, StartGate, StartGuard};
 use crate::placement;
 use crate::runtime::{self, Admission, Started};
@@ -316,6 +317,12 @@ pub trait Agent {
     /// Its start was just queued on `max_live`, with `live` of `max`
     /// running: tell whom it reports to (M22). Called with no lock held.
     fn queued(&self, _live: u32, _max: u32) {}
+    /// It is held, and not running, and a message just queued for it would
+    /// have started it: queue its start, which the drain its resume runs
+    /// makes. Asked holding its inbox lock.
+    fn queue_held_start(&self) -> Result<()> {
+        Ok(())
+    }
     /// What its hooks last said, from the task in `task_dir`: the task's
     /// latest status, unless it is one of several sessions there.
     fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
@@ -378,12 +385,17 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     // idle between the status being read and the message being queued.
     let inbox = Inbox::lock(task_dir)?;
     let me = agent.session();
-    // Held: handed nothing, and started by nothing, until it is resumed.
+    let activity = || status::activity(agent.status(task_dir).as_ref(), agent.alive());
+    // Held: handed nothing, and started by nothing, until it is resumed;
+    // one it would have started starts with it then.
     if agent.held()? {
         inbox.push_to(&message, me)?;
+        if route(&activity(), agent.has_hooks()) == Route::Start && agent.can_start() {
+            agent.queue_held_start()?;
+        }
         return Ok(Delivered::Paused);
     }
-    let activity = status::activity(agent.status(task_dir).as_ref(), agent.alive());
+    let activity = activity();
     let route = match route(&activity, agent.has_hooks()) {
         // Typed in, it would be joined to what the user has not sent.
         Route::Type if agent.has_draft() => Route::Queue,
@@ -415,6 +427,7 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
             // Held since it was asked above.
             Some(StartGate::Held(_)) => {
                 inbox.push_to(&message, me)?;
+                agent.queue_held_start()?;
                 return Ok(Delivered::Paused);
             }
         },
@@ -584,6 +597,9 @@ pub struct TmuxAgent<'a> {
     task: &'a TaskRecord,
     /// May start it when it is not running; see [`TmuxAgent::may_start`].
     may_start: bool,
+    /// What its start warns of, kept for the caller rather than printed;
+    /// see [`TmuxAgent::keep_warnings`].
+    warnings: Option<RefCell<Vec<String>>>,
 }
 
 impl<'a> TmuxAgent<'a> {
@@ -592,7 +608,24 @@ impl<'a> TmuxAgent<'a> {
             app,
             task,
             may_start: true,
+            warnings: None,
         }
+    }
+
+    /// Keep what its start warns of for [`TmuxAgent::warnings`] rather than
+    /// print it: for a caller with no stderr to print to, the TUI's.
+    pub fn keep_warnings(self) -> Self {
+        Self {
+            warnings: Some(RefCell::new(Vec::new())),
+            ..self
+        }
+    }
+
+    /// What its start warned of, kept by [`TmuxAgent::keep_warnings`].
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings
+            .as_ref()
+            .map_or_else(Vec::new, |w| w.borrow().clone())
     }
 
     /// Without `may_start`, a message for it while it is not running waits
@@ -644,6 +677,15 @@ impl Agent for TmuxAgent<'_> {
         run::report_queued(self.app, self.task, live, max);
     }
 
+    fn queue_held_start(&self) -> Result<()> {
+        // The assistant's sessions are opened with `jeet chat`, not started.
+        if self.task.kind == TaskKind::Assistant {
+            return Ok(());
+        }
+        self.app.db.queue_start(&self.task.id, now_secs())?;
+        Ok(())
+    }
+
     fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
         let running = match guard {
             Some(guard) => {
@@ -653,8 +695,13 @@ impl Agent for TmuxAgent<'_> {
                 runtime::ensure_running(self.app, self.task, None, Some(prompt), Admission::Gate)?
             }
         };
-        for warning in &running.warnings {
-            eprintln!("jeet: {warning}");
+        match &self.warnings {
+            Some(kept) => kept.borrow_mut().extend(running.warnings),
+            None => {
+                for warning in &running.warnings {
+                    eprintln!("jeet: {warning}");
+                }
+            }
         }
         Ok(running.started)
     }
@@ -694,6 +741,8 @@ mod tests {
         gate_queued: std::cell::Cell<bool>,
         /// Whom it reports to was told its start is queued.
         told_queued: RefCell<Vec<(u32, u32)>>,
+        /// Its start was queued for its resume.
+        held_start: std::cell::Cell<bool>,
         /// The user has text in its input box.
         draft: bool,
         typed: RefCell<Vec<String>>,
@@ -732,6 +781,10 @@ mod tests {
         }
         fn queued(&self, live: u32, max: u32) {
             self.told_queued.borrow_mut().push((live, max));
+        }
+        fn queue_held_start(&self) -> Result<()> {
+            self.held_start.set(true);
+            Ok(())
         }
         fn start(&self, prompt: &str, _: Option<&StartGuard>) -> Result<Started> {
             if self.fail {
@@ -929,6 +982,17 @@ mod tests {
         );
         assert!(agent.started.borrow().is_empty());
         assert_eq!(left(task.path()), ["one"]);
+        // Its start is queued, for the resume to make.
+        assert!(agent.held_start.get());
+
+        // One that may not be started here is not queued to start either.
+        let agent = Fake {
+            paused: true,
+            held: true,
+            ..Fake::default()
+        };
+        deliver(task.path(), &agent, "one").unwrap();
+        assert!(!agent.held_start.get());
 
         // Idle at its prompt: not typed to either.
         let idle = task_in(Some(State::Idle));
@@ -943,6 +1007,8 @@ mod tests {
         );
         assert!(agent.typed.borrow().is_empty());
         assert_eq!(left(idle.path()), ["two"]);
+        // Running already: nothing to start.
+        assert!(!agent.held_start.get());
     }
 
     #[test]

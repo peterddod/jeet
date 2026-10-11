@@ -100,6 +100,17 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     // Its inbox, then the start lock (M22): a brief queued on `max_live` is
     // in the inbox before a drain can start the agent with it.
     let inbox = Inbox::lock(&dir)?;
+    // Under a paused or stopped manager: its brief waits in its inbox, and
+    // its start for the resume.
+    if let Some((holder, _)) = run::hold(app, &created.task)? {
+        inbox.push_to(&prompt, None)?;
+        app.db.queue_start(&created.task.id, now_secs())?;
+        eprintln!(
+            "jeet: not started: {}; it starts with its brief then",
+            run::held_refusal(&created.task, &holder)
+        );
+        return Ok(());
+    }
     match runtime::ensure_running(app, &created.task, None, Some(&prompt), Admission::Gate) {
         Ok(running) => {
             warn_all(&running.warnings);

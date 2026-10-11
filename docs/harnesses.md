@@ -97,10 +97,11 @@ stop`), and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
 for. A task with a budget is charged from its own hooks (attributed, as
 these reports are): a turn for each `Stopped`, and the time from the first
-`Working` or `NeedsInput` of a busy spell to the `Stopped` or `Ended` that
-closes it (the status file keeps when the spell began, and `jeet watch`
-charges a long one as it goes). A
-harness with no `Stopped` event is charged no turns. A task that is paused
+`Working` or `NeedsInput` of a busy spell to the `Stopped`, `Ended` or
+`Idle` that closes it (the status file keeps when the spell began, and
+`jeet watch` charges a long one as it goes, while its agent's pane is
+alive: an agent that died with no `Ended` is charged no more). A harness
+with no `Stopped` event is charged no turns. A task that is paused
 or stopped, or that its turn's charge used its budget up, is handed nothing
 at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays
 in its inbox. An `Ended` that is not `cleared` frees a slot under `[managers]

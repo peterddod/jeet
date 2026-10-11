@@ -361,8 +361,8 @@ struct HookCtx {
 /// The [`HookCtx`] for the hook of task `task_id`: opening the app when the
 /// task was found without it (by the session's directory), and, for an
 /// attributed turn's end, charging the task a turn and the time it was
-/// busy, or at the session's end the busy time left, and checking its
-/// budget ([`budget::enforce`]) before what holds it is read, so a pause
+/// busy, or at the session's end, or sitting idle after a spell no turn's
+/// end closed, the busy time left, and checking its budget ([`budget::enforce`]) before what holds it is read, so a pause
 /// the charge makes holds this same turn's end.
 fn hook_ctx(
     app: Option<App>,
@@ -399,7 +399,13 @@ fn hook_ctx_with(
         .filter(|p| matches!(p.state, State::Running | State::Waiting))
         .and_then(|p| p.busy_since);
     let kind = hook.kind.as_ref();
-    let charges = matches!(kind, Some(EventKind::Stopped | EventKind::Ended { .. }));
+    // A turn's end, the session's, or sitting idle after a busy spell no
+    // Stop closed (the user pressed Escape, or refused a permission).
+    let charges = match kind {
+        Some(EventKind::Stopped | EventKind::Ended { .. }) => true,
+        Some(EventKind::Idle) => busy.is_some(),
+        _ => false,
+    };
     let in_tree = task.as_ref().is_some_and(|t| t.parent_id.is_some());
     // Asked only when needed: it walks the process tree.
     let attributed =
@@ -502,8 +508,13 @@ fn charge_busy(
 /// Charge `task`, in the tree, the time its agent's busy spell has run so
 /// far, and check its budget: for a sweep, so a long turn is held to its
 /// budget before it ends, and for a pause or a stop, which end a spell with
-/// no hook to say so. Returns the threshold newly crossed.
-pub fn fold_busy(app: &App, task: &TaskRecord, now: i64) -> Result<Threshold> {
+/// no hook to say so. Returns the threshold newly crossed. Nothing for an
+/// agent that is not `alive`: a status left running by one that died with
+/// no `Ended` hook (a crash, a reboot, a killed server) is no busy time.
+pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<Threshold> {
+    if !alive {
+        return Ok(Threshold::None);
+    }
     let task_dir = tasks::task_dir(app, task);
     let Some(status) = current_status(&task_dir) else {
         return Ok(Threshold::None);
@@ -1121,7 +1132,7 @@ mod tests {
         let home = app.home.clone();
         // A sweep charged the spell so far: the turn's end charges the rest.
         let w = app.db.get_task("w").unwrap().unwrap();
-        fold_busy(&app, &w, 250).unwrap();
+        fold_busy(&app, &w, true, 250).unwrap();
         assert_eq!(used(&app, "w"), (150, 0));
 
         let stop = hook("Stop", EventKind::Stopped);
@@ -1193,6 +1204,81 @@ mod tests {
         report_step(&ended, &ctx, Some("w"), 500).unwrap();
         let report = ctx.app.db.last_status_report("w").unwrap().unwrap();
         assert!(report.body.contains("ended"), "{}", report.body);
+    }
+
+    #[test]
+    fn sitting_idle_after_a_spell_no_stop_closed_charges_it() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), None).unwrap();
+        let dir = busy_w(&app);
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        // The user pressed Escape: no Stop, then idle.
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        assert!(ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        // Idle again: nothing more to charge, and nobody is asked whose it is.
+        let ctx = hook_ctx_with(Some(ctx.app), &open, &dir, "w", &idle, 500, &|_| {
+            panic!("asked whose an idle with no spell is")
+        })
+        .unwrap();
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_held_agent_sitting_idle_is_handed_nothing() {
+        let (_home, app) = lab();
+        app.db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Paused));
+        // Handed over, it would be typed into a tmux unit tests never have.
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_tasks_end_asks_what_holds_it() {
+        let (_home, app) = lab();
+        app.db
+            .set_run_state(
+                "w",
+                RunState::Stopped,
+                Some(&crate::db::tasks::Setter::User),
+            )
+            .unwrap();
+        let dir = busy_w(&app);
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Stopped));
+        report_step(&ended, &ctx, Some("w"), 400).unwrap();
+        assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_dead_agents_stale_status_is_not_charged() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(10), None).unwrap();
+        busy_w(&app);
+        let w = app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(
+            fold_busy(&app, &w, false, 100_000).unwrap(),
+            Threshold::None
+        );
+        assert_eq!(used(&app, "w"), (0, 0));
+        assert_eq!(
+            app.db.get_task("w").unwrap().unwrap().run_state,
+            RunState::Run
+        );
     }
 
     #[test]

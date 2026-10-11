@@ -844,9 +844,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                     match messages::deliver(&dir, &agent, &task_message(event)) {
                         Ok(delivered) => {
                             sent[i] = Sent::Task(task.slug.clone());
-                            // Paused, or waiting on `max_live`: not lost,
-                            // it gets it once resumed or started.
-                            held[i] = delivered == Delivered::Held;
+                            held[i] = still_notified(delivered);
                         }
                         Err(e) => {
                             eprintln!("jeet: could not tell task {}: {e:#}", task.slug);
@@ -870,7 +868,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
             Ok((delivered, _)) => {
                 for &i in &carried {
                     sent[i] = Sent::Assistant;
-                    held[i] = delivered == Delivered::Held;
+                    held[i] = still_notified(delivered);
                 }
             }
             Err(e) => {
@@ -886,6 +884,13 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         .collect();
     notify_events(&notified);
     sent
+}
+
+/// Whether an event delivered as `delivered` is notified as well: only
+/// when its agent could not be started. Paused, or waiting on `max_live`,
+/// it is not lost: it gets it once resumed or started.
+fn still_notified(delivered: Delivered) -> bool {
+    delivered == Delivered::Held
 }
 
 /// A desktop notification for each of `events`, or one for them all when
@@ -1878,6 +1883,20 @@ mod tests {
             on: on.to_vec(),
             repos: repos.iter().map(|r| r.to_string()).collect(),
             action,
+        }
+    }
+
+    #[test]
+    fn only_an_agent_that_could_not_be_started_is_notified_as_well() {
+        for (delivered, notified) in [
+            (Delivered::Typed, false),
+            (Delivered::Queued, false),
+            (Delivered::Started, false),
+            (Delivered::Held, true),
+            (Delivered::Paused, false),
+            (Delivered::StartQueued { live: 1, max: 1 }, false),
+        ] {
+            assert_eq!(still_notified(delivered), notified, "{delivered:?}");
         }
     }
 

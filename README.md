@@ -666,7 +666,7 @@ task.create,worktree.add` names what it may do instead of `[managers]
 worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
-or waiting on a prompt) and a turn for each turn it ends, and counts toward
+or waiting on a prompt, while its pane is alive) and a turn for each turn it ends, and counts toward
 every budget above it too. At 80% the parent is told and the task gets a
 note; at 100% the task is paused and its parent told `blocked: budget`: its
 turn ends with nothing more handed to it, and messages for it wait in its
@@ -699,7 +699,10 @@ Escape, never over what you typed), and says, task by task, what it did. Stop en
 tmux sessions, and their ending is not reported. Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
-assistant, then a manager above, so what you stop only you resume.
+assistant, then a manager above, so what you stop only you resume. Once
+resumed, a task whose agent is not running starts with what waited for it,
+as it would have when it was sent; `task new --prompt` under a paused
+manager makes the task and keeps its brief for then.
 
 ### Archiving and deleting
 

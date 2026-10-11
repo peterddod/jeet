@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::context::App;
-use crate::db::tasks::{ReportKind, Setter, TaskKind, TaskRecord, TaskReportRecord};
+use crate::db::tasks::{ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord};
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
@@ -543,8 +543,17 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
 pub fn pause(app: &App, name: &str) -> Result<()> {
     let (caller, task) = scoped(app, name, Verb::ManagerPause)?;
     let outcomes = run::pause(app, &caller, &task)?;
+    // A stop stays a stop, though a pause may take it over.
+    let state = app
+        .db
+        .get_task(&task.id)?
+        .map_or(RunState::Paused, |t| t.run_state);
     eprintln!(
-        "jeet: paused {}; it and the tasks below it are handed nothing until it is resumed",
+        "jeet: {} {}; it and the tasks below it are handed nothing until it is resumed",
+        match state {
+            RunState::Stopped => "kept stopped",
+            _ => "paused",
+        },
         manager::label(&task)
     );
     print_outcomes(&outcomes);

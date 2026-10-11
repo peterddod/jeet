@@ -198,19 +198,10 @@ pub fn auto_status(
 /// and charge each task in the tree the time its agent has been busy so
 /// far, holding a long turn to its budget before it ends (M19). No event
 /// fires then, so this runs from `jeet watch` and the assistant's own Stop
-/// hook. One task's failure does not stop the others.
+/// hook. Only a live agent is charged: one that died with no `Ended` hook
+/// left a status that says it is busy still. One task's failure does not
+/// stop the others.
 pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
-    for task in app.db.list_tasks(Some(TaskState::Active))? {
-        if task.parent_id.is_none() {
-            continue;
-        }
-        match status::fold_busy(app, &task, now) {
-            // No Stop hook of its own has said so yet.
-            Ok(Threshold::Hit100) => budget::report_blocked(app, &task),
-            Ok(_) => {}
-            Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug),
-        }
-    }
     let tmux_ok = tmux::available();
     sweep_idle_with(app, now, |task| runtime::activity(app, task, tmux_ok))
 }
@@ -222,7 +213,18 @@ fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activi
         if task.parent_id.is_none() {
             continue;
         }
-        let Activity::Idle { since } = activity(&task) else {
+        let activity = activity(&task);
+        let busy = matches!(
+            activity,
+            Activity::Running { .. } | Activity::Waiting { .. }
+        );
+        match status::fold_busy(app, &task, busy, now) {
+            // No Stop hook of its own has said so yet.
+            Ok(Threshold::Hit100) => budget::report_blocked(app, &task),
+            Ok(_) => {}
+            Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug),
+        }
+        let Activity::Idle { since } = activity else {
             continue;
         };
         let idle = now - since;
@@ -634,6 +636,53 @@ mod tests {
         assert_eq!(last.id, 2, "told once for one idle period");
         // A top-level task idle as long is nobody's to tell of.
         assert!(app.db.last_report("top").unwrap().is_none());
+    }
+
+    /// `w`'s session `s`, running since 100, with a 600s budget.
+    fn busy_on_a_budget(app: &App, w: &TaskRecord) {
+        app.db.set_budget_max("w", Some(600), None).unwrap();
+        let dir = crate::tasks::task_dir(app, w);
+        std::fs::create_dir_all(crate::status::status_dir(&dir)).unwrap();
+        std::fs::write(
+            crate::status::status_dir(&dir).join("s.json"),
+            r#"{"session_id":"s","state":"running","event":"UserPromptSubmit","at":100,"busy_since":100}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_holds_a_long_turn_to_its_budget_and_tells_once() {
+        let (_dir, app, w) = lab();
+        busy_on_a_budget(&app, &w);
+        let running = |_: &TaskRecord| Activity::Running { detail: None };
+        sweep_idle_with(&app, 800, running).unwrap();
+        assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 700);
+        let w = app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(
+            (w.run_state, w.run_state_by),
+            (RunState::Paused, Some(crate::db::tasks::Setter::Budget))
+        );
+        let told = app.db.last_status_report("w").unwrap().unwrap();
+        assert!(told.body.contains("blocked: budget"), "{}", told.body);
+        // Charged on, but told once.
+        sweep_idle_with(&app, 900, running).unwrap();
+        assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 800);
+        assert_eq!(last_status(&app, "w"), Some(told.id));
+    }
+
+    #[test]
+    fn the_sweep_charges_nothing_to_an_agent_that_died_mid_turn() {
+        let (_dir, app, w) = lab();
+        busy_on_a_budget(&app, &w);
+        // Its status says running still, but its pane is gone.
+        sweep_idle_with(&app, 100_000, |_| Activity::NotRunning).unwrap();
+        sweep_idle_with(&app, 100_000, |t| runtime::activity(&app, t, false)).unwrap();
+        assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 0);
+        assert_eq!(
+            app.db.get_task("w").unwrap().unwrap().run_state,
+            RunState::Run
+        );
+        assert!(app.db.last_report("w").unwrap().is_none());
     }
 
     /// Delivery itself is tested with a stand-in tmux, in the integration

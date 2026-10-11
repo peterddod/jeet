@@ -130,6 +130,8 @@ pub fn pause_with(
     app.db
         .set_run_state(&target.id, RunState::Paused, Some(&setter_of(by)))?;
     let mut outcomes = Vec::new();
+    // A start admitted before the row was written is done before the walk.
+    drop(start_lock(app)?);
     for node in subtree_leaves_first(app, target)? {
         let line = interrupt_line(app, &node, rt, own);
         outcomes.push(NodeOutcome::new(&node, line));
@@ -148,11 +150,15 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     if own(node) {
         return "this jeet runs in its session; not interrupted".to_string();
     }
+    // Under its inbox lock: a delivery that found it not held yet has
+    // typed its message in, and is interrupted with the rest.
+    let inbox = Inbox::lock(&tasks::task_dir(app, node)).ok();
     let interrupted = rt(node).and_then(|r| r.interrupt(app, node));
+    drop(inbox);
     match interrupted {
         Ok(Interrupted::Sent) => {
             // The turn ends with no Stop hook to charge it.
-            if let Err(e) = status::fold_busy(app, node, now_secs()) {
+            if let Err(e) = status::fold_busy(app, node, true, now_secs()) {
                 eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
             }
             match status::mark_paused(&tasks::task_dir(app, node), now_secs()) {
@@ -217,7 +223,7 @@ pub fn check_resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<()> {
 
 /// Resume `target` for `by`, if [`check_resume`] lets it: set it running,
 /// hand each idle agent below it that runs again what queued for it while
-/// held, then start what waits on `max_live`.
+/// held, then start what waits on `max_live` or waited on the resume.
 pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOutcome>> {
     check_resume(app, by, target)?;
     let mut outcomes = Vec::new();
@@ -282,6 +288,9 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
         app.db
             .set_run_state(&target.id, RunState::Stopped, Some(&setter))?;
     }
+    // A start admitted before the rows were written is done, and its
+    // session seen, before the walk; one after sees the stop.
+    drop(start_lock(app)?);
     let live = live_set(app)?;
     let mut outcomes = Vec::new();
     for target in &targets {
@@ -312,8 +321,9 @@ fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
     if runtime::is_own_session(node) {
         return "this jeet runs in its session; stop it from outside".to_string();
     }
-    // Before its session ends, whether or not its `Ended` hook gets to.
-    if let Err(e) = status::fold_busy(app, node, now_secs()) {
+    // Before its session ends, whether or not its `Ended` hook gets to; a
+    // stale status of an agent already gone is no busy time.
+    if let Err(e) = status::fold_busy(app, node, live, now_secs()) {
         eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
     }
     if let Err(e) = runtime::stop(node) {
@@ -328,10 +338,11 @@ fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
     }
 }
 
-/// The active tasks in the tree, below the assistant, whose tmux session
+/// The active tasks in the tree, below the assistant, whose agent's pane
 /// is live: what `max_live` counts, managers included, the assistant and
-/// top-level tasks not. One `tmux list-sessions`; a session left open
-/// after its agent exited (`remain-on-exit`) counts until it is replaced.
+/// top-level tasks not. One `tmux list-sessions`, then a look at the panes
+/// of each task's session in it: a session left open after its agent
+/// exited (`remain-on-exit`) does not count.
 pub fn live_set(app: &App) -> Result<HashSet<String>> {
     let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
     if sessions.is_empty() {
@@ -341,7 +352,10 @@ pub fn live_set(app: &App) -> Result<HashSet<String>> {
         .db
         .list_tasks(Some(TaskState::Active))?
         .into_iter()
-        .filter(|t| t.parent_id.is_some() && sessions.contains(&runtime::session_name(t)))
+        .filter(|t| {
+            let name = runtime::session_name(t);
+            t.parent_id.is_some() && sessions.contains(&name) && tmux::pane_alive(&name)
+        })
         .map(|t| t.id)
         .collect())
 }
@@ -480,7 +494,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             StartGate::Queue { .. } => break,
         };
         // Started meanwhile some other way: what queued waits for its Stop.
-        if tmux::has_session(&runtime::session_name(&task)) {
+        if tmux::pane_alive(&runtime::session_name(&task)) {
             app.db.unqueue(&task.id)?;
             continue;
         }
@@ -507,8 +521,9 @@ fn start_queued(
         let running = runtime::ensure_running_admitted(app, task, None, None, guard)?;
         return Ok(running.warnings);
     }
-    messages::start_with_queue(inbox, &TmuxAgent::new(app, task), Some(guard))?;
-    Ok(Vec::new())
+    let agent = TmuxAgent::new(app, task).keep_warnings();
+    messages::start_with_queue(inbox, &agent, Some(guard))?;
+    Ok(agent.warnings())
 }
 
 #[cfg(test)]
@@ -877,6 +892,40 @@ mod tests {
         let left = Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].message, "from m");
+    }
+
+    #[test]
+    fn a_stop_or_pause_waits_for_a_start_admitted_before_it() {
+        let (dir, app) = lab();
+        // A start of w1 admitted, its session still to be made.
+        let StartGate::Go(guard) = admit_start(&app, &get(&app, "w1")).unwrap() else {
+            panic!("w1 was not admitted");
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let home = dir.path().canonicalize().unwrap();
+        std::thread::spawn(move || {
+            let app = App {
+                config: config::load_or_create(&home).unwrap(),
+                db: Database::open(&config::index_path(&home)).unwrap(),
+                home,
+            };
+            stop(&app, &Caller::User, Some(&get(&app, "m"))).unwrap();
+            let rt = fake(&app, |_| Ok(Interrupted::Sent));
+            let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+            pause_with(&app, &Caller::User, &get(&app, "m2"), &lookup, &nobody).unwrap();
+            tx.send(()).unwrap();
+        });
+        // The row is written first, so a start admitted after it is held.
+        let wait = std::time::Duration::from_millis(500);
+        assert!(rx.recv_timeout(wait).is_err(), "the stop did not wait");
+        assert_eq!(get(&app, "m").run_state, RunState::Stopped);
+        drop(guard);
+        let done = rx.recv_timeout(std::time::Duration::from_secs(20));
+        assert!(done.is_ok(), "the stop never went on");
+        assert!(matches!(
+            admit_start(&app, &get(&app, "w1")).unwrap(),
+            StartGate::Held(_)
+        ));
     }
 
     #[test]

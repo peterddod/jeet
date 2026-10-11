@@ -2428,7 +2428,7 @@ if [ -d "$here/alive" ]; then
       exit 0 ;;
     new-session)
       s=$(named -s "$@")
-      touch "$here/alive/$s"; rm -f "$here/agent-pane/$s"
+      touch "$here/alive/$s"; rm -f "$here/agent-pane/$s" "$here/dead/$s"
       p=$(($(cat "$here/panes" 2>/dev/null || echo 0) + 1))
       echo "$p" > "$here/panes"
       case " $* " in
@@ -2453,7 +2453,8 @@ if [ -d "$here/alive" ]; then
       [ -e "$here/alive/$s" ] || exit 1
       case "$*" in
         *pane_pid*) echo "0 $(cat "$here/pid/$s" 2>/dev/null)" ;;
-        *) echo 0 ;;
+        # A session kept after its agent exited (`remain-on-exit`).
+        *) if [ -e "$here/dead/$s" ]; then echo 1; else echo 0; fi ;;
       esac
       exit 0 ;;
     show-options)
@@ -2526,13 +2527,14 @@ esac
 /// up on that session's process only, after running an `on-kill` script
 /// with the session's name, when the test leaves one) and the agent pane's
 /// options act on the session named, and `list-sessions -F …` prints the live ones, one
-/// per line. The rest (`current`, `client`, the captured pane, the keys)
+/// per line. A session with a `dead/<name>` file is kept with its pane dead,
+/// as `remain-on-exit` keeps one. The rest (`current`, `client`, the captured pane, the keys)
 /// stays shared. Several nodes' panes can then run under one stub, which
 /// every [`PaneShell`] of the test is given as `JEET_TMUX`.
 #[cfg(unix)]
 fn multi_session(tmux: &std::path::Path) {
     let here = tmux.parent().unwrap();
-    for dir in ["alive", "pid", "agent-pane"] {
+    for dir in ["alive", "pid", "agent-pane", "dead"] {
         std::fs::create_dir_all(here.join(dir)).unwrap();
     }
 }
@@ -9822,10 +9824,20 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
         lab.jeet_at(&["task", "open", "w"], &lab.home(), &env),
         "`jeet manager resume w` first",
     );
-    jeet(&["manager", "resume", "w"]);
+    // A message for it while stopped waits, and starts it once resumed.
+    let said = jeet(&["task", "send", "w", "after the stop"]);
+    assert!(said.contains("paused or stopped"), "{said}");
+    assert!(!stub.join("alive/jeet-w").exists());
     let mut w_again = session_pane(&lab, &tmux, "w", &w);
-    jeet(&["task", "open", "w"]);
+    jeet(&["manager", "resume", "w"]);
     assert!(stub.join("alive/jeet-w").exists());
+    let started = calls_of(&tmux, "new-session");
+    let w_start = started.last().unwrap();
+    assert!(
+        w_start.iter().any(|arg| arg.contains("after the stop")),
+        "{w_start:?}"
+    );
+    assert!(lab.start_queue().is_empty());
 
     // Stopping everything is the user's alone: not the assistant's, which
     // holds `manager.stop`, nor a worker's.
@@ -9977,10 +9989,21 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
     // The user's own session keeps the server up once the tasks' go.
     std::fs::write(stub.join("alive/main"), "").unwrap();
+    // A top-level task running neither counts nor waits.
+    let t = task_id(&lab.new_task("t"));
+    let _t_agent = session_pane(&lab, &tmux, "t", &t);
+    succeeded(&lab.jeet_at(&["task", "open", "t"], &lab.home(), &env));
     let a = lab.new_task_with("a", &["--parent", "assistant"]);
     let root = lab.assistant_id();
     let mut a_agent = session_pane(&lab, &tmux, "a", &a);
-    succeeded(&lab.jeet_at(&["task", "open", "a"], &lab.home(), &env));
+    let output = lab.jeet_at(&["task", "open", "a"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("max_live"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(lab.start_queue().is_empty());
 
     // b is made, but its start waits; its parent is told.
     let b_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
@@ -10012,9 +10035,10 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     assert_eq!(reports[0].1, root);
     assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
 
-    // a's session ends: the drain its hook leaves behind waits for the
-    // session to go, as the hook runs before its agent exits, then starts
-    // b, with its brief.
+    // a's session ends: the drain its hook leaves behind waits for its
+    // pane to go, as the hook runs before its agent exits, then starts b,
+    // with its brief. The user's `remain-on-exit` keeps a's session, its
+    // pane dead, which takes no slot.
     let session = "11111111-2222-4333-8444-555555555555";
     let a_dir = lab.home().join("tasks/a");
     hook_ok(&a_agent.hook(
@@ -10026,7 +10050,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     ));
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!stub.join("alive/jeet-b").exists());
-    std::fs::remove_file(stub.join("alive/jeet-a")).unwrap();
+    std::fs::write(stub.join("dead/jeet-a"), "").unwrap();
     wait_until("b to start", || stub.join("alive/jeet-b").exists());
     wait_until("b to leave the queue", || lab.start_queue().is_empty());
     let started = calls_of(&tmux, "new-session");
@@ -10082,4 +10106,61 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     );
     assert!(stub.join("alive/jeet-c").exists());
     drop(b_agent);
+}
+
+/// A child made with a brief under a paused manager is made, not started:
+/// its brief waits in its inbox, and the manager's resume starts it.
+#[cfg(unix)]
+#[test]
+fn a_brief_under_a_paused_manager_starts_once_it_is_resumed() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    lab.index()
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    succeeded(&lab.jeet_at(&["manager", "pause", "m"], &lab.home(), &env));
+
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "kid",
+            "--parent",
+            "m",
+            "--prompt",
+            "first job",
+        ],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("not started: task kid is paused under manager m"),
+        "{}",
+        stderr_of(&output)
+    );
+    let kid = task_id(&lab.home().join("tasks/kid"));
+    assert!(!stub.join("alive/jeet-kid").exists());
+    assert_eq!(lab.start_queue(), [kid.as_str()]);
+
+    let _kid_agent = session_pane(&lab, &tmux, "kid", &kid);
+    succeeded(&lab.jeet_at(&["manager", "resume", "m"], &lab.home(), &env));
+    assert!(stub.join("alive/jeet-kid").exists());
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert!(
+        started[0].iter().any(|arg| arg.contains("first job")),
+        "{:?}",
+        started[0]
+    );
+    assert!(lab.start_queue().is_empty());
+    // Nothing waited for the manager itself: it is not started.
+    assert!(!stub.join("alive/jeet-m").exists());
 }
