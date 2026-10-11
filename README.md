@@ -608,14 +608,14 @@ jeet task interrupt fix-login
 
 `jeet task interrupt` ends the turn the task's agent is running, as Esc in
 its window would, and leaves its session open for the next message. The key
-goes to the agent's window, the first of its session, never to a window you
-opened there yourself (as `jeet task send` types into it). It presses the key
+goes to the agent's own pane, never to a pane you split off its window or a
+window you opened in its session (as `jeet task send` types into it). It presses the key
 once, and only while the agent is working or waiting on you
 (at a permission prompt, Esc refuses the pending tool call): an idle agent,
 one starting up or held at a startup prompt such as the trust dialog, one
-whose prompt holds text you have not sent, or one waiting on a prompt while
-someone is attached to its session (you may be typing an answer into it) is
-left alone, since Esc there
+whose prompt holds text you have not sent, or one waiting on a prompt, asking
+you a question or showing its plan for approval while someone is attached to
+its session (you may be typing an answer into it) is left alone, since Esc there
 would clear your text, rewind the conversation or exit the agent, and the
 command says why nothing was sent. The task's status may read `running`
 for about a minute afterwards, until Claude reports it sits idle, as after a
@@ -1111,8 +1111,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review` and `pr.merge` (`jeet pr merge`). Nothing is
 allowed until listed. The assistant's Claude settings
-pre-approve exactly the matching `jeet` commands, so allowed actions do not
-prompt. Every action it takes, and every one refused, is appended to
+pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
+`pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
+review`), so allowed actions do not prompt. Every action it takes, and every one refused, is appended to
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent

@@ -194,6 +194,14 @@ pub trait Harness: Sync {
         false
     }
 
+    /// Whether `status`, though it reads as working, is the agent showing
+    /// the user a dialog of its own, such as a question: one an attached
+    /// user may be typing an answer into, which [`Harness::has_draft`]
+    /// does not see and its interrupt keys would discard.
+    fn in_dialog(&self, _status: &crate::status::SessionStatus) -> bool {
+        false
+    }
+
     /// The file in a session's directory it reads its instructions from:
     /// `AGENTS.md`, or a file of its own that imports it (see
     /// [`Harness::instructions_import`]).

@@ -141,15 +141,52 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         );
     }
     set_detach_hint(name);
+    record_agent_pane(name);
     Ok(())
 }
 
-/// The pane of session `name` its agent runs in: the active pane of the
-/// session's first window, the one [`new_session`] started it in. The
-/// session's active pane may be in a window the user opened there, for a
-/// shell or an editor, which must not get the agent's keys.
+/// The session option that holds the tmux id (`%3`) of the pane
+/// [`new_session`] started the agent in.
+const AGENT_PANE_OPTION: &str = "@jeet-agent-pane";
+
+/// Note in session `name`, just started, the id of the pane its agent runs
+/// in: its only pane yet. An id names that pane for as long as the server
+/// runs, wherever the user splits or moves it, and goes with the session.
+fn record_agent_pane(name: &str) {
+    let _ = quiet()
+        .args(["set-option", "-t", &format!("{}:", target(name)), "-F"])
+        .args([AGENT_PANE_OPTION, "#{pane_id}"])
+        .status();
+}
+
+/// The pane of session `name` its agent runs in, by the id
+/// [`new_session`] noted. The session's active pane may be one the user
+/// opened there, splitting the agent's window or in a window of its own,
+/// for a shell or an editor, which must not get the agent's keys. A
+/// session started before jeet noted the id falls back to the active pane
+/// of its first window, the one the agent was started in.
 fn agent_pane(name: &str) -> String {
-    format!("{}:^", target(name))
+    let recorded = Command::new(binary())
+        .args(["show-options", "-qv", "-t", &format!("{}:", target(name))])
+        .arg(AGENT_PANE_OPTION)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    pane_or_first_window(name, &recorded)
+}
+
+/// The pane `recorded` names, when it is a pane id, or else the active pane
+/// of session `name`'s first window.
+fn pane_or_first_window(name: &str, recorded: &str) -> String {
+    let recorded = recorded.trim();
+    match recorded.strip_prefix('%') {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => recorded.to_string(),
+        _ => format!("{}:^", target(name)),
+    }
 }
 
 /// Type `text` into the agent's pane of session `name` (see
@@ -887,8 +924,12 @@ mod tests {
     #[test]
     fn targets_match_exactly() {
         assert_eq!(target("jeet-api"), "=jeet-api");
-        // The agent's window, not whichever window of its session is active.
-        assert_eq!(agent_pane("jeet-api"), "=jeet-api:^");
+        // The agent's pane, by its id, not whichever pane is active.
+        assert_eq!(pane_or_first_window("jeet-api", "%12\n"), "%12");
+        // No id noted: the agent's window, not whichever window is active.
+        assert_eq!(pane_or_first_window("jeet-api", ""), "=jeet-api:^");
+        assert_eq!(pane_or_first_window("jeet-api", "%\n"), "=jeet-api:^");
+        assert_eq!(pane_or_first_window("jeet-api", "C-b"), "=jeet-api:^");
     }
 
     #[test]

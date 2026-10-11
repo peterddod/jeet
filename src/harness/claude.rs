@@ -65,6 +65,11 @@ pub const IMPORT_AGENTS_MD: &str = "@AGENTS.md\n";
 /// What marks the selected option.
 const CURSOR: char = '❯';
 
+/// The tools by which Claude shows the user a dialog: a question, with a
+/// field to type another answer, and the plan to approve, with one for
+/// feedback.
+const DIALOG_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
 #[derive(Debug)]
 pub struct ClaudeCode;
 
@@ -222,6 +227,17 @@ impl Harness for ClaudeCode {
             TRUST_NO => Some(TrustStep::Select(vec!["Down"])),
             _ => None,
         }
+    }
+
+    fn in_dialog(&self, status: &crate::status::SessionStatus) -> bool {
+        // Reported only by PreToolUse: no Notification says Claude is
+        // asking, or not until the user has left the dialog alone a while.
+        status.event == "PreToolUse"
+            && status.state == crate::status::State::Running
+            && status
+                .detail
+                .as_deref()
+                .is_some_and(|tool| DIALOG_TOOLS.contains(&tool))
     }
 
     fn has_draft(&self, pane: &str) -> bool {
@@ -698,7 +714,7 @@ fn one_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{status_for, State};
+    use crate::status::{status_for, SessionStatus, State};
 
     fn raw_fixture(event: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -804,6 +820,23 @@ mod tests {
                 Some(EventKind::Working(Some(detail.into())))
             );
         }
+    }
+
+    #[test]
+    fn only_a_question_or_a_plan_is_a_dialog() {
+        let status = |event: &str, detail: Option<&str>| SessionStatus {
+            session_id: "s".into(),
+            state: State::Running,
+            detail: detail.map(Into::into),
+            event: event.into(),
+            at: 1,
+        };
+        assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("AskUserQuestion"))));
+        assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("ExitPlanMode"))));
+        assert!(!ClaudeCode.in_dialog(&status("PreToolUse", Some("Bash"))));
+        assert!(!ClaudeCode.in_dialog(&status("PreToolUse", None)));
+        // A prompt that happens to read as one is no dialog.
+        assert!(!ClaudeCode.in_dialog(&status("UserPromptSubmit", Some("AskUserQuestion"))));
     }
 
     #[test]
