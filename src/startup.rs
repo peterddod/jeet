@@ -456,23 +456,25 @@ mod tests {
             watch: Duration::from_millis(50),
             hook_wait: Duration::from_millis(200),
             poll: Duration::from_millis(1),
-            redraw_wait: Duration::from_millis(100),
+            // Wide, so a slow machine still sees a lagging redraw through:
+            // a redraw that comes ends the wait at once.
+            redraw_wait: Duration::from_secs(5),
             redraw_poll: Duration::from_millis(1),
         }
     }
 
     fn run_watch(pane: &FakeClaude, auto: bool) -> Outcome {
-        run_logged(pane, auto).0
+        run_logged(pane, auto, quick()).0
     }
 
-    fn run_logged(pane: &FakeClaude, auto: bool) -> (Outcome, Vec<String>) {
+    fn run_logged(pane: &FakeClaude, auto: bool, limits: Limits) -> (Outcome, Vec<String>) {
         let log = RefCell::new(Vec::new());
         let outcome = watch(
             &ClaudeCode,
             pane,
             &|| pane.hooked.get(),
             auto,
-            quick(),
+            limits,
             &|line| log.borrow_mut().push(line.to_string()),
         )
         .unwrap();
@@ -497,7 +499,7 @@ mod tests {
     #[test]
     fn a_redraw_seen_only_on_a_later_look_is_waited_for() {
         let pane = FakeClaude::new("trust-no-selected", 20);
-        let (outcome, log) = run_logged(&pane, true);
+        let (outcome, log) = run_logged(&pane, true, quick());
         assert_eq!(outcome, Outcome::Accepted);
         assert_eq!(*pane.pressed.borrow(), ["Down", "Enter"]);
         assert!(log.iter().any(|l| l.starts_with("accepting seen selected")));
@@ -516,7 +518,11 @@ mod tests {
     fn a_redraw_that_never_comes_gets_no_enter_and_says_why() {
         let pane = FakeClaude::new("trust-no-selected", 0);
         pane.redraws.set(false);
-        let (outcome, log) = run_logged(&pane, true);
+        let limits = Limits {
+            redraw_wait: Duration::from_millis(50),
+            ..quick()
+        };
+        let (outcome, log) = run_logged(&pane, true, limits);
         assert_eq!(outcome, Outcome::CouldNotAccept);
         // One Down only: a second could wrap round to "No".
         assert_eq!(*pane.pressed.borrow(), ["Down"]);
