@@ -138,7 +138,7 @@ pub fn new(
 pub(crate) fn assistant_parent(app: &App) -> Result<TaskRecord> {
     match app.db.get_assistant_task()? {
         Some(task) => Ok(task),
-        None => assistant::ensure(app),
+        None => crate::manager::root(app),
     }
 }
 
