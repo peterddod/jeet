@@ -92,9 +92,10 @@ pub struct Limits {
     pub watch: Duration,
     pub hook_wait: Duration,
     pub poll: Duration,
-    /// How long the trust prompt gets to redraw after a key, looked at
-    /// every `redraw_poll`.
-    pub redraw_wait: Duration,
+    /// How many looks the trust prompt gets to redraw after a key,
+    /// `redraw_poll` apart: counted, not timed, so a slow machine gets the
+    /// same number of looks.
+    pub redraw_looks: u32,
     pub redraw_poll: Duration,
 }
 
@@ -104,7 +105,8 @@ impl Default for Limits {
             watch: Duration::from_secs(WATCH_SECS),
             hook_wait: Duration::from_secs(HOOK_WAIT_SECS),
             poll: Duration::from_millis(500),
-            redraw_wait: Duration::from_millis(2500),
+            // About 2.5s.
+            redraw_looks: 13,
             redraw_poll: Duration::from_millis(200),
         }
     }
@@ -212,8 +214,9 @@ fn accept(
         }
         Some(TrustStep::Select(_)) => Ok(gave_up(
             &format!(
-                "still not on accepting {}ms after the select key",
-                limits.redraw_wait.as_millis()
+                "still not on accepting after {} looks over {}ms since the select key",
+                limits.redraw_looks,
+                started.elapsed().as_millis()
             ),
             &screen,
         )),
@@ -225,18 +228,19 @@ fn accept(
 }
 
 /// Look at the pane until `done` with the step it shows, or for
-/// `limits.redraw_wait`: the last step and the pane it came from.
+/// `limits.redraw_looks` looks: the last step and the pane it came from.
 fn settle(
     harness: &dyn Harness,
     pane: &dyn Pane,
     limits: Limits,
     done: impl Fn(&Option<TrustStep>) -> bool,
 ) -> Result<(Option<TrustStep>, String)> {
-    let deadline = Instant::now() + limits.redraw_wait;
+    let mut looks = 0;
     loop {
         let screen = pane.capture()?;
         let step = harness.accept_trust(&screen);
-        if done(&step) || Instant::now() >= deadline {
+        looks += 1;
+        if done(&step) || looks >= limits.redraw_looks.max(1) {
             return Ok((step, screen));
         }
         thread::sleep(limits.redraw_poll);
@@ -456,10 +460,8 @@ mod tests {
             watch: Duration::from_millis(50),
             hook_wait: Duration::from_millis(200),
             poll: Duration::from_millis(1),
-            // Wide, so a slow machine still sees a lagging redraw through:
-            // a redraw that comes ends the wait at once.
-            redraw_wait: Duration::from_secs(5),
-            redraw_poll: Duration::from_millis(1),
+            redraw_looks: 30,
+            redraw_poll: Duration::ZERO,
         }
     }
 
@@ -506,6 +508,21 @@ mod tests {
     }
 
     #[test]
+    fn the_redraw_gets_its_looks_and_no_more() {
+        let limits = Limits {
+            redraw_looks: 5,
+            ..quick()
+        };
+        // Four looks still show "No"; the fifth, the last, shows "Yes".
+        let in_time = FakeClaude::new("trust-no-selected", 4);
+        assert_eq!(run_logged(&in_time, true, limits).0, Outcome::Accepted);
+        assert_eq!(*in_time.pressed.borrow(), ["Down", "Enter"]);
+        let late = FakeClaude::new("trust-no-selected", 5);
+        assert_eq!(run_logged(&late, true, limits).0, Outcome::CouldNotAccept);
+        assert_eq!(*late.pressed.borrow(), ["Down"]);
+    }
+
+    #[test]
     fn a_frame_caught_mid_redraw_is_looked_past() {
         let pane = FakeClaude::new("trust-no-selected", 3);
         *pane.between.borrow_mut() =
@@ -519,7 +536,7 @@ mod tests {
         let pane = FakeClaude::new("trust-no-selected", 0);
         pane.redraws.set(false);
         let limits = Limits {
-            redraw_wait: Duration::from_millis(50),
+            redraw_looks: 5,
             ..quick()
         };
         let (outcome, log) = run_logged(&pane, true, limits);
