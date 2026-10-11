@@ -2080,11 +2080,21 @@ mod tests {
                 t => t,
             };
             let own = caller == target;
-            match verb.reach() {
-                Reach::Own => own,
-                Reach::OwnOrBelow => own || below(caller, target),
-                Reach::Below | Reach::Tree => below(caller, target),
-                Reach::Parent => (own || below(caller, target)) && manager(target),
+            let below = below(caller, target);
+            // Written out per verb rather than asked of `Verb::reach`.
+            match verb {
+                Verb::WorktreeAdd | Verb::WorktreeLs | Verb::WorktreePath => own,
+                Verb::TaskLast | Verb::TaskPath | Verb::TaskPrs => own || below,
+                Verb::TaskSend
+                | Verb::TaskInterrupt
+                | Verb::TaskOpen
+                | Verb::TaskArchive
+                | Verb::TaskUnarchive
+                | Verb::TaskDelete
+                | Verb::TaskResync
+                | Verb::ManagerShow
+                | Verb::ManagerGrant => below,
+                Verb::TaskNew => (own || below) && manager(target),
             }
         };
         for caller in ["m", "wk", "s"] {
@@ -2103,6 +2113,19 @@ mod tests {
                     }
                 }
             }
+        }
+        // A manager may not act on itself.
+        for args in [
+            &["task", "delete", "m"][..],
+            &["task", "archive", "m"],
+            &["task", "send", "m", "hi"],
+            &["manager", "grant", "m", "--none"],
+        ] {
+            let e = node_of(&app, &row("m"), args, false)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(&format!("jeet {} {}", args[0], args[1])), "{e}");
+            assert!(e.contains("jeet report"), "{e}");
         }
         // Sideways messages say why.
         let e = node_of(&app, &row("wk"), &["task", "send", "fix-b", "hi"], false).unwrap_err();
@@ -2123,7 +2146,8 @@ mod tests {
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     let result = run_as(&app, &caller, &args, false);
                     let tree_node = !["assistant", "top", "fix"].contains(&target);
-                    match verb.reach() != Reach::Tree || tree_node {
+                    let manager_verb = matches!(verb, Verb::ManagerShow | Verb::ManagerGrant);
+                    match !manager_verb || tree_node {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
                             let e = result.expect_err(&format!("{caller:?} {args:?}"));
@@ -2132,6 +2156,19 @@ mod tests {
                     }
                 }
             }
+        }
+
+        // Not even on the assistant itself.
+        for args in [
+            &["manager", "show", "assistant"][..],
+            &["manager", "grant", "assistant", "--none"],
+        ] {
+            let e = run_as(&app, &Caller::Root, args, false).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains(&format!("jeet {} {}", args[0], args[1])),
+                "{e}"
+            );
         }
 
         // Lists show a task with a parent itself and what is below it.
