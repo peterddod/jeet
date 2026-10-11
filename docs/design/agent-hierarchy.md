@@ -795,9 +795,12 @@ RFC left open, or departed from it:
   `jeet review` warns when it starts one, as E13 does.
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch, and capped at
-  twelve (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
-  repos use, none longer than 40 bytes (`MAX_BRANCH_NAME`). Each costs
-  about 100 bytes of the inline settings, which share tmux's 16KB command
+  eight (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
+  repos use, none longer than 24 bytes (`MAX_BRANCH_NAME`). Each costs
+  about 280 bytes of the inline settings (three patterns, each rendered
+  for Claude Code as two rules, with and without a trailing ` *`, since
+  its trailing ` *` matches the bare command only in a rule with no other
+  `*`), which share tmux's 16KB command
   limit with the first prompt (E9). A repo's `default_branch` is
   `origin/HEAD` at clone or import, or else the branch then checked out,
   and is not refreshed, so a wrong guess denies pushing to that branch
@@ -838,6 +841,10 @@ RFC left open, or departed from it:
   dialog's own text field, which `has_draft` does not see. No retry, no confirmation and no status
   repair yet (the status reads `running` until the next hook, as after a
   manual Esc); those come with pause. The assistant is refused (5.4).
+  The draft check and the keys aim at the agent's pane, the session's
+  first window (`=<session>:^`), not its active pane, which may be a
+  window the user opened there; `jeet task send` and the startup watcher
+  aim there too.
 - **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`;
   nodes are refused because it is not in their grant.
 - **E13** A parented task launched on a harness with `Enforcement::None`

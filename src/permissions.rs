@@ -192,11 +192,12 @@ const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 /// rules go inline in the agent's command line, which shares tmux's 16KB
 /// command limit with its first prompt; past this, the branches fewest
 /// repositories use are left out.
-pub const MAX_DEFAULT_BRANCHES: usize = 12;
+pub const MAX_DEFAULT_BRANCHES: usize = 8;
 
 /// The longest default branch name denied, in bytes, for the same limit:
-/// each costs three patterns. A longer one is left out.
-pub const MAX_BRANCH_NAME: usize = 40;
+/// each costs three patterns, six rules in Claude Code's settings. A longer
+/// one is left out.
+pub const MAX_BRANCH_NAME: usize = 24;
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
@@ -1390,7 +1391,8 @@ mod tests {
         assert!(branches.iter().all(|b| b.len() <= MAX_BRANCH_NAME));
         // Ties among the rare ones go by name.
         assert!(branches.contains(&"rare-00".to_string()), "{branches:?}");
-        assert!(!branches.contains(&"rare-11".to_string()), "{branches:?}");
+        let last = format!("rare-{:02}", MAX_DEFAULT_BRANCHES - 1);
+        assert!(!branches.contains(&last), "{branches:?}");
         let mut sorted = branches.clone();
         sorted.sort();
         assert_eq!(branches, sorted);
@@ -1398,19 +1400,37 @@ mod tests {
 
     #[test]
     fn a_top_level_task_gets_no_deny_and_a_node_gets_the_list() {
-        let (_dir, app, w) = tree();
+        let (_dir, mut app, w) = tree();
+        app.db
+            .upsert_repo(&crate::db::RepoRecord {
+                id: "d".into(),
+                trunk_path: "/store/d".into(),
+                remote_url: "https://example.com/o/d".into(),
+                default_branch: "develop".into(),
+            })
+            .unwrap();
+        // What the root holds is not handed down beyond the node's grant.
+        app.config.assistant.allow = CAPABILITIES.iter().map(|c| c.name.into()).collect();
         let top = app.db.get_task("top-id").unwrap().unwrap();
         assert!(task_deny(&app, &top).unwrap().is_empty());
         let deny = task_deny(&app, &w).unwrap();
-        assert!(deny.contains(&"gh pr merge".to_string()), "{deny:?}");
-        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
-        assert!(deny.contains(&"git push * master".to_string()), "{deny:?}");
+        for denied in [
+            "gh pr merge",
+            "gh pr comment",
+            "gh pr review",
+            "gh issue comment",
+            "git push * master",
+            "git push * develop",
+        ] {
+            assert!(deny.contains(&denied.to_string()), "{denied}: {deny:?}");
+        }
     }
 
-    /// A model of how Claude Code matches a `Bash(…)` deny rule as jeet
-    /// writes it (see `deny_rule` in the Claude harness): `*` matches any
-    /// run of characters, and a trailing ` *` also matches nothing. It is
-    /// not Claude itself; docs/harnesses.md lists what to check by hand.
+    /// A model of how Claude Code (2.1) matches the `Bash(…)` deny rules
+    /// jeet writes for `pattern` (see `deny_rules` in the Claude harness):
+    /// `*` matches any run of characters, and a trailing ` *` also matches
+    /// nothing, but only when it is the rule's one `*`. It is not Claude
+    /// itself; docs/harnesses.md lists what to check by hand.
     fn claude_match(pattern: &str, command: &str) -> bool {
         fn glob(p: &[u8], c: &[u8]) -> bool {
             match p.split_first() {
@@ -1419,13 +1439,16 @@ mod tests {
                 Some((b, rest)) => c.first() == Some(b) && glob(rest, &c[1..]),
             }
         }
-        let rule = match pattern.ends_with('*') {
-            true => pattern.to_string(),
-            false => format!("{pattern} *"),
-        };
-        let bare = rule.strip_suffix(" *");
-        glob(rule.as_bytes(), command.as_bytes())
-            || bare.is_some_and(|b| glob(b.as_bytes(), command.as_bytes()))
+        crate::harness::claude::deny_rules(pattern)
+            .iter()
+            .any(|rule| {
+                let rule = &rule["Bash(".len()..rule.len() - 1];
+                let bare = rule
+                    .strip_suffix(" *")
+                    .filter(|_| rule.matches('*').count() == 1);
+                glob(rule.as_bytes(), command.as_bytes())
+                    || bare.is_some_and(|b| glob(b.as_bytes(), command.as_bytes()))
+            })
     }
 
     #[test]
@@ -1440,7 +1463,10 @@ mod tests {
             "git push origin +x",
             "git push --mirror",
             "git push origin main",
+            "git push -u origin main",
             "git push origin HEAD:main",
+            "git push origin HEAD:refs/heads/main",
+            "git push origin --mirror",
             "git push origin :main",
             "git push origin HEAD:refs/heads/master",
             "git push origin refs/heads/main",

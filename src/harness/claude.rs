@@ -428,7 +428,7 @@ fn settings_json(hooks: &HookSetup) -> String {
         .collect();
     let mut permissions = serde_json::json!({ "allow": allow });
     if !hooks.deny.is_empty() {
-        let deny: Vec<String> = hooks.deny.iter().map(|p| deny_rule(p)).collect();
+        let deny: Vec<String> = hooks.deny.iter().flat_map(|p| deny_rules(p)).collect();
         permissions["deny"] = serde_json::json!(deny);
     }
     serde_json::json!({
@@ -438,13 +438,17 @@ fn settings_json(hooks: &HookSetup) -> String {
     .to_string()
 }
 
-/// The `Bash(…)` rule for a deny pattern (see [`HookSetup::deny`]): a
-/// trailing ` *` lets any further arguments follow, and Claude matches it
-/// against the bare command too. A pattern already ending in `*` needs none.
-fn deny_rule(pattern: &str) -> String {
-    match pattern.ends_with('*') {
-        true => format!("Bash({pattern})"),
-        false => format!("Bash({pattern} *)"),
+/// The `Bash(…)` rules for a deny pattern (see [`HookSetup::deny`]). A
+/// trailing ` *` lets any further arguments follow; Claude also matches it
+/// against the bare command, but only when it is the rule's one `*`, so a
+/// pattern with a `*` of its own gets a second rule, for the bare command
+/// (`git push * main` and `git push * main *`). A pattern already ending
+/// in `*` needs neither.
+pub(crate) fn deny_rules(pattern: &str) -> Vec<String> {
+    match (pattern.ends_with('*'), pattern.contains('*')) {
+        (true, _) => vec![format!("Bash({pattern})")],
+        (false, false) => vec![format!("Bash({pattern} *)")],
+        (false, true) => vec![format!("Bash({pattern})"), format!("Bash({pattern} *)")],
     }
 }
 
@@ -871,14 +875,25 @@ mod tests {
         let hooks = HookSetup {
             exe: "/bin/jeet".into(),
             allow: vec!["jeet ls".into()],
-            deny: vec!["gh pr merge".into(), "git push --force*".into()],
+            deny: vec![
+                "gh pr merge".into(),
+                "git push --force*".into(),
+                "git push * main".into(),
+            ],
         };
         assert_eq!(ClaudeCode.enforcement(), Enforcement::Rules);
         let args = ClaudeCode.hook_args(&hooks).unwrap();
         let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
         assert_eq!(
             value["permissions"]["deny"],
-            serde_json::json!(["Bash(gh pr merge *)", "Bash(git push --force*)"])
+            serde_json::json!([
+                "Bash(gh pr merge *)",
+                "Bash(git push --force*)",
+                // Claude's trailing ` *` matches nothing only when it is the
+                // rule's one `*`: `git push origin main` needs the first.
+                "Bash(git push * main)",
+                "Bash(git push * main *)",
+            ])
         );
         assert_eq!(
             value["permissions"]["allow"],
