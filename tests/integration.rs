@@ -7459,15 +7459,14 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     let x_dir = lab.home().join("tasks/x");
     let y_dir = lab.home().join("tasks/y");
     let session = "11111111-2222-4333-8444-555555555555";
-    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    let background = [("JEET_BACKGROUND", "1")];
+    let mut x_agent = lab.task_pane("x");
+    let mut hook =
+        |event: &str, input: &str| x_agent.hook(&lab, Some(&x), event, input, &background);
     let waiting = hook_input("Notification", session, &x_dir);
 
     // Its brief, as each session starts.
-    let output = lab.hook(
-        "SessionStart",
-        &hook_input("SessionStart", session, &x_dir),
-        &as_x,
-    );
+    let output = hook("SessionStart", &hook_input("SessionStart", session, &x_dir));
     succeeded(&output);
     let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
     let context = value["hookSpecificOutput"]["additionalContext"]
@@ -7490,28 +7489,28 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
             )
             .unwrap();
     };
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     backdate();
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].0, "status");
     assert!(reports[0].2.starts_with("waiting"), "{reports:?}");
     // Running again, then a new wait: told again.
     let prompt = hook_input("UserPromptSubmit", session, &x_dir);
-    hook_ok(&lab.hook("UserPromptSubmit", &prompt, &as_x));
+    hook_ok(&hook("UserPromptSubmit", &prompt));
     backdate();
-    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    hook_ok(&hook("Notification", &waiting));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 2, "{reports:?}");
     assert!(reports[1].2.starts_with("waiting"), "{reports:?}");
 
     // Cleared: another session takes over, so nothing is said.
     let cleared = hook_input("SessionEnd-clear", session, &x_dir);
-    hook_ok(&lab.hook("SessionEnd", &cleared, &as_x));
+    hook_ok(&hook("SessionEnd", &cleared));
     assert_eq!(lab.reports_of(&x).len(), 2);
     let ended = hook_input("SessionEnd", session, &x_dir);
-    hook_ok(&lab.hook("SessionEnd", &ended, &as_x));
+    hook_ok(&hook("SessionEnd", &ended));
     let reports = lab.reports_of(&x);
     assert_eq!(reports.len(), 3, "{reports:?}");
     assert!(reports[2].2.starts_with("ended"), "{reports:?}");
@@ -7519,10 +7518,9 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     // A worker in its sibling's directory is still itself: its hooks name
     // it with `--task`.
     let other = "22222222-2222-4333-8444-555555555555";
-    hook_ok(&lab.hook(
+    hook_ok(&hook(
         "Notification",
         &hook_input("Notification", other, &y_dir),
-        &as_x,
     ));
     assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&y).is_empty());

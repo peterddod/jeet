@@ -12,6 +12,7 @@ use crate::assistant;
 use crate::cd;
 use crate::context::App;
 use crate::db::tasks::{TaskBriefRecord, TaskKind, TaskRecord, TaskState};
+use crate::identity;
 use crate::messages::{self, Delivered};
 use crate::permissions::{self, Caller};
 use crate::pr_history;
@@ -231,10 +232,16 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
 }
 
 /// Who is sending a message, as far as jeet can tell, for the assistant to
-/// weigh it by: a task's agent, by its environment or where it runs, or
-/// else the command line. Anything can claim to be the command line, so the
-/// assistant is told never to take that for the user.
+/// weigh it by: the agent it runs under ([`identity::identify`]), else a
+/// task's agent by its environment or where it runs, or else the command
+/// line. Anything can claim to be the command line, so the assistant is
+/// told never to take that for the user.
 fn sender(app: &App) -> String {
+    match identity::identify(&app.db).ok().and_then(|me| me.task) {
+        Some(task) if task.kind == TaskKind::Assistant => return "the assistant".to_string(),
+        Some(task) => return format!("task {}", task.slug),
+        None => {}
+    }
     if permissions::assistant_mode() {
         return "the assistant".to_string();
     }

@@ -30,6 +30,7 @@ use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
+use crate::identity;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
@@ -248,8 +249,8 @@ fn handle_hook(
                     Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
                 }
             } else if task.parent_id.is_some()
-                && attributed(launched_for, &task.id)
                 && harness.session_context_output("").is_some()
+                && attributed(launched_for, &task.id, &app)
             {
                 // What its parent asked of it, each time a session starts,
                 // /clear included.
@@ -306,9 +307,16 @@ fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
 }
 
 /// Whether a hook's task, `located`, is the one this agent was launched
-/// for, as its `--task` says: a hook without one, from before `--task`,
-/// never reports up.
-fn attributed(task: Option<&str>, located: &str) -> bool {
+/// for, as its `--task` says, and the one it runs under
+/// ([`identity::identify`]): a hook without `--task`, from before it, or
+/// one naming another task than its own, never reports up.
+fn attributed(task: Option<&str>, located: &str, app: &App) -> bool {
+    names_task(task, located)
+        && identity::identify(&app.db).is_ok_and(|me| me.task.is_some_and(|t| t.id == located))
+}
+
+/// Whether a hook's `--task` names `located`.
+fn names_task(task: Option<&str>, located: &str) -> bool {
     task.map(str::trim) == Some(located)
 }
 
@@ -341,13 +349,17 @@ fn report_step(
     prev: Option<SessionStatus>,
     now: i64,
 ) -> Result<()> {
-    if !attributed(task, task_id) {
+    // A hook from before `--task` is never attributed: no need to look.
+    if task.is_none() {
         return Ok(());
     }
     let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev.as_ref())) else {
         return Ok(());
     };
     let app = App::open()?;
+    if !attributed(task, task_id, &app) {
+        return Ok(());
+    }
     let Some(task) = app.db.get_task(task_id)? else {
         return Ok(());
     };
@@ -817,9 +829,9 @@ mod tests {
     #[test]
     fn only_the_task_an_agent_was_launched_for_reports() {
         // A hook from before `--task` never reports up.
-        assert!(!attributed(None, "t"));
-        assert!(!attributed(Some("u"), "t"));
-        assert!(attributed(Some(" t\n"), "t"));
+        assert!(!names_task(None, "t"));
+        assert!(!names_task(Some("u"), "t"));
+        assert!(names_task(Some(" t\n"), "t"));
     }
 
     #[test]

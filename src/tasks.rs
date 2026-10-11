@@ -26,6 +26,7 @@ use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
+use crate::identity;
 use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
@@ -351,18 +352,23 @@ fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     }
 }
 
-/// The task a command run here is about: the one named, else the one in
-/// `$JEET_TASK_ID` (set inside a task's agent session), else the task whose
-/// directory holds the current directory.
+/// The task a command run here is about: the one named, else the one whose
+/// agent runs this jeet ([`identity::identify`]), else the one in
+/// `$JEET_TASK_ID` (set inside a task's agent session), else the task
+/// whose directory holds the current directory.
 pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
     if let Some(key) = explicit {
         return find(app, key);
     }
-    if let Some(id) = std::env::var(TASK_ID_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        let id = id.trim();
+    let own = identity::identify(&app.db)?.task.map(|task| task.id);
+    let hinted = || {
+        std::env::var(TASK_ID_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(id) = own.or_else(hinted) {
+        let id = id.as_str();
         return match app.db.get_task(id)? {
             Some(task) if task.kind == TaskKind::Assistant => bail!(
                 "the assistant's home is no task to work in; pick one with --task <name> \
