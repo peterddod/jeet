@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.7.2
+cargo install --git https://github.com/peterddod/jeet --tag v0.8.0
 ```
 
 ## Quick start
@@ -853,6 +853,23 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.8
+
+- **Harnesses**: the coding agent now runs behind a harness interface, so
+  agents other than Claude Code can be supported. `harness` picks it
+  (`claude-code` by default, or `generic`). jeet detects the agent's
+  folder-trust prompt, and with `auto_trust` on, answers it for you.
+- **AGENTS.md**: projects and the assistant keep agent instructions in
+  `AGENTS.md`, with a `CLAUDE.md` that imports it.
+- **Projects form**: the new-project form picks repos, and the task and
+  project pickers can add repos the store does not have yet.
+- `jeet pr merge` and the assistant's `pr.merge` capability merge a PR once
+  it is ready.
+- `jeet task last` shows what a task's agent last said and how its turn
+  ended.
+- **tmux**: Shift+Enter reaches agents running in tmux, and
+  `jeet task send` pastes long messages whole, never onto a draft.
 
 ## What's new in v0.7
 
