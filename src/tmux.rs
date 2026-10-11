@@ -868,7 +868,7 @@ fn parse_processes(listing: &str) -> Vec<Proc> {
 
 /// `roots` and all their descendants that are running now. This process is
 /// never among them: waiting for itself would never end.
-fn process_tree(roots: &[u32]) -> Vec<u32> {
+pub fn process_tree(roots: &[u32]) -> Vec<u32> {
     if roots.is_empty() {
         return Vec::new();
     }
@@ -915,7 +915,7 @@ fn wait_for_exit(pids: &[u32], limit: Duration) -> Vec<u32> {
 }
 
 /// Let `pids` exit within `grace`, then kill whatever has not.
-fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
+pub fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
     if pids.is_empty() {
         return Ok(());
     }

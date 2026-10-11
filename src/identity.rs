@@ -155,6 +155,12 @@ pub fn live(anchor: &Anchor) -> bool {
     proc_info(anchor.pid).is_some_and(|info| info.start == anchor.start)
 }
 
+/// Whether this jeet runs under `anchor`'s process: is it, or descends
+/// from it. Only as far up as [`ancestry`] can read.
+pub fn runs_under(anchor: &Anchor) -> bool {
+    ancestry().0.contains(&(anchor.pid, anchor.start))
+}
+
 /// What the environment says the caller is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Hint {
@@ -314,7 +320,8 @@ pub fn identify(app: &App) -> Result<Identity> {
             .into());
         }
         Verdict::Unconfirmed(claimed) => {
-            let found = claimed.as_deref().map(task);
+            // A lookup that fails is an index error, not a task that is gone.
+            let found = claimed.as_deref().map(|id| db.get_task(id)).transpose()?;
             let (who, reopen) = match (claimed, found) {
                 (Some(id), Some(None)) => {
                     return Err(Refused::Unconfirmed(format!(

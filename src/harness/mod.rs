@@ -129,7 +129,8 @@ pub trait Harness: Sync {
     /// The tmux key names that end the turn it is running, keeping the
     /// session; jeet presses them once, only while it is working or waiting
     /// on the user. `None`: it cannot be interrupted. A harness returning
-    /// keys needs [`Harness::hook_args`] too, since jeet presses nothing
+    /// keys needs [`Harness::hook_args`] or [`Harness::hook_file`] too,
+    /// since jeet presses nothing
     /// until a hook has reported since the launch, and
     /// [`Harness::has_draft`], or the keys are pressed over unsent text.
     fn interrupt_keys(&self) -> Option<&'static [&'static str]> {

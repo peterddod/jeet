@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ReviewConfig;
 use crate::context::App;
-use crate::db::anchors::AnchorKind;
+use crate::db::anchors::{Anchor, AnchorKind};
 use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
 use crate::remote;
+use crate::tmux;
 use crate::worktrees::now_secs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,49 +302,86 @@ fn launch(
     Ok(())
 }
 
-/// End the review jobs running for task `task_id`: each runner jeet
-/// recorded for it, while it is still that process, with its process group
-/// ([`launch`] gives it one), so the command it runs goes too. Best effort.
-pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
-    for anchor in db.task_anchors(task_id, AnchorKind::Job)? {
-        end_group(&anchor);
-    }
-    Ok(())
+/// The runners jeet recorded for task `task_id`'s review jobs.
+fn task_jobs(db: &Database, task_id: &str) -> Result<Vec<Anchor>> {
+    db.task_anchors(task_id, AnchorKind::Job)
 }
 
-/// End the review jobs still running in a worktree under `dir`, whoever
-/// they run as: one the assistant started for a top-level review task is
-/// recorded as the assistant's, not the task's, so [`stop_jobs`] does not
-/// find it. Only the runner the job recorded as its own, by pid and start
-/// (a pid reused by another job's runner is not it), while it is still
-/// that process; its record goes with it. Best effort.
-pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
+/// The runners of the review jobs still running in a worktree under `dir`,
+/// whoever they run as: one the assistant started for a top-level review
+/// task is recorded as the assistant's, not the task's, so [`task_jobs`]
+/// does not find it. Only the runner the job recorded as its own, by pid
+/// and start (a pid reused by another job's runner is not it), while it is
+/// still that process.
+fn jobs_in(app: &App, dir: &Path) -> Result<Vec<Anchor>> {
     let jobs: Vec<Job> = recorded_jobs(app)
         .filter(|job| job.exit_code.is_none() && job.worktree.starts_with(dir))
         .collect();
     let pids: Vec<u32> = jobs.iter().filter_map(|job| job.pid).collect();
-    for anchor in app.db.anchors_for(&pids)? {
-        let ours = anchor.kind == AnchorKind::Job
+    let mut runners = app.db.anchors_for(&pids)?;
+    runners.retain(|anchor| {
+        anchor.kind == AnchorKind::Job
             && jobs
                 .iter()
-                .any(|job| job.pid == Some(anchor.pid) && job.runner_start == Some(anchor.start));
-        if ours && identity::live(&anchor) {
-            end_group(&anchor);
-            app.db.delete_anchor(anchor.pid, anchor.start)?;
-        }
+                .any(|job| job.pid == Some(anchor.pid) && job.runner_start == Some(anchor.start))
+            && identity::live(anchor)
+    });
+    Ok(runners)
+}
+
+/// Fail when this jeet runs under one of the review jobs [`stop_jobs`] or
+/// [`stop_jobs_in`] would end for task `task_id`, in `dir`: ending the job
+/// to `verb` the task would end this jeet with it, part-way through.
+pub fn refuse_inside_job(app: &App, task_id: &str, dir: &Path, verb: &str) -> Result<()> {
+    let mut runners = task_jobs(&app.db, task_id)?;
+    runners.extend(jobs_in(app, dir)?);
+    if runners.iter().any(identity::runs_under) {
+        bail!(
+            "this jeet runs under a review job in the task, which {verb} would end, and this \
+             jeet with it; {verb} the task once the review is done, or from outside it"
+        );
     }
     Ok(())
 }
 
-/// End `anchor`'s process group, while it is still that process.
-fn end_group(anchor: &crate::db::anchors::Anchor) {
-    if anchor.pid > 1 && identity::live(anchor) {
-        let _ = Command::new("kill")
-            .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+/// End the review jobs running for task `task_id`: each runner jeet
+/// recorded for it, while it is still that process, with its process group
+/// ([`launch`] gives it one), so the command it runs goes too. Returns
+/// once they have exited.
+pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
+    for anchor in task_jobs(db, task_id)? {
+        end_group(&anchor)?;
     }
+    Ok(())
+}
+
+/// End the review jobs still running in a worktree under `dir` (see
+/// [`jobs_in`]) as [`stop_jobs`] does; their records go with them.
+pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
+    for anchor in jobs_in(app, dir)? {
+        end_group(&anchor)?;
+        app.db.delete_anchor(anchor.pid, anchor.start)?;
+    }
+    Ok(())
+}
+
+/// End `anchor`'s process group, while it is still that process, and
+/// return once the runner and what it started have exited: what they write
+/// after this would miss an archive's snapshot. Whatever has not exited
+/// within [`tmux::EXIT_GRACE`] is killed outright.
+fn end_group(anchor: &Anchor) -> Result<()> {
+    if anchor.pid <= 1 || !identity::live(anchor) {
+        return Ok(());
+    }
+    // Taken before the signal: once the runner is gone, its children are
+    // no longer known as its.
+    let tree = tmux::process_tree(&[anchor.pid]);
+    let _ = Command::new("kill")
+        .args(["-s", "TERM", "--", &format!("-{}", anchor.pid)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    tmux::end_processes(&tree, tmux::EXIT_GRACE).context("end the review command")
 }
 
 /// What [`launch`] writes to the runner once it is recorded.
@@ -679,6 +717,120 @@ mod tests {
         let left = app.db.task_anchors("a", AnchorKind::Job).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].pid, other.id());
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+    /// A test index holding the assistant and one top-level review task `t`.
+    #[cfg(unix)]
+    fn test_app(home: &Path) -> App {
+        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::placement::Placement;
+        let app = App {
+            config: crate::config::load_or_create(home).unwrap(),
+            db: Database::open(&crate::config::index_path(home)).unwrap(),
+            home: home.to_path_buf(),
+        };
+        for (id, kind) in [("a", TaskKind::Assistant), ("t", TaskKind::Review)] {
+            app.db
+                .insert_task(&TaskRecord {
+                    id: id.into(),
+                    slug: id.into(),
+                    name: id.into(),
+                    project: None,
+                    kind,
+                    state: TaskState::Active,
+                    created_at: 0,
+                    last_activity: 0,
+                    parent_id: None,
+                    placement: Placement::Local,
+                })
+                .unwrap();
+        }
+        app
+    }
+
+    /// A review command that takes a moment to finish once told to end,
+    /// writing as it goes: stopping the job returns only once it is done, so
+    /// what it wrote is there before an archive's snapshot.
+    #[cfg(unix)]
+    #[test]
+    fn stop_jobs_waits_for_the_command_to_exit() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let done = home.join("done");
+        let mut job = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "trap 'sleep 1; touch {}; exit 0' TERM; while :; do sleep 0.1; done",
+                done.display()
+            ))
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        identity::record(&app.db, "t", AnchorKind::Job, None, job.id()).unwrap();
+
+        stop_jobs(&app.db, "t").unwrap();
+        assert!(done.exists(), "returned before the command had exited");
+        let _ = job.wait();
+    }
+
+    /// Archive or delete run under the task's review job would end itself
+    /// part-way, so it is refused there; run elsewhere, it is not.
+    #[cfg(unix)]
+    #[test]
+    fn refuse_inside_job_refuses_only_under_the_tasks_job() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let task_dir = home.join("tasks/t");
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        identity::record(&app.db, "t", AnchorKind::Job, None, other.id()).unwrap();
+        refuse_inside_job(&app, "t", &task_dir, "archive").unwrap();
+
+        // This process as the task's runner.
+        let me = Anchor {
+            pid: std::process::id(),
+            start: identity::start_of(std::process::id()).unwrap(),
+            task_id: "t".into(),
+            kind: AnchorKind::Job,
+            created_at: 0,
+        };
+        app.db.insert_anchor(&me, None).unwrap();
+        let err = refuse_inside_job(&app, "t", &task_dir, "archive").unwrap_err();
+        assert!(err.to_string().contains("runs under a review job"), "{err}");
+        app.db.delete_anchor(me.pid, me.start).unwrap();
+
+        // The assistant's runner for a job in the task's worktree.
+        let reviews = home.join("reviews/widget");
+        std::fs::create_dir_all(&reviews).unwrap();
+        let mut j = job(None, "abc");
+        j.worktree = task_dir.join("widget");
+        j.pid = Some(me.pid);
+        j.runner_start = Some(me.start);
+        write(&reviews.join("1.json"), &j).unwrap();
+        app.db
+            .insert_anchor(
+                &Anchor {
+                    task_id: "a".into(),
+                    ..me.clone()
+                },
+                None,
+            )
+            .unwrap();
+        let err = refuse_inside_job(&app, "t", &task_dir, "delete").unwrap_err();
+        assert!(err.to_string().contains("delete would end"), "{err}");
+
         let _ = other.kill();
         let _ = other.wait();
     }

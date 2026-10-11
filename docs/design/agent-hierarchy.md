@@ -1024,7 +1024,10 @@ what this RFC left open, or departed from it:
   `task archive`: the runner recorded as the task's, and an unfinished one
   in the task's worktrees whose recorded runner is still live, which is how
   a job the assistant started for a top-level review task (recorded as the
-  assistant's) is found.
+  assistant's) is found. Both wait for the job's processes to exit
+  (killing what outlives the grace period) before anything is saved or
+  removed, and both are refused from a jeet running under that job, which
+  ending it would end part-way.
 - **I5** An anchored assistant is Root, an anchored task with a parent is a
   Node, anything else the user. Supersedes D13 and D23: a user shell in a
   parented task's session is refused for gated commands, not gated as the

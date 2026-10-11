@@ -1139,7 +1139,11 @@ as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask w
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
-exits without reporting done.
+exits without reporting done. No harness launches that command, so it gets none of
+the settings jeet gives Claude Code: if it runs Claude Code with its sandbox
+on, exclude `jeet` from the sandbox yourself (`--settings
+'{"sandbox":{"excludedCommands":["jeet"]}}'`), or its `jeet report` and
+`jeet worktree add` are refused as unconfirmed.
 
 jeet knows which agent is calling by the process it launched: each task's
 agent, each assistant window and each review job is recorded when jeet

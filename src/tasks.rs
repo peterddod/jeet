@@ -1208,7 +1208,8 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
 /// finishes the job. It is refused from inside the agent's tmux session,
-/// which ending the agent would end too.
+/// which ending the agent would end too, and from under the task's review
+/// job, likewise.
 ///
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
@@ -1217,6 +1218,7 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         bail!("the assistant cannot be archived");
     }
     runtime::refuse_inside_session(task, "archive")?;
+    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
     // The agent goes first, and is gone before anything is saved: it works
     // in the worktrees about to be removed, and what it wrote after the
@@ -1706,6 +1708,7 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         );
     }
     runtime::refuse_inside_session(task, "delete")?;
+    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "delete")?;
     let mut warnings = Vec::new();
     // Stopped, and gone, before anything is removed: a running agent would
     // carry on working in worktrees that are about to go, and its exit hook

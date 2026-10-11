@@ -26,7 +26,7 @@ jeet does without that feature:
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for the `local-sandbox` placement) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
@@ -55,10 +55,10 @@ must print nothing on stdout except the outputs above, and always exits 0.
 `task-hook` takes care of that: `parse_hook` only reads the payload.
 
 If the agent can take hooks only from a file, not a flag or an environment
-variable, the launch arguments alone cannot install them. Likewise, if it
-cannot start a session under an id jeet picks, jeet has to learn the id
-from the first hook instead of recording it before launch. Both need a
-change to the trait, so raise them in the PR.
+variable, implement `hook_file` instead of `hook_args`. If it cannot start
+a session under an id jeet picks, jeet has to learn the id from the first
+hook instead of recording it before launch. That needs a change to the
+trait, so raise it in the PR.
 
 ### Mapping hook payloads to events
 
@@ -89,7 +89,7 @@ answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
 for. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
-Both need the hook to carry `--task <id>` (`hook_args`) and to run as a
+Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
 descendant of the process jeet starts in the task's pane: jeet reports and
 briefs only when `--task` names the task found and jeet confirms, by walking
 the hook's process ancestry up to that recorded process, that it is that
