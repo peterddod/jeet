@@ -398,8 +398,9 @@ impl Config {
 
     /// `[managers]` with its defaults, checked where it is used rather
     /// than when config.toml is read, so a mistake there breaks only the
-    /// tree. It refuses an unknown capability, a held one in a default, a
-    /// limit of 0 and a budget that does not parse.
+    /// tree. It refuses an unknown capability, a held one in a default the
+    /// user set, a limit of 0 and a budget that does not parse. The
+    /// built-in worker default drops whatever `held` names.
     pub fn manager_policy(&self) -> Result<ManagerPolicy> {
         let m = self.managers.clone().unwrap_or_default();
         let limit = |key: &str, value: Option<u32>, default: u32| match value {
@@ -415,7 +416,11 @@ impl Config {
         }
         let worker_default = match &m.worker_default {
             Some(names) => capabilities("worker_default", names)?,
-            None => DEFAULT_WORKER_GRANT.to_vec(),
+            None => DEFAULT_WORKER_GRANT
+                .iter()
+                .copied()
+                .filter(|name| !held.contains(name))
+                .collect(),
         };
         let manager_default = capabilities(
             "manager_default",
@@ -785,6 +790,12 @@ mod tests {
             ]
         );
 
+        // Holding the built-in worker default drops it from the default,
+        // rather than blaming a `worker_default` the user never set.
+        let policy = policy_of("held = [\"worktree.add\"]").unwrap();
+        assert!(policy.worker_default.is_empty());
+        assert!(policy.held.contains(&"worktree.add"));
+
         // Round trip: every key written back.
         let config: Config = toml::from_str(&format!("[managers]\n{text}\n")).unwrap();
         let out = toml::to_string_pretty(&config).unwrap();
@@ -822,6 +833,10 @@ mod tests {
         refused(
             "held = [\"task.create\"]\nmanager_default = [\"task.create\"]",
             "names task.create, which is held",
+        );
+        refused(
+            "held = [\"worktree.add\"]\nworker_default = [\"worktree.add\"]",
+            "worker_default names worktree.add",
         );
         // A limit of 0.
         for key in ["max_depth", "max_children", "max_live"] {

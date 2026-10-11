@@ -487,7 +487,8 @@ held = ["pr.merge", "pr.comment", "pr.review", "task.delete"]
 ```
 
 A `held` capability in `worker_default` or `manager_default` is a config
-error.
+error. Left unset, `worker_default` is the built-in `["worktree.add"]` less
+whatever `held` names, so holding `worktree.add` needs no second key.
 
 `max_live` is checked when jeet starts an agent (`task new --prompt`,
 `task open`, a message to a stopped agent). Over the limit, the start is

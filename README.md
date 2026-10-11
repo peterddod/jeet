@@ -1220,16 +1220,16 @@ idle_report_mins = 10   # tell the assistant when a task of its sits idle this l
 max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
-worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
+worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
 manager_default = []    # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete
 ```
 
 The tree's settings are checked when they are used, not when config.toml
-is read: a mistake in them (an unknown capability, a held one in a default,
-a limit of 0, a `$` budget) refuses making tasks under the assistant,
-`jeet manager grant` and unarchiving a task under a manager, and nothing
-else.
+is read: a mistake in them (an unknown capability, a held one in a default
+you set, a limit of 0, a `$` budget) refuses making tasks under the
+assistant, `jeet manager grant` and unarchiving a task under a manager, and
+nothing else.
 
 ### Keeping the store fetched
 

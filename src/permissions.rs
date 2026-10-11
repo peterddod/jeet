@@ -1930,6 +1930,23 @@ mod tests {
         .unwrap();
         assert_eq!(given.caps, ["pr.merge", "task.create"]);
         assert_eq!(given.held, ["pr.merge"]);
+        // A capability `[managers] held` adds is held as the floor's are.
+        app.config.managers = Some(config::ManagersConfig {
+            held: Some(vec!["task.send".into()]),
+            ..Default::default()
+        });
+        let given = grant(
+            &app,
+            &Caller::Root,
+            &root,
+            TaskKind::Work,
+            Some(&["task.send"]),
+        )
+        .unwrap();
+        assert_eq!(
+            (given.caps, given.held),
+            (vec!["task.send"], vec!["task.send"])
+        );
     }
 
     #[test]
