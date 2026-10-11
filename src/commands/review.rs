@@ -62,7 +62,13 @@ pub fn run(
             .parent_id
             .as_ref()
             .map(|_| review.task.id.as_str());
-        start_review(app, &repo, &pr, &review.path, rerun, as_task)?;
+        // The runner is always recorded as the task it runs for: the review
+        // task, else the assistant that started it (a review task it found
+        // at the top level is never moved under it). Unrecorded, a runner
+        // that inherits the assistant's environment is refused once this
+        // jeet has exited.
+        let runner_for = as_task.or(parent.as_deref());
+        start_review(app, &repo, &pr, &review.path, rerun, as_task, runner_for)?;
     }
 
     if io::stdout().is_terminal() {
@@ -82,6 +88,7 @@ fn start_review(
     worktree: &std::path::Path,
     rerun: bool,
     as_task: Option<&str>,
+    runner_for: Option<&str>,
 ) -> Result<()> {
     let config = &app.config.review;
     let Some(template) = config.command() else {
@@ -103,7 +110,9 @@ fn start_review(
             return Ok(());
         }
     }
-    let job = review::start(app, repo, pr, worktree, config, template, as_task)?;
+    let job = review::start(
+        app, repo, pr, worktree, config, template, as_task, runner_for,
+    )?;
     eprintln!("jeet: reviewing in the background: {}", job.command);
     eprintln!("jeet: output -> {}", job.log.display());
     if as_task.is_some() {

@@ -243,7 +243,7 @@ pub struct Identity {
 pub fn identify(db: &Database) -> Result<Identity> {
     let chain = ancestry();
     let pids: Vec<u32> = chain.iter().map(|(pid, _)| *pid).collect();
-    let anchors = db.anchors_for(&pids, boot_floor())?;
+    let anchors = anchors_of(db, &pids)?;
     let task = |id: &str| db.get_task(id).ok().flatten();
     let verdict = resolve(
         &chain,
@@ -283,13 +283,18 @@ pub fn identify(db: &Database) -> Result<Identity> {
             .into());
         }
         Verdict::Unconfirmed(claimed) => {
-            let who = match claimed {
-                Some(id) => format!("{}'s agent", label(&id)),
-                None => "the assistant".to_string(),
+            let is_assistant =
+                |id: &String| task(id).is_some_and(|t| t.kind == TaskKind::Assistant);
+            let (who, reopen) = match claimed.filter(|id| !is_assistant(id)) {
+                Some(id) => (format!("{}'s agent", label(&id)), "reopen the task"),
+                None => (
+                    "the assistant".to_string(),
+                    "exit the assistant in its window and run `jeet chat` again",
+                ),
             };
             return Err(Refused::Unconfirmed(format!(
-                "jeet can't confirm this is {who}: reopen the task (agents started before this \
-                 jeet must be reopened), or run this outside the agent's tmux session"
+                "jeet can't confirm this is {who}: {reopen} (agents started before this jeet \
+                 must be restarted), or run this outside the agent's tmux session"
             ))
             .into());
         }
@@ -300,10 +305,30 @@ pub fn identify(db: &Database) -> Result<Identity> {
     })
 }
 
+/// The anchors of the processes `pids` that can still be theirs: none
+/// written before the machine last booted.
+fn anchors_of(db: &Database, pids: &[u32]) -> Result<Vec<Anchor>> {
+    db.anchors_for(pids, boot_floor())
+}
+
+/// Forget the anchors of processes that are gone, or from before the
+/// machine last booted.
+fn prune(db: &Database) -> Result<()> {
+    let floor = boot_floor();
+    for old in db.all_anchors()? {
+        if old.created_at < floor || !live(&old) {
+            db.delete_anchor(old.pid, old.start)?;
+        }
+    }
+    Ok(())
+}
+
 /// Record process `pid`, just started for task `task_id`, as its anchor
-/// (in tmux pane `pane_id`, for a pane). Rows of processes that are gone go
-/// first. Fails, writing nothing, when the process cannot be read: its
-/// caller warns that the agent cannot be identified.
+/// (in tmux pane `pane_id`, for a pane). The process is already running
+/// and may ask who it is at once, so its row goes in first; rows of
+/// processes that are gone go after, or first when one is in its way.
+/// Fails, writing nothing, when the process cannot be read: its caller
+/// warns that the agent cannot be identified.
 pub fn record(
     db: &Database,
     task_id: &str,
@@ -317,12 +342,6 @@ pub fn record(
     let Some(info) = proc_info(pid) else {
         bail!("its process {pid} cannot be read");
     };
-    let floor = boot_floor();
-    for old in db.all_anchors()? {
-        if old.created_at < floor || !live(&old) {
-            db.delete_anchor(old.pid, old.start)?;
-        }
-    }
     let anchor = Anchor {
         pid,
         start: info.start,
@@ -330,14 +349,24 @@ pub fn record(
         kind,
         created_at: now_secs(),
     };
-    db.insert_anchor(&anchor, pane_id)
+    if db.insert_anchor(&anchor, pane_id).is_err() {
+        // A row from before a reboot can hold the same pid and start.
+        prune(db)?;
+        return db.insert_anchor(&anchor, pane_id);
+    }
+    // Recorded: a sweep that fails costs only stale rows.
+    let _ = prune(db);
+    Ok(())
 }
 
-/// The warning for task `name`'s agent that [`record`] failed on.
+/// The warning for task `name`'s agent that [`record`] failed on. With no
+/// anchor, only its environment says who it is: what claims the task is
+/// refused, but a command that drops the claim runs as the user.
 pub fn unidentified(name: &str, e: &anyhow::Error) -> String {
     format!(
-        "task {name}'s agent cannot be identified ({e:#}); its gated jeet commands will be \
-         refused until it is reopened"
+        "task {name}'s agent cannot be identified ({e:#}): its jeet commands that name the \
+         task are refused, but one run without ${TASK_ID_ENV} and ${ASSISTANT_ENV} runs as \
+         the user; stop it and open the task again"
     )
 }
 
@@ -557,5 +586,43 @@ mod tests {
         assert_eq!(rows[0].pid, second.id());
         second.kill().unwrap();
         second.wait().unwrap();
+    }
+
+    /// A row from before the last boot can match a live process on Linux,
+    /// whose start times count from boot: it is neither matched nor kept.
+    #[test]
+    fn rows_from_before_the_last_boot_are_neither_matched_nor_kept() {
+        let (_dir, db) = db();
+        let old = sleeper();
+        let stale = Anchor {
+            created_at: boot_floor() - 1,
+            ..anchor(
+                old.id(),
+                proc_info(old.id()).unwrap().start,
+                "t",
+                AnchorKind::Pane,
+            )
+        };
+        db.insert_anchor(&stale, None).unwrap();
+        assert!(live(&stale));
+        assert!(anchors_of(&db, &[old.id()]).unwrap().is_empty());
+
+        let new = sleeper();
+        record(&db, "t", AnchorKind::Pane, None, new.id()).unwrap();
+        let rows = db.all_anchors().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].pid, new.id());
+        assert_eq!(anchors_of(&db, &[new.id()]).unwrap(), rows);
+
+        // One in the way of the process being recorded goes too.
+        db.insert_anchor(&stale, None).unwrap();
+        record(&db, "t", AnchorKind::Job, None, old.id()).unwrap();
+        let rows = anchors_of(&db, &[old.id()]).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, AnchorKind::Job);
+        for mut child in [old, new] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
     }
 }

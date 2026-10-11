@@ -196,7 +196,9 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
 ///
 /// `as_task` is the review task when it has a parent: the command then runs
 /// as that task's agent, a Node that reports to it, not as whoever started
-/// the review.
+/// the review. `runner_for` is the task the runner is recorded as: that
+/// one, else the assistant that started it, or none for the user.
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     app: &App,
     repo: &RepoRecord,
@@ -205,6 +207,7 @@ pub fn start(
     config: &ReviewConfig,
     template: &str,
     as_task: Option<&str>,
+    runner_for: Option<&str>,
 ) -> Result<Job> {
     let dir = jobs_dir(app, repo)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -237,7 +240,7 @@ pub fn start(
     // over with a stale copy. So launching records nothing — except when it
     // fails, which would otherwise leave a job that reads as running forever,
     // refusing every later `jeet review`, `--rerun` included.
-    if let Err(e) = launch(app, &path, &log, worktree, as_task) {
+    if let Err(e) = launch(app, &path, &log, worktree, runner_for) {
         job.finished_at = Some(now_secs());
         job.exit_code = Some(127);
         let _ = write(&path, &job);
@@ -246,15 +249,15 @@ pub fn start(
     Ok(job)
 }
 
-/// Launch the runner for the job in `state`. Run as task `as_task`, the
-/// runner is recorded as that task's, so what its command runs is known
+/// Launch the runner for the job in `state`. Run for task `runner_for`,
+/// the runner is recorded as that task's, so what its command runs is known
 /// for the task's.
 fn launch(
     app: &App,
     state: &Path,
     log: &Path,
     worktree: &Path,
-    as_task: Option<&str>,
+    runner_for: Option<&str>,
 ) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
@@ -276,7 +279,7 @@ fn launch(
         cmd.process_group(0);
     }
     let mut child = cmd.spawn().context("start the review command")?;
-    if let Some(task) = as_task {
+    if let Some(task) = runner_for {
         // `nohup` execs the runner, so this is its pid.
         if let Err(e) = identity::record(&app.db, task, AnchorKind::Job, None, child.id()) {
             let _ = child.kill();
@@ -309,6 +312,31 @@ pub fn await_go() -> Result<()> {
         _ => bail!(refused),
     }
 }
+
+/// The runner for the job in `state`, refused before it ran the command:
+/// record that it ended, or the job reads as running forever, refusing
+/// every later `jeet review`. Only a state file jeet wrote, for a job no
+/// runner has taken up.
+pub fn refused(state: &Path) {
+    let Ok(app) = App::open() else {
+        return;
+    };
+    if crate::permissions::check_review_job(&app.home, state).is_err() {
+        return;
+    }
+    let Ok(mut job) = read(state) else {
+        return;
+    };
+    if job.pid.is_some() || job.exit_code.is_some() {
+        return;
+    }
+    job.finished_at = Some(now_secs());
+    job.exit_code = Some(REFUSED);
+    let _ = write(state, &job);
+}
+
+/// The status a refused runner records: its command never ran.
+const REFUSED: i32 = 126;
 
 /// `jeet review-job <state>`: run a job's command and record how it ended.
 ///

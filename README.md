@@ -1177,6 +1177,8 @@ launches it, so it gets no deny rules.
 ```toml
 [managers]
 idle_report_mins = 10   # tell the assistant when a task of its sits idle this long
+placement = "cloud"     # where managers below the assistant run (not built yet); "local" is
+                        # an error when such a task is made, "local-sandbox" is refused at start
 ```
 
 ### Keeping the store fetched

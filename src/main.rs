@@ -56,7 +56,15 @@ fn main() -> Result<()> {
     }
     // Who the caller is and what it may do, before the command does
     // anything.
-    let authorized = permissions::authorize(cli.command.as_ref())?;
+    let authorized = match permissions::authorize(cli.command.as_ref()) {
+        Ok(authorized) => authorized,
+        Err(e) => {
+            if let Some(Commands::ReviewJob { state }) = &cli.command {
+                review::refused(state);
+            }
+            return Err(e);
+        }
+    };
     let result = run(cli.command);
     if let Some(action) = authorized {
         action.finish(&result);

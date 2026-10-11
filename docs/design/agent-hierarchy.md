@@ -541,8 +541,9 @@ jeet can unset `JEET_TASK_ID`, edit `config.toml`, or attach to another tmux
 session. The gate stops honest mistakes and agents steered through jeet's own
 commands. A hard boundary needs the harness's sandbox and deny rules: no
 writes outside the node's own directory, and no `tmux`, `sqlite3` or edits to
-`~/.jeet/config.toml`. jeet writes those rules where the harness supports
-them. The `auto_trust` scope from #23 must exclude manager homes, as it
+`~/.jeet/config.toml`. jeet writes none of those rules today (its deny rules
+cover only pushes and merges, §5.6); they are what a `local-sandbox`
+placement would provide (§11). The `auto_trust` scope from #23 must exclude manager homes, as it
 already excludes the assistant's, unless the user opts in.
 
 **Decision (#33).** Where and how a node runs is its *placement*, chosen
@@ -575,7 +576,7 @@ local agent that sets out to escape:
 | Escape | Status |
 |---|---|
 | Forging `JEET_TASK_ID` / `JEET_ASSISTANT` | closed (mismatch / unconfirmed) |
-| Stripping the env inside the pane | closed (the anchor still binds) |
+| Stripping the env inside the pane | closed (the anchor still binds); open for a pane whose anchor could not be recorded (jeet warns at start) |
 | A Node claiming Root | closed (mismatch) |
 | Pid reuse | closed (start time; boot floor on Linux) |
 | A pre-created `jeet-<slug>` session | closed (not adopted; warning) |
@@ -1007,18 +1008,24 @@ what this RFC left open, or departed from it:
   Denied in `actions.log`. An index error fails closed.
 - **I7** `authorize` resolves identity for every gated or node-only
   command, whatever the env says. Hooks and free commands never ask.
-- **I8** Anchors are a plain `INSERT`, never re-bound. Dead rows are pruned
-  on insert. If a start time cannot be read, nothing is recorded and jeet
-  warns that the agent cannot be identified. Archiving a task deletes its
-  pane anchors; deleting it cascades.
+- **I8** Anchors are a plain `INSERT`, never re-bound. The process is
+  already running when its row goes in, so the insert comes first and
+  dead rows are pruned after it (or before a retry, when a pre-reboot row
+  holds the same pid and start). If a start time cannot be read, nothing is
+  recorded and jeet warns that the agent cannot be identified. Archiving a
+  task deletes its pane anchors; deleting it cascades.
 - **I9** No backfill: matching sessions by name is spoofable. A live session
   with no live anchor is not adopted; `task open` warns to stop and reopen
-  it. **Reopen running tasks after upgrading:** older agents are refused for
+  it. `jeet chat` going back to an assistant window whose pane has no live
+  anchor warns the same way (exit it there and `jeet chat` again). **Reopen running tasks after upgrading:** older agents are refused for
   `report` and `worktree add`, and old hooks no longer report up.
 - **I10** `jeet review` starts the runner with stdin piped, records its job
-  anchor when the review task has a parent (the caller is the root), then
-  writes one go byte `g`. If the anchor cannot be recorded, the runner is
-  killed and the job ends with 127. `review-job` refuses to run on a
+  anchor, then writes one go byte `g`. The anchor names the review task when
+  it has a parent, else the assistant when the caller is the root (a
+  top-level review task the root reviews again is never moved under it),
+  else nothing (the user). If the anchor cannot be recorded, the runner is
+  killed and the job ends with 127. A runner refused after the go byte
+  records its job as ended with 126, so it never reads as running. `review-job` refuses to run on a
   terminal, on EOF or on any other byte ("review-job is started only by
   `jeet review`"), before `authorize`. Every caller of `review-job` is then
   held to the reviews-dir check ("review jobs run only from jeet's reviews
@@ -1057,9 +1064,9 @@ what this RFC left open, or departed from it:
   file as a transitive one.
 - **I21** As built, beyond the decisions above:
   - The refusals read "jeet can't confirm this is task X's agent: reopen
-    the task (agents started before this jeet must be reopened), or run
+    the task (agents started before this jeet must be restarted), or run
     this outside the agent's tmux session" (or "… this is the assistant:
-    …"), and "this jeet runs under task X's agent (<id>), but
+    exit the assistant in its window and run `jeet chat` again …"), and "this jeet runs under task X's agent (<id>), but
     $JEET_TASK_ID says it is task Y (<id>); jeet refuses a caller that
     claims to be another" (or "… $JEET_ASSISTANT says it is the
     assistant …"). A mismatch is logged as `denied` under the gated
@@ -1077,11 +1084,13 @@ what this RFC left open, or departed from it:
     user window inside a parented task's or the assistant's session.
   - `tmux::new_session` reads `#{pane_id}\t#{pane_pid}` back and fails if
     tmux reports no pane; a failed record warns "task X's agent cannot be
-    identified (<cause>); its gated jeet commands will be refused until it
-    is reopened". A live session with no live anchor warns "tmux session S
+    identified (<cause>): its jeet commands that name the task are
+    refused, but one run without $JEET_TASK_ID and $JEET_ASSISTANT runs as
+    the user; stop it and open the task again". The agent is still
+    started (I8). A live session with no live anchor warns "tmux session S
     was started by an older jeet or outside jeet, so jeet cannot confirm
     its agent is task X's; stop it and open the task again".
-  - The prune on each insert removes rows of dead processes, rows whose
+  - The prune after each insert removes rows of dead processes, rows whose
     start differs and, on Linux, rows older than the boot time.
   - The #32 notes' forward references to "#33's sandbox" (E0, E1, E9,
     E15) are superseded: #33 built no sandbox. The boundary is a

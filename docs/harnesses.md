@@ -43,7 +43,11 @@ ones included.
 
 jeet's hook command is `jeet task-hook --task <id> <Event>`, with the event's
 payload on stdin; `<id>` is `HookSetup::task_id`, the task jeet launched the
-agent for, and only a hook that names it reports to the task's parent. For
+agent for, and only a hook that names it, and runs as a descendant of the
+process jeet starts in the task's pane, reports to the task's parent (jeet
+identifies callers by process ancestry; the agent's own `jeet` commands are
+held to the same, so a harness that runs hooks or shell tools from a
+separate daemon gets status but no reports, and gated commands refused). For
 any harness except Claude Code, add `--harness <id>` so that `task-hook`
 hands the payload to your `parse_hook`. A hook has to be quick,
 must print nothing on stdout except the outputs above, and always exits 0.
@@ -84,13 +88,18 @@ answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
 for. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
-Both need the hook to run with the agent's environment: jeet reports and
-briefs only when the hook's `$JEET_TASK_ID` names the task its cwd found.
-Status needs only the cwd, so a hook run by a plugin host or server that
-does not inherit the agent's environment still shows status, and idle
-reports (swept from status) still go out, but it silently never sends the
-other reports or briefs; run hooks as children of the agent, or pass
-`$JEET_TASK_ID` on. Only what the harness knows (the `clear` reason, say) belongs in its module:
+Both need the hook to carry `--task <id>` (`hook_args`) and to run as a
+descendant of the process jeet starts in the task's pane: jeet reports and
+briefs only when `--task` names the task found and jeet confirms, by walking
+the hook's process ancestry up to that recorded process, that it is that
+task's agent. The environment is only a hint. Status needs only `--task` or
+the cwd, so a hook run by a plugin host, daemon or server outside the
+pane's process tree still shows status, and idle reports (swept from
+status) still go out, but it silently never sends the other reports or
+briefs; run hooks as children of the agent. The same holds for the agent's
+shell tool: its `jeet report`, `jeet worktree add` and other gated jeet
+commands are refused ("jeet can't confirm this is task X's agent") unless
+they run under the pane's process. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 
 ## Deny rules

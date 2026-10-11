@@ -777,6 +777,11 @@ fn live_pane_pids(name: &str) -> Vec<u32> {
     pane_pids(&["-s", "-t", &target(name)])
 }
 
+/// The processes tmux started in window `id`'s live panes.
+pub fn window_pane_pids(id: &str) -> Vec<u32> {
+    pane_pids(&["-t", id])
+}
+
 /// The pids of the live panes `list-panes` with `args` lists.
 fn pane_pids(args: &[&str]) -> Vec<u32> {
     let Ok(output) = Command::new(binary())

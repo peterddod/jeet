@@ -304,11 +304,27 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         .iter()
         .find(|w| w.alive && w.key.as_deref() == Some(id.as_str()))
     {
+        // Only a window jeet started is the assistant's: one from a jeet
+        // before anchors has none, and every jeet command it runs is refused.
+        let pids = tmux::window_pane_pids(&window.id);
+        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
+        let mut warnings = Vec::new();
+        if !anchors
+            .iter()
+            .any(|a| pids.contains(&a.pid) && identity::live(a))
+        {
+            warnings.push(
+                "the assistant's window was started by an older jeet or outside jeet, so jeet \
+                 cannot confirm it is the assistant and refuses its jeet commands; exit the \
+                 assistant there and run `jeet chat` again"
+                    .to_string(),
+            );
+        }
         return Ok(Opened {
             name,
             window: window.id.clone(),
             started: false,
-            warnings: Vec::new(),
+            warnings,
         });
     }
 

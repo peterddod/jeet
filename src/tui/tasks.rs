@@ -2758,10 +2758,12 @@ impl Screen<'_> {
         let attached = term::suspended(self.terminal, || assistant::attach(&opened.window))?;
         self.refresh(false);
         let name = printable(&opened.name);
+        let mut back = format!("back from the assistant ({name})");
+        if !opened.warnings.is_empty() {
+            back.push_str(&format!(" — {}", opened.warnings.join("; ")));
+        }
         match attached {
-            Ok(_) => self
-                .ui
-                .set_status(format!("back from the assistant ({name})")),
+            Ok(_) => self.ui.set_status(back),
             Err(e) => self.ui.set_status(format!("could not attach: {e:#}")),
         }
         Ok(())

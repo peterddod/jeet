@@ -859,7 +859,7 @@ impl Authorized {
 /// A review job runs the command its state file names, so only the ones
 /// `jeet review` wrote, under `$JEET_HOME/reviews`, are run — not one an
 /// agent wrote itself.
-fn check_review_job(home: &Path, state: &Path) -> Result<()> {
+pub fn check_review_job(home: &Path, state: &Path) -> Result<()> {
     let reviews = home.join("reviews");
     let reviews = reviews.canonicalize().unwrap_or(reviews);
     let state = state
