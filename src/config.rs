@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::github::MergeMethod;
+use crate::manager::budget::{self, Limits};
+use crate::permissions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -47,7 +49,7 @@ pub struct Config {
     pub watch: Option<WatchConfig>,
 
     /// How tasks with a parent are watched over (`[managers]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "managers_is_empty")]
     pub managers: Option<ManagersConfig>,
 }
 
@@ -225,9 +227,75 @@ pub struct ManagersConfig {
     /// (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_report_mins: Option<u64>,
+
+    /// How deep the tree under the assistant goes, the assistant being 0: a
+    /// worker sits at most this deep, a manager one less (default: 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+
+    /// Active tasks a manager may have under it, unless it was given fewer
+    /// (default: 6). The assistant has no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+
+    /// Tasks under the assistant whose agents may run at once (default: 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_live: Option<u32>,
+
+    /// The budget a manager, or a task under one, gets unless given one,
+    /// e.g. `"4h"` or `"2h,40turns"` (default: `"4h"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_budget: Option<String>,
+
+    /// What a new worker may do unless given `--allow` (default:
+    /// `["worktree.add"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_default: Option<Vec<String>>,
+
+    /// What a new manager may do unless given `--allow` (default: nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_default: Option<Vec<String>>,
+
+    /// Capabilities, besides [`HELD_FLOOR`], that pass down only when named
+    /// and are logged and notified when granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Vec<String>>,
+}
+
+impl ManagersConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn managers_is_empty(managers: &Option<ManagersConfig>) -> bool {
+    managers.as_ref().is_none_or(ManagersConfig::is_empty)
 }
 
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
+pub const DEFAULT_MAX_DEPTH: u32 = 3;
+pub const DEFAULT_MAX_CHILDREN: u32 = 6;
+pub const DEFAULT_MAX_LIVE: u32 = 8;
+pub const DEFAULT_BUDGET: &str = "4h";
+pub const DEFAULT_WORKER_GRANT: &[&str] = &["worktree.add"];
+
+/// Capabilities that are always held, whatever `[managers] held` says.
+pub const HELD_FLOOR: &[&str] = &["pr.merge", "pr.comment", "pr.review", "task.delete"];
+
+/// `[managers]`, checked and with its defaults filled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagerPolicy {
+    pub max_depth: u32,
+    pub max_children: u32,
+    // Read once `max_live` gates starts.
+    #[allow(dead_code)]
+    pub max_live: u32,
+    pub default_budget: Limits,
+    pub worker_default: Vec<&'static str>,
+    pub manager_default: Vec<&'static str>,
+    /// [`HELD_FLOOR`] and `[managers] held`.
+    pub held: Vec<&'static str>,
+}
 
 /// A GitHub Project: `{ owner = "acme", number = 3 }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +395,72 @@ impl Config {
             .and_then(|m| m.idle_report_mins)
             .unwrap_or(DEFAULT_IDLE_REPORT_MINS)
     }
+
+    /// `[managers]` with its defaults, checked where it is used rather
+    /// than when config.toml is read, so a mistake there breaks only the
+    /// tree. It refuses an unknown capability, a held one in a default the
+    /// user set, a limit of 0 and a budget that does not parse. The
+    /// built-in worker default drops whatever `held` names.
+    pub fn manager_policy(&self) -> Result<ManagerPolicy> {
+        let m = self.managers.clone().unwrap_or_default();
+        let limit = |key: &str, value: Option<u32>, default: u32| match value {
+            Some(0) => bail!("[managers] {key} = 0 allows nothing; give at least 1"),
+            Some(n) => Ok(n),
+            None => Ok(default),
+        };
+        let mut held = HELD_FLOOR.to_vec();
+        for name in capabilities("held", m.held.as_deref().unwrap_or_default())? {
+            if !held.contains(&name) {
+                held.push(name);
+            }
+        }
+        let worker_default = match &m.worker_default {
+            Some(names) => capabilities("worker_default", names)?,
+            None => DEFAULT_WORKER_GRANT
+                .iter()
+                .copied()
+                .filter(|name| !held.contains(name))
+                .collect(),
+        };
+        let manager_default = capabilities(
+            "manager_default",
+            m.manager_default.as_deref().unwrap_or_default(),
+        )?;
+        for (key, names) in [
+            ("worker_default", &worker_default),
+            ("manager_default", &manager_default),
+        ] {
+            if let Some(name) = names.iter().find(|n| held.contains(n)) {
+                bail!(
+                    "[managers] {key} names {name}, which is held: \
+                     it passes down only when a grant names it"
+                );
+            }
+        }
+        let budget = m.default_budget.as_deref().unwrap_or(DEFAULT_BUDGET);
+        let default_budget =
+            budget::parse_limits(budget).map_err(|e| anyhow!("[managers] default_budget: {e}"))?;
+        Ok(ManagerPolicy {
+            max_depth: limit("max_depth", m.max_depth, DEFAULT_MAX_DEPTH)?,
+            max_children: limit("max_children", m.max_children, DEFAULT_MAX_CHILDREN)?,
+            max_live: limit("max_live", m.max_live, DEFAULT_MAX_LIVE)?,
+            default_budget,
+            worker_default,
+            manager_default,
+            held,
+        })
+    }
+}
+
+/// `names` as capabilities, refusing one jeet does not know.
+fn capabilities(key: &str, names: &[String]) -> Result<Vec<&'static str>> {
+    names
+        .iter()
+        .map(|name| match permissions::capability(name.trim()) {
+            Some(c) => Ok(c.name),
+            None => bail!("[managers] {key}: {name} is not a capability"),
+        })
+        .collect()
 }
 
 /// First non-blank candidate, in precedence order, else `default`.
@@ -593,6 +727,129 @@ mod tests {
         let config: Config =
             toml::from_str("[managers]\nplacement = \"cloud\"\nidle_report_mins = 5\n").unwrap();
         assert_eq!(config.idle_report_mins(), 5);
+        assert!(config.manager_policy().is_ok());
+        // A `[managers]` present but empty writes nothing back.
+        let config: Config = toml::from_str("[managers]\n").unwrap();
+        assert!(config.managers.is_some());
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("managers"), "{out}");
+    }
+
+    fn policy_of(text: &str) -> Result<ManagerPolicy> {
+        toml::from_str::<Config>(&format!("[managers]\n{text}\n"))
+            .unwrap()
+            .manager_policy()
+    }
+
+    #[test]
+    fn manager_policy_fills_in_its_defaults() {
+        let policy = Config::default().manager_policy().unwrap();
+        assert_eq!(
+            policy,
+            ManagerPolicy {
+                max_depth: 3,
+                max_children: 6,
+                max_live: 8,
+                default_budget: Limits {
+                    secs: Some(4 * 3600),
+                    turns: None
+                },
+                worker_default: vec!["worktree.add"],
+                manager_default: vec![],
+                held: HELD_FLOOR.to_vec(),
+            }
+        );
+
+        let text = "max_depth = 2\nmax_children = 3\nmax_live = 4\n\
+                    default_budget = \"2h,40turns\"\nworker_default = []\n\
+                    manager_default = [\"task.create\", \"worktree.add\"]\n\
+                    held = [\"task.archive\", \"pr.merge\"]";
+        let policy = policy_of(text).unwrap();
+        assert_eq!(
+            (policy.max_depth, policy.max_children, policy.max_live),
+            (2, 3, 4)
+        );
+        assert_eq!(
+            policy.default_budget,
+            Limits {
+                secs: Some(7200),
+                turns: Some(40)
+            }
+        );
+        assert!(policy.worker_default.is_empty());
+        assert_eq!(policy.manager_default, ["task.create", "worktree.add"]);
+        // The floor stays, whatever `held` says, and nothing is listed twice.
+        assert_eq!(
+            policy.held,
+            [
+                "pr.merge",
+                "pr.comment",
+                "pr.review",
+                "task.delete",
+                "task.archive"
+            ]
+        );
+
+        // Holding the built-in worker default drops it from the default,
+        // rather than blaming a `worker_default` the user never set.
+        let policy = policy_of("held = [\"worktree.add\"]").unwrap();
+        assert!(policy.worker_default.is_empty());
+        assert!(policy.held.contains(&"worktree.add"));
+
+        // Round trip: every key written back.
+        let config: Config = toml::from_str(&format!("[managers]\n{text}\n")).unwrap();
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&out).unwrap().managers,
+            config.managers
+        );
+    }
+
+    #[test]
+    fn manager_policy_refuses_what_it_cannot_honour() {
+        let refused = |text: &str, says: &str| {
+            let err = policy_of(text).unwrap_err().to_string();
+            assert!(err.contains(says), "{text}: {err}");
+        };
+        // An unknown capability, in each list.
+        refused(
+            "worker_default = [\"task.fly\"]",
+            "worker_default: task.fly is not",
+        );
+        refused(
+            "manager_default = [\"nope\"]",
+            "manager_default: nope is not",
+        );
+        refused("held = [\"nope\"]", "held: nope is not");
+        // A held capability in a default: the floor's, and one added.
+        refused(
+            "worker_default = [\"pr.merge\"]",
+            "worker_default names pr.merge",
+        );
+        refused(
+            "manager_default = [\"task.delete\"]",
+            "manager_default names task.delete",
+        );
+        refused(
+            "held = [\"task.create\"]\nmanager_default = [\"task.create\"]",
+            "names task.create, which is held",
+        );
+        refused(
+            "held = [\"worktree.add\"]\nworker_default = [\"worktree.add\"]",
+            "worker_default names worktree.add",
+        );
+        // A limit of 0.
+        for key in ["max_depth", "max_children", "max_live"] {
+            refused(&format!("{key} = 0"), &format!("{key} = 0 allows nothing"));
+        }
+        // A budget that does not parse, costs money, is 0 or repeats a unit.
+        refused("default_budget = \"4\"", "default_budget");
+        refused("default_budget = \"$5\"", "#26");
+        refused("default_budget = \"0h\"", "default_budget");
+        refused("default_budget = \"1h,30m\"", "time twice");
+        refused("default_budget = \"\"", "default_budget");
+        // A mistake there does not stop config.toml from loading.
+        assert!(toml::from_str::<Config>("[managers]\nmax_live = 0\n").is_ok());
     }
 
     #[test]

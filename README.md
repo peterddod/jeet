@@ -91,6 +91,7 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+jeet manager ls                          # the tree under it; show <task>, grant <task> <caps>
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 
@@ -648,14 +649,27 @@ claim, `<jeet-report … untrusted="true">`; the assistant's session context
 lists each such task with its last report. Reports hold at most 2,000 bytes:
 put detail in the pull request or a file and say where. `done`, `blocked` and
 `question` start an assistant session when none is running; `progress`
-waits for the next one.
+waits for the next one. A task under a manager reports to that manager the
+same way, fenced with its path in the tree (`path="assistant/backend/fix-x"`):
+typed into the manager's pane when it sits idle, queued while it is busy, and
+held in its inbox when it is not running, unless the report is one that
+starts it.
 
 jeet reports for the task too, as `status`: when its agent waits on a prompt
 only you can answer, sits idle longer than `[managers] idle_report_mins`
 (default 10; `jeet watch` and the assistant's own turns look), or ends without
 reporting done. These never start an assistant session. `--goal` and `--done`
 on `jeet task new` give the task a definition of done, shown to its agent at
-the start of each session with what it may do and how to report.
+the start of each session with what it may do and how to report. `--allow
+task.create,worktree.add` names what it may do instead of `[managers]
+worker_default`, refused unless its parent holds each one, and `--budget
+1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
+wait). For now a budget is recorded, and checked against what is left above
+when a task is made, but not yet charged or enforced: a task runs past it.
+`jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
+show <task> [--json]` a task's brief, grant (and what cut it), budget, run
+state and children, and `jeet manager grant <task> <caps>|--none` replaces
+its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 
 ### Archiving and deleting
 
@@ -1131,14 +1145,24 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
-assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly. It may run the reads that
-need no capability (`jeet ls`, `jeet task ls`, `jeet prs`, …), run
-`jeet report`, and add worktrees to itself, and only that last when the
-assistant may too: add `worktree.add` to `[assistant] allow` to let such
-tasks add worktrees. Everything else that needs a capability is refused,
-whatever the assistant holds, `project.read` (`jeet projects ls`) included,
-as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask with `jeet report`. The assistant's own
+assistant`; `--parent` also takes a manager by its exact name, once
+managers can be made) is gated more narrowly. It is granted `worktree.add`
+when made (`[managers] worker_default`, or what `--allow` names), and may
+use what its grant names only while the assistant may too: add
+`worktree.add` to `[assistant] allow` to let such tasks add worktrees.
+Granting a held capability (`pr.merge`, `pr.comment`, `pr.review`,
+`task.delete` and `[managers] held`) is written to `actions.log` and
+announced, whatever `[assistant] notify` says, unless you grant it
+yourself. It reaches only itself: it may run `jeet report`, add
+worktrees to itself and read itself (`jeet task last`, `task path`, `task
+prs`, `worktree ls`/`path`), and `jeet task ls` lists only it. The reads
+that name no task (`jeet ls`, `jeet prs`, …) are free. Anything else is
+refused, whatever the assistant holds, `project.read` (`jeet projects ls`)
+included, as are `jeet notify`, `jeet todo` and review jobs; the refusal
+tells it to ask with `jeet report`. When the assistant reads what a task
+said with `jeet task last`, it gets it fenced as untrusted, as it gets
+reports, and the status beside it (which the task's agent can write) unable
+to close or open a fence. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
@@ -1155,8 +1179,9 @@ process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
 disagrees is refused and written to `actions.log`, and one that claims a task
 with a parent, or the assistant, with no recorded agent behind it is refused
 as unconfirmed. So a shell you open inside such a task's or the assistant's
-tmux session is refused for commands that need a capability, and for
-`jeet worktree ls`, `path` and `add` without `--task`; use one outside it. This stops mistakes and casual forging, not an agent that sets
+tmux session is refused for commands that need a capability or name a
+task (`jeet task last`, `jeet worktree ls` and the like); use one outside
+it. This stops mistakes and casual forging, not an agent that sets
 out to escape. Every agent, managers below the assistant included, runs
 locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
 
@@ -1192,7 +1217,19 @@ launches it, so it gets no deny rules.
 ```toml
 [managers]
 idle_report_mins = 10   # tell the assistant when a task of its sits idle this long
+max_depth = 3           # a task at most 3 below the assistant, a manager 2
+max_children = 6        # active tasks under one manager (the assistant has no limit)
+default_budget = "4h"   # for a manager's task when `--budget` names none
+worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
+manager_default = []    # a new manager's
+held = []               # added to pr.merge, pr.comment, pr.review, task.delete
 ```
+
+The tree's settings are checked when they are used, not when config.toml
+is read: a mistake in them (an unknown capability, a held one in a default
+you set, a limit of 0, a `$` budget) refuses making tasks under the
+assistant, `jeet manager grant` and unarchiving a task under a manager, and
+nothing else.
 
 ### Keeping the store fetched
 

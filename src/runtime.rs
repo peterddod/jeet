@@ -287,12 +287,29 @@ pub fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String>
 }
 
 /// jeet's hooks for a task's agent, with what it is denied (nothing for a
-/// top-level task).
+/// top-level task). A manager, started with nobody at its pane, also has
+/// the commands of what it holds pre-approved, read at each start, as the
+/// assistant has those of `[assistant] allow`.
 fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<HookSetup> {
+    let mut allow = ALLOWED.map(str::to_string).to_vec();
+    match task.kind {
+        TaskKind::Manager => {
+            let held: Vec<String> = permissions::effective(app, task)?
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            for command in permissions::allowed_commands(&held) {
+                if !allow.contains(&command) {
+                    allow.push(command);
+                }
+            }
+        }
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {}
+    }
     Ok(HookSetup {
         exe,
         task_id: task.id.clone(),
-        allow: ALLOWED.map(str::to_string).to_vec(),
+        allow,
         deny: permissions::task_deny(app, task)?,
     })
 }
@@ -626,6 +643,55 @@ mod tests {
         );
         // A task with a parent reports to it without a prompt.
         assert!(ALLOWED.contains(&"jeet report"));
+    }
+
+    #[test]
+    fn a_manager_has_the_commands_of_what_it_holds_pre_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let mut app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        app.config.assistant.allow = vec!["task.create".into(), "task.send".into()];
+        let root = crate::assistant::ensure(&app).unwrap();
+        let row = |slug: &str, kind| TaskRecord {
+            id: format!("{slug}-id"),
+            slug: slug.into(),
+            name: slug.into(),
+            kind,
+            parent_id: Some(root.id.clone()),
+            ..root.clone()
+        };
+        let (api, worker) = (row("api", TaskKind::Manager), row("wk", TaskKind::Work));
+        for (task, grant) in [
+            (&api, ["task.create", "task.delete"]),
+            (&worker, ["task.create", "task.send"]),
+        ] {
+            app.db.insert_task(task).unwrap();
+            app.db.set_grants(&task.id, &grant).unwrap();
+        }
+        let hooks = task_hooks(&app, &api, "/bin/jeet".into()).unwrap();
+        for allowed in ["jeet task new", "jeet report", "jeet manager show"] {
+            assert!(
+                hooks.allow.contains(&allowed.to_string()),
+                "{:?}",
+                hooks.allow
+            );
+        }
+        // Granted but cut by the assistant, or never granted.
+        for withheld in ["jeet task delete", "jeet task send"] {
+            assert!(
+                !hooks.allow.contains(&withheld.to_string()),
+                "{:?}",
+                hooks.allow
+            );
+        }
+        assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
+        // A worker asks at the prompt, as before.
+        let hooks = task_hooks(&app, &worker, "/bin/jeet".into()).unwrap();
+        assert_eq!(hooks.allow, ALLOWED.map(str::to_string));
     }
 
     #[test]

@@ -41,8 +41,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, PrCommands, ProjectCommands, TaskCommands, TodoCommands, WatchCommands,
-    WorktreeArgs, WorktreeCommands,
+    Cli, Commands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands, TodoCommands,
+    WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -204,6 +204,16 @@ fn run(command: Option<Commands>) -> Result<()> {
             let app = context::App::open()?;
             startup::run(&app, &task, session.as_deref())?;
         }
+        Commands::Manager { command } => {
+            let app = context::App::open()?;
+            match command {
+                ManagerCommands::Ls { json } => commands::manager::ls(&app, json)?,
+                ManagerCommands::Show { name, json } => commands::manager::show(&app, &name, json)?,
+                ManagerCommands::Grant { name, caps, none } => {
+                    commands::manager::grant(&app, &name, &caps, none)?
+                }
+            }
+        }
         Commands::Task { command } => {
             let app = context::App::open()?;
             match command {
@@ -213,19 +223,17 @@ fn run(command: Option<Commands>) -> Result<()> {
                     repos,
                     branch,
                     prompt,
-                    parent,
-                    goal,
-                    done_when,
+                    delegation,
                 } => commands::task::new(
                     &app,
-                    &name,
-                    project.as_deref(),
-                    &repos,
-                    branch.as_deref(),
-                    prompt.as_deref(),
-                    parent.as_deref(),
-                    goal.as_deref(),
-                    done_when.as_deref(),
+                    &commands::task::NewTaskArgs {
+                        name: &name,
+                        project: project.as_deref(),
+                        repos: &repos,
+                        branch: branch.as_deref(),
+                        prompt: prompt.as_deref(),
+                        delegation: &delegation,
+                    },
                 )?,
                 TaskCommands::Send { name, message } => {
                     commands::task::send(&app, &name, &message)?

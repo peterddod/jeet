@@ -2,9 +2,11 @@ use clap::{Args, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completion_candidates::{
-    all_branch_candidates, project_candidates, repo_filter_candidates, task_candidates,
-    task_worktree_candidates,
+    all_branch_candidates, capability_candidates, manager_candidates, parent_candidates,
+    project_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
 };
+use crate::manager::budget::BudgetPart;
+use crate::permissions::parse_capability;
 
 #[derive(Parser)]
 #[command(
@@ -115,6 +117,12 @@ pub enum Commands {
     Task {
         #[command(subcommand)]
         command: TaskCommands,
+    },
+
+    /// Managers: tasks under the assistant that delegate to tasks under them
+    Manager {
+        #[command(subcommand)]
+        command: ManagerCommands,
     },
 
     /// Projects: repositories, AGENTS.md and skills a task can start from
@@ -230,17 +238,8 @@ pub enum TaskCommands {
         /// Start the task's agent straight away, with this as its first prompt
         #[arg(long, allow_hyphen_values = true)]
         prompt: Option<String>,
-        /// The task it reports to: `assistant`, the only one for now. Made by
-        /// the assistant, a task reports to it without this
-        #[arg(long)]
-        parent: Option<String>,
-        /// What its parent wants of it, shown to its agent as each session
-        /// starts (needs a parent)
-        #[arg(long, allow_hyphen_values = true)]
-        goal: Option<String>,
-        /// When it is done, alongside --goal
-        #[arg(long = "done", allow_hyphen_values = true)]
-        done_when: Option<String>,
+        #[command(flatten)]
+        delegation: Delegation,
     },
 
     /// List tasks, most recently active first
@@ -337,6 +336,63 @@ pub enum TaskCommands {
         /// Replace copies the task has changed, too
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+/// Where a new task sits in the tree, and what it is asked and allowed.
+#[derive(Args, Default)]
+pub struct Delegation {
+    /// The task it reports to: `assistant`, or a manager by its exact name.
+    /// Made by the assistant, a task reports to it without this; made by a
+    /// manager, to that manager
+    #[arg(long, add = ArgValueCandidates::new(parent_candidates))]
+    pub parent: Option<String>,
+    /// What its parent wants of it, shown to its agent as each session
+    /// starts (needs a parent)
+    #[arg(long, allow_hyphen_values = true)]
+    pub goal: Option<String>,
+    /// When it is done, alongside --goal
+    #[arg(long = "done", allow_hyphen_values = true)]
+    pub done_when: Option<String>,
+    /// What it may do (comma-separated capabilities), within what its
+    /// parent holds; default `[managers] worker_default`
+    #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
+    pub allow: Option<Vec<String>>,
+    /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
+    /// comma-separated, within what is left above it (recorded; not yet
+    /// charged or enforced)
+    #[arg(long, value_delimiter = ',', value_parser = crate::manager::budget::parse_part)]
+    pub budget: Vec<BudgetPart>,
+}
+
+#[derive(Subcommand)]
+pub enum ManagerCommands {
+    /// The tree under the assistant
+    Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// A task under the assistant: its brief, grant, budget and children
+    Show {
+        #[arg(add = ArgValueCandidates::new(manager_candidates))]
+        name: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Replace what a task under the assistant may do (comma-separated
+    /// capabilities)
+    Grant {
+        #[arg(add = ArgValueCandidates::new(manager_candidates))]
+        name: String,
+        #[arg(value_delimiter = ',', required_unless_present = "none", value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
+        caps: Vec<String>,
+        /// Grant nothing
+        #[arg(long, conflicts_with = "caps")]
+        none: bool,
     },
 }
 

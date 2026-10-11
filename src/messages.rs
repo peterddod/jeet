@@ -496,11 +496,24 @@ fn marked(text: &str) -> String {
 pub struct TmuxAgent<'a> {
     app: &'a App,
     task: &'a TaskRecord,
+    /// May start it when it is not running; see [`TmuxAgent::may_start`].
+    may_start: bool,
 }
 
 impl<'a> TmuxAgent<'a> {
     pub fn new(app: &'a App, task: &'a TaskRecord) -> Self {
-        Self { app, task }
+        Self {
+            app,
+            task,
+            may_start: true,
+        }
+    }
+
+    /// Without `may_start`, a message for it while it is not running waits
+    /// in its inbox rather than start it: a report that does not wake its
+    /// parent, say.
+    pub fn may_start(self, may_start: bool) -> Self {
+        Self { may_start, ..self }
     }
 }
 
@@ -530,7 +543,7 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn can_start(&self) -> bool {
-        tmux::may_start_session()
+        self.may_start && tmux::may_start_session()
     }
 
     fn start(&self, prompt: &str) -> Result<bool> {

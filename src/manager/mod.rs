@@ -4,6 +4,7 @@
 //! its todo and its inbox. The assistant is the root node; [`crate::assistant`] keeps its
 //! sessions and windows.
 
+pub mod budget;
 pub mod context;
 pub mod fence;
 
@@ -12,7 +13,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::context::App;
-use crate::db::tasks::TaskRecord;
+use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::instructions;
 use crate::messages::{self, Queued};
 use crate::status;
@@ -91,6 +92,36 @@ pub fn ensure_files(dir: &Path, role: Role) -> Result<Vec<&'static str>> {
 /// set up.
 pub fn root(app: &App) -> Result<TaskRecord> {
     crate::assistant::ensure(app)
+}
+
+/// Where `task` sits in the tree, from the root down:
+/// `assistant/backend/fix-x`. A task outside the tree is its slug alone.
+pub fn tree_path(app: &App, task: &TaskRecord) -> Result<String> {
+    let mut slugs: Vec<String> = app
+        .db
+        .ancestors(&task.id)?
+        .into_iter()
+        .rev()
+        .map(|a| a.slug)
+        .collect();
+    slugs.push(task.slug.clone());
+    Ok(slugs.join("/"))
+}
+
+/// Who `task` is, to the tasks around it: `the assistant`, `manager
+/// backend` or `task fix-x`.
+pub fn label(task: &TaskRecord) -> String {
+    label_at(task, &task.slug)
+}
+
+/// [`label`], with `task` named by `path` (its [`tree_path`]) instead of
+/// its slug: `manager assistant/backend`.
+pub fn label_at(task: &TaskRecord, path: &str) -> String {
+    match task.kind {
+        TaskKind::Assistant => "the assistant".to_string(),
+        TaskKind::Manager => format!("manager {path}"),
+        TaskKind::Work | TaskKind::Review => format!("task {path}"),
+    }
 }
 
 /// `YYYY-MM-DD`, in UTC, for unix seconds `at`.

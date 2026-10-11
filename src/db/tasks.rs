@@ -516,7 +516,7 @@ fn unarchive_refusal_in(conn: &Connection, id: &str, fan_out: Option<u32>) -> Re
 
 /// The refusal when `parent` already has `active` children, its limit of
 /// `max`.
-fn fan_out_full(parent: &str, active: usize, max: u32) -> String {
+pub fn fan_out_full(parent: &str, active: usize, max: u32) -> String {
     format!(
         "{parent} already has {active} active {} under it, its limit of {max}; \
          archive one first",

@@ -2448,7 +2448,7 @@ impl Screen<'_> {
                                 project: spec.project.as_deref(),
                                 repos: &spec.repos,
                                 branch: spec.branch.as_deref(),
-                                parent_id: None,
+                                child: None,
                             },
                         )
                     })

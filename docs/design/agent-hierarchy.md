@@ -487,7 +487,8 @@ held = ["pr.merge", "pr.comment", "pr.review", "task.delete"]
 ```
 
 A `held` capability in `worker_default` or `manager_default` is a config
-error.
+error. Left unset, `worker_default` is the built-in `["worktree.add"]` less
+whatever `held` names, so holding `worktree.add` needs no second key.
 
 `max_live` is checked when jeet starts an agent (`task new --prompt`,
 `task open`, a message to a stopped agent). Over the limit, the start is
@@ -1173,9 +1174,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   manager can be made, and apply to every task with children.
 - **P3** Every `Manager` arm that restricts a manager lands before
   `jeet manager new` can make one: teardown refusals (P2), read-only
-  worktrees and git denies (P4) and the trust scope (P5). Until then a
-  report to a manager is refused ("reports to managers land in a later
-  version"); no manager row exists for it to reach.
+  worktrees and git denies (P4) and the trust scope (P5). Until then no
+  manager row exists for a report or a `--parent` to reach (P11, P14).
 - **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
   #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
   chmod, since a manager runs unconfined anyway. `git branch` is not
@@ -1187,6 +1187,102 @@ Managers run locally in tmux, as the user, like any other task (I22).
 - **P5** A manager follows `[harness] auto_trust` as a worker does (5.7):
   it is started by its parent with nobody at its pane. The assistant
   stays excluded.
+- **P6** `[managers]` (5.2) is checked where it is used, not when
+  config.toml is read, so a mistake there breaks only the tree. `held`
+  adds to a floor of `pr.merge`, `pr.comment`, `pr.review` and
+  `task.delete` rather than replacing it. An unknown capability, a held one
+  in a default, a limit of 0, and a budget that does not parse or names `$`
+  are errors. `default_budget` takes the parts `--budget` does
+  (`"2h,40turns"`). A manager without its own
+  `max_children` is held to `[managers] max_children` on unarchive too.
+- **P7** Effective lists (5.1) come from stored grants: a node's grant cut
+  by each ancestor's own list (a manager's grant, the assistant's
+  `[assistant] allow`; a worker passes nothing on), read at every check and
+  never cached. A chain of parents that does not end at the assistant
+  holds nothing, and a broken one is an error. A new child stores its
+  kind's default (`worker_default`) uncut, so widening `[assistant] allow`
+  later reaches existing children, as in phase 1; a grant someone names
+  must be within the parent's list and, for a node granting, its own.
+  New capabilities: `manager.create`, `manager.grant` (grant, and budget
+  when it lands) and `manager.stop` (pause, resume, stop). `git.push` is
+  deferred (§13).
+- **P8** Scope (5.1) is one table, `permissions::node_scope`, saying for
+  each command what a node may name: itself (`worktree add`, `ls`,
+  `path`), itself or below (`task last`, `path`, `prs`), strictly below
+  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`), a
+  manager at or below it as `--parent`, or no task at all (`jeet ls`,
+  `jeet prs`, `report`, hooks, screens). A name is resolved within the
+  node's subtree, so a prefix cannot reach outside it; delete and
+  `--parent` take exact names. A command the table leaves out is refused
+  to every node, reads included (`worktree rm`, `projects`, `clone`, …).
+  `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
+  it lets a node merge. The root keeps D1; the `jeet manager` verbs act
+  only on a task under the assistant, for anyone. `task ls` lists a node's
+  subtree only. `task send assistant` and `task interrupt assistant` mean
+  the assistant to the user and the root only; to a node, `assistant` is a
+  name like any other, found in its subtree, so a child named for it is
+  that child, never the root.
+- **P9** A node's allowed actions go to its own `actions.log`,
+  unannounced. A held capability granted is logged by the granter (the
+  assistant's log, a manager's own, or the assistant's marked `by user`)
+  and announced whatever `[assistant] notify` says, except the user's own,
+  once the task is fully made (its worktrees added), so no entry names a
+  task that was undone.
+  `jeet task last` fences what it prints for any caller but the user: an
+  agent's words may carry text it read (5.5). The status beside them and
+  an API error, which its agent can write too, reach an agent unable to
+  close a fence or open one (as `jeet task ls`'s STATUS column does), and
+  everyone without control characters. So does `jeet manager show`,
+  for the children's reports and for the brief's goal and done-when, which
+  a manager writes from what it has read.
+- **P10** A manager's harness settings pre-approve the commands of what it
+  holds (§7 "allow rules from capabilities"), read at each start, since it
+  is started with nobody at its pane. Never `jeet *`.
+- **P11** Making a child (§3, 5.1) is planned, then made: the plan checks,
+  writing nothing, the parent (`assistant` or an exact name, within a
+  node's subtree), that the caller may make tasks under it, that it is
+  active and the assistant or a manager, the depth (a worker at most
+  `max_depth` below the assistant, a manager one less), the fan-out (the
+  assistant has none), the grant, the budget and, for a manager, the
+  harness. Making it writes the row, grant, budget and brief in one
+  transaction that refuses a parent archived or filled meanwhile. The
+  parent defaults to the assistant for the assistant and to itself for a
+  manager; the user's task has none unless given. A brief names who made
+  the task, not its parent. `--budget` must fit what is left under the
+  parent and every ancestor; `[managers] default_budget`, given to a
+  manager and to a manager's child when unasked, is cut to what is left
+  rather than refused. Nothing is made under a parent with either unit
+  used up, whatever `--budget` names. A worker of the assistant's gets no budget unless
+  asked. Every command naming a task finds it as the permission check did,
+  then checks its reach again.
+- **P12** A manager needs a harness with hook events, continue-turn
+  output, `interrupt_keys` and deny rules (§7), and is refused, naming what
+  is missing, on one without. A worker starts without them; only a
+  worker with a parent is warned, and only of missing deny rules.
+  There is no `--harness` flag: the configured harness is checked.
+- **P13** `jeet manager ls [--json]` is the tree (a flat list with each
+  task's parent and depth), in place of `manager tree --json`. `jeet
+  manager show` lists, as open, the children's last reports that are
+  `blocked` or `question`. `jeet manager grant` warns of each running task
+  below that lost a capability with commands outside jeet (`pr.comment`,
+  `pr.review`, which jeet never sees run): its agent may still run them
+  until it next starts, when its harness deny rules change.
+- **P14** Reports (5.5) go to a manager parent through its pane, as a
+  message does: typed in when it sits idle, queued while it is busy, and,
+  when it is not running, started only by a `done`, `blocked` or
+  `question` from a caller that may start it; anything else is held in its
+  inbox. Pause and `max_live` gate it once they land. `<jeet-report>` names the sender as `task <slug>`
+  or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
+  (`the assistant`, `manager <slug>`) with the task's tree path, and its
+  last line says whom to report to. A broken chain that hides what a task
+  may do costs the brief its list, with a warning, and its path (the bare
+  slug), not the brief. `jeet report` names the parent it reported to.
+- **P15** A task is named by its kind wherever jeet names one in the tree:
+  `manager <slug>` or `task <slug>` in a refusal's "cut by", in `task new`'s
+  "reports to" line, in a report's sender and `jeet report`'s output, and
+  (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
+  manager `(manager)` after its name (M29); `jeet manager ls` has a kind
+  column. `max_live` is read once it gates starts.
 
 ## 11. Placement
 

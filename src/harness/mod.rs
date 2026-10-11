@@ -53,6 +53,38 @@ pub fn detect(program: &str) -> &'static dyn Harness {
         .unwrap_or(&Generic)
 }
 
+/// Whether `harness` installs jeet's hooks, either way (see
+/// `runtime::hook_args`).
+pub fn has_hooks(harness: &dyn Harness) -> bool {
+    let hooks = HookSetup::default();
+    harness.hook_args(&hooks).is_some()
+        || harness
+            .hook_file(&hooks, Path::new("/hooks.json"))
+            .is_some()
+}
+
+/// What `harness` lacks that a manager needs (design §7), by name: hook
+/// events (its budget and its children's reports), continue-turn output
+/// (handing it what queued mid-turn), `interrupt_keys` (pausing it) and
+/// deny rules (the git denies that keep it from writing code). Nothing
+/// when it has them all. A worker runs without them, with a warning.
+pub fn manager_missing(harness: &dyn Harness) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !has_hooks(harness) {
+        missing.push("hook events");
+    }
+    if harness.continue_output("").is_none() {
+        missing.push("continue-turn output");
+    }
+    if harness.interrupt_keys().is_none() {
+        missing.push("interrupt_keys");
+    }
+    if harness.enforcement() < Enforcement::Rules {
+        missing.push("deny rules");
+    }
+    missing
+}
+
 /// `claude-code, generic`: what `harness` in config.toml may be.
 pub fn ids() -> String {
     HARNESSES
@@ -252,8 +284,9 @@ impl Harness for Generic {
     }
 }
 
-/// How a harness keeps its agent from running what jeet denies it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a harness keeps its agent from running what jeet denies it, weakest
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Enforcement {
     /// It cannot: deny rules are dropped.
     None,
@@ -507,6 +540,59 @@ mod tests {
         assert!(h.accept_trust("Yes, I trust this folder").is_none());
         assert!(h.tested_version().is_none());
         assert!(h.last_messages(Path::new("/"), "x", 1).is_none());
+    }
+
+    /// A harness with everything a manager needs, less what `drop` names.
+    struct Partial(&'static str);
+
+    impl Harness for Partial {
+        fn id(&self) -> &'static str {
+            "partial"
+        }
+        fn name(&self) -> &'static str {
+            "partial"
+        }
+        fn default_command(&self) -> Option<&'static str> {
+            None
+        }
+        fn hook_args(&self, _hooks: &HookSetup) -> Option<Vec<String>> {
+            (self.0 != "hooks").then(Vec::new)
+        }
+        fn enforcement(&self) -> Enforcement {
+            match self.0 {
+                "rules" => Enforcement::None,
+                _ => Enforcement::Rules,
+            }
+        }
+        fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
+            (self.0 != "interrupt").then_some(&["Escape"][..])
+        }
+        fn continue_output(&self, _reason: &str) -> Option<String> {
+            (self.0 != "continue").then(String::new)
+        }
+    }
+
+    #[test]
+    fn a_manager_needs_hooks_continue_output_interrupt_and_rules() {
+        assert!(manager_missing(&claude::ClaudeCode).is_empty());
+        assert!(manager_missing(&Partial("")).is_empty());
+        assert_eq!(
+            manager_missing(&Generic),
+            [
+                "hook events",
+                "continue-turn output",
+                "interrupt_keys",
+                "deny rules"
+            ]
+        );
+        for (drop, named) in [
+            ("hooks", "hook events"),
+            ("continue", "continue-turn output"),
+            ("interrupt", "interrupt_keys"),
+            ("rules", "deny rules"),
+        ] {
+            assert_eq!(manager_missing(&Partial(drop)), [named], "{drop}");
+        }
     }
 
     #[test]

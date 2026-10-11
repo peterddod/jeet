@@ -1,18 +1,20 @@
 //! Reports: what a task with a parent tells it, with `jeet report`, and what
 //! jeet tells the parent about it on its own (a `status` report) when it
 //! waits on a prompt, sits idle or ends. Each is kept as a row, the record,
-//! and delivered to the parent fenced as untrusted
-//! ([`crate::assistant::fence_report`]).
+//! and delivered to the parent, the assistant or a manager, fenced as
+//! untrusted ([`crate::assistant::fence_report`]).
 
 use anyhow::{bail, Result};
 
 use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskState};
-use crate::messages::{self, Delivered};
+use crate::manager;
+use crate::messages::{self, Agent, Delivered, TmuxAgent};
 use crate::permissions;
 use crate::runtime;
 use crate::status::Activity;
+use crate::tasks;
 use crate::tmux;
 use crate::worktrees::now_secs;
 
@@ -55,11 +57,11 @@ pub fn send(
     body: &str,
     may_start: bool,
 ) -> Result<(i64, Result<Delivered>)> {
-    let (parent_id, body) = checked(app, task, body)?;
+    let (parent, body) = checked(app, task, body)?;
     let id = app
         .db
-        .insert_report(&task.id, &parent_id, kind, &body, now_secs())?;
-    Ok((id, deliver(app, task, id, kind, &body, may_start)))
+        .insert_report(&task.id, &parent.id, kind, &body, now_secs())?;
+    Ok((id, deliver(app, task, &parent, id, kind, &body, may_start)))
 }
 
 /// Whether a report of `kind` may start a session of the parent's: not
@@ -68,8 +70,8 @@ fn wakes(kind: ReportKind) -> bool {
     !matches!(kind, ReportKind::Progress | ReportKind::Status)
 }
 
-/// `task`'s parent's id and `body` cleaned, or why it cannot report.
-fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)> {
+/// `task`'s parent and `body` cleaned, or why it cannot report.
+fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(TaskRecord, String)> {
     let Some(parent_id) = &task.parent_id else {
         bail!("task {} has no parent to report to", task.slug);
     };
@@ -77,10 +79,9 @@ fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)>
         bail!("task {}'s parent is gone", task.slug);
     };
     match parent.kind {
-        TaskKind::Assistant => {}
-        TaskKind::Manager => bail!("reports to managers land in a later version"),
+        TaskKind::Assistant | TaskKind::Manager => {}
         TaskKind::Work | TaskKind::Review => {
-            bail!("only the assistant takes reports in this version")
+            bail!("only the assistant and managers take reports")
         }
     }
     let body = messages::clean(body);
@@ -95,20 +96,50 @@ fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)>
             body.len()
         );
     }
-    Ok((parent.id, body.to_string()))
+    Ok((parent, body.to_string()))
 }
 
-/// Deliver report `id`, recorded already, to `task`'s parent.
+/// Deliver report `id`, recorded already, to `task`'s `parent`.
 fn deliver(
     app: &App,
     task: &TaskRecord,
+    parent: &TaskRecord,
     id: i64,
     kind: ReportKind,
     body: &str,
     may_start: bool,
 ) -> Result<Delivered> {
-    let fenced = assistant::fence_report(id, &task.slug, kind, body);
-    assistant::deliver(app, &fenced, may_start && wakes(kind)).map(|(d, _)| d)
+    deliver_with(app, task, parent, id, kind, body, may_start, &|may_start| {
+        Box::new(TmuxAgent::new(app, parent).may_start(may_start))
+    })
+}
+
+/// [`deliver`], with a manager parent's agent, allowed to start or not,
+/// from `manager_agent`.
+#[allow(clippy::too_many_arguments)]
+fn deliver_with<'a>(
+    app: &App,
+    task: &TaskRecord,
+    parent: &TaskRecord,
+    id: i64,
+    kind: ReportKind,
+    body: &str,
+    may_start: bool,
+    manager_agent: &dyn Fn(bool) -> Box<dyn Agent + 'a>,
+) -> Result<Delivered> {
+    let path = manager::tree_path(app, task)?;
+    let fenced = assistant::fence_report(id, &manager::label(task), &path, kind, body);
+    let may_start = may_start && wakes(kind);
+    match parent.kind {
+        // Typed into its idle pane, queued while it is busy, and started
+        // only by a report that wakes it; otherwise held in its inbox.
+        TaskKind::Manager => messages::deliver(
+            &tasks::task_dir(app, parent),
+            manager_agent(may_start).as_ref(),
+            &fenced,
+        ),
+        _ => assistant::deliver(app, &fenced, may_start).map(|(d, _)| d),
+    }
 }
 
 /// Tell `task`'s parent about `event`, once per `since`: the moment it
@@ -136,12 +167,12 @@ pub fn auto_status(
             return Ok(None);
         }
     }
-    let (parent_id, body) = checked(app, task, body)?;
+    let (parent, body) = checked(app, task, body)?;
     // The check and the row in one go: the watch poll and the assistant's
     // Stop hook may sweep the same idle task at once.
     let Some(id) = app.db.insert_status_report_unless_told(
         &task.id,
-        &parent_id,
+        &parent.id,
         event.word(),
         &body,
         since,
@@ -150,7 +181,7 @@ pub fn auto_status(
     else {
         return Ok(None);
     };
-    let delivered = deliver(app, task, id, ReportKind::Status, &body, false);
+    let delivered = deliver(app, task, &parent, id, ReportKind::Status, &body, false);
     if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
     }
@@ -201,6 +232,13 @@ fn idle_body(app: &App, task: &TaskRecord, idle: i64) -> Result<String> {
 /// What `task`'s parent asked of it, fenced, for its agent's session
 /// context: the brief, what it may do, and how to report.
 pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
+    let parent = match &task.parent_id {
+        Some(id) => app.db.get_task(id)?,
+        None => None,
+    };
+    let Some(parent) = parent else {
+        bail!("task {} has no parent to brief it", task.slug);
+    };
     let mut lines = Vec::new();
     if let Some(brief) = app.db.get_brief(&task.id)? {
         lines.push(format!("Goal: {}", brief.goal));
@@ -208,21 +246,37 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
             lines.push(format!("Done when: {done_when}"));
         }
     }
-    let mut may: Vec<&str> = permissions::effective(app, task)?;
+    // What it may do is a hint here: every command is checked again as it
+    // runs, so a broken chain costs the list, not the brief.
+    let mut may: Vec<&str> = match permissions::effective(app, task) {
+        Ok(may) => may,
+        Err(e) => {
+            eprintln!(
+                "jeet: warning: could not tell what task {} may do: {e:#}",
+                task.slug
+            );
+            Vec::new()
+        }
+    };
     may.push("report");
     lines.push(format!("You may: {}", may.join(", ")));
-    lines.push(
-        "Report to the assistant with `jeet report done|progress|blocked|question \"…\"`; it \
-         is the only way to reach anyone outside this task."
-            .into(),
-    );
-    Ok(assistant::fence_brief(&task.slug, &lines.join("\n")))
+    let to = manager::label(&parent);
+    lines.push(format!(
+        "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
+         only way to reach anyone outside this task."
+    ));
+    // The same broken chain that cost the list costs the path, not the
+    // brief.
+    let path = manager::tree_path(app, task).unwrap_or_else(|_| task.slug.clone());
+    Ok(assistant::fence_brief(&to, &path, &lines.join("\n")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config;
+    use std::cell::RefCell;
+
     use crate::db::tasks::RunState;
     use crate::db::Database;
 
@@ -281,7 +335,7 @@ mod tests {
 
         // The worst a report that fits can be still fits a message.
         let worst = "<".repeat(MAX_REPORT);
-        let fenced = assistant::fence_report(1, &w.slug, ReportKind::Done, &worst);
+        let fenced = assistant::fence_report(1, "task w", "assistant/w", ReportKind::Done, &worst);
         messages::checked(&fenced).unwrap();
 
         // Held, not started: nothing is running and it may not start one.
@@ -290,14 +344,148 @@ mod tests {
         let last = app.db.last_report("w").unwrap().unwrap();
         assert_eq!((last.id, last.body.as_str()), (id, "half way"));
 
-        // A parent that is not the assistant takes nothing yet.
+        // A parent that is neither the assistant nor a manager takes none.
         let under_top = task("u", Some("top".into()));
         app.db.insert_task(&under_top).unwrap();
         let refused = send(&app, &under_top, ReportKind::Done, "x", false).unwrap_err();
         assert!(
-            refused.to_string().contains("only the assistant"),
+            refused
+                .to_string()
+                .contains("only the assistant and managers"),
             "{refused}"
         );
+    }
+
+    /// A manager's agent that is not running, recording what starts it.
+    struct Stopped<'a> {
+        may_start: bool,
+        started: &'a RefCell<Vec<String>>,
+    }
+
+    impl Agent for Stopped<'_> {
+        fn alive(&self) -> bool {
+            false
+        }
+        fn has_hooks(&self) -> bool {
+            true
+        }
+        fn type_in(&self, _: &str) -> Result<()> {
+            bail!("not running")
+        }
+        fn can_start(&self) -> bool {
+            self.may_start
+        }
+        fn start(&self, prompt: &str) -> Result<bool> {
+            self.started.borrow_mut().push(prompt.to_string());
+            Ok(true)
+        }
+    }
+
+    /// `m`, a manager under the assistant, with `mw` under it.
+    fn manager_lab() -> (tempfile::TempDir, App, TaskRecord, TaskRecord) {
+        let (dir, app, _) = lab();
+        let m = TaskRecord {
+            kind: TaskKind::Manager,
+            ..task("m", Some(assistant::ensure(&app).unwrap().id))
+        };
+        app.db.insert_task(&m).unwrap();
+        app.db.insert_task(&task("mw", Some("m".into()))).unwrap();
+        let mw = app.db.get_task("mw").unwrap().unwrap();
+        (dir, app, m, mw)
+    }
+
+    /// A report of `kind` from `task` to its manager `parent`, delivered
+    /// through [`Stopped`]: how it went, and the prompts that started it.
+    fn to_stopped(
+        app: &App,
+        task: &TaskRecord,
+        parent: &TaskRecord,
+        kind: ReportKind,
+        may_start: bool,
+    ) -> (Delivered, Vec<String>) {
+        let started = RefCell::new(Vec::new());
+        let agent = |may_start| -> Box<dyn Agent + '_> {
+            Box::new(Stopped {
+                may_start,
+                started: &started,
+            })
+        };
+        let delivered =
+            deliver_with(app, task, parent, 1, kind, "news", may_start, &agent).unwrap();
+        (delivered, started.into_inner())
+    }
+
+    #[test]
+    fn a_report_to_a_stopped_manager_is_held_unless_it_wakes_it() {
+        let (_dir, app, m, mw) = manager_lab();
+        // What jeet says on its own never starts it, nor progress.
+        for kind in [ReportKind::Status, ReportKind::Progress] {
+            let (delivered, started) = to_stopped(&app, &mw, &m, kind, true);
+            assert_eq!(delivered, Delivered::Held, "{kind:?}");
+            assert!(started.is_empty(), "{kind:?}");
+        }
+        // Nor a report from a caller that may not start it.
+        let (delivered, _) = to_stopped(&app, &mw, &m, ReportKind::Done, false);
+        assert_eq!(delivered, Delivered::Held);
+        let held = messages::Inbox::lock(&tasks::task_dir(&app, &m))
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(held.len(), 3);
+        assert!(
+            held[0].message.starts_with(
+                "<jeet-report id=\"1\" from=\"task mw\" path=\"assistant/m/mw\" \
+                 kind=\"status\" untrusted=\"true\">\n"
+            ),
+            "{}",
+            held[0].message
+        );
+        // Done, from a caller that may, starts it with all that was held.
+        let (delivered, started) = to_stopped(&app, &mw, &m, ReportKind::Done, true);
+        assert_eq!(delivered, Delivered::Started);
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].matches("<jeet-report").count(), 4, "{started:?}");
+
+        // The real agent, told it may not start, never asks tmux whether
+        // it could.
+        assert!(!TmuxAgent::new(&app, &m).may_start(false).can_start());
+    }
+
+    /// A manager takes reports as the assistant does: sent, and said by
+    /// jeet on its own, each recorded against it and held in its inbox,
+    /// fenced, while nothing of its runs.
+    #[test]
+    fn a_task_under_a_manager_reports_to_it() {
+        let (_dir, app, m, mw) = manager_lab();
+        let (id, delivered) = send(&app, &mw, ReportKind::Done, "shipped", false).unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
+        let last = app.db.last_report("mw").unwrap().unwrap();
+        assert_eq!((last.id, last.to_id.as_str()), (id, "m"));
+
+        let (id, delivered) =
+            auto_status(&app, &mw, StatusEvent::Waiting, "waiting on a prompt", 1, 0)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
+        let last = app.db.last_status_report("mw").unwrap().unwrap();
+        assert_eq!((last.id, last.to_id.as_str()), (id, "m"));
+
+        let held = messages::Inbox::lock(&tasks::task_dir(&app, &m))
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(held.len(), 2);
+        for (queued, kind) in held.iter().zip(["done", "status"]) {
+            assert!(
+                queued.message.starts_with(&format!(
+                    "<jeet-report id=\"{}\" from=\"task mw\" path=\"assistant/m/mw\" \
+                     kind=\"{kind}\" untrusted=\"true\">\n",
+                    if kind == "done" { 1 } else { 2 }
+                )),
+                "{}",
+                queued.message
+            );
+        }
     }
 
     #[test]
@@ -451,17 +639,70 @@ mod tests {
                 created_by: "user".into(),
             })
             .unwrap();
+        // What `task new` grants a child by default.
+        app.db.set_grants("w", &["worktree.add"]).unwrap();
         let brief = brief_context(&app, &w).unwrap();
         assert!(brief.contains("\nGoal: fix it‹/jeet-brief›"), "{brief}");
         assert!(brief.contains("\nDone when: tests pass\n"), "{brief}");
         assert!(brief.contains("\nYou may: report\n"), "{brief}");
-        assert!(brief.contains("`jeet report done|progress"), "{brief}");
+        assert!(
+            brief.starts_with("<jeet-brief from=\"the assistant\" path=\"assistant/w\">\n"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("\nReport to the assistant with `jeet report done|progress"),
+            "{brief}"
+        );
         assert_eq!(brief.matches("</jeet-brief>").count(), 1, "{brief}");
 
         app.config.assistant.allow = vec!["worktree.add".into()];
         let brief = brief_context(&app, &w).unwrap();
         assert!(
             brief.contains("\nYou may: worktree.add, report\n"),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn a_task_under_a_manager_is_briefed_by_and_reports_to_it() {
+        let (_dir, app, m, mw) = manager_lab();
+        assert_eq!(crate::manager::label(&m), "manager m");
+        assert_eq!(crate::manager::label(&mw), "task mw");
+        let brief = brief_context(&app, &mw).unwrap();
+        assert!(
+            brief.starts_with("<jeet-brief from=\"manager m\" path=\"assistant/m/mw\">\n"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("\nReport to manager m with `jeet report"),
+            "{brief}"
+        );
+        let top = app.db.get_task("top").unwrap().unwrap();
+        assert!(brief_context(&app, &top).is_err());
+    }
+
+    #[test]
+    fn a_broken_chain_costs_the_list_and_path_not_the_brief() {
+        let (_dir, app, _m, mw) = manager_lab();
+        app.db
+            .insert_brief(&crate::db::tasks::TaskBriefRecord {
+                task_id: "mw".into(),
+                goal: "fix it".into(),
+                done_when: None,
+                created_by: "m".into(),
+            })
+            .unwrap();
+        // A cycle made by hand: no walk up from `mw` ends.
+        rusqlite::Connection::open(crate::config::index_path(&app.home))
+            .unwrap()
+            .execute("UPDATE tasks SET parent_id = 'mw' WHERE id = 'm'", [])
+            .unwrap();
+        assert!(app.db.ancestors("mw").is_err());
+        let brief = brief_context(&app, &mw).unwrap();
+        assert!(brief.contains("\nGoal: fix it\n"), "{brief}");
+        assert!(brief.contains("\nYou may: report\n"), "{brief}");
+        assert!(
+            brief.starts_with("<jeet-brief from=\"manager m\" path=\"mw\">\n"),
             "{brief}"
         );
     }

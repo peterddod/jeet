@@ -71,12 +71,7 @@ impl AgentSpec {
     /// Whether the agent reports what it is doing through jeet's hooks.
     /// Either way of installing them counts (see `runtime::hook_args`).
     pub fn has_hooks(&self) -> bool {
-        let hooks = harness::HookSetup::default();
-        self.harness.hook_args(&hooks).is_some()
-            || self
-                .harness
-                .hook_file(&hooks, Path::new("/hooks.json"))
-                .is_some()
+        harness::has_hooks(self.harness)
     }
 
     /// A warning when the agent is older than its harness was tested with;
