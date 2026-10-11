@@ -794,7 +794,10 @@ RFC left open, or departed from it:
   launched through a harness, so jeet has no settings to put the rules in.
   `jeet review` warns when it starts one, as E13 does.
 - **E5** Default branches are every indexed repo's `default_branch` plus
-  `main` and `master`, deduplicated, snapshot at launch.
+  `main` and `master`, deduplicated, snapshot at launch, and capped at
+  twelve (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
+  repos use. Each costs about 100 bytes of the inline settings, which
+  share tmux's 16KB command limit with the first prompt (E9).
 - **E6** `Capability.external` names the `gh` commands a capability
   stands for (`pr.comment`: `gh pr comment`, `gh issue comment`;
   `pr.review`: `gh pr review`). A held one is allowed. A parented node is
@@ -806,21 +809,25 @@ RFC left open, or departed from it:
 - **E7** Merging is denied to the root and nodes: `gh pr merge`, the REST
   merge endpoints through `gh api` or `curl`, and the GraphQL
   `mergePullRequest`, `enablePullRequestAutoMerge`, `mergeBranch` and
-  `enqueuePullRequest` mutations, matched anywhere after `gh api`.
+  `enqueuePullRequest` mutations, matched anywhere after `gh api` or
+  `curl`. `git push --branches` is denied with `--all`, its synonym.
   `jeet pr merge` runs `gh` from jeet's process and is unaffected.
 - **E8** A node's allow list is unchanged; narrowing it is phase 2's.
 - **E9** Settings stay inline on argv; a 0600 settings file is #33's. A
   test checks the first prompt still fits one tmux command with every
-  capability held and with none.
+  capability held and with none, and the most default branches E5 allows.
 - **E10** `runtime::interrupt` returns `Interrupted { Sent,
-  NotWorking(activity), UserTyping, AtStartup }` and does not fail when there is
-  nothing to interrupt, so phase 2's pause can walk a subtree with idle
-  nodes.
+  NotWorking(activity), UserTyping, Watched, AtStartup }` and does not fail
+  when there is nothing to interrupt, so phase 2's pause can walk a subtree
+  with idle nodes. Under the assistant, an interrupt that sent nothing is
+  logged as `skipped` (with why) and not announced, rather than as done.
 - **E11** Keys are pressed once, only while `Running` or `Waiting`, and
   never over the user's draft. Not at a startup prompt either (Esc at the
   trust dialog exits): a Waiting no hook reported, synthesised for an agent
   with no status or written by the startup watcher, returns
-  `Interrupted::AtStartup`. No retry, no confirmation and no status
+  `Interrupted::AtStartup`. Nor at `Waiting` while a client is attached to
+  the session (`Interrupted::Watched`): the user may be typing into the
+  dialog's own text field, which `has_draft` does not see. No retry, no confirmation and no status
   repair yet (the status reads `running` until the next hook, as after a
   manual Esc); those come with pause. The assistant is refused (5.4).
 - **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`;

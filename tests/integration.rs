@@ -2234,7 +2234,8 @@ fn resync_updates_what_the_task_left_alone() {
 /// ends it, and `has-session` and `list-panes` report it. The pane's pid is
 /// whatever the `pid` file holds, and `kill-session` hangs up on it, as tmux
 /// does. `display-message` prints the `current` file: the session the
-/// caller runs in.
+/// caller runs in. `list-clients` reports a client while a `client` file
+/// exists.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -2275,6 +2276,8 @@ case "$1" in
       *) echo 0 ;;
     esac ;;
   display-message) cat "$here/current" 2>/dev/null ;;
+  # Someone is attached while the test leaves a `client` file.
+  list-clients) [ -e "$here/client" ] && echo /dev/ttys001 ;;
   show-options) echo C-b ;;
   # A pane to look at, which Down and Enter change when the test says how:
   # Down shows `pane-down`, after `down-lag` more captures if that is set.
@@ -7411,6 +7414,13 @@ fn interrupt_presses_escape_once_and_only_while_working() {
         &hook_input("Notification", &session, &task),
         &[],
     ));
+    // Someone attached to that prompt may be typing an answer into it,
+    // which Esc would throw away.
+    std::fs::write(stub.join("client"), "").unwrap();
+    let said = interrupt();
+    assert!(said.contains("someone attached"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    std::fs::remove_file(stub.join("client")).unwrap();
     let said = interrupt();
     assert!(said.contains("interrupted task fix-x's turn"), "{said}");
     assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
@@ -7420,6 +7430,47 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     let said = interrupt();
     assert!(said.contains("is not working (idle"), "{said}");
     assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupt_that_sends_nothing_is_logged_as_skipped_and_not_announced() {
+    let lab = StoreLab::new();
+    lab.new_task("fix-x");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.send\"]\n",
+    )
+    .unwrap();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("nothing sent"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["outcome"], "skipped");
+    assert_eq!(log[0]["action"], "interrupted task fix-x");
+    let why = log[0]["error"].as_str().unwrap();
+    assert!(
+        why.starts_with("nothing sent: its agent is not working"),
+        "{why}"
+    );
+    assert!(notes(&notifier).is_empty());
 }
 
 #[cfg(unix)]
