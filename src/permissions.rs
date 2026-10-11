@@ -175,14 +175,16 @@ const ALWAYS_DENY: &[&str] = &[
     "git push --branches",
     "git push * --branches",
     "gh pr merge",
-    "gh api *pulls/*/merge*",
-    "gh api *repos/*/merges*",
+    // The REST endpoints end at `merge`/`merges`, followed by a space or
+    // nothing, so `repos/acme/mergesort` or `docs/merges.md` still run.
+    "gh api *pulls/*/merge",
+    "gh api *repos/*/merges",
     "gh api *mergePullRequest*",
     "gh api *enablePullRequestAutoMerge*",
     "gh api *mergeBranch*",
     "gh api *enqueuePullRequest*",
-    "curl *pulls/*/merge*",
-    "curl *repos/*/merges*",
+    "curl *pulls/*/merge",
+    "curl *repos/*/merges",
     "curl *mergePullRequest*",
     "curl *enablePullRequestAutoMerge*",
     "curl *mergeBranch*",
@@ -1495,6 +1497,8 @@ mod tests {
             "curl -X PUT https://api.github.com/repos/o/r/pulls/3/merge",
             "gh api -X POST repos/o/r/merges -f base=main -f head=task-x",
             "curl -X POST https://api.github.com/repos/o/r/merges -d '{}'",
+            "gh api repos/o/r/pulls/3/merge",
+            "gh api /repos/o/r/merges --method POST -f base=main",
             "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{mergePullRequest(input:{})}\"}'",
             "curl https://api.github.com/graphql -d 'mutation{enablePullRequestAutoMerge(input:{})}'",
             "curl https://api.github.com/graphql -d 'mutation{mergeBranch(input:{})}'",
@@ -1521,6 +1525,11 @@ mod tests {
             "git stash push",
             "gh api graphql -f query='{viewer{login}}'",
             "curl https://api.github.com/graphql -d '{\"query\":\"{viewer{login}}\"}'",
+            "gh api repos/acme/mergesort/pulls",
+            "gh api repos/mergestat/mergestat/pulls/3",
+            "gh api repos/o/r/contents/docs/merges.md",
+            "gh api repos/o/r/pulls/3/comments -f path=src/merge.rs -f body=x",
+            "curl https://api.github.com/repos/acme/mergesort/pulls",
         ] {
             assert!(!denied(command), "denied: {command}");
         }
@@ -1553,6 +1562,11 @@ mod tests {
             // The mutation in a file, not on the command line.
             "gh api graphql -F query=@merge.graphql -F id=PR_x",
             "gh api graphql --input body.json",
+            // The endpoint quoted, or with a query string: matching what
+            // follows `merge` would refuse `repos/acme/mergesort` too.
+            "curl -X PUT \"https://api.github.com/repos/o/r/pulls/3/merge\"",
+            "gh api -X POST 'repos/o/r/merges' -f base=main",
+            "gh api -X PUT repos/o/r/pulls/3/merge?x=1",
         ];
         for command in KNOWN_GAPS {
             assert!(!denied(command), "now denied, update the docs: {command}");
