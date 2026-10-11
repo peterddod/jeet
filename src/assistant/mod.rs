@@ -355,7 +355,8 @@ fn launch_argv(
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let hooks = runtime::assistant_hooks(exe, &app.config.assistant);
+    let branches = permissions::default_branches(app)?;
+    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches);
     argv.extend(spec.harness.hook_args(&hooks).unwrap_or_default());
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());

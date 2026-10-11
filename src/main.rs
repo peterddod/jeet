@@ -204,6 +204,7 @@ fn run(command: Option<Commands>) -> Result<()> {
                 TaskCommands::Send { name, message } => {
                     commands::task::send(&app, &name, &message)?
                 }
+                TaskCommands::Interrupt { name } => commands::task::interrupt(&app, &name)?,
                 TaskCommands::Ls { archived } => commands::task::ls(&app, archived)?,
                 TaskCommands::Open { name, session } => {
                     commands::task::open(&app, &name, session.as_deref())?
