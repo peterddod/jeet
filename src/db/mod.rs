@@ -751,8 +751,12 @@ mod tests {
         assert_eq!(violations, 0);
         // A parent with a child cannot go; a child takes what is its own.
         assert!(db.delete_task("a").is_err());
+        db.set_budget_max("c", Some(60), None).unwrap();
+        db.charge("c", 5, 1).unwrap();
         db.delete_task("c").unwrap();
+        assert!(db.budget("c").unwrap().is_none());
         for table in [
+            "task_budgets",
             "task_worktrees",
             "task_sessions",
             "task_prs",

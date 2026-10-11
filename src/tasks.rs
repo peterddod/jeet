@@ -256,8 +256,15 @@ fn make_task(
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    match scaffold(&dir, &task, project).and_then(|notes| app.db.insert_task(&task).map(|_| notes))
-    {
+    // A child gets what v6 backfilled for the children before it, so the
+    // grants that phase 2 reads cover every child alike.
+    let insert = || match task.parent_id {
+        Some(_) => app
+            .db
+            .insert_child(&task, crate::permissions::NODE_GRANT, None, None, None),
+        None => app.db.insert_task(&task),
+    };
+    match scaffold(&dir, &task, project).and_then(|notes| insert().map(|_| notes)) {
         Ok(notes) => Ok((task, notes)),
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);
@@ -1157,9 +1164,10 @@ pub fn reconcile(app: &App) -> Result<Vec<String>> {
             if let (true, Some(branch)) = (read_only, &entry.branch) {
                 // The dir name is whatever the agent gave `git worktree add`.
                 warnings.push(format!(
-                    "{}/{} is read-only but on branch {branch}; {MANAGER_READ_ONLY}",
+                    "{}/{} is read-only but on branch {}; {MANAGER_READ_ONLY}",
                     task.slug,
-                    crate::commands::task::printable(&dir_name)
+                    crate::commands::task::printable(&dir_name),
+                    crate::commands::task::printable(branch)
                 ));
             }
             match row {
@@ -2174,20 +2182,48 @@ mod tests {
                 "add",
                 "-q",
                 "-b",
-                "e-branch",
+                "e\u{9b}2J-branch",
                 path.to_str().unwrap(),
             ],
         );
         let warnings = reconcile(&app).unwrap();
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
-            warnings.iter().any(|w| w.contains("m/e[31mvil")),
+            warnings
+                .iter()
+                .any(|w| w.contains("m/e[31mvil") && w.contains("e2J-branch")),
             "{warnings:?}"
         );
         assert!(
             !warnings.iter().any(|w| w.chars().any(char::is_control)),
             "{warnings:?}"
         );
+    }
+
+    /// A child made the phase-1 way gets the `worktree.add` row that v6
+    /// gave the children before it; a top-level task gets none.
+    #[test]
+    fn a_new_child_is_granted_what_the_backfill_gave_the_rest() {
+        let (_dir, app, _trunk) = manager_lab();
+        let assistant = app.db.get_task("m-id").unwrap().unwrap().parent_id;
+        let make = |name: &str, parent_id: Option<&str>| {
+            create(
+                &app,
+                &NewTask {
+                    name,
+                    project: None,
+                    repos: &[],
+                    branch: None,
+                    parent_id,
+                },
+            )
+            .unwrap()
+            .task
+        };
+        let child = make("kid", assistant.as_deref());
+        assert_eq!(app.db.grants(&child.id).unwrap(), vec!["worktree.add"]);
+        let top = make("top", None);
+        assert!(app.db.grants(&top.id).unwrap().is_empty());
     }
 
     /// `tasks::archive` and `tasks::delete` refuse a parent before touching

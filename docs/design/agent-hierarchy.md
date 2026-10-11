@@ -223,7 +223,10 @@ rises, so a node's stop does not take over a user's pause) and
 `task_start_queue` table (task id, queued at) holds starts waiting for a
 `max_live` slot, and `task_worktrees.read_only` is added. v6 backfills a
 `worktree.add` grant for every parented `work` and `review` task, so phase-1
-children keep what they could do; nothing else is granted by default.
+children keep what they could do; nothing else is granted by default. Until
+creation moves to `--allow` and the `[managers]` defaults, a parented `work`
+or `review` task made the phase-1 way is written with that same grant, so no
+child made after the migration is left without it.
 
 ### Creation and teardown
 
