@@ -31,6 +31,8 @@ pub enum StatusEvent {
     Idle,
     /// The session ended without reporting done.
     Ended,
+    /// Its subtree crossed a share of its budget.
+    Budget,
 }
 
 impl StatusEvent {
@@ -40,6 +42,7 @@ impl StatusEvent {
             StatusEvent::Waiting => "waiting",
             StatusEvent::Idle => "idle",
             StatusEvent::Ended => "ended",
+            StatusEvent::Budget => "budget",
         }
     }
 }

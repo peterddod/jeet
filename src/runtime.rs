@@ -497,16 +497,22 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if task.kind == TaskKind::Assistant {
         bail!("only the user interrupts the assistant, in its own window");
     }
-    let name = session_name(task);
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
-    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+    if is_own_session(task) {
         bail!(
-            "this jeet runs inside tmux session {name}, task {}'s agent session; interrupt it \
+            "this jeet runs inside tmux session {}, task {}'s agent session; interrupt it \
              from outside that session",
+            session_name(task),
             task.name
         );
     }
     placement::runtime_for(task)?.interrupt(app, task)
+}
+
+/// Whether this jeet runs inside the task's agent session: as the agent's
+/// own command (`$JEET_TASK_ID`), or in a window the user opened there.
+pub fn is_own_session(task: &TaskRecord) -> bool {
+    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
+    in_task || tmux::current_session().is_some_and(|s| s == session_name(task))
 }
 
 /// [`interrupt`] in the task's tmux session.
@@ -563,12 +569,11 @@ fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) ->
 /// session to `verb` the task would end this jeet with it, before it had
 /// done anything.
 pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
-    let name = session_name(task);
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
-    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+    if is_own_session(task) {
         bail!(
-            "this jeet runs inside tmux session {name}, the agent's session for task {}, \
+            "this jeet runs inside tmux session {}, the agent's session for task {}, \
              which ending the agent would end too; {verb} the task from outside that session",
+            session_name(task),
             task.name
         );
     }

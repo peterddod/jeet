@@ -166,6 +166,28 @@ pub fn mark_startup_prompt(
     )
 }
 
+/// The event of the status a pause leaves an interrupted session in.
+pub const PAUSED_EVENT: &str = "Paused";
+
+/// Mark the task's latest session idle, its turn ended by a pause: an
+/// interrupted turn ends with no Stop hook to say so. Nothing for a task
+/// with no status.
+pub fn mark_paused(task_dir: &Path, now: i64) -> Result<()> {
+    let Some(current) = current_status(task_dir) else {
+        return Ok(());
+    };
+    write_status(
+        task_dir,
+        &SessionStatus {
+            session_id: current.session_id,
+            state: State::Idle,
+            detail: Some("paused".to_string()),
+            event: PAUSED_EVENT.to_string(),
+            at: now,
+        },
+    )
+}
+
 /// `jeet task-hook [--task <id>] <event>`: record what the hook on stdin
 /// says, as the harness called `harness` reports it, for `task`, the one
 /// jeet launched the agent for (none from hooks older than `--task`).
@@ -365,7 +387,7 @@ fn report_step(
     };
     let since = match event {
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
-        StatusEvent::Waiting | StatusEvent::Idle => now,
+        StatusEvent::Waiting | StatusEvent::Idle | StatusEvent::Budget => now,
     };
     reports::auto_status(&app, &task, event, body, since, 0)?;
     Ok(())

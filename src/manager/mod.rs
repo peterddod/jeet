@@ -7,6 +7,7 @@
 pub mod budget;
 pub mod context;
 pub mod fence;
+pub mod run;
 
 use std::path::Path;
 

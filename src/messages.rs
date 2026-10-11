@@ -398,6 +398,23 @@ pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
     Ok(true)
 }
 
+/// Start the agent with its queue as its first prompt, as much of it as
+/// fits; the rest waits for the Stop hook of the turn that starts. For a
+/// start that waited, the messages for it queued meanwhile.
+pub fn start_with_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<Delivered> {
+    let queue = inbox.read_for(agent.session())?;
+    if queue.is_empty() {
+        bail!("nothing is queued to start it with");
+    }
+    let sent = hand_over(inbox, agent, &queue, Route::Start);
+    if sent.is_err() {
+        if let Err(e) = inbox.replace_for(agent.session(), &queue) {
+            eprintln!("jeet: warning: could not put queued messages back: {e:#}");
+        }
+    }
+    sent
+}
+
 /// Send the oldest of `queue` that fit in one go by `route`, leaving the
 /// rest queued for the Stop hook of the turn that starts. Queued when the
 /// last, the newest, had to stay.

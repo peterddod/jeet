@@ -3,13 +3,18 @@
 //! is `+` or `=` before them (`+1h`, `=2h,40turns`). Cost budgets wait on
 //! #26.
 
-// `manager budget`, which changes a budget, is the caller still to come.
+// `manager budget`, which changes a budget, and the Stop hook, which
+// enforces one, are the callers still to come.
 #![allow(dead_code)]
 
 use anyhow::{bail, Result};
 
 use crate::context::App;
-use crate::db::tasks::TaskRecord;
+use crate::db::tasks::{BudgetRow, RunState, Setter, TaskRecord};
+use crate::messages::Inbox;
+use crate::permissions::Caller;
+use crate::reports::{self, StatusEvent};
+use crate::tasks;
 
 /// A node's caps; `None` is no cap on that unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -145,6 +150,143 @@ pub fn remaining(app: &App, under: &TaskRecord) -> Result<Limits> {
     Ok(left)
 }
 
+/// `want` as `target`'s new limits, set by `by`, or why it may not have
+/// them (M19): in neither unit may it be left more to spend than is left
+/// above it, nor, for a node setting it, than the node has left itself.
+/// No limit in a unit is always allowed: the ones above still apply.
+pub fn cap(app: &App, target: &TaskRecord, by: &Caller, want: Limits) -> Result<Limits> {
+    let parent = match &target.parent_id {
+        Some(id) => app.db.get_task(id)?,
+        None => None,
+    };
+    let mut left = match &parent {
+        Some(parent) => remaining(app, parent)?,
+        None => Limits::default(),
+    };
+    if let Caller::Node(me) = by {
+        let mine = remaining(app, me)?;
+        left.secs = least(left.secs, mine.secs);
+        left.turns = least(left.turns, mine.turns);
+    }
+    // What it has used, and what is left above it.
+    let (secs, turns) = app.db.subtree_used(&target.id)?;
+    let room = Limits {
+        secs: left.secs.map(|left| left.saturating_add(secs)),
+        turns: left.turns.map(|left| left.saturating_add(turns)),
+    };
+    let fits = |want: Option<i64>, room: Option<i64>| match (want, room) {
+        (Some(want), Some(room)) => want <= room,
+        _ => true,
+    };
+    if !fits(want.secs, room.secs) || !fits(want.turns, room.turns) {
+        bail!(
+            "{} is more than {} may have: at most {}, what it has used and what is left \
+             above it",
+            label(want),
+            super::label(target),
+            label(room)
+        );
+    }
+    Ok(want)
+}
+
+/// The budget threshold a check newly crossed (M21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Threshold {
+    None,
+    /// 80% of a limit used, by the node or above it.
+    Warn80,
+    /// A limit used up: the task it is on is paused.
+    Hit100,
+}
+
+/// Check the budgets `node`'s use counts toward, its own and each
+/// ancestor's, once it has been charged (M21). At 80% of a limit, the task
+/// it is on is told, through its inbox, and its parent gets a `status`
+/// report. At 100% the task is paused, with `budget` as the setter, which
+/// leaves a pause or stop by anyone else as it is; above `node`, its parent
+/// gets a `status` report, while `node`'s own Stop hook reports it. Each
+/// threshold is told once until the limit changes. Interrupts nothing:
+/// what runs finishes its turn and then gets nothing new. Returns the
+/// highest threshold newly crossed.
+pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
+    let mut crossed = Threshold::None;
+    let mut chain = vec![node.clone()];
+    chain.extend(app.db.ancestors(&node.id)?);
+    for task in &chain {
+        let Some(row) = app.db.budget(&task.id)? else {
+            continue;
+        };
+        let used = app.db.subtree_used(&task.id)?;
+        let Some(pct) = percent(&row, used) else {
+            continue;
+        };
+        if pct >= 100 {
+            app.db
+                .set_run_state(&task.id, RunState::Paused, Some(&Setter::Budget))?;
+            if row.warned < 100 {
+                app.db.set_warned(&task.id, 100)?;
+                crossed = crossed.max(Threshold::Hit100);
+                if task.id != node.id {
+                    tell_parent(
+                        app,
+                        task,
+                        &format!("budget used up ({}); paused", usage(&row, used)),
+                    );
+                }
+            }
+        } else if pct >= 80 && row.warned < 80 {
+            app.db.set_warned(&task.id, 80)?;
+            crossed = crossed.max(Threshold::Warn80);
+            let usage = usage(&row, used);
+            tell_parent(app, task, &format!("budget {pct}% used ({usage})"));
+            let note = format!(
+                "jeet: your budget is {pct}% used ({usage}). At 100% you are paused; wrap up, \
+                 or report to ask for more."
+            );
+            let told = Inbox::lock(&tasks::task_dir(app, task))
+                .and_then(|inbox| inbox.push_to(&note, None));
+            if let Err(e) = told {
+                eprintln!("jeet: could not tell task {} its budget: {e:#}", task.slug);
+            }
+        }
+    }
+    Ok(crossed)
+}
+
+/// The most of any limit in `row` that `used` (seconds, turns) is, in per
+/// cent; `None` with no limit.
+fn percent(row: &BudgetRow, (secs, turns): (i64, i64)) -> Option<i64> {
+    let of = |used: i64, max: Option<i64>| max.map(|max| used.saturating_mul(100) / max.max(1));
+    of(secs, row.max_secs).max(of(turns, row.max_turns))
+}
+
+/// `48m of 1h, 16 of 20turns`.
+fn usage(row: &BudgetRow, (secs, turns): (i64, i64)) -> String {
+    let mut parts = Vec::new();
+    if let Some(max) = row.max_secs {
+        let max = label(Limits {
+            secs: Some(max),
+            turns: None,
+        });
+        parts.push(format!("{}m of {max}", secs / 60));
+    }
+    if let Some(max) = row.max_turns {
+        parts.push(format!("{turns} of {max}turns"));
+    }
+    parts.join(", ")
+}
+
+/// A `status` report about `task` to its parent; what goes wrong is warned
+/// of, not failed on. `task_budgets.warned` says what was told already, so
+/// no earlier report holds this one back: none was sent at or after
+/// `i64::MAX`.
+fn tell_parent(app: &App, task: &TaskRecord, body: &str) {
+    if let Err(e) = reports::auto_status(app, task, StatusEvent::Budget, body, i64::MAX, 0) {
+        eprintln!("jeet: could not report task {}'s budget: {e:#}", task.slug);
+    }
+}
+
 fn least(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -155,6 +297,214 @@ fn least(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
+    use crate::db::tasks::{TaskKind, TaskState};
+    use crate::db::Database;
+    use crate::messages;
+
+    /// An index in a tempdir with the assistant, manager `m` under it and
+    /// worker `w` under `m`.
+    fn lab() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: config::load_or_create(&home).unwrap(),
+            db: Database::open(&config::index_path(&home)).unwrap(),
+            home,
+        };
+        let root = super::super::root(&app).unwrap();
+        for (slug, kind, parent) in [
+            ("m", TaskKind::Manager, root.id.as_str()),
+            ("w", TaskKind::Work, "m"),
+        ] {
+            app.db
+                .insert_task(&TaskRecord {
+                    id: slug.into(),
+                    slug: slug.into(),
+                    name: slug.into(),
+                    project: None,
+                    kind,
+                    state: TaskState::Active,
+                    created_at: 0,
+                    last_activity: 0,
+                    parent_id: Some(parent.into()),
+                    placement: crate::placement::for_new(),
+                    run_state: RunState::Run,
+                    run_state_by: None,
+                    max_children: None,
+                })
+                .unwrap();
+        }
+        (dir, app)
+    }
+
+    fn get(app: &App, id: &str) -> TaskRecord {
+        app.db.get_task(id).unwrap().unwrap()
+    }
+
+    /// The bodies of jeet's budget reports about `id`.
+    fn budget_reports(app: &App, id: &str) -> Vec<String> {
+        let conn = rusqlite::Connection::open(config::index_path(&app.home)).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT body FROM task_reports WHERE task_id = ?1 AND kind = 'status' ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|b| b.starts_with("budget"))
+            .collect()
+    }
+
+    fn inbox(app: &App, id: &str) -> Vec<String> {
+        let dir = tasks::task_dir(app, &get(app, id));
+        let queued = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        queued.into_iter().map(|q| q.message).collect()
+    }
+
+    #[test]
+    fn eighty_per_cent_is_told_once_and_a_hundred_pauses() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", None, Some(100)).unwrap();
+        let w = get(&app, "w");
+        app.db.charge("w", 0, 79).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::None);
+        assert!(budget_reports(&app, "m").is_empty());
+
+        app.db.charge("w", 0, 1).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::Warn80);
+        assert_eq!(
+            budget_reports(&app, "m"),
+            ["budget 80% used (80 of 100turns)"]
+        );
+        let note = inbox(&app, "m");
+        assert_eq!(note.len(), 1);
+        assert!(
+            note[0].starts_with("jeet: your budget is 80% used"),
+            "{note:?}"
+        );
+        assert_eq!(app.db.budget("m").unwrap().unwrap().warned, 80);
+
+        // Not again, an idle report about it in between or not.
+        crate::reports::auto_status(&app, &get(&app, "m"), StatusEvent::Idle, "idle 9m", 1, 0)
+            .unwrap();
+        app.db.charge("w", 0, 5).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::None);
+        assert_eq!(budget_reports(&app, "m").len(), 1);
+        assert_eq!(inbox(&app, "m").len(), 1);
+        assert_eq!(get(&app, "m").run_state, RunState::Run);
+
+        // At 100% the task above is paused, inline, by its budget, and its
+        // parent told.
+        app.db.charge("w", 0, 15).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::Hit100);
+        let m = get(&app, "m");
+        assert_eq!(
+            (m.run_state, m.run_state_by),
+            (RunState::Paused, Some(Setter::Budget))
+        );
+        assert_eq!(
+            budget_reports(&app, "m")[1],
+            "budget used up (100 of 100turns); paused"
+        );
+        assert_eq!(get(&app, "w").run_state, RunState::Run);
+        // Told once.
+        app.db.charge("w", 0, 1).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::None);
+        assert_eq!(budget_reports(&app, "m").len(), 2);
+    }
+
+    #[test]
+    fn a_node_at_its_own_limit_is_paused_and_left_to_its_stop_hook_to_report() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("w", Some(600), None).unwrap();
+        app.db.set_budget_max("m", Some(3600), None).unwrap();
+        app.db.charge("w", 600, 1).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        let w = get(&app, "w");
+        assert_eq!(
+            (w.run_state, w.run_state_by),
+            (RunState::Paused, Some(Setter::Budget))
+        );
+        assert!(budget_reports(&app, "w").is_empty());
+        // m, at 16%, is left alone.
+        assert_eq!(get(&app, "m").run_state, RunState::Run);
+        assert!(budget_reports(&app, "m").is_empty());
+    }
+
+    #[test]
+    fn a_spent_budget_leaves_a_users_stop_as_it_is() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", None, Some(10)).unwrap();
+        app.db
+            .set_run_state("m", RunState::Stopped, Some(&Setter::User))
+            .unwrap();
+        app.db.charge("w", 0, 10).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        let m = get(&app, "m");
+        assert_eq!(
+            (m.run_state, m.run_state_by),
+            (RunState::Stopped, Some(Setter::User))
+        );
+        // Nor a user's pause.
+        app.db.set_run_state("m", RunState::Run, None).unwrap();
+        app.db
+            .set_run_state("m", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        app.db.set_warned("m", 0).unwrap();
+        enforce(&app, &get(&app, "w")).unwrap();
+        assert_eq!(get(&app, "m").run_state_by, Some(Setter::User));
+    }
+
+    #[test]
+    fn a_new_limit_tells_the_thresholds_again() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", Some(3600), None).unwrap();
+        app.db.charge("w", 2880, 0).unwrap();
+        let w = get(&app, "w");
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::Warn80);
+        assert_eq!(budget_reports(&app, "m"), ["budget 80% used (48m of 1h)"]);
+        // `+1h`: 48m of 2h is under 80%, and told again once it is not.
+        app.db.set_budget_max("m", Some(7200), None).unwrap();
+        assert_eq!(app.db.budget("m").unwrap().unwrap().warned, 0);
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::None);
+        app.db.charge("w", 3000, 0).unwrap();
+        assert_eq!(enforce(&app, &w).unwrap(), Threshold::Warn80);
+        assert_eq!(budget_reports(&app, "m").len(), 2);
+    }
+
+    #[test]
+    fn a_limit_is_capped_by_what_is_left_above_and_the_setters_own() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", Some(3600), Some(20)).unwrap();
+        app.db.charge("w", 1200, 5).unwrap();
+        app.db.charge("m", 600, 0).unwrap();
+        let w = get(&app, "w");
+        let want = |b: &str| parse_limits(b).unwrap();
+        // m has 30m left; w has used 20m of it, so may have 50m.
+        assert_eq!(
+            cap(&app, &w, &Caller::Root, want("50m")).unwrap(),
+            want("50m")
+        );
+        let err = cap(&app, &w, &Caller::User, want("51m")).unwrap_err();
+        assert!(err.to_string().contains("at most 50m,20turns"), "{err}");
+        assert!(cap(&app, &w, &Caller::Root, want("21turns")).is_err());
+        // No limit in a unit is no more than what is above allows.
+        assert_eq!(
+            cap(&app, &w, &Caller::Root, Limits::default()).unwrap(),
+            Limits::default()
+        );
+        // Under nothing with a limit, anything goes.
+        let m = get(&app, "m");
+        assert_eq!(
+            cap(&app, &m, &Caller::Root, want("9h")).unwrap(),
+            want("9h")
+        );
+        // A node setting it is held to what it has left itself.
+        let err = cap(&app, &m, &Caller::Node(m.clone()), want("2h")).unwrap_err();
+        assert!(err.to_string().contains("at most 1h,20turns"), "{err}");
+    }
 
     #[test]
     fn parses_each_part() {

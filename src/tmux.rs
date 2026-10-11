@@ -101,6 +101,28 @@ fn refuse_new_server(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The names of the sessions on the tmux server: none when no server runs,
+/// or tmux cannot be run.
+pub fn list_sessions() -> Vec<String> {
+    let Ok(output) = Command::new(binary())
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub fn has_session(name: &str) -> bool {
     quiet()
         .args(["has-session", "-t", &target(name)])

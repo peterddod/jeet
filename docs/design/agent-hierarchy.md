@@ -1283,6 +1283,33 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
   manager `(manager)` after its name (M29); `jeet manager ls` has a kind
   column. `max_live` is read once it gates starts.
+- **P16** Run state (5.4) is changed by `manager/run.rs`. A pause writes
+  the target's row, then interrupts its subtree leaves first, through a
+  runtime lookup and an own-session check passed in (production:
+  `placement::runtime_for` and `runtime::is_own_session`, which
+  `runtime::interrupt` and `refuse_inside_session` share), so the walk is
+  tested with a fake runtime and no tmux. It skips the assistant and the
+  node this jeet runs in, turns each refusal or error into a line and goes
+  on, and marks an interrupted node idle (`Paused`), since an interrupted
+  turn has no Stop hook. `resume` is refused under a held ancestor, while
+  the target's own subtree has used its budget, and to a caller ranked
+  below the setter: the user, the assistant, a node above the caller, the
+  caller, a node below it, then `budget`. A stop ends every node's session
+  in the subtree, live or not, and forgets its pane. `max_live` counts the
+  active tasks below the assistant whose `jeet-<slug>` session one `tmux
+  list-sessions` lists; a session the user's `remain-on-exit` keeps after
+  its agent exits counts until it is replaced. The start gate is a
+  blocking lock beside the watch's: a held task is refused before any
+  count, and one over the limit is queued, keeping its place. A queued
+  task leaves the queue once a drain has started it, so one that fails to
+  start stays queued, and a drain from a background job with no tmux
+  server starts nothing. A budget check tells each threshold once, by
+  `task_budgets.warned` alone: 80% as a `budget` status report to the
+  parent and a note in the task's inbox; 100% pauses the task with the
+  `budget` setter, which leaves anyone else's pause or stop as it is, and
+  is reported to the parent for a task above the one charged (the charged
+  node's own Stop hook reports it). A budget change that does not fit what
+  is left above is refused, not cut.
 
 ## 11. Placement
 

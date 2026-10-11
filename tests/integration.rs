@@ -2381,6 +2381,7 @@ fn resync_updates_what_the_task_left_alone() {
 /// identify), and `kill-session` hangs up on it, as tmux does.
 /// `display-message` prints the `current` file: the session the caller runs
 /// in. `list-clients` reports a client while a `client` file exists.
+/// [`multi_session`] turns it into one that keeps each session apart.
 #[cfg(unix)]
 fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("tmux-stub");
@@ -2406,6 +2407,60 @@ for arg in "$@"; do [ "$arg" = ";" ] && chained=1; done
 if [ -n "$chained" ]; then
   while [ "$1" != ";" ]; do shift; done
   shift
+fi
+# The session the call names after `$1`, the flag: `=jeet-x:` is jeet-x.
+named() {
+  flag=$1; shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$flag" ]; then n=${2#=}; echo "${n%:}"; return; fi
+    shift
+  done
+}
+# With several sessions (`alive` a directory), each has its own liveness,
+# process and agent pane, in `alive/<name>`, `pid/<name>` and
+# `agent-pane/<name>`; a new session's pane is `%<n>`, numbered from 1.
+if [ -d "$here/alive" ]; then
+  case "$1" in
+    has-session) [ -e "$here/alive/$(named -t "$@")" ]; exit $? ;;
+    list-sessions)
+      [ -n "$(ls "$here/alive")" ] || exit 1
+      case " $* " in *" -F "*) ls "$here/alive" ;; esac
+      exit 0 ;;
+    new-session)
+      s=$(named -s "$@")
+      touch "$here/alive/$s"; rm -f "$here/agent-pane/$s"
+      p=$(($(cat "$here/panes" 2>/dev/null || echo 0) + 1))
+      echo "$p" > "$here/panes"
+      case " $* " in
+        *" -P "*) printf '%%%s\t%s\n' "$p" "$(cat "$here/pid/$s" 2>/dev/null || echo 0)" ;;
+      esac
+      exit 0 ;;
+    set-option)
+      case "$*" in
+        *@jeet-agent-pane*) for last in "$@"; do :; done
+          echo "$last" > "$here/agent-pane/$(named -t "$@")" ;;
+      esac
+      exit 0 ;;
+    kill-session)
+      s=$(named -t "$@")
+      rm -f "$here/alive/$s" "$here/agent-pane/$s"
+      if [ -e "$here/pid/$s" ]; then kill -HUP "$(cat "$here/pid/$s")"; fi
+      exit 0 ;;
+    list-panes)
+      s=$(named -t "$@")
+      [ -e "$here/alive/$s" ] || exit 1
+      case "$*" in
+        *pane_pid*) echo "0 $(cat "$here/pid/$s" 2>/dev/null)" ;;
+        *) echo 0 ;;
+      esac
+      exit 0 ;;
+    show-options)
+      case "$*" in
+        *@jeet-agent-pane*) cat "$here/agent-pane/$(named -t "$@")" 2>/dev/null ;;
+        *) echo C-b ;;
+      esac
+      exit 0 ;;
+  esac
 fi
 case "$1" in
   -V) echo "tmux 3.4" ;;
@@ -2461,6 +2516,22 @@ esac
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     script
+}
+
+/// Make `tmux`, a [`stub_tmux`], keep each session apart, by name: its
+/// liveness, the process in its pane ([`PaneShell::as_session_pane`]) and
+/// its agent pane. `has-session`, `list-panes`, `kill-session` (which hangs
+/// up on that session's process only) and the agent pane's options act on
+/// the session named, and `list-sessions -F …` prints the live ones, one
+/// per line. The rest (`current`, `client`, the captured pane, the keys)
+/// stays shared. Several nodes' panes can then run under one stub, which
+/// every [`PaneShell`] of the test is given as `JEET_TMUX`.
+#[cfg(unix)]
+fn multi_session(tmux: &std::path::Path) {
+    let here = tmux.parent().unwrap();
+    for dir in ["alive", "pid", "agent-pane"] {
+        std::fs::create_dir_all(here.join(dir)).unwrap();
+    }
 }
 
 /// Every command the stub `tmux` has had, oldest first, each as its
@@ -6924,6 +6995,13 @@ impl PaneShell {
         std::fs::write(pid, self.child.id().to_string()).unwrap();
     }
 
+    /// Make this shell the process `tmux`, a [`multi_session`] stub,
+    /// reports for session `session`'s pane once it starts.
+    fn as_session_pane(&self, tmux: &std::path::Path, session: &str) {
+        let pid = tmux.parent().unwrap().join("pid").join(session);
+        std::fs::write(pid, self.child.id().to_string()).unwrap();
+    }
+
     /// Set `key` for every later command.
     fn export(&mut self, key: &str, value: &str) {
         self.send(&format!("export {key}={}", sh_quote(value)));
@@ -7309,6 +7387,60 @@ fn a_task_in_the_assistants_home_is_not_the_assistant() {
         .join(".jeet/status")
         .join(format!("{session}.json"))
         .exists());
+}
+
+/// One stub tmux with several sessions keeps them apart: each task's agent
+/// starts in its own pane and is that task's, and ending one session hangs
+/// up on its agent only.
+#[cfg(unix)]
+#[test]
+fn one_stub_tmux_runs_several_tasks_apart() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    let mut panes = Vec::new();
+    for name in ["a", "b"] {
+        let id = lab.new_task_with(name, &["--parent", "assistant"]);
+        let shell = PaneShell::spawn(&lab, &[("JEET_TASK_ID", &id), ("JEET_TMUX", &tmux_env)]);
+        shell.as_session_pane(&tmux, &format!("jeet-{name}"));
+        succeeded(&lab.jeet_at(&["task", "open", name], &lab.home(), &env));
+        panes.push((id, shell));
+    }
+    let live = || {
+        let output = Command::new(&tmux)
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .unwrap();
+        stdout_of(&output)
+    };
+    assert_eq!(live(), "jeet-a\njeet-b\n");
+    let started: Vec<String> = calls_of(&tmux, "new-session")
+        .iter()
+        .map(|c| c[c.iter().position(|a| a == "-s").unwrap() + 1].clone())
+        .collect();
+    assert_eq!(started, ["jeet-a", "jeet-b"]);
+
+    // Each pane's agent is its own task's.
+    let background = [("JEET_BACKGROUND", "1")];
+    for (id, shell) in &mut panes {
+        let body = format!("from {id}");
+        succeeded(&shell.jeet(&["report", "progress", &body], &lab.home(), &background));
+        let reports = lab.reports_of(id);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].2, body);
+    }
+
+    succeeded(&lab.jeet_at(&["task", "archive", "a"], &lab.home(), &env));
+    assert_eq!(live(), "jeet-b\n");
+    let (_, a) = &mut panes[0];
+    wait_until("a's agent to hang up", || {
+        a.child.try_wait().unwrap().is_some()
+    });
+    let (_, b) = &mut panes[1];
+    assert!(b.child.try_wait().unwrap().is_none());
 }
 
 #[cfg(unix)]
