@@ -250,11 +250,12 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             if let Some(id) = session {
                 status::mark_startup_prompt(&dir, id, "trust folder", now_secs())?;
             }
-            // No hook fires for this prompt, so its parent hears of it here.
+            // No hook fires for this prompt, so its parent hears of it here,
+            // once per launch however often startup is watched.
             if task.parent_id.is_some() {
                 let body = "waiting for the user to trust the folder";
                 let waiting = StatusEvent::Waiting;
-                if let Err(e) = reports::auto_status(app, &task, waiting, body, now_secs(), 0) {
+                if let Err(e) = reports::auto_status(app, &task, waiting, body, since, 0) {
                     eprintln!("jeet task-startup {}: warning: {e:#}", task.slug);
                 }
             }

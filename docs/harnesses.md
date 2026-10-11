@@ -62,14 +62,16 @@ describes it, and use `None` for events jeet does not use:
 | `SessionStarted(source)` | a session began; `source` is `Startup`, `Resume`, `Clear`, `Compact` or `Other` | `idle` | `SessionStart` |
 | `Working(detail)` | busy; `detail` is the prompt's first line or the tool in use | `running – <detail>` | `UserPromptSubmit`, `PreToolUse`, `SubagentStop` |
 | `Idle` | sitting at its prompt without a turn having just ended | `idle`; the queue is typed in | `Notification` with `idle_prompt` |
-| `NeedsInput(detail)` | stopped mid-turn for a permission or a question | `needs input – <detail>` | other `Notification`s |
+| `NeedsInput(detail)` | stopped mid-turn for a permission or a question | `needs input – <detail>` | `Notification` with `permission_prompt` or `elicitation_dialog` (or no type); others are ignored |
 | `Stopped` | a turn finished | `idle`; the queue is handed over | `Stop` |
 | `Ended { cleared }` | the session is over; `cleared` when a new one replaces it in the same window, as `/clear` does | `ended` | `SessionEnd` (`cleared` when its `reason` is `clear`) |
 
 Cut details with `status::first_line(text, status::DETAIL_MAX)`. A
 `Clear` or `Other` start records the new session as following on from the
 task's previous one. A `Compact` start keeps whatever state the session was
-in.
+in. Map to `NeedsInput` only what blocks until the user answers: an
+informational notification mapped there tells a parent its task waits on
+the user when it does not.
 
 For a task with a parent (one the assistant made), some events also become
 `status` reports to the parent: `NeedsInput` (once until the prompt is
@@ -80,8 +82,9 @@ for. The same task's `SessionStarted` prints its brief through
 Both need the hook to run with the agent's environment: jeet reports and
 briefs only when the hook's `$JEET_TASK_ID` names the task its cwd found.
 Status needs only the cwd, so a hook run by a plugin host or server that
-does not inherit the agent's environment still shows status but silently
-never reports or briefs; run hooks as children of the agent, or pass
+does not inherit the agent's environment still shows status, and idle
+reports (swept from status) still go out, but it silently never sends the
+other reports or briefs; run hooks as children of the agent, or pass
 `$JEET_TASK_ID` on. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
 

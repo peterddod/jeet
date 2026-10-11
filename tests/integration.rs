@@ -2820,9 +2820,20 @@ fn a_trust_prompt_is_accepted_only_with_auto_trust() {
     succeeded(&lab.jeet_at(&["task", "open", "child"], &lab.home(), &env));
     let child_session = lab.sessions(&child)[0].0.clone();
     let sessions_started = calls_of(&tmux, "new-session").len();
+    let child_dir = task.parent().unwrap().join("child");
     for _ in 0..2 {
         let args = ["task-startup", &child, "--session", &child_session];
         succeeded(&lab.jeet_at(&args, &lab.home(), &env));
+        // Clear the waiting status, or the second run takes it for the
+        // session having started and never meets the prompt again.
+        assert_eq!(
+            status_file(&child_dir, &child_session)["detail"],
+            "trust folder"
+        );
+        let child_status = child_dir.join(format!(".jeet/status/{child_session}.json"));
+        std::fs::remove_file(&child_status).unwrap();
+        // A second later, so only the launch time can tell it was said.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
     }
     assert_eq!(
         lab.reports_of(&child),
