@@ -637,7 +637,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stop_jobs_spares_a_group_whose_pid_was_reused() {
-        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
         use crate::placement::Placement;
         use std::os::unix::process::CommandExt;
 
@@ -654,6 +654,9 @@ mod tests {
             last_activity: 0,
             parent_id: None,
             placement: Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         })
         .unwrap();
         // An unrelated process group, as a job's would be.
@@ -689,7 +692,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stop_jobs_in_ends_only_the_dirs_own_runner() {
-        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
         use crate::placement::Placement;
         use std::os::unix::process::CommandExt;
 
@@ -712,6 +715,9 @@ mod tests {
                 last_activity: 0,
                 parent_id: None,
                 placement: Placement::Local,
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
             })
             .unwrap();
         let group = || {
@@ -764,7 +770,7 @@ mod tests {
     /// A test index holding the assistant and one top-level review task `t`.
     #[cfg(unix)]
     fn test_app(home: &Path) -> App {
-        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
         use crate::placement::Placement;
         let app = App {
             config: crate::config::load_or_create(home).unwrap(),
@@ -784,6 +790,9 @@ mod tests {
                     last_activity: 0,
                     parent_id: None,
                     placement: Placement::Local,
+                    run_state: RunState::Run,
+                    run_state_by: None,
+                    max_children: None,
                 })
                 .unwrap();
         }

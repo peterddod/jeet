@@ -466,7 +466,7 @@ fn idle_prompt(
             &inbox,
             &assistant::SessionAgent::for_session(&app, &task, session_id),
         ),
-        TaskKind::Work | TaskKind::Review => {
+        TaskKind::Work | TaskKind::Review | TaskKind::Manager => {
             messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(&app, &task))
         }
     }

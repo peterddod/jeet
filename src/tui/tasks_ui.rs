@@ -448,6 +448,7 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
     ];
     let name = match row.task.kind {
         TaskKind::Review => format!("{} (review)", row.task.name),
+        TaskKind::Manager => format!("{} (manager)", row.task.name),
         TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
     // The assistant is the only parent there is for now. The name gives way
@@ -1271,7 +1272,9 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::{ReportKind, TaskRecord, TaskReportRecord, TaskWorktreeRecord};
+    use crate::db::tasks::{
+        ReportKind, RunState, TaskRecord, TaskReportRecord, TaskWorktreeRecord,
+    };
     use crate::tui::tasks::{NewTaskForm, Panel};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1290,6 +1293,9 @@ mod tests {
                 last_activity: crate::worktrees::now_secs() - 120,
                 parent_id: None,
                 placement: crate::placement::Placement::Local,
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
             },
             dir: PathBuf::from("/t"),
             worktrees: vec![TaskWorktreeRecord {
@@ -1303,6 +1309,7 @@ mod tests {
                 stash_ref: None,
                 pr_number: None,
                 created_at: 0,
+                read_only: false,
             }],
             activity,
             last_activity: crate::worktrees::now_secs() - 120,

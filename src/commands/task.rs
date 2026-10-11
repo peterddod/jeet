@@ -264,8 +264,13 @@ fn sender(app: &App) -> String {
 }
 
 pub fn ls(app: &App, archived: bool) -> Result<()> {
-    if let Err(e) = tasks::reconcile(app) {
-        eprintln!("jeet: warning: could not reconcile worktrees: {e:#}");
+    match tasks::reconcile(app) {
+        Ok(warnings) => {
+            for warning in warnings {
+                eprintln!("jeet: warning: {warning}");
+            }
+        }
+        Err(e) => eprintln!("jeet: warning: could not reconcile worktrees: {e:#}"),
     }
     let state = if archived {
         TaskState::Archived
@@ -352,6 +357,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
 pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
     let task = tasks::find(app, name)?;
     // Before asking, not after: the answer would count for nothing.
+    app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(&task, "archive")?;
     if !force {
         confirm_archive(app, &task)?;
@@ -392,6 +398,7 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
         );
     }
     // Before asking, not after: the answer would count for nothing.
+    tasks::refuse_delete_with_children(app, &task)?;
     runtime::refuse_inside_session(&task, "delete")?;
     if !force {
         confirm_delete(app, &task)?;

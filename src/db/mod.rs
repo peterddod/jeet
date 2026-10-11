@@ -142,7 +142,7 @@ const MIGRATIONS: &[&str] = &[
     ",
     // v5: where a task's agent runs (`placement`; only `local`, tmux on this
     // machine, for now: a confined placement widens the CHECK when it is
-    // built, in a migration that rebuilds `tasks`), and the processes jeet
+    // built, in a migration that rebuilds `tasks` as v6 does), and the processes jeet
     // launched for a task, keyed by pid and start time so a reused pid
     // never matches. Additive only.
     "
@@ -158,6 +158,65 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (pid, start)
     );
     CREATE INDEX task_anchors_task ON task_anchors(task_id);
+    ",
+    // v6: hierarchy, phase 2. The `manager` kind, and on each task whether
+    // it may run (`run_state`, with who held it: 'user', 'root', 'budget' or
+    // a task id, NULL while it runs; no FK, as a node setter is an ancestor
+    // of the row, which cannot go while the row exists) and how many active
+    // children it may have. `tasks` is rebuilt for the kind CHECK, keeping
+    // v5's `placement` CHECK as it is; a confined placement widens it in a
+    // migration of its own. A task's grant (`worktree.add` for every
+    // parented task that could add worktrees until now), its budget and what
+    // it has used of it, the starts waiting for a free `max_live` slot, and
+    // worktrees a manager holds read-only.
+    "
+    CREATE TABLE tasks_v6 (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        project TEXT,
+        kind TEXT NOT NULL DEFAULT 'work'
+            CHECK (kind IN ('work', 'review', 'assistant', 'manager')),
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+        created_at INTEGER NOT NULL,
+        last_activity INTEGER NOT NULL,
+        parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+        placement TEXT NOT NULL DEFAULT 'local' CHECK (placement IN ('local')),
+        run_state TEXT NOT NULL DEFAULT 'run'
+            CHECK (run_state IN ('run', 'paused', 'stopped')),
+        run_state_by TEXT,
+        max_children INTEGER CHECK (max_children IS NULL OR max_children > 0),
+        CHECK ((run_state = 'run') = (run_state_by IS NULL))
+    );
+    INSERT INTO tasks_v6 (id, slug, name, project, kind, state, created_at, last_activity,
+                          parent_id, placement)
+        SELECT id, slug, name, project, kind, state, created_at, last_activity,
+               parent_id, placement FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE tasks_v6 RENAME TO tasks;
+    CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
+    CREATE INDEX tasks_parent ON tasks(parent_id);
+    CREATE TABLE task_grants (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        capability TEXT NOT NULL,
+        PRIMARY KEY (task_id, capability)
+    );
+    INSERT INTO task_grants (task_id, capability)
+        SELECT id, 'worktree.add' FROM tasks
+        WHERE parent_id IS NOT NULL AND kind IN ('work', 'review');
+    CREATE TABLE task_budgets (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        max_secs INTEGER CHECK (max_secs IS NULL OR max_secs > 0),
+        max_turns INTEGER CHECK (max_turns IS NULL OR max_turns > 0),
+        used_secs INTEGER NOT NULL DEFAULT 0,
+        used_turns INTEGER NOT NULL DEFAULT 0,
+        warned INTEGER NOT NULL DEFAULT 0 CHECK (warned IN (0, 80, 100))
+    );
+    CREATE TABLE task_start_queue (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        queued_at INTEGER NOT NULL
+    );
+    ALTER TABLE task_worktrees ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
     ",
 ];
 
@@ -573,7 +632,7 @@ mod tests {
             .unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
         for id in ["a", "w", "c"] {
             let task = db.get_task(id).unwrap().unwrap();
             assert_eq!(task.placement, crate::placement::Placement::Local, "{id}");
@@ -590,6 +649,124 @@ mod tests {
         db.conn()
             .execute_batch("UPDATE tasks SET placement = 'local' WHERE id = 'c';")
             .unwrap();
+    }
+
+    #[test]
+    fn a_v5_index_gains_managers_and_keeps_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        v3_index(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[3]).unwrap();
+            conn.execute_batch(MIGRATIONS[4]).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version = 5;
+                 PRAGMA foreign_keys = ON;
+                 INSERT INTO repos (id, trunk_path, remote_url, default_branch)
+                     VALUES ('github.com/acme/api', '/t', 'u', 'main');
+                 INSERT INTO tasks (id, slug, name, parent_id, created_at, last_activity)
+                     VALUES ('c', 'child', 'child', 'a', 1, 1);
+                 INSERT INTO tasks (id, slug, name, kind, parent_id, created_at, last_activity)
+                     VALUES ('r', 'review', 'review', 'review', 'a', 1, 1);
+                 INSERT INTO task_worktrees (task_id, repo_id, dir_name, branch, created_at)
+                     VALUES ('c', 'github.com/acme/api', 'api', 'feat', 1);
+                 INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
+                     VALUES ('s1', 'c', 'child', 1, 1);
+                 INSERT INTO task_prs (task_id, repo_id, number, title, url, state, updated_at)
+                     VALUES ('c', 'github.com/acme/api', 7, 'x', 'u', 'OPEN', 'z');
+                 INSERT INTO task_reports (task_id, to_id, kind, body, at)
+                     VALUES ('c', 'a', 'done', 'ok', 1);
+                 INSERT INTO task_briefs (task_id, goal, created_by)
+                     VALUES ('c', 'fix it', 'a');
+                 INSERT INTO task_anchors (pid, start, task_id, kind, created_at)
+                     VALUES (10, 20, 'c', 'pane', 1);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let count = |table: &str| -> i64 {
+            db.conn()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        for (table, n) in [
+            ("tasks", 4),
+            ("task_worktrees", 1),
+            ("task_sessions", 1),
+            ("task_prs", 1),
+            ("task_reports", 1),
+            ("task_briefs", 1),
+            ("task_anchors", 1),
+            ("task_budgets", 0),
+            ("task_start_queue", 0),
+        ] {
+            assert_eq!(count(table), n, "{table}");
+        }
+        for (id, parent) in [("a", None), ("w", None), ("c", Some("a")), ("r", Some("a"))] {
+            let task = db.get_task(id).unwrap().unwrap();
+            assert_eq!(task.parent_id.as_deref(), parent, "{id}");
+            assert_eq!(task.placement, crate::placement::Placement::Local, "{id}");
+            assert_eq!(task.run_state, tasks::RunState::Run, "{id}");
+            assert_eq!(task.run_state_by, None, "{id}");
+            assert_eq!(task.max_children, None, "{id}");
+        }
+        assert!(!db.list_task_worktrees("c").unwrap()[0].read_only);
+        // Exactly the parented tasks that could add worktrees keep that.
+        for (id, grants) in [("a", vec![]), ("w", vec![]), ("c", vec!["worktree.add"])] {
+            assert_eq!(db.grants(id).unwrap(), grants, "{id}");
+        }
+        assert_eq!(db.grants("r").unwrap(), ["worktree.add"]);
+
+        for bad in [
+            "INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('b', 'assistant-2', 'x', 'assistant', 1, 1);",
+            "INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('b', 'bogus', 'x', 'bogus', 1, 1);",
+            "UPDATE tasks SET placement = 'cloud' WHERE id = 'c';",
+            "UPDATE tasks SET placement = 'moon' WHERE id = 'c';",
+            "UPDATE tasks SET run_state = 'paused' WHERE id = 'c';",
+            "UPDATE tasks SET run_state_by = 'user' WHERE id = 'c';",
+            "UPDATE tasks SET max_children = 0 WHERE id = 'c';",
+        ] {
+            assert!(db.conn().execute_batch(bad).is_err(), "{bad}");
+        }
+        db.conn()
+            .execute_batch(
+                "INSERT INTO tasks (id, slug, name, kind, parent_id, created_at, last_activity)
+                     VALUES ('m', 'manager', 'm', 'manager', 'a', 1, 1);
+                 UPDATE tasks SET run_state = 'paused', run_state_by = 'user' WHERE id = 'm';",
+            )
+            .unwrap();
+
+        let violations: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        // A parent with a child cannot go; a child takes what is its own.
+        assert!(db.delete_task("a").is_err());
+        db.set_budget_max("c", Some(60), None).unwrap();
+        db.charge("c", 5, 1).unwrap();
+        db.delete_task("c").unwrap();
+        assert!(db.budget("c").unwrap().is_none());
+        for table in [
+            "task_budgets",
+            "task_worktrees",
+            "task_sessions",
+            "task_prs",
+            "task_reports",
+            "task_briefs",
+            "task_anchors",
+        ] {
+            assert_eq!(count(table), 0, "{table}");
+        }
+        assert!(db.grants("c").unwrap().is_empty());
     }
 
     #[test]

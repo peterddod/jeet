@@ -84,6 +84,16 @@ stays small. For a manager, `jeet worktree add`:
 Before #32 lands, read-only is cooperative, like the rest of phase 1
 (5.7).
 
+**Phase 2 (as built).** `tasks::add_worktree` refuses `--branch` for a
+manager ("a manager holds read-only worktrees; delegate the change to a
+worker (`jeet task new`)"), detaches at `origin/<default>` and records
+`read_only`; `reconcile` adopts a worktree a manager made itself as
+read-only and warns, through `task ls` and `worktree ls`, when a read-only
+worktree is on a branch; `worktree ls` shows "(read-only)". A manager's deny
+rules add `git commit`, `git push`, `git checkout -b` and `git switch -c`.
+There is no chmod and no write deny, and managers run unconfined: this is a
+lint that keeps an honest manager from writing code, not a guarantee (5.7).
+
 ### Layout
 
 A manager's home is a task directory, so every task path keeps working:
@@ -104,7 +114,7 @@ A manager's home is a task directory, so every task path keeps working:
 
 ## 2. Tree
 
-### Schema (v4)
+### Schema (v6)
 
 `MIGRATIONS` gains one step. SQLite cannot change a `CHECK` in place, so
 `tasks` is rebuilt, as v3 did.
@@ -199,6 +209,25 @@ and the `task_anchors` table (5.7). The `manager` kind, `run_state`,
 `tasks` must copy `parent_id` and `placement` and re-create
 `tasks_one_assistant` and `tasks_parent`.
 
+**Phase 2 (as built).** v6 rebuilds `tasks` with the `manager` kind and
+keeps v5's `CHECK (placement IN ('local'))` unchanged; a confined placement
+widens it in a migration of its own. It adds three columns to `tasks`:
+`run_state`, `run_state_by` (who set a state other than `run`: `user`,
+`root`, `budget` or a task id; NULL exactly while it runs, enforced by a
+`CHECK`; no FK, since a node setter is an ancestor of the row; a state
+never drops in severity and keeps its highest-ranked setter even as it
+rises, so a node's stop does not take over a user's pause) and
+`max_children` (a manager's own fan-out limit). `task_grants` and
+`task_budgets` are as above, with `CHECK`s that a limit is positive and a
+`warned` column (0, 80 or 100) recording the last threshold told. A
+`task_start_queue` table (task id, queued at) holds starts waiting for a
+`max_live` slot, and `task_worktrees.read_only` is added. v6 backfills a
+`worktree.add` grant for every parented `work` and `review` task, so phase-1
+children keep what they could do; nothing else is granted by default. Until
+creation moves to `--allow` and the `[managers]` defaults, a parented `work`
+or `review` task made the phase-1 way is written with that same grant, so no
+child made after the migration is left without it.
+
 ### Creation and teardown
 
 | Operation on a manager | Children |
@@ -212,6 +241,18 @@ and the `task_anchors` table (5.7). The `manager` kind, `run_state`,
 
 A manager can archive or delete only its own descendants. Archiving a worker
 is unchanged.
+
+**Phase 2 (as built).** The refusals live in `tasks::{archive, unarchive,
+delete}`, which the CLI, the TUI and import share, and apply to any task
+with children; the CLI and the TUI also check before asking. Delete is refused while any child exists, before anything is
+stopped or removed (the `RESTRICT` key would otherwise refuse only the row,
+after the disk work).
+Archive is refused while a child is active, and unarchive under an archived
+parent or when the parent already has its `max_children` active children
+(the root has no limit). Each of these two checks once before any work and
+again with the state change, in one IMMEDIATE transaction, so a child made
+meanwhile cannot slip past. `--recursive` comes later in phase 2;
+`--reparent` is phase 4.
 
 ## 3. Delegation
 
@@ -551,8 +592,10 @@ settings jeet gives Claude Code list `jeet` in `sandbox.excludedCommands`,
 since the ancestry walk cannot see past a sandbox's pid namespace (Linux)
 and jeet writes under `~/.jeet`, so with the user's sandbox on, jeet, and
 possibly whatever a Bash command chains with it, runs unconfined. The
-`auto_trust` scope from #23 must exclude manager homes, as it already
-excludes the assistant's, unless the user opts in.
+`auto_trust` scope from #23 covers managers as it covers workers: a manager
+is started by its parent with nobody at its pane, so a trust prompt would
+stall it, and `[harness] auto_trust` is the user's opt-in. The assistant's
+home stays excluded.
 
 **Placement (#33).** Where a node runs is its *placement*, recorded per node
 in the index (`tasks.placement`). There is one, `local`: tmux panes on the
@@ -705,7 +748,7 @@ row, so past the last column it would never show).
   `permissions.rs`, `config.rs` (`[managers]`), `tasks.rs`
   (archive/delete/unarchive cascade), `worktrees.rs` and `db/tasks.rs`
   (`read_only`), `harness/` (`interrupt`, deny rules),
-  `startup.rs` (#23 trust scope excludes manager homes), `cli.rs`.
+  `startup.rs` (#23 trust scope: managers follow `auto_trust` as workers do), `cli.rs`.
 
 **Phase 3: the agents pane.** (#35)
 - The agents tab, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
@@ -1115,6 +1158,35 @@ what this RFC left open, or departed from it:
   requirement: managers run locally in tmux like any other task, the
   placement seam stays (local only), and the cloud design moved to §13 as
   future work, with no probes run and no `hmac`/`sha2`.
+
+### Phase 2 implementation notes
+
+Where phase 2 (#34) settled what this RFC left open, or departed from it.
+Managers run locally in tmux, as the user, like any other task (I22).
+
+- **P1** Schema v6 (§2 "Phase 2 (as built)"): the `manager` kind, run
+  state with its setter, `max_children`, grants, budgets, the start queue
+  and `task_worktrees.read_only`, with the placement `CHECK` still
+  `local` only. The data layer (tree walks, grants, budgets, run state,
+  the queue) lands with it and is used by later steps.
+- **P2** Teardown refusals (§2 "Creation and teardown") land before any
+  manager can be made, and apply to every task with children.
+- **P3** Every `Manager` arm that restricts a manager lands before
+  `jeet manager new` can make one: teardown refusals (P2), read-only
+  worktrees and git denies (P4) and the trust scope (P5). Until then a
+  report to a manager is refused ("reports to managers land in a later
+  version"); no manager row exists for it to reach.
+- **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
+  #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
+  chmod, since a manager runs unconfined anyway. `git branch` is not
+  denied: a prefix rule would also deny `git branch -a`, `-r` and
+  `--show-current`, which a manager reads with, and a branch made in a
+  detached worktree carries nothing without `git commit`, which is
+  denied. `reconcile` now returns its warnings; `task ls` and
+  `worktree ls` print them, the TUI and teardown do not.
+- **P5** A manager follows `[harness] auto_trust` as a worker does (5.7):
+  it is started by its parent with nobody at its pane. The assistant
+  stays excluded.
 
 ## 11. Placement
 

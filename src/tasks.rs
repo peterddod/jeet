@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
+use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
@@ -99,7 +99,7 @@ are refused. Ask your parent instead.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
     match task.kind {
         TaskKind::Assistant => crate::config::assistant_dir(&app.home),
-        TaskKind::Work | TaskKind::Review => app.tasks_root().join(&task.slug),
+        TaskKind::Work | TaskKind::Review | TaskKind::Manager => app.tasks_root().join(&task.slug),
     }
 }
 
@@ -249,12 +249,22 @@ fn make_task(
         last_activity: now,
         parent_id: parent_id.map(str::to_string),
         placement: placement::for_new(),
+        run_state: RunState::Run,
+        run_state_by: None,
+        max_children: None,
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    match scaffold(&dir, &task, project).and_then(|notes| app.db.insert_task(&task).map(|_| notes))
-    {
+    // A child gets what v6 backfilled for the children before it, so the
+    // grants that phase 2 reads cover every child alike.
+    let insert = || match task.parent_id {
+        Some(_) => app
+            .db
+            .insert_child(&task, crate::permissions::NODE_GRANT, None, None, None),
+        None => app.db.insert_task(&task),
+    };
+    match scaffold(&dir, &task, project).and_then(|notes| insert().map(|_| notes)) {
         Ok(notes) => Ok((task, notes)),
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);
@@ -431,6 +441,10 @@ pub fn worktree_summary(rows: &[TaskWorktreeRecord]) -> String {
     format!("{} wt: {}", rows.len(), repos.join(", "))
 }
 
+/// Why a manager may not take a branch: its worktrees are read-only.
+pub const MANAGER_READ_ONLY: &str =
+    "a manager holds read-only worktrees; delegate the change to a worker (`jeet task new`)";
+
 /// A worktree just added to a task.
 pub struct AddedWorktree {
     pub record: TaskWorktreeRecord,
@@ -446,6 +460,10 @@ pub struct AddedWorktree {
 /// branch it is detached at `origin/<default>`. With one, an existing local
 /// branch is checked out, one that exists only on origin is tracked, and
 /// anything else is created from `origin/<default>`.
+///
+/// A manager's worktrees are always detached and marked read-only, to read
+/// and review from: a lint that keeps an honest manager from writing code,
+/// not a guarantee (it runs unconfined, as the user).
 pub fn add_worktree(
     app: &App,
     task: &TaskRecord,
@@ -470,6 +488,11 @@ pub fn add_worktree(
     let branch = match branch.map(str::trim) {
         Some("") => bail!("branch name cannot be empty"),
         other => other,
+    };
+    let read_only = match task.kind {
+        TaskKind::Manager if branch.is_some() => bail!("{MANAGER_READ_ONLY}"),
+        TaskKind::Manager => true,
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => false,
     };
     if let Some(name) = name {
         validate_dir_name(name)?;
@@ -540,6 +563,7 @@ pub fn add_worktree(
         stash_ref: None,
         pr_number: None,
         created_at: now_secs(),
+        read_only,
     };
     // A `jeet task ls` running meanwhile reconciles: it can see the new
     // worktree in `git worktree list` before its row is written, and adopt
@@ -747,6 +771,7 @@ fn review_worktree(
         stash_ref: None,
         pr_number: Some(pr.number),
         created_at: now_secs(),
+        read_only: false,
     };
     if let Err(e) = app.db.insert_task_worktree(&record) {
         let _ = git::worktree_remove(&trunk, &dest, true);
@@ -1103,11 +1128,16 @@ fn plural(n: usize, what: &str) -> String {
 /// whose directory has vanished is dropped, and git told to forget it.
 /// Archived tasks are left alone: their rows describe worktrees that are
 /// meant to be gone.
-pub fn reconcile(app: &App) -> Result<()> {
+///
+/// A worktree adopted into a manager is marked read-only, as one jeet made
+/// for it would be. Returns a warning for each read-only worktree found on
+/// a branch: a manager checked one out itself.
+pub fn reconcile(app: &App) -> Result<Vec<String>> {
     let root = canonical_tasks_root(app);
     let tasks = app.db.list_tasks(Some(TaskState::Active))?;
     let by_slug: HashMap<&str, &TaskRecord> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     let mut prune = BTreeSet::new();
+    let mut warnings = Vec::new();
 
     for repo in app.db.list_repos(None)? {
         let trunk = PathBuf::from(&repo.trunk_path);
@@ -1127,7 +1157,20 @@ pub fn reconcile(app: &App) -> Result<()> {
             if !entry.path.exists() {
                 continue;
             }
-            match app.db.get_task_worktree(&task.id, &dir_name)? {
+            let row = app.db.get_task_worktree(&task.id, &dir_name)?;
+            let read_only = row
+                .as_ref()
+                .map_or(task.kind == TaskKind::Manager, |r| r.read_only);
+            if let (true, Some(branch)) = (read_only, &entry.branch) {
+                // The dir name is whatever the agent gave `git worktree add`.
+                warnings.push(format!(
+                    "{}/{} is read-only but on branch {}; {MANAGER_READ_ONLY}",
+                    task.slug,
+                    crate::commands::task::printable(&dir_name),
+                    crate::commands::task::printable(branch)
+                ));
+            }
+            match row {
                 Some(mut row) if row.repo_id == repo.id && row.branch != entry.branch => {
                     // Someone switched branches in it. The branch it is on now
                     // is not one this task made, so it is never jeet's to delete.
@@ -1148,6 +1191,7 @@ pub fn reconcile(app: &App) -> Result<()> {
                         stash_ref: None,
                         pr_number: None,
                         created_at: now_secs(),
+                        read_only,
                     })?;
                 }
             }
@@ -1173,7 +1217,7 @@ pub fn reconcile(app: &App) -> Result<()> {
     for trunk in prune {
         let _ = git::worktree_prune(&trunk);
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// `(slug, dir_name)` for a path inside a task directory: `dir_name` is the
@@ -1206,10 +1250,14 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 ///
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
+///
+/// It is refused while a task under it is active, before anything is done,
+/// and checked again as it is marked archived.
 pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.kind == TaskKind::Assistant {
         bail!("the assistant cannot be archived");
     }
+    app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(task, "archive")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
@@ -1232,7 +1280,7 @@ pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
         }
     }
-    app.db.set_task_state(&task.id, TaskState::Archived)?;
+    app.db.archive_task(&task.id)?;
     let task_root = task_dir(app, task);
 
     for mut row in app.db.list_task_worktrees(&task.id)? {
@@ -1440,7 +1488,13 @@ fn describe_foreign(dir: &Path, checkout: &ForeignCheckout) -> String {
 /// Worktrees already present are left as they are, so running it again after
 /// a failure picks up where it stopped. The task becomes active only once
 /// every worktree is back.
+///
+/// It is refused under an archived parent, and when the parent already has
+/// as many active tasks under it as it may, before anything is done, and
+/// checked again as it is marked active.
 pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    let fan_out = fan_out_of_parent(app, task)?;
+    app.db.check_unarchive(&task.id, fan_out)?;
     let dir = task_dir(app, task);
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
@@ -1538,9 +1592,25 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         app.db.update_task_worktree(&row)?;
     }
 
-    app.db.set_task_state(&task.id, TaskState::Active)?;
+    app.db.unarchive_task(&task.id, fan_out)?;
     app.db.touch_task(&task.id, now_secs())?;
     Ok(warnings)
+}
+
+/// How many active tasks `task`'s parent may hold: its own `max_children`.
+/// The assistant has no limit, nor does a task with no parent.
+fn fan_out_of_parent(app: &App, task: &TaskRecord) -> Result<Option<u32>> {
+    let Some(parent_id) = &task.parent_id else {
+        return Ok(None);
+    };
+    // A parent that is gone is refused by the check that follows.
+    let Some(parent) = app.db.get_task(parent_id)? else {
+        return Ok(None);
+    };
+    match parent.kind {
+        TaskKind::Assistant => Ok(None),
+        TaskKind::Work | TaskKind::Review | TaskKind::Manager => Ok(parent.max_children),
+    }
 }
 
 /// What deleting `task` would destroy, one line per problem: uncommitted
@@ -1688,7 +1758,8 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// confirmed what [`losses`] lists.
 ///
 /// The rows go last, so a failure part-way leaves a task that can be deleted
-/// again.
+/// again. It is refused, before anything is done, while any task sits under
+/// it (see [`refuse_delete_with_children`]).
 pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // Its directory is the assistant's home: its notes, its todo list.
     if task.kind == TaskKind::Assistant {
@@ -1700,6 +1771,7 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             task.slug
         );
     }
+    refuse_delete_with_children(app, task)?;
     runtime::refuse_inside_session(task, "delete")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "delete")?;
     let mut warnings = Vec::new();
@@ -1771,6 +1843,21 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     }
     app.db.delete_task(&task.id)?;
     Ok(warnings)
+}
+
+/// Refuse to delete `task` while any task sits under it, archived ones
+/// included: its row cannot go before theirs, so nothing of it on disk may
+/// go first either.
+pub fn refuse_delete_with_children(app: &App, task: &TaskRecord) -> Result<()> {
+    let n = app.db.child_count(&task.id, false)?;
+    if n > 0 {
+        bail!(
+            "{} has {} under it, archived ones included; delete them first",
+            task.slug,
+            plural(n, "task")
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1935,6 +2022,7 @@ mod tests {
             stash_ref: None,
             pr_number: None,
             created_at: 0,
+            read_only: false,
         };
         assert_eq!(worktree_summary(&[]), "empty");
         assert_eq!(
@@ -1945,6 +2033,260 @@ mod tests {
             ]),
             "3 wt: api, web"
         );
+    }
+
+    /// A home with a repository in the store (cloned from a local origin,
+    /// so there is an `origin/main`), the assistant, and under it a manager
+    /// `m` and a worker `w`, each with its task directory.
+    fn manager_lab() -> (tempfile::TempDir, App, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let home = root.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let origin = root.join("origin");
+        let trunk = root.join("trunk");
+        std::fs::create_dir(&origin).unwrap();
+        hermetic_git(&origin, &["init", "-q", "-b", "main"]);
+        hermetic_git(&origin, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        hermetic_git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                trunk.to_str().unwrap(),
+            ],
+        );
+        app.db
+            .upsert_repo(&RepoRecord {
+                id: "example.com/o/api".into(),
+                trunk_path: trunk.display().to_string(),
+                remote_url: format!("file://{}", origin.display()),
+                default_branch: "main".into(),
+            })
+            .unwrap();
+        let assistant = crate::assistant::ensure(&app).unwrap();
+        for (slug, kind) in [("m", TaskKind::Manager), ("w", TaskKind::Work)] {
+            app.db
+                .insert_task(&TaskRecord {
+                    id: format!("{slug}-id"),
+                    slug: slug.into(),
+                    name: slug.into(),
+                    project: None,
+                    kind,
+                    state: TaskState::Active,
+                    created_at: 0,
+                    last_activity: 0,
+                    parent_id: Some(assistant.id.clone()),
+                    placement: crate::placement::for_new(),
+                    run_state: RunState::Run,
+                    run_state_by: None,
+                    max_children: None,
+                })
+                .unwrap();
+            std::fs::create_dir_all(app.tasks_root().join(slug)).unwrap();
+        }
+        (dir, app, trunk)
+    }
+
+    fn hermetic_git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_manager_gets_detached_read_only_worktrees_only() {
+        let (_dir, app, trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        let refused = add_worktree(&app, &m, "example.com/o/api", Some("fix"), None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(refused, MANAGER_READ_ONLY);
+        assert!(app.db.list_task_worktrees("m-id").unwrap().is_empty());
+        assert!(!git::branch_exists(&trunk, "fix").unwrap());
+
+        let added = add_worktree(&app, &m, "example.com/o/api", None, None).unwrap();
+        assert!(added.record.read_only);
+        assert_eq!(added.record.branch, None);
+        assert_eq!(git::head_branch(&added.path), None);
+        let row = app
+            .db
+            .get_task_worktree("m-id", &added.record.dir_name)
+            .unwrap()
+            .unwrap();
+        assert!(row.read_only);
+        assert_eq!(row.branch, None);
+
+        // A worker's are as before.
+        let w = app.db.get_task("w-id").unwrap().unwrap();
+        let added = add_worktree(&app, &w, "example.com/o/api", Some("fix"), None).unwrap();
+        assert!(!added.record.read_only);
+        assert_eq!(added.record.branch.as_deref(), Some("fix"));
+    }
+
+    #[test]
+    fn reconcile_adopts_a_managers_worktree_as_read_only_and_warns_on_a_branch() {
+        let (_dir, app, trunk) = manager_lab();
+        let by_hand = |slug: &str| {
+            let path = app.tasks_root().join(slug).join("hand");
+            hermetic_git(
+                &trunk,
+                &["worktree", "add", "-q", "--detach", path.to_str().unwrap()],
+            );
+            path
+        };
+        let m_hand = by_hand("m");
+        let w_hand = by_hand("w");
+        hermetic_git(&w_hand, &["switch", "-q", "-c", "w-branch"]);
+        assert_eq!(reconcile(&app).unwrap(), Vec::<String>::new());
+        let row = |id: &str| app.db.get_task_worktree(id, "hand").unwrap().unwrap();
+        assert!(row("m-id").read_only);
+        assert!(!row("w-id").read_only);
+
+        // The manager checks a branch out itself: kept read-only, and named.
+        hermetic_git(&m_hand, &["switch", "-q", "-c", "m-branch"]);
+        let warnings = reconcile(&app).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("m/hand"), "{warnings:?}");
+        assert!(warnings[0].contains("m-branch"), "{warnings:?}");
+        assert!(warnings[0].contains(MANAGER_READ_ONLY), "{warnings:?}");
+        assert!(row("m-id").read_only);
+        assert_eq!(row("m-id").branch.as_deref(), Some("m-branch"));
+
+        // The dir name is the agent's to pick: no escape reaches a terminal.
+        let path = app.tasks_root().join("m").join("e\x1b[31mvil");
+        hermetic_git(
+            &trunk,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "e\u{9b}2J-branch",
+                path.to_str().unwrap(),
+            ],
+        );
+        let warnings = reconcile(&app).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("m/e[31mvil") && w.contains("e2J-branch")),
+            "{warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.chars().any(char::is_control)),
+            "{warnings:?}"
+        );
+    }
+
+    /// A child made the phase-1 way gets the `worktree.add` row that v6
+    /// gave the children before it; a top-level task gets none.
+    #[test]
+    fn a_new_child_is_granted_what_the_backfill_gave_the_rest() {
+        let (_dir, app, _trunk) = manager_lab();
+        let assistant = app.db.get_task("m-id").unwrap().unwrap().parent_id;
+        let make = |name: &str, parent_id: Option<&str>| {
+            create(
+                &app,
+                &NewTask {
+                    name,
+                    project: None,
+                    repos: &[],
+                    branch: None,
+                    parent_id,
+                },
+            )
+            .unwrap()
+            .task
+        };
+        let child = make("kid", assistant.as_deref());
+        assert_eq!(app.db.grants(&child.id).unwrap(), vec!["worktree.add"]);
+        let top = make("top", None);
+        assert!(app.db.grants(&top.id).unwrap().is_empty());
+    }
+
+    /// `tasks::archive` and `tasks::delete` refuse a parent before touching
+    /// anything: the TUI and import reach them with no check of their own.
+    #[test]
+    fn teardown_with_tasks_under_it_is_refused_before_anything_goes() {
+        let (_dir, app, _trunk) = manager_lab();
+        let assistant = app.db.get_task("m-id").unwrap().unwrap().parent_id;
+        // A slug no real tmux session has, should a regression reach it.
+        let record = |id: &str, slug: &str, kind, parent: Option<String>| TaskRecord {
+            id: id.into(),
+            slug: slug.into(),
+            name: slug.into(),
+            project: None,
+            kind,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: parent,
+            placement: crate::placement::for_new(),
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        let lead = record("lead-id", "jeet-unit-lead", TaskKind::Manager, assistant);
+        app.db.insert_task(&lead).unwrap();
+        let dir = task_dir(&app, &lead);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wt = add_worktree(&app, &lead, "example.com/o/api", None, None)
+            .unwrap()
+            .path;
+        let kid = record(
+            "kid-id",
+            "jeet-unit-kid",
+            TaskKind::Work,
+            Some("lead-id".into()),
+        );
+        app.db.insert_task(&kid).unwrap();
+        // Archive removes the agent's settings long before its row changes.
+        let settings = runtime::settings_dir(&app.home, "lead-id");
+        std::fs::create_dir_all(&settings).unwrap();
+
+        let untouched = |what: &str| {
+            assert!(settings.is_dir(), "{what}: the agent's settings went");
+            assert!(dir.is_dir(), "{what}: the task directory went");
+            assert!(wt.is_dir(), "{what}: the worktree went");
+            assert_eq!(app.db.list_task_worktrees("lead-id").unwrap().len(), 1);
+            let row = app.db.get_task("lead-id").unwrap().unwrap();
+            assert_eq!(row.state, TaskState::Active, "{what}");
+        };
+        let refused = archive(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("1 active task under it"), "{refused}");
+        untouched("archive");
+        let refused = delete(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("1 task under it"), "{refused}");
+        untouched("delete");
+
+        app.db
+            .set_task_state("kid-id", TaskState::Archived)
+            .unwrap();
+        let refused = delete(&app, &lead).unwrap_err().to_string();
+        assert!(refused.contains("archived ones included"), "{refused}");
+        untouched("delete with the child archived");
     }
 
     #[test]

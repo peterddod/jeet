@@ -588,6 +588,11 @@ mod tests {
         assert_eq!(DEFAULT_IDLE_REPORT_MINS, 10);
         let out = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!out.contains("managers"), "{out}");
+        // A `placement` key left from an earlier design is ignored: managers
+        // run locally, and there is nothing to choose.
+        let config: Config =
+            toml::from_str("[managers]\nplacement = \"cloud\"\nidle_report_mins = 5\n").unwrap();
+        assert_eq!(config.idle_report_mins(), 5);
     }
 
     #[test]

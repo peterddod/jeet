@@ -30,9 +30,10 @@ pub fn add(
     for warning in &added.warnings {
         eprintln!("jeet: {warning}");
     }
-    let on = match &added.record.branch {
-        Some(branch) => format!("on {branch}"),
-        None => "detached".to_string(),
+    let on = match (&added.record.branch, added.record.read_only) {
+        (Some(branch), _) => format!("on {branch}"),
+        (None, true) => "detached (read-only)".to_string(),
+        (None, false) => "detached".to_string(),
     };
     eprintln!(
         "jeet: {} ({}, {on}) -> {}",
@@ -47,8 +48,13 @@ pub fn add(
 pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
     let task = tasks::current(app, task)?;
     if task.state == TaskState::Active {
-        if let Err(e) = tasks::reconcile(app) {
-            eprintln!("jeet: warning: could not reconcile worktrees: {e:#}");
+        match tasks::reconcile(app) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    eprintln!("jeet: warning: {warning}");
+                }
+            }
+            Err(e) => eprintln!("jeet: warning: could not reconcile worktrees: {e:#}"),
         }
     }
     let rows = app.db.list_task_worktrees(&task.id)?;
@@ -107,6 +113,10 @@ pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
                 _ => "missing",
             };
             (checkout, note.to_string())
+        };
+        let checkout = match row.read_only {
+            true => format!("{checkout} (read-only)"),
+            false => checkout,
         };
         println!(
             "{:<16} {:<32} {:<24} {}",

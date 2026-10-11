@@ -133,7 +133,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+    use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
     use crate::placement::Placement;
 
     fn open() -> (tempfile::TempDir, Database) {
@@ -151,6 +151,9 @@ mod tests {
                 last_activity: 0,
                 parent_id: None,
                 placement: Placement::Local,
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
             })
             .unwrap();
         }

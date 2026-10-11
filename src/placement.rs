@@ -76,7 +76,7 @@ pub fn for_new() -> Placement {
 mod tests {
     use super::*;
     use crate::config;
-    use crate::db::tasks::{TaskKind, TaskState};
+    use crate::db::tasks::{RunState, TaskKind, TaskState};
     use crate::db::Database;
 
     fn task(id: &str, kind: TaskKind, parent: Option<&str>) -> TaskRecord {
@@ -91,6 +91,9 @@ mod tests {
             last_activity: 0,
             parent_id: parent.map(Into::into),
             placement: for_new(),
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         }
     }
 

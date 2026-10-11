@@ -78,6 +78,7 @@ fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(String, String)>
     };
     match parent.kind {
         TaskKind::Assistant => {}
+        TaskKind::Manager => bail!("reports to managers land in a later version"),
         TaskKind::Work | TaskKind::Review => {
             bail!("only the assistant takes reports in this version")
         }
@@ -222,6 +223,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
 mod tests {
     use super::*;
     use crate::config;
+    use crate::db::tasks::RunState;
     use crate::db::Database;
 
     /// An index in a tempdir with the assistant, `w` under it and `top`
@@ -254,6 +256,9 @@ mod tests {
             last_activity: 0,
             parent_id,
             placement: crate::placement::Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         }
     }
 
