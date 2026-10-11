@@ -2786,7 +2786,13 @@ fn a_trust_prompt_is_accepted_only_with_auto_trust() {
     let startup = |extra: &[&str]| {
         let mut args = vec!["task-startup", id.as_str(), "--session", session.as_str()];
         args.extend(extra);
-        succeeded(&lab.jeet_at(&args, &lab.home(), &env));
+        let output = lab.jeet_at(&args, &lab.home(), &env);
+        succeeded(&output);
+        assert!(
+            !stderr_of(&output).contains("warning"),
+            "{}",
+            stderr_of(&output)
+        );
     };
     std::fs::copy(pane_fixture("trust-no-selected"), stub.join("pane")).unwrap();
     std::fs::copy(pane_fixture("trust-yes-selected"), stub.join("pane-down")).unwrap();
@@ -2803,6 +2809,30 @@ fn a_trust_prompt_is_accepted_only_with_auto_trust() {
         "{}",
         stdout_of(&output)
     );
+    // A top-level task has nobody to tell.
+    assert!(lab.reports_of(&id).is_empty());
+
+    // No hook fires for the prompt, so a task under the assistant tells it
+    // here, once, without starting a session of the assistant's.
+    let child = lab.new_task_with("child", &["--parent", "assistant"]);
+    // The stub's one session is the first task's: let the child start its own.
+    std::fs::remove_file(stub.join("alive")).unwrap();
+    succeeded(&lab.jeet_at(&["task", "open", "child"], &lab.home(), &env));
+    let child_session = lab.sessions(&child)[0].0.clone();
+    let sessions_started = calls_of(&tmux, "new-session").len();
+    for _ in 0..2 {
+        let args = ["task-startup", &child, "--session", &child_session];
+        succeeded(&lab.jeet_at(&args, &lab.home(), &env));
+    }
+    assert_eq!(
+        lab.reports_of(&child),
+        [(
+            "status".to_string(),
+            lab.assistant_id(),
+            "waiting for the user to trust the folder".to_string()
+        )]
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), sessions_started);
 
     // On: Down to "Yes", and Enter only once it shows selected. The
     // SessionStart hook that trusting lets through is what it waits for.
@@ -6585,6 +6615,17 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
         std::fs::read_to_string(&seen).unwrap().trim(),
         format!("{task}:")
     );
+
+    // Headless, it has no hooks to say it ended: the runner says so.
+    let ended = (
+        "status".to_string(),
+        assistant.clone(),
+        "ended without reporting done; the review command exited with status 0".to_string(),
+    );
+    while lab.reports_of(&task).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(lab.reports_of(&task), [ended]);
 }
 
 #[test]
@@ -6690,6 +6731,91 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
     assert!(stderr.contains("no task jeet knows"), "{stderr}");
     assert!(!stderr.contains("no parent"), "{stderr}");
     assert!(lab.reports_of(&y).is_empty());
+}
+
+/// Mark the task in `dir` idle, in a session of its own, since `secs` ago.
+fn idle_since(dir: &std::path::Path, secs: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let status = dir.join(".jeet/status");
+    std::fs::create_dir_all(&status).unwrap();
+    std::fs::write(
+        status.join("s.json"),
+        format!(
+            r#"{{"session_id":"s","state":"idle","event":"Stop","at":{}}}"#,
+            now - secs
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[managers]\nidle_report_mins = 1\n",
+    )
+    .unwrap();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let assistant = lab.assistant_id();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    // Every session reads as alive, so an idle status is idle.
+    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    idle_since(&lab.home().join("tasks/x"), 120);
+
+    // The assistant's Stop hook sweeps, once per idle period: run as the
+    // assistant's sessions are, found by `$JEET_TASK_ID`.
+    let as_assistant = [
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_TASK_ID", assistant.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+    ];
+    let session = "11111111-2222-4333-8444-555555555555";
+    let stop = hook_input("Stop", session, &lab.home().join("assistant"));
+    let mut said = String::new();
+    for _ in 0..2 {
+        let output = lab.hook("Stop", &stop, &as_assistant);
+        succeeded(&output);
+        said.push_str(&stdout_of(&output));
+        let reports = lab.reports_of(&x);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let (kind, to, body) = &reports[0];
+        assert_eq!((kind.as_str(), to), ("status", &assistant));
+        assert_eq!(body, "idle 2m; last report none");
+    }
+    // Swept before the inbox is handed over: it comes back to the
+    // assistant in the very turn-end that found it, once.
+    assert_eq!(
+        said.matches("kind=\\\"status\\\" untrusted=\\\"true\\\">\\nidle 2m; last report none\\n")
+            .count(),
+        1,
+        "{said}"
+    );
+
+    // So does each watch poll.
+    let y = lab.new_task_with("y", &["--parent", "assistant"]);
+    idle_since(&lab.home().join("tasks/y"), 180);
+    let gh = stub_watch_gh(scratch.path());
+    let path = path_with(&gh);
+    let env = [("PATH", path.as_str()), ("JEET_TMUX", tmux_env.as_str())];
+    for _ in 0..2 {
+        succeeded(&lab.jeet_at(&["watch", "--once"], &lab.home(), &env));
+        assert_eq!(
+            lab.reports_of(&y),
+            [(
+                "status".to_string(),
+                assistant.clone(),
+                "idle 3m; last report none".to_string()
+            )]
+        );
+    }
+    assert_eq!(lab.reports_of(&x).len(), 1);
 }
 
 #[cfg(unix)]

@@ -299,6 +299,14 @@ pub fn run_job(path: &Path) -> Result<()> {
     job.exit_code = Some(code);
     write(path, &job)?;
 
+    // Run headless, the command gets no hooks to say it ended: as its
+    // task's Node, the runner says so for it, unless it reported done.
+    if let Some((_, id)) = job.env.iter().find(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
+        if let Err(e) = App::open().and_then(|app| report_end(&app, id, code, job.started_at)) {
+            eprintln!("jeet: could not report the review's end: {e:#}");
+        }
+    }
+
     if job.notify {
         let message = match code {
             0 => format!("Review of #{} is ready", job.pr),
@@ -316,6 +324,18 @@ pub fn run_job(path: &Path) -> Result<()> {
             url,
         });
     }
+    Ok(())
+}
+
+/// Tell review task `id`'s parent its command exited with `code`, once
+/// for the run that started at `since`.
+fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
+    let Some(task) = app.db.get_task(id)? else {
+        return Ok(());
+    };
+    let body =
+        format!("ended without reporting done; the review command exited with status {code}");
+    crate::reports::auto_status(app, &task, crate::reports::StatusEvent::Ended, &body, since)?;
     Ok(())
 }
 

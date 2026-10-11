@@ -610,7 +610,9 @@ Phase 1 as built: review tasks the root makes with `jeet review` are
 parented; the TUI's `browse_pr` stays top level (D5; both call sites run in
 the foreground). The `[review] command` of a parented review task runs with
 that task's `JEET_TASK_ID` and without `JEET_ASSISTANT`, so it is the task's
-Node and reports; the `review-job` runner around it stays the assistant's. No tree helpers and no delete/archive pre-checks yet, since
+Node and reports; the `review-job` runner around it stays the assistant's,
+and, as the command has no hooks, sends the `ended` status report when it
+exits without having reported done. No tree helpers and no delete/archive pre-checks yet, since
 only the assistant can be a parent and both already refuse it; FK RESTRICT is
 the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
 (D20). The TUI marks a parented row ` ↳ assistant` and dims its last report

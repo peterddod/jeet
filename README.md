@@ -1095,7 +1095,8 @@ whatever the assistant holds, as are `jeet notify`, `jeet todo` and review
 jobs; the refusal tells it to ask with `jeet report`. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
-task, gated like any task under it. The gating is cooperative, like the rest: a
+task, gated like any task under it, and jeet tells the assistant when it
+exits without reporting done. The gating is cooperative, like the rest: a
 shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
 and is gated as that task, so use one outside it. After upgrading, an older
 jeet refuses the index.
