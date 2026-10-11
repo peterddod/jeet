@@ -340,7 +340,7 @@ fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
         })),
         "SubagentStop" => EventKind::Working(None),
         "Notification" if is_idle_prompt(input) => EventKind::Idle,
-        "Notification" => EventKind::NeedsInput(
+        "Notification" if asks_the_user(input) => EventKind::NeedsInput(
             input
                 .message
                 .as_deref()
@@ -363,6 +363,16 @@ fn is_idle_prompt(input: &HookInput) -> bool {
             .message
             .as_deref()
             .is_some_and(|m| m.contains("waiting for your input"))
+}
+
+/// A notification that leaves Claude stuck until the user answers: a
+/// permission prompt or an MCP elicitation, or an untyped one from a
+/// Claude too old to say. Others (`auth_success`…) are only news.
+fn asks_the_user(input: &HookInput) -> bool {
+    matches!(
+        input.notification_type.as_deref(),
+        None | Some("permission_prompt") | Some("elicitation_dialog")
+    )
 }
 
 /// The `--settings` JSON: a hook per event running `jeet task-hook`, and
@@ -755,6 +765,24 @@ mod tests {
         assert_eq!(event_kind("Notification", &input), Some(EventKind::Idle));
         input.notification_type = None;
         assert_eq!(event_kind("Notification", &input), Some(EventKind::Idle));
+    }
+
+    #[test]
+    fn only_notifications_that_ask_the_user_need_input() {
+        let mut input = fixture("Notification");
+        for kind in [None, Some("permission_prompt"), Some("elicitation_dialog")] {
+            input.notification_type = kind.map(Into::into);
+            assert!(
+                matches!(
+                    event_kind("Notification", &input),
+                    Some(EventKind::NeedsInput(_))
+                ),
+                "{kind:?}"
+            );
+        }
+        let auth = parsed("Notification", &raw_fixture("Notification-auth"));
+        assert_eq!(auth.kind, None);
+        assert!(status_for(&auth, 1000).is_none());
     }
 
     #[test]
