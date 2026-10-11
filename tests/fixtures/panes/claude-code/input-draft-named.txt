@@ -1,0 +1,24 @@
+[100m  [97mbravo219 bravo220 alpha221 delta222 foxtrot223 bravo224 echo225 foxtrot226 [39m
+  [97malpha227 bravo228 bravo229 foxtrot230 delta231 alpha232 charlie233 alpha234 [39m
+  [97mecho235 bravo236 echo237 echo238 foxtrot239 charlie240 charlie241 foxtrot242 [39m
+  [97mdelta243 charlie244 echo245 alpha246 bravo247 alpha248 delta249 delta250 [39m
+  [97mbravo251 alpha252 echo253 foxtrot254 alpha255 bravo256 alpha257 alpha258 [39m
+  [97malpha259 bravo260 bravo261 alpha262 bravo263 alpha264 echo265 foxtrot266 [39m
+  [97mdelta267 delta268 charlie269 echo270 foxtrot271 delta272 bravo273 foxtrot274 [39m
+  [97mbravo275 foxtrot276 delta277 delta278 echo279 alpha280 echo281 echo282 [39m
+  [97malpha283 delta284 echo285 echo286 bravo287 alpha288 foxtrot289 delta290 [39m
+  [97mcharlie291 alpha292 echo293 alpha294 echo295 charlie296 charlie297 foxtrot298[39m
+  [97mcharlie299 charlie300 alpha301 foxtrot302 delta303 alpha304 alpha305 [39m
+  [97mcharlie306 bravo307 foxtrot308 alpha309 delta310 alpha311 delta312 foxtrot313[39m
+  [97mdelta314 delta315 bravo316 echo317  finalword[39m
+
+[97m[49m⏺[39m Reply finalword 338
+
+[37m✻[39m [37mChurned for 4s · done 0:59[39m
+
+[37m[100m❯ [97mmy unsent draftstart on phase 1[39m
+[49m  [37mtmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and re…[39m
+[37m────────────────────────────────────────────────────────────────────── longmsg ─
+[39m❯ my unsent draft
+[37m────────────────────────────────────────────────────────────────────────────────
+[39m  [93m⏵⏵ auto mode on[37m (shift+tab to cycle)[39m

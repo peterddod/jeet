@@ -2,7 +2,9 @@
 //!
 //! How a message gets there depends on what the agent is doing:
 //! - idle: it is typed into the agent's tmux pane, as if by the user, and
-//!   submitted;
+//!   submitted: pasted in, as one paste, then Enter. Unless the user has
+//!   typed something there and not sent it, which the message would be
+//!   joined to: then it is queued, for the turn the user's text starts;
 //! - busy, or waiting on the user: it is queued in
 //!   `<task>/.jeet/inbox.jsonl`, and the agent's Stop hook hands the queue
 //!   over when it finishes, so it carries straight on. Typed into a
@@ -280,6 +282,10 @@ pub trait Agent {
     fn has_hooks(&self) -> bool;
     /// Type `text` into its pane and press Enter.
     fn type_in(&self, text: &str) -> Result<()>;
+    /// Whether its input box holds text the user has typed and not sent.
+    fn has_draft(&self) -> bool {
+        false
+    }
     /// Start it with `prompt` as its first; false when it turned out to be
     /// running already, and nothing was started.
     fn start(&self, prompt: &str) -> Result<bool>;
@@ -341,7 +347,11 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     // idle between the status being read and the message being queued.
     let inbox = Inbox::lock(task_dir)?;
     let activity = status::activity(agent.status(task_dir).as_ref(), agent.alive());
-    let route = route(&activity, agent.has_hooks());
+    let route = match route(&activity, agent.has_hooks()) {
+        // Typed in, it would be joined to what the user has not sent.
+        Route::Type if agent.has_draft() => Route::Queue,
+        route => route,
+    };
     let me = agent.session();
     if route == Route::Queue {
         inbox.push_to(&message, me)?;
@@ -370,10 +380,12 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
 }
 
 /// Type the task's queue into its idle agent: for an agent that went idle
-/// with no Stop to hand the queue over. True when there was anything.
+/// with no Stop to hand the queue over. True when there was anything. Left
+/// queued while the user has text in the agent's input box: the turn it
+/// starts takes it.
 pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
     let queue = inbox.read_for(agent.session())?;
-    if queue.is_empty() {
+    if queue.is_empty() || agent.has_draft() {
         return Ok(false);
     }
     if let Err(e) = hand_over(inbox, agent, &queue, Route::Type) {
@@ -504,6 +516,14 @@ impl Agent for TmuxAgent<'_> {
         tmux::send_text(&runtime::session_name(self.task), text)
     }
 
+    fn has_draft(&self) -> bool {
+        let Ok(spec) = AgentSpec::from_config(&self.app.config) else {
+            return false;
+        };
+        tmux::capture_styled(&runtime::session_name(self.task))
+            .is_ok_and(|pane| spec.harness.has_draft(&pane))
+    }
+
     fn can_start(&self) -> bool {
         tmux::may_start_session()
     }
@@ -541,6 +561,8 @@ mod tests {
         fail: bool,
         /// May not be started here.
         held: bool,
+        /// The user has text in its input box.
+        draft: bool,
         typed: RefCell<Vec<String>>,
         started: RefCell<Vec<String>>,
     }
@@ -558,6 +580,9 @@ mod tests {
             }
             self.typed.borrow_mut().push(text.to_string());
             Ok(())
+        }
+        fn has_draft(&self) -> bool {
+            self.draft
         }
         fn can_start(&self) -> bool {
             !self.held
@@ -958,6 +983,27 @@ mod tests {
         };
         assert!(deliver(task.path(), &broken, "now").is_err());
         assert_eq!(left(task.path()), [long('a'), long('b'), long('c')]);
+    }
+
+    #[test]
+    fn an_idle_agent_with_a_draft_has_it_queued_not_joined_to_it() {
+        let task = task_in(Some(State::Idle));
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            draft: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "start on phase 1").unwrap(),
+            Delivered::Queued
+        );
+        assert!(agent.typed.borrow().is_empty());
+        // Nor typed in when it sits idle with the draft still there.
+        let inbox = Inbox::lock(task.path()).unwrap();
+        assert!(!hand_over_queue(&inbox, &agent).unwrap());
+        assert!(agent.typed.borrow().is_empty());
+        assert_eq!(inbox.read().unwrap().len(), 1);
     }
 
     #[test]

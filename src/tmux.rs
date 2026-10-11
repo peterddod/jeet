@@ -9,9 +9,10 @@
 //! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
 //! tests, which point it at a stub so they never reach a real server.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
@@ -116,7 +117,9 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
     }
     refuse_new_server(name)?;
     let mut cmd = Command::new(binary());
-    cmd.args(["new-session", "-d", "-s", name, "-c"]).arg(cwd);
+    cmd.args(extended_keys_first())
+        .args(["new-session", "-d", "-s", name, "-c"])
+        .arg(cwd);
     for (key, value) in env {
         cmd.arg("-e").arg(format!("{key}={value}"));
     }
@@ -143,9 +146,10 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
 
 /// Type `text` into the active pane of session `name`, then press Enter.
 ///
-/// `-l` sends the text as it is, never as key names, and `--` keeps text
-/// that starts with a dash from being read as a flag. The caller removes
-/// control characters: sent literally, they would still drive the pane.
+/// The text goes in as one paste, not as keystrokes: Claude Code takes a
+/// long burst of keys for several pastes and keeps only the end of it. The
+/// caller removes control characters: pasted, they would still drive the
+/// pane.
 pub fn send_text(name: &str, text: &str) -> Result<()> {
     type_into(&format!("{}:", target(name)), text)
 }
@@ -156,11 +160,57 @@ pub fn send_text_to_window(window: &str, text: &str) -> Result<()> {
 }
 
 fn type_into(pane: &str, text: &str) -> Result<()> {
-    send_keys(&["-t", pane, "-l", "--", &literal_arg(text)])?;
-    // A moment between the text and the Enter, or a pane reading the two as
-    // one paste may take the Enter as part of the text.
+    paste(pane, text)?;
+    // A moment between the text and the Enter, or a pane still reading the
+    // paste may take the Enter as part of it.
     std::thread::sleep(Duration::from_millis(100));
     send_keys(&["-t", pane, "Enter"])
+}
+
+/// Paste `text` into `pane` through a tmux buffer of its own, bracketed
+/// (`-p`) for a program that asks for that, so it reads the text as one
+/// paste. The text goes to tmux on stdin, never as an argument tmux would
+/// parse, and the buffer is deleted once pasted.
+fn paste(pane: &str, text: &str) -> Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let buffer = format!("jeet-{}-{nanos}", std::process::id());
+    let mut load = Command::new(binary())
+        .args(["load-buffer", "-b", &buffer, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run tmux")?;
+    let written = load
+        .stdin
+        .take()
+        .context("tmux took no input")?
+        .write_all(text.as_bytes());
+    let output = load.wait_with_output().context("run tmux")?;
+    written.context("hand tmux the text")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not take the text to type in: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let output = Command::new(binary())
+        .args(["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        let _ = quiet().args(["delete-buffer", "-b", &buffer]).status();
+        bail!(
+            "tmux could not type into the agent's pane: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// The window option a window made by [`new_window`] is keyed by.
@@ -244,10 +294,12 @@ pub fn new_window(
     if creating {
         refuse_new_server(name)?;
     }
+    let first = extended_keys_first();
     let mut attempts = 0;
     let output = loop {
         attempts += 1;
         let mut cmd = Command::new(binary());
+        cmd.args(&first);
         match creating {
             true => cmd.args(["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]),
             false => cmd.args([
@@ -416,14 +468,34 @@ pub fn press(name: &str, keys: &[&str]) -> Result<()> {
 
 /// The text session `name`'s active pane shows.
 pub fn capture(name: &str) -> Result<String> {
-    let output = Command::new(binary())
-        .args(["capture-pane", "-p", "-t", &format!("{}:", target(name))])
+    capture_pane(&format!("{}:", target(name)), false)
+}
+
+/// [`capture`], with the text's colours and styles kept as escape
+/// sequences: to tell a dimmed placeholder from what was typed.
+pub fn capture_styled(name: &str) -> Result<String> {
+    capture_pane(&format!("{}:", target(name)), true)
+}
+
+/// [`capture_styled`] for the window with tmux id `window` (`@3`).
+pub fn capture_window_styled(window: &str) -> Result<String> {
+    capture_pane(window, true)
+}
+
+fn capture_pane(pane: &str, styled: bool) -> Result<String> {
+    let mut cmd = Command::new(binary());
+    cmd.args(["capture-pane", "-p"]);
+    if styled {
+        cmd.arg("-e");
+    }
+    let output = cmd
+        .args(["-t", pane])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .context("run tmux")?;
     if !output.status.success() {
-        bail!("tmux could not read session {name}'s pane");
+        bail!("tmux could not read pane {pane}");
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -455,16 +527,6 @@ fn send_keys(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// tmux reads an argument that ends in `;` as the end of its command, and
-/// drops the `;`; one ending in `\;` keeps a literal `;`. So the last
-/// `;` is escaped, and the text arrives whole.
-fn literal_arg(text: &str) -> String {
-    match text.strip_suffix(';') {
-        Some(rest) => format!("{rest}\\;"),
-        None => text.to_string(),
-    }
-}
-
 /// The way back to jeet that leaves the agent running: one key, no prefix.
 /// Quitting Claude ends it; detaching is what keeps it going, and `C-b d`
 /// is two steps that Claude Code's own `C-b` gets in the way of.
@@ -493,6 +555,66 @@ fn set_detach_hint(name: &str) {
             DETACH_HINT,
         ])
         .status();
+}
+
+/// The server option that has tmux pass modified keys such as Shift+Enter
+/// on to a program that asks for them, rather than the plain key: Claude
+/// Code asks, and takes Shift+Enter for a new line. tmux has it off.
+const EXTENDED_KEYS: &str = "extended-keys";
+
+/// Set on the server once jeet has turned [`EXTENDED_KEYS`] on there, so a
+/// user who turns it off again is not overruled.
+const EXTENDED_KEYS_MARK: &str = "@jeet-extended-keys";
+
+/// A tmux command to run first, in the same call, wherever jeet starts a
+/// session or window: it turns [`EXTENDED_KEYS`] on, and tells tmux the
+/// outer terminal can send such keys too (which takes effect for a client
+/// on attaching). It has to come first: tmux drops a program's request for
+/// these keys while the option is off, and does not remember it.
+///
+/// The server is the user's own, so the option is changed only from tmux's
+/// default, once per server, and never when the user's tmux.conf sets it.
+/// A tmux that has no such option (before 3.2) expands it to nothing, and
+/// nothing is done.
+fn extended_keys_first() -> Vec<String> {
+    if config_sets_extended_keys() {
+        return Vec::new();
+    }
+    vec![
+        "if-shell".into(),
+        "-F".into(),
+        format!("#{{==:#{{{EXTENDED_KEYS}}}#{{{EXTENDED_KEYS_MARK}}},off}}"),
+        format!(
+            "set-option -s {EXTENDED_KEYS} on ; \
+             set-option -as terminal-features 'xterm*:extkeys' ; \
+             set-option -s {EXTENDED_KEYS_MARK} on"
+        ),
+        ";".into(),
+    ]
+}
+
+/// Whether one of the files tmux reads its configuration from sets
+/// [`EXTENDED_KEYS`], to whatever value.
+fn config_sets_extended_keys() -> bool {
+    let mut files = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        files.push(home.join(".tmux.conf"));
+        files.push(home.join(".config/tmux/tmux.conf"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        files.push(Path::new(&xdg).join("tmux/tmux.conf"));
+    }
+    files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .any(|conf| sets_extended_keys(&conf))
+}
+
+fn sets_extended_keys(conf: &str) -> bool {
+    conf.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with('#'))
+        .any(|line| line.split_whitespace().any(|word| word == EXTENDED_KEYS))
 }
 
 /// `text` as tmux shows it where it expands formats: `#` starts one, and
@@ -759,16 +881,6 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_semicolon_is_typed_not_parsed() {
-        assert_eq!(literal_arg("do it"), "do it");
-        assert_eq!(literal_arg("do it;"), r"do it\;");
-        assert_eq!(literal_arg(";"), r"\;");
-        // Escaped already: tmux unescapes once, so it stays as typed.
-        assert_eq!(literal_arg(r"a\;"), r"a\\;");
-        assert_eq!(literal_arg("a; b"), "a; b");
-    }
-
-    #[test]
     fn windows_are_read_with_their_keys() {
         let listing = "@1\t0\tabc\n@2\t1\t\n@3\t0\n%junk\t0\tx\n";
         assert_eq!(
@@ -792,6 +904,17 @@ mod tests {
             ]
         );
         assert!(parse_windows("").is_empty());
+    }
+
+    #[test]
+    fn a_tmux_conf_that_sets_extended_keys_is_found() {
+        assert!(sets_extended_keys(
+            "set -g mouse on\nset -s extended-keys off\n"
+        ));
+        assert!(sets_extended_keys("  set-option -s extended-keys always"));
+        assert!(!sets_extended_keys("# set -s extended-keys on\n"));
+        assert!(!sets_extended_keys("set -s extended-keys-format csi-u\n"));
+        assert!(!sets_extended_keys(""));
     }
 
     #[test]

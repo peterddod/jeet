@@ -200,6 +200,16 @@ impl Harness for ClaudeCode {
         }
     }
 
+    fn has_draft(&self, pane: &str) -> bool {
+        input_box(pane).is_some_and(|text| {
+            !text
+                .trim_start()
+                .trim_start_matches(CURSOR)
+                .trim()
+                .is_empty()
+        })
+    }
+
     fn instructions_file(&self) -> Option<&'static str> {
         Some(INSTRUCTIONS_FILE)
     }
@@ -207,6 +217,60 @@ impl Harness for ClaudeCode {
     fn instructions_import(&self) -> Option<&'static str> {
         Some(IMPORT_AGENTS_MD)
     }
+}
+
+/// What the input box shows, with the dimmed placeholder Claude puts in an
+/// empty one left out: the lines between the last two rules across the
+/// pane. The rule above may carry the session's name (`──── fix-x ─`).
+/// `pane` is captured with styles.
+fn input_box(pane: &str) -> Option<String> {
+    let lines: Vec<String> = pane.lines().map(undimmed).collect();
+    let is_rule = |line: &String| {
+        let line = line.trim_end();
+        line.starts_with("───") && line.ends_with('─')
+    };
+    let below = lines.iter().rposition(is_rule)?;
+    let above = lines[..below].iter().rposition(is_rule)?;
+    Some(lines[above + 1..below].join("\n"))
+}
+
+/// `line` without its escape sequences, and without the text they dim.
+fn undimmed(line: &str) -> String {
+    let mut text = String::new();
+    let mut dim = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            if !dim {
+                text.push(c);
+            }
+            continue;
+        }
+        // CSI: `ESC [`, parameters, then a final letter; only SGR (`m`)
+        // matters here.
+        if chars.next() != Some('[') {
+            continue;
+        }
+        let mut params = String::new();
+        let end = chars.by_ref().find(|&c| {
+            let done = c.is_ascii_alphabetic() || c == '~';
+            if !done {
+                params.push(c);
+            }
+            done
+        });
+        if end != Some('m') {
+            continue;
+        }
+        for param in params.split(';') {
+            match param {
+                "2" => dim = true,
+                "" | "0" | "22" => dim = false,
+                _ => {}
+            }
+        }
+    }
+    text
 }
 
 /// The option the cursor is on, in a pane showing a list of them.
@@ -590,6 +654,23 @@ mod tests {
             .join("tests/fixtures/panes/claude-code")
             .join(format!("{name}.txt"));
         std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_draft_in_the_input_box_is_seen_but_not_the_placeholder() {
+        assert!(ClaudeCode.has_draft(&pane("input-draft")));
+        assert!(ClaudeCode.has_draft(&pane("input-draft-lines")));
+        // Named, as jeet starts it: the name is in the rule above the box,
+        // and a message sent before shows above it.
+        assert!(ClaudeCode.has_draft(&pane("input-draft-named")));
+        // Dimmed: Claude's suggestion, not typed.
+        assert!(!ClaudeCode.has_draft(&pane("input-placeholder")));
+        // Empty after a turn; the message sent shows above it.
+        assert!(!ClaudeCode.has_draft(&pane("input-empty")));
+        // At the trust prompt there is no input box.
+        assert!(!ClaudeCode.has_draft(&pane("trust-no-selected")));
+        assert_eq!(undimmed("\x1b[39m❯ \x1b[2mTry this\x1b[0m!"), "❯ !");
+        assert_eq!(undimmed("\x1b[1;2mdim\x1b[22mbold"), "bold");
     }
 
     #[test]

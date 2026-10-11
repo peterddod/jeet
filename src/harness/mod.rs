@@ -162,6 +162,14 @@ pub trait Harness: Sync {
         None
     }
 
+    /// Whether its input box holds text the user typed and has not sent,
+    /// from its tmux pane captured with styles (see
+    /// [`crate::tmux::capture_styled`]): a message typed in then would be
+    /// joined to it.
+    fn has_draft(&self, _pane: &str) -> bool {
+        false
+    }
+
     /// The file in a session's directory it reads its instructions from:
     /// `AGENTS.md`, or a file of its own that imports it (see
     /// [`Harness::instructions_import`]).
