@@ -562,6 +562,14 @@ impl Agent for SessionAgent<'_> {
         }
     }
 
+    fn has_draft(&self) -> bool {
+        let (Some(window), Ok(spec)) = (&self.window, AgentSpec::from_config(&self.app.config))
+        else {
+            return false;
+        };
+        tmux::capture_window_styled(window).is_ok_and(|pane| spec.harness.has_draft(&pane))
+    }
+
     fn can_start(&self) -> bool {
         tmux::may_start_session()
     }

@@ -9,9 +9,10 @@
 //! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
 //! tests, which point it at a stub so they never reach a real server.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
@@ -145,9 +146,10 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
 
 /// Type `text` into the active pane of session `name`, then press Enter.
 ///
-/// `-l` sends the text as it is, never as key names, and `--` keeps text
-/// that starts with a dash from being read as a flag. The caller removes
-/// control characters: sent literally, they would still drive the pane.
+/// The text goes in as one paste, not as keystrokes: Claude Code takes a
+/// long burst of keys for several pastes and keeps only the end of it. The
+/// caller removes control characters: pasted, they would still drive the
+/// pane.
 pub fn send_text(name: &str, text: &str) -> Result<()> {
     type_into(&format!("{}:", target(name)), text)
 }
@@ -158,11 +160,57 @@ pub fn send_text_to_window(window: &str, text: &str) -> Result<()> {
 }
 
 fn type_into(pane: &str, text: &str) -> Result<()> {
-    send_keys(&["-t", pane, "-l", "--", &literal_arg(text)])?;
-    // A moment between the text and the Enter, or a pane reading the two as
-    // one paste may take the Enter as part of the text.
+    paste(pane, text)?;
+    // A moment between the text and the Enter, or a pane still reading the
+    // paste may take the Enter as part of it.
     std::thread::sleep(Duration::from_millis(100));
     send_keys(&["-t", pane, "Enter"])
+}
+
+/// Paste `text` into `pane` through a tmux buffer of its own, bracketed
+/// (`-p`) for a program that asks for that, so it reads the text as one
+/// paste. The text goes to tmux on stdin, never as an argument tmux would
+/// parse, and the buffer is deleted once pasted.
+fn paste(pane: &str, text: &str) -> Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let buffer = format!("jeet-{}-{nanos}", std::process::id());
+    let mut load = Command::new(binary())
+        .args(["load-buffer", "-b", &buffer, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run tmux")?;
+    let written = load
+        .stdin
+        .take()
+        .context("tmux took no input")?
+        .write_all(text.as_bytes());
+    let output = load.wait_with_output().context("run tmux")?;
+    written.context("hand tmux the text")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not take the text to type in: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let output = Command::new(binary())
+        .args(["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("run tmux")?;
+    if !output.status.success() {
+        let _ = quiet().args(["delete-buffer", "-b", &buffer]).status();
+        bail!(
+            "tmux could not type into the agent's pane: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// The window option a window made by [`new_window`] is keyed by.
@@ -420,14 +468,34 @@ pub fn press(name: &str, keys: &[&str]) -> Result<()> {
 
 /// The text session `name`'s active pane shows.
 pub fn capture(name: &str) -> Result<String> {
-    let output = Command::new(binary())
-        .args(["capture-pane", "-p", "-t", &format!("{}:", target(name))])
+    capture_pane(&format!("{}:", target(name)), false)
+}
+
+/// [`capture`], with the text's colours and styles kept as escape
+/// sequences: to tell a dimmed placeholder from what was typed.
+pub fn capture_styled(name: &str) -> Result<String> {
+    capture_pane(&format!("{}:", target(name)), true)
+}
+
+/// [`capture_styled`] for the window with tmux id `window` (`@3`).
+pub fn capture_window_styled(window: &str) -> Result<String> {
+    capture_pane(window, true)
+}
+
+fn capture_pane(pane: &str, styled: bool) -> Result<String> {
+    let mut cmd = Command::new(binary());
+    cmd.args(["capture-pane", "-p"]);
+    if styled {
+        cmd.arg("-e");
+    }
+    let output = cmd
+        .args(["-t", pane])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .context("run tmux")?;
     if !output.status.success() {
-        bail!("tmux could not read session {name}'s pane");
+        bail!("tmux could not read pane {pane}");
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -457,16 +525,6 @@ fn send_keys(args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// tmux reads an argument that ends in `;` as the end of its command, and
-/// drops the `;`; one ending in `\;` keeps a literal `;`. So the last
-/// `;` is escaped, and the text arrives whole.
-fn literal_arg(text: &str) -> String {
-    match text.strip_suffix(';') {
-        Some(rest) => format!("{rest}\\;"),
-        None => text.to_string(),
-    }
 }
 
 /// The way back to jeet that leaves the agent running: one key, no prefix.
@@ -820,16 +878,6 @@ mod tests {
     #[test]
     fn targets_match_exactly() {
         assert_eq!(target("jeet-api"), "=jeet-api");
-    }
-
-    #[test]
-    fn a_trailing_semicolon_is_typed_not_parsed() {
-        assert_eq!(literal_arg("do it"), "do it");
-        assert_eq!(literal_arg("do it;"), r"do it\;");
-        assert_eq!(literal_arg(";"), r"\;");
-        // Escaped already: tmux unescapes once, so it stays as typed.
-        assert_eq!(literal_arg(r"a\;"), r"a\\;");
-        assert_eq!(literal_arg("a; b"), "a; b");
     }
 
     #[test]

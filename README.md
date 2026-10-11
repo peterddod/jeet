@@ -553,8 +553,11 @@ jeet task new fix-x --repo api --prompt "Fix X; add a test for it"
 ```
 
 `jeet task send` gets a message to the task's agent however it is doing. An
-idle agent has it typed in (`tmux send-keys -l`) and submitted. A busy one, or
-one waiting on you, has it queued in `.jeet/inbox.jsonl`; when the agent
+idle agent has it pasted in, as one bracketed paste (`tmux paste-buffer -p`),
+and submitted. A message typed in key by key could arrive cut off: Claude Code
+reads a long burst of keys as several pastes and keeps only the end. A busy
+agent, one waiting on you, or one with text in its prompt that you have not
+sent (the message would be joined to it) has it queued in `.jeet/inbox.jsonl`; when the agent
 finishes, its Stop hook hands the queue over and it carries straight on. A
 turn you interrupt with Esc has no Stop, so the queue is also typed in once
 Claude reports it has sat idle at its prompt (after about a minute). A message

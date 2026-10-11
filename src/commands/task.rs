@@ -96,8 +96,8 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {}'s agent", task.name),
         Delivered::Queued => eprintln!(
-            "jeet: {}'s agent is busy or waiting on you, so the message is queued; it gets it \
-             when it finishes or sits idle",
+            "jeet: {}'s agent is busy, waiting on you, or has text you have not sent in its \
+             prompt, so the message is queued; it gets it when it finishes or sits idle",
             task.name
         ),
         Delivered::Started => eprintln!(
@@ -120,8 +120,8 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to the assistant's session {session}"),
         Delivered::Queued => eprintln!(
-            "jeet: the assistant is busy or waiting on you, so the message is queued; it gets \
-             it when it finishes or sits idle"
+            "jeet: the assistant is busy, waiting on you, or has text you have not sent in its \
+             prompt, so the message is queued; it gets it when it finishes or sits idle"
         ),
         Delivered::Started => eprintln!(
             "jeet: started a session of the assistant's with the message in tmux session {}",
