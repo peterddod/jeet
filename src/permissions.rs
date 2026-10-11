@@ -45,6 +45,12 @@ pub struct Capability {
     /// The command lines that use it, pre-approved in the assistant's
     /// harness when it is allowed.
     pub commands: &'static [&'static str],
+    /// Commands outside jeet that use it, as [`HookSetup::deny`] patterns:
+    /// pre-approved for the assistant when it is allowed, and denied to a
+    /// task with a parent that does not hold it.
+    ///
+    /// [`HookSetup::deny`]: crate::harness::HookSetup::deny
+    pub external: &'static [&'static str],
 }
 
 pub const CAPABILITIES: &[Capability] = &[
@@ -78,8 +84,16 @@ pub const CAPABILITIES: &[Capability] = &[
         "check pull requests out for review",
         &["jeet review"],
     ),
-    cap("pr.comment", "comment on pull requests", &[]),
-    cap("pr.review", "submit pull request reviews", &[]),
+    ext(
+        "pr.comment",
+        "comment on pull requests",
+        &["gh pr comment", "gh issue comment"],
+    ),
+    ext(
+        "pr.review",
+        "submit pull request reviews",
+        &["gh pr review"],
+    ),
     cap("pr.merge", "merge pull requests", &["jeet pr merge"]),
     cap("project.read", "list projects", &["jeet projects ls"]),
     cap("project.create", "make projects", &["jeet projects new"]),
@@ -116,8 +130,49 @@ const fn cap(
         name,
         about,
         commands,
+        external: &[],
     }
 }
+
+/// A capability used through commands outside jeet.
+const fn ext(
+    name: &'static str,
+    about: &'static str,
+    external: &'static [&'static str],
+) -> Capability {
+    Capability {
+        name,
+        about,
+        commands: &[],
+        external,
+    }
+}
+
+/// What no agent jeet gates may run, whatever it holds: rewriting a
+/// branch's history, and merging other than through `jeet pr merge` (which
+/// runs `gh` from jeet itself, not from the agent's shell). Patterns as for
+/// [`HookSetup::deny`], anchored at the start of the command, so
+/// `git -C . push -f`, `sh -c '…'` and aliases get past them: a lint
+/// against mistakes, with branch protection as the real control.
+///
+/// [`HookSetup::deny`]: crate::harness::HookSetup::deny
+const ALWAYS_DENY: &[&str] = &[
+    "git push --force*",
+    "git push * --force*",
+    "git push -f",
+    "git push * -f",
+    "git push * +*",
+    "git push --mirror",
+    "git push * --mirror",
+    "gh pr merge",
+    "gh api *pulls/*/merge*",
+    "gh api graphql *mergePullRequest*",
+    "gh api graphql *enablePullRequestAutoMerge*",
+    "curl *pulls/*/merge*",
+];
+
+/// Default branches assumed whatever the index says.
+const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[
@@ -365,6 +420,7 @@ fn task_gate(command: &TaskCommands) -> Gate {
             "task.send",
             format!("messaged task {name}: {}", first_line(message, 80)),
         ),
+        TaskCommands::Interrupt { name } => needs("task.send", format!("interrupted task {name}")),
         TaskCommands::Archive { name, .. } => {
             needs("task.archive", format!("archived task {name}"))
         }
@@ -427,18 +483,83 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
 }
 
 /// The command prefixes the assistant's harness pre-approves: the read-only
-/// jeet commands, its own, and the commands of each allowed capability.
+/// jeet commands, its own, and the commands, jeet's and others, of each
+/// allowed capability.
 pub fn allowed_commands(allow: &[String]) -> Vec<String> {
     let allowed = CAPABILITIES
         .iter()
         .filter(|c| allow.iter().any(|a| a.trim() == c.name))
-        .flat_map(|c| c.commands.iter());
+        .flat_map(|c| c.commands.iter().chain(c.external));
     READ_ONLY
         .iter()
         .chain(OWN)
         .chain(allowed)
         .map(|command| command.to_string())
         .collect()
+}
+
+/// The branches no gated agent may push to: every indexed repository's
+/// default branch, and `main` and `master`, sorted. Read at launch, so a
+/// repository cloned later is covered from the next launch.
+pub fn default_branches(app: &App) -> Result<Vec<String>> {
+    let mut branches: Vec<String> = app
+        .db
+        .list_repos(None)?
+        .into_iter()
+        .map(|r| r.default_branch)
+        .chain(FALLBACK_BRANCHES.map(str::to_string))
+        .filter(|b| !b.trim().is_empty())
+        .collect();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+/// What every agent jeet gates (the assistant, and tasks with a parent) is
+/// denied: [`ALWAYS_DENY`], and pushing to any of `branches`.
+pub fn denied_commands(branches: &[String]) -> Vec<String> {
+    let mut deny: Vec<String> = ALWAYS_DENY.iter().map(|d| d.to_string()).collect();
+    for branch in branches {
+        for pattern in [
+            format!("git push * {branch}"),
+            format!("git push * *:{branch}"),
+            format!("git push * *:refs/heads/{branch}"),
+        ] {
+            if !deny.contains(&pattern) {
+                deny.push(pattern);
+            }
+        }
+    }
+    deny
+}
+
+/// The commands outside jeet of every capability not in `held`.
+fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str> + 'a {
+    CAPABILITIES
+        .iter()
+        .filter(move |c| !held.contains(&c.name))
+        .flat_map(|c| c.external.iter().copied())
+}
+
+/// What `task`'s agent is denied: nothing for a top-level task, which jeet
+/// does not gate; for one with a parent, [`denied_commands`] and the
+/// commands outside jeet of every capability it does not hold.
+pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    if task.parent_id.is_none() {
+        return Ok(Vec::new());
+    }
+    let held = effective(app, task)?;
+    Ok(node_deny(&held, &default_branches(app)?))
+}
+
+fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
+    let mut deny = denied_commands(branches);
+    for command in withheld_externals(held) {
+        if !deny.iter().any(|d| d == command) {
+            deny.push(command.to_string());
+        }
+    }
+    deny
 }
 
 /// An action the assistant was allowed, to record once it has run.
@@ -545,7 +666,7 @@ fn node(
     if !NODE_GRANT.contains(&capability) {
         let mut message = node_refusal(slug, about, None);
         if let Some(Commands::Task {
-            command: TaskCommands::Send { .. },
+            command: TaskCommands::Send { .. } | TaskCommands::Interrupt { .. },
         }) = command
         {
             message.push_str(" (tasks never message each other)");
@@ -741,6 +862,11 @@ mod tests {
                 &["task", "send", "fix-x", "also add tests\nand docs"],
                 "task.send",
                 "messaged task fix-x: also add tests",
+            ),
+            (
+                &["task", "interrupt", "x"],
+                "task.send",
+                "interrupted task x",
             ),
             (&["task", "archive", "x"], "task.archive", "archived task x"),
             (
@@ -991,6 +1117,7 @@ mod tests {
             &["worktree", "rm", "r", "--task", "w"],
             &["task", "send", "sib", "x"],
             &["task", "send", "assistant", "x"],
+            &["task", "interrupt", "sib"],
             &["task", "archive", "sib"],
             &["task", "unarchive", "sib"],
             &["task", "delete", "sib"],
@@ -1014,11 +1141,16 @@ mod tests {
             let message = node_of(&app, &w, args, false).unwrap_err().to_string();
             assert!(message.contains("jeet report"), "{args:?}: {message}");
         }
-        let send = node_of(&app, &w, &["task", "send", "sib", "x"], false).unwrap_err();
-        assert!(
-            send.to_string().contains("never message each other"),
-            "{send}"
-        );
+        for args in [
+            &["task", "send", "sib", "x"][..],
+            &["task", "interrupt", "sib"],
+        ] {
+            let refused = node_of(&app, &w, args, false).unwrap_err();
+            assert!(
+                refused.to_string().contains("never message each other"),
+                "{refused}"
+            );
+        }
 
         let allowed: &[&[&str]] = &[
             &["ls"],
@@ -1087,6 +1219,181 @@ mod tests {
                 }
                 assert_eq!(needs_of(&args).0, c.name, "{command}");
             }
+        }
+    }
+
+    fn main_master() -> Vec<String> {
+        FALLBACK_BRANCHES.map(str::to_string).to_vec()
+    }
+
+    #[test]
+    fn every_gated_agent_is_denied_force_push_and_merge() {
+        let every: Vec<&str> = CAPABILITIES.iter().map(|c| c.name).collect();
+        for deny in [
+            denied_commands(&main_master()),
+            node_deny(&[], &main_master()),
+            node_deny(&every, &main_master()),
+        ] {
+            for always in ALWAYS_DENY {
+                assert!(deny.contains(&always.to_string()), "{always}: {deny:?}");
+            }
+            assert!(deny.contains(&"git push * main".to_string()), "{deny:?}");
+            let mut unique = deny.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(unique.len(), deny.len(), "{deny:?}");
+        }
+    }
+
+    #[test]
+    fn comment_and_review_are_denied_unless_held() {
+        let deny = node_deny(&[], &main_master());
+        for external in ["gh pr comment", "gh issue comment", "gh pr review"] {
+            assert!(deny.contains(&external.to_string()), "{external}");
+        }
+        let deny = node_deny(&["pr.comment"], &main_master());
+        assert!(!deny.contains(&"gh pr comment".to_string()));
+        assert!(!deny.contains(&"gh issue comment".to_string()));
+        assert!(deny.contains(&"gh pr review".to_string()));
+        // The assistant is never denied them: it asks the user at the prompt.
+        assert!(!denied_commands(&main_master())
+            .iter()
+            .any(|d| d.contains("comment") || d.contains("review")));
+        // Held, the assistant runs them without asking.
+        let allowed = allowed_commands(&["pr.comment".into()]);
+        assert!(allowed.contains(&"gh pr comment".to_string()));
+        assert!(allowed.contains(&"gh issue comment".to_string()));
+        assert!(!allowed.contains(&"gh pr review".to_string()));
+    }
+
+    #[test]
+    fn externals_are_not_jeet_commands() {
+        for c in CAPABILITIES {
+            for external in c.external {
+                assert!(!external.starts_with("jeet "), "{external}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_command_is_both_allowed_and_denied() {
+        let every: Vec<String> = CAPABILITIES.iter().map(|c| c.name.to_string()).collect();
+        let allowed = allowed_commands(&every);
+        let denied = denied_commands(&main_master());
+        for a in &allowed {
+            assert!(!denied.contains(a), "{a}");
+            assert!(
+                !denied.iter().any(|d| claude_match(d, a)),
+                "{a} is pre-approved and denied"
+            );
+        }
+    }
+
+    #[test]
+    fn default_branches_cover_every_repo_plus_main_master() {
+        let (_dir, app, _w) = tree();
+        for (id, branch) in [("a", "develop"), ("b", "main"), ("c", "develop")] {
+            app.db
+                .upsert_repo(&crate::db::RepoRecord {
+                    id: id.into(),
+                    trunk_path: format!("/store/{id}"),
+                    remote_url: format!("https://example.com/o/{id}"),
+                    default_branch: branch.into(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            default_branches(&app).unwrap(),
+            ["develop", "main", "master"]
+        );
+    }
+
+    #[test]
+    fn a_top_level_task_gets_no_deny_and_a_node_gets_the_list() {
+        let (_dir, app, w) = tree();
+        let top = app.db.get_task("top-id").unwrap().unwrap();
+        assert!(task_deny(&app, &top).unwrap().is_empty());
+        let deny = task_deny(&app, &w).unwrap();
+        assert!(deny.contains(&"gh pr merge".to_string()), "{deny:?}");
+        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        assert!(deny.contains(&"git push * master".to_string()), "{deny:?}");
+    }
+
+    /// A model of how Claude Code matches a `Bash(…)` deny rule as jeet
+    /// writes it (see `deny_rule` in the Claude harness): `*` matches any
+    /// run of characters, and a trailing ` *` also matches nothing. It is
+    /// not Claude itself; docs/harnesses.md lists what to check by hand.
+    fn claude_match(pattern: &str, command: &str) -> bool {
+        fn glob(p: &[u8], c: &[u8]) -> bool {
+            match p.split_first() {
+                None => c.is_empty(),
+                Some((b'*', rest)) => (0..=c.len()).any(|i| glob(rest, &c[i..])),
+                Some((b, rest)) => c.first() == Some(b) && glob(rest, &c[1..]),
+            }
+        }
+        let rule = match pattern.ends_with('*') {
+            true => pattern.to_string(),
+            false => format!("{pattern} *"),
+        };
+        let bare = rule.strip_suffix(" *");
+        glob(rule.as_bytes(), command.as_bytes())
+            || bare.is_some_and(|b| glob(b.as_bytes(), command.as_bytes()))
+    }
+
+    #[test]
+    fn the_deny_list_stops_force_pushes_and_merges_but_not_work() {
+        let deny = node_deny(&[], &main_master());
+        let denied = |command: &str| deny.iter().any(|d| claude_match(d, command));
+        for command in [
+            "git push --force",
+            "git push origin x --force-with-lease",
+            "git push -f",
+            "git push origin x -f",
+            "git push origin +x",
+            "git push --mirror",
+            "git push origin main",
+            "git push origin HEAD:main",
+            "git push origin :main",
+            "git push origin HEAD:refs/heads/master",
+            "git push origin --delete main",
+            "gh pr merge",
+            "gh pr merge 3 --squash",
+            "gh api -X PUT repos/o/r/pulls/3/merge",
+            "gh api graphql -f query='mutation{mergePullRequest(input:{})}'",
+            "gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'",
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/3/merge",
+            "gh pr comment 3 -b hi",
+            "gh pr review 3 --approve",
+        ] {
+            assert!(denied(command), "not denied: {command}");
+        }
+        for command in [
+            "git push -u origin HEAD",
+            "git push origin task-x",
+            "git push origin main-fix",
+            "git push --follow-tags",
+            "gh pr create",
+            "gh pr view 3",
+            "gh pr checks 3",
+            "jeet pr merge 3",
+            "git log main",
+            "git commit -m 'gh pr merge later'",
+            "rg 'gh pr merge'",
+            "git stash push",
+            "gh api graphql -f query='{viewer{login}}'",
+        ] {
+            assert!(!denied(command), "denied: {command}");
+        }
+        // Gaps an anchored pattern leaves, pinned so a change is noticed.
+        // Branch protection, and #33's sandbox, are the real control.
+        const KNOWN_GAPS: &[&str] = &[
+            "git -C . push -f",
+            "git -c a=b push --force",
+            "sh -c 'git push --force'",
+            "git push -uf origin x",
+        ];
+        for command in KNOWN_GAPS {
+            assert!(!denied(command), "now denied, update the docs: {command}");
         }
     }
 

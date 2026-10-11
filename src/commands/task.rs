@@ -16,7 +16,7 @@ use crate::messages::{self, Delivered};
 use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::projects;
-use crate::runtime;
+use crate::runtime::{self, Interrupted};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -174,6 +174,27 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
         Delivered::Held => eprintln!(
             "jeet: {}'s agent is not running and cannot be started from here, so the message \
              is queued; it gets it when it next runs",
+            task.name
+        ),
+    }
+    Ok(())
+}
+
+/// End the turn task `name`'s agent is running, if it is running one.
+pub fn interrupt(app: &App, name: &str) -> Result<()> {
+    if name.trim() == assistant::SLUG {
+        bail!("only the user interrupts the assistant, in its own window");
+    }
+    let task = tasks::find(app, name)?;
+    match runtime::interrupt(app, &task)? {
+        Interrupted::Sent => eprintln!("jeet: interrupted task {}'s turn", task.name),
+        Interrupted::NotWorking(activity) => eprintln!(
+            "jeet: task {}'s agent is not working ({}); nothing sent",
+            task.name,
+            activity.label()
+        ),
+        Interrupted::UserTyping => eprintln!(
+            "jeet: task {} has unsent input in its agent's prompt; nothing sent",
             task.name
         ),
     }

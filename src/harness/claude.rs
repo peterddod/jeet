@@ -3,8 +3,11 @@
 //! jeet picks each session's id (`--session-id`, `-n`), resumes with
 //! `--resume`, and gives a first prompt after `--`. Its hooks arrive in a
 //! `--settings` JSON layered over the user's own, which also pre-approves
-//! the jeet commands the agent may run. Each hook runs `jeet task-hook
-//! <Event>` with the event's JSON on stdin.
+//! the jeet commands the agent may run and denies what jeet forbids it
+//! (force-pushing, merging…). Claude checks deny rules before any allow
+//! rule from any settings scope, and a denied command cannot be approved at
+//! the prompt. Each hook runs `jeet task-hook <Event>` with the event's JSON
+//! on stdin. Esc ends a running turn.
 //!
 //! Sessions are found by their transcripts, in
 //! `$CLAUDE_CONFIG_DIR/projects/<slug>/<id>.jsonl` (default `~/.claude`),
@@ -18,8 +21,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use super::{
-    shell_quote, AgentMessage, EventKind, Harness, HookEvent, HookSetup, LastTurn, StartSource,
-    StartupPrompt, TrustStep, TurnEnd,
+    shell_quote, AgentMessage, Enforcement, EventKind, Harness, HookEvent, HookSetup, LastTurn,
+    StartSource, StartupPrompt, TrustStep, TurnEnd,
 };
 use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
@@ -107,6 +110,15 @@ impl Harness for ClaudeCode {
 
     fn hook_args(&self, hooks: &HookSetup) -> Option<Vec<String>> {
         Some(vec!["--settings".to_string(), settings_json(hooks)])
+    }
+
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Rules
+    }
+
+    /// Esc ends the turn, and at a permission prompt refuses the tool call.
+    fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["Escape"])
     }
 
     fn parse_hook(&self, event: &str, raw: &str) -> Result<HookEvent> {
@@ -375,8 +387,9 @@ fn asks_the_user(input: &HookInput) -> bool {
     )
 }
 
-/// The `--settings` JSON: a hook per event running `jeet task-hook`, and
-/// permission to run the commands `allow` names, as `Bash(…)` rules.
+/// The `--settings` JSON: a hook per event running `jeet task-hook`,
+/// permission to run the commands `allow` names, as `Bash(…)` rules, and,
+/// when there are any, `Bash(…)` rules denying those `deny` names.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
@@ -398,11 +411,26 @@ fn settings_json(hooks: &HookSetup) -> String {
         .iter()
         .map(|command| format!("Bash({command}:*)"))
         .collect();
+    let mut permissions = serde_json::json!({ "allow": allow });
+    if !hooks.deny.is_empty() {
+        let deny: Vec<String> = hooks.deny.iter().map(|p| deny_rule(p)).collect();
+        permissions["deny"] = serde_json::json!(deny);
+    }
     serde_json::json!({
         "hooks": groups,
-        "permissions": { "allow": allow },
+        "permissions": permissions,
     })
     .to_string()
+}
+
+/// The `Bash(…)` rule for a deny pattern (see [`HookSetup::deny`]): a
+/// trailing ` *` lets any further arguments follow, and Claude matches it
+/// against the bare command too. A pattern already ending in `*` needs none.
+fn deny_rule(pattern: &str) -> String {
+    match pattern.ends_with('*') {
+        true => format!("Bash({pattern})"),
+        false => format!("Bash({pattern} *)"),
+    }
 }
 
 /// Root of Claude Code's per-project session store.
@@ -799,6 +827,7 @@ mod tests {
         let hooks = HookSetup {
             exe: "/opt/it's here/jeet".into(),
             allow: vec!["jeet worktree".into(), "jeet ls".into()],
+            ..Default::default()
         };
         let args = ClaudeCode.hook_args(&hooks).unwrap();
         assert_eq!(args[0], "--settings");
@@ -819,6 +848,32 @@ mod tests {
             value["permissions"]["allow"],
             serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
         );
+        assert!(value["permissions"].get("deny").is_none());
+    }
+
+    #[test]
+    fn settings_carry_deny_rules() {
+        let hooks = HookSetup {
+            exe: "/bin/jeet".into(),
+            allow: vec!["jeet ls".into()],
+            deny: vec!["gh pr merge".into(), "git push --force*".into()],
+        };
+        assert_eq!(ClaudeCode.enforcement(), Enforcement::Rules);
+        let args = ClaudeCode.hook_args(&hooks).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(
+            value["permissions"]["deny"],
+            serde_json::json!(["Bash(gh pr merge *)", "Bash(git push --force*)"])
+        );
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!(["Bash(jeet ls:*)"])
+        );
+    }
+
+    #[test]
+    fn it_interrupts_with_one_escape() {
+        assert_eq!(ClaudeCode.interrupt_keys(), Some(&["Escape"][..]));
     }
 
     #[test]
