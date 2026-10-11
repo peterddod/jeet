@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::context::App;
-use crate::db::tasks::{ReportKind, TaskKind, TaskRecord};
+use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord};
 use crate::manager;
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::runtime;
@@ -280,30 +280,30 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
     let mut children = Vec::new();
     let mut open = Vec::new();
     for child in app.db.children(&task.id)? {
-        let last_report = match app.db.last_report(&child.id)? {
-            Some(r) => {
-                let asks = matches!(r.kind, ReportKind::Blocked | ReportKind::Question);
-                let body = match caller {
-                    Caller::User => r.body,
-                    Caller::Root | Caller::Node(_) => crate::manager::fence::fence_message(
-                        &manager::label_at(&child, &format!("{path}/{}", child.slug)),
-                        &r.body,
-                    ),
-                };
-                let report = Report {
-                    task: child.slug.clone(),
-                    id: r.id,
-                    kind: r.kind.as_str(),
-                    at: r.at,
-                    body,
-                };
-                if asks {
-                    open.push(report.clone());
-                }
-                Some(report)
+        let shown_report = |r: TaskReportRecord| {
+            let body = match caller {
+                Caller::User => r.body,
+                Caller::Root | Caller::Node(_) => crate::manager::fence::fence_message(
+                    &manager::label_at(&child, &format!("{path}/{}", child.slug)),
+                    &r.body,
+                ),
+            };
+            Report {
+                task: child.slug.clone(),
+                id: r.id,
+                kind: r.kind.as_str(),
+                at: r.at,
+                body,
             }
-            None => None,
         };
+        // Open asks come from what the child said itself: a status report
+        // jeet files while it waits for the answer must not hide them.
+        if let Some(r) = app.db.last_own_report(&child.id)? {
+            if matches!(r.kind, ReportKind::Blocked | ReportKind::Question) {
+                open.push(shown_report(r));
+            }
+        }
+        let last_report = app.db.last_report(&child.id)?.map(shown_report);
         children.push(Child {
             task: child.slug,
             kind: child.kind.as_str(),
@@ -616,6 +616,35 @@ mod tests {
             body.starts_with("<jeet-message from=\"task assistant/api/w\" untrusted=\"true\">"),
             "{body}"
         );
+    }
+
+    /// A child that asked and then sat idle keeps its ask open, though
+    /// the status report jeet filed about it is now its latest.
+    #[test]
+    fn show_keeps_an_ask_open_after_jeet_files_a_status_report() {
+        let (_dir, app, root) = lab();
+        let api = add(&app, "api", TaskKind::Manager, &root, &[]);
+        let w = add(&app, "w", TaskKind::Work, &api, &[]);
+        let ask = app
+            .db
+            .insert_report(&w.id, &api.id, ReportKind::Blocked, "need creds", 100)
+            .unwrap();
+        let status = app
+            .db
+            .insert_status_report_unless_told(&w.id, &api.id, "idle", "idle 15m", 100, 1000)
+            .unwrap()
+            .unwrap();
+
+        let s = shown(&app, &Caller::User, &api).unwrap();
+        assert_eq!(s.children[0].last_report.as_ref().unwrap().id, status);
+        assert_eq!(s.open.len(), 1);
+        assert_eq!((s.open[0].id, s.open[0].kind), (ask, "blocked"));
+
+        // Once it says something else, the ask is no longer open.
+        app.db
+            .insert_report(&w.id, &api.id, ReportKind::Progress, "got them", 1100)
+            .unwrap();
+        assert!(shown(&app, &Caller::User, &api).unwrap().open.is_empty());
     }
 
     /// What a manager wrote, an agent reading `show` gets fenced; each

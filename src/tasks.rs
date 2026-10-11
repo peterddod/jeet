@@ -2742,6 +2742,38 @@ mod tests {
         plan_child(&app, &Caller::User, TaskKind::Work, "x", &d, None).unwrap();
     }
 
+    /// A manager's own fan-out limit is at most `[managers] max_children`
+    /// and is kept on its row; under the assistant, unasked, it gets
+    /// `default_budget`.
+    #[test]
+    fn a_manager_keeps_its_own_fan_out_limit_and_gets_the_default_budget() {
+        let (_dir, app, _trunk) = manager_lab();
+        let policy = app.config.manager_policy().unwrap();
+        let user = Caller::User;
+        let d = under("assistant");
+        let above = policy.max_children + 1;
+        let err = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(above)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains(&format!("--max-children {above}")), "{err}");
+        assert!(err.contains("`[managers] max_children`"), "{err}");
+
+        let plan = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(2)).unwrap();
+        assert_eq!(plan.record.max_children, Some(2));
+        assert_eq!(plan.budget, Some(policy.default_budget));
+        let (made, _) = commit_child(&app, &plan, None).unwrap();
+        let made = app.db.get_task(&made.id).unwrap().unwrap();
+        assert_eq!(made.max_children, Some(2));
+        assert_eq!(fan_out_of(&app, &made).unwrap(), Some(2));
+        let row = app.db.budget(&made.id).unwrap().unwrap();
+        assert_eq!(
+            (row.max_secs, row.max_turns),
+            (policy.default_budget.secs, policy.default_budget.turns)
+        );
+        // A worker under the assistant gets none unasked.
+        let plan = plan_child(&app, &user, TaskKind::Work, "y", &d, None).unwrap();
+        assert_eq!(plan.budget, None);
+    }
+
     /// The parent defaults to the assistant for the assistant, and to
     /// itself for a manager; `created_by` is whoever made it.
     #[test]
