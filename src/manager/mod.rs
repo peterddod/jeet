@@ -111,10 +111,16 @@ pub fn tree_path(app: &App, task: &TaskRecord) -> Result<String> {
 /// Who `task` is, to the tasks around it: `the assistant`, `manager
 /// backend` or `task fix-x`.
 pub fn label(task: &TaskRecord) -> String {
+    label_at(task, &task.slug)
+}
+
+/// [`label`], with `task` named by `path` (its [`tree_path`]) instead of
+/// its slug: `manager assistant/backend`.
+pub fn label_at(task: &TaskRecord, path: &str) -> String {
     match task.kind {
         TaskKind::Assistant => "the assistant".to_string(),
-        TaskKind::Manager => format!("manager {}", task.slug),
-        TaskKind::Work | TaskKind::Review => format!("task {}", task.slug),
+        TaskKind::Manager => format!("manager {path}"),
+        TaskKind::Work | TaskKind::Review => format!("task {path}"),
     }
 }
 

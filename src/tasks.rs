@@ -2631,6 +2631,38 @@ mod tests {
         assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
     }
 
+    /// What is left is the least left anywhere above, in turns as in time:
+    /// a grandparent's limit binds a grandchild.
+    #[test]
+    fn a_budget_is_cut_by_every_task_above_in_both_units() {
+        let (_dir, app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        insert(&app, "m2", TaskKind::Manager, &m.id);
+        // m has 30 minutes and 5 turns left; m2 has no limit of its own.
+        app.db.set_budget_max(&m.id, Some(3600), Some(20)).unwrap();
+        app.db.charge(&m.id, 1800, 15).unwrap();
+        let budget = |b: &str| Delegation {
+            budget: vec![crate::manager::budget::parse_part(b).unwrap()],
+            ..under("m2")
+        };
+        let user = Caller::User;
+        for want in ["4h", "20turns"] {
+            let err = plan_child(&app, &user, TaskKind::Work, "x", &budget(want), None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("more than is left under task m2"),
+                "{want}: {err}"
+            );
+            assert!(err.contains("(30m,5turns)"), "{want}: {err}");
+        }
+        let plan = plan_child(&app, &user, TaskKind::Work, "x", &budget("5turns"), None).unwrap();
+        assert_eq!(plan.budget.unwrap().turns, Some(5));
+        // `default_budget` (4h) is cut to what m has left.
+        let plan = plan_child(&app, &user, TaskKind::Work, "x", &under("m2"), None).unwrap();
+        assert_eq!(plan.budget.unwrap().secs, Some(1800));
+    }
+
     /// Last of the checks: a manager needs a harness with hooks and the
     /// rest (M36); a worker does without.
     #[test]
@@ -2705,6 +2737,30 @@ mod tests {
         app.db.set_task_state("m-id", TaskState::Archived).unwrap();
         let err = commit_child(&app, &Caller::User, &plan, None).unwrap_err();
         assert!(err.to_string().contains("archived"), "{err:#}");
+        assert!(!task_dir(&app, &plan.record).exists());
+        assert!(app.db.get_task(&plan.record.id).unwrap().is_none());
+    }
+
+    /// A sibling made between plan and commit fills the parent: the
+    /// commit counts again and refuses, and the directory goes again.
+    #[test]
+    fn commit_child_recounts_the_fan_out() {
+        let (_dir, app, _trunk) = manager_lab();
+        for n in 0..5 {
+            insert(&app, &format!("k{n}"), TaskKind::Work, "m-id");
+        }
+        let plan = plan_child(
+            &app,
+            &Caller::User,
+            TaskKind::Work,
+            "late",
+            &under("m"),
+            None,
+        )
+        .unwrap();
+        insert(&app, "k5", TaskKind::Work, "m-id");
+        let err = commit_child(&app, &Caller::User, &plan, None).unwrap_err();
+        assert!(err.to_string().contains("its limit of 6"), "{err:#}");
         assert!(!task_dir(&app, &plan.record).exists());
         assert!(app.db.get_task(&plan.record.id).unwrap().is_none());
     }

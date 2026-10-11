@@ -1217,13 +1217,18 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone. `task ls` lists a node's
-  subtree only.
+  subtree only. `task send assistant` and `task interrupt assistant` mean
+  the assistant to the user and the root only; to a node, `assistant` is a
+  name like any other, found in its subtree, so a child named for it is
+  that child, never the root.
 - **P9** A node's allowed actions go to its own `actions.log`,
   unannounced. A held capability granted is logged by the granter (the
   assistant's log, a manager's own, or the assistant's marked `by user`)
   and announced whatever `[assistant] notify` says, except the user's own.
   `jeet task last` fences what it prints for any caller but the user: an
-  agent's words may carry text it read (5.5).
+  agent's words may carry text it read (5.5). So does `jeet manager show`,
+  for the children's reports and for the brief's goal and done-when, which
+  a manager writes from what it has read.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1251,8 +1256,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   task's parent and depth), in place of `manager tree --json`. `jeet
   manager show` lists, as open, the children's last reports that are
   `blocked` or `question`. `jeet manager grant` warns of each running task
-  below that lost a capability with commands outside jeet: jeet refuses it
-  at once, but its harness deny rules change only when it next starts.
+  below that lost a capability with commands outside jeet (`pr.comment`,
+  `pr.review`, which jeet never sees run): its agent may still run them
+  until it next starts, when its harness deny rules change.
 - **P14** Reports (5.5) go to a manager parent through its pane, as a
   message does: typed in when it sits idle, queued while it is busy, and,
   when it is not running, started only by a `done`, `blocked` or
@@ -1261,10 +1267,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
   last line says whom to report to. A broken chain that hides what a task
-  may do costs the brief its list, with a warning, not the brief.
+  may do costs the brief its list, with a warning, and its path (the bare
+  slug), not the brief. `jeet report` names the parent it reported to.
 - **P15** A task is named by its kind wherever jeet names one in the tree:
   `manager <slug>` or `task <slug>` in a refusal's "cut by", in `task new`'s
-  "reports to" line and in a report's sender. `jeet task ls` marks a
+  "reports to" line, in a report's sender and `jeet report`'s output, and
+  (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
   manager `(manager)` after its name (M29); `jeet manager ls` has a kind
   column. `max_live` is read once it gates starts.
 

@@ -131,7 +131,10 @@ pub(crate) fn assistant_parent(app: &App) -> Result<TaskRecord> {
 /// [`messages`]. `assistant` is the assistant, whose message goes to the
 /// session [`assistant::target`] picks.
 pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
-    if name.trim() == assistant::SLUG {
+    // A task with a parent was let through for a task of that name in its
+    // own subtree, if anything: never the assistant, whatever a child is
+    // called.
+    if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
         return send_to_assistant(app, message);
     }
     let task = permissions::scoped_target(
@@ -175,7 +178,7 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
 
 /// End the turn task `name`'s agent is running, if it is running one.
 pub fn interrupt(app: &App, name: &str) -> Result<()> {
-    if name.trim() == assistant::SLUG {
+    if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
         bail!("only the user interrupts the assistant, in its own window");
     }
     let task = permissions::scoped_target(
@@ -560,6 +563,20 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
     Ok(())
 }
 
+/// Who `task` is, as the fence around what it said names it, when
+/// `caller` gets it fenced. What an agent said may carry text it read (a
+/// PR, an issue), so an agent reading it gets it fenced; the user sees it
+/// as it is.
+fn fence_for(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Option<String>> {
+    match caller {
+        Caller::User => Ok(None),
+        Caller::Root | Caller::Node(_) => {
+            let path = crate::manager::tree_path(app, task)?;
+            Ok(Some(crate::manager::label_at(task, &path)))
+        }
+    }
+}
+
 /// What the task's agent last said — its last `count` messages — how its
 /// last turn ended and when, and how the task is doing now, read from its
 /// latest session's record through the harness.
@@ -570,14 +587,7 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     };
     let (caller, task) = permissions::resolve_target(app, &target)?;
     permissions::in_scope(app, &caller, permissions::Verb::TaskLast, &task)?;
-    // What an agent said may carry text it read (a PR, an issue), so an
-    // agent reading it gets it fenced; the user sees it as it is.
-    let from = match caller {
-        Caller::User => None,
-        Caller::Root | Caller::Node(_) => {
-            Some(format!("task {}", crate::manager::tree_path(app, &task)?))
-        }
-    };
+    let from = fence_for(app, &caller, &task)?;
     let dir = tasks::task_dir(app, &task);
     let status = match task.state {
         TaskState::Active => runtime::activity(app, &task, tmux::available()).label(),
@@ -714,5 +724,55 @@ mod tests {
         let mut user = turn();
         fence_turn(None, &mut user);
         assert_eq!(user[0].text, said);
+    }
+
+    /// Whom `task last` fences for: any agent, naming the task by kind and
+    /// path; never the user.
+    #[test]
+    fn task_last_fences_for_every_agent_and_not_the_user() {
+        use crate::db::tasks::RunState;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let root = assistant::ensure(&app).unwrap();
+        let add = |slug: &str, kind, parent: &TaskRecord| {
+            let task = TaskRecord {
+                id: format!("{slug}-id"),
+                slug: slug.into(),
+                name: slug.into(),
+                project: None,
+                kind,
+                state: TaskState::Active,
+                created_at: 0,
+                last_activity: 0,
+                parent_id: Some(parent.id.clone()),
+                placement: crate::placement::for_new(),
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
+            };
+            app.db.insert_task(&task).unwrap();
+            task
+        };
+        let api = add("api", TaskKind::Manager, &root);
+        let w = add("w", TaskKind::Work, &api);
+        let from = |caller: &Caller, task: &TaskRecord| fence_for(&app, caller, task).unwrap();
+        assert_eq!(from(&Caller::User, &w), None);
+        assert_eq!(
+            from(&Caller::Root, &w).as_deref(),
+            Some("task assistant/api/w")
+        );
+        assert_eq!(
+            from(&Caller::Node(api.clone()), &w).as_deref(),
+            Some("task assistant/api/w")
+        );
+        assert_eq!(
+            from(&Caller::Root, &api).as_deref(),
+            Some("manager assistant/api")
+        );
     }
 }

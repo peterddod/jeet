@@ -7677,6 +7677,30 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{log:?}"
     );
     assert!(notes(&notifier).is_empty(), "{:?}", notes(&notifier));
+    // So is one granted as the task is made.
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "y",
+            "--parent",
+            "assistant",
+            "--allow",
+            "pr.merge",
+        ],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let y = task_id(&path_from(&output));
+    assert_eq!(lab.grants_of(&y), ["pr.merge"]);
+    let log = actions(&lab.home());
+    assert!(
+        log.iter()
+            .any(|a| a["action"] == "granted held `pr.merge` to task y by user"),
+        "{log:?}"
+    );
+    assert!(notes(&notifier).is_empty(), "{:?}", notes(&notifier));
     let output = lab.jeet_at(&["manager", "grant", "w", "--none"], &lab.home(), &env);
     succeeded(&output);
     assert!(lab.grants_of(&w).is_empty());
@@ -7707,6 +7731,28 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{:?}",
         notes(&notifier)
     );
+    let output = root.jeet(
+        &["task", "new", "z", "--allow", "pr.merge"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let z = task_id(&path_from(&output));
+    assert_eq!(lab.grants_of(&z), ["pr.merge"]);
+    assert!(
+        actions(&lab.home())
+            .iter()
+            .any(|a| a["action"] == "granted held `pr.merge` to task z"),
+        "{:?}",
+        actions(&lab.home())
+    );
+    assert!(
+        notes(&notifier)
+            .iter()
+            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task z|")),
+        "{:?}",
+        notes(&notifier)
+    );
     // What the assistant makes is its, and names it.
     let output = root.jeet(&["task", "new", "r", "--goal", "g"], &lab.home(), &[]);
     succeeded(&output);
@@ -7731,7 +7777,7 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     succeeded(&output);
     let listed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     let slugs: Vec<&str> = listed.iter().map(|r| r["task"].as_str().unwrap()).collect();
-    assert_eq!(slugs, ["r", "v", "w"]);
+    assert_eq!(slugs, ["r", "v", "w", "y", "z"]);
 }
 
 /// A manager (made by hand here: `jeet manager new` comes later) makes
@@ -7851,6 +7897,87 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     assert_eq!(slugs, ["api", "w"]);
     let output = mp.jeet(&["manager", "show", "w", "--json"], &api_dir, &[]);
     succeeded(&output);
+}
+
+/// A manager names a task as anything else does, but only within its
+/// subtree: a child named for the assistant, or for a task outside, is
+/// that child, to the check and to the command alike.
+#[cfg(unix)]
+#[test]
+fn a_manager_acts_on_the_task_its_check_resolved() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\", \
+         \"task.archive\", \"manager.grant\"]\n",
+    )
+    .unwrap();
+    let api = lab.new_task_with("api", &["--parent", "assistant"]);
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&api])
+        .unwrap();
+    index
+        .execute("DELETE FROM task_grants WHERE task_id = ?1", [&api])
+        .unwrap();
+    for cap in ["task.create", "task.send", "task.archive", "manager.grant"] {
+        index
+            .execute(
+                "INSERT INTO task_grants (task_id, capability) VALUES (?1, ?2)",
+                [&api, cap],
+            )
+            .unwrap();
+    }
+    let api_dir = lab.home().join("tasks/api");
+    let mut mp = lab.task_pane("api");
+
+    // Named for the assistant: a message goes to the child, never to the
+    // assistant.
+    let output = mp.jeet(&["task", "new", "assistant", "--goal", "g"], &api_dir, &[]);
+    succeeded(&output);
+    let child = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&child), Some(api.clone()));
+    // A tmux of its own, to start the child's agent with.
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path()).to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux.as_str())];
+    let output = mp.jeet(&["task", "send", "assistant", "hi"], &api_dir, &env);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("assistant's agent"), "{stderr}");
+    assert!(!stderr.contains("the assistant"), "{stderr}");
+    assert!(!lab.home().join(".jeet/inbox.jsonl").exists());
+    assert!(!lab.home().join("assistant/.jeet/inbox.jsonl").exists());
+    let output = mp.jeet(&["task", "interrupt", "assistant"], &api_dir, &[]);
+    assert!(
+        !stderr_of(&output).contains("only the user interrupts"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    // Named for a task outside: the child, not that task.
+    let output = mp.jeet(&["task", "new", "sib", "--goal", "g"], &api_dir, &[]);
+    succeeded(&output);
+    let inner = task_id(&path_from(&output));
+    assert_ne!(inner, sib);
+    let output = mp.jeet(&["manager", "show", "sib", "--json"], &api_dir, &[]);
+    succeeded(&output);
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["path"], "assistant/api/sib-2");
+    succeeded(&mp.jeet(&["manager", "grant", "sib", "--none"], &api_dir, &[]));
+    assert!(lab.grants_of(&inner).is_empty());
+    assert_eq!(lab.grants_of(&sib), ["worktree.add"]);
+    succeeded(&mp.jeet(&["task", "send", "sib", "hi"], &api_dir, &env));
+    assert!(!lab.home().join("tasks/sib/.jeet/inbox.jsonl").exists());
+    succeeded(&mp.jeet(&["task", "archive", "sib", "--force"], &api_dir, &env));
+    let state = |id: &str| -> String {
+        lab.index()
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(state(&inner), "archived");
+    assert_eq!(state(&sib), "active");
 }
 
 #[cfg(unix)]

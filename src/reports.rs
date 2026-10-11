@@ -265,7 +265,9 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
          only way to reach anyone outside this task."
     ));
-    let path = manager::tree_path(app, task)?;
+    // The same broken chain that cost the list costs the path, not the
+    // brief.
+    let path = manager::tree_path(app, task).unwrap_or_else(|_| task.slug.clone());
     Ok(assistant::fence_brief(&to, &path, &lines.join("\n")))
 }
 
@@ -640,5 +642,31 @@ mod tests {
         );
         let top = app.db.get_task("top").unwrap().unwrap();
         assert!(brief_context(&app, &top).is_err());
+    }
+
+    #[test]
+    fn a_broken_chain_costs_the_list_and_path_not_the_brief() {
+        let (_dir, app, _m, mw) = manager_lab();
+        app.db
+            .insert_brief(&crate::db::tasks::TaskBriefRecord {
+                task_id: "mw".into(),
+                goal: "fix it".into(),
+                done_when: None,
+                created_by: "m".into(),
+            })
+            .unwrap();
+        // A cycle made by hand: no walk up from `mw` ends.
+        rusqlite::Connection::open(crate::config::index_path(&app.home))
+            .unwrap()
+            .execute("UPDATE tasks SET parent_id = 'mw' WHERE id = 'm'", [])
+            .unwrap();
+        assert!(app.db.ancestors("mw").is_err());
+        let brief = brief_context(&app, &mw).unwrap();
+        assert!(brief.contains("\nGoal: fix it\n"), "{brief}");
+        assert!(brief.contains("\nYou may: report\n"), "{brief}");
+        assert!(
+            brief.starts_with("<jeet-brief from=\"manager m\" path=\"mw\">\n"),
+            "{brief}"
+        );
     }
 }
