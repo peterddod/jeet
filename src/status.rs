@@ -78,7 +78,7 @@ pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
         EventKind::Idle => (State::Idle, None),
         EventKind::NeedsInput(detail) => (State::Waiting, detail),
         EventKind::Stopped => (State::Idle, None),
-        EventKind::Ended => (State::Ended, None),
+        EventKind::Ended { .. } => (State::Ended, None),
     };
     Some(SessionStatus {
         session_id,

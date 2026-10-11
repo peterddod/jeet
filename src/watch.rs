@@ -862,7 +862,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         }
     }
     for (text, carried) in assistant_messages(&for_assistant) {
-        match assistant::deliver(app, &text) {
+        match assistant::deliver(app, &text, true) {
             Ok((delivered, _)) => {
                 for &i in &carried {
                     sent[i] = Sent::Assistant;

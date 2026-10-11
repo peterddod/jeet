@@ -19,6 +19,7 @@ mod permissions;
 mod pr_history;
 mod projects;
 mod remote;
+mod reports;
 mod resolve;
 mod review;
 mod runtime;
@@ -67,6 +68,10 @@ fn run(command: Option<Commands>) -> Result<()> {
         Commands::InitShell => commands::shell::run_init_shell()?,
         Commands::Notify { title, body, url } => {
             commands::notify::run(&title, body.as_deref(), url.as_deref())?
+        }
+        Commands::Report { kind, message } => {
+            let app = context::App::open()?;
+            commands::report::run(&app, kind, &message)?
         }
         Commands::InstallShell => commands::install_shell::run()?,
         Commands::Watch { once, command } => {
@@ -182,6 +187,9 @@ fn run(command: Option<Commands>) -> Result<()> {
                     repos,
                     branch,
                     prompt,
+                    parent: _,
+                    goal: _,
+                    done_when: _,
                 } => commands::task::new(
                     &app,
                     &name,

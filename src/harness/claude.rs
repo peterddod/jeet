@@ -313,6 +313,9 @@ struct HookInput {
     source: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
+    /// SessionEnd's: why it ended (`clear`, `logout`, `prompt_input_exit`…).
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
@@ -344,7 +347,9 @@ fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
                 .and_then(|m| first_line(m, DETAIL_MAX)),
         ),
         "Stop" => EventKind::Stopped,
-        "SessionEnd" => EventKind::Ended,
+        "SessionEnd" => EventKind::Ended {
+            cleared: input.reason.as_deref() == Some("clear"),
+        },
         _ => return None,
     })
 }
@@ -682,6 +687,23 @@ mod tests {
         }
         // Every installed event is covered.
         assert_eq!(cases.map(|c| c.0), HOOK_EVENTS);
+        // A session /clear ends is over too, though another replaces it.
+        let cleared = status_for(
+            &parsed("SessionEnd", &raw_fixture("SessionEnd-clear")),
+            1000,
+        );
+        assert_eq!(cleared.unwrap().state, State::Ended);
+    }
+
+    #[test]
+    fn a_session_ended_by_clear_says_so() {
+        for (fixture, cleared) in [("SessionEnd", false), ("SessionEnd-clear", true)] {
+            assert_eq!(
+                parsed("SessionEnd", &raw_fixture(fixture)).kind,
+                Some(EventKind::Ended { cleared }),
+                "{fixture}"
+            );
+        }
     }
 
     #[test]

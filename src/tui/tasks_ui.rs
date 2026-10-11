@@ -1265,6 +1265,7 @@ mod tests {
                 state: TaskState::Active,
                 created_at: 0,
                 last_activity: crate::worktrees::now_secs() - 120,
+                parent_id: None,
             },
             dir: PathBuf::from("/t"),
             worktrees: vec![TaskWorktreeRecord {

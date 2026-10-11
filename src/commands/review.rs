@@ -29,7 +29,7 @@ pub fn run(
     let pr = found.pr.clone();
     eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
 
-    let review = tasks::review_task(app, &repo, &pr)?;
+    let review = tasks::review_task(app, &repo, &pr, None)?;
     // Only now: a sync started before the checkout would be fetching this
     // repo just as `gh pr checkout` does. The checkout waits out one already
     // running, but there is no need to start one in its way.

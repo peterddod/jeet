@@ -1,5 +1,6 @@
-//! The task tables (schema v1, v3): a task, the worktrees it holds, its
-//! agent sessions and its PR history.
+//! The task tables (schema v1, v3, v4): a task, the worktrees it holds, its
+//! agent sessions, its PR history, and what its parent asked of it and heard
+//! back from it.
 
 // The tasks milestone is the first caller; until it lands only the tests here
 // use most of this.
@@ -63,6 +64,42 @@ impl TaskState {
     }
 }
 
+/// What a task told its parent with `jeet report`, or, as `Status`, what
+/// jeet told the parent about it on its own (waiting, idle, ended).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReportKind {
+    Progress,
+    Done,
+    Blocked,
+    Question,
+    /// jeet's, never the task's: not offered to `jeet report`.
+    #[value(skip)]
+    Status,
+}
+
+impl ReportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportKind::Progress => "progress",
+            ReportKind::Done => "done",
+            ReportKind::Blocked => "blocked",
+            ReportKind::Question => "question",
+            ReportKind::Status => "status",
+        }
+    }
+
+    pub fn parse(s: &str) -> rusqlite::Result<Self> {
+        match s {
+            "progress" => Ok(ReportKind::Progress),
+            "done" => Ok(ReportKind::Done),
+            "blocked" => Ok(ReportKind::Blocked),
+            "question" => Ok(ReportKind::Question),
+            "status" => Ok(ReportKind::Status),
+            other => Err(bad_enum("report kind", other)),
+        }
+    }
+}
+
 /// The CHECK constraints keep these out, so seeing one means the index was
 /// edited by hand; say which column rather than failing anonymously.
 fn bad_enum(column: &str, value: &str) -> rusqlite::Error {
@@ -86,6 +123,9 @@ pub struct TaskRecord {
     pub state: TaskState,
     pub created_at: i64,
     pub last_activity: i64,
+    /// The task this one reports to; `None` for a top-level task. Not
+    /// [`TaskSessionRecord::parent_id`], which is a session's.
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +175,34 @@ pub struct TaskPrRecord {
     pub updated_at: String,
 }
 
-const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity";
+/// One report, kept after it is delivered: the record a parent's session
+/// context and the tasks list read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReportRecord {
+    /// Assigned by the index; ignored on insert.
+    pub id: i64,
+    /// The task it is about.
+    pub task_id: String,
+    /// The task it went to: the parent, when it was sent.
+    pub to_id: String,
+    pub kind: ReportKind,
+    pub body: String,
+    pub at: i64,
+}
+
+/// What a task's parent asked of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBriefRecord {
+    pub task_id: String,
+    pub goal: String,
+    /// The definition of done.
+    pub done_when: Option<String>,
+    /// The parent's task id, or `user` when the user made the task.
+    pub created_by: String,
+}
+
+const TASK_COLUMNS: &str =
+    "id, slug, name, project, kind, state, created_at, last_activity, parent_id";
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
@@ -147,6 +214,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         state: TaskState::parse(&row.get::<_, String>(5)?)?,
         created_at: row.get(6)?,
         last_activity: row.get(7)?,
+        parent_id: row.get(8)?,
     })
 }
 
@@ -194,10 +262,25 @@ fn task_pr_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPrRecord> {
     })
 }
 
+const TASK_REPORT_COLUMNS: &str = "id, task_id, to_id, kind, body, at";
+
+fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportRecord> {
+    Ok(TaskReportRecord {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        to_id: row.get(2)?,
+        kind: ReportKind::parse(&row.get::<_, String>(3)?)?,
+        body: row.get(4)?,
+        at: row.get(5)?,
+    })
+}
+
 impl Database {
     pub fn insert_task(&self, task: &TaskRecord) -> Result<()> {
         self.conn().execute(
-            &format!("INSERT INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            &format!(
+                "INSERT INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            ),
             params![
                 task.id,
                 task.slug,
@@ -207,6 +290,7 @@ impl Database {
                 task.state.as_str(),
                 task.created_at,
                 task.last_activity,
+                task.parent_id,
             ],
         )?;
         Ok(())
@@ -554,6 +638,82 @@ impl Database {
         let rows = stmt.query_map(params![task_id], task_pr_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Record a report, returning its id.
+    pub fn insert_report(
+        &self,
+        task_id: &str,
+        to_id: &str,
+        kind: ReportKind,
+        body: &str,
+        at: i64,
+    ) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO task_reports (task_id, to_id, kind, body, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, to_id, kind.as_str(), body, at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// The latest report about a task matching `filter`, a condition on
+    /// `kind`. By id, not `at`: two in the same second keep their order.
+    fn last_report_where(&self, task_id: &str, filter: &str) -> Result<Option<TaskReportRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {TASK_REPORT_COLUMNS} FROM task_reports
+                     WHERE task_id = ?1 AND {filter} ORDER BY id DESC LIMIT 1"
+                ),
+                params![task_id],
+                task_report_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The latest report about a task, of any kind.
+    pub fn last_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
+        self.last_report_where(task_id, "1")
+    }
+
+    /// The latest report jeet sent about a task on its own.
+    pub fn last_status_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
+        self.last_report_where(task_id, "kind = 'status'")
+    }
+
+    /// The latest report the task sent itself.
+    pub fn last_own_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
+        self.last_report_where(task_id, "kind <> 'status'")
+    }
+
+    pub fn insert_brief(&self, brief: &TaskBriefRecord) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO task_briefs (task_id, goal, done_when, created_by)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![brief.task_id, brief.goal, brief.done_when, brief.created_by,],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_brief(&self, task_id: &str) -> Result<Option<TaskBriefRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT task_id, goal, done_when, created_by FROM task_briefs WHERE task_id = ?1",
+                params![task_id],
+                |row| {
+                    Ok(TaskBriefRecord {
+                        task_id: row.get(0)?,
+                        goal: row.get(1)?,
+                        done_when: row.get(2)?,
+                        created_by: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +746,7 @@ mod tests {
             state: TaskState::Active,
             created_at: 100,
             last_activity,
+            parent_id: None,
         }
     }
 
@@ -910,5 +1071,99 @@ mod tests {
         assert!(db.list_task_prs("t").unwrap().is_empty());
         // Nothing of the other task's goes with it.
         assert_eq!(db.list_task_worktrees("other").unwrap().len(), 1);
+    }
+
+    /// The assistant, and a task under it.
+    fn parent_and_child(db: &Database) {
+        let mut assistant = task("a", "assistant", 1);
+        assistant.kind = TaskKind::Assistant;
+        db.insert_task(&assistant).unwrap();
+        let mut child = task("c", "child", 1);
+        child.parent_id = Some("a".into());
+        db.insert_task(&child).unwrap();
+    }
+
+    #[test]
+    fn a_task_keeps_its_parent() {
+        let (_dir, db) = open();
+        parent_and_child(&db);
+        assert_eq!(
+            db.get_task("c").unwrap().unwrap().parent_id.as_deref(),
+            Some("a")
+        );
+        assert_eq!(db.get_task("a").unwrap().unwrap().parent_id, None);
+        // The parent must exist.
+        let mut orphan = task("o", "orphan", 1);
+        orphan.parent_id = Some("missing".into());
+        assert!(db.insert_task(&orphan).is_err());
+    }
+
+    #[test]
+    fn a_report_kind_must_be_known() {
+        let (_dir, db) = open();
+        parent_and_child(&db);
+        assert!(db
+            .conn()
+            .execute_batch(
+                "INSERT INTO task_reports (task_id, to_id, kind, body, at)
+                 VALUES ('c', 'a', 'other', 'x', 1);"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn the_last_report_is_the_last_written_even_in_the_same_second() {
+        let (_dir, db) = open();
+        parent_and_child(&db);
+        assert_eq!(db.last_report("c").unwrap(), None);
+        let first = db
+            .insert_report("c", "a", ReportKind::Status, "waiting", 5)
+            .unwrap();
+        let second = db
+            .insert_report("c", "a", ReportKind::Progress, "half", 5)
+            .unwrap();
+        let third = db
+            .insert_report("c", "a", ReportKind::Status, "idle", 5)
+            .unwrap();
+        assert!(first < second && second < third);
+
+        let last = db.last_report("c").unwrap().unwrap();
+        assert_eq!(
+            last,
+            TaskReportRecord {
+                id: third,
+                task_id: "c".into(),
+                to_id: "a".into(),
+                kind: ReportKind::Status,
+                body: "idle".into(),
+                at: 5,
+            }
+        );
+        assert_eq!(db.last_status_report("c").unwrap().unwrap().id, third);
+        let own = db.last_own_report("c").unwrap().unwrap();
+        assert_eq!((own.id, own.kind), (second, ReportKind::Progress));
+        // Another task's reports are its own.
+        assert_eq!(db.last_report("a").unwrap(), None);
+    }
+
+    #[test]
+    fn a_brief_round_trips_and_goes_with_its_task() {
+        let (_dir, db) = open();
+        parent_and_child(&db);
+        assert_eq!(db.get_brief("c").unwrap(), None);
+        let brief = TaskBriefRecord {
+            task_id: "c".into(),
+            goal: "fix it".into(),
+            done_when: Some("PR open".into()),
+            created_by: "a".into(),
+        };
+        db.insert_brief(&brief).unwrap();
+        assert_eq!(db.get_brief("c").unwrap(), Some(brief));
+        db.insert_report("c", "a", ReportKind::Done, "ok", 1)
+            .unwrap();
+
+        db.delete_task("c").unwrap();
+        assert_eq!(db.get_brief("c").unwrap(), None);
+        assert_eq!(db.last_report("c").unwrap(), None);
     }
 }

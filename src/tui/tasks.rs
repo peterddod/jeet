@@ -2444,6 +2444,7 @@ impl Screen<'_> {
                                 project: spec.project.as_deref(),
                                 repos: &spec.repos,
                                 branch: spec.branch.as_deref(),
+                                parent_id: None,
                             },
                         )
                     })
@@ -3202,6 +3203,7 @@ mod tests {
                 state,
                 created_at: 0,
                 last_activity: last,
+                parent_id: None,
             },
             dir: PathBuf::from(format!("/tasks/{}", tasks::slugify(name))),
             worktrees: Vec::new(),

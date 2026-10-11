@@ -252,8 +252,9 @@ pub enum EventKind {
     NeedsInput(Option<String>),
     /// A turn finished; the queue is handed over.
     Stopped,
-    /// The session is over.
-    Ended,
+    /// The session ended. `cleared`: a new one replaces it in the same
+    /// window (e.g. `/clear`).
+    Ended { cleared: bool },
 }
 
 /// What a session last said, from [`Harness::last_messages`].

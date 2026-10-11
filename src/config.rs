@@ -45,6 +45,10 @@ pub struct Config {
     /// has the tasks list poll while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchConfig>,
+
+    /// How tasks with a parent are watched over (`[managers]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managers: Option<ManagersConfig>,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -214,6 +218,17 @@ impl WatchConfig {
     }
 }
 
+/// `[managers]` in config.toml.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ManagersConfig {
+    /// Minutes a task with a parent may sit idle before its parent is told
+    /// (default: 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_report_mins: Option<u64>,
+}
+
+pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
+
 /// A GitHub Project: `{ owner = "acme", number = 3 }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRef {
@@ -237,6 +252,7 @@ impl Default for Config {
             sync_interval_secs: None,
             assistant: AssistantConfig::default(),
             watch: None,
+            managers: None,
         }
     }
 }
@@ -302,6 +318,15 @@ impl Config {
             .and_then(|v| v.trim().parse().ok())
             .or(self.sync_interval_secs)
             .unwrap_or(DEFAULT_SYNC_INTERVAL_SECS)
+    }
+
+    /// `[managers] idle_report_mins`, else the default.
+    #[allow(dead_code)]
+    pub fn idle_report_mins(&self) -> u64 {
+        self.managers
+            .as_ref()
+            .and_then(|m| m.idle_report_mins)
+            .unwrap_or(DEFAULT_IDLE_REPORT_MINS)
     }
 }
 
@@ -551,6 +576,19 @@ mod tests {
         assert!(Config::default().assistant.notify());
         let out = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!out.contains("assistant"), "{out}");
+    }
+
+    #[test]
+    fn reads_the_managers_section() {
+        let config: Config = toml::from_str("[managers]\nidle_report_mins = 5\n").unwrap();
+        assert_eq!(config.idle_report_mins(), 5);
+        assert_eq!(
+            Config::default().idle_report_mins(),
+            DEFAULT_IDLE_REPORT_MINS
+        );
+        assert_eq!(DEFAULT_IDLE_REPORT_MINS, 10);
+        let out = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!out.contains("managers"), "{out}");
     }
 
     #[test]

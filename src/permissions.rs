@@ -26,7 +26,11 @@ use crate::cli::{
     WorktreeCommands,
 };
 use crate::config;
+use crate::context::App;
+use crate::db::tasks::{TaskKind, TaskRecord};
+use crate::db::Database;
 use crate::notify::{self, Notification};
+use crate::tasks::TASK_ID_ENV;
 use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
@@ -145,6 +149,75 @@ pub fn assistant_mode() -> bool {
     })
 }
 
+/// Who runs this jeet, as far as what it may do goes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// A person, or an agent of a top-level task: not gated.
+    User,
+    /// The assistant, the root of the tree: gated by `[assistant] allow`.
+    Root,
+    /// The agent of a task with a parent: gated by [`effective`], and only
+    /// over itself.
+    Node(TaskRecord),
+}
+
+/// Who `row`, the task `$JEET_TASK_ID` names, makes the caller. A task with
+/// a parent is a Node even under `JEET_ASSISTANT=1`: the narrower reading
+/// wins.
+#[allow(dead_code)]
+fn classify(row: Option<TaskRecord>, assistant: bool) -> Caller {
+    match row {
+        Some(task) if task.parent_id.is_some() => Caller::Node(task),
+        _ if assistant => Caller::Root,
+        _ => Caller::User,
+    }
+}
+
+/// Who runs this jeet: by `$JEET_TASK_ID` and `JEET_ASSISTANT` only, never
+/// the working directory. An id jeet does not know names no Node. A
+/// database error is an error, so what is gated fails closed.
+#[allow(dead_code)]
+pub fn caller(db: &Database) -> Result<Caller> {
+    let row = match std::env::var(TASK_ID_ENV) {
+        Ok(id) if !id.trim().is_empty() => db.get_task(id.trim())?,
+        _ => None,
+    };
+    Ok(classify(row, assistant_mode()))
+}
+
+/// What a task with a parent may be allowed, before its parent's list cuts
+/// it down. Phase 2 keeps a grant per task instead (`task_grants`).
+#[allow(dead_code)]
+pub const NODE_GRANT: &[&str] = &["worktree.add"];
+
+/// The capabilities of `grant` that `allow` lists.
+#[allow(dead_code)]
+fn intersect(grant: &[&'static str], allow: &[String]) -> Vec<&'static str> {
+    grant
+        .iter()
+        .copied()
+        .filter(|g| allow.iter().any(|a| a.trim() == *g))
+        .collect()
+}
+
+/// What `node` may do: [`NODE_GRANT`] ∩ `[assistant] allow`, so a child
+/// never holds what its parent lacks. Nothing when its parent is not the
+/// assistant, the only parent there is for now.
+#[allow(dead_code)]
+pub fn effective(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
+    let parent = match &node.parent_id {
+        Some(id) => app.db.get_task(id)?,
+        None => None,
+    };
+    Ok(match parent {
+        Some(parent) if parent.kind == TaskKind::Assistant => {
+            intersect(NODE_GRANT, &app.config.assistant.allow)
+        }
+        _ => Vec::new(),
+    })
+}
+
 /// What running a command takes, for the assistant.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Gate {
@@ -181,6 +254,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { .. }
+        // Only ever to the caller's own parent; the command checks who that is.
+        | Commands::Report { .. }
         // Its own todo list.
         | Commands::Todo { .. }
         // Started by jeet itself, under the command that was checked.
@@ -680,6 +755,58 @@ mod tests {
         assert_eq!(gate(None, false), Gate::Interactive);
         let cli = crate::cli::Cli::try_parse_from(["jeet", "projects"]).unwrap();
         assert_eq!(gate(cli.command.as_ref(), true), Gate::Interactive);
+    }
+
+    #[test]
+    fn reporting_is_free() {
+        for kind in ["progress", "done", "blocked", "question"] {
+            assert_eq!(gate_of(&["report", kind, "x"]), Gate::Free, "{kind}");
+        }
+        // jeet's own kind is not the task's to send.
+        assert!(crate::cli::Cli::try_parse_from(["jeet", "report", "status", "x"]).is_err());
+    }
+
+    fn task(parent_id: Option<&str>) -> TaskRecord {
+        TaskRecord {
+            id: "t".into(),
+            slug: "t".into(),
+            name: "t".into(),
+            project: None,
+            kind: TaskKind::Work,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: parent_id.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_task_with_a_parent_is_a_node_whatever_else_it_says() {
+        let child = task(Some("a"));
+        assert_eq!(
+            classify(Some(child.clone()), true),
+            Caller::Node(child.clone())
+        );
+        assert_eq!(classify(Some(child.clone()), false), Caller::Node(child));
+        assert_eq!(classify(Some(task(None)), true), Caller::Root);
+        assert_eq!(classify(Some(task(None)), false), Caller::User);
+        assert_eq!(classify(None, true), Caller::Root);
+        assert_eq!(classify(None, false), Caller::User);
+    }
+
+    #[test]
+    fn a_node_holds_only_what_its_grant_and_its_parent_both_do() {
+        assert!(intersect(&["worktree.add"], &[]).is_empty());
+        assert_eq!(
+            intersect(
+                &["worktree.add"],
+                &[" worktree.add ".into(), "task.send".into()]
+            ),
+            ["worktree.add"]
+        );
+        // Never anything outside the grant, whatever the parent holds.
+        let every: Vec<String> = CAPABILITIES.iter().map(|c| c.name.to_string()).collect();
+        assert_eq!(intersect(NODE_GRANT, &every), NODE_GRANT);
     }
 
     #[test]

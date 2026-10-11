@@ -107,6 +107,37 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
     ALTER TABLE task_sessions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0;
     ",
+    // v4: hierarchy, phase 1. A task may have a parent (NULL: top level), what
+    // its parent asked of it, and what it reported back. Additive only: the
+    // kind CHECK is unchanged, so `tasks` is not rebuilt. When v5 rebuilds it
+    // (for the manager kind), the rebuild must copy `parent_id` and re-create
+    // `tasks_one_assistant` and `tasks_parent`. `needs_user`, `answer` and
+    // `answered_by` are for questions escalated to the user, not read yet.
+    "
+    ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT;
+    CREATE INDEX tasks_parent ON tasks(parent_id);
+    CREATE TABLE task_briefs (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        goal TEXT NOT NULL,
+        done_when TEXT,
+        brief TEXT,
+        created_by TEXT NOT NULL
+    );
+    CREATE TABLE task_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        to_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL
+            CHECK (kind IN ('progress', 'done', 'blocked', 'question', 'status')),
+        body TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        needs_user INTEGER NOT NULL DEFAULT 0,
+        answer TEXT,
+        answered_by TEXT
+    );
+    CREATE INDEX task_reports_to ON task_reports(to_id, answer);
+    CREATE INDEX task_reports_task ON task_reports(task_id, id);
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
@@ -403,6 +434,61 @@ mod tests {
         db.delete_task("t1").unwrap();
         assert!(db.list_task_worktrees("t1").unwrap().is_empty());
         assert!(db.list_task_sessions("t1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_v3_index_gains_parents_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(BASELINE).unwrap();
+            for sql in &MIGRATIONS[..3] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "PRAGMA user_version = 3;
+                 PRAGMA foreign_keys = ON;
+                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                     VALUES ('a', 'assistant', 'assistant', 'assistant', 1, 1);
+                 INSERT INTO tasks (id, slug, name, created_at, last_activity)
+                     VALUES ('w', 'work', 'work', 1, 1);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 4);
+        // Existing tasks are top level, and still list.
+        assert_eq!(db.get_task("w").unwrap().unwrap().parent_id, None);
+        assert_eq!(db.list_tasks(None).unwrap().len(), 1);
+        assert!(has_table(&db, "task_briefs"));
+        assert!(has_table(&db, "task_reports"));
+        // Not rebuilt, so the one-assistant index is still there.
+        assert!(db
+            .conn()
+            .execute_batch(
+                "INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                 VALUES ('b', 'assistant-2', 'x', 'assistant', 1, 1);"
+            )
+            .is_err());
+
+        // A child's reports go with it; a parent with a child cannot go.
+        db.conn()
+            .execute_batch(
+                "INSERT INTO tasks (id, slug, name, parent_id, created_at, last_activity)
+                     VALUES ('c', 'child', 'child', 'a', 1, 1);
+                 INSERT INTO task_reports (task_id, to_id, kind, body, at)
+                     VALUES ('c', 'a', 'done', 'ok', 1);",
+            )
+            .unwrap();
+        assert!(db.delete_task("a").is_err());
+        db.delete_task("c").unwrap();
+        let reports: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM task_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(reports, 0);
+        db.delete_task("a").unwrap();
     }
 
     #[test]

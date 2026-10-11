@@ -150,6 +150,8 @@ pub struct NewTask<'a> {
     /// Branch for the worktree of the single repository in `repos`; the
     /// project's worktrees start detached.
     pub branch: Option<&'a str>,
+    /// The task it reports to, by id; `None` for a top-level task.
+    pub parent_id: Option<&'a str>,
 }
 
 /// A task that was just made, plus anything worth telling the user.
@@ -177,7 +179,8 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         None => None,
     };
 
-    let (task, mut warnings) = make_task(app, name, project.as_ref(), TaskKind::Work)?;
+    let (task, mut warnings) =
+        make_task(app, name, project.as_ref(), TaskKind::Work, spec.parent_id)?;
 
     let preset = project
         .iter()
@@ -210,6 +213,7 @@ fn make_task(
     name: &str,
     project: Option<&Project>,
     kind: TaskKind,
+    parent_id: Option<&str>,
 ) -> Result<(TaskRecord, Vec<String>)> {
     let now = now_secs();
     let task = TaskRecord {
@@ -221,6 +225,7 @@ fn make_task(
         state: TaskState::Active,
         created_at: now,
         last_activity: now,
+        parent_id: parent_id.map(str::to_string),
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
@@ -564,17 +569,20 @@ pub struct ReviewCheckout {
 /// archived one is brought back; one whose checkout is there already is
 /// brought up to date with the PR when clean. A task made here for a PR
 /// that cannot be checked out is undone — it holds nothing yet.
+///
+/// A task made here reports to `parent_id`; one found is never moved.
 pub fn review_task(
     app: &App,
     repo: &RepoRecord,
     pr: &crate::github::PullRequest,
+    parent_id: Option<&str>,
 ) -> Result<ReviewCheckout> {
     let mut warnings = Vec::new();
     let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
         Some(task) => (task, false),
         None => {
             let name = review_task_name(repo, pr.number);
-            let (task, notes) = make_task(app, &name, None, TaskKind::Review)?;
+            let (task, notes) = make_task(app, &name, None, TaskKind::Review, parent_id)?;
             warnings.extend(notes);
             (task, true)
         }
@@ -638,7 +646,7 @@ pub fn browse_pr(
             }
         }
     }
-    review_task(app, repo, pr)
+    review_task(app, repo, pr, None)
 }
 
 /// The review task's checkout of `pr`: the one it has, refreshed, or a new

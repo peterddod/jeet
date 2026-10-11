@@ -42,6 +42,7 @@ pub fn new(
             project,
             repos,
             branch,
+            parent_id: None,
         },
     )?;
     warn_all(&created.warnings);
