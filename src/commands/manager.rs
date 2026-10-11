@@ -88,12 +88,18 @@ fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
     for children in below.values_mut() {
         children.sort_by(|a, b| a.slug.cmp(&b.slug));
     }
-    let slugs: HashMap<String, String> = below
+    let mut slugs: HashMap<String, String> = below
         .values()
         .flatten()
         .chain(std::iter::once(top))
         .map(|t| (t.id.clone(), t.slug.clone()))
         .collect();
+    // The top's own parent sits above the tree but is still its parent.
+    if let Some(id) = &top.parent_id {
+        if let Some(parent) = app.db.get_task(id)? {
+            slugs.insert(parent.id, parent.slug);
+        }
+    }
     let mut rows = Vec::new();
     // Depth first, from the top; `descendants` already refused a cycle.
     let mut stack: Vec<(TaskRecord, u32)> = match top.kind {

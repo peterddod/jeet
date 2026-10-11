@@ -7959,6 +7959,9 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     let slugs: Vec<&str> = rows.iter().map(|r| r["task"].as_str().unwrap()).collect();
     assert_eq!(slugs, ["api", "w"]);
+    // Its own row still names the parent above it.
+    assert_eq!(rows[0]["parent"], "assistant");
+    assert_eq!(rows[1]["parent"], "api");
     let output = mp.jeet(&["manager", "show", "w", "--json"], &api_dir, &[]);
     succeeded(&output);
     // The brief it wrote it reads back fenced, as an agent reads anything
