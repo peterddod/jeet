@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
+use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState, TaskWorktreeRecord};
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
@@ -99,7 +99,7 @@ are refused. Ask your parent instead.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
     match task.kind {
         TaskKind::Assistant => crate::config::assistant_dir(&app.home),
-        TaskKind::Work | TaskKind::Review => app.tasks_root().join(&task.slug),
+        TaskKind::Work | TaskKind::Review | TaskKind::Manager => app.tasks_root().join(&task.slug),
     }
 }
 
@@ -249,6 +249,9 @@ fn make_task(
         last_activity: now,
         parent_id: parent_id.map(str::to_string),
         placement: placement::for_new(),
+        run_state: RunState::Run,
+        run_state_by: None,
+        max_children: None,
     };
     let dir = task_dir(app, &task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
@@ -540,6 +543,7 @@ pub fn add_worktree(
         stash_ref: None,
         pr_number: None,
         created_at: now_secs(),
+        read_only: false,
     };
     // A `jeet task ls` running meanwhile reconciles: it can see the new
     // worktree in `git worktree list` before its row is written, and adopt
@@ -747,6 +751,7 @@ fn review_worktree(
         stash_ref: None,
         pr_number: Some(pr.number),
         created_at: now_secs(),
+        read_only: false,
     };
     if let Err(e) = app.db.insert_task_worktree(&record) {
         let _ = git::worktree_remove(&trunk, &dest, true);
@@ -1148,6 +1153,7 @@ pub fn reconcile(app: &App) -> Result<()> {
                         stash_ref: None,
                         pr_number: None,
                         created_at: now_secs(),
+                        read_only: false,
                     })?;
                 }
             }
@@ -1935,6 +1941,7 @@ mod tests {
             stash_ref: None,
             pr_number: None,
             created_at: 0,
+            read_only: false,
         };
         assert_eq!(worktree_summary(&[]), "empty");
         assert_eq!(

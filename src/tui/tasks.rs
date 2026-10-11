@@ -3188,7 +3188,7 @@ fn with_warnings(what: String, warnings: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::TaskKind;
+    use crate::db::tasks::{RunState, TaskKind};
 
     #[test]
     fn the_archive_confirm_names_what_is_not_kept() {
@@ -3215,6 +3215,9 @@ mod tests {
                 last_activity: last,
                 parent_id: None,
                 placement: crate::placement::Placement::Local,
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
             },
             dir: PathBuf::from(format!("/tasks/{}", tasks::slugify(name))),
             worktrees: Vec::new(),
@@ -3797,6 +3800,7 @@ mod tests {
             stash_ref: None,
             pr_number: None,
             created_at: 0,
+            read_only: false,
         };
         let canvas = places(dir.path(), &[]);
         assert_eq!(only_place(&canvas).unwrap().repo_id, None);
@@ -4312,6 +4316,7 @@ mod tests {
                 stash_ref: None,
                 pr_number: None,
                 created_at: 0,
+                read_only: false,
             },
             path: PathBuf::from("/t/api"),
             present: true,

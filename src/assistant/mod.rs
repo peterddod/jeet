@@ -33,7 +33,7 @@ use crate::cd;
 use crate::config;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord, TaskState};
+use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord, TaskState};
 use crate::identity;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
@@ -114,6 +114,9 @@ fn create_record(app: &App) -> Result<TaskRecord> {
         last_activity: now,
         parent_id: None,
         placement: Placement::Local,
+        run_state: RunState::Run,
+        run_state_by: None,
+        max_children: None,
     };
     match app.db.insert_task(&task) {
         Ok(()) => Ok(task),

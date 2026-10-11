@@ -910,6 +910,7 @@ fn append(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::tasks::RunState;
     use crate::db::Database;
     use clap::Parser;
 
@@ -1093,6 +1094,9 @@ mod tests {
             last_activity: 0,
             parent_id: parent_id.map(Into::into),
             placement: crate::placement::Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         }
     }
 

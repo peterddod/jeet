@@ -1294,6 +1294,7 @@ fn import_move(
         stash_ref: None,
         pr_number: None,
         created_at: now_secs(),
+        read_only: false,
     };
     if let Err(e) = app.db.insert_task_worktree(&row) {
         let _ = git::worktree_move(&trunk, &dest, from);

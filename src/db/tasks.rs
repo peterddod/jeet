@@ -1,13 +1,14 @@
-//! The task tables (schema v1, v3, v4, v5): a task, where its agent runs,
-//! the worktrees it holds, its agent sessions, its PR history, and what its
-//! parent asked of it and heard back from it.
+//! The task tables (schema v1, v3, v4, v5, v6): a task, where its agent
+//! runs, the worktrees it holds, its agent sessions, its PR history, what its
+//! parent asked of it and heard back from it, and, for the tree under the
+//! assistant, what each node may do, may spend and whether it may run.
 
 // The tasks milestone is the first caller; until it lands only the tests here
 // use most of this.
 #![allow(dead_code)]
 
-use anyhow::Result;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use anyhow::{bail, Result};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::Database;
 use crate::placement::Placement;
@@ -20,6 +21,9 @@ pub enum TaskKind {
     /// The global assistant: there is one, and it is kept out of the tasks
     /// list; see [`crate::assistant`].
     Assistant,
+    /// A node below the assistant that delegates rather than codes: it has
+    /// children of its own and holds its worktrees read-only.
+    Manager,
 }
 
 impl TaskKind {
@@ -28,6 +32,7 @@ impl TaskKind {
             TaskKind::Work => "work",
             TaskKind::Review => "review",
             TaskKind::Assistant => "assistant",
+            TaskKind::Manager => "manager",
         }
     }
 
@@ -36,6 +41,7 @@ impl TaskKind {
             "work" => Ok(TaskKind::Work),
             "review" => Ok(TaskKind::Review),
             "assistant" => Ok(TaskKind::Assistant),
+            "manager" => Ok(TaskKind::Manager),
             other => Err(bad_enum("kind", other)),
         }
     }
@@ -61,6 +67,68 @@ impl TaskState {
             "active" => Ok(TaskState::Active),
             "archived" => Ok(TaskState::Archived),
             other => Err(bad_enum("state", other)),
+        }
+    }
+}
+
+/// Whether a task may run. Ordered by severity: a node's effective state is
+/// the most severe over itself and its ancestors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunState {
+    Run,
+    /// Nothing new starts or is handed over; what runs finishes its turn.
+    Paused,
+    /// Its agent is ended and never restarted on its own.
+    Stopped,
+}
+
+impl RunState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunState::Run => "run",
+            RunState::Paused => "paused",
+            RunState::Stopped => "stopped",
+        }
+    }
+
+    fn parse(s: &str) -> rusqlite::Result<Self> {
+        match s {
+            "run" => Ok(RunState::Run),
+            "paused" => Ok(RunState::Paused),
+            "stopped" => Ok(RunState::Stopped),
+            other => Err(bad_enum("run state", other)),
+        }
+    }
+}
+
+/// Who paused or stopped a task (`tasks.run_state_by`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Setter {
+    User,
+    Root,
+    /// jeet, when the task's subtree used up its budget.
+    Budget,
+    /// A manager above the task, or the task itself, by id.
+    Node(String),
+}
+
+impl Setter {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Setter::User => "user",
+            Setter::Root => "root",
+            Setter::Budget => "budget",
+            Setter::Node(id) => id,
+        }
+    }
+
+    /// Task ids are uuids, so no id reads as one of the words.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "user" => Setter::User,
+            "root" => Setter::Root,
+            "budget" => Setter::Budget,
+            id => Setter::Node(id.to_string()),
         }
     }
 }
@@ -129,6 +197,13 @@ pub struct TaskRecord {
     pub parent_id: Option<String>,
     /// Where its agent runs; fixed when the task is made.
     pub placement: Placement,
+    /// Its own run state; see [`Database::effective_run_state`] for the one
+    /// that applies.
+    pub run_state: RunState,
+    /// Who set a run state other than `Run`; `None` while it runs.
+    pub run_state_by: Option<Setter>,
+    /// How many active children it may have, below the configured limit.
+    pub max_children: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +224,9 @@ pub struct TaskWorktreeRecord {
     pub stash_ref: Option<String>,
     pub pr_number: Option<u64>,
     pub created_at: i64,
+    /// Held by a manager, which reads and does not write; jeet keeps it
+    /// detached.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,8 +282,34 @@ pub struct TaskBriefRecord {
     pub created_by: String,
 }
 
-const TASK_COLUMNS: &str =
-    "id, slug, name, project, kind, state, created_at, last_activity, parent_id, placement";
+/// A task's limits and what it has used itself; its subtree's use is
+/// [`Database::subtree_used`]. `None`: no limit of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetRow {
+    pub max_secs: Option<i64>,
+    pub max_turns: Option<i64>,
+    pub used_secs: i64,
+    pub used_turns: i64,
+    /// The last threshold told: 0, 80 or 100 (per cent).
+    pub warned: u8,
+}
+
+const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity, \
+     parent_id, placement, run_state, run_state_by, max_children";
+
+/// [`TASK_COLUMNS`], each qualified by `alias`, for a query that joins.
+fn prefixed_columns(alias: &str) -> String {
+    TASK_COLUMNS
+        .split(", ")
+        .map(|c| format!("{alias}.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// How far up or down the tree a walk goes before it calls the index
+/// corrupt: far deeper than any limit jeet lets a tree grow to, so only a
+/// cycle made by hand reaches it.
+const MAX_HOPS: u32 = 64;
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
@@ -222,11 +326,17 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
             let value = row.get::<_, String>(9)?;
             Placement::parse(&value).ok_or_else(|| bad_enum("placement", &value))?
         },
+        run_state: RunState::parse(&row.get::<_, String>(10)?)?,
+        run_state_by: row
+            .get::<_, Option<String>>(11)?
+            .as_deref()
+            .map(Setter::parse),
+        max_children: row.get(12)?,
     })
 }
 
 const TASK_WORKTREE_COLUMNS: &str = "id, task_id, repo_id, dir_name, branch, created_branch, \
-     head_oid, stash_ref, pr_number, created_at";
+     head_oid, stash_ref, pr_number, created_at, read_only";
 
 fn task_worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskWorktreeRecord> {
     Ok(TaskWorktreeRecord {
@@ -240,6 +350,7 @@ fn task_worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskWorkt
         stash_ref: row.get(7)?,
         pr_number: row.get::<_, Option<i64>>(8)?.map(|n| n as u64),
         created_at: row.get(9)?,
+        read_only: row.get::<_, i32>(10)? != 0,
     })
 }
 
@@ -282,37 +393,100 @@ fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportR
     })
 }
 
+fn insert_task_in(conn: &Connection, task: &TaskRecord) -> Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT INTO tasks ({TASK_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+        ),
+        params![
+            task.id,
+            task.slug,
+            task.name,
+            task.project,
+            task.kind.as_str(),
+            task.state.as_str(),
+            task.created_at,
+            task.last_activity,
+            task.parent_id,
+            task.placement.as_str(),
+            task.run_state.as_str(),
+            task.run_state_by.as_ref().map(Setter::as_str),
+            task.max_children,
+        ],
+    )?;
+    Ok(())
+}
+
+fn get_task_in(conn: &Connection, id: &str) -> Result<Option<TaskRecord>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+            params![id],
+            task_from_row,
+        )
+        .optional()?)
+}
+
+/// `id`'s ancestors, nearest first. A link to a missing task, or a chain
+/// longer than [`MAX_HOPS`] (a cycle), is an error: callers decide what a
+/// node may do from this, so a broken tree must not read as a short one.
+fn ancestors_in(conn: &Connection, id: &str) -> Result<Vec<TaskRecord>> {
+    let Some(task) = get_task_in(conn, id)? else {
+        bail!("task {id} is not in the index");
+    };
+    let mut chain = Vec::new();
+    let mut next = task.parent_id;
+    while let Some(parent_id) = next {
+        if chain.len() as u32 >= MAX_HOPS {
+            bail!(
+                "task {} has more than {MAX_HOPS} ancestors; the tree has a cycle",
+                task.slug
+            );
+        }
+        let Some(parent) = get_task_in(conn, &parent_id)? else {
+            bail!("an ancestor of task {} ({parent_id}) is gone", task.slug);
+        };
+        next = parent.parent_id.clone();
+        chain.push(parent);
+    }
+    Ok(chain)
+}
+
+fn child_count_in(conn: &Connection, id: &str, active_only: bool) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE parent_id = ?1 AND (?2 = 0 OR state = 'active')",
+        params![id, active_only],
+        |row| row.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// How a run state's setter ranks when two hold a task at the same severity:
+/// whether `new` outranks `old`. Both are the task or its ancestors, so of two
+/// nodes the one nearer the root ranks higher.
+fn outranks_in(conn: &Connection, new: &Setter, old: &Setter) -> Result<bool> {
+    let rank = |s: &Setter| match s {
+        Setter::User => 3,
+        Setter::Root => 2,
+        Setter::Node(_) => 1,
+        Setter::Budget => 0,
+    };
+    match (new, old) {
+        (Setter::Node(new), Setter::Node(old)) => {
+            Ok(ancestors_in(conn, old)?.iter().any(|a| &a.id == new))
+        }
+        _ => Ok(rank(new) > rank(old)),
+    }
+}
+
 impl Database {
     pub fn insert_task(&self, task: &TaskRecord) -> Result<()> {
-        self.conn().execute(
-            &format!(
-                "INSERT INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
-            ),
-            params![
-                task.id,
-                task.slug,
-                task.name,
-                task.project,
-                task.kind.as_str(),
-                task.state.as_str(),
-                task.created_at,
-                task.last_activity,
-                task.parent_id,
-                task.placement.as_str(),
-            ],
-        )?;
-        Ok(())
+        insert_task_in(&self.conn(), task)
     }
 
     pub fn get_task(&self, id: &str) -> Result<Option<TaskRecord>> {
-        Ok(self
-            .conn()
-            .query_row(
-                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
-                params![id],
-                task_from_row,
-            )
-            .optional()?)
+        get_task_in(&self.conn(), id)
     }
 
     pub fn get_task_by_slug(&self, slug: &str) -> Result<Option<TaskRecord>> {
@@ -356,11 +530,7 @@ impl Database {
     /// checked out for it, else one whose history records it. Oldest first,
     /// should there ever be two.
     pub fn find_review_task(&self, repo_id: &str, number: u64) -> Result<Option<TaskRecord>> {
-        let columns = TASK_COLUMNS
-            .split(", ")
-            .map(|c| format!("t.{c}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let columns = prefixed_columns("t");
         Ok(self
             .conn()
             .query_row(
@@ -413,8 +583,8 @@ impl Database {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO task_worktrees (task_id, repo_id, dir_name, branch, created_branch,
-                                         head_oid, stash_ref, pr_number, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                         head_oid, stash_ref, pr_number, created_at, read_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 wt.task_id,
                 wt.repo_id,
@@ -425,17 +595,19 @@ impl Database {
                 wt.stash_ref,
                 wt.pr_number.map(|n| n as i64),
                 wt.created_at,
+                i32::from(wt.read_only),
             ],
         )?;
         Ok(conn.last_insert_rowid())
     }
 
-    /// Rewrite a worktree row's mutable fields (branch, archive state, PR),
-    /// keyed by its id.
+    /// Rewrite a worktree row's mutable fields (branch, archive state, PR,
+    /// read-only), keyed by its id.
     pub fn update_task_worktree(&self, wt: &TaskWorktreeRecord) -> Result<()> {
         self.conn().execute(
             "UPDATE task_worktrees
-             SET branch = ?2, created_branch = ?3, head_oid = ?4, stash_ref = ?5, pr_number = ?6
+             SET branch = ?2, created_branch = ?3, head_oid = ?4, stash_ref = ?5, pr_number = ?6,
+                 read_only = ?7
              WHERE id = ?1",
             params![
                 wt.id,
@@ -444,6 +616,7 @@ impl Database {
                 wt.head_oid,
                 wt.stash_ref,
                 wt.pr_number.map(|n| n as i64),
+                i32::from(wt.read_only),
             ],
         )?;
         Ok(())
@@ -736,12 +909,7 @@ impl Database {
     }
 
     pub fn insert_brief(&self, brief: &TaskBriefRecord) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO task_briefs (task_id, goal, done_when, created_by)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![brief.task_id, brief.goal, brief.done_when, brief.created_by,],
-        )?;
-        Ok(())
+        insert_brief_in(&self.conn(), brief)
     }
 
     pub fn get_brief(&self, task_id: &str) -> Result<Option<TaskBriefRecord>> {
@@ -761,6 +929,386 @@ impl Database {
             )
             .optional()?)
     }
+
+    /// `id`'s children in any state, oldest first.
+    pub fn children(&self, id: &str) -> Result<Vec<TaskRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE parent_id = ?1 ORDER BY created_at, slug"
+        ))?;
+        let rows = stmt.query_map(params![id], task_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn child_count(&self, id: &str, active_only: bool) -> Result<usize> {
+        child_count_in(&self.conn(), id, active_only)
+    }
+
+    /// Everything below `id`, with its depth under it (a child is 1), deepest
+    /// first and then by slug: the order to work a subtree leaves first. A
+    /// subtree deeper than [`MAX_HOPS`] (a cycle) is an error.
+    pub fn descendants(&self, id: &str) -> Result<Vec<(TaskRecord, u32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "WITH RECURSIVE sub(id, depth) AS (
+                 SELECT id, 1 FROM tasks WHERE parent_id = ?1
+                 UNION
+                 SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
+                 WHERE sub.depth <= ?2
+             )
+             SELECT {}, sub.depth FROM sub JOIN tasks t ON t.id = sub.id
+             ORDER BY sub.depth DESC, t.slug",
+            prefixed_columns("t")
+        ))?;
+        let rows = stmt.query_map(params![id, MAX_HOPS], |row| {
+            Ok((task_from_row(row)?, row.get::<_, u32>(13)?))
+        })?;
+        let found: Vec<(TaskRecord, u32)> = rows.collect::<rusqlite::Result<_>>()?;
+        if found.first().is_some_and(|(_, depth)| *depth > MAX_HOPS) {
+            bail!("the tree under task {id} is more than {MAX_HOPS} deep; it has a cycle");
+        }
+        Ok(found)
+    }
+
+    /// `id`'s ancestors, nearest first; see [`ancestors_in`].
+    pub fn ancestors(&self, id: &str) -> Result<Vec<TaskRecord>> {
+        ancestors_in(&self.conn(), id)
+    }
+
+    /// How many ancestors `id` has: 0 for the assistant and for a top-level
+    /// task.
+    pub fn depth(&self, id: &str) -> Result<u32> {
+        Ok(self.ancestors(id)?.len() as u32)
+    }
+
+    /// Whether `id` is below `of`; never for `of` itself.
+    pub fn is_strict_descendant(&self, id: &str, of: &str) -> Result<bool> {
+        Ok(self.ancestors(id)?.iter().any(|a| a.id == of))
+    }
+
+    /// The capabilities granted to `id` itself, sorted; what it may use is
+    /// this narrowed by its ancestors'.
+    pub fn grants(&self, id: &str) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1 ORDER BY capability")?;
+        let rows = stmt.query_map(params![id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Replace `id`'s grant with `caps`.
+    pub fn set_grants(&self, id: &str, caps: &[&str]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM task_grants WHERE task_id = ?1", params![id])?;
+        insert_grants_in(&tx, id, caps)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record a child of `rec.parent_id` with its grant, budget (max seconds,
+    /// max turns) and brief, all or nothing. The parent is read again under
+    /// the write lock, so a child is never made under a parent archived since
+    /// the caller looked, nor past `fan_out` active children by two makers at
+    /// once.
+    pub fn insert_child(
+        &self,
+        rec: &TaskRecord,
+        grants: &[&str],
+        budget: Option<(Option<i64>, Option<i64>)>,
+        brief: Option<&TaskBriefRecord>,
+        fan_out: Option<u32>,
+    ) -> Result<()> {
+        let Some(parent_id) = &rec.parent_id else {
+            bail!("task {} has no parent to be made under", rec.slug);
+        };
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(parent) = get_task_in(&tx, parent_id)? else {
+            bail!("the parent of task {} is gone", rec.slug);
+        };
+        if parent.state != TaskState::Active {
+            bail!("{} is archived; it takes no new tasks", parent.slug);
+        }
+        if let Some(max) = fan_out {
+            let active = child_count_in(&tx, parent_id, true)?;
+            if active >= max as usize {
+                bail!(
+                    "{} already has {active} active tasks under it, its limit of {max}; \
+                     archive one first",
+                    parent.slug
+                );
+            }
+        }
+        insert_task_in(&tx, rec)?;
+        insert_grants_in(&tx, &rec.id, grants)?;
+        if let Some((max_secs, max_turns)) = budget {
+            tx.execute(
+                "INSERT INTO task_budgets (task_id, max_secs, max_turns) VALUES (?1, ?2, ?3)",
+                params![rec.id, max_secs, max_turns],
+            )?;
+        }
+        if let Some(brief) = brief {
+            insert_brief_in(&tx, brief)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Archive `id`'s row, unless it has an active child: checked and written
+    /// under one write lock, so no child slips in between.
+    pub fn archive_task(&self, id: &str) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(task) = get_task_in(&tx, id)? else {
+            bail!("task {id} is not in the index");
+        };
+        let active = child_count_in(&tx, id, true)?;
+        if active > 0 {
+            bail!(
+                "{} has {active} active tasks under it; archive or delete them first",
+                task.slug
+            );
+        }
+        tx.execute(
+            "UPDATE tasks SET state = 'archived' WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Make `id`'s row active again, unless its parent is archived or already
+    /// has `fan_out` active children; checked and written under one write
+    /// lock.
+    pub fn unarchive_task(&self, id: &str, fan_out: Option<u32>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(task) = get_task_in(&tx, id)? else {
+            bail!("task {id} is not in the index");
+        };
+        if let Some(parent_id) = &task.parent_id {
+            let Some(parent) = get_task_in(&tx, parent_id)? else {
+                bail!("the parent of task {} is gone", task.slug);
+            };
+            if parent.state != TaskState::Active {
+                bail!(
+                    "{} is under {}, which is archived; unarchive {} first",
+                    task.slug,
+                    parent.slug,
+                    parent.slug
+                );
+            }
+            if let Some(max) = fan_out {
+                let active: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM tasks
+                     WHERE parent_id = ?1 AND state = 'active' AND id != ?2",
+                    params![parent_id, id],
+                    |row| row.get(0),
+                )?;
+                if active >= i64::from(max) {
+                    bail!(
+                        "{} already has {active} active tasks under it, its limit of {max}; \
+                         archive one first",
+                        parent.slug
+                    );
+                }
+            }
+        }
+        tx.execute(
+            "UPDATE tasks SET state = 'active' WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `id`'s own budget row, if it has a limit or has used anything.
+    pub fn budget(&self, id: &str) -> Result<Option<BudgetRow>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT max_secs, max_turns, used_secs, used_turns, warned
+                 FROM task_budgets WHERE task_id = ?1",
+                params![id],
+                |row| {
+                    Ok(BudgetRow {
+                        max_secs: row.get(0)?,
+                        max_turns: row.get(1)?,
+                        used_secs: row.get(2)?,
+                        used_turns: row.get(3)?,
+                        warned: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Set `id`'s limits, keeping what it has used. The thresholds are told
+    /// again against the new limits.
+    pub fn set_budget_max(&self, id: &str, secs: Option<i64>, turns: Option<i64>) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO task_budgets (task_id, max_secs, max_turns) VALUES (?1, ?2, ?3)
+             ON CONFLICT(task_id) DO UPDATE SET
+               max_secs = excluded.max_secs,
+               max_turns = excluded.max_turns,
+               warned = 0",
+            params![id, secs, turns],
+        )?;
+        Ok(())
+    }
+
+    /// Add to what `id` itself has used; a task with no limit of its own
+    /// still counts toward its ancestors'.
+    pub fn charge(&self, id: &str, secs: i64, turns: i64) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO task_budgets (task_id, used_secs, used_turns) VALUES (?1, ?2, ?3)
+             ON CONFLICT(task_id) DO UPDATE SET
+               used_secs = used_secs + excluded.used_secs,
+               used_turns = used_turns + excluded.used_turns",
+            params![id, secs, turns],
+        )?;
+        Ok(())
+    }
+
+    /// What `id` and everything below it have used: (seconds, turns).
+    pub fn subtree_used(&self, id: &str) -> Result<(i64, i64)> {
+        Ok(self.conn().query_row(
+            "WITH RECURSIVE sub(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
+                 WHERE sub.depth < ?2
+             )
+             SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
+             FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
+            params![id, MAX_HOPS],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    /// Record the last threshold told about `id`'s budget: 0, 80 or 100.
+    pub fn set_warned(&self, id: &str, level: u8) -> Result<()> {
+        self.conn().execute(
+            "UPDATE task_budgets SET warned = ?2 WHERE task_id = ?1",
+            params![id, level],
+        )?;
+        Ok(())
+    }
+
+    /// Set `id`'s own run state. `Run` (a resume) takes no setter and always
+    /// applies; whether the caller may is its own check. Otherwise the state
+    /// never drops in severity, and at the same severity the setter changes
+    /// only to one that outranks it: user, then root, then the node nearest
+    /// the root, then budget. So a user's stop outlives a later pause.
+    pub fn set_run_state(&self, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(task) = get_task_in(&tx, id)? else {
+            bail!("task {id} is not in the index");
+        };
+        let write = match (state, by) {
+            (RunState::Run, None) => true,
+            (RunState::Run, Some(_)) => bail!("a running task has no setter"),
+            (_, None) => bail!("a {} task needs a setter", state.as_str()),
+            (_, Some(_)) if state > task.run_state => true,
+            (_, Some(by)) if state == task.run_state => match &task.run_state_by {
+                Some(old) => outranks_in(&tx, by, old)?,
+                None => true,
+            },
+            _ => false,
+        };
+        if write {
+            tx.execute(
+                "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
+                params![id, state.as_str(), by.map(Setter::as_str)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The run state that applies to `id`: the most severe over it and its
+    /// ancestors, with the nearest task holding it (`None` while it runs).
+    pub fn effective_run_state(&self, id: &str) -> Result<(RunState, Option<TaskRecord>)> {
+        let conn = self.conn();
+        let Some(task) = get_task_in(&conn, id)? else {
+            bail!("task {id} is not in the index");
+        };
+        let mut held: Option<TaskRecord> = None;
+        for node in std::iter::once(task).chain(ancestors_in(&conn, id)?) {
+            let more = held.as_ref().map_or(RunState::Run, |h| h.run_state);
+            if node.run_state > more {
+                held = Some(node);
+            }
+        }
+        Ok(match held {
+            Some(holder) => (holder.run_state, Some(holder)),
+            None => (RunState::Run, None),
+        })
+    }
+
+    /// Queue `id` to start once a `max_live` slot frees; a task queued
+    /// already keeps its place.
+    pub fn queue_start(&self, id: &str, at: i64) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO task_start_queue (task_id, queued_at) VALUES (?1, ?2)
+             ON CONFLICT(task_id) DO NOTHING",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+
+    /// The queued tasks, oldest first.
+    pub fn queued_starts(&self) -> Result<Vec<TaskRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM task_start_queue q JOIN tasks t ON t.id = q.task_id
+             ORDER BY q.queued_at, q.rowid",
+            prefixed_columns("t")
+        ))?;
+        let rows = stmt.query_map([], task_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn unqueue(&self, id: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM task_start_queue WHERE task_id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the rows of `ids`, in order, all or nothing: a parent may not
+    /// go before its children, so the caller lists leaves first.
+    pub fn delete_rows_leaves_first(&self, ids: &[String]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in ids {
+            tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn insert_grants_in(conn: &Connection, id: &str, caps: &[&str]) -> Result<()> {
+    for cap in caps {
+        conn.execute(
+            "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, ?2)",
+            params![id, cap],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_brief_in(conn: &Connection, brief: &TaskBriefRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_briefs (task_id, goal, done_when, created_by)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![brief.task_id, brief.goal, brief.done_when, brief.created_by],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -795,6 +1343,9 @@ mod tests {
             last_activity,
             parent_id: None,
             placement: Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         }
     }
 
@@ -810,6 +1361,7 @@ mod tests {
             stash_ref: None,
             pr_number: None,
             created_at: 100,
+            read_only: false,
         }
     }
 
@@ -1252,5 +1804,428 @@ mod tests {
         db.delete_task("c").unwrap();
         assert_eq!(db.get_brief("c").unwrap(), None);
         assert_eq!(db.last_report("c").unwrap(), None);
+    }
+
+    /// Insert `id` under `parent`, of `kind`.
+    fn node(db: &Database, id: &str, kind: TaskKind, parent: Option<&str>) {
+        let mut rec = task(id, id, 1);
+        rec.kind = kind;
+        rec.parent_id = parent.map(Into::into);
+        db.insert_task(&rec).unwrap();
+    }
+
+    /// The assistant `a`; under it the manager `m` and the worker `w1`;
+    /// under `m` the manager `n` and the worker `w2`; under `n` the worker
+    /// `w3`.
+    fn tree(db: &Database) {
+        node(db, "a", TaskKind::Assistant, None);
+        node(db, "m", TaskKind::Manager, Some("a"));
+        node(db, "w1", TaskKind::Work, Some("a"));
+        node(db, "n", TaskKind::Manager, Some("m"));
+        node(db, "w2", TaskKind::Work, Some("m"));
+        node(db, "w3", TaskKind::Work, Some("n"));
+    }
+
+    fn ids(tasks: &[TaskRecord]) -> Vec<&str> {
+        tasks.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_tree_is_walked_in_order_and_at_depth() {
+        let (_dir, db) = open();
+        tree(&db);
+        assert_eq!(db.get_task("m").unwrap().unwrap().kind, TaskKind::Manager);
+        assert_eq!(ids(&db.children("a").unwrap()), ["m", "w1"]);
+        assert_eq!(db.child_count("m", false).unwrap(), 2);
+        db.set_task_state("w2", TaskState::Archived).unwrap();
+        assert_eq!(db.child_count("m", true).unwrap(), 1);
+
+        let below = db.descendants("a").unwrap();
+        let below: Vec<(&str, u32)> = below.iter().map(|(t, d)| (t.id.as_str(), *d)).collect();
+        assert_eq!(below, [("w3", 3), ("n", 2), ("w2", 2), ("m", 1), ("w1", 1)]);
+        assert!(db.descendants("w3").unwrap().is_empty());
+
+        assert_eq!(ids(&db.ancestors("w3").unwrap()), ["n", "m", "a"]);
+        assert!(db.ancestors("a").unwrap().is_empty());
+        assert_eq!(db.depth("w3").unwrap(), 3);
+        assert_eq!(db.depth("a").unwrap(), 0);
+        assert!(db.ancestors("missing").is_err());
+
+        assert!(db.is_strict_descendant("w3", "m").unwrap());
+        assert!(db.is_strict_descendant("w3", "a").unwrap());
+        assert!(!db.is_strict_descendant("m", "m").unwrap());
+        assert!(!db.is_strict_descendant("w1", "m").unwrap());
+        assert!(!db.is_strict_descendant("m", "w3").unwrap());
+    }
+
+    #[test]
+    fn a_broken_tree_is_an_error_not_a_short_one() {
+        let (_dir, db) = open();
+        tree(&db);
+        // A cycle made by hand: a walk stops at the cap and says so.
+        db.conn()
+            .execute_batch("UPDATE tasks SET parent_id = 'w3' WHERE id = 'm';")
+            .unwrap();
+        let err = db.ancestors("w3").unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+        let err = db.descendants("m").unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+        assert!(db.is_strict_descendant("w3", "x").is_err());
+
+        // A parent that is gone.
+        let (_dir, db) = open();
+        tree(&db);
+        db.conn()
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM tasks WHERE id = 'm';
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+        let err = db.ancestors("w3").unwrap_err();
+        assert!(err.to_string().contains("gone"), "{err}");
+        assert!(db.depth("w2").is_err());
+    }
+
+    #[test]
+    fn grants_are_replaced_whole_and_go_with_the_task() {
+        let (_dir, db) = open();
+        tree(&db);
+        assert!(db.grants("m").unwrap().is_empty());
+        db.set_grants("m", &["worktree.add", "manager.create", "worktree.add"])
+            .unwrap();
+        assert_eq!(db.grants("m").unwrap(), ["manager.create", "worktree.add"]);
+        db.set_grants("m", &["task.create"]).unwrap();
+        assert_eq!(db.grants("m").unwrap(), ["task.create"]);
+        db.set_grants("w3", &["worktree.add"]).unwrap();
+        db.delete_task("w3").unwrap();
+        assert!(db.grants("w3").unwrap().is_empty());
+    }
+
+    fn child(id: &str, parent: &str) -> TaskRecord {
+        let mut rec = task(id, id, 1);
+        rec.parent_id = Some(parent.into());
+        rec
+    }
+
+    #[test]
+    fn a_child_is_made_with_everything_or_nothing() {
+        let (_dir, db) = open();
+        tree(&db);
+        let brief = TaskBriefRecord {
+            task_id: "c".into(),
+            goal: "fix it".into(),
+            done_when: None,
+            created_by: "m".into(),
+        };
+        db.insert_child(
+            &child("c", "m"),
+            &["worktree.add"],
+            Some((Some(60), None)),
+            Some(&brief),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_task("c").unwrap().unwrap().parent_id.as_deref(),
+            Some("m")
+        );
+        assert_eq!(db.grants("c").unwrap(), ["worktree.add"]);
+        assert_eq!(db.get_brief("c").unwrap(), Some(brief));
+        let budget = db.budget("c").unwrap().unwrap();
+        assert_eq!((budget.max_secs, budget.max_turns), (Some(60), None));
+
+        // A brief for another task fails the insert, and nothing is left.
+        let stray = TaskBriefRecord {
+            task_id: "elsewhere".into(),
+            goal: "x".into(),
+            done_when: None,
+            created_by: "m".into(),
+        };
+        assert!(db
+            .insert_child(
+                &child("d", "m"),
+                &["worktree.add"],
+                None,
+                Some(&stray),
+                None
+            )
+            .is_err());
+        assert!(db.get_task("d").unwrap().is_none());
+        assert!(db.grants("d").unwrap().is_empty());
+
+        // Under a parent archived since the caller planned: refused.
+        db.set_task_state("w3", TaskState::Archived).unwrap();
+        db.set_task_state("n", TaskState::Archived).unwrap();
+        let err = db
+            .insert_child(&child("e", "n"), &[], None, None, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("archived"), "{err}");
+        assert!(db.get_task("e").unwrap().is_none());
+        assert!(db
+            .insert_child(&task("t", "t", 1), &[], None, None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn two_makers_at_once_cannot_pass_the_fan_out() {
+        for _ in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.db");
+            tree(&Database::open(&path).unwrap());
+            // `n` has one active child; room for one more.
+            let start = std::sync::Barrier::new(2);
+            let made: Vec<bool> = std::thread::scope(|s| {
+                let handles: Vec<_> = ["x", "y"]
+                    .into_iter()
+                    .map(|id| {
+                        let (path, start) = (&path, &start);
+                        s.spawn(move || {
+                            let db = Database::open(path).unwrap();
+                            start.wait();
+                            db.insert_child(&child(id, "n"), &[], None, None, Some(2))
+                                .is_ok()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert_eq!(made.iter().filter(|m| **m).count(), 1, "{made:?}");
+            let db = Database::open(&path).unwrap();
+            assert_eq!(db.child_count("n", true).unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn archive_and_unarchive_keep_the_tree_whole() {
+        let (_dir, db) = open();
+        tree(&db);
+        let err = db.archive_task("n").unwrap_err();
+        assert!(err.to_string().contains("active"), "{err}");
+        db.archive_task("w3").unwrap();
+        db.archive_task("n").unwrap();
+        assert_eq!(
+            db.get_task("n").unwrap().unwrap().state,
+            TaskState::Archived
+        );
+
+        // Not back under an archived parent.
+        let err = db.unarchive_task("w3", None).unwrap_err();
+        assert!(err.to_string().contains("archived"), "{err}");
+        db.unarchive_task("n", None).unwrap();
+        db.unarchive_task("w3", None).unwrap();
+        assert_eq!(db.get_task("w3").unwrap().unwrap().state, TaskState::Active);
+
+        // Not past the parent's fan-out: `m` at its limit of 2 (n, w2),
+        // archive w2, add one, and w2 cannot come back.
+        db.archive_task("w2").unwrap();
+        db.insert_child(&child("w4", "m"), &[], None, None, Some(2))
+            .unwrap();
+        let err = db.unarchive_task("w2", Some(2)).unwrap_err();
+        assert!(err.to_string().contains("limit of 2"), "{err}");
+        assert_eq!(
+            db.get_task("w2").unwrap().unwrap().state,
+            TaskState::Archived
+        );
+        db.unarchive_task("w2", Some(3)).unwrap();
+        // A top-level task has no parent to check.
+        db.insert_task(&task("t", "top", 1)).unwrap();
+        db.archive_task("t").unwrap();
+        db.unarchive_task("t", Some(1)).unwrap();
+    }
+
+    #[test]
+    fn budgets_count_a_whole_subtree() {
+        let (_dir, db) = open();
+        tree(&db);
+        assert_eq!(db.budget("m").unwrap(), None);
+        assert_eq!(db.subtree_used("m").unwrap(), (0, 0));
+        db.set_budget_max("m", Some(600), Some(10)).unwrap();
+        // Use is counted whether or not the task has a limit of its own.
+        db.charge("m", 10, 1).unwrap();
+        db.charge("w3", 20, 2).unwrap();
+        db.charge("w3", 5, 1).unwrap();
+        db.charge("w2", 100, 1).unwrap();
+        db.charge("w1", 1000, 9).unwrap();
+        assert_eq!(db.subtree_used("m").unwrap(), (135, 5));
+        assert_eq!(db.subtree_used("n").unwrap(), (25, 3));
+        assert_eq!(db.subtree_used("a").unwrap(), (1135, 14));
+        let own = db.budget("w3").unwrap().unwrap();
+        assert_eq!((own.max_secs, own.used_secs, own.used_turns), (None, 25, 3));
+
+        db.set_warned("m", 80).unwrap();
+        assert_eq!(db.budget("m").unwrap().unwrap().warned, 80);
+        assert!(db.set_warned("m", 50).is_err());
+        // A new limit keeps the use and tells the thresholds afresh.
+        db.set_budget_max("m", Some(1200), None).unwrap();
+        assert_eq!(
+            db.budget("m").unwrap().unwrap(),
+            BudgetRow {
+                max_secs: Some(1200),
+                max_turns: None,
+                used_secs: 10,
+                used_turns: 1,
+                warned: 0,
+            }
+        );
+        assert!(db.set_budget_max("m", Some(0), None).is_err());
+    }
+
+    #[test]
+    fn the_most_severe_run_state_above_a_task_holds_it() {
+        let (_dir, db) = open();
+        tree(&db);
+        assert_eq!(db.effective_run_state("w3").unwrap(), (RunState::Run, None));
+
+        db.set_run_state("m", RunState::Paused, Some(&Setter::Root))
+            .unwrap();
+        let (state, holder) = db.effective_run_state("w3").unwrap();
+        assert_eq!(
+            (state, holder.map(|h| h.id)),
+            (RunState::Paused, Some("m".into()))
+        );
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Node("m".into())))
+            .unwrap();
+        let (_, holder) = db.effective_run_state("w3").unwrap();
+        assert_eq!(holder.map(|h| h.id).as_deref(), Some("n"));
+        db.set_run_state("w3", RunState::Stopped, Some(&Setter::Node("n".into())))
+            .unwrap();
+        let (state, holder) = db.effective_run_state("w3").unwrap();
+        assert_eq!(
+            (state, holder.map(|h| h.id)),
+            (RunState::Stopped, Some("w3".into()))
+        );
+        assert_eq!(db.effective_run_state("w1").unwrap(), (RunState::Run, None));
+
+        let rec = db.get_task("n").unwrap().unwrap();
+        assert_eq!(rec.run_state, RunState::Paused);
+        assert_eq!(rec.run_state_by, Some(Setter::Node("m".into())));
+    }
+
+    #[test]
+    fn a_run_state_never_drops_and_keeps_its_higher_setter() {
+        let (_dir, db) = open();
+        tree(&db);
+        let state = |id: &str| {
+            let t = db.get_task(id).unwrap().unwrap();
+            (t.run_state, t.run_state_by)
+        };
+        db.set_run_state("w3", RunState::Stopped, Some(&Setter::User))
+            .unwrap();
+        db.set_run_state("w3", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        assert_eq!(state("w3"), (RunState::Stopped, Some(Setter::User)));
+        db.set_run_state("w3", RunState::Stopped, Some(&Setter::Root))
+            .unwrap();
+        assert_eq!(state("w3"), (RunState::Stopped, Some(Setter::User)));
+
+        // At the same severity a higher setter takes over, a lower one not.
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Node("n".into())))
+            .unwrap();
+        assert_eq!(
+            state("n"),
+            (RunState::Paused, Some(Setter::Node("n".into())))
+        );
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Node("m".into())))
+            .unwrap();
+        assert_eq!(
+            state("n"),
+            (RunState::Paused, Some(Setter::Node("m".into())))
+        );
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Node("n".into())))
+            .unwrap();
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        assert_eq!(
+            state("n"),
+            (RunState::Paused, Some(Setter::Node("m".into())))
+        );
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Root))
+            .unwrap();
+        assert_eq!(state("n"), (RunState::Paused, Some(Setter::Root)));
+        // More severe wins whoever sets it.
+        db.set_run_state("n", RunState::Stopped, Some(&Setter::Budget))
+            .unwrap();
+        assert_eq!(state("n"), (RunState::Stopped, Some(Setter::Budget)));
+
+        // A resume clears it; whether the caller may is not the index's call.
+        db.set_run_state("w3", RunState::Run, None).unwrap();
+        assert_eq!(state("w3"), (RunState::Run, None));
+        assert!(db
+            .set_run_state("w3", RunState::Run, Some(&Setter::User))
+            .is_err());
+        assert!(db.set_run_state("w3", RunState::Paused, None).is_err());
+        assert!(db
+            .set_run_state("missing", RunState::Paused, Some(&Setter::User))
+            .is_err());
+    }
+
+    #[test]
+    fn starts_wait_in_order_and_keep_their_place() {
+        let (_dir, db) = open();
+        tree(&db);
+        assert!(db.queued_starts().unwrap().is_empty());
+        db.queue_start("w2", 20).unwrap();
+        db.queue_start("w3", 10).unwrap();
+        db.queue_start("w1", 20).unwrap();
+        db.queue_start("w3", 30).unwrap();
+        assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w2", "w1"]);
+        db.unqueue("w2").unwrap();
+        assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w1"]);
+        db.delete_task("w1").unwrap();
+        assert_eq!(ids(&db.queued_starts().unwrap()), ["w3"]);
+    }
+
+    #[test]
+    fn a_subtree_is_deleted_leaves_first_or_not_at_all() {
+        let (_dir, db) = open();
+        tree(&db);
+        // Parent before child: refused, and nothing goes.
+        assert!(db
+            .delete_rows_leaves_first(&["n".into(), "w3".into()])
+            .is_err());
+        assert!(db.get_task("w3").unwrap().is_some());
+        let leaves_first: Vec<String> = db
+            .descendants("m")
+            .unwrap()
+            .into_iter()
+            .map(|(t, _)| t.id)
+            .chain(["m".to_string()])
+            .collect();
+        db.delete_rows_leaves_first(&leaves_first).unwrap();
+        assert_eq!(ids(&db.children("a").unwrap()), ["w1"]);
+    }
+
+    #[test]
+    fn a_worktree_remembers_it_is_read_only() {
+        let (_dir, db) = open();
+        db.upsert_repo(&repo("github.com/acme/api")).unwrap();
+        db.insert_task(&task("t", "work", 1)).unwrap();
+        let mut wt = worktree("t", "api", None);
+        wt.read_only = true;
+        db.insert_task_worktree(&wt).unwrap();
+        let mut row = db.get_task_worktree("t", "api").unwrap().unwrap();
+        assert!(row.read_only);
+        row.read_only = false;
+        db.update_task_worktree(&row).unwrap();
+        assert!(!db.get_task_worktree("t", "api").unwrap().unwrap().read_only);
+    }
+
+    #[test]
+    fn a_review_task_found_by_its_pr_reads_every_column() {
+        let (_dir, db) = open();
+        db.upsert_repo(&repo("github.com/acme/api")).unwrap();
+        let mut review = task("r", "review-api-7", 2);
+        review.kind = TaskKind::Review;
+        review.max_children = Some(3);
+        db.insert_task(&review).unwrap();
+        db.upsert_task_pr(&pr("r", 7, "2026-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.find_review_task("github.com/acme/api", 7).unwrap(),
+            Some(review)
+        );
     }
 }

@@ -104,7 +104,7 @@ A manager's home is a task directory, so every task path keeps working:
 
 ## 2. Tree
 
-### Schema (v4)
+### Schema (v6)
 
 `MIGRATIONS` gains one step. SQLite cannot change a `CHECK` in place, so
 `tasks` is rebuilt, as v3 did.
@@ -198,6 +198,20 @@ and the `task_anchors` table (5.7). The `manager` kind, `run_state`,
 `task_grants`, `task_budgets` and `read_only` move to v6, whose rebuild of
 `tasks` must copy `parent_id` and `placement` and re-create
 `tasks_one_assistant` and `tasks_parent`.
+
+**Phase 2 (as built).** v6 rebuilds `tasks` with the `manager` kind and
+keeps v5's `CHECK (placement IN ('local'))` unchanged; a confined placement
+widens it in a migration of its own. It adds three columns to `tasks`:
+`run_state`, `run_state_by` (who set a state other than `run`: `user`,
+`root`, `budget` or a task id; NULL exactly while it runs, enforced by a
+`CHECK`; no FK, since a node setter is an ancestor of the row) and
+`max_children` (a manager's own fan-out limit). `task_grants` and
+`task_budgets` are as above, with `CHECK`s that a limit is positive and a
+`warned` column (0, 80 or 100) recording the last threshold told. A
+`task_start_queue` table (task id, queued at) holds starts waiting for a
+`max_live` slot, and `task_worktrees.read_only` is added. v6 backfills a
+`worktree.add` grant for every parented `work` and `review` task, so phase-1
+children keep what they could do; nothing else is granted by default.
 
 ### Creation and teardown
 

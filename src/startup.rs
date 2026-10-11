@@ -59,7 +59,7 @@ pub fn may_auto_trust(config: &Config, home: &Path, task: &TaskRecord, dir: &Pat
     match task.kind {
         TaskKind::Work => tasks && in_tasks,
         TaskKind::Review => reviews && in_tasks,
-        TaskKind::Assistant => false,
+        TaskKind::Assistant | TaskKind::Manager => false,
     }
 }
 
@@ -391,6 +391,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
+    use crate::db::tasks::RunState;
     use crate::harness::claude::ClaudeCode;
 
     fn pane_fixture(name: &str) -> String {
@@ -606,6 +607,9 @@ mod tests {
             last_activity: 0,
             parent_id: None,
             placement: crate::placement::Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
         };
         let in_tasks = config::tasks_root(home).join("t");
         let config = |text: &str| toml::from_str::<Config>(text).unwrap();
