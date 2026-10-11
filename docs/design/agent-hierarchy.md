@@ -1,6 +1,8 @@
 # Hierarchical agents
 
-Status: **draft, for review; all open questions decided**. Nothing here is implemented.
+Status: **draft, for review**. Phase 1 (#31), #32 and #33 are built; the
+notes after §10 say where they departed from this text. The cloud placement
+in §12 is decided but not built, and its open questions are in §14.
 Designed against `main` at v0.7.2, plus the open PRs #21 (projects form), #22
 (AGENTS.md) and #23 (`Harness` trait, neutral hook events, trust watcher,
 `starting` / `needs input` states).
@@ -189,7 +191,11 @@ COLUMN parent_id … REFERENCES tasks(id) ON DELETE RESTRICT`, the
 `tasks_parent` index, `task_briefs`, and `task_reports` as above (with the
 phase-4 columns `needs_user`/`answer`/`answered_by`, unread for now). The
 `manager` kind, `run_state`, `task_grants`, `task_budgets` and `read_only`
-move to v5, whose rebuild of `tasks` must copy `parent_id` and re-create
+were to move to v5. #33 took v5 instead, also additive: `tasks.placement`
+(`local`, `cloud` or `local-sandbox`, default `local`, checked by a `CHECK`)
+and the `task_anchors` table (5.7). The `manager` kind, `run_state`,
+`task_grants`, `task_budgets` and `read_only` move to v6, whose rebuild of
+`tasks` must copy `parent_id` and `placement` and re-create
 `tasks_one_assistant` and `tasks_parent`.
 
 ### Creation and teardown
@@ -375,10 +381,12 @@ located, so a worker in its sibling's directory reports as neither (D14).
 
 ### 5.1 Allow-lists
 
-- **The caller's identity** comes from `JEET_TASK_ID`, which jeet sets in each
-  node's tmux environment. The root also keeps `JEET_ASSISTANT=1` for
-  compatibility. `permissions::authorize` changes from "is assistant mode on"
-  to "which node is calling".
+- **The caller's identity** is the task whose pane or review job jeet
+  launched, found by walking the caller's process ancestry (5.7, #33).
+  `JEET_TASK_ID`, which jeet sets in each node's tmux environment, and the
+  root's `JEET_ASSISTANT=1` are hints that must agree with it.
+  `permissions::authorize` changes from "is assistant mode on" to "which
+  node is calling".
 - **The effective allow-list** of a node is
   `grant(node) ∩ effective(parent)`, and the root's is `[assistant] allow`.
   It is computed on every check, so removing a capability from a parent (or
@@ -524,7 +532,7 @@ Deny rules are a lint, not a gate. They are matched against the start of a
 command, so `git -C . push -f`, `sh -c '…'`, aliases, scripts, MCP tools and
 `!` commands get past them (`docs/harnesses.md`, "Deny rules"). They stop
 honest mistakes. GitHub branch protection or a ruleset is the real control
-on a default branch, and #33's sandbox is the boundary.
+on a default branch, and a placement with a boundary (§11) is the boundary.
 
 ### 5.7 What this does not protect against
 
@@ -537,9 +545,51 @@ writes outside the node's own directory, and no `tmux`, `sqlite3` or edits to
 them. The `auto_trust` scope from #23 must exclude manager homes, as it
 already excludes the assistant's, unless the user opts in.
 
-**Decision:** this cooperative model is accepted for phase 1. There the only
-manager is the assistant, and it already runs under it. The model must be
-reviewed again before phase 2 ships (see the gate in §8, tracked in #33).
+**Decision (#33).** Where and how a node runs is its *placement*, chosen
+per node and recorded in the index (`tasks.placement`):
+
+- `local`: tmux panes on the user's machine, unconfined and cooperative.
+- `cloud`: Claude Code cloud sessions in Anthropic-managed VMs. This is the
+  first real boundary. It is designed in §12 and not built.
+- `local-sandbox`: a confined local runtime, reserved and not built.
+
+The root (assistant) and the workers it parents directly may run `local`.
+Every manager below the root, and every node under one, must run on a
+placement whose boundary is not `None`. A child is never less confined than
+its parent. jeet refuses to start a node that breaks this, and the refusal
+names the reason (`placement::runtime_for`, on every start and interrupt).
+The first boundary implementation is `cloud` (decided). Which cloud runtime
+comes first waits on Q1 (§14) and on the probes in `docs/cloud-probes.md`.
+
+**Local identity.** A local caller is the task bound to the nearest
+`(pid, start time)` in its process ancestry that jeet recorded when it
+launched that pane or review job. The record is written only by the
+launching jeet, never re-bound, and ignored after a reboot. `JEET_TASK_ID`
+and `JEET_ASSISTANT` are hints. A hint that disagrees with the anchor is
+refused and logged. A hint that claims a parented task or the root with no
+anchor behind it is refused as unconfirmed. Hooks carry their task in argv
+(`--task`), and report up only when that agrees with the anchor. This fails
+closed against mistakes and casual forging. It is not a boundary against a
+local agent that sets out to escape:
+
+| Escape | Status |
+|---|---|
+| Forging `JEET_TASK_ID` / `JEET_ASSISTANT` | closed (mismatch / unconfirmed) |
+| Stripping the env inside the pane | closed (the anchor still binds) |
+| A Node claiming Root | closed (mismatch) |
+| Pid reuse | closed (start time; boot floor on Linux) |
+| A pre-created `jeet-<slug>` session | closed (not adopted; warning) |
+| Calling `review-job` directly | closed (go byte plus job anchor at the process itself) |
+| Forged `task-hook --task <other>` | closed for reports up; status files remain writable |
+| Orphaning (`nohup … & exit`, `setsid`, double fork) with the env stripped | **open locally**: resolves as the user |
+| Spawning through tmux (`new-window`, `split-window`, `new-session`, or `send-keys` into another pane, including the assistant's) | **open locally**: the process has no anchor, or acts as the other pane |
+| Direct edits to `index.db` or `config.toml`; a forged `JEET_HOME` (acts only on a fake index) | **open locally** / harmless |
+| User windows opened inside a parented task's or the assistant's session | refused for gated commands (inherited hint, no anchor), by design |
+| jeet's own helpers (`watch --once`, `task-startup`) while their parent is alive | may resolve as the task; they are Free and must never ask for identity |
+
+The open rows are closed only by running the node behind a boundary, which
+is why managers below the root require one. Agents started before #33 have
+no anchor and must be reopened.
 
 ## 6. Agents pane (TUI)
 
@@ -632,15 +682,57 @@ the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
 in what the name leaves of its column (D22; the columns after it fill the
 row, so past the last column it would never show).
 
-**Gate before phase 2 ships: review the identity model (5.7, #33).** Phase 1 accepts
-the cooperative model. Phase 2 lets managers below the root hold real
-capabilities, so before it ships, decide whether the cooperative model is
-still enough. The alternative is to require harness enforcement (deny rules,
-or sandboxing that keeps a node out of `tmux`, `index.db`, `config.toml` and
-other nodes' homes) for any harness that runs a manager below the root.
-Record the outcome in this doc.
+**Gate before phase 2 ships: met for local identity by #33.**
+- Local callers are identified by process ancestry and fail closed (5.7).
+- Every node has a placement, and starts go through
+  `placement::runtime_for`, which refuses a node below a non-root manager
+  unless its placement has a boundary (§11).
+- Phase 2 may not start a manager below the root until a boundary placement
+  is built. The first will be `cloud` (§12), blocked on Q1 and the probes in
+  `docs/cloud-probes.md` (§14).
+- Phase 2a, an optional watcher wake channel for local Claude Code nodes
+  (§13), runs its spike alongside those probes. The gaps cloud placement
+  leaves in phases 2–4 are in the table below.
 
-**Phase 2: managers.** (#34; needs #32 and #33)
+**What cloud placement cannot provide.** *Fence-off*, used below, means:
+jeet sets `run_state = 'stopped'|'paused'`, rejects all of the node's
+envelopes, sends it nothing more, fences off its subtree the same way, and
+notifies the user with each session URL to stop or archive on claude.ai.
+Each gap degrades to "jeet stops brokering for the node and tells the user";
+none is presented as enforced.
+
+| Requirement (§) | Cloud placement | How, or why not |
+|---|---|---|
+| Managers below the root (§1, ph2) | **Supported** | cloud session plus mailbox, message-driven |
+| Effective allow-lists, intersection, scope, no sideways sends (5.1) | **Supported for jeet commands** | enforced at the local broker on every envelope |
+| Same, for direct git/`gh` actions (5.6) | **Not supported per node** | one GitHub identity. Repo-wide no-bypass rulesets plus attestation only |
+| Held capabilities (5.1) | **Supported by refusal** | never grantable to cloud nodes. Merge is root-only through `jeet pr merge`. GitHub-side protection needs Q4 |
+| Depth, fan-out (5.2) | **Supported** | every spawn goes through the broker. Nodes cannot create sessions themselves, pending probe P2 |
+| `max_live` and queueing (5.2) | **Degraded** | jeet counts nodes it has not stopped or ended as live. It cannot see whether a session is running or idle. Starts over the limit are queued |
+| Time budget (5.3) | **Degraded** | wall clock since start, enforced by fence-off at 100%. The node is not paused |
+| Turn budget (5.3) | **Not supported** | no turn events reach jeet |
+| Cost budget (later, #26) | **Not supported** | no per-session usage source |
+| Pause / resume (5.4) | **Degraded** | pause is fence-off plus holding the node's down-queue in the index. The current turn keeps running. Resume releases the queue |
+| Stop, `stop --all` (5.4) | **Degraded** | fence-off. Real stop or archive is UI-only. jeet detects archiving when `-p --cloud` fails |
+| Harness interrupt (#32) | **Not supported** | no CLI or API |
+| Message delivered mid-turn | local Claude Code: **Supported** (wake channel, §13); cloud: **Not supported** | a cloud message queues until Claude reads it |
+| Read-only worktrees (§1, decision 2) | **Not supported** | the node has a writable clone and push access. The read-only intent is cooperative |
+| `worktree add` mid-session | **Not supported** | one repo per session, fixed at start. Use a child node instead |
+| Recursive archive/delete (ph2) | **Degraded** | index bookkeeping is supported. Sessions are archived by the user in the UI. jeet deletes mail branches locally |
+| Agents pane rollup (ph3) | **Supported from the index** | rows come from reports and `last heard`. No live status, needs-input or turns |
+| Attach `⏎` (ph3) | **Degraded** | opens the claude.ai URL. `--teleport` gives a one-way local copy |
+| Worklog `l` (ph3) | **Supported** | jeet appends verified envelopes and results to the node's local worklog |
+| Inbox `i` (ph3) | **Degraded** | shows jeet's held and sent log; the server's queue is not visible. Local panes with a wake channel no longer show message text either, so `i` is where both are read |
+| Pause/stop keys (ph3) | **Degraded** | fence-off, as above |
+| Escalation and questions (ph4) | **Supported, with latency** | `report question` goes up through the mailbox, the answer comes down by `-p`, and copies go to each manager on the path. The last hop to a local manager uses the wake channel (§13): one tick plus the push, with no wait for Stop |
+| Answers bypassing jeet | **Not preventable** | the user, or the node's own AskUserQuestion or permission prompt, can act on claude.ai, which jeet does not see. Nodes are told to use `jeet report question` (cooperative) |
+| `jeet watch` rules to managers (ph4) | **Supported** | routed through `-p --cloud` as pointers only; to a local manager, through the wake channel. Events caused by nodes themselves never arrive as notifications |
+| Reparent (ph4) | **Supported** | index-only. Session and key are unchanged, and scope is re-evaluated on the next envelope |
+| Tree works while the Mac sleeps | **Not supported** | brokering, spawns, answers and budget checks stop. Nodes keep running until their next jeet call (Q6) |
+| Multi-repo node | **Not supported** | the CLI attaches one repo |
+| Non-Claude harnesses below the root | **Not supported** | cloud runs Claude Code only. Other harnesses wait for `local-sandbox` |
+
+**Phase 2: managers.** (#34; needs #32, #33 and a built boundary placement)
 - `kind = 'manager'`, `jeet manager new|ls|show|grant|budget|pause|resume|stop`,
   `task_grants`, effective allow-lists, held capabilities, depth/fan-out/
   `max_live`, time and turn budgets, read-only worktrees, and recursive
@@ -697,8 +789,9 @@ the assistant hears when a task finishes or gets stuck, without polling
 
 ## 10. Decisions
 
-None of the questions this RFC raised are still open. The user decided
-(2026-10-11):
+None of the questions this RFC first raised are still open. The user decided
+(2026-10-11). The cloud-placement questions in §14 are open; #33 depends on
+none of them.
 
 1. **Name.** The code and data model say *manager*; UI text may say *agent*
    where that is unambiguous (§1).
@@ -719,8 +812,13 @@ None of the questions this RFC raised are still open. The user decided
    terminal makes one parented to the assistant (§3).
 9. **No sideways messaging.** Siblings never message each other; everything
    goes through the common parent (5.1).
-10. **The cooperative identity model is accepted for phase 1.** It must be
-    reviewed again before phase 2 ships, which is a gate in §8 (5.7, #33).
+10. **Identity and placement (#33).** Managers below the root, and every
+    node under them, run behind a real boundary through a per-node
+    placement. The first implementation runs them as Claude Code cloud
+    sessions; local sandboxing stays in the design. Local callers are
+    identified by process ancestry to a pane or job jeet recorded, and fail
+    closed; the env is a hint. `libc` is approved as a direct dependency for
+    macOS pid lookups (5.7, §11–§12, #33).
 
 ### Phase 1 implementation notes
 
@@ -873,3 +971,533 @@ RFC left open, or departed from it:
 - **E15** Deny rules are a lint, not a gate (5.6). They cover only the
   agent's Bash and file tools, not MCP tools, `!` commands or scripts.
   Branch protection is the real control; #33 is the boundary.
+
+### #33 implementation notes
+
+Where #33 (identity that is hard to fake, and the placement seam) settled
+what this RFC left open, or departed from it:
+
+- **I0** Scope: ancestry identity, `Placement`, a `NodeRuntime` trait with
+  only `LocalTmux`, `[managers] placement`, this text and
+  `docs/cloud-probes.md`. No cloud code, no `[cloud]` config, no
+  `worker_placement`, no `Delivered::Sent`/`Watched`, no MAC crate. Nothing
+  depends on Q1–Q6.
+- **I1** The anchor is the identity: a `(pid, start)` row in
+  `task_anchors`, kind `pane` or `job`, recorded only by the jeet that
+  spawned that pid, at one of three launch paths: a task's tmux session
+  (`runtime`), an assistant window (`assistant::open`) and a review job's
+  runner (`jeet review`). A process never records its own anchor.
+- **I2** The walk starts at jeet's own pid and goes up through the kernel:
+  `/proc/<pid>/stat` on Linux (split after the last `)`), `proc_pidinfo`
+  (`PROC_PIDTBSDINFO`) through `libc` on macOS. It stops at pid ≤ 1, a
+  failed lookup, a zombie, a cycle or depth 64. Other unix targets find
+  nothing and fail closed. jeet never runs `ps` for identity.
+- **I3** Start times are re-read on every check. On Linux, rows older than
+  the boot time are ignored; macOS start times are absolute.
+- **I4** Resolution, nearest anchor first: a job anchor at the process
+  itself is that job; an anchor whose task disagrees with `JEET_TASK_ID`,
+  or a non-root anchor under `JEET_ASSISTANT`, is a mismatch; an anchor is
+  that task; no anchor but a hint naming a parented task or the root is
+  unconfirmed; anything else is the user.
+- **I5** An anchored assistant is Root, an anchored task with a parent is a
+  Node, anything else the user. Supersedes D13 and D23: a user shell in a
+  parented task's session is refused for gated commands, not gated as the
+  task.
+- **I6** Mismatch and unconfirmed are errors; a mismatch is also logged as
+  Denied in `actions.log`. An index error fails closed.
+- **I7** `authorize` resolves identity for every gated or node-only
+  command, whatever the env says. Hooks and free commands never ask.
+- **I8** Anchors are a plain `INSERT`, never re-bound. Dead rows are pruned
+  on insert. If a start time cannot be read, nothing is recorded and jeet
+  warns that the agent cannot be identified. Archiving a task deletes its
+  pane anchors; deleting it cascades.
+- **I9** No backfill: matching sessions by name is spoofable. A live session
+  with no live anchor is not adopted; `task open` warns to stop and reopen
+  it. **Reopen running tasks after upgrading:** older agents are refused for
+  `report` and `worktree add`, and old hooks no longer report up.
+- **I10** `jeet review` starts the runner with stdin piped, records its job
+  anchor when the caller is the root, then writes one go byte. `review-job`
+  refuses to run on a terminal, on EOF or on any other byte.
+- **I11** Hooks run `jeet task-hook --task <id> <event>`. `--task` locates
+  the task first; a `--task` the index does not know writes nothing and does
+  not fall back. Without `--task`, today's env-then-cwd lookup still writes
+  status, but nothing reports up and no brief is sent. A hook reports up
+  only when `--task` is the located task and agrees with the anchor.
+  Supersedes D14: a worker whose cwd is a sibling's directory is attributed
+  to itself through `--task`. Hooks that carry `--task` always open the
+  index.
+- **I12** `Placement { Local, Cloud, LocalSandbox }` on `tasks.placement`;
+  `support()` gives `Support { boundary }` (§11).
+- **I13** `NodeRuntime` has `start` and `interrupt` only; `runtime_for` is
+  the one fail-closed choke point. The five start sites and the interrupt
+  site route through `runtime::ensure_running` and `runtime::interrupt`
+  unchanged.
+- **I14** The boundary rule runs on every start and interrupt. Under D12 its
+  refusing branch cannot be reached from the CLI; phase 2 adds the
+  `kind == 'manager'` condition and calls it from `manager new`, `grant`
+  and child starts.
+- **I15** A new task's placement: `local` at the top level or under the
+  root, else `[managers] placement`. A missing parent is refused at create.
+- **I16** `[managers] placement` defaults to `cloud`. `local` is an error
+  where it is used, not at load. `local-sandbox` parses and is refused at
+  start as not built.
+- **I17** The env stays the source for self-protection (not killing the
+  session you are in), the `[assistant] notify` opt-out and message sender
+  labels, where a wrong hint cannot widen anything.
+- **I18** No `TMUX` or `jeet-` session check: jeet uses the user's default
+  tmux server, and an orphan can unset `TMUX`.
+- **I19** v5 is additive; the `tasks` rebuild is v6 (§2).
+- **I20** `libc` is a macOS-only direct dependency, already in the lock
+  file as a transitive one.
+
+## 11. Placement
+
+A node's placement says where its agent runs and what confines it.
+
+```rust
+pub enum Placement { Local, Cloud, LocalSandbox }   // tasks.placement
+pub enum Boundary { None, Machine, Sandbox }
+pub struct Support { pub boundary: Boundary }       // Placement::support()
+```
+
+| Placement | Boundary | Built |
+|---|---|---|
+| `local` | `None` | yes: tmux panes, as before |
+| `cloud` | `Machine` | no: designed in §12, waiting on Q1 and the probes |
+| `local-sandbox` | `Sandbox` | no: reserved |
+
+`Support` gains more fields only when phase 2–4 code reads them.
+
+**The boundary rule.** A task needs a boundary when its parent exists and is
+not the root, or when its parent's placement has one (a child is never less
+confined than its parent). Such a task on a placement with `Boundary::None`
+is refused: "managers below the root, and every node under them, must run
+behind a boundary; placement local has none". A parent missing from the
+index refuses too.
+
+**Choosing a placement.** A task made at the top level or under the root
+gets `local`. Anything deeper gets `[managers] placement`:
+
+```toml
+[managers]
+placement = "cloud"   # the default; "local" is an error; "local-sandbox" is refused as not built
+```
+
+**The runtime seam.**
+
+```rust
+pub trait NodeRuntime {
+    fn start(&self, app: &App, task: &TaskRecord, session: Option<&str>, prompt: Option<&str>) -> Result<Running>;
+    fn interrupt(&self, app: &App, task: &TaskRecord) -> Result<Interrupted>;
+}
+pub fn runtime_for(app: &App, task: &TaskRecord) -> Result<&'static dyn NodeRuntime>;
+```
+
+`runtime_for` checks the boundary rule, then returns `LocalTmux` for
+`local` and refuses `cloud` ("not built yet: it waits on the choice of cloud
+runtime (Q1) and the probes in docs/cloud-probes.md") and `local-sandbox`
+("not built yet"). `runtime::ensure_running` and `runtime::interrupt` keep
+their signatures and dispatch through it, so every start and interrupt site
+routes without change.
+
+Left off the trait, each for a reason:
+
+- **`stop`**: archive and delete must always work, and `tmux::kill` is
+  already a no-op when there is no session, so a non-local task archives
+  and deletes its local state correctly.
+- **`send`**: `messages::Agent` is already the local abstraction. A message
+  to a non-local task finds no pane, routes to Start and is refused there.
+- **`activity`, `attach`, `collect`**: no caller until phase 2. With no pane
+  and no status files, a non-local task reads as not running.
+
+**Introduced with the second runtime** (a sketch, not built):
+
+```rust
+pub struct Support {
+    pub boundary: Boundary,
+    pub interrupt: bool,           // local: Esc via the harness; cloud: false
+    pub stop: bool,                // local: kill tmux; cloud: false (UI only)
+    pub live_status: bool,         // local: hook status files; cloud: false
+    pub turn_count: bool,          // local: Stopped events; cloud: false
+    pub usage: bool,               // when #26 lands; cloud: false
+    pub read_only_worktree: bool,  // local: yes; cloud: false
+}
+pub enum Attach { Tmux { session: String }, Url(String) }
+pub enum Inbound {                 // what collect() hands to the broker
+    Command { node: String, seq: u64, argv: Vec<String>, body: Option<String> },
+    Rejected { node: String, reason: String },   // bad MAC, replay, rewrite
+}
+pub trait NodeRuntime {
+    fn start(..) -> Result<Running>;
+    fn interrupt(..) -> Result<Interrupted>;              // Unsupported on cloud
+    fn send(&self, app: &App, task: &TaskRecord, msg: &str) -> Result<Delivered>;
+    fn stop(&self, app: &App, task: &TaskRecord) -> Result<(), Unsupported>;  // cloud: fence-off (§8)
+    fn activity(&self, app: &App, task: &TaskRecord) -> Activity;  // cloud: LastHeard(ts) | Unknown
+    fn attach(&self, app: &App, task: &TaskRecord) -> Attach;
+    fn collect(&self, app: &App) -> Result<Vec<Inbound>>;  // local: empty
+}
+```
+
+`messages::Delivered` then gains `Sent` (handed to the cloud server's
+queue; jeet cannot tell whether the session was busy) and, with phase 2a,
+`Watched` (§13). `[managers] worker_placement` (default `local`) lets
+root-parented workers run in the cloud too. A later `Placement::Managed`
+(Q1) would be another implementation of the same trait.
+
+Call sites once the second runtime lands:
+
+| Call site | Today | With placement |
+|---|---|---|
+| `runtime::ensure_running` (`task new --prompt`, `task open`, a message to a stopped agent) | `runtime_for(task).start` (#33) | the same; cloud starts a session |
+| `runtime::interrupt` (`task interrupt`) | `runtime_for(task).interrupt` (#33) | the same; cloud is unsupported |
+| `runtime::stop` (archive, delete) | kill tmux | `.stop`; when it is unsupported, fence-off |
+| `messages::deliver` (`task send`, `watch` dispatch, the Stop hand-over) | `TmuxAgent` routing | `.send`; cloud skips the inbox, the Stop hand-over and `Route` |
+| `reports::deliver` | to the root through `assistant::deliver` | unchanged: the root is always local |
+| `status.rs` hook path (`run_hook`, `auto_status`) | hook events become reports | local only; a cloud node's mailbox `report` envelopes go into the same `reports::send` |
+| `reports::sweep_idle` | idle from status files | cloud: idle means "no verified envelope for `idle_report_mins`", flagged `last heard` |
+| `permissions::authorize` | ancestry identity (#33) | local unchanged; cloud: `authorize_as(Caller::Node(id), …)` in-process, from verified envelopes only |
+| `watch::run_once` | poll GitHub, dispatch, sweep | adds `collect()` and broker execution, under `WatchLock`, before dispatch |
+| TUI refresh thread | status files | also `collect()` every `[cloud] poll_secs` while cloud nodes are live, under `WatchLock` |
+| TUI attach (`⏎`) | `tmux attach` | `Attach::Url` opens the session; `claude --teleport <id>` is offered as a one-way local copy |
+
+## 12. Cloud managers (designed, not built)
+
+This is the decided design for the first boundary placement. Nothing here is
+built: it waits on Q1 (§14) and on the probes in `docs/cloud-probes.md`.
+
+**What the cloud boundary is.** It is a boundary *around the user's
+machine*. A cloud node cannot reach `index.db`, `config.toml`, tmux, other
+nodes' homes, the user's `gh` token or the user's shell. Every jeet action it
+takes goes through one broker, the local jeet process, which re-checks
+identity, scope and the effective allow-list on every call.
+
+**What it is not.** It is *not* a boundary between cloud nodes, and it does
+not limit what a node does directly through git or GitHub:
+
+- all nodes push and comment as one GitHub identity;
+- all nodes share one cloud environment's egress and environment variables;
+- a node's jeet identity rests on a per-node key that sits in its own
+  conversation.
+
+### 12.1 Running a node
+
+- **Start.** jeet pushes the node's branch `jeet/<node-id>/base` from a
+  worktree in its store, then runs `claude --cloud "<brief>"` there with
+  `CLAUDE_CONFIG_DIR=[cloud].config_dir`, and stores the session id and URL
+  in the index. If the CLI prints no parseable session id without a
+  terminal, the fallback is a routine `/fire` per node tier (P1). The CLI
+  attaches one repo per session, so a cloud node is single-repo, and a
+  child on another repo is a separate session jeet starts.
+- **Send.** `claude -p "<fenced msg>" --cloud <session-id> --output-format
+  json`. The server queues it. It fails on archived sessions, which is how
+  jeet notices archiving. This queue is also the cloud node's wake channel:
+  cloud runs no jeet watcher (§13).
+- **Brief.** The first prompt carries the node id, its goal and done text
+  (`<jeet-brief>`), the mailbox protocol and the node key. Cloud nodes get
+  no session-start context from jeet. Repo `.claude/settings.json` hooks
+  would run there, but the node can edit them, so jeet relies on none of
+  them, a watcher included.
+- **Shim.** `jeet cloud setup-script` prints an environment setup script
+  that embeds a small `jeet` shim (POSIX sh plus python3). The user pastes
+  it into the cloud environment once. The shim turns `jeet report …`,
+  `jeet task new …` and similar into signed envelopes on the mailbox
+  branch. It is not trusted: jeet trusts only what it verifies.
+- **Managers are message-driven.** Idle VMs are paused and reclaimed, and
+  background commands die after about 30 minutes. A manager ends each turn
+  with its state in its conversation and on its branch, and wakes on the
+  next `<jeet-result>` or report sent down. It never runs a poller.
+
+**Managed Agents would do this better, and is not the choice.** Its custom
+tools give a synchronous call back with identity bound to the session and no
+key in the conversation, and it has `user.interrupt`, per-session usage and
+cost budgets, and per-session repo tokens, which cover most of the §8 gaps.
+It is a different product: another agent loop without Claude Code hooks or
+settings, Console API billing, a workspace and key, and an HTTP client in
+jeet. The trait is shaped so a `Placement::Managed` could be added later.
+Making it the first instead is Q1.
+
+Rejected for v1: a jeet remote MCP server (a daemon and a public tunnel),
+transcript polling (no documented API), Claude Code Projects (UI only), and
+self-hosted environments (a Team or Enterprise plan and a runner; a
+strong-identity option later, through verifiable session JWTs).
+
+### 12.2 The mailbox: up from a node
+
+- A node writes envelopes to `jeet-mail/<node-id>` in its session's repo,
+  one file per envelope (`<seq>.json`), pushed through the proxy:
+  `{v, node_id, session_id, seq, ts, argv[], body}` plus
+  `mac = HMAC-SHA256(K_node, canonical_json_without_mac)`.
+- At most 8 KiB per envelope and 32 new envelopes per node per tick. An
+  issue or PR comment is never accepted as a command.
+- `collect()` runs `git fetch origin '+refs/heads/jeet-mail/*:refs/jeet-mail/*'`
+  in the store, with `core.hooksPath=/dev/null`, `core.fsmonitor=false` and
+  `GIT_CONFIG_NOSYSTEM=1`, and reads new blobs with `git cat-file`. No HTTP
+  client, one fetch per attested repo with live cloud nodes.
+- Triggers: the `jeet watch` launchd tick, the TUI refresh thread every
+  `poll_secs`, and `jeet cloud sync`, all under `WatchLock`. GitHub does not
+  notify a user of their own actions, so `jeet watch` notifications cannot
+  carry this.
+- Each verified envelope is claimed with a unique `(node_id, seq)` row
+  before it runs, so the TUI and watch cannot run it twice. Latency is one
+  tick plus the push.
+
+### 12.3 How hard a node's identity is to forge
+
+jeet accepts an envelope only if the MAC verifies under the node's key,
+`node_id` matches the branch, `session_id` matches the bound session, `seq`
+is above the last seen, `ts` is within 15 minutes, and the branch history
+includes the last verified commit (a rewrite is rejected and the user told).
+
+`K_node` is 32 random bytes kept in `index.db`, delivered only in the node's
+first `claude -p --cloud` message, never through environment variables, the
+repo or the setup script.
+
+- **Cannot forge:** another cloud node (VMs are isolated, and pushes as the
+  shared identity carry no authority); anyone with push or comment access to
+  the repo.
+- **Can forge:** anything that gets X's transcript or tricks X into leaking
+  the key (it is in the model's context, visible on claude.ai and copied by
+  `--teleport`); any local process holding the cloud account login, which can
+  send X a fake "new key". Rekey messages therefore carry a MAC under the
+  current key, a node that loses its key (compaction) is ended and replaced,
+  and a key is never re-sent in the clear. The separate login (12.6) keeps
+  ordinary local agents off the account, cooperatively.
+
+A stolen key gets exactly X's effective allow-list and subtree scope.
+Identity is *attributable and scoped*, not secret-proof against a
+compromised victim, which is why held capabilities never go to cloud nodes.
+
+### 12.4 Commands a cloud node may send
+
+Every command runs in-process through `authorize_as(Caller::Node(id), …)`,
+never as a `jeet` subprocess with `JEET_TASK_ID` set, and must name its
+target: no fallback to the current directory.
+
+| Command | Phase | Notes |
+|---|---|---|
+| `report progress\|done\|blocked\|question` | 1 | to the parent through `reports::send`, fenced `<jeet-report untrusted>` |
+| `task new --parent <self or a descendant> --repo <attested> --goal … --done …` | 2 | jeet starts a cloud session, subject to depth, fan-out, `max_live` and grant ⊆ effective |
+| `task send <descendant>` | 2 | scope applies; no sideways sends |
+| `manager new\|grant\|budget\|pause\|resume\|stop <descendant>` | 2 | `pause` and `stop` mean fence-off |
+| `tree` / `task ls` (own subtree) | 2 | answered in a `<jeet-result>` |
+| `report answer\|escalate` | 4 | |
+| `pr create --head jeet/<self>/…` | 2 | with the user's local `gh`; the head must be in the node's namespace, and `git.push` is required |
+| `pr comment\|review\|merge` | — | refused in v1: held capabilities |
+
+### 12.5 Down to a node, and how messages are framed
+
+- Results are batched per tick into one `claude -p --cloud <id>` message per
+  node: `<jeet-result seq=N ok=true|false>…</jeet-result>`, with a MAC under
+  `K_node` so the shim can tell real results from forged ones.
+- Messages from a parent and GitHub events are fenced `<jeet-message
+  untrusted>`. A GitHub event goes down as a pointer only ("PR #12 has a new
+  review, fetch it"): attacker-written text never arrives as a user turn.
+- **Two framings.** A cloud `-p` message carries full user authority, so no
+  event text may ever look like a `<jeet-result>` or a rekey message; those
+  forgery rules are cloud-only. A local node with a wake channel (§13)
+  receives messages as peer messages from another session, which cannot
+  approve anything. 5.5 must say which framing each direction gets; the
+  brief stays a user turn.
+
+### 12.6 Credentials
+
+**GitHub.** The Claude GitHub App, installed only on the repos in
+`[cloud].repos`, not `/web-setup` (which exposes the user's whole `gh` token
+behind the proxy). The proxy limits API calls to the attached repo, blocks
+GraphQL and rejects branch deletion and tag pushes, but does not limit which
+branches a push updates. So a node, as the shared identity, can push any
+branch on its repo, comment and review through REST, and call the merge API.
+
+- No-bypass rulesets must cover the default and protected branches (PR
+  required, no force push, at least one approving review, which the shared
+  identity cannot give itself) and `jeet-mail/**` (no force push). They bind
+  the user too. Keeping merge with the root on GitHub's side needs a
+  required check from a jeet-owned app (Q4).
+- Branch namespaces (`jeet/<node-id>/…`, `jeet-mail/<node-id>`) are enforced
+  only on brokered actions. Direct pushes cannot be limited per node with
+  one identity. Siblings on one repo can read each other's branches;
+  separate repos are the only isolation.
+- `pr.merge`, `pr.comment`, `pr.review` and `task.delete` cannot be granted
+  to a cloud node. Merges happen only through `jeet pr merge`, by the root.
+- A repo enters `[cloud].repos` only after the user attests that no repo
+  secrets are reachable from `on: push`, `pull_request_target` or
+  `issue_comment` workflows on `jeet/**` and `jeet-mail/**`, and that there
+  is no comment-triggered automation. jeet refuses cloud placement on other
+  repos.
+
+**Anthropic account.** Every cloud call uses `CLAUDE_CONFIG_DIR=[cloud].config_dir`,
+logged into a dedicated claude.ai account with no connectors (Q2): connectors
+reach every cloud session by default, so a prompt-injected manager could read
+and exfiltrate mail. jeet refuses to start a cloud node until `jeet cloud
+doctor` confirms no connectors (P6), or the user attests it. Usage counts
+against that account's limits, and jeet cannot stop a node mid-turn.
+Bedrock, Vertex and Foundry users, and ZDR or HIPAA orgs, cannot use cloud
+placement.
+
+**Secrets.** Environment variables are readable by every session in the
+environment, and from the CLI every node shares one environment, so they
+never hold per-node secrets. The only per-node secret is `K_node`, which
+travels in the conversation. (If phase 2a settles on W3, its messaging token
+is a secret too: 0600, out of logs and the worklog.) Egress is `Trusted`; the
+Anthropic API and the GitHub proxy can carry data out even at `None`, which
+is accepted.
+
+**Config** (not built):
+
+```toml
+[cloud]
+claude = "claude"                    # a claude.ai login, not Bedrock/Vertex/Foundry
+config_dir = "~/.jeet/cloud-claude"  # CLAUDE_CONFIG_DIR for every cloud call
+repos = ["owner/repo"]               # attested repos; others are refused
+poll_secs = 30                       # TUI mailbox poll while cloud nodes are live
+mail_prefix = "jeet-mail/"
+branch_prefix = "jeet/"
+```
+
+### 12.7 What stays cooperative
+
+- The root and local workers run as the user with a shell. They can escape
+  the ancestry walk (5.7).
+- They hold the user's `gh` token. If they can read `[cloud].config_dir`,
+  they can drive cloud nodes, send messages, or read a transcript and its
+  key. The cloud boundary protects the user's machine from cloud nodes, not
+  cloud nodes from local agents.
+- Upward prompt injection through reports, PR bodies and commits is the main
+  remaining risk. Identity proves who sent text, not that it is safe.
+
+### 12.8 What phase 2 builds for it
+
+Once Q1 is answered and the probes pass: `placement/cloud.rs` (argv
+builders, result parsing, envelopes and their checks, `<jeet-result>` and
+rekey builders, the shim), the trait methods of §11, `Delivered::Sent`,
+`[cloud]` and `worker_placement`, the `node_mailbox` table and claim rows,
+`collect()` in `watch::run_once` and the TUI, fence-off, `jeet cloud
+doctor`/`sync`, attestation for `[cloud].repos`, and refusing held grants to
+cloud nodes. MAC verification waits on Q3.
+
+## 13. Message delivery through a watcher (phase 2a)
+
+Today jeet types messages into an agent's pane. A watcher would instead let
+a background process, started by a hook, hand messages to the agent.
+
+| Goal | Meaning |
+|---|---|
+| G1: seen once | the user does not see a message twice, typed and then fenced |
+| G2: any time | an agent can be messaged while busy, not only idle or at Stop |
+| G3: no typing | jeet never types into an input box: no draft check, no risk of answering a trust or permission prompt |
+| G4: no pane | the same path could serve nodes without a pane |
+
+**Verdict: adopt partly.** An optional *wake channel* for local Claude Code
+nodes, as PR 2a of phase 2, after a spike (probes P-W1 to P-W10). It meets
+G1 and G3, and G2 at tool-call boundaries. It needs no daemon and falls back
+to today's path wherever it is missing. Do not:
+
+- make it the transport: `.jeet/inbox.jsonl` stays the queue,
+  `Inbox::lock` the one place a message is taken, and `task_reports` the
+  record;
+- require it of any harness;
+- use it for cloud nodes: `claude -p --cloud` already meets G1, G3 and G4
+  there, and nothing in the VM can host a watcher;
+- adopt a long-lived `asyncRewake` waiter: its timeout is enforced (600 s by
+  default, 30 s on `UserPromptSubmit`), so an idle manager's waiter would
+  expire.
+
+**Candidates, in order of preference** (the spike picks one):
+
+| | W1: hook-started poster | W2: the harness watches the inbox | W3: jeet posts directly |
+|---|---|---|---|
+| Started by | a `SessionStart` hook entry with `async: true`, in jeet's `--settings` | `SessionStart` returns `watchPaths: [<task>/.jeet/inbox.jsonl]`; a `FileChanged` hook with `asyncRewake: true` | nothing; `SessionStart` stores the socket path and token |
+| Reaches the model | posts to `CLAUDE_CODE_MESSAGING_SOCKET` as the agent's own child, so no `crossSessionInbound` setting is needed | exit 2 with the messages on stderr, as a system reminder | `deliver` posts to the socket; needs `crossSessionInbound: "accept"` |
+| Mid-turn | documented: the next tool-call boundary | unverified (P-W5) | documented |
+| Main unknown | the message wire format (P-W1); own-child status of a long-lived hook child (P-W2) | `FileChanged` with `asyncRewake`; the watch surviving `Inbox::replace` | the wire format; a token outside the session; repo `refuse` |
+
+W1 is preferred: it wakes an idle session and lands mid-turn by documented
+paths, needs no settings change, and its process dies with the agent. W2 is
+the fallback; W3 is a last resort, as it keeps a session token in jeet.
+
+**How W1 works.** `jeet inbox watch` takes a non-blocking lock on
+`.jeet/wait/<session>.lock` (held: exit 0, so compaction does not start a
+second). It finds its task from `--task` in argv, as hooks do (#33), and its
+session from the hook's stdin. It writes nothing to stdout. On each inbox
+change it takes this session's messages under `Inbox::lock`, posts them as
+one fenced batch with a nonce, and notes the delivery in the worklog. It
+exits when the harness pid it recorded is gone, when its status says
+`Ended`, or when `run_state` is paused or stopped (paused: it takes
+nothing).
+
+**How it fits with today's path.**
+
+- `deliver` computes the route as today; under `Inbox::lock`, a live watcher
+  means queue and return `Delivered::Watched`, otherwise `Type`, `Queue` or
+  `Hold` as before. The watcher checks the queue once more under the lock
+  before it releases its own, closing the race with `deliver`.
+- The Stop hand-over stays; Stop and the watcher take under the same lock,
+  so each message is taken once. Idle typing is skipped while a watcher is
+  live.
+- Taken messages go to `.jeet/wait/<session>.inflight` with their nonce,
+  cleared when the nonce appears in the transcript; a new watcher pushes
+  stale ones back to the front of the queue.
+- The watcher writes a `Running` status before it posts, since a wake may
+  start a turn jeet does not otherwise see.
+- The pane shows only a preview line, so the full text is read in Ctrl+O,
+  the phase 3 `i` view and `jeet report ls`. Fencing is unchanged.
+
+**Harnesses without it** degrade: with hooks and continue-turn but no async
+wake, today's queue, Stop hand-over and idle typing; with no hooks, typing.
+§7 gains an optional row, "background wake (`wake_hook`)".
+
+**Required safeguards.** A cap on wakes per session (for example 6 a
+minute; the rest wait for Stop), designed with Claude Code's cap of 8 Stop
+continuations in a row; a wake counts as a turn against 5.3 budgets; pause
+means the watcher takes nothing; batching and nonces against Claude Code's
+inbound throttling (50 queued, per-sender limits, identical repeats
+dropped).
+
+**Risks.** Claude Code only. A peer message "can't approve anything", which
+suits reports going up but may let a child ignore a manager's command
+(P-W9); W2's system reminder is trusted more than user text, a larger
+injection risk. A repo's `crossSessionInbound: "refuse"` or a `--bare`
+session turns it off, so jeet must detect a failed post and fall back to
+typing. Async hook lifetime on interactive exit or tmux kill is unverified;
+the pid check bounds an orphan to one poll. In the assistant's shared inbox,
+a message with no session wakes whichever watcher wins the lock.
+`@internal` fields (`rewakeSummary`, `rewakeMessage`) are used for
+appearance only.
+
+| Phase | What lands |
+|---|---|
+| Before 2 | the spike, alongside the cloud probes; no code |
+| 2a (#34) | `Harness::wake_hook`, `HookSetup.wake`, the settings entry, `src/waiter.rs`, `Delivered::Watched` routing in `messages.rs`, the idle skip and ack in `status.rs`, hidden `jeet inbox watch --task`/`take`. It does not block phase 2 |
+| 3 (#35) | the `i` view becomes required; rows show `wake: armed/none` and inbox depth |
+| 4 (#36) | answers, copies up the path and watch rules to managers may arrive mid-turn; the wake cap and turn accounting must exist first |
+
+§9 gains: "a per-agent watcher replacing typing: accepted as an optional
+harness wake capability; the inbox, its lock and the Stop hand-over stay."
+
+## 14. Open questions
+
+Unanswered. #33 depends on none of them; the cloud placement (§12) depends
+on all but Q6, which it must state.
+
+1. **Q1: the first cloud runtime.** Claude Code cloud sessions, with the §8
+   gaps (no pause, stop or interrupt; no turn or cost budgets; no read-only
+   worktrees; no per-node git gating; a key in each node's context), or
+   Managed Agents, which closes most of them but uses API billing, a
+   different agent harness, and a Console workspace and key?
+2. **Q2: the account.** A dedicated claude.ai account with no connectors
+   for cloud nodes, and on which plan? Pro/Max gets network secrets;
+   Team/Enterprise gets self-hosted environments, which give verifiable
+   session identity later.
+3. **Q3: MACs.** `hmac` and `sha2` (RustCrypto) as new dependencies, or
+   `/usr/bin/openssl` by absolute path?
+4. **Q4: GitHub.** The Claude GitHub App limited to the nodes' repos,
+   no-bypass rulesets on default branches (which bind the user too), and
+   the Actions and automation attestation. Optionally a jeet-owned GitHub
+   App, so a required check keeps merges with the local root on GitHub's
+   side.
+5. **Q5: live probes.** Permission to run the live, billed probes in
+   `docs/cloud-probes.md`.
+6. **Q6: liveness.** Accept that a cloud tree cannot delegate, report, get
+   answers or enforce budgets while the Mac sleeps, and that a round trip is
+   one poll tick (about 30 s with the TUI open, the launchd interval
+   otherwise)?

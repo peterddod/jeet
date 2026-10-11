@@ -1095,8 +1095,8 @@ command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
 
 ### The assistant's permissions
 
-jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
-do what `[assistant] allow` lists; anything else fails with a message saying
+jeet commands run by the assistant's agent may only do what `[assistant]
+allow` lists; anything else fails with a message saying
 what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet task last`, `jeet prs`, …),
 `jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
 `jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
@@ -1120,7 +1120,7 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` takes only `assistant` for now) is gated more
-narrowly, as soon as `$JEET_TASK_ID` names it. It may run the reads that
+narrowly. It may run the reads that
 need no capability (`jeet ls`, `jeet task ls`, `jeet prs`, …), run
 `jeet report`, and add worktrees to itself, and only that last when the
 assistant may too: add `worktree.add` to `[assistant] allow` to let such
@@ -1130,10 +1130,27 @@ as are `jeet notify`, `jeet todo` and review jobs; the refusal tells it to ask w
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
-exits without reporting done. The gating is cooperative, like the rest: a
-shell you open inside such a task's tmux session inherits `$JEET_TASK_ID`
-and is gated as that task, so use one outside it. After upgrading, an older
-jeet refuses the index.
+exits without reporting done.
+
+jeet knows which agent is calling by the process it launched: each task's
+agent, each assistant window and each review job is recorded when jeet
+starts it, and a jeet command is that agent's when it runs below that
+process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
+disagrees is refused and written to `actions.log`, and one that claims a task
+with a parent, or the assistant, with no recorded agent behind it is refused
+as unconfirmed. So a shell you open inside such a task's or the assistant's
+tmux session is refused for commands that need a capability; use one
+outside it. This stops mistakes and casual forging, not an agent that sets
+out to escape: only a placement with a boundary does that, which is why
+managers below the assistant will run behind one (`[managers] placement`,
+`cloud` by default; not built yet).
+
+**Upgrading to this version:** reopen running tasks and assistant windows
+(stop them and `jeet task open` again). Agents started by an older jeet were
+never recorded, so their `jeet report` and `jeet worktree add` are refused,
+and their hooks still write status but no longer report to the assistant.
+`jeet task open` on such a task warns instead of adopting it. After
+upgrading, an older jeet refuses the index.
 
 On a harness with deny rules (Claude Code), the assistant and every task
 with a parent are also denied, even with your approval at the prompt:
