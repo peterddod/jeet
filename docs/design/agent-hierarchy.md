@@ -1228,7 +1228,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   once the task is fully made (its worktrees added), so no entry names a
   task that was undone.
   `jeet task last` fences what it prints for any caller but the user: an
-  agent's words may carry text it read (5.5). So does `jeet manager show`,
+  agent's words may carry text it read (5.5). The status beside them and
+  an API error, which its agent can write too, reach an agent unable to
+  close a fence or open one (as `jeet task ls`'s STATUS column does), and
+  everyone without control characters. So does `jeet manager show`,
   for the children's reports and for the brief's goal and done-when, which
   a manager writes from what it has read.
 - **P10** A manager's harness settings pre-approve the commands of what it

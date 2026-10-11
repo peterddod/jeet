@@ -451,6 +451,43 @@ mod tests {
         assert!(!TmuxAgent::new(&app, &m).may_start(false).can_start());
     }
 
+    /// A manager takes reports as the assistant does: sent, and said by
+    /// jeet on its own, each recorded against it and held in its inbox,
+    /// fenced, while nothing of its runs.
+    #[test]
+    fn a_task_under_a_manager_reports_to_it() {
+        let (_dir, app, m, mw) = manager_lab();
+        let (id, delivered) = send(&app, &mw, ReportKind::Done, "shipped", false).unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
+        let last = app.db.last_report("mw").unwrap().unwrap();
+        assert_eq!((last.id, last.to_id.as_str()), (id, "m"));
+
+        let (id, delivered) =
+            auto_status(&app, &mw, StatusEvent::Waiting, "waiting on a prompt", 1, 0)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
+        let last = app.db.last_status_report("mw").unwrap().unwrap();
+        assert_eq!((last.id, last.to_id.as_str()), (id, "m"));
+
+        let held = messages::Inbox::lock(&tasks::task_dir(&app, &m))
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(held.len(), 2);
+        for (queued, kind) in held.iter().zip(["done", "status"]) {
+            assert!(
+                queued.message.starts_with(&format!(
+                    "<jeet-report id=\"{}\" from=\"task mw\" path=\"assistant/m/mw\" \
+                     kind=\"{kind}\" untrusted=\"true\">\n",
+                    if kind == "done" { 1 } else { 2 }
+                )),
+                "{}",
+                queued.message
+            );
+        }
+    }
+
     #[test]
     fn status_reports_come_once_per_event_and_not_after_done() {
         let (_dir, app, w) = lab();

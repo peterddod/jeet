@@ -1161,7 +1161,8 @@ refused, whatever the assistant holds, `project.read` (`jeet projects ls`)
 included, as are `jeet notify`, `jeet todo` and review jobs; the refusal
 tells it to ask with `jeet report`. When the assistant reads what a task
 said with `jeet task last`, it gets it fenced as untrusted, as it gets
-reports. The assistant's own
+reports, and the status beside it (which the task's agent can write) unable
+to close or open a fence. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
 `jeet review` report to it too: their `[review] command` runs as the review
 task, gated like any task under it, and jeet tells the assistant when it
