@@ -4,6 +4,7 @@
 //! its todo and its inbox. The assistant is the root node; [`crate::assistant`] keeps its
 //! sessions and windows.
 
+pub mod budget;
 pub mod context;
 pub mod fence;
 

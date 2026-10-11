@@ -1597,8 +1597,9 @@ pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
-/// How many active tasks `task`'s parent may hold: its own `max_children`.
-/// The assistant has no limit, nor does a task with no parent.
+/// How many active tasks `task`'s parent may hold: its own `max_children`,
+/// else, for a manager, `[managers] max_children`. The assistant has no
+/// limit, nor does a task with no parent.
 fn fan_out_of_parent(app: &App, task: &TaskRecord) -> Result<Option<u32>> {
     let Some(parent_id) = &task.parent_id else {
         return Ok(None);
@@ -1609,7 +1610,11 @@ fn fan_out_of_parent(app: &App, task: &TaskRecord) -> Result<Option<u32>> {
     };
     match parent.kind {
         TaskKind::Assistant => Ok(None),
-        TaskKind::Work | TaskKind::Review | TaskKind::Manager => Ok(parent.max_children),
+        TaskKind::Manager => match parent.max_children {
+            Some(n) => Ok(Some(n)),
+            None => Ok(Some(app.config.manager_policy()?.max_children)),
+        },
+        TaskKind::Work | TaskKind::Review => Ok(parent.max_children),
     }
 }
 
@@ -2287,6 +2292,35 @@ mod tests {
         let refused = delete(&app, &lead).unwrap_err().to_string();
         assert!(refused.contains("archived ones included"), "{refused}");
         untouched("delete with the child archived");
+    }
+
+    /// A manager's own limit, else `[managers] max_children`; the assistant
+    /// and a worker parent as before.
+    #[test]
+    fn unarchive_takes_a_managers_fan_out_from_config_unless_it_has_its_own() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        let mut kid = app.db.get_task("w-id").unwrap().unwrap();
+        assert_eq!(fan_out_of_parent(&app, &kid).unwrap(), None);
+        kid.parent_id = Some("m-id".into());
+        assert_eq!(
+            fan_out_of_parent(&app, &kid).unwrap(),
+            Some(crate::config::DEFAULT_MAX_CHILDREN)
+        );
+        app.config.managers = Some(crate::config::ManagersConfig {
+            max_children: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(fan_out_of_parent(&app, &kid).unwrap(), Some(2));
+        app.config.managers.as_mut().unwrap().max_children = Some(0);
+        let err = fan_out_of_parent(&app, &kid).unwrap_err().to_string();
+        assert!(err.contains("max_children"), "{err}");
+        let mut own = app.db.get_task("m-id").unwrap().unwrap();
+        own.id = "own-id".into();
+        own.slug = "own".into();
+        own.max_children = Some(1);
+        app.db.insert_task(&own).unwrap();
+        kid.parent_id = Some("own-id".into());
+        assert_eq!(fan_out_of_parent(&app, &kid).unwrap(), Some(1));
     }
 
     #[test]

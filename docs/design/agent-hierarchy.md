@@ -1187,6 +1187,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
 - **P5** A manager follows `[harness] auto_trust` as a worker does (5.7):
   it is started by its parent with nobody at its pane. The assistant
   stays excluded.
+- **P6** `[managers]` (5.2) is checked where it is used, not when
+  config.toml is read, so a mistake there breaks only the tree. `held`
+  adds to a floor of `pr.merge`, `pr.comment`, `pr.review` and
+  `task.delete` rather than replacing it. An unknown capability, a held one
+  in a default, a limit of 0, and a budget that does not parse or names `$`
+  are errors. `default_budget` takes the parts `--budget` does
+  (`"2h,40turns"`). A manager without its own
+  `max_children` is held to `[managers] max_children` on unarchive too.
 
 ## 11. Placement
 
