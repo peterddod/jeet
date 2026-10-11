@@ -14,11 +14,12 @@ use crate::cli::Delegation;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
-use crate::messages::{self, Delivered};
+use crate::manager::run;
+use crate::messages::{self, Delivered, Inbox};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
 use crate::projects;
-use crate::runtime::{self, Interrupted};
+use crate::runtime::{self, Admission, Interrupted, Started};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -96,19 +97,33 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let Some(prompt) = prompt else {
         return Ok(());
     };
-    match runtime::ensure_running(app, &created.task, None, Some(&prompt)) {
+    // Its inbox, then the start lock (M22): a brief queued on `max_live` is
+    // in the inbox before a drain can start the agent with it.
+    let inbox = Inbox::lock(&dir)?;
+    match runtime::ensure_running(app, &created.task, None, Some(&prompt), Admission::Gate) {
         Ok(running) => {
             warn_all(&running.warnings);
             match running.started {
-                true => eprintln!(
+                Started::Now => eprintln!(
                     "jeet: started the agent with its brief in tmux session {}",
                     running.tmux_session
                 ),
-                false => eprintln!(
+                Started::AlreadyRunning => eprintln!(
                     "jeet: an agent was already running in tmux session {}, so it was not \
                      given the brief; `jeet task send {}` sends it",
                     running.tmux_session, created.task.slug
                 ),
+                Started::Queued { live, max, prompt } => {
+                    if let Some(prompt) = prompt {
+                        inbox.push_to(&prompt, None)?;
+                    }
+                    drop(inbox);
+                    run::report_queued(app, &created.task, live, max);
+                    eprintln!(
+                        "jeet: queued (tasks in the tree running: {live}/{max}, [managers] \
+                         max_live); the agent starts with its brief when one ends"
+                    );
+                }
             }
             Ok(())
         }
@@ -344,14 +359,28 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         );
     }
     let dir = tasks::task_dir(app, &task);
-    let running = runtime::ensure_running(app, &task, session, None)?;
+    // The user at a terminal asked for it: over `max_live` it starts anyway
+    // (M22). Anyone else waits for a slot like any start.
+    let admission = match permissions::caller(app)? {
+        Caller::User => Admission::Bypass,
+        Caller::Root | Caller::Node(_) => Admission::Gate,
+    };
+    let running = runtime::ensure_running(app, &task, session, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
-    if running.started {
-        eprintln!(
+    match running.started {
+        Started::Now => eprintln!(
             "jeet: started {} in tmux session {tmux_session}",
             AgentSpec::from_config(&app.config)?.display()
-        );
+        ),
+        Started::AlreadyRunning => {}
+        Started::Queued { live, max, .. } => {
+            eprintln!(
+                "jeet: queued (tasks in the tree running: {live}/{max}, [managers] max_live); \
+                 its agent starts when one ends"
+            );
+            return Ok(());
+        }
     }
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         eprintln!("jeet: `tmux attach -t {tmux_session}` to talk to the agent");

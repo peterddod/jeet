@@ -42,8 +42,9 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentSpec;
 use crate::context::App;
 use crate::db::tasks::TaskRecord;
+use crate::manager::run::StartGuard;
 use crate::placement;
-use crate::runtime;
+use crate::runtime::{self, Admission, Started};
 use crate::status::{self, Activity};
 use crate::tasks;
 use crate::tmux;
@@ -287,9 +288,11 @@ pub trait Agent {
     fn has_draft(&self) -> bool {
         false
     }
-    /// Start it with `prompt` as its first; false when it turned out to be
-    /// running already, and nothing was started.
-    fn start(&self, prompt: &str) -> Result<bool>;
+    /// Start it with `prompt` as its first: `AlreadyRunning` when it turned
+    /// out to be running already, and nothing was started, `Queued` when
+    /// `[managers] max_live` keeps it from starting yet. `guard` is the start
+    /// lock, when the caller admitted the start already.
+    fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started>;
     /// Whether it may be started here; when not, a message for it while it
     /// is not running waits in its inbox.
     fn can_start(&self) -> bool {
@@ -370,7 +373,7 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
         message,
         to: None,
     });
-    let sent = hand_over(&inbox, agent, &queue, route);
+    let sent = hand_over(&inbox, agent, &queue, route, None);
     if sent.is_err() {
         // Not delivered, so not taken either.
         if let Err(e) = inbox.replace_for(me, &earlier) {
@@ -389,7 +392,7 @@ pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
     if queue.is_empty() || agent.has_draft() {
         return Ok(false);
     }
-    if let Err(e) = hand_over(inbox, agent, &queue, Route::Type) {
+    if let Err(e) = hand_over(inbox, agent, &queue, Route::Type, None) {
         if let Err(e) = inbox.replace_for(agent.session(), &queue) {
             eprintln!("jeet: warning: could not put queued messages back: {e:#}");
         }
@@ -400,13 +403,18 @@ pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
 
 /// Start the agent with its queue as its first prompt, as much of it as
 /// fits; the rest waits for the Stop hook of the turn that starts. For a
-/// start that waited, the messages for it queued meanwhile.
-pub fn start_with_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<Delivered> {
+/// start that waited, the messages for it queued meanwhile; `guard` is the
+/// start lock it was admitted under.
+pub fn start_with_queue(
+    inbox: &Inbox,
+    agent: &dyn Agent,
+    guard: Option<&StartGuard>,
+) -> Result<Delivered> {
     let queue = inbox.read_for(agent.session())?;
     if queue.is_empty() {
         bail!("nothing is queued to start it with");
     }
-    let sent = hand_over(inbox, agent, &queue, Route::Start);
+    let sent = hand_over(inbox, agent, &queue, Route::Start, guard);
     if sent.is_err() {
         if let Err(e) = inbox.replace_for(agent.session(), &queue) {
             eprintln!("jeet: warning: could not put queued messages back: {e:#}");
@@ -423,6 +431,7 @@ fn hand_over(
     agent: &dyn Agent,
     queue: &[Queued],
     route: Route,
+    guard: Option<&StartGuard>,
 ) -> Result<Delivered> {
     let n = fitting(queue);
     // What does not fit waits for this agent's next turn, not another's.
@@ -437,12 +446,17 @@ fn hand_over(
     inbox.replace_for(me, &rest)?;
     let text = joined(&queue[..n]);
     let sent = match route {
-        Route::Start => match agent.start(&marked(&text))? {
-            true => Delivered::Started,
+        Route::Start => match agent.start(&marked(&text), guard)? {
+            Started::Now => Delivered::Started,
             // Came up between looking and starting: it can take it typed.
-            false => {
+            Started::AlreadyRunning => {
                 agent.type_in(&marked(&typed(&text)))?;
                 Delivered::Typed
+            }
+            // Waits on `max_live`: all of it stays queued for its start.
+            Started::Queued { .. } => {
+                inbox.replace_for(me, queue)?;
+                return Ok(Delivered::Queued);
             }
         },
         _ => {
@@ -563,8 +577,15 @@ impl Agent for TmuxAgent<'_> {
         self.may_start && tmux::may_start_session()
     }
 
-    fn start(&self, prompt: &str) -> Result<bool> {
-        let running = runtime::ensure_running(self.app, self.task, None, Some(prompt))?;
+    fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
+        let running = match guard {
+            Some(guard) => {
+                runtime::ensure_running_admitted(self.app, self.task, None, Some(prompt), guard)?
+            }
+            None => {
+                runtime::ensure_running(self.app, self.task, None, Some(prompt), Admission::Gate)?
+            }
+        };
         for warning in &running.warnings {
             eprintln!("jeet: {warning}");
         }
@@ -593,6 +614,8 @@ mod tests {
         alive: bool,
         hooks: bool,
         running_already: bool,
+        /// Its start waits on `max_live`.
+        queued: bool,
         fail: bool,
         /// May not be started here.
         held: bool,
@@ -622,12 +645,20 @@ mod tests {
         fn can_start(&self) -> bool {
             !self.held
         }
-        fn start(&self, prompt: &str) -> Result<bool> {
+        fn start(&self, prompt: &str, _: Option<&StartGuard>) -> Result<Started> {
             if self.fail {
                 bail!("tmux went away");
             }
             self.started.borrow_mut().push(prompt.to_string());
-            Ok(!self.running_already)
+            Ok(match (self.queued, self.running_already) {
+                (true, _) => Started::Queued {
+                    live: 1,
+                    max: 1,
+                    prompt: Some(prompt.to_string()),
+                },
+                (false, true) => Started::AlreadyRunning,
+                (false, false) => Started::Now,
+            })
         }
     }
 
@@ -757,6 +788,23 @@ mod tests {
     }
 
     #[test]
+    fn a_start_that_waits_on_max_live_leaves_it_all_queued() {
+        let task = task_in(None);
+        enqueue(task.path(), "earlier").unwrap();
+        let agent = Fake {
+            queued: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "now").unwrap(),
+            Delivered::Queued
+        );
+        assert!(agent.typed.borrow().is_empty());
+        // In order, for the start a drain makes.
+        assert_eq!(left(task.path()), ["earlier", "now"]);
+    }
+
+    #[test]
     fn an_agent_that_may_not_be_started_has_it_held() {
         let task = task_in(None);
         enqueue(task.path(), "earlier").unwrap();
@@ -849,8 +897,8 @@ mod tests {
         fn type_in(&self, text: &str) -> Result<()> {
             self.1.type_in(text)
         }
-        fn start(&self, prompt: &str) -> Result<bool> {
-            self.1.start(prompt)
+        fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
+            self.1.start(prompt, guard)
         }
         fn session(&self) -> Option<&str> {
             Some(self.0)

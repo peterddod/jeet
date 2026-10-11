@@ -666,6 +666,10 @@ worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). For now a budget is recorded, and checked against what is left above
 when a task is made, but not yet charged or enforced: a task runs past it.
+At most `[managers] max_live` tasks under the assistant run at once: a
+start past it is queued and the task's parent told, and it starts when a
+running one ends. `jeet task open` from your terminal starts it anyway,
+with a warning.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
@@ -1244,6 +1248,7 @@ idle_report_mins = 10   # tell the assistant when a task of its sits idle this l
 max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
+max_live = 8            # tasks under the assistant running at once; a start past it waits
 worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
 manager_default = []    # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete

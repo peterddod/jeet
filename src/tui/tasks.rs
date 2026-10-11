@@ -54,7 +54,7 @@ use crate::git;
 use crate::github;
 use crate::pr_history;
 use crate::projects;
-use crate::runtime;
+use crate::runtime::{self, Admission};
 use crate::status::{self, Activity};
 use crate::tasks::{self, NewTask};
 use crate::tmux;
@@ -2836,9 +2836,10 @@ impl Screen<'_> {
                 }
             }
         }
+        // The user at the terminal asked for it: past `max_live` too (M22).
         let running = self
             .progress(&format!("starting {}'s agent", task.name), || {
-                runtime::ensure_running(app, &task, session.as_deref(), None)
+                runtime::ensure_running(app, &task, session.as_deref(), None, Admission::Bypass)
             })
             .and_then(|inner| inner)?;
         let attached = term::suspended(self.terminal, || tmux::attach(&running.tmux_session))?;

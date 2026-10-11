@@ -6,8 +6,7 @@
 //! holds it is the most severe state over it and its ancestors
 //! ([`hold`]). A held node starts nothing and is handed nothing.
 
-// `jeet manager pause|resume|stop|drain` and the start paths are the
-// callers still to come.
+// `jeet manager pause|resume|stop|drain` are the callers still to come.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -21,6 +20,7 @@ use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskState};
 use crate::messages::{self, Inbox, TmuxAgent};
 use crate::permissions::Caller;
 use crate::placement::{self, NodeRuntime};
+use crate::reports::{self, StatusEvent};
 use crate::runtime::{self, Interrupted};
 use crate::status::{self, Activity};
 use crate::tasks;
@@ -384,20 +384,67 @@ pub fn admit_start(app: &App, task: &TaskRecord) -> Result<StartGate> {
     if let Some((holder, _)) = hold(app, task)? {
         return Ok(StartGate::Held(holder));
     }
+    match full(app, task)? {
+        Some((live, max)) => {
+            app.db.queue_start(&task.id, now_secs())?;
+            Ok(StartGate::Queue { live, max })
+        }
+        None => Ok(StartGate::Go(guard)),
+    }
+}
+
+/// [`admit_start`] for the user opening `task` at a terminal, who asked
+/// for it (M22): a held task is refused still, but one over `max_live`
+/// goes, with how many run and the limit.
+pub fn admit_over(app: &App, task: &TaskRecord) -> Result<(StartGuard, Option<(u32, u32)>)> {
+    let guard = start_lock(app)?;
+    if let Some((holder, _)) = hold(app, task)? {
+        bail!(held_refusal(task, &holder));
+    }
+    Ok((guard, full(app, task)?))
+}
+
+/// Why `task`, held by `holder` (itself or above it), does not start.
+pub fn held_refusal(task: &TaskRecord, holder: &TaskRecord) -> String {
+    let under = match holder.id == task.id {
+        true => String::new(),
+        false => format!(" under {}", label(holder)),
+    };
+    format!(
+        "{} is {}{under}; `jeet manager resume {}` first",
+        label(task),
+        holder.run_state.as_str(),
+        holder.slug
+    )
+}
+
+/// How many tasks in the tree run, and `max_live`, when starting `task`
+/// would take one more than that: never for a task running already, a
+/// top-level task or the assistant.
+fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
     if task.parent_id.is_none() || task.kind == TaskKind::Assistant {
-        return Ok(StartGate::Go(guard));
+        return Ok(None);
     }
     let live = live_set(app)?;
     if live.contains(&task.id) {
-        return Ok(StartGate::Go(guard));
+        return Ok(None);
     }
     let max = app.config.manager_policy()?.max_live;
     let n = live.len() as u32;
-    if n >= max {
-        app.db.queue_start(&task.id, now_secs())?;
-        return Ok(StartGate::Queue { live: n, max });
+    Ok((n >= max).then_some((n, max)))
+}
+
+/// Tell `task`'s parent that its start waits on `max_live`, with `live` of
+/// `max` running: what goes wrong is warned of, not failed on. Each queued
+/// start is told, so no earlier report holds this one back.
+pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32) {
+    let body = format!("queued, {live}/{max} live: it starts when a task in the tree ends");
+    if let Err(e) = reports::auto_status(app, task, StatusEvent::Queued, &body, i64::MAX, 0) {
+        eprintln!(
+            "jeet: could not report task {}'s queued start: {e:#}",
+            task.slug
+        );
     }
-    Ok(StartGate::Go(guard))
 }
 
 /// Start what waits on `max_live`, oldest first, while slots are free:
@@ -433,17 +480,17 @@ pub fn drain(app: &App) -> Result<()> {
     Ok(())
 }
 
-/// Start `task`, admitted under `_guard`, with what queued in its inbox as
+/// Start `task`, admitted under `guard`, with what queued in its inbox as
 /// its first prompt.
-fn start_queued(app: &App, task: &TaskRecord, inbox: &Inbox, _guard: &StartGuard) -> Result<()> {
+fn start_queued(app: &App, task: &TaskRecord, inbox: &Inbox, guard: &StartGuard) -> Result<()> {
     if inbox.read_for(None)?.is_empty() {
-        let running = runtime::ensure_running(app, task, None, None)?;
+        let running = runtime::ensure_running_admitted(app, task, None, None, guard)?;
         for warning in &running.warnings {
             eprintln!("jeet: {warning}");
         }
         return Ok(());
     }
-    messages::start_with_queue(inbox, &TmuxAgent::new(app, task))?;
+    messages::start_with_queue(inbox, &TmuxAgent::new(app, task), Some(guard))?;
     Ok(())
 }
 
@@ -748,5 +795,85 @@ mod tests {
             assert!(err.to_string().contains("only the user"), "{err}");
         }
         assert_eq!(get(&app, "m").run_state, RunState::Run);
+    }
+
+    /// Run `f` on the index at `home` in a thread of its own, failing
+    /// rather than hanging when it does not finish: a lock taken twice in
+    /// one process waits for good.
+    fn finishes(home: &std::path::Path, f: fn(&App)) {
+        let home = home.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let app = App {
+                config: config::load_or_create(&home).unwrap(),
+                db: Database::open(&config::index_path(&home)).unwrap(),
+                home,
+            };
+            f(&app);
+            tx.send(()).unwrap();
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(20));
+        assert!(done.is_ok(), "did not finish: a lock was taken twice");
+    }
+
+    #[test]
+    fn a_delivery_that_starts_an_agent_takes_the_start_lock_once() {
+        let (dir, _app) = lab();
+        finishes(dir.path(), |app| {
+            let w1 = get(app, "w1");
+            let task_dir = tasks::task_dir(app, &w1);
+            // Under its inbox lock, through `TmuxAgent::start`, the start
+            // admits it and starts it holding the start lock: so far as
+            // tmux, which unit tests never reach.
+            let err = messages::deliver(&task_dir, &TmuxAgent::new(app, &w1), "hi").unwrap_err();
+            assert!(err.to_string().contains(tmux::INSTALL_HINT), "{err:#}");
+            // Neither lock is left held.
+            assert!(matches!(admit_start(app, &w1).unwrap(), StartGate::Go(_)));
+            Inbox::lock(&task_dir).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_drain_starts_queued_tasks_under_locks_it_takes_once() {
+        let (dir, app) = lab();
+        app.db.queue_start("w1", 1).unwrap();
+        app.db.queue_start("w2", 2).unwrap();
+        let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
+        Inbox::lock(&w1_dir)
+            .unwrap()
+            .push_to("from m", None)
+            .unwrap();
+        // One with messages to start with, one without; neither starts with
+        // no tmux, so both stay queued, and w1's message waits still.
+        finishes(dir.path(), |app| drain(app).unwrap());
+        let queued: Vec<String> = app
+            .db
+            .queued_starts()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(queued, ["w1", "w2"]);
+        let left = Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].message, "from m");
+    }
+
+    #[test]
+    fn a_held_task_does_not_start_even_for_the_user() {
+        let (_dir, app) = lab();
+        app.db
+            .set_run_state("m", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        let w2 = get(&app, "w2");
+        for admission in [runtime::Admission::Gate, runtime::Admission::Bypass] {
+            let started = runtime::ensure_running(&app, &w2, None, Some("go"), admission);
+            assert_eq!(
+                started.err().unwrap().to_string(),
+                "task w2 is paused under manager m; `jeet manager resume m` first"
+            );
+        }
+        // Held is not queued.
+        assert!(app.db.queued_starts().unwrap().is_empty());
     }
 }

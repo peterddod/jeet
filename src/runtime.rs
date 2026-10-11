@@ -22,6 +22,7 @@ use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
 use crate::identity;
+use crate::manager::run::{self, StartGate, StartGuard};
 use crate::permissions;
 use crate::placement::{self, NodeRuntime};
 use crate::projects;
@@ -43,20 +44,94 @@ pub fn session_name(task: &TaskRecord) -> String {
 /// The outcome of [`ensure_running`].
 pub struct Running {
     pub tmux_session: String,
-    /// False when the agent was already running.
-    pub started: bool,
+    pub started: Started,
     pub warnings: Vec<String>,
+}
+
+/// Whether [`ensure_running`] started the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Started {
+    /// It was not running, and was started now.
+    Now,
+    /// It was running already, and was given no prompt.
+    AlreadyRunning,
+    /// `live` of `max` tasks in the tree run already (`[managers]
+    /// max_live`): it is queued to start when one ends, and `prompt` is
+    /// handed back for its inbox.
+    Queued {
+        live: u32,
+        max: u32,
+        prompt: Option<String>,
+    },
+}
+
+/// How a start gets past `[managers] max_live` (M22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Queued while it is full.
+    Gate,
+    /// Started anyway, with a warning: the user opening it at a terminal
+    /// asked for it. A held task is refused either way.
+    Bypass,
 }
 
 /// Make sure the task's agent is running where its placement says, starting
 /// it if not: resuming `session` when given, else the task's latest
 /// session, else a new one. An agent this starts gets `prompt` as its first
-/// prompt; one already running does not.
+/// prompt; one already running does not. A start is admitted first
+/// ([`run::admit_start`]): refused while the task is held, and by
+/// `admission` while `max_live` tasks run.
 pub fn ensure_running(
     app: &App,
     task: &TaskRecord,
     session: Option<&str>,
     prompt: Option<&str>,
+    admission: Admission,
+) -> Result<Running> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant's sessions are opened with `jeet chat`");
+    }
+    // Running already: nothing starts, so there is nothing to admit, and a
+    // held task's live pane is still there to attach to (M16).
+    let name = session_name(task);
+    if tmux::has_session(&name) && tmux::pane_alive(&name) {
+        return placement::runtime_for(task)?.start(app, task, session, prompt);
+    }
+    let (guard, over) = match admission {
+        Admission::Gate => match run::admit_start(app, task)? {
+            StartGate::Go(guard) => (guard, None),
+            StartGate::Queue { live, max } => {
+                return Ok(Running {
+                    tmux_session: name,
+                    started: Started::Queued {
+                        live,
+                        max,
+                        prompt: prompt.map(str::to_string),
+                    },
+                    warnings: Vec::new(),
+                })
+            }
+            StartGate::Held(holder) => bail!(run::held_refusal(task, &holder)),
+        },
+        Admission::Bypass => run::admit_over(app, task)?,
+    };
+    let mut running = ensure_running_admitted(app, task, session, prompt, &guard)?;
+    if let Some((live, max)) = over {
+        running.warnings.push(format!(
+            "over max_live ({live}/{max} tasks in the tree run already)"
+        ));
+    }
+    Ok(running)
+}
+
+/// [`ensure_running`] for a start admitted already, under `_guard`: what
+/// holds it passes it down, as the start lock is not taken twice.
+pub fn ensure_running_admitted(
+    app: &App,
+    task: &TaskRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+    _guard: &StartGuard,
 ) -> Result<Running> {
     if task.kind == TaskKind::Assistant {
         bail!("the assistant's sessions are opened with `jeet chat`");
@@ -118,7 +193,7 @@ fn start_tmux(
         }
         return Ok(Running {
             tmux_session: name,
-            started: false,
+            started: Started::AlreadyRunning,
             warnings,
         });
     }
@@ -177,7 +252,7 @@ fn start_tmux(
     let _ = app.db.touch_task(&task.id, now_secs());
     Ok(Running {
         tmux_session: name,
-        started: true,
+        started: Started::Now,
         warnings,
     })
 }

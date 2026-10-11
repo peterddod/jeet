@@ -1271,7 +1271,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   message does: typed in when it sits idle, queued while it is busy, and,
   when it is not running, started only by a `done`, `blocked` or
   `question` from a caller that may start it; anything else is held in its
-  inbox. Pause and `max_live` gate it once they land. `<jeet-report>` names the sender as `task <slug>`
+  inbox. A start it makes passes the start gate (P17): refused while the
+  parent is held, queued, with the report in its inbox, over `max_live`.
+  `<jeet-report>` names the sender as `task <slug>`
   or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
   last line says whom to report to. A broken chain that hides what a task
@@ -1282,7 +1284,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   "reports to" line, in a report's sender and `jeet report`'s output, and
   (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
   manager `(manager)` after its name (M29); `jeet manager ls` has a kind
-  column. `max_live` is read once it gates starts.
+  column.
 - **P16** Run state (5.4) is changed by `manager/run.rs`. A pause writes
   the target's row, then interrupts its subtree leaves first, through a
   runtime lookup and an own-session check passed in (production:
@@ -1310,6 +1312,22 @@ Managers run locally in tmux, as the user, like any other task (I22).
   is reported to the parent for a task above the one charged (the charged
   node's own Stop hook reports it). A budget change that does not fit what
   is left above is refused, not cut.
+- **P17** Every start of a task's agent but the assistant's is admitted by
+  `runtime::ensure_running` before `runtime_for` (M22), unless the agent
+  is running already: a live pane is attached to, held or not. A held
+  task is refused ("`jeet manager resume <holder>` first") for every
+  caller. Over `max_live` a start is queued (`Started::Queued`, the
+  prompt handed back) for whoever asked, except the user's `jeet task
+  open` and the TUI's open, which start it anyway and warn "over
+  max_live". A start made holding the start lock (a drain, or a delivery
+  admitted already) goes through `ensure_running_admitted` with the
+  guard, as the lock is not re-entrant. `Agent::start` takes that guard
+  and says how the start went (`Started`); a delivery whose start is
+  queued keeps the whole message queue in the inbox, in order. `task new`
+  takes its inbox lock before the start lock, puts a queued brief in the
+  inbox and reports `queued, n/max live` to the parent (`StatusEvent::
+  Queued`). Unit tests never run tmux: under `cfg(test)`, `tmux::binary`
+  names one that does not exist, whatever `$JEET_TMUX` says.
 
 ## 11. Placement
 

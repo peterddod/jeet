@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
+#[cfg_attr(test, allow(dead_code))]
 pub const BINARY_ENV: &str = "JEET_TMUX";
 
 /// Every tmux session jeet makes is named with this in front.
@@ -31,11 +32,21 @@ pub const BACKGROUND_ENV: &str = "JEET_BACKGROUND";
 pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not found; install it \
      (`brew install tmux` on macOS, `sudo apt install tmux` on Debian and Ubuntu)";
 
+#[cfg(not(test))]
 fn binary() -> String {
     std::env::var(BINARY_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "tmux".to_string())
+}
+
+/// Unit tests run in this process, where an environment variable set for
+/// one would reach every test at once: they never reach a tmux server, the
+/// user's or any other, whatever `$JEET_TMUX` says. To them tmux is not
+/// installed.
+#[cfg(test)]
+fn binary() -> String {
+    "/nonexistent/jeet-unit-test-tmux".to_string()
 }
 
 /// A tmux command that cannot read the terminal and says nothing on it.

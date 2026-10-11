@@ -387,7 +387,7 @@ fn report_step(
     };
     let since = match event {
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
-        StatusEvent::Waiting | StatusEvent::Idle | StatusEvent::Budget => now,
+        StatusEvent::Waiting | StatusEvent::Idle | StatusEvent::Budget | StatusEvent::Queued => now,
     };
     reports::auto_status(&app, &task, event, body, since, 0)?;
     Ok(())

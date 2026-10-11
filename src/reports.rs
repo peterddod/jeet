@@ -33,6 +33,8 @@ pub enum StatusEvent {
     Ended,
     /// Its subtree crossed a share of its budget.
     Budget,
+    /// Its start waits on `[managers] max_live`.
+    Queued,
 }
 
 impl StatusEvent {
@@ -43,6 +45,7 @@ impl StatusEvent {
             StatusEvent::Idle => "idle",
             StatusEvent::Ended => "ended",
             StatusEvent::Budget => "budget",
+            StatusEvent::Queued => "queued",
         }
     }
 }
@@ -378,9 +381,13 @@ mod tests {
         fn can_start(&self) -> bool {
             self.may_start
         }
-        fn start(&self, prompt: &str) -> Result<bool> {
+        fn start(
+            &self,
+            prompt: &str,
+            _: Option<&crate::manager::run::StartGuard>,
+        ) -> Result<crate::runtime::Started> {
             self.started.borrow_mut().push(prompt.to_string());
-            Ok(true)
+            Ok(crate::runtime::Started::Now)
         }
     }
 
