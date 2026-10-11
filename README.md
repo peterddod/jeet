@@ -668,14 +668,16 @@ worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its pane is alive) and a turn for each turn it ends, and counts toward
-every budget above it too. At 80% the parent is told and the task gets a
+every budget above it too, even once the task is deleted. At 80% the parent is told and the task gets a
 note; at 100% the task is paused and its parent told `blocked: budget`: its
 turn ends with nothing more handed to it, and messages for it wait in its
 inbox until the budget is raised and it is resumed.
 At most `[managers] max_live` tasks under the assistant run at once: a
 start past it is queued and the task's parent told, and it starts when a
-running one ends. `jeet task open` from your terminal starts it anyway,
-with a warning.
+running one ends (its session's end hook starts it; on a harness without
+that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
+from your terminal starts it anyway, with a warning, and with its brief and
+whatever waited for it.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
@@ -701,9 +703,11 @@ tmux sessions, and their ending is not reported. Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once
-resumed, a task whose agent is not running, or ended while held, starts
-with what waited for it, and one still running is handed it; `task new --prompt` under a paused
-manager makes the task and keeps its brief for then.
+resumed, a task a message was held for starts with what waited for it if
+its agent is not running, and one still running is handed it; reports
+(progress, idle and the like) never start it, and wait for its next start.
+`task new --prompt` under a paused manager makes the task and keeps its
+brief for then.
 
 ### Archiving and deleting
 

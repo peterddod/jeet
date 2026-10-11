@@ -23,6 +23,7 @@ use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
 use crate::identity;
 use crate::manager::run::{self, StartGate, StartGuard};
+use crate::messages::{self, Delivered, Inbox, TmuxAgent};
 use crate::permissions;
 use crate::placement::{self, NodeRuntime};
 use crate::projects;
@@ -78,7 +79,9 @@ pub enum Admission {
 /// Make sure the task's agent is running where its placement says, starting
 /// it if not: resuming `session` when given, else the task's latest
 /// session, else a new one. An agent this starts gets `prompt` as its first
-/// prompt; one already running does not. A start is admitted first
+/// prompt; one already running does not. Given neither, it starts with what
+/// waits in its inbox, as a drain would (a brief queued on `max_live`, a
+/// message held while it could not start). A start is admitted first
 /// ([`run::admit_start`]): refused while the task is held, and by
 /// `admission` while `max_live` tasks run.
 pub fn ensure_running(
@@ -99,6 +102,13 @@ pub fn ensure_running(
         placement::runtime_for(task)?;
         return already_running(app, task, &name, session);
     }
+    // Its inbox, then the start lock (M22), as a drain takes them. Only for
+    // a task directory that is there: a missing one is the start's to refuse.
+    let dir = tasks::task_dir(app, task);
+    let inbox = match (prompt, session) {
+        (None, None) if dir.is_dir() => Some(Inbox::lock(&dir)?),
+        _ => None,
+    };
     let (guard, over) = match admission {
         Admission::Gate => match run::admit_start(app, task)? {
             StartGate::Go(guard) => (guard, None),
@@ -117,7 +127,10 @@ pub fn ensure_running(
         },
         Admission::Bypass => run::admit_over(app, task)?,
     };
-    let mut running = ensure_running_admitted(app, task, session, prompt, &guard)?;
+    let mut running = match &inbox {
+        Some(inbox) => start_with_inbox(app, task, inbox, &guard)?,
+        None => ensure_running_admitted(app, task, session, prompt, &guard)?,
+    };
     if let Some((live, max)) = over {
         running.warnings.push(format!(
             "over max_live ({live}/{max} tasks in the tree run already)"
@@ -145,6 +158,31 @@ pub fn ensure_running_admitted(
         app.db.unqueue(&task.id)?;
     }
     Ok(running)
+}
+
+/// Start `task`, admitted under `guard`, with what waits for it in its
+/// locked `inbox` as its first prompt, as much of it as fits, or with none
+/// when nothing does.
+pub fn start_with_inbox(
+    app: &App,
+    task: &TaskRecord,
+    inbox: &Inbox,
+    guard: &StartGuard,
+) -> Result<Running> {
+    if inbox.read_for(None)?.is_empty() {
+        return ensure_running_admitted(app, task, None, None, guard);
+    }
+    let agent = TmuxAgent::new(app, task).keep_warnings();
+    let started = match messages::start_with_queue(inbox, &agent, Some(guard))? {
+        // It came up meanwhile, and was typed the queue.
+        Delivered::Typed => Started::AlreadyRunning,
+        _ => Started::Now,
+    };
+    Ok(Running {
+        tmux_session: session_name(task),
+        started,
+        warnings: agent.warnings(),
+    })
 }
 
 /// A task's agent in a tmux session on this machine: the runtime of

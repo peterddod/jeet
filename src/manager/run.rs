@@ -24,6 +24,7 @@ use crate::tasks;
 use crate::tmux;
 use crate::worktrees::now_secs;
 
+use super::budget::{self, Threshold};
 use super::label;
 
 /// The runtime that interrupts a node: [`placement::runtime_for`], or a
@@ -157,9 +158,12 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     drop(inbox);
     match interrupted {
         Ok(Interrupted::Sent) => {
-            // The turn ends with no Stop hook to charge it.
-            if let Err(e) = status::fold_busy(app, node, true, now_secs()) {
-                eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
+            // The turn ends with no Stop hook to charge it, or to report
+            // a charge that uses its budget up: that is told here.
+            match status::fold_busy(app, node, true, now_secs()) {
+                Ok(Threshold::Hit100) => budget::report_blocked(app, node),
+                Ok(_) => {}
+                Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug),
             }
             match status::mark_paused(&tasks::task_dir(app, node), now_secs()) {
                 Ok(()) => "interrupted".to_string(),
@@ -224,8 +228,9 @@ pub fn check_resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<()> {
 /// Resume `target` for `by`, if [`check_resume`] lets it: set it running,
 /// unless its row changed since it was read; hand each agent below it that
 /// runs again, and would take a message typed in now, what queued for it
-/// while held; queue the start of each that ended while held with messages
-/// waiting; then start what waits on `max_live` or waited on the resume.
+/// while held; then start what waits on `max_live` or waited on the
+/// resume: a node a message held would have started, or might have once
+/// its agent ended.
 pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOutcome>> {
     check_resume(app, by, target)?;
     let mut outcomes = Vec::new();
@@ -252,27 +257,26 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         if hold(app, &node)?.is_some() {
             continue;
         }
-        let agent = TmuxAgent::new(app, &node);
+        // Not running: what was held from starting it had its start queued
+        // ([`messages::Agent::queue_held_start`]), for the drain below; a
+        // report, which never starts it, waits for its next start.
         if !live.contains(&node.id) {
-            // Its agent ended while held: what waits for it starts it, as
-            // its senders were told.
-            match queue_waiting_start(app, &node) {
-                Ok(()) => {}
-                Err(e) => outcomes.push(NodeOutcome::new(
-                    &node,
-                    format!("could not queue its start: {e:#}"),
-                )),
-            }
             continue;
         }
+        let agent = TmuxAgent::new(app, &node);
         // As a delivery would type it in: to an idle agent, or to a running
         // one with no hooks to queue for.
         let activity = runtime::activity(app, &node, true);
         if messages::route(&activity, agent.has_hooks()) != Route::Type {
             continue;
         }
-        let handed = Inbox::lock(&tasks::task_dir(app, &node))
-            .and_then(|inbox| messages::hand_over_queue(&inbox, &agent));
+        // Asked again under its inbox lock: a pause since, whose walk takes
+        // that lock, holds it.
+        let handed =
+            Inbox::lock(&tasks::task_dir(app, &node)).and_then(|inbox| match hold(app, &node)? {
+                Some(_) => Ok(false),
+                None => messages::hand_over_queue(&inbox, &agent),
+            });
         match handed {
             Ok(true) => outcomes.push(NodeOutcome::new(&node, "handed what queued while held")),
             Ok(false) => {}
@@ -290,19 +294,6 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         )),
     }
     Ok(outcomes)
-}
-
-/// Queue the start of `node`, not running, when messages wait in its
-/// inbox: the drain a resume runs starts it with them.
-fn queue_waiting_start(app: &App, node: &TaskRecord) -> Result<()> {
-    let dir = tasks::task_dir(app, node);
-    if !messages::inbox_path(&dir).exists() {
-        return Ok(());
-    }
-    if !Inbox::lock(&dir)?.read()?.is_empty() {
-        app.db.queue_start(&node.id, now_secs())?;
-    }
-    Ok(())
 }
 
 /// Stop `target` for `by`, or with `None` (`--all`, the user's alone) every
@@ -365,7 +356,8 @@ fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
         return "this jeet runs in its session; stop it from outside".to_string();
     }
     // Before its session ends, whether or not its `Ended` hook gets to; a
-    // stale status of an agent already gone is no busy time.
+    // stale status of an agent already gone is no busy time. A charge that
+    // uses its budget up is not reported: a stopped node's end is not.
     if let Err(e) = status::fold_busy(app, node, live, now_secs()) {
         eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
     }
@@ -541,32 +533,15 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        match start_queued(app, &task, &inbox, &guard) {
-            Ok(said) => {
+        match runtime::start_with_inbox(app, &task, &inbox, &guard) {
+            Ok(running) => {
                 app.db.unqueue(&task.id)?;
-                warnings.extend(said);
+                warnings.extend(running.warnings);
             }
             Err(e) => warnings.push(format!("could not start queued task {}: {e:#}", task.slug)),
         }
     }
     Ok(warnings)
-}
-
-/// Start `task`, admitted under `guard`, with what queued in its inbox as
-/// its first prompt; what the start warns of.
-fn start_queued(
-    app: &App,
-    task: &TaskRecord,
-    inbox: &Inbox,
-    guard: &StartGuard,
-) -> Result<Vec<String>> {
-    if inbox.read_for(None)?.is_empty() {
-        let running = runtime::ensure_running_admitted(app, task, None, None, guard)?;
-        return Ok(running.warnings);
-    }
-    let agent = TmuxAgent::new(app, task).keep_warnings();
-    messages::start_with_queue(inbox, &agent, Some(guard))?;
-    Ok(agent.warnings())
 }
 
 #[cfg(test)]
@@ -781,6 +756,32 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_whose_charge_uses_a_budget_up_reports_it_blocked() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("w2", Some(60), None).unwrap();
+        let dir = tasks::task_dir(&app, &get(&app, "w2"));
+        // Mid-turn for two minutes, with a minute's budget.
+        let running = status::SessionStatus {
+            session_id: "s".into(),
+            state: status::State::Running,
+            detail: None,
+            event: "UserPromptSubmit".into(),
+            at: now_secs() - 120,
+            busy_since: Some(now_secs() - 120),
+        };
+        let path = status::status_dir(&dir).join("s.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&running).unwrap()).unwrap();
+        let rt = fake(&app, |_| Ok(Interrupted::Sent));
+        let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+        pause_with(&app, &Caller::Root, &get(&app, "m2"), &lookup, &nobody).unwrap();
+        // No Stop hook follows the interrupt to say so: the pause does.
+        let report = app.db.last_status_report("w2").unwrap().unwrap();
+        assert!(report.body.contains("blocked: budget"), "{}", report.body);
+        assert_eq!(report.to_id, "m2");
+    }
+
+    #[test]
     fn a_child_born_under_a_paused_manager_is_held() {
         let (_dir, app) = lab();
         app.db
@@ -938,12 +939,13 @@ mod tests {
         assert_eq!(left[0].message, "from m");
     }
 
-    #[test]
-    fn a_stop_or_pause_waits_for_a_start_admitted_before_it() {
-        let (dir, app) = lab();
-        // A start of w1 admitted, its session still to be made.
-        let StartGate::Go(guard) = admit_start(&app, &get(&app, "w1")).unwrap() else {
-            panic!("w1 was not admitted");
+    /// Run `walk` on the index at `home` in a thread of its own while a
+    /// start of `w2` admitted before it holds the start lock: it waits for
+    /// that start, its row written already, then goes on once it is done.
+    fn waits_for_a_start_admitted_before(dir: &tempfile::TempDir, app: &App, walk: fn(&App)) {
+        // A start of w2 admitted, its session still to be made.
+        let StartGate::Go(guard) = admit_start(app, &get(app, "w2")).unwrap() else {
+            panic!("w2 was not admitted");
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let home = dir.path().canonicalize().unwrap();
@@ -953,41 +955,65 @@ mod tests {
                 db: Database::open(&config::index_path(&home)).unwrap(),
                 home,
             };
-            stop(&app, &Caller::User, Some(&get(&app, "m"))).unwrap();
-            let rt = fake(&app, |_| Ok(Interrupted::Sent));
-            let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
-            pause_with(&app, &Caller::User, &get(&app, "m2"), &lookup, &nobody).unwrap();
+            walk(&app);
             tx.send(()).unwrap();
         });
         // The row is written first, so a start admitted after it is held.
         let wait = std::time::Duration::from_millis(500);
-        assert!(rx.recv_timeout(wait).is_err(), "the stop did not wait");
-        assert_eq!(get(&app, "m").run_state, RunState::Stopped);
+        assert!(rx.recv_timeout(wait).is_err(), "the walk did not wait");
+        assert_ne!(get(app, "m2").run_state, RunState::Run);
         drop(guard);
         let done = rx.recv_timeout(std::time::Duration::from_secs(20));
-        assert!(done.is_ok(), "the stop never went on");
+        assert!(done.is_ok(), "the walk never went on");
         assert!(matches!(
-            admit_start(&app, &get(&app, "w1")).unwrap(),
+            admit_start(app, &get(app, "w2")).unwrap(),
             StartGate::Held(_)
         ));
     }
 
     #[test]
-    fn a_resume_queues_the_start_of_what_ended_held_with_messages_waiting() {
+    fn a_stop_waits_for_a_start_admitted_before_it() {
+        let (dir, app) = lab();
+        waits_for_a_start_admitted_before(&dir, &app, |app| {
+            stop(app, &Caller::User, Some(&get(app, "m2"))).unwrap();
+        });
+        assert_eq!(get(&app, "m2").run_state, RunState::Stopped);
+    }
+
+    #[test]
+    fn a_pause_waits_for_a_start_admitted_before_it() {
+        let (dir, app) = lab();
+        waits_for_a_start_admitted_before(&dir, &app, |app| {
+            let rt = fake(app, |_| Ok(Interrupted::Sent));
+            let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+            pause_with(app, &Caller::User, &get(app, "m2"), &lookup, &nobody).unwrap();
+        });
+        assert_eq!(get(&app, "m2").run_state, RunState::Paused);
+    }
+
+    #[test]
+    fn a_resume_starts_only_what_a_held_message_queued_the_start_of() {
         let (_dir, app) = lab();
         app.db
             .set_run_state("m", RunState::Paused, Some(&Setter::User))
             .unwrap();
-        // Queued for w1 while it ran, held; its agent has ended since.
+        // Reports for m, not running: they never start it, held or not.
+        let m_dir = tasks::task_dir(&app, &get(&app, "m"));
+        Inbox::lock(&m_dir)
+            .unwrap()
+            .push_to("idle 12m; w1 is waiting", None)
+            .unwrap();
+        // A message held for w1, which queued its start.
         let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
         Inbox::lock(&w1_dir)
             .unwrap()
             .push_to("your report", None)
             .unwrap();
+        app.db.queue_start("w1", 1).unwrap();
         let outcomes = resume(&app, &Caller::User, &get(&app, "m")).unwrap();
         assert_eq!(get(&app, "m").run_state, RunState::Run);
-        // Its start is queued, for the drain; with no tmux here it stays
-        // queued, its message still waiting. Nothing else waited.
+        // The drain tries w1 alone; with no tmux here it stays queued, its
+        // message still waiting.
         let queued: Vec<String> = app
             .db
             .queued_starts()
@@ -1002,8 +1028,18 @@ mod tests {
                 .any(|o| o.line.contains("could not start queued task w1")),
             "{outcomes:?}"
         );
-        let left = Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap();
-        assert_eq!(left.len(), 1);
+        assert!(
+            !outcomes.iter().any(|o| o.line.contains("task m:")),
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            Inbox::lock(&w1_dir).unwrap().read_for(None).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            Inbox::lock(&m_dir).unwrap().read_for(None).unwrap().len(),
+            1
+        );
     }
 
     #[test]

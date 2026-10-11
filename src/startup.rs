@@ -299,6 +299,13 @@ fn wait_for_hook(pane: &dyn Pane, reported: &dyn Fn() -> bool, limits: Limits) -
     }
 }
 
+/// Whether `task`'s trust prompt may be accepted now, `in_scope` of
+/// `auto_trust`: not while it, or a task above it, is paused or stopped,
+/// as accepting would let its brief run. Asked before each key.
+fn may_accept_now(app: &App, task: &TaskRecord, in_scope: bool) -> bool {
+    in_scope && matches!(run::hold(app, task), Ok(None))
+}
+
 /// `jeet task-startup <task>`: watch the start of the task's agent, which
 /// runs session `session` when jeet picked its id.
 pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
@@ -317,8 +324,7 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
     };
     let name = runtime::session_name(&task);
     let in_scope = may_auto_trust(&app.config, &app.home, &task, &dir);
-    // Not while it is paused or stopped: accepting would let its brief run.
-    let auto = || in_scope && matches!(run::hold(app, &task), Ok(None));
+    let auto = || may_accept_now(app, &task, in_scope);
     let outcome = watch(
         spec.harness,
         &TmuxPane(name.clone()),
@@ -600,6 +606,52 @@ mod tests {
         let outcome = watch(&ClaudeCode, &pane, &|| false, &auto, quick(), &|_| {}).unwrap();
         assert_eq!(outcome, Outcome::NeedsUser);
         assert_eq!(*pane.pressed.borrow(), ["Down"]);
+    }
+
+    #[test]
+    fn a_held_task_or_one_under_a_held_one_is_not_accepted_for() {
+        use crate::db::tasks::{Setter, TaskKind, TaskState};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let root = crate::manager::root(&app).unwrap();
+        for (id, kind, parent) in [
+            ("m", TaskKind::Manager, root.id.as_str()),
+            ("w", TaskKind::Work, "m"),
+        ] {
+            app.db
+                .insert_task(&TaskRecord {
+                    id: id.into(),
+                    slug: id.into(),
+                    name: id.into(),
+                    project: None,
+                    kind,
+                    state: TaskState::Active,
+                    created_at: 0,
+                    last_activity: 0,
+                    parent_id: Some(parent.into()),
+                    placement: crate::placement::for_new(),
+                    run_state: RunState::Run,
+                    run_state_by: None,
+                    max_children: None,
+                })
+                .unwrap();
+        }
+        let w = || app.db.get_task("w").unwrap().unwrap();
+        assert!(may_accept_now(&app, &w(), true));
+        assert!(!may_accept_now(&app, &w(), false));
+        for (id, state) in [("m", RunState::Paused), ("w", RunState::Stopped)] {
+            app.db
+                .set_run_state(id, state, Some(&Setter::User))
+                .unwrap();
+            assert!(!may_accept_now(&app, &w(), true), "{id} {state:?}");
+            app.db.set_run_state(id, RunState::Run, None).unwrap();
+        }
+        assert!(may_accept_now(&app, &w(), true));
     }
 
     #[test]

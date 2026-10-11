@@ -9250,6 +9250,7 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     // A worker in its sibling's directory is still itself: its hooks name
     // it with `--task`.
     let other = "22222222-2222-4333-8444-555555555555";
+    backdate();
     hook_ok(&hook(
         "Notification",
         &hook_input("Notification", other, &y_dir),
@@ -9978,7 +9979,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[managers]\nmax_live = 1\n",
+        "scan_roots = []\n[assistant]\nallow = [\"task.open\"]\n[managers]\nmax_live = 1\n",
     )
     .unwrap();
     let scratch = TempDir::new().unwrap();
@@ -10096,6 +10097,18 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     succeeded(&lab.jeet_at(&["task", "send", "c", "more"], &lab.home(), &env));
     assert_eq!(lab.reports_of(&c).len(), 1, "{:?}", lab.reports_of(&c));
 
+    // The assistant opening it waits like any start: nothing to attach to.
+    let mut assistant = lab.assistant_pane();
+    let output = assistant.jeet(&["task", "open", "c"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("queued (tasks in the tree running: 1/1"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!stub.join("alive/jeet-c").exists());
+    assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
+
     let _c_agent = session_pane(&lab, &tmux, "c", &c);
     let output = lab.jeet_at(&["task", "open", "c"], &lab.home(), &env);
     succeeded(&output);
@@ -10105,6 +10118,19 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
         stderr_of(&output)
     );
     assert!(stub.join("alive/jeet-c").exists());
+    // With its brief and what waited with it, as a drain would have.
+    let started = calls_of(&tmux, "new-session");
+    let c_start = started.last().unwrap();
+    assert!(c_start.contains(&"jeet-c".to_string()), "{c_start:?}");
+    assert!(
+        c_start.iter().any(|arg| arg.contains("test it")),
+        "{c_start:?}"
+    );
+    assert!(
+        c_start.iter().any(|arg| arg.contains("more")),
+        "{c_start:?}"
+    );
+    assert!(!lab.home().join("tasks/c/.jeet/inbox.jsonl").exists());
     // Started, it waits no longer: a drain after it ends must not start it
     // again.
     assert_eq!(lab.start_queue(), [d.as_str()]);
@@ -10245,7 +10271,8 @@ fn a_brief_under_a_paused_manager_starts_once_it_is_resumed() {
         "{}",
         stderr_of(&output)
     );
-    assert!(lab.start_queue().is_empty());
+    // Queued to start even while it runs, should it end before the resume.
+    assert_eq!(lab.start_queue(), [kid.as_str()]);
     std::fs::write(stub.join("dead/jeet-kid"), "").unwrap();
     let _kid_again = session_pane(&lab, &tmux, "kid", &kid);
     succeeded(&lab.jeet_at(&["manager", "resume", "m"], &lab.home(), &env));

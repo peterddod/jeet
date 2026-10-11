@@ -107,7 +107,10 @@ at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays
 in its inbox. An `Ended` that is not `cleared` frees a slot under `[managers]
 max_live`: when a start waits on it, the hook leaves a detached `jeet manager
 drain --after <task>` behind, which waits a few seconds for the task's pane
-to go and then starts what waits. The same task's `SessionStarted` prints its brief through
+to go and then starts what waits. On a harness with no hooks, or one that
+maps no `Ended`, nothing drains when its agent exits: a queued start waits
+for the next `jeet watch` poll, TUI refresh, `jeet manager stop` or
+`resume`, or a `jeet manager drain`. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
 Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
 descendant of the process jeet starts in the task's pane: jeet reports and

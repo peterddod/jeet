@@ -633,10 +633,14 @@ impl Database {
     }
 
     /// Remove a task's rows: its worktrees, sessions and PR history go with
-    /// it. The caller deals with what is on disk.
+    /// it, and what it used goes to its parent ([`keep_spend_in`]). The
+    /// caller deals with what is on disk.
     pub fn delete_task(&self, id: &str) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        keep_spend_in(&tx, id)?;
+        tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -900,11 +904,13 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Record a `status` report about `task_id`, unless its last one starts
-    /// with `word` and was sent at or after `since`: the same event told
-    /// already. Checked and written in one write transaction, so two
-    /// processes telling the same event record it once. Returns the new
-    /// report's id, or None when it was told already.
+    /// Record a `status` report about `task_id`, unless its last one that
+    /// starts with `word` was sent at or after `since`: the same event told
+    /// already, whatever other events were told since (a `budget` report
+    /// between two sweeps of one idle spell does not make it news again).
+    /// Checked and written in one write transaction, so two processes
+    /// telling the same event record it once. Returns the new report's id,
+    /// or None when it was told already.
     pub fn insert_status_report_unless_told(
         &self,
         task_id: &str,
@@ -920,13 +926,15 @@ impl Database {
             .query_row(
                 &format!(
                     "SELECT {TASK_REPORT_COLUMNS} FROM task_reports
-                     WHERE task_id = ?1 AND kind = 'status' ORDER BY id DESC LIMIT 1"
+                     WHERE task_id = ?1 AND kind = 'status'
+                       AND substr(body, 1, length(?2)) = ?2
+                     ORDER BY id DESC LIMIT 1"
                 ),
-                params![task_id],
+                params![task_id, word],
                 task_report_from_row,
             )
             .optional()?;
-        if last.is_some_and(|r| r.body.starts_with(word) && r.at >= since) {
+        if last.is_some_and(|r| r.at >= since) {
             return Ok(None);
         }
         tx.execute(
@@ -1339,11 +1347,30 @@ impl Database {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in ids {
+            keep_spend_in(&tx, id)?;
             tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Add what task `id` used to its parent's use, before `id`'s row goes and
+/// its budget row with it: what a deleted task spent still counts toward
+/// every budget above it.
+fn keep_spend_in(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_budgets (task_id, used_secs, used_turns)
+         SELECT t.parent_id, b.used_secs, b.used_turns
+         FROM tasks t JOIN task_budgets b ON b.task_id = t.id
+         WHERE t.id = ?1 AND t.parent_id IS NOT NULL
+           AND (b.used_secs > 0 OR b.used_turns > 0)
+         ON CONFLICT(task_id) DO UPDATE SET
+           used_secs = used_secs + excluded.used_secs,
+           used_turns = used_turns + excluded.used_turns",
+        params![id],
+    )?;
+    Ok(())
 }
 
 fn insert_grants_in(conn: &Connection, id: &str, caps: &[&str]) -> Result<()> {
@@ -1802,6 +1829,16 @@ mod tests {
             .insert_status_report_unless_told("c", "a", "idle", "idle 1m", 8, 8)
             .unwrap();
         assert!(idle > waiting);
+        // Another event told between two sweeps of the same spell does not
+        // make it news again.
+        db.insert_status_report_unless_told("c", "a", "budget", "budget 80% used", i64::MAX, 9)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.insert_status_report_unless_told("c", "a", "idle", "idle 2m", 8, 10)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2128,6 +2165,15 @@ mod tests {
                 warned: 0,
             }
         );
+        // A deleted task's use stays with its parent, and so above it.
+        db.delete_task("w2").unwrap();
+        assert_eq!(db.subtree_used("m").unwrap(), (135, 5));
+        assert_eq!(db.subtree_used("a").unwrap(), (1135, 14));
+        db.delete_rows_leaves_first(&["w3".into(), "n".into()])
+            .unwrap();
+        assert_eq!(db.subtree_used("m").unwrap(), (135, 5));
+        let own = db.budget("m").unwrap().unwrap();
+        assert_eq!((own.used_secs, own.used_turns), (135, 5));
         assert!(db.set_budget_max("m", Some(0), None).is_err());
     }
 

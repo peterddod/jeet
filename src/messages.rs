@@ -317,9 +317,9 @@ pub trait Agent {
     /// Its start was just queued on `max_live`, with `live` of `max`
     /// running: tell whom it reports to (M22). Called with no lock held.
     fn queued(&self, _live: u32, _max: u32) {}
-    /// It is held, and not running, and a message just queued for it would
-    /// have started it: queue its start, which the drain its resume runs
-    /// makes. Asked holding its inbox lock.
+    /// It is held, and a message just queued for it may start it: queue
+    /// its start, which the drain its resume runs makes if its agent is not
+    /// running then. Asked holding its inbox lock.
     fn queue_held_start(&self) -> Result<()> {
         Ok(())
     }
@@ -388,9 +388,12 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
     let activity = || status::activity(agent.status(task_dir).as_ref(), agent.alive());
     // Held: handed nothing, and started by nothing, until it is resumed;
     // one it would have started starts with it then.
+    // Its start is queued even while it runs, should its agent end before
+    // the resume: a drain finding it running leaves it be. Not for what
+    // may not start it (a report): that waits for its next start.
     if agent.held()? {
         inbox.push_to(&message, me)?;
-        if route(&activity(), agent.has_hooks()) == Route::Start && agent.can_start() {
+        if agent.can_start() {
             agent.queue_held_start()?;
         }
         return Ok(Delivered::Paused);
@@ -1007,7 +1010,18 @@ mod tests {
         );
         assert!(agent.typed.borrow().is_empty());
         assert_eq!(left(idle.path()), ["two"]);
-        // Running already: nothing to start.
+        // Running: its start is queued too, should its agent end while
+        // held; the drain leaves one still running be.
+        assert!(agent.held_start.get());
+
+        // A report, which may not start it, queues no start.
+        let agent = Fake {
+            alive: true,
+            paused: true,
+            held: true,
+            ..Fake::default()
+        };
+        deliver(idle.path(), &agent, "progress").unwrap();
         assert!(!agent.held_start.get());
     }
 

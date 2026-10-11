@@ -315,10 +315,7 @@ fn handle_hook(
             })
         }
         Some(EventKind::Stopped | EventKind::Idle) => idle_prompt(&task_dir, &hook, &ctx, now),
-        _ => match status_for(&hook, now) {
-            Some(status) => write_status(&task_dir, &with_busy(status, &ctx)),
-            None => Ok(()),
-        },
+        _ => write_event_status(&task_dir, &hook, &ctx, now),
     };
     // Only now, with the task's inbox no longer locked.
     if let (Threshold::Hit100, Some(task)) = (ctx.threshold, &ctx.task) {
@@ -451,6 +448,15 @@ fn hook_ctx_with(
         hold,
         threshold,
     })
+}
+
+/// Write the status an event that neither ends a turn nor sits idle
+/// leaves, with the busy spell it carries on or starts.
+fn write_event_status(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Result<()> {
+    match status_for(hook, now) {
+        Some(status) => write_status(task_dir, &with_busy(status, ctx)),
+        None => Ok(()),
+    }
 }
 
 /// `status` with its `busy_since`, for one running or waiting.
@@ -649,6 +655,26 @@ fn report_step(
     Ok(())
 }
 
+/// Whether the hook's task is held: as [`HookCtx::hold`] read it, or as its
+/// row says now. Asked again under the task's inbox lock, before handing
+/// anything over: a pause written since `ctx` was made interrupts the task
+/// under that same lock, so it either holds this event or comes after it.
+fn held_now(ctx: &HookCtx) -> bool {
+    if ctx.hold.is_some() {
+        return true;
+    }
+    match &ctx.task {
+        Some(task) if task.parent_id.is_some() => match run::hold(&ctx.app, task) {
+            Ok(hold) => hold.is_some(),
+            Err(e) => {
+                eprintln!("jeet task-hook: {e:#}");
+                false
+            }
+        },
+        _ => false,
+    }
+}
+
 /// Stop: hand over what `jeet task send` queued, else go idle. The inbox
 /// stays locked until the status is written, so a message is either taken
 /// here or sent after the session is idle, and typed in. Returns the
@@ -664,16 +690,16 @@ fn stop(
     now: i64,
 ) -> Result<Option<String>> {
     let event = hook.name.as_str();
-    if ctx.hold.is_some() {
+    // A broken inbox must not keep the status from being written.
+    let inbox = messages::Inbox::lock(task_dir)
+        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
+        .ok();
+    if held_now(ctx) {
         if let Some(status) = status_for(hook, now) {
             write_status(task_dir, &status)?;
         }
         return Ok(None);
     }
-    // A broken inbox must not keep the status from being written.
-    let inbox = messages::Inbox::lock(task_dir)
-        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
-        .ok();
     // Only what is for this session: the assistant's sessions share an
     // inbox, and what was sent to one of them is that one's to deal with.
     // What was sent to one that has ended is let go by the next send or
@@ -736,7 +762,7 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
     let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
-    if ctx.hold.is_some() || inbox.read_for(Some(session_id))?.is_empty() {
+    if held_now(ctx) || inbox.read_for(Some(session_id))?.is_empty() {
         return Ok(());
     }
     let Some(task) = &ctx.task else {
@@ -1178,6 +1204,73 @@ mod tests {
             None
         );
         assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_turns_busy_spell_runs_from_its_prompt_through_tools_and_waits() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), Some(10)).unwrap();
+        let dir = tasks::task_dir(&app, &app.db.get_task("w").unwrap().unwrap());
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let mut app = Some(app);
+        for (name, kind, at) in [
+            ("UserPromptSubmit", EventKind::Working(None), 100),
+            ("PreToolUse", EventKind::Working(Some("Bash".into())), 200),
+            ("Notification", EventKind::NeedsInput(None), 250),
+            ("PostToolUse", EventKind::Working(None), 300),
+        ] {
+            let event = hook(name, kind);
+            let ctx = hook_ctx_with(app.take(), &open, &dir, "w", &event, at, &|_| true).unwrap();
+            write_event_status(&dir, &event, &ctx, at).unwrap();
+            let status = read_status(&dir, "s").unwrap();
+            assert_eq!(status.busy_since, Some(100), "{name}");
+            assert_eq!(status.at, at, "{name}");
+            assert_eq!(used(&ctx.app, "w"), (0, 0), "{name}");
+            app = Some(ctx.app);
+        }
+        // Its end charges the whole spell and the one turn.
+        let stop = hook("Stop", EventKind::Stopped);
+        let ctx = hook_ctx_with(app.take(), &open, &dir, "w", &stop, 400, &|_| true).unwrap();
+        assert_eq!(used(&ctx.app, "w"), (300, 1));
+    }
+
+    #[test]
+    fn a_sessions_end_charges_the_time_left_and_no_turn() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), Some(10)).unwrap();
+        let dir = busy_w(&app);
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
+        assert!(ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_pause_since_the_hook_began_is_asked_again_under_the_inbox_lock() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, None);
+        // Paused after the hook read its hold, before it took the inbox.
+        ctx.app
+            .db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        assert_eq!(
+            stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap(),
+            None
+        );
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        // Handed over, it would be typed into a tmux unit tests never have.
+        idle_prompt(&dir, &idle, &ctx, 500).unwrap();
         let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
         assert_eq!(left.len(), 1);
     }

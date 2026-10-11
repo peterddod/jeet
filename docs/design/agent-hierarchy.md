@@ -1310,9 +1310,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`Database::resume_run_state`), so a pause or stop made meanwhile, by
   someone who may outrank the caller, stays. It then hands what queued to
   each live, unheld node below that a delivery would type into (idle, or
-  running with no hooks: `messages::route` is `Type`), and queues the
-  start of each not running with messages waiting, its agent having
-  ended while held, for the drain it runs. A stop ends every node's
+  running with no hooks: `messages::route` is `Type`), reading the hold
+  again under its inbox lock, then runs a drain, which starts each node
+  a held message queued the start of whose agent is not running. A
+  report to a node that is not running (`may_start` off) queues no start,
+  held or not, so a resume never starts a node for reports alone. A stop ends every node's
   session in the subtree, live or not, and forgets its pane. `max_live` counts the
   active tasks below the assistant whose `jeet-<slug>` session one `tmux
   list-sessions` lists and whose pane is alive; a session the user's
@@ -1339,7 +1341,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   caller. Over `max_live` a start is queued (`Started::Queued`, the
   prompt handed back) for whoever asked, except the user's `jeet task
   open` and the TUI's open, which start it anyway and warn "over
-  max_live". A start made holding the start lock (a drain, or a delivery
+  max_live". A start with no prompt and no session named (`task open`,
+  the TUI's open) takes the task's inbox lock before the start lock and
+  starts it with what waits there, as a drain would
+  (`runtime::start_with_inbox`): a brief queued on `max_live` is not left
+  behind by an open that starts it first. A start made holding the start lock (a drain, or a delivery
   admitted already) goes through `ensure_running_admitted` with the
   guard, as the lock is not re-entrant. `Agent::start` takes that guard
   and says how the start went (`Started`); a delivery whose start is
@@ -1355,8 +1361,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a brief given before the pause run: the prompt is left for the user. `messages::deliver` asks
   `Agent::held` first, under the inbox lock, and queues for a held agent
   whatever it is doing (`Delivered::Paused`), queueing its start
-  (`Agent::queue_held_start`) when the message would have started it, so
-  the drain a resume runs starts it with its queue; only then, for a start, does
+  (`Agent::queue_held_start`) when the message may start it, whether or
+  not its agent runs then (it may end while held; a drain that finds it
+  running only unqueues it), so the drain a resume runs starts it with
+  its queue if need be; only then, for a start, does
   it ask `Agent::admit`, which takes the start lock after the inbox lock
   and is `None` for an agent the gate does not count (the assistant's).
   Over `max_live` the message is queued with the start
@@ -1376,17 +1384,21 @@ Managers run locally in tmux, as the user, like any other task (I22).
   then is the run state read, so a turn that uses a budget up is held at
   its own end: no `continue_output`, its queue left in the inbox, and its
   parent told `blocked: budget` from the hook itself, with no `jeet`
-  spawned. How far a session's time is charged is kept beside its status
+  spawned. The Stop hook and `idle_prompt` read the hold again once they
+  hold the inbox lock, before handing anything over, so a pause written
+  in between, whose walk interrupts under that lock, holds them too. How far a session's time is charged is kept beside its status
   (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
   assistant's turns), a pause's interrupt and a stop, which each charge a
   spell still going, never charge the same time as the hook that ends it.
   A sweep and a stop charge only an agent whose pane is alive: one that
   died with no `Ended` (a crash, a reboot) leaves a status that still says
-  busy, which is no busy time. A sweep that uses a budget up reports `blocked: budget` itself. An
+  busy, which is no busy time. A sweep, and a pause's interrupt, that use a budget up report `blocked: budget` themselves; a stop's does not, as a stopped node's end is not reported. A status report is debounced against the last one of the same event (its word), so a `budget` or `queued` report between two sweeps of one idle spell does not make it news again. Deleting a task adds what it used to its parent's use, in the same transaction, so its spend still counts toward every budget above it. An
   `Ended` that no new session replaces starts a detached `jeet manager
   drain` (output to `drain.log` in jeet's home) when a start waits on
   `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
-  reported to its parent.
+  reported to its parent. A harness with no hooks, or no `Ended`, has
+  nothing drain when its agent exits: a queued start waits for the next
+  drain from `run_once`, the TUI refresh, a stop or a resume (M22's list).
 - **P20** `jeet manager budget <task> +…|=…` (`manager.grant`) raises
   a limit the task has (`+` on a unit with no limit is refused: there is
   no cap to raise) or sets one, keeping the unit not given; the result
