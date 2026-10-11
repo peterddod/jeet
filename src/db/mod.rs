@@ -140,12 +140,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX task_reports_to ON task_reports(to_id, answer);
     CREATE INDEX task_reports_task ON task_reports(task_id, id);
     ",
-    // v5: where a task's agent runs (`placement`; every existing task ran
-    // in local tmux), and the processes jeet launched for a task, keyed by
-    // pid and start time so a reused pid never matches. Additive only.
+    // v5: where a task's agent runs (`placement`; only `local`, tmux on this
+    // machine, for now: a confined placement widens the CHECK when it is
+    // built, in a migration that rebuilds `tasks`), and the processes jeet
+    // launched for a task, keyed by pid and start time so a reused pid
+    // never matches. Additive only.
     "
     ALTER TABLE tasks ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
-        CHECK (placement IN ('local', 'cloud', 'local-sandbox'));
+        CHECK (placement IN ('local'));
     CREATE TABLE task_anchors (
         pid INTEGER NOT NULL,
         start INTEGER NOT NULL,
@@ -581,17 +583,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM task_anchors", [], |row| row.get(0))
             .unwrap();
         assert_eq!(anchors, 0);
-        assert!(db
-            .conn()
-            .execute_batch("UPDATE tasks SET placement = 'moon' WHERE id = 'w';")
-            .is_err());
+        for unknown in ["moon", "cloud", "local-sandbox"] {
+            let sql = format!("UPDATE tasks SET placement = '{unknown}' WHERE id = 'c';");
+            assert!(db.conn().execute_batch(&sql).is_err(), "{unknown}");
+        }
         db.conn()
-            .execute_batch("UPDATE tasks SET placement = 'cloud' WHERE id = 'c';")
+            .execute_batch("UPDATE tasks SET placement = 'local' WHERE id = 'c';")
             .unwrap();
-        assert_eq!(
-            db.get_task("c").unwrap().unwrap().placement,
-            crate::placement::Placement::Cloud
-        );
     }
 
     #[test]

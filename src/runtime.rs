@@ -61,7 +61,7 @@ pub fn ensure_running(
     if task.kind == TaskKind::Assistant {
         bail!("the assistant's sessions are opened with `jeet chat`");
     }
-    placement::runtime_for(app, task)?.start(app, task, session, prompt)
+    placement::runtime_for(task)?.start(app, task, session, prompt)
 }
 
 /// A task's agent in a tmux session on this machine: the runtime of
@@ -489,7 +489,7 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
             task.name
         );
     }
-    placement::runtime_for(app, task)?.interrupt(app, task)
+    placement::runtime_for(task)?.interrupt(app, task)
 }
 
 /// [`interrupt`] in the task's tmux session.

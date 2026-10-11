@@ -1157,9 +1157,8 @@ with a parent, or the assistant, with no recorded agent behind it is refused
 as unconfirmed. So a shell you open inside such a task's or the assistant's
 tmux session is refused for commands that need a capability, and for
 `jeet worktree ls`, `path` and `add` without `--task`; use one outside it. This stops mistakes and casual forging, not an agent that sets
-out to escape: only a placement with a boundary does that, which is why
-managers below the assistant will run behind one (`[managers] placement`,
-`cloud` by default; not built yet).
+out to escape. Every agent, managers below the assistant included, runs
+locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
 
 **Upgrading to this version:** reopen running tasks (stop them and `jeet
 task open` again) and assistant windows (close them and `jeet chat`). Agents started by an older jeet were
@@ -1193,8 +1192,6 @@ launches it, so it gets no deny rules.
 ```toml
 [managers]
 idle_report_mins = 10   # tell the assistant when a task of its sits idle this long
-placement = "cloud"     # where managers below the assistant run (not built yet); "local" is
-                        # an error when such a task is made, "local-sandbox" is refused at start
 ```
 
 ### Keeping the store fetched

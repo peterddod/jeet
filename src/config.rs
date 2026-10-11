@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::github::MergeMethod;
-use crate::placement::Placement;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -226,10 +225,6 @@ pub struct ManagersConfig {
     /// (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_report_mins: Option<u64>,
-    /// Where managers below the root, and every node under them, run
-    /// (default: `cloud`). `local` is refused: it has no boundary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<Placement>,
 }
 
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
@@ -331,18 +326,6 @@ impl Config {
             .as_ref()
             .and_then(|m| m.idle_report_mins)
             .unwrap_or(DEFAULT_IDLE_REPORT_MINS)
-    }
-
-    /// `[managers] placement`, else `cloud`; `local` is an error.
-    pub fn manager_placement(&self) -> Result<Placement> {
-        match self.managers.as_ref().and_then(|m| m.placement) {
-            Some(Placement::Local) => bail!(
-                "[managers] placement = \"local\": managers below the root must run behind a \
-                 boundary; `local` has none"
-            ),
-            Some(placement) => Ok(placement),
-            None => Ok(Placement::Cloud),
-        }
     }
 }
 
@@ -605,27 +588,6 @@ mod tests {
         assert_eq!(DEFAULT_IDLE_REPORT_MINS, 10);
         let out = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!out.contains("managers"), "{out}");
-    }
-
-    #[test]
-    fn reads_where_managers_run() {
-        let placed = |value: &str| {
-            let text = format!("[managers]\nplacement = \"{value}\"\n");
-            toml::from_str::<Config>(&text).unwrap().manager_placement()
-        };
-        assert_eq!(placed("cloud").unwrap(), Placement::Cloud);
-        assert_eq!(placed("local-sandbox").unwrap(), Placement::LocalSandbox);
-        let err = placed("local").unwrap_err();
-        assert!(err.to_string().contains("`local` has none"), "{err}");
-        assert!(toml::from_str::<Config>("[managers]\nplacement = \"moon\"\n").is_err());
-        assert_eq!(
-            Config::default().manager_placement().unwrap(),
-            Placement::Cloud
-        );
-        let config: Config = toml::from_str("[managers]\nidle_report_mins = 5\n").unwrap();
-        assert_eq!(config.manager_placement().unwrap(), Placement::Cloud);
-        let out = toml::to_string_pretty(&config).unwrap();
-        assert!(!out.contains("placement"), "{out}");
     }
 
     #[test]

@@ -514,10 +514,10 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn type_in(&self, text: &str) -> Result<()> {
-        // A live session under the name of a task jeet may not run here (a
-        // cloud one, or one that needs a boundary) is not its agent: what
-        // starting it would refuse, typing into it does too.
-        placement::runtime_for(self.app, self.task)?;
+        // A live session under the name of a task jeet may not run here is
+        // not its agent: what starting it would refuse, typing into it does
+        // too.
+        placement::runtime_for(self.task)?;
         tmux::send_text(&runtime::session_name(self.task), text)
     }
 

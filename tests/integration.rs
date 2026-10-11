@@ -8213,31 +8213,57 @@ fn an_assistant_window_jeet_did_not_record_is_flagged() {
     assert!(stderr.contains("run `jeet chat` again"), "{stderr}");
 }
 
+/// Every node runs locally, a manager's child as much as the root's: none
+/// is refused for where it sits in the tree.
 #[cfg(unix)]
 #[test]
-fn a_task_jeet_cannot_place_is_refused_but_can_be_cleaned_up() {
+fn a_node_below_a_manager_runs_locally() {
     let lab = StoreLab::new();
-    let cloud = lab.new_task_with("c", &["--parent", "assistant"]);
-    let worker = lab.new_task_with("w", &["--parent", "assistant"]);
-    let db = lab.index();
-    db.execute(
-        "UPDATE tasks SET placement = 'cloud' WHERE id = ?1",
-        [&cloud],
-    )
-    .unwrap();
-    // Below a worker, as only a manager's child will be: local is no
-    // boundary.
-    db.execute(
-        "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
-         VALUES ('g', 'g', 'g', 'work', 'active', 0, 0, ?1)",
-        [&worker],
-    )
-    .unwrap();
+    let manager = lab.new_task_with("m", &["--parent", "assistant"]);
+    // As only a manager's child will be, until `jeet manager new` (phase 2).
+    lab.index()
+        .execute(
+            "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
+             VALUES ('g', 'g', 'g', 'work', 'active', 0, 0, ?1)",
+            [&manager],
+        )
+        .unwrap();
+    std::fs::create_dir_all(lab.home().join("tasks/g")).unwrap();
+    let placement: String = lab
+        .index()
+        .query_row("SELECT placement FROM tasks WHERE id = 'g'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(placement, "local");
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
     let env = [("JEET_TMUX", tmux_env.as_str())];
+    succeeded(&lab.jeet_at(&["task", "open", "g"], &lab.home(), &env));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+}
 
+/// A placement this jeet does not know (written by a later one) is never
+/// run: the task is refused, not started in tmux.
+#[cfg(unix)]
+#[test]
+fn a_task_jeet_cannot_place_is_refused() {
+    let lab = StoreLab::new();
+    let c = lab.new_task_with("c", &["--parent", "assistant"]);
+    let db = lab.index();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    db.execute(
+        "UPDATE tasks SET placement = 'elsewhere' WHERE id = ?1",
+        [&c],
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
     for args in [
         &["task", "open", "c"][..],
         &["task", "send", "c", "hi"],
@@ -8246,49 +8272,11 @@ fn a_task_jeet_cannot_place_is_refused_but_can_be_cleaned_up() {
         let output = lab.jeet_at(args, &lab.home(), &env);
         assert!(!output.status.success(), "{args:?}");
         let stderr = stderr_of(&output);
-        assert!(stderr.contains("not built yet"), "{args:?}: {stderr}");
-    }
-    for args in [
-        &["task", "open", "g"][..],
-        &["task", "send", "g", "hi"],
-        &["task", "interrupt", "g"],
-    ] {
-        let output = lab.jeet_at(args, &lab.home(), &env);
-        assert!(!output.status.success(), "{args:?}");
-        let stderr = stderr_of(&output);
-        assert!(
-            stderr.contains("must run behind a boundary"),
-            "{args:?}: {stderr}"
-        );
+        assert!(stderr.contains("placement"), "{args:?}: {stderr}");
     }
     assert!(calls_of(&tmux, "new-session").is_empty());
-
-    // A live session under its name, idle, which jeet did not start for
-    // it, is not typed into or interrupted either.
-    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
-    for task in ["c", "g"] {
-        idle_since(&lab.home().join("tasks").join(task), 0);
-    }
-    for (task, why) in [("c", "not built yet"), ("g", "must run behind a boundary")] {
-        for args in [
-            &["task", "send", task, "hi"][..],
-            &["task", "interrupt", task],
-        ] {
-            let output = lab.jeet_at(args, &lab.home(), &env);
-            assert!(!output.status.success(), "{args:?}");
-            let stderr = stderr_of(&output);
-            assert!(stderr.contains(why), "{args:?}: {stderr}");
-        }
-    }
     assert!(calls_of(&tmux, "send-keys").is_empty());
-    assert!(calls_of(&tmux, "load-buffer").is_empty());
     assert!(calls_of(&tmux, "paste-buffer").is_empty());
-    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
-
-    // Whatever it runs on, its local state can always go.
-    succeeded(&lab.jeet_at(&["task", "archive", "c", "--force"], &lab.home(), &env));
-    succeeded(&lab.jeet_at(&["task", "delete", "c", "-f"], &lab.home(), &env));
-    assert!(!lab.home().join("tasks/c").exists());
 }
 
 /// A session already running under a task's name, which jeet did not
@@ -8324,7 +8312,7 @@ fn a_session_jeet_did_not_start_is_not_adopted() {
 /// The escape design §5.7 leaves open locally, asserted so that closing it
 /// flips this test on purpose: a process the agent orphans, with its
 /// environment stripped, has no anchor above it, and runs as the user.
-/// Only a boundary closes it.
+/// Only a confined placement (future work) closes it.
 #[cfg(unix)]
 #[test]
 fn an_orphan_with_its_environment_stripped_escapes_local_identity_5_7() {
