@@ -205,7 +205,7 @@ impl Harness for ClaudeCode {
     /// "No" exits.
     fn accept_trust(&self, pane: &str) -> Option<TrustStep> {
         self.startup_prompt(pane)?;
-        match selected_option(pane)? {
+        match trust_selection(pane)? {
             TRUST_YES => Some(TrustStep::Confirm(vec!["Enter"])),
             TRUST_NO => Some(TrustStep::Select(vec!["Down"])),
             _ => None,
@@ -285,12 +285,27 @@ fn undimmed(line: &str) -> String {
     text
 }
 
-/// The option the cursor is on, in a pane showing a list of them.
-fn selected_option(pane: &str) -> Option<&str> {
-    pane.lines()
-        .filter_map(|line| line.trim().strip_prefix(CURSOR))
-        .map(str::trim)
-        .next_back()
+/// Which trust option the cursor is on: `TRUST_YES` or `TRUST_NO`, and
+/// `None` unless exactly one of them is, as on a frame caught mid-redraw.
+/// Spacing and a number before the option (`❯ 2. Yes, …`) do not count.
+fn trust_selection(pane: &str) -> Option<&'static str> {
+    let numbered = |w: &&str| {
+        w.strip_suffix('.')
+            .is_some_and(|n| n.parse::<u32>().is_ok())
+    };
+    let mut selected = pane.lines().filter_map(|line| {
+        let rest = line.trim_start().strip_prefix(CURSOR)?;
+        let text = rest
+            .split_whitespace()
+            .skip_while(numbered)
+            .collect::<Vec<_>>()
+            .join(" ");
+        [TRUST_YES, TRUST_NO]
+            .into_iter()
+            .find(|option| text.starts_with(option))
+    });
+    let first = selected.next()?;
+    selected.next().is_none().then_some(first)
 }
 
 /// The fields of a Claude Code hook payload that jeet reads; every event
@@ -845,6 +860,27 @@ mod tests {
         );
         let odd = pane("trust-no-selected").replace("❯ No, exit", "❯ Maybe");
         assert!(ClaudeCode.accept_trust(&odd).is_none());
+    }
+
+    #[test]
+    fn the_selection_is_read_past_spacing_and_numbers_but_not_two_cursors() {
+        let numbered = pane("trust-yes-selected")
+            .replace("❯ Yes, I", "❯  2.  Yes,  I")
+            .replace("  No, exit", "  1. No, exit");
+        assert_eq!(
+            ClaudeCode.accept_trust(&numbered),
+            Some(TrustStep::Confirm(vec!["Enter"]))
+        );
+        let padded = pane("trust-no-selected").replace("❯ No, exit", "  ❯No, exit   ");
+        assert_eq!(
+            ClaudeCode.accept_trust(&padded),
+            Some(TrustStep::Select(vec!["Down"]))
+        );
+        // Mid-redraw: no cursor, or both, is no step at all.
+        let none = pane("trust-no-selected").replace("❯ No, exit", "  No, exit");
+        assert!(ClaudeCode.accept_trust(&none).is_none());
+        let both = pane("trust-no-selected").replace("  Yes, I", "❯ Yes, I");
+        assert!(ClaudeCode.accept_trust(&both).is_none());
     }
 
     #[test]
