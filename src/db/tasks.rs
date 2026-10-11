@@ -509,13 +509,19 @@ fn unarchive_refusal_in(conn: &Connection, id: &str, fan_out: Option<u32>) -> Re
         |row| row.get(0),
     )?;
     if active >= i64::from(max) {
-        bail!(
-            "{} already has {active} active tasks under it, its limit of {max}; \
-             archive one first",
-            parent.slug
-        );
+        bail!(fan_out_full(&parent.slug, active as usize, max));
     }
     Ok(())
+}
+
+/// The refusal when `parent` already has `active` children, its limit of
+/// `max`.
+fn fan_out_full(parent: &str, active: usize, max: u32) -> String {
+    format!(
+        "{parent} already has {active} active {} under it, its limit of {max}; \
+         archive one first",
+        if active == 1 { "task" } else { "tasks" }
+    )
 }
 
 /// How a run state's setter ranks when two hold a task at the same severity:
@@ -1089,11 +1095,7 @@ impl Database {
         if let Some(max) = fan_out {
             let active = child_count_in(&tx, parent_id, true)?;
             if active >= max as usize {
-                bail!(
-                    "{} already has {active} active tasks under it, its limit of {max}; \
-                     archive one first",
-                    parent.slug
-                );
+                bail!(fan_out_full(&parent.slug, active, max));
             }
         }
         insert_task_in(&tx, rec)?;

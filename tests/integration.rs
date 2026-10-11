@@ -1660,7 +1660,10 @@ fn archive_and_unarchive_keep_a_parent_over_its_tasks() {
     let output = lab.jeet_at(&["task", "unarchive", "kid2"], &lab.home(), &[]);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
-    assert!(stderr.contains("its limit of 1"), "{stderr}");
+    assert!(
+        stderr.contains("1 active task under it, its limit of 1"),
+        "{stderr}"
+    );
     assert_eq!(state("kid2"), "archived");
 }
 
