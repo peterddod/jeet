@@ -288,6 +288,19 @@ pub enum TaskCommands {
         offline: bool,
     },
 
+    /// Show what the task's agent last said and how its last turn ended
+    Last {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Show its last N messages, oldest first
+        #[arg(short = 'n', long = "messages", value_name = "N", default_value_t = 1,
+              value_parser = clap::value_parser!(u16).range(1..))]
+        count: u16,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Copy the task's project files (AGENTS.md, skills) in again
     Resync {
         #[arg(add = ArgValueCandidates::new(task_candidates))]

@@ -33,7 +33,8 @@ anything else.
 
 The `jeet-assistant` skill lists the commands. In short:
 
-- `jeet task ls` and `jeet task prs <task>` show what is going on.
+- `jeet task ls`, `jeet task last <task>` and `jeet task prs <task>` show
+  what is going on.
 - `jeet task new <name> [--repo <repo>] --prompt "<brief>"` starts a task
   and its agent on a brief. Write briefs a newcomer could act on.
 - `jeet task send <task> "<message>"` tells a task's agent something.

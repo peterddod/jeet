@@ -206,6 +206,9 @@ fn run(command: Option<Commands>) -> Result<()> {
                 TaskCommands::Prs { name, offline } => {
                     commands::task::prs(&app, name.as_deref(), offline)?
                 }
+                TaskCommands::Last { name, count, json } => {
+                    commands::task::last(&app, &name, count.into(), json)?
+                }
                 TaskCommands::Resync { name, force } => commands::task::resync(&app, &name, force)?,
             }
         }

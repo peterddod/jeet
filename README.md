@@ -77,6 +77,7 @@ jeet task ls [--archived]                # with what each task's agent is doing
 jeet task open fix-login                 # the task's agent, in tmux (started if need be)
 jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
 jeet task send fix-login "add tests too" # message the task's agent
+jeet task last fix-login [-n 3] [--json] # what the task's agent last said, and how its turn ended
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
@@ -535,6 +536,26 @@ attached, need a restart or a detach and reattach. A terminal that cannot
 send Shift+Enter differently from Enter still sends the message on
 Shift+Enter. In that case, use `Ctrl+J`, or type `\` and then press Enter, to
 start a new line.
+
+```bash
+jeet task last fix-login         # the agent's last message, how its turn ended and when
+jeet task last fix-login -n 3    # its last three messages, oldest first
+jeet task last fix-login --json  # the same, for scripts
+```
+
+`jeet task last` reads the task's latest session from the agent's own record
+of it (Claude Code's transcript), not from its tmux pane, and says how the
+last turn ended: `finished`, `interrupted`, `API error: <what it said>`, or
+`still running`, beside the task's status as `jeet task ls` shows it. An
+agent jeet cannot read the record of says so.
+
+```text
+task:      fix-login (idle 4m)
+session:   3f1c2a9e-5b7d-4e61-9a0b-2c4d6e8f0a1b
+last turn: API error: Connection lost mid-response. The response above may be incomplete. (4m ago)
+
+Pushed fix/login-cookie; opening the PR next.
+```
 
 Claude Code asks once per folder whether you trust it, before any hook runs,
 and a task's agent waits at that question until you answer it. Trusting a
@@ -996,7 +1017,7 @@ command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
 
 jeet commands run with `JEET_ASSISTANT=1` (the assistant's session) may only
 do what `[assistant] allow` lists; anything else fails with a message saying
-what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet prs`, …),
+what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet task last`, `jeet prs`, …),
 `jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
 `jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
 
