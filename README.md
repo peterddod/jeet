@@ -1157,7 +1157,7 @@ with a parent are also denied, even with your approval at the prompt:
 force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the eight in all
-most of them use, none longer than 24 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
+most of them use, none longer than 16 bytes; a repo's is `origin/HEAD` when jeet indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr

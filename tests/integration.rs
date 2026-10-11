@@ -8333,13 +8333,14 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
         "scan_roots = []\n[assistant]\nallow = [\"task.send\"]\n",
     )
     .unwrap();
+    // The assistant, as jeet started it: it is known by its process.
+    let mut assistant = lab.assistant_pane();
     let env = [
         ("JEET_TMUX", tmux_env.as_str()),
         ("JEET_AGENT", "claude"),
-        ("JEET_ASSISTANT", "1"),
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
     ];
-    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    let output = assistant.jeet(&["task", "interrupt", "fix-x"], &lab.home(), &env);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("nothing sent"),
@@ -8368,7 +8369,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
         &hook_input("UserPromptSubmit", &session, &task),
         &[],
     ));
-    let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+    let output = assistant.jeet(&["task", "interrupt", "fix-x"], &lab.home(), &env);
     succeeded(&output);
     assert_eq!(
         calls_of(&tmux, "send-keys"),

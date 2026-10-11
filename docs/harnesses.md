@@ -117,7 +117,7 @@ The list is:
   and its git 2.46 synonym `--branches`, and pushes naming a default
   branch: `main`, `master` and the default branches of the repos jeet has
   indexed, up to eight in all, the ones most repos use first, and none
-  longer than 24 bytes (the list goes inline on the agent's command line,
+  longer than 16 bytes (the list goes inline on the agent's command line,
   which shares tmux's 16KB limit with the first prompt), as a destination (`git push *
   main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
   `heads/main` with or without a source);
@@ -189,7 +189,7 @@ a gate. They do not catch:
   `repos/acme/mergesort/pulls` too, and quoted variants would not fit the
   command line jeet launches the agent with;
 - the default branches of indexed repos past the eight listed, or longer
-  than 24 bytes;
+  than 16 bytes;
 - moving a branch through the REST refs endpoint
   (`gh api -X PATCH repos/o/r/git/refs/heads/main`): denying it would also
   refuse reading the ref;

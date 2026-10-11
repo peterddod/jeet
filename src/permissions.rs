@@ -202,7 +202,7 @@ pub const MAX_DEFAULT_BRANCHES: usize = 8;
 /// The longest default branch name denied, in bytes, for the same limit:
 /// each costs three patterns, six rules in Claude Code's settings. A longer
 /// one is left out.
-pub const MAX_BRANCH_NAME: usize = 24;
+pub const MAX_BRANCH_NAME: usize = 16;
 
 /// Commands that only read, pre-approved whatever is allowed.
 const READ_ONLY: &[&str] = &[

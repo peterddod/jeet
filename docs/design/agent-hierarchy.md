@@ -895,8 +895,9 @@ RFC left open, or departed from it:
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch, and capped at
   eight (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
-  repos use, none longer than 24 bytes (`MAX_BRANCH_NAME`). Each costs
-  about 280 bytes of the inline settings (three patterns, each rendered
+  repos use, none longer than 16 bytes (`MAX_BRANCH_NAME`; 24 before #33's
+  `--task <id>` on every hook command took about 300 bytes of the budget).
+  Each costs about 240 bytes of the inline settings (three patterns, each rendered
   for Claude Code as two rules, with and without a trailing ` *`, since
   its trailing ` *` matches the bare command only in a rule with no other
   `*`), which share tmux's 16KB command
@@ -1097,7 +1098,9 @@ what this RFC left open, or departed from it:
     identity error propagates, so these are refused as unconfirmed in a
     user window inside a parented task's or the assistant's session.
   - `tmux::new_session` reads `#{pane_id}\t#{pane_pid}` back and fails if
-    tmux reports no pane; a failed record warns "task X's agent cannot be
+    tmux reports no pane. The pane id it reads is also the one noted in
+    `@jeet-agent-pane` (E11), so the anchor and the pane interrupt and send
+    aim at are the same pane. A failed record warns "task X's agent cannot be
     identified (<cause>): its jeet commands that name the task are
     refused, but one run without $JEET_TASK_ID and $JEET_ASSISTANT runs as
     the user; stop it and open the task again". The agent is still
