@@ -92,6 +92,10 @@ pub struct Limits {
     pub watch: Duration,
     pub hook_wait: Duration,
     pub poll: Duration,
+    /// How long the trust prompt gets to redraw after a key, looked at
+    /// every `redraw_poll`.
+    pub redraw_wait: Duration,
+    pub redraw_poll: Duration,
 }
 
 impl Default for Limits {
@@ -100,9 +104,14 @@ impl Default for Limits {
             watch: Duration::from_secs(WATCH_SECS),
             hook_wait: Duration::from_secs(HOOK_WAIT_SECS),
             poll: Duration::from_millis(500),
+            redraw_wait: Duration::from_millis(2500),
+            redraw_poll: Duration::from_millis(200),
         }
     }
 }
+
+/// How many of the pane's last lines a failure logs.
+const LOG_LINES: usize = 12;
 
 /// How the agent's start went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,13 +134,15 @@ pub enum Outcome {
 
 /// Watch `pane` until `reported` (a hook has said something since the
 /// launch), the agent is gone, or a prompt is found, accepting a trust
-/// prompt when `auto`.
+/// prompt when `auto`. What accepting did, and why it gave up if it did,
+/// goes to `log`.
 pub fn watch(
     harness: &dyn Harness,
     pane: &dyn Pane,
     reported: &dyn Fn() -> bool,
     auto: bool,
     limits: Limits,
+    log: &dyn Fn(&str),
 ) -> Result<Outcome> {
     let deadline = Instant::now() + limits.watch;
     loop {
@@ -143,7 +154,7 @@ pub fn watch(
         }
         if harness.startup_prompt(&pane.capture()?) == Some(StartupPrompt::Trust) {
             return match auto {
-                true => accept(harness, pane, reported, limits),
+                true => accept(harness, pane, reported, limits, log),
                 false => Ok(Outcome::NeedsUser),
             };
         }
@@ -154,41 +165,104 @@ pub fn watch(
     }
 }
 
-/// Accept the trust prompt: each key only once the pane shows what the
-/// harness expects it to be pressed on, and confirm only once accepting is
-/// seen selected.
+/// Accept the trust prompt: Down at most once, since a second could wrap
+/// the selection back to "No", and Enter only once accepting is seen
+/// selected. Each key waits for the pane to show what the harness expects
+/// it to be pressed on, looking again while it redraws.
 fn accept(
     harness: &dyn Harness,
     pane: &dyn Pane,
     reported: &dyn Fn() -> bool,
     limits: Limits,
+    log: &dyn Fn(&str),
 ) -> Result<Outcome> {
-    // A few presses at most, each given a moment to redraw.
-    let mut presses = 0;
-    let mut last: Option<TrustStep> = None;
-    let deadline = Instant::now() + limits.hook_wait;
-    loop {
-        let step = harness.accept_trust(&pane.capture()?);
-        match step.clone() {
-            Some(TrustStep::Confirm(keys)) => {
-                pane.press(&keys)?;
-                return Ok(wait_for_hook(pane, reported, limits));
-            }
-            // The same step again before the pane has redrawn: look again
-            // rather than press twice, unless it has had long enough.
-            Some(TrustStep::Select(_)) if step == last && Instant::now() < deadline => {}
-            Some(TrustStep::Select(keys)) if presses < 3 => {
-                pane.press(&keys)?;
-                presses += 1;
-                last = step;
-            }
-            _ => return Ok(Outcome::CouldNotAccept),
+    let gave_up = |why: &str, screen: &str| {
+        // Answered some other way while jeet looked: not jeet's to report.
+        if reported() {
+            return Outcome::Started;
         }
-        if Instant::now() >= deadline {
-            return Ok(Outcome::CouldNotAccept);
+        log(&format!(
+            "could not accept the trust prompt: {why}; the pane ended:"
+        ));
+        for line in last_lines(screen, LOG_LINES) {
+            log(&format!("  | {line}"));
         }
-        thread::sleep(limits.poll);
+        Outcome::CouldNotAccept
+    };
+    let (step, screen) = settle(harness, pane, limits, |step| step.is_some())?;
+    match step {
+        Some(TrustStep::Confirm(keys)) => return confirm(pane, &keys, reported, limits, log),
+        Some(TrustStep::Select(keys)) => {
+            pane.press(&keys)?;
+            log(&format!("pressed {}", keys.join(" ")));
+        }
+        None => return Ok(gave_up("no option it knows was seen selected", &screen)),
     }
+    let started = Instant::now();
+    let (step, screen) = settle(harness, pane, limits, |step| {
+        matches!(step, Some(TrustStep::Confirm(_)))
+    })?;
+    match step {
+        Some(TrustStep::Confirm(keys)) => {
+            log(&format!(
+                "accepting seen selected after {}ms",
+                started.elapsed().as_millis()
+            ));
+            confirm(pane, &keys, reported, limits, log)
+        }
+        Some(TrustStep::Select(_)) => Ok(gave_up(
+            &format!(
+                "still not on accepting {}ms after the select key",
+                limits.redraw_wait.as_millis()
+            ),
+            &screen,
+        )),
+        None => Ok(gave_up(
+            "no option it knows was seen selected after the select key",
+            &screen,
+        )),
+    }
+}
+
+/// Look at the pane until `done` with the step it shows, or for
+/// `limits.redraw_wait`: the last step and the pane it came from.
+fn settle(
+    harness: &dyn Harness,
+    pane: &dyn Pane,
+    limits: Limits,
+    done: impl Fn(&Option<TrustStep>) -> bool,
+) -> Result<(Option<TrustStep>, String)> {
+    let deadline = Instant::now() + limits.redraw_wait;
+    loop {
+        let screen = pane.capture()?;
+        let step = harness.accept_trust(&screen);
+        if done(&step) || Instant::now() >= deadline {
+            return Ok((step, screen));
+        }
+        thread::sleep(limits.redraw_poll);
+    }
+}
+
+fn confirm(
+    pane: &dyn Pane,
+    keys: &[&str],
+    reported: &dyn Fn() -> bool,
+    limits: Limits,
+    log: &dyn Fn(&str),
+) -> Result<Outcome> {
+    pane.press(keys)?;
+    log(&format!("pressed {}", keys.join(" ")));
+    Ok(wait_for_hook(pane, reported, limits))
+}
+
+/// The last `n` lines of `screen` with anything on them.
+fn last_lines(screen: &str, n: usize) -> Vec<&str> {
+    let lines: Vec<&str> = screen
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
 fn wait_for_hook(pane: &dyn Pane, reported: &dyn Fn() -> bool, limits: Limits) -> Outcome {
@@ -232,6 +306,7 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         &reported,
         auto,
         Limits::default(),
+        &|line| eprintln!("jeet task-startup {}: {line}", task.slug),
     )?;
     eprintln!("jeet task-startup {}: {outcome:?}", task.slug);
     let tell = |body: &str| {
@@ -317,9 +392,12 @@ mod tests {
         screen: RefCell<String>,
         alive: Cell<bool>,
         pressed: RefCell<Vec<String>>,
-        /// Captures it takes to redraw after a key.
+        /// Captures it takes to redraw after a key, showing `between`.
         lag: Cell<u32>,
         lagging: Cell<u32>,
+        between: RefCell<String>,
+        /// Whether Down moves the cursor at all.
+        redraws: Cell<bool>,
         hooked: Cell<bool>,
     }
 
@@ -331,6 +409,8 @@ mod tests {
                 pressed: RefCell::default(),
                 lag: Cell::new(lag),
                 lagging: Cell::new(0),
+                between: RefCell::new(pane_fixture("trust-no-selected")),
+                redraws: Cell::new(true),
                 hooked: Cell::new(false),
             }
         }
@@ -344,7 +424,7 @@ mod tests {
         fn capture(&self) -> Result<String> {
             if self.lagging.get() > 0 {
                 self.lagging.set(self.lagging.get() - 1);
-                return Ok(pane_fixture("trust-no-selected"));
+                return Ok(self.between.borrow().clone());
             }
             Ok(self.screen.borrow().clone())
         }
@@ -355,7 +435,7 @@ mod tests {
                 let screen = self.screen.borrow().clone();
                 let yes = screen.contains("❯ Yes");
                 match *key {
-                    "Down" => {
+                    "Down" if self.redraws.get() => {
                         *self.screen.borrow_mut() = pane_fixture("trust-yes-selected");
                         self.lagging.set(self.lag.get());
                     }
@@ -376,11 +456,27 @@ mod tests {
             watch: Duration::from_millis(50),
             hook_wait: Duration::from_millis(200),
             poll: Duration::from_millis(1),
+            redraw_wait: Duration::from_millis(100),
+            redraw_poll: Duration::from_millis(1),
         }
     }
 
     fn run_watch(pane: &FakeClaude, auto: bool) -> Outcome {
-        watch(&ClaudeCode, pane, &|| pane.hooked.get(), auto, quick()).unwrap()
+        run_logged(pane, auto).0
+    }
+
+    fn run_logged(pane: &FakeClaude, auto: bool) -> (Outcome, Vec<String>) {
+        let log = RefCell::new(Vec::new());
+        let outcome = watch(
+            &ClaudeCode,
+            pane,
+            &|| pane.hooked.get(),
+            auto,
+            quick(),
+            &|line| log.borrow_mut().push(line.to_string()),
+        )
+        .unwrap();
+        (outcome, log.into_inner())
     }
 
     #[test]
@@ -396,6 +492,37 @@ mod tests {
         let pane = FakeClaude::new("trust-no-selected", 3);
         assert_eq!(run_watch(&pane, true), Outcome::Accepted);
         assert_eq!(*pane.pressed.borrow(), ["Down", "Enter"]);
+    }
+
+    #[test]
+    fn a_redraw_seen_only_on_a_later_look_is_waited_for() {
+        let pane = FakeClaude::new("trust-no-selected", 20);
+        let (outcome, log) = run_logged(&pane, true);
+        assert_eq!(outcome, Outcome::Accepted);
+        assert_eq!(*pane.pressed.borrow(), ["Down", "Enter"]);
+        assert!(log.iter().any(|l| l.starts_with("accepting seen selected")));
+    }
+
+    #[test]
+    fn a_frame_caught_mid_redraw_is_looked_past() {
+        let pane = FakeClaude::new("trust-no-selected", 3);
+        *pane.between.borrow_mut() =
+            pane_fixture("trust-no-selected").replace("❯ No, exit", "  No, exit");
+        assert_eq!(run_watch(&pane, true), Outcome::Accepted);
+        assert_eq!(*pane.pressed.borrow(), ["Down", "Enter"]);
+    }
+
+    #[test]
+    fn a_redraw_that_never_comes_gets_no_enter_and_says_why() {
+        let pane = FakeClaude::new("trust-no-selected", 0);
+        pane.redraws.set(false);
+        let (outcome, log) = run_logged(&pane, true);
+        assert_eq!(outcome, Outcome::CouldNotAccept);
+        // One Down only: a second could wrap round to "No".
+        assert_eq!(*pane.pressed.borrow(), ["Down"]);
+        assert!(pane.alive.get());
+        assert!(log.iter().any(|l| l.contains("still not on accepting")));
+        assert!(log.iter().any(|l| l.contains("❯ No, exit")));
     }
 
     #[test]
@@ -428,7 +555,7 @@ mod tests {
     #[test]
     fn accepted_but_silent_is_reported() {
         let pane = FakeClaude::new("trust-yes-selected", 0);
-        let outcome = watch(&ClaudeCode, &pane, &|| false, true, quick()).unwrap();
+        let outcome = watch(&ClaudeCode, &pane, &|| false, true, quick(), &|_| {}).unwrap();
         assert_eq!(outcome, Outcome::AcceptedNoHook);
     }
 

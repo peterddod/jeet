@@ -2276,11 +2276,19 @@ case "$1" in
     esac ;;
   display-message) cat "$here/current" 2>/dev/null ;;
   show-options) echo C-b ;;
-  # A pane to look at, which Down and Enter change when the test says how.
-  capture-pane) cat "$here/pane" 2>/dev/null ;;
+  # A pane to look at, which Down and Enter change when the test says how:
+  # Down shows `pane-down`, after `down-lag` more captures if that is set.
+  capture-pane)
+    lag=$(cat "$here/lagging" 2>/dev/null || echo 0)
+    if [ "$lag" -gt 0 ]; then echo $((lag - 1)) > "$here/lagging"
+    elif [ -e "$here/pane-next" ]; then mv "$here/pane-next" "$here/pane"; fi
+    cat "$here/pane" 2>/dev/null ;;
   send-keys)
     case "$*" in
-      *" Down") if [ -e "$here/pane-down" ]; then cp "$here/pane-down" "$here/pane"; fi ;;
+      *" Down") if [ -e "$here/pane-down" ]; then
+          cp "$here/pane-down" "$here/pane-next"
+          if [ -e "$here/down-lag" ]; then cp "$here/down-lag" "$here/lagging"; fi
+        fi ;;
       *" Enter") if [ -e "$here/on-enter" ]; then sh "$here/on-enter"; fi ;;
     esac ;;
 esac
@@ -2825,6 +2833,70 @@ fn a_trust_prompt_is_accepted_only_with_auto_trust() {
         .collect();
     assert_eq!(keys, ["Down", "Enter"]);
     assert_eq!(status_file(&task, &session)["event"], "SessionStart");
+}
+
+/// A trust prompt slow to redraw after Down is looked at again until
+/// "Yes" shows selected; one that never redraws gets no Enter, and the log
+/// says why with what the pane showed.
+#[cfg(unix)]
+#[test]
+fn a_slow_trust_redraw_is_waited_for_but_never_guessed() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[harness]\nname = \"claude-code\"\nauto_trust = true\n",
+    )
+    .unwrap();
+    let task = lab.new_task("Fix login");
+    let id = task_id(&task);
+    let jeet = env!("CARGO_BIN_EXE_jeet");
+    let run = |redraw: Option<u32>| {
+        let scratch = TempDir::new().unwrap();
+        let tmux = stub_tmux(scratch.path());
+        let stub = tmux.parent().unwrap().to_path_buf();
+        let tmux_env = tmux.to_string_lossy().to_string();
+        let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+        succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+        let session = lab.sessions(&id).last().unwrap().0.clone();
+        let _ = std::fs::remove_dir_all(task.join(".jeet/status"));
+        std::fs::copy(pane_fixture("trust-no-selected"), stub.join("pane")).unwrap();
+        if let Some(lag) = redraw {
+            std::fs::copy(pane_fixture("trust-yes-selected"), stub.join("pane-down")).unwrap();
+            std::fs::write(stub.join("down-lag"), lag.to_string()).unwrap();
+        }
+        let hook = hook_input("SessionStart", &session, &task).replace('\'', "'\\''");
+        std::fs::write(
+            stub.join("on-enter"),
+            format!(
+                "printf '%s' '{hook}' | JEET_HOME='{}' '{jeet}' task-hook SessionStart\n",
+                lab.home().display()
+            ),
+        )
+        .unwrap();
+        let args = ["task-startup", id.as_str(), "--session", session.as_str()];
+        let output = lab.jeet_at(&args, &lab.home(), &env);
+        succeeded(&output);
+        let keys: Vec<String> = calls_of(&tmux, "send-keys")
+            .into_iter()
+            .map(|c| c.last().unwrap().clone())
+            .collect();
+        let log = String::from_utf8_lossy(&output.stderr).into_owned();
+        (keys, status_file(&task, &session), log)
+    };
+
+    // The first looks after Down still show "No": wait, then Enter.
+    let (keys, status, log) = run(Some(3));
+    assert_eq!(keys, ["Down", "Enter"], "{log}");
+    assert_eq!(status["event"], "SessionStart");
+    assert!(log.contains("Accepted"), "{log}");
+
+    // It never redraws: no second Down, no Enter, and the user is asked.
+    let (keys, status, log) = run(None);
+    assert_eq!(keys, ["Down"], "{log}");
+    assert_eq!(status["detail"], "trust folder");
+    assert!(log.contains("CouldNotAccept"), "{log}");
+    assert!(log.contains("still not on accepting"), "{log}");
+    assert!(log.contains("❯ No, exit"), "{log}");
 }
 
 /// `kill-session` returns at once, while the agent may still be finishing a
