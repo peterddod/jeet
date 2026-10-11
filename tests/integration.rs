@@ -7451,6 +7451,303 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn who_runs_jeet_is_the_pane_jeet_started_not_the_environment() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\"]\n",
+    )
+    .unwrap();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let y = lab.new_task_with("y", &["--parent", "assistant"]);
+    lab.new_task_with("top", &[]);
+    let x_dir = lab.home().join("tasks/x");
+
+    // Claiming a task with a parent from outside its pane.
+    let as_x = [("JEET_TASK_ID", x.as_str())];
+    let output = lab.jeet_at(&["worktree", "add", "widget"], &x_dir, &as_x);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("can't confirm this is task x's agent"),
+        "{stderr}"
+    );
+    assert!(!x_dir.join("widget").exists());
+
+    // Claiming another task from inside one's own pane: refused, and the
+    // claim logged.
+    let mut x_agent = lab.task_pane("x");
+    let before = actions(&lab.home()).len();
+    let output = x_agent.jeet(
+        &["worktree", "add", "widget"],
+        &x_dir,
+        &[("JEET_TASK_ID", &y)],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("claims to be another"), "{stderr}");
+    assert!(stderr.contains(&x) && stderr.contains(&y), "{stderr}");
+    let log = actions(&lab.home());
+    assert_eq!(log.len(), before + 1);
+    assert_eq!(log[before]["outcome"], "denied");
+    assert_eq!(log[before]["capability"], "worktree.add");
+    assert!(
+        log[before]["error"].as_str().unwrap().contains(&y),
+        "{log:?}"
+    );
+    assert!(!x_dir.join("widget").exists());
+    // As itself, it may.
+    succeeded(&x_agent.jeet(&["worktree", "add", "widget"], &x_dir, &[]));
+
+    // Claiming to be the assistant with no pane behind it.
+    let output = lab.jeet_at(
+        &["task", "new", "q"],
+        &lab.home(),
+        &[("JEET_ASSISTANT", "1")],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("can't confirm this is the assistant"),
+        "{stderr}"
+    );
+    assert!(!lab.home().join("tasks/q").exists());
+
+    // A top-level task's agent, with its environment or without, and the
+    // user, are not gated.
+    let mut top_agent = lab.task_pane("top");
+    succeeded(&top_agent.jeet(&["task", "new", "by-top"], &lab.home(), &[]));
+    succeeded(&top_agent.run(r#"env -u JEET_TASK_ID "$JEET" task new by-bare-top"#));
+    succeeded(&lab.jeet_at(&["task", "new", "by-user"], &lab.home(), &[]));
+    for name in ["by-top", "by-bare-top", "by-user"] {
+        let id = task_id(&lab.home().join("tasks").join(name));
+        assert_eq!(lab.parent_of(&id), None, "{name}");
+    }
+
+    // An agent jeet could not read the process of is never identified:
+    // the stub tmux names none here.
+    let z = lab.new_task_with("z", &["--parent", "assistant"]);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux = tmux.to_string_lossy().to_string();
+    let output = lab.jeet_at(&["task", "open", "z"], &lab.home(), &[("JEET_TMUX", &tmux)]);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("task z's agent cannot be identified"),
+        "{stderr}"
+    );
+    let output = lab.jeet_at(
+        &["report", "done", "x"],
+        &lab.home(),
+        &[("JEET_TASK_ID", &z)],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("can't confirm"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(lab.reports_of(&z).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_reports_up_only_from_its_own_tasks_pane() {
+    let lab = StoreLab::new();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    let x_dir = lab.home().join("tasks/x");
+    let sib_dir = lab.home().join("tasks/sib");
+    let background = [("JEET_BACKGROUND", "1")];
+    let status = |dir: &std::path::Path, session: &str| {
+        dir.join(".jeet/status").join(format!("{session}.json"))
+    };
+    let mut x_agent = lab.task_pane("x");
+
+    // Naming its sibling from its own pane: the sibling's status, but no
+    // report from either.
+    let first = "11111111-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", first, &sib_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&sib), "Notification", &waiting, &background));
+    assert!(status(&sib_dir, first).is_file());
+    assert!(lab.reports_of(&sib).is_empty());
+    assert!(lab.reports_of(&x).is_empty());
+
+    // Its own `--task`, from outside its pane: the same.
+    let second = "22222222-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", second, &x_dir);
+    let as_x = [("JEET_TASK_ID", x.as_str()), ("JEET_BACKGROUND", "1")];
+    hook_ok(&lab.hook("Notification", &waiting, &as_x));
+    assert!(status(&x_dir, second).is_file());
+    assert!(lab.reports_of(&x).is_empty());
+
+    // From its pane, as itself: told.
+    let third = "33333333-2222-4333-8444-555555555555";
+    let waiting = hook_input("Notification", third, &x_dir);
+    hook_ok(&x_agent.hook(&lab, Some(&x), "Notification", &waiting, &background));
+    let reports = lab.reports_of(&x);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].2.starts_with("waiting"), "{reports:?}");
+    assert!(lab.reports_of(&sib).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    // Well after `jeet review` has gone.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"sleep 1 && JEET_BACKGROUND=1 '{}' report progress 'from the job'\"\n\
+             notify = false\n",
+            env!("CARGO_BIN_EXE_jeet")
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &[("PATH", path.as_str())]));
+    let task = task_id(&lab.home().join("tasks/review-widget-7"));
+    let assistant = lab.assistant_id();
+    wait_until("the job's reports", || lab.reports_of(&task).len() >= 2);
+    let reports = lab.reports_of(&task);
+    assert_eq!(
+        reports[0],
+        ("progress".into(), assistant, "from the job".into()),
+        "{reports:?}"
+    );
+    assert!(reports[1].2.starts_with("ended"), "{reports:?}");
+
+    // Started by hand in a task's pane, it is refused as what only the
+    // root may do, even with the go-ahead and a state file jeet's own.
+    lab.new_task_with("x", &["--parent", "assistant"]);
+    let mut x_agent = lab.task_pane("x");
+    let state = lab.home().join("reviews/forged.json");
+    std::fs::write(&state, "{}").unwrap();
+    let output = x_agent.run(&format!(
+        r#"echo g | "$JEET" review-job {}"#,
+        sh_quote(&state.to_string_lossy())
+    ));
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("task x may not run review jobs"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_task_jeet_cannot_place_is_refused_but_can_be_cleaned_up() {
+    let lab = StoreLab::new();
+    let cloud = lab.new_task_with("c", &["--parent", "assistant"]);
+    let worker = lab.new_task_with("w", &["--parent", "assistant"]);
+    let db = lab.index();
+    db.execute(
+        "UPDATE tasks SET placement = 'cloud' WHERE id = ?1",
+        [&cloud],
+    )
+    .unwrap();
+    // Below a worker, as only a manager's child will be: local is no
+    // boundary.
+    db.execute(
+        "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
+         VALUES ('g', 'g', 'g', 'work', 'active', 0, 0, ?1)",
+        [&worker],
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+
+    for args in [
+        &["task", "open", "c"][..],
+        &["task", "send", "c", "hi"],
+        &["task", "interrupt", "c"],
+    ] {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("not built yet"), "{args:?}: {stderr}");
+    }
+    let output = lab.jeet_at(&["task", "open", "g"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("must run behind a boundary"), "{stderr}");
+    assert!(calls_of(&tmux, "new-session").is_empty());
+
+    // Whatever it runs on, its local state can always go.
+    succeeded(&lab.jeet_at(&["task", "archive", "c", "--force"], &lab.home(), &env));
+    succeeded(&lab.jeet_at(&["task", "delete", "c", "-f"], &lab.home(), &env));
+    assert!(!lab.home().join("tasks/c").exists());
+}
+
+/// A session already running under a task's name, which jeet did not
+/// start, is not taken for the task's agent.
+#[cfg(unix)]
+#[test]
+fn a_session_jeet_did_not_start_is_not_adopted() {
+    let lab = StoreLab::new();
+    lab.new_task("t");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    std::fs::write(tmux.parent().unwrap().join("alive"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let output = lab.jeet_at(
+        &["task", "open", "t"],
+        &lab.home(),
+        &[("JEET_TMUX", &tmux_env)],
+    );
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("started by an older jeet or outside jeet"),
+        "{stderr}"
+    );
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM task_anchors", [], |r| r
+            .get::<_, i64>(0))
+        .is_ok_and(|n| n == 0));
+}
+
+/// The escape design §5.7 leaves open locally, asserted so that closing it
+/// flips this test on purpose: a process the agent orphans, with its
+/// environment stripped, has no anchor above it, and runs as the user.
+/// Only a boundary closes it.
+#[cfg(unix)]
+#[test]
+fn an_orphan_with_its_environment_stripped_escapes_local_identity_5_7() {
+    let lab = StoreLab::new();
+    lab.new_task_with("x", &["--parent", "assistant"]);
+    let mut x_agent = lab.task_pane("x");
+    let scratch = TempDir::new().unwrap();
+    let out = sh_quote(&scratch.path().join("out").to_string_lossy());
+    let rc = scratch.path().join("rc");
+    let rc_quoted = sh_quote(&rc.to_string_lossy());
+    // Still the Node, from its pane.
+    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    assert!(!output.status.success());
+    succeeded(&x_agent.run(&format!(
+        r#"sh -c '(sleep 0.2; env -u JEET_TASK_ID "$JEET" notify escaped >{out} 2>&1; echo $? >{rc_quoted}.tmp; mv {rc_quoted}.tmp {rc_quoted}) & exit'"#,
+        out = out.replace('\'', r"'\''"),
+        rc_quoted = rc_quoted.replace('\'', r"'\''"),
+    )));
+    wait_until("the orphan", || rc.exists());
+    assert_eq!(std::fs::read_to_string(&rc).unwrap().trim(), "0");
+}
+
+#[cfg(unix)]
 #[test]
 fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     let lab = StoreLab::new();
