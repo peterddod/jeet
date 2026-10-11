@@ -963,9 +963,12 @@ RFC left open, or departed from it:
   turn's end: a refusal, the safe direction). Known gap: a permission prompt
   reads as `Running` until Claude's notification, which it sends only
   once the user has left the prompt alone for some seconds, so an
-  attached user typing feedback into one may still have it discarded. No retry, no confirmation and no status
-  repair yet (the status reads `running` until the next hook, as after a
-  manual Esc); those come with pause. The assistant is refused (5.4).
+  attached user typing feedback into one may still have it discarded. No retry and no confirmation. Since
+  2-ii an interrupt that sent its keys charges the spell so far
+  (`run::charge_interrupted`, reporting `blocked: budget` if that uses the
+  budget up) and writes an idle status (`Interrupted`, or `Paused` for a
+  pause), as no Stop hook follows; a manual Esc still reads `running`
+  until the next hook. The assistant is refused (5.4).
   The draft check and the keys aim at the agent's own pane, by the id
   (`%3`) jeet notes in the session option `@jeet-agent-pane` when it
   starts the session, not the session's active pane, which may be a pane
@@ -1302,7 +1305,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   its brief on its command line, or typed a message: `TmuxAgent::type_in`
   touches `.jeet/typed` first) that no hook has reported on since
   (`status::input_unreported`; a status in the same second does not
-  count, and a startup-prompt status ends the wait) is about to start a
+  count, nor does a session start's, written before the prompt on its
+  command line is submitted however late it boots, and a startup-prompt
+  status ends the wait) is about to start a
   turn its status does not show: while the interrupt finds it starting,
   idle or at startup, it is tried again every 250 ms, with the inbox lock
   let go in between, until a hook reports or the window passes.
@@ -1323,7 +1328,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a held message queued the start of whose agent is not running. A
   report to a node that is not running (`may_start` off) queues no start,
   held or not, so a resume never starts a node for reports alone. A stop ends every node's
-  session in the subtree, live or not, and forgets its pane. `max_live` counts the
+  session in the subtree, live or not, and forgets its pane, through an
+  end function and own-session check passed in as for a pause
+  (`run::stop_with`; production: `run::end_agent`). It also ends the
+  review jobs running as the node or in its directory, as an archive does
+  (a review task's agent is its review command, with no session to end or
+  interrupt), and `jeet review` refuses to start a held review task's job. `max_live` counts the
   active tasks below the assistant whose `jeet-<slug>` session one `tmux
   list-sessions` lists and whose pane is alive; a session the user's
   `remain-on-exit` keeps after its agent exits does not count. The start gate is a
@@ -1409,7 +1419,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   has not reported yet (a status older than `.jeet/launched`). Archiving
   or deleting a task in the tree charges its live agent's spell so far
   before its session ends, as a stop does, since no hook or sweep charges
-  it after. A sweep, and a pause's interrupt, that use a budget up report `blocked: budget` themselves; a stop's does not, as a stopped node's end is not reported. A status report is debounced against the last one of the same event (its word), so a `budget` or `queued` report between two sweeps of one idle spell does not make it news again. Deleting a task adds what it used to its parent's use, in the same transaction, so its spend still counts toward every budget above it. An
+  it after. A sweep, and a pause's or `task interrupt`'s interrupt, that use a budget up report `blocked: budget` themselves; a stop's does not, as a stopped node's end is not reported. A status report is debounced against the last one of the same event (its word), so a `budget` or `queued` report between two sweeps of one idle spell does not make it news again. Deleting a task adds what it used to its parent's use, in the same transaction, so its spend still counts toward every budget above it. An
   `Ended` that no new session replaces starts a detached `jeet manager
   drain` (output to `drain.log` in jeet's home) when a start waits on
   `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
@@ -1420,8 +1430,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a limit the task has (`+` on a unit with no limit is refused: there is
   no cap to raise) or sets one, keeping the unit not given; the result
   must fit what is left above the task and, for a node, what it has left
-  itself, and the 80%/100% reports start over. It leaves the run state
-  alone: a task its budget paused runs again only once resumed, and the
+  itself, and the 80%/100% reports start over, then the budgets are
+  checked at once (`budget::enforce`), so a limit set at or below what
+  the task has used pauses it now, not after a turn past it. Otherwise it
+  leaves the run state alone: a task its budget paused runs again only once resumed, and the
   command says so. There is no `BRIEF.md` to rewrite yet (2-iii). `jeet
   manager pause`, `resume` and `stop` (`manager.stop`) print one line per
   node the walk touched. `stop --all` is the user's alone, refused before

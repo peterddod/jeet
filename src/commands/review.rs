@@ -3,11 +3,12 @@
 
 use std::io::{self, IsTerminal};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::cd;
 use crate::context::App;
 use crate::github;
+use crate::manager::run;
 use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::resolve::repo_from_filter_or_cwd;
@@ -100,6 +101,15 @@ fn start_review(
     let Some(template) = config.command() else {
         return Ok(());
     };
+    // Run as a task, the job is its agent: a paused or stopped task, or
+    // one under a held node, is not started again until resumed.
+    if let Some(id) = as_task {
+        if let Some(task) = app.db.get_task(id)? {
+            if let Some((holder, _)) = run::hold(app, &task)? {
+                bail!("not reviewing: {}", run::held_refusal(&task, &holder));
+            }
+        }
+    }
     let existing = review::load(app, repo, pr.number);
     if let Some(job) = &existing {
         if rerun && job.state() == review::JobState::Running {

@@ -88,7 +88,7 @@ pub struct SessionStatus {
 pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
     let session_id = event.session_id.clone()?;
     let (state, detail) = match event.kind.clone()? {
-        EventKind::SessionStarted(_) => (State::Idle, None),
+        EventKind::SessionStarted(_) => (State::Idle, Some(STARTED_DETAIL.to_string())),
         EventKind::Working(detail) => (State::Running, detail),
         EventKind::Idle => (State::Idle, None),
         EventKind::NeedsInput(detail) => (State::Waiting, detail),
@@ -104,6 +104,10 @@ pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
         busy_since: None,
     })
 }
+
+/// The detail of the status a session start leaves: written before the
+/// first prompt is submitted, so it says nothing of the input it was given.
+pub const STARTED_DETAIL: &str = "session started";
 
 /// The first non-blank line of `text`, cut to `max` characters.
 pub fn first_line(text: &str, max: usize) -> Option<String> {
@@ -185,9 +189,14 @@ pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
     if now - given >= STARTING_SECS {
         return false;
     }
-    // In whole seconds: a status from the second it was given may be the
-    // one before it (SessionStart's), so only a later one has seen it.
-    current_status(task_dir).is_none_or(|s| s.event != STARTUP_PROMPT_EVENT && s.at <= given)
+    // A session start's status comes before the prompt it was launched
+    // with is submitted, however much later; and in whole seconds, any
+    // status from the second it was given may be from before it, so only a
+    // later one of another kind has seen it.
+    current_status(task_dir).is_none_or(|s| {
+        s.event != STARTUP_PROMPT_EVENT
+            && (s.at <= given || s.detail.as_deref() == Some(STARTED_DETAIL))
+    })
 }
 
 /// The event of a status [`mark_startup_prompt`] wrote.
@@ -217,10 +226,18 @@ pub fn mark_startup_prompt(
 /// The event of the status a pause leaves an interrupted session in.
 pub const PAUSED_EVENT: &str = "Paused";
 
-/// Mark the task's latest session idle, its turn ended by a pause: an
-/// interrupted turn ends with no Stop hook to say so. Nothing for a task
-/// with no status.
+/// The event of the status `jeet task interrupt` leaves a session in.
+pub const INTERRUPTED_EVENT: &str = "Interrupted";
+
+/// Mark the task's latest session idle, its turn ended by a pause.
 pub fn mark_paused(task_dir: &Path, now: i64) -> Result<()> {
+    mark_interrupted(task_dir, PAUSED_EVENT, "paused", now)
+}
+
+/// Mark the task's latest session idle, as `event` with `detail`: a turn
+/// jeet interrupted ends with no Stop hook to say so, and its busy spell is
+/// closed here. Nothing for a task with no status.
+pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) -> Result<()> {
     let Some(current) = current_status(task_dir) else {
         return Ok(());
     };
@@ -229,8 +246,8 @@ pub fn mark_paused(task_dir: &Path, now: i64) -> Result<()> {
         &SessionStatus {
             session_id: current.session_id,
             state: State::Idle,
-            detail: Some("paused".to_string()),
-            event: PAUSED_EVENT.to_string(),
+            detail: Some(detail.to_string()),
+            event: event.to_string(),
             at: now,
             busy_since: None,
         },
@@ -1456,8 +1473,19 @@ mod tests {
         // its prompt was submitted.
         write_status(dir, &status(State::Idle, "SessionStart", now)).unwrap();
         assert!(input_unreported(dir, now));
+        // Its SessionStart seconds on, as an agent slow to boot writes it,
+        // is still from before its prompt was submitted.
+        let started = SessionStatus {
+            detail: Some(STARTED_DETAIL.into()),
+            ..status(State::Idle, "SessionStart", now + 2)
+        };
+        write_status(dir, &started).unwrap();
+        assert!(input_unreported(dir, now + 2));
         // Its prompt submitted, seconds on.
         write_status(dir, &status(State::Running, "UserPromptSubmit", now + 3)).unwrap();
+        assert!(!input_unreported(dir, now + 3));
+        // Or its turn ended before a poll saw it running.
+        write_status(dir, &status(State::Idle, "Stop", now + 3)).unwrap();
         assert!(!input_unreported(dir, now + 3));
         // Typed a message since its last hook: not reported on until the
         // next.

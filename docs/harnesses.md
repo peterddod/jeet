@@ -100,7 +100,11 @@ these reports are): a turn for each `Stopped`, and the time from the first
 `Working` or `NeedsInput` of a busy spell to the `Stopped`, `Ended` or
 `Idle` that closes it (the status file keeps when the spell began, and
 `jeet watch` charges a long one as it goes, while its agent's pane is
-alive: an agent that died with no `Ended` is charged no more). A harness
+alive: an agent that died with no `Ended` is charged no more). A turn jeet
+ends with `interrupt_keys` (`jeet task interrupt`, `jeet manager pause`) is
+charged, and its status set idle, by jeet itself; one the user interrupts
+stays charged until the harness's `Idle` or next `Stopped`, so a harness
+that maps no `Idle` charges it until its next turn ends. A harness
 with no `Stopped` event is charged no turns. A task that is paused
 or stopped, or that its turn's charge used its budget up, is handed nothing
 at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays

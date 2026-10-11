@@ -18,6 +18,7 @@ use crate::messages::{self, Agent, Inbox, Route, TmuxAgent};
 use crate::permissions::Caller;
 use crate::placement::{self, NodeRuntime};
 use crate::reports::{self, StatusEvent};
+use crate::review;
 use crate::runtime::{self, Interrupted};
 use crate::status::{self, Activity};
 use crate::tasks;
@@ -34,6 +35,9 @@ pub type RuntimeFor<'a> = &'a dyn Fn(&TaskRecord) -> Result<&'a dyn NodeRuntime>
 /// Whether this jeet runs in a node's own session, which it may not
 /// interrupt or end: [`runtime::is_own_session`], or a stand-in in tests.
 pub type OwnSession<'a> = &'a dyn Fn(&TaskRecord) -> bool;
+
+/// End a node's agent for a stop: [`end_agent`], or a stand-in in tests.
+pub type EndAgent<'a> = &'a dyn Fn(&App, &TaskRecord) -> Result<String>;
 
 /// What a walk did to one node, or why it left it alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,13 +181,7 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     };
     match interrupted {
         Ok(Interrupted::Sent) => {
-            // The turn ends with no Stop hook to charge it, or to report
-            // a charge that uses its budget up: that is told here.
-            match status::fold_busy(app, node, true, now_secs()) {
-                Ok(Threshold::Hit100) => budget::report_blocked(app, node),
-                Ok(_) => {}
-                Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug),
-            }
+            charge_interrupted(app, node);
             match status::mark_paused(&tasks::task_dir(app, node), now_secs()) {
                 Ok(()) => "interrupted".to_string(),
                 Err(e) => format!("interrupted, but not marked paused: {e:#}"),
@@ -200,6 +198,17 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
         }
         Ok(Interrupted::AtStartup) => "not interrupted: it is at a startup prompt".to_string(),
         Err(e) => format!("not interrupted: {e:#}"),
+    }
+}
+
+/// Charge `node` the turn jeet just interrupted: it ends with no Stop hook
+/// to charge it, or to report a charge that uses its budget up, so that is
+/// done and told here. Its status is the caller's to close.
+pub fn charge_interrupted(app: &App, node: &TaskRecord) {
+    match status::fold_busy(app, node, true, now_secs()) {
+        Ok(Threshold::Hit100) => budget::report_blocked(app, node),
+        Ok(_) => {}
+        Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug),
     }
 }
 
@@ -315,12 +324,25 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
     Ok(outcomes)
 }
 
+/// Stop `target` for `by`, or with `None` every active child of the
+/// assistant: [`stop_with`] the agents' own ends.
+pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<NodeOutcome>> {
+    stop_with(app, by, target, &end_agent, &runtime::is_own_session)
+}
+
 /// Stop `target` for `by`, or with `None` (`--all`, the user's alone) every
 /// active child of the assistant as the user (M18): write each row, then end
-/// the agent of every node below, leaves first, and forget its pane. A
-/// stopped node is never started again until resumed. Then start what
-/// waits on `max_live`.
-pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<NodeOutcome>> {
+/// the agent of every node below, leaves first, through `end`, and forget
+/// its pane. The assistant and the node whose session this jeet runs in are
+/// skipped. A stopped node is never started again until resumed. Then
+/// start what waits on `max_live`.
+pub fn stop_with(
+    app: &App,
+    by: &Caller,
+    target: Option<&TaskRecord>,
+    end: EndAgent,
+    own: OwnSession,
+) -> Result<Vec<NodeOutcome>> {
     let (targets, setter) = match target {
         Some(target) => (vec![target.clone()], setter_of(by)),
         None => {
@@ -348,7 +370,7 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
     let mut outcomes = Vec::new();
     for target in &targets {
         for node in subtree_leaves_first(app, target)? {
-            let line = end_line(app, &node, live.contains(&node.id));
+            let line = end_line(app, &node, live.contains(&node.id), end, own);
             outcomes.push(NodeOutcome::new(&node, line));
         }
     }
@@ -366,12 +388,12 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
 }
 
 /// End `node`'s agent for a stop, whether or not it was seen `live`,
-/// saying what came of it.
-fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
+/// through `end`, saying what came of it.
+fn end_line(app: &App, node: &TaskRecord, live: bool, end: EndAgent, own: OwnSession) -> String {
     if node.kind == TaskKind::Assistant {
         return "the assistant; not stopped".to_string();
     }
-    if runtime::is_own_session(node) {
+    if own(node) {
         return "this jeet runs in its session; stop it from outside".to_string();
     }
     // Before its session ends, whether or not its `Ended` hook gets to; a
@@ -380,16 +402,36 @@ fn end_line(app: &App, node: &TaskRecord, live: bool) -> String {
     if let Err(e) = status::fold_busy(app, node, live, now_secs()) {
         eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
     }
-    if let Err(e) = runtime::stop(node) {
-        return format!("could not end its agent: {e:#}");
-    }
+    let ended = match end(app, node) {
+        Ok(ended) => ended,
+        Err(e) => return format!("could not end its agent: {e:#}"),
+    };
     if let Err(e) = app.db.delete_task_anchors(&node.id, AnchorKind::Pane) {
         return format!("ended its agent, but could not forget its pane: {e:#}");
     }
-    match live {
-        true => "stopped its agent".to_string(),
-        false => "not running".to_string(),
+    match (live, ended.is_empty()) {
+        (true, true) => "stopped its agent".to_string(),
+        (true, false) => format!("stopped its agent; {ended}"),
+        (false, true) => "not running".to_string(),
+        (false, false) => ended,
     }
+}
+
+/// End `node`'s agent for a stop: its tmux session, and the review jobs
+/// that run as it or in its directory (a review task's agent is its
+/// review command, with no session), as an archive would. Says which
+/// review jobs it ended, if any. Refused when this jeet runs under one.
+pub fn end_agent(app: &App, node: &TaskRecord) -> Result<String> {
+    let dir = tasks::task_dir(app, node);
+    review::refuse_inside_job(app, &node.id, &dir, "stop")?;
+    runtime::stop(node)?;
+    let jobs = review::stop_jobs(&app.db, &node.id).context("end the task's review job")?
+        + review::stop_jobs_in(app, &dir).context("end the task's review job")?;
+    Ok(match jobs {
+        0 => String::new(),
+        1 => "stopped its review job".to_string(),
+        n => format!("stopped its {n} review jobs"),
+    })
 }
 
 /// The active tasks in the tree, below the assistant, whose agent's pane
@@ -965,6 +1007,81 @@ mod tests {
             assert!(err.to_string().contains("only the user"), "{err}");
         }
         assert_eq!(get(&app, "m").run_state, RunState::Run);
+    }
+
+    #[test]
+    fn a_stop_ends_leaves_first_and_skips_the_assistant_and_its_own_session() {
+        let (_dir, app) = lab();
+        // Whom it ends, with the run state each had then.
+        let ended: RefCell<Vec<(String, RunState)>> = RefCell::new(Vec::new());
+        let end = |app: &App, t: &TaskRecord| -> Result<String> {
+            let (state, _) = app.db.effective_run_state(&t.id).unwrap();
+            ended.borrow_mut().push((t.slug.clone(), state));
+            match t.slug.as_str() {
+                "m2" => bail!("no session here"),
+                _ => Ok(String::new()),
+            }
+        };
+        let own = |t: &TaskRecord| t.slug == "w1";
+        let m = get(&app, "m");
+        let outcomes = stop_with(&app, &Caller::Root, Some(&m), &end, &own).unwrap();
+        // Each was held already when it was ended; w1 runs this jeet.
+        let stopped = |s: &str| (s.to_string(), RunState::Stopped);
+        assert_eq!(
+            *ended.borrow(),
+            [stopped("w2"), stopped("m2"), stopped("m")]
+        );
+        let lines: Vec<(&str, &str)> = outcomes
+            .iter()
+            .map(|o| (o.slug.as_str(), o.line.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("w2", "not running"),
+                ("m2", "could not end its agent: no session here"),
+                ("w1", "this jeet runs in its session; stop it from outside"),
+                ("m", "not running"),
+            ]
+        );
+        let m = get(&app, "m");
+        assert_eq!(
+            (m.run_state, m.run_state_by),
+            (RunState::Stopped, Some(Setter::Root))
+        );
+
+        // A walk that reaches the assistant leaves it alone.
+        let root = super::super::root(&app).unwrap();
+        let outcomes = stop_with(&app, &Caller::User, Some(&root), &end, &nobody).unwrap();
+        assert_eq!(outcomes.last().unwrap().line, "the assistant; not stopped");
+        assert!(ended.borrow().iter().all(|(slug, _)| *slug != root.slug));
+    }
+
+    /// A review task's agent is its review command, which has no session:
+    /// a stop ends it, and says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_ends_a_review_tasks_job() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let (_dir, app) = lab();
+        let root = super::super::root(&app).unwrap();
+        app.db
+            .insert_task(&task("r", TaskKind::Review, &root.id))
+            .unwrap();
+        let mut job = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        crate::identity::record(&app.db, "r", AnchorKind::Job, None, job.id()).unwrap();
+        let outcomes = stop(&app, &Caller::User, Some(&get(&app, "r"))).unwrap();
+        assert_eq!(outcomes[0].line, "stopped its review job", "{outcomes:?}");
+        // Ended, not left to run on.
+        assert!(job.try_wait().unwrap().is_some());
+        assert_eq!(get(&app, "r").run_state, RunState::Stopped);
     }
 
     /// Run `f` on the index at `home` in a thread of its own, failing

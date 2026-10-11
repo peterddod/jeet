@@ -752,7 +752,11 @@ mod tests {
     #[test]
     fn each_event_leaves_the_session_in_its_state() {
         let cases: [(&str, State, Option<&str>); 7] = [
-            ("SessionStart", State::Idle, None),
+            (
+                "SessionStart",
+                State::Idle,
+                Some(crate::status::STARTED_DETAIL),
+            ),
             (
                 "UserPromptSubmit",
                 State::Running,

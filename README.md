@@ -630,9 +630,10 @@ its session (you may be typing an answer into it; once a question or plan is
 answered, this lasts until the agent's next tool call or the end of its turn,
 as Claude reports no answer) is left alone, since Esc there
 would clear your text, rewind the conversation or exit the agent, and the
-command says why nothing was sent. The task's status may read `running`
-for about a minute afterwards, until Claude reports it sits idle, as after a
-manual Esc. The assistant is yours to interrupt in its own window, and a
+command says why nothing was sent. Once the key is pressed the task's
+status reads idle (`Interrupted`), and the turn's time so far is charged to
+its budget then; a turn you end with Esc yourself may read `running`, and be
+charged, for about a minute, until Claude reports it sits idle. The assistant is yours to interrupt in its own window, and a
 harness that cannot be interrupted is refused. Under the assistant it needs
 `task.send` (which pre-approves it, as it does `jeet task send`), and an
 interrupt that sent nothing is logged as `skipped`, with why, and not
@@ -687,7 +688,8 @@ state and children, and `jeet manager grant <task> <caps>|--none` replaces
 its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 `jeet manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
 sets one (`manager.grant`), within what is left above it; the 80% and 100%
-reports start over.
+reports start over, and a limit set at or below what the task has used
+pauses it at once.
 
 ```bash
 jeet manager pause fix-x       # interrupt its turn, and every task's below it
@@ -704,7 +706,10 @@ Pause interrupts the turn of each of their agents that is working (one
 Escape, never over what you typed), and says, task by task, what it did; an
 agent started or typed a message in the last few seconds, whose turn has
 not begun yet, is waited for and then interrupted. Stop ends their
-tmux sessions, and their ending is not reported. Resume is refused while a
+tmux sessions, and any review job running for them or in their worktrees
+(a review task's agent is its review command, which pause cannot
+interrupt), and their ending is not reported; `jeet review` does not
+start a held review task's job again. Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once

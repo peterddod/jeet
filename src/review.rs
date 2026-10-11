@@ -387,31 +387,33 @@ pub fn refuse_inside_job(app: &App, task_id: &str, dir: &Path, verb: &str) -> Re
 /// End the review jobs running for task `task_id`: each runner jeet
 /// recorded for it, while it is still that process, with its process group
 /// ([`launch`] gives it one), so the command it runs goes too. Returns
-/// once they have exited.
-pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
+/// once they have exited, with how many were still running.
+pub fn stop_jobs(db: &Database, task_id: &str) -> Result<usize> {
+    let mut ended = 0;
     for anchor in task_jobs(db, task_id)? {
-        end_group(&anchor)?;
+        ended += usize::from(end_group(&anchor)?);
     }
-    Ok(())
+    Ok(ended)
 }
 
 /// End the review jobs still running in a worktree under `dir` (see
 /// [`jobs_in`]) as [`stop_jobs`] does; their records go with them.
-pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
+pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<usize> {
+    let mut ended = 0;
     for anchor in jobs_in(app, dir)? {
-        end_group(&anchor)?;
+        ended += usize::from(end_group(&anchor)?);
         app.db.delete_anchor(anchor.pid, anchor.start)?;
     }
-    Ok(())
+    Ok(ended)
 }
 
 /// End `anchor`'s process group, while it is still that process, and
 /// return once the runner and what it started have exited: what they write
 /// after this would miss an archive's snapshot. Whatever has not exited
-/// within [`tmux::EXIT_GRACE`] is killed outright.
-fn end_group(anchor: &Anchor) -> Result<()> {
+/// within [`tmux::EXIT_GRACE`] is killed outright. Whether it was running.
+fn end_group(anchor: &Anchor) -> Result<bool> {
     if anchor.pid <= 1 || !identity::live(anchor) {
-        return Ok(());
+        return Ok(false);
     }
     // Taken before the signal: once the runner is gone, its children are
     // no longer known as its.
@@ -421,7 +423,8 @@ fn end_group(anchor: &Anchor) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    tmux::end_processes(&tree, tmux::EXIT_GRACE).context("end the review command")
+    tmux::end_processes(&tree, tmux::EXIT_GRACE).context("end the review command")?;
+    Ok(true)
 }
 
 /// What [`launch`] writes to the runner once it is recorded.

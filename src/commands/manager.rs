@@ -504,8 +504,10 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
 /// Change what task `name` may spend (M19): `+` raises a limit it has,
 /// `=` sets one, a unit not given is kept. Within what is left above it
 /// and, for a task with a parent changing it, what it has left itself.
-/// The thresholds are told again from scratch. Its run state is left as it
-/// is: a task its budget paused runs again only once resumed.
+/// The thresholds are told again from scratch, and checked at once: a limit
+/// set at or below what it has used pauses it now, not after its next turn.
+/// Otherwise its run state is left as it is: a task its budget paused runs
+/// again only once resumed.
 pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
     let (caller, task) = scoped(app, name, Verb::ManagerBudget)?;
     let row = app.db.budget(&task.id)?;
@@ -529,6 +531,12 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
             "jeet: it is a review job, which runs no hooks, so nothing is counted against it"
         );
     }
+    // No hook charges an idle task, so nothing else would check it before
+    // it ran a turn past the new limit.
+    if matches!(budget::enforce(app, &task)?, budget::Threshold::Hit100) {
+        budget::report_blocked(app, &task);
+    }
+    let task = app.db.get_task(&task.id)?.unwrap_or(task);
     if task.run_state_by == Some(Setter::Budget) {
         eprintln!(
             "jeet: its budget paused it; `jeet manager resume {}` lets it run again",

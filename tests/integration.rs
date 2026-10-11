@@ -2687,7 +2687,7 @@ fn task_hook_writes_the_status_each_event_leaves() {
     std::fs::create_dir_all(&cwd).unwrap();
 
     let cases: [(&str, &str, Option<&str>); 8] = [
-        ("SessionStart", "idle", None),
+        ("SessionStart", "idle", Some("session started")),
         (
             "UserPromptSubmit",
             "running",
@@ -8795,6 +8795,51 @@ fn archiving_a_review_task_ends_its_job() {
     assert!(!ran.exists(), "the job outlived its task's archive");
 }
 
+/// Stopping a review task ends its job, its agent, and the assistant's
+/// `jeet review` does not start another until it is resumed.
+#[cfg(unix)]
+#[test]
+fn stopping_a_review_task_ends_its_job_until_resumed() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let started = lab.home().join("started");
+    let ran = lab.home().join("ran");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
+             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&ran.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    let env = [("PATH", path.as_str())];
+    succeeded(&root.jeet(&["review", "7"], &trunk, &env));
+    wait_until("the job to start", || started.exists());
+    let output = lab.jeet_at(&["manager", "stop", "review-widget-7"], &lab.home(), &[]);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(said.contains("stopped its review job"), "{said}");
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!ran.exists(), "the job outlived its task's stop");
+
+    std::fs::remove_file(&started).unwrap();
+    let output = root.jeet(&["review", "7", "--rerun"], &trunk, &env);
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(said.contains("not reviewing"), "{said}");
+    assert!(
+        said.contains("`jeet manager resume review-widget-7` first"),
+        "{said}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!started.exists(), "a stopped review task's job started");
+}
+
 /// The assistant reviewing a PR whose review task the user made, top
 /// level: the task is not moved, and the runner is the assistant's, so it
 /// runs once `jeet review` has gone.
@@ -9518,6 +9563,19 @@ fn interrupt_presses_escape_once_and_only_while_working() {
         "{captures:?}"
     );
     std::fs::remove_file(stub.join("client")).unwrap();
+    // No Stop hook follows an Escape: jeet itself says the turn is over.
+    let status = status_file(&task, &session);
+    assert_eq!(status["state"], "idle", "{status}");
+    assert_eq!(status["event"], "Interrupted", "{status}");
+    assert!(status.get("busy_since").is_none(), "{status}");
+    let said = interrupt();
+    assert!(said.contains("is not working (idle"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
 
     // Running with text the user has not sent: left alone.
     std::fs::copy(pane_fixture("input-draft"), stub.join("pane")).unwrap();
@@ -9815,6 +9873,8 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     // ending hands it nothing.
     let said = jeet(&["task", "send", "w", "carry on"]);
     assert!(said.contains("paused or stopped"), "{said}");
+    // Its start is queued too, in case its agent ends while held.
+    assert_eq!(lab.start_queue(), [w.as_str()]);
     hook_ok(&w_hook("Stop"));
     assert!(pasted(&tmux).is_empty());
     let inbox = w_dir.join(".jeet/inbox.jsonl");
@@ -9830,6 +9890,10 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(typed[0].1.contains("carry on"), "{typed:?}");
     assert!(!inbox.exists());
+    // Its agent still runs: the start queued while held is let go, and
+    // nothing is started.
+    assert!(lab.start_queue().is_empty());
+    assert_eq!(calls_of(&tmux, "new-session").len(), sessions);
 
     // Stopped: the row is written before its session ends, its agent is
     // hung up on, and nothing starts it until it is resumed.
@@ -10049,6 +10113,52 @@ fn a_worker_that_uses_its_turns_up_is_paused_and_blocked_on_budget() {
     assert_eq!(lab.run_state_of(&w).0, "paused");
     succeeded(&lab.jeet_at(&["manager", "resume", "w"], &lab.home(), &env));
     assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    // Lowered to what it has used while it sits idle: no turn of its own
+    // is coming to check, so the change pauses it at once.
+    let output = lab.jeet_at(&["manager", "budget", "w", "=5turns"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("its budget paused it"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        lab.run_state_of(&w),
+        ("paused".into(), Some("budget".into()))
+    );
+    let reports = budget_reports();
+    assert_eq!(reports.len(), 3, "{reports:?}");
+    assert!(reports[2].contains("blocked: budget"), "{reports:?}");
+}
+
+/// A budget is never set past what is left above the task: the change is
+/// refused and the limit it had stays.
+#[cfg(unix)]
+#[test]
+fn a_budget_past_what_is_left_above_is_refused() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    lab.index()
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    succeeded(&lab.jeet_at(&["manager", "budget", "m", "=1h"], &lab.home(), &env));
+    let kid = lab.new_task_with("kid", &["--parent", "m"]);
+    succeeded(&lab.jeet_at(&["manager", "budget", "kid", "=30m"], &lab.home(), &env));
+
+    let output = lab.jeet_at(&["manager", "budget", "kid", "=9h"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(said.contains("is more than"), "{said}");
+    assert!(said.contains("at most 1h"), "{said}");
+    assert_eq!(lab.budget_of(&kid), Some((Some(1800), None)));
+    let output = lab.jeet_at(&["manager", "budget", "kid", "+31m"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert_eq!(lab.budget_of(&kid), Some((Some(1800), None)));
 }
 
 /// Over `[managers] max_live` a start waits: the parent is told, and the
@@ -10258,9 +10368,10 @@ fn a_hookless_worker_is_typed_what_waited_once_resumed() {
         succeeded(&output);
         stderr_of(&output)
     };
-    lab.new_task_with("w", &["--parent", "assistant"]);
+    let w = lab.new_task_with("w", &["--parent", "assistant"]);
     jeet(&["task", "open", "w"]);
     assert!(stub.join("alive/jeet-w").exists());
+    let sessions = calls_of(&tmux, "new-session").len();
 
     // It cannot be interrupted, so its turn runs on; a message waits.
     let said = jeet(&["manager", "pause", "w"]);
@@ -10268,6 +10379,7 @@ fn a_hookless_worker_is_typed_what_waited_once_resumed() {
     let said = jeet(&["task", "send", "w", "carry on"]);
     assert!(said.contains("paused or stopped"), "{said}");
     assert!(pasted(&tmux).is_empty());
+    assert_eq!(lab.start_queue(), [w.as_str()]);
 
     let said = jeet(&["manager", "resume", "w"]);
     assert!(said.contains("handed what queued while held"), "{said}");
@@ -10275,6 +10387,9 @@ fn a_hookless_worker_is_typed_what_waited_once_resumed() {
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(typed[0].1.contains("carry on"), "{typed:?}");
     assert!(!lab.home().join("tasks/w/.jeet/inbox.jsonl").exists());
+    // Still running: its queued start is let go, not made.
+    assert!(lab.start_queue().is_empty());
+    assert_eq!(calls_of(&tmux, "new-session").len(), sessions);
 }
 
 /// A child made with a brief under a paused manager is made, not started:

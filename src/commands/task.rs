@@ -20,6 +20,7 @@ use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Admission, Interrupted, Started};
+use crate::status;
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -236,6 +237,14 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
     let why = match runtime::interrupt(app, &task)? {
         Interrupted::Sent => {
             eprintln!("jeet: interrupted task {}'s turn", task.name);
+            // Its busy spell is closed now, not left charged until the
+            // harness says it sits idle.
+            run::charge_interrupted(app, &task);
+            let dir = tasks::task_dir(app, &task);
+            let event = status::INTERRUPTED_EVENT;
+            if let Err(e) = status::mark_interrupted(&dir, event, "interrupted", now_secs()) {
+                eprintln!("jeet: could not mark task {} idle: {e:#}", task.name);
+            }
             return Ok(());
         }
         Interrupted::NotWorking(activity) => {
