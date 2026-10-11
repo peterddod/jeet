@@ -25,7 +25,7 @@ jeet does without that feature:
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (#33 adds `Sandbox`) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported (never at a startup prompt) | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text. A harness with these keys needs `hook_args` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary) | the assistant starts without its summary |
@@ -104,11 +104,14 @@ The list is:
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`,
   and pushes naming a default branch: `main`, `master` and the default
   branch of every repo jeet has indexed, as a destination (`git push *
-  main`, `refs/heads/main`, `*:main`, `*:refs/heads/main`);
+  main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
+  `heads/main` with or without a source);
 - merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
   (`pulls/*/merge`, and `repos/*/merges`, which merges branches) through
-  `gh api` or `curl`, and the GraphQL `mergePullRequest` and
-  `enablePullRequestAutoMerge` mutations;
+  `gh api` or `curl`, and the GraphQL `mergePullRequest`,
+  `enablePullRequestAutoMerge`, `mergeBranch` and `enqueuePullRequest`
+  mutations (any `gh api` command naming one, flags before `graphql`
+  included);
 - for a parented task only, the commands of each capability it does not
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are

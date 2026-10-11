@@ -310,7 +310,11 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if !interruptible(&activity) {
         return Ok(Interrupted::NotWorking(activity));
     }
-    if at_startup(status::current_status(&tasks::task_dir(app, task)).as_ref()) {
+    let dir = tasks::task_dir(app, task);
+    if at_startup(
+        status::current_status(&dir).as_ref(),
+        status::launched_at(&dir),
+    ) {
         return Ok(Interrupted::AtStartup);
     }
     if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
@@ -329,12 +333,16 @@ fn interruptible(activity: &Activity) -> bool {
     )
 }
 
-/// Whether the agent whose latest status is `current` may be at a startup
-/// prompt rather than in a turn: no hook has reported yet (a live agent
-/// with no status shows as Waiting once it has been starting a while), or
-/// the startup watcher marked it at one.
-fn at_startup(current: Option<&status::SessionStatus>) -> bool {
-    current.is_none_or(|s| s.event == status::STARTUP_PROMPT_EVENT)
+/// Whether the agent whose latest status is `current`, last launched at
+/// `launched`, may be at a startup prompt rather than in a turn: no hook
+/// has reported yet (a live agent with no status shows as Waiting once it
+/// has been starting a while), none has since this launch (the status is
+/// left from an agent that died without its SessionEnd hook, and still
+/// reads as it did then), or the startup watcher marked it at one.
+fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) -> bool {
+    current.is_none_or(|s| {
+        s.event == status::STARTUP_PROMPT_EVENT || launched.is_some_and(|l| s.at < l)
+    })
 }
 
 /// Fail when this jeet runs inside the task's agent session, whether as the
@@ -501,7 +509,7 @@ mod tests {
             status::activity_since(None, true, Some(0), 60),
             Activity::Waiting { .. }
         ));
-        assert!(at_startup(None));
+        assert!(at_startup(None, Some(0)));
         // The startup watcher marked it at the trust dialog: Waiting too.
         let dir = tempfile::tempdir().unwrap();
         status::mark_startup_prompt(dir.path(), "s", "trust folder", 60).unwrap();
@@ -510,7 +518,7 @@ mod tests {
             status::activity_since(marked.as_ref(), true, Some(0), 60),
             Activity::Waiting { .. }
         ));
-        assert!(at_startup(marked.as_ref()));
+        assert!(at_startup(marked.as_ref(), Some(0)));
         // A hook reported: past the startup.
         let hooked = status::SessionStatus {
             session_id: "s".into(),
@@ -519,7 +527,23 @@ mod tests {
             event: "Notification".into(),
             at: 61,
         };
-        assert!(!at_startup(Some(&hooked)));
+        assert!(!at_startup(Some(&hooked), Some(0)));
+        assert!(!at_startup(Some(&hooked), Some(61)));
+        assert!(!at_startup(Some(&hooked), None));
+        // A status left from an earlier launch, whose agent died mid-turn
+        // without its SessionEnd hook: the relaunched one may be at a
+        // startup prompt, though the status still reads Running.
+        let stale = status::SessionStatus {
+            state: status::State::Running,
+            event: "UserPromptSubmit".into(),
+            at: 50,
+            ..hooked
+        };
+        assert!(matches!(
+            status::activity_since(Some(&stale), true, Some(60), 70),
+            Activity::Running { .. }
+        ));
+        assert!(at_startup(Some(&stale), Some(60)));
     }
 
     #[test]

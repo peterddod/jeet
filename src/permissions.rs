@@ -169,8 +169,10 @@ const ALWAYS_DENY: &[&str] = &[
     "gh pr merge",
     "gh api *pulls/*/merge*",
     "gh api *repos/*/merges*",
-    "gh api graphql *mergePullRequest*",
-    "gh api graphql *enablePullRequestAutoMerge*",
+    "gh api *mergePullRequest*",
+    "gh api *enablePullRequestAutoMerge*",
+    "gh api *mergeBranch*",
+    "gh api *enqueuePullRequest*",
     "curl *pulls/*/merge*",
     "curl *repos/*/merges*",
 ];
@@ -526,9 +528,10 @@ pub fn denied_commands(branches: &[String]) -> Vec<String> {
     for branch in branches {
         for pattern in [
             format!("git push * {branch}"),
-            format!("git push * refs/heads/{branch}"),
             format!("git push * *:{branch}"),
-            format!("git push * *:refs/heads/{branch}"),
+            // `refs/heads/b`, and `heads/b`, which git also resolves to
+            // it, as the refspec or its destination.
+            format!("git push * *heads/{branch}"),
         ] {
             if !deny.contains(&pattern) {
                 deny.push(pattern);
@@ -1361,6 +1364,8 @@ mod tests {
             "git push origin :main",
             "git push origin HEAD:refs/heads/master",
             "git push origin refs/heads/main",
+            "git push origin heads/main",
+            "git push origin HEAD:heads/master",
             "git push origin --delete main",
             "git push --all",
             "git push --all origin",
@@ -1370,6 +1375,10 @@ mod tests {
             "gh api -X PUT repos/o/r/pulls/3/merge",
             "gh api graphql -f query='mutation{mergePullRequest(input:{})}'",
             "gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'",
+            "gh api -X POST graphql -f query='mutation{mergePullRequest(input:{})}'",
+            "gh api -H 'GraphQL-Features: x' graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'",
+            "gh api graphql -f query='mutation{mergeBranch(input:{})}'",
+            "gh api graphql -f query='mutation{enqueuePullRequest(input:{})}'",
             "curl -X PUT https://api.github.com/repos/o/r/pulls/3/merge",
             "gh api -X POST repos/o/r/merges -f base=main -f head=task-x",
             "curl -X POST https://api.github.com/repos/o/r/merges -d '{}'",
@@ -1383,6 +1392,7 @@ mod tests {
             "git push origin task-x",
             "git push origin main-fix",
             "git push origin refs/heads/main:refs/heads/task-x",
+            "git push origin heads/main-fix",
             "git push --follow-tags",
             "gh pr create",
             "gh pr view 3",

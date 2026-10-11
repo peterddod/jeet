@@ -7333,11 +7333,21 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
     std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
 
+    // Waiting at a permission prompt a hook reported: Esc refuses the call.
+    hook_ok(&lab.hook(
+        "Notification",
+        &hook_input("Notification", &session, &task),
+        &[],
+    ));
+    let said = interrupt();
+    assert!(said.contains("interrupted task fix-x's turn"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
+
     // Idle: nothing to interrupt, and Esc there would clear or rewind.
     hook_ok(&lab.hook("Stop", &hook_input("Stop", &session, &task), &[]));
     let said = interrupt();
     assert!(said.contains("is not working (idle"), "{said}");
-    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
 }
 
 #[cfg(unix)]
