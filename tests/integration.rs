@@ -7777,7 +7777,7 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     let output = mp.jeet(&["task", "new", "w", "--goal", "g"], &api_dir, &[]);
     succeeded(&output);
     assert!(
-        stderr_of(&output).contains("reports to task api"),
+        stderr_of(&output).contains("reports to manager api"),
         "{}",
         stderr_of(&output)
     );
@@ -7836,6 +7836,14 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
         .collect();
     listed.sort();
     assert_eq!(listed, ["api", "w"], "{stdout}");
+    // A manager is said to be one.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("api ") && l.ends_with("api (manager)")),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("w (manager)"), "{stdout}");
     let output = mp.jeet(&["manager", "ls", "--json"], &api_dir, &[]);
     succeeded(&output);
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();

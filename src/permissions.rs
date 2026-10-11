@@ -377,7 +377,7 @@ pub fn cut_by(app: &App, node: &TaskRecord, capability: &str) -> Result<Option<S
                 "`[assistant] allow` ({})",
                 config::config_path(&app.home).display()
             ),
-            _ => format!("task {}", ancestor.slug),
+            _ => crate::manager::label(&ancestor),
         }));
     }
     // Every ancestor holds it, yet `node` does not: it is outside the tree.
@@ -1806,7 +1806,7 @@ mod tests {
         // assistant's list; not granted, or held, not cut at all.
         assert_eq!(
             cut_by(&app, &m3, "task.send").unwrap().as_deref(),
-            Some("task m2")
+            Some("manager m2")
         );
         let cut = cut_by(&app, &m3, "task.delete").unwrap().unwrap();
         assert!(cut.contains("[assistant] allow"), "{cut}");

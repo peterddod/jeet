@@ -36,6 +36,12 @@ jeet does without that feature:
 | `startup_prompt(pane)`, `accept_trust(pane)` | spot a prompt that blocks the agent before its first hook, and accept a trust prompt one key at a time | the task shows `needs input – startup prompt?` after 15s |
 | `instructions_file`, `instructions_import` | the file the agent reads its instructions from, and, when that is not `AGENTS.md`, what jeet writes in it to import `AGENTS.md` (Claude Code: `CLAUDE.md` holding `@AGENTS.md`) | none of jeet's instruction files is written for it |
 
+A manager (phase 2) needs four of these: `hook_args` or `hook_file`,
+`continue_output`, `interrupt_keys` and `Enforcement::Rules`. Making one
+on a harness without them all is refused, naming each that is missing
+("hook events", "continue-turn output", "interrupt_keys", "deny rules");
+a worker starts without them, with a warning.
+
 `AgentSpec::supports_sessions` and `AgentSpec::has_hooks` (`hook_args` or
 `hook_file`) check whether these methods return `Some`, so they must return `Some` for any arguments, empty
 ones included.

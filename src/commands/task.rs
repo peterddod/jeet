@@ -85,11 +85,11 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("jeet: task {} -> {}", created.task.name, dir.display());
     if let Some(parent) = &parent {
-        let to = match parent.kind {
-            TaskKind::Assistant => "the assistant".to_string(),
-            _ => format!("task {}", parent.slug),
-        };
-        eprintln!("jeet: task {} reports to {to}", created.task.name);
+        eprintln!(
+            "jeet: task {} reports to {}",
+            created.task.name,
+            crate::manager::label(parent)
+        );
     }
     println!("{}", dir.display());
     cd::request(&dir)?;
@@ -303,8 +303,13 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             TaskState::Active => runtime::activity(app, &task, tmux_ok).label(),
             TaskState::Archived => "archived".to_string(),
         };
+        // A manager is said to be one (M29).
+        let kind = match task.kind {
+            TaskKind::Manager => " (manager)",
+            _ => "",
+        };
         println!(
-            "{:<28} {:<28} {:<10} {:<24} {}",
+            "{:<28} {:<28} {:<10} {:<24} {}{kind}",
             task.slug,
             tasks::worktree_summary(&rows),
             agent::age_label(at),

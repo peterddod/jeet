@@ -1173,9 +1173,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   manager can be made, and apply to every task with children.
 - **P3** Every `Manager` arm that restricts a manager lands before
   `jeet manager new` can make one: teardown refusals (P2), read-only
-  worktrees and git denies (P4) and the trust scope (P5). Until then a
-  report to a manager is refused ("reports to managers land in a later
-  version"); no manager row exists for it to reach.
+  worktrees and git denies (P4) and the trust scope (P5). Until then no
+  manager row exists for a report or a `--parent` to reach (P11, P14).
 - **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
   #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
   chmod, since a manager runs unconfined anyway. `git branch` is not
@@ -1263,6 +1262,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
   last line says whom to report to. A broken chain that hides what a task
   may do costs the brief its list, with a warning, not the brief.
+- **P15** A task is named by its kind wherever jeet names one in the tree:
+  `manager <slug>` or `task <slug>` in a refusal's "cut by", in `task new`'s
+  "reports to" line and in a report's sender. `jeet task ls` marks a
+  manager `(manager)` after its name (M29); `jeet manager ls` has a kind
+  column. `max_live` is read once it gates starts.
 
 ## 11. Placement
 

@@ -360,7 +360,7 @@ fn shown_text(s: &Shown) -> String {
     }
     if r.effective != r.state {
         let held_by = r.held_by.as_deref().unwrap_or("an ancestor");
-        run.push_str(&format!("; {} by task {held_by}", r.effective));
+        run.push_str(&format!("; {} by {held_by}", r.effective));
     }
     out.push_str(&format!("{run}\n"));
     if s.children.is_empty() {

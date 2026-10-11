@@ -2587,7 +2587,8 @@ mod tests {
         refused(&user, TaskKind::Work, &under("m3"), "4 levels below");
         refused(&user, TaskKind::Manager, &under("m2"), "3 levels below");
         plan_child(&app, &user, TaskKind::Work, "x", &under("m2"), None).unwrap();
-        // Fan-out: m holds m2 and four more, then a sixth is too many.
+        // Fan-out: m holds m2 and four more, room for a sixth; a seventh is
+        // too many.
         for n in 0..4 {
             insert(&app, &format!("k{n}"), TaskKind::Work, &m.id);
         }
