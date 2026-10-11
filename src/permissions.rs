@@ -1934,7 +1934,10 @@ mod tests {
 
     #[test]
     fn held_grants_are_logged_by_the_granter_and_announced_unless_the_user_made_them() {
-        let (_dir, app, w) = tree();
+        let (_dir, mut app, w) = tree();
+        // Held grants are announced even with `[assistant] notify = false`,
+        // which only the root's own actions follow (M9).
+        app.config.assistant.notify = Some(false);
         let root = crate::assistant::ensure(&app).unwrap();
         let m = add(&app, "m", TaskKind::Manager, Some(&root), &[]);
         let read = |log: &Path| -> Vec<ActionRecord> {
@@ -1954,8 +1957,6 @@ mod tests {
         assert!(root_log[0].action.contains("task w"), "{root_log:?}");
         assert_eq!(*announced.borrow(), ["Assistant"]);
 
-        // Even with `[assistant] notify = false`, which only the root's own
-        // actions follow.
         record_held_with(
             &app,
             &Caller::Node(m.clone()),

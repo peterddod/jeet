@@ -2654,6 +2654,38 @@ mod tests {
         assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
     }
 
+    /// A configured `[managers] max_depth` binds, not the default: at 2, a
+    /// worker sits at most 2 below the assistant and a manager 1.
+    #[test]
+    fn plan_child_takes_its_depth_cap_from_config() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        let m2 = insert(&app, "m2", TaskKind::Manager, &m.id);
+        app.config.managers = Some(crate::config::ManagersConfig {
+            max_depth: Some(2),
+            ..Default::default()
+        });
+        let user = Caller::User;
+        let refused = |kind, parent: &str, says: &str| {
+            let err = plan_child(&app, &user, kind, "x", &under(parent), None).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(says), "{says}: {err}");
+            assert!(err.contains("`[managers] max_depth` is 2"), "{err}");
+        };
+        refused(TaskKind::Work, &m2.slug, "3 levels below");
+        refused(TaskKind::Manager, "m", "2 levels below");
+        plan_child(&app, &user, TaskKind::Work, "x", &under("m"), None).unwrap();
+        plan_child(
+            &app,
+            &user,
+            TaskKind::Manager,
+            "x",
+            &under("assistant"),
+            None,
+        )
+        .unwrap();
+    }
+
     /// What is left is the least left anywhere above, in turns as in time:
     /// a grandparent's limit binds a grandchild.
     #[test]

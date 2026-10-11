@@ -7605,8 +7605,10 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"worktree.add\", \
-         \"manager.grant\", \"pr.merge\"]\n",
+        // `notify = false` silences the assistant's own actions, never a
+        // held grant (M9).
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"worktree.add\", \"manager.grant\", \"pr.merge\"]\n",
     )
     .unwrap();
     let parent = ["--parent", "assistant"];
@@ -7712,7 +7714,8 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         stderr_of(&output)
     );
 
-    // The assistant's is logged in its own name and announced.
+    // The assistant's is logged in its own name and announced, though
+    // `notify = false`.
     let mut root = lab.assistant_pane();
     let output = root.jeet(&["manager", "grant", "w", "pr.merge"], &lab.home(), &env);
     succeeded(&output);
