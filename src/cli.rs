@@ -133,6 +133,9 @@ pub enum Commands {
         /// The harness whose hook it is
         #[arg(long, default_value = "claude-code")]
         harness: String,
+        /// The task jeet launched the agent for
+        #[arg(long)]
+        task: Option<String>,
     },
 
     /// Watch a task's agent start, for a trust prompt (run by jeet)

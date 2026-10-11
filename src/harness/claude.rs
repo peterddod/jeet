@@ -6,8 +6,8 @@
 //! the jeet commands the agent may run and denies what jeet forbids it
 //! (force-pushing, merging…). Claude checks deny rules before any allow
 //! rule from any settings scope, and a denied command cannot be approved at
-//! the prompt. Each hook runs `jeet task-hook <Event>` with the event's JSON
-//! on stdin. Esc ends a running turn.
+//! the prompt. Each hook runs `jeet task-hook --task <id> <Event>` with the
+//! event's JSON on stdin. Esc ends a running turn.
 //!
 //! Sessions are found by their transcripts, in
 //! `$CLAUDE_CONFIG_DIR/projects/<slug>/<id>.jsonl` (default `~/.claude`),
@@ -420,9 +420,9 @@ fn asks_the_user(input: &HookInput) -> bool {
     )
 }
 
-/// The `--settings` JSON: a hook per event running `jeet task-hook`,
-/// permission to run the commands `allow` names, as `Bash(…)` rules, and,
-/// when there are any, `Bash(…)` rules denying those `deny` names.
+/// The `--settings` JSON: a hook per event running `jeet task-hook` for the
+/// task, permission to run the commands `allow` names, as `Bash(…)` rules,
+/// and, when there are any, `Bash(…)` rules denying those `deny` names.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
@@ -430,7 +430,7 @@ fn settings_json(hooks: &HookSetup) -> String {
         let mut group = serde_json::json!({
             "hooks": [{
                 "type": "command",
-                "command": format!("{program} task-hook {event}"),
+                "command": format!("{program} task-hook --task {} {event}", hooks.task_id),
                 "timeout": HOOK_TIMEOUT_SECS,
             }]
         });
@@ -880,6 +880,7 @@ mod tests {
     fn settings_install_every_hook_and_the_jeet_permissions() {
         let hooks = HookSetup {
             exe: "/opt/it's here/jeet".into(),
+            task_id: "t-1".into(),
             allow: vec!["jeet worktree".into(), "jeet ls".into()],
             ..Default::default()
         };
@@ -893,7 +894,7 @@ mod tests {
             assert_eq!(hook["type"], "command");
             assert_eq!(
                 hook["command"],
-                format!(r"'/opt/it'\''s here/jeet' task-hook {event}")
+                format!(r"'/opt/it'\''s here/jeet' task-hook --task t-1 {event}")
             );
         }
         assert_eq!(value["hooks"]["PreToolUse"][0]["matcher"], "*");
@@ -909,6 +910,7 @@ mod tests {
     fn settings_carry_deny_rules() {
         let hooks = HookSetup {
             exe: "/bin/jeet".into(),
+            task_id: "t".into(),
             allow: vec!["jeet ls".into()],
             deny: vec![
                 "gh pr merge".into(),

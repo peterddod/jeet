@@ -256,6 +256,9 @@ pub enum Enforcement {
 pub struct HookSetup {
     /// The jeet binary the hooks run, as `jeet task-hook`.
     pub exe: PathBuf,
+    /// The task the agent is launched for, which each hook names with
+    /// `--task`.
+    pub task_id: String,
     /// Command prefixes the agent may run without asking, e.g.
     /// `jeet worktree`.
     pub allow: Vec<String>,

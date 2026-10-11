@@ -171,8 +171,13 @@ fn run(command: Option<Commands>) -> Result<()> {
         }
         // Run by the agent on every tool call: quick, silent on stdout, and
         // never a failure, whatever goes wrong.
-        Commands::TaskHook { event, harness } => {
-            let _ = std::panic::catch_unwind(|| status::run_hook(&harness, &event));
+        Commands::TaskHook {
+            event,
+            harness,
+            task,
+        } => {
+            let _ =
+                std::panic::catch_unwind(|| status::run_hook(&harness, &event, task.as_deref()));
         }
         // Launched in the background with a task's agent; says nothing.
         Commands::TaskStartup { task, session } => {

@@ -2387,12 +2387,17 @@ fn hook_input(event_fixture: &str, session: &str, cwd: &std::path::Path) -> Stri
 }
 
 impl StoreLab {
-    /// `jeet task-hook <event>` with `input` on stdin, the way Claude runs it.
+    /// `jeet task-hook <event>` with `input` on stdin, the way Claude runs it:
+    /// with `--task` naming the task `JEET_TASK_ID` in `env` does, as the
+    /// hooks jeet installs for a task's agent do.
     fn hook(&self, event: &str, input: &str, env: &[(&str, &str)]) -> std::process::Output {
         use std::io::Write;
         let mut cmd = jeet_bin();
-        self.wire(&mut cmd)
-            .args(["task-hook", event])
+        self.wire(&mut cmd).arg("task-hook");
+        if let Some((_, task)) = env.iter().find(|(key, _)| *key == "JEET_TASK_ID") {
+            cmd.args(["--task", task]);
+        }
+        cmd.arg(event)
             .current_dir(self.home())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2608,7 +2613,7 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         .as_str()
         .unwrap();
     assert!(
-        stop.starts_with('\'') && stop.ends_with("' task-hook Stop"),
+        stop.starts_with('\'') && stop.ends_with(&format!("' task-hook --task {id} Stop")),
         "{stop}"
     );
     assert_eq!(
@@ -7272,26 +7277,35 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     assert_eq!(reports.len(), 3, "{reports:?}");
     assert!(reports[2].2.starts_with("ended"), "{reports:?}");
 
-    // A worker in its sibling's directory reports as neither.
+    // A worker in its sibling's directory is still itself: its hooks name
+    // it with `--task`.
     let other = "22222222-2222-4333-8444-555555555555";
     hook_ok(&lab.hook(
         "Notification",
         &hook_input("Notification", other, &y_dir),
         &as_x,
     ));
-    assert_eq!(lab.reports_of(&x).len(), 3);
+    assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&y).is_empty());
-    // Nor as a sibling with a parent of its own, and gets no brief of its.
+    let status = |dir: &std::path::Path, session: &str| {
+        dir.join(".jeet/status").join(format!("{session}.json"))
+    };
+    assert!(status(&x_dir, other).is_file());
+    assert!(!status(&y_dir, other).exists());
+    // A hook from before `--task` keeps the status of the task it runs in,
+    // but reports to nobody and gets no brief, even in one with a parent.
     let sib = lab.new_task_with("sib", &["--parent", "assistant", "--goal", "other"]);
     let sib_dir = lab.home().join("tasks/sib");
+    let third = "33333333-2222-4333-8444-555555555555";
     for (event, input) in [
-        ("SessionStart", hook_input("SessionStart", other, &sib_dir)),
-        ("Notification", hook_input("Notification", other, &sib_dir)),
-        ("SessionEnd", hook_input("SessionEnd", other, &sib_dir)),
+        ("SessionStart", hook_input("SessionStart", third, &sib_dir)),
+        ("Notification", hook_input("Notification", third, &sib_dir)),
+        ("SessionEnd", hook_input("SessionEnd", third, &sib_dir)),
     ] {
-        hook_ok(&lab.hook(event, &input, &as_x));
+        hook_ok(&lab.hook(event, &input, &[]));
     }
-    assert_eq!(lab.reports_of(&x).len(), 3);
+    assert!(status(&sib_dir, third).is_file());
+    assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&sib).is_empty());
 
     // A top-level task has nobody to tell, and no brief.

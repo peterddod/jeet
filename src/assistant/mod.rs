@@ -321,7 +321,7 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         created_at: now,
         last_activity: now,
     })?;
-    let argv = launch_argv(app, &spec, &id, &name, resume, prompt)?;
+    let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt)?;
     let home = app.home.to_string_lossy();
     let env = [
         // Its hooks find it by this even after it `cd`s into a task.
@@ -344,6 +344,7 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
 /// id, with the assistant's settings and, given one, its first prompt.
 fn launch_argv(
     app: &App,
+    task: &TaskRecord,
     spec: &AgentSpec,
     id: &str,
     name: &str,
@@ -358,7 +359,7 @@ fn launch_argv(
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let branches = permissions::default_branches(app)?;
-    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches);
+    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id);
     argv.extend(spec.harness.hook_args(&hooks).unwrap_or_default());
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());

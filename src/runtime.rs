@@ -271,6 +271,7 @@ pub fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String>
 fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<HookSetup> {
     Ok(HookSetup {
         exe,
+        task_id: task.id.clone(),
         allow: ALLOWED.map(str::to_string).to_vec(),
         deny: permissions::task_deny(app, task)?,
     })
@@ -284,9 +285,11 @@ pub fn assistant_hooks(
     exe: std::path::PathBuf,
     settings: &AssistantConfig,
     branches: &[String],
+    task_id: &str,
 ) -> HookSetup {
     HookSetup {
         exe,
+        task_id: task_id.to_string(),
         allow: permissions::allowed_commands(&settings.allow),
         deny: permissions::denied_commands(branches),
     }
@@ -469,7 +472,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()]);
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a");
         assert!(
             hooks.allow.contains(&"jeet task send".into()),
             "{:?}",
@@ -496,7 +499,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()]);
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a");
         for denied in ["gh pr merge", "git push --force*", "git push * main"] {
             assert!(hooks.deny.contains(&denied.into()), "{:?}", hooks.deny);
         }
@@ -527,6 +530,7 @@ mod tests {
                 exe.into(),
                 &settings,
                 &branches(crate::permissions::MAX_DEFAULT_BRANCHES),
+                &uuid::Uuid::new_v4().to_string(),
             );
             let args = crate::harness::claude::ClaudeCode
                 .hook_args(&hooks)

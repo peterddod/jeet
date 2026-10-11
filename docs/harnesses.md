@@ -41,9 +41,11 @@ ones included.
 
 ### Hooks
 
-jeet's hook command is `jeet task-hook <Event>`, with the event's payload on
-stdin. For any harness except Claude Code, add `--harness <id>` so that
-`task-hook` hands the payload to your `parse_hook`. A hook has to be quick,
+jeet's hook command is `jeet task-hook --task <id> <Event>`, with the event's
+payload on stdin; `<id>` is `HookSetup::task_id`, the task jeet launched the
+agent for, and only a hook that names it reports to the task's parent. For
+any harness except Claude Code, add `--harness <id>` so that `task-hook`
+hands the payload to your `parse_hook`. A hook has to be quick,
 must print nothing on stdout except the outputs above, and always exits 0.
 `task-hook` takes care of that: `parse_hook` only reads the payload.
 
