@@ -377,8 +377,9 @@ pub enum StartGate {
     /// Start it, holding this until it is started.
     Go(StartGuard),
     /// `live` of `max` nodes run already: it is queued to start when one
-    /// ends.
-    Queue { live: u32, max: u32 },
+    /// ends; `fresh` when it was not queued already, and its parent is
+    /// still to be told.
+    Queue { live: u32, max: u32, fresh: bool },
     /// This task, itself or above it, holds it: nothing starts.
     Held(TaskRecord),
 }
@@ -395,8 +396,8 @@ pub fn admit_start(app: &App, task: &TaskRecord) -> Result<StartGate> {
     }
     match full(app, task)? {
         Some((live, max)) => {
-            app.db.queue_start(&task.id, now_secs())?;
-            Ok(StartGate::Queue { live, max })
+            let fresh = app.db.queue_start(&task.id, now_secs())?;
+            Ok(StartGate::Queue { live, max, fresh })
         }
         None => Ok(StartGate::Go(guard)),
     }

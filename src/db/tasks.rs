@@ -1283,14 +1283,14 @@ impl Database {
     }
 
     /// Queue `id` to start once a `max_live` slot frees; a task queued
-    /// already keeps its place.
-    pub fn queue_start(&self, id: &str, at: i64) -> Result<()> {
-        self.conn().execute(
+    /// already keeps its place. True when it was not queued already.
+    pub fn queue_start(&self, id: &str, at: i64) -> Result<bool> {
+        let inserted = self.conn().execute(
             "INSERT INTO task_start_queue (task_id, queued_at) VALUES (?1, ?2)
              ON CONFLICT(task_id) DO NOTHING",
             params![id, at],
         )?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     /// The queued tasks, oldest first.
@@ -2219,10 +2219,10 @@ mod tests {
         let (_dir, db) = open();
         tree(&db);
         assert!(db.queued_starts().unwrap().is_empty());
-        db.queue_start("w2", 20).unwrap();
-        db.queue_start("w3", 10).unwrap();
-        db.queue_start("w1", 20).unwrap();
-        db.queue_start("w3", 30).unwrap();
+        assert!(db.queue_start("w2", 20).unwrap());
+        assert!(db.queue_start("w3", 10).unwrap());
+        assert!(db.queue_start("w1", 20).unwrap());
+        assert!(!db.queue_start("w3", 30).unwrap());
         assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w2", "w1"]);
         db.unqueue("w2").unwrap();
         assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w1"]);

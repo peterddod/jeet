@@ -10054,6 +10054,24 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     succeeded(&output);
     let c = task_id(&lab.home().join("tasks/c"));
     assert_eq!(lab.start_queue(), [c.as_str()]);
+
+    // A message that would start a task queues its start too, and its
+    // parent is told once: not again for one queued already.
+    let d = lab.new_task_with("d", &["--parent", "assistant"]);
+    let output = lab.jeet_at(&["task", "send", "d", "go"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("waits on max_live (1/1 live)"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
+    let reports = lab.reports_of(&d);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+    succeeded(&lab.jeet_at(&["task", "send", "c", "more"], &lab.home(), &env));
+    assert_eq!(lab.reports_of(&c).len(), 1, "{:?}", lab.reports_of(&c));
+
     let _c_agent = session_pane(&lab, &tmux, "c", &c);
     let output = lab.jeet_at(&["task", "open", "c"], &lab.home(), &env);
     succeeded(&output);

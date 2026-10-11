@@ -1338,7 +1338,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   and is `None` for an agent the gate does not count (the assistant's).
   Over `max_live` the message is queued with the start
   (`Delivered::StartQueued { live, max }`, as `Delivered::Queued` already
-  means queued for a busy agent). `jeet watch` notifies the user of a held
+  means queued for a busy agent), and, once the inbox is unlocked, the
+  task's parent is told `queued, n/max live` (`Agent::queued`) when the
+  start was not queued already, so a run of messages tells it once. `jeet watch` notifies the user of a held
   delivery only when the agent could not be started (`Held`), not when it
   is paused or waits on `max_live`, and drains the start queue each poll.
 - **P19** Budgets (5.3) are charged in the hook, before it acts on the

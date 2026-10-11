@@ -1172,6 +1172,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_tasks_end_is_not_reported() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let prev = read_status(&dir, "s");
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let w = app.db.get_task("w").unwrap().unwrap();
+        let mut ctx = HookCtx {
+            task: Some(w),
+            attributed: true,
+            prev,
+            hold: Some(RunState::Stopped),
+            ..quiet_ctx(app)
+        };
+        // `jeet manager stop`, which ended it, said so to whoever asked.
+        report_step(&ended, &ctx, Some("w"), 500).unwrap();
+        assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
+        // Paused, or running, its end is news to its parent.
+        ctx.hold = Some(RunState::Paused);
+        report_step(&ended, &ctx, Some("w"), 500).unwrap();
+        let report = ctx.app.db.last_status_report("w").unwrap().unwrap();
+        assert!(report.body.contains("ended"), "{}", report.body);
+    }
+
+    #[test]
     fn a_new_session_follows_on_from_the_one_its_window_ran() {
         let record = |id: &str| TaskSessionRecord {
             session_id: id.into(),

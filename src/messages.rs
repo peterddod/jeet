@@ -313,6 +313,9 @@ pub trait Agent {
     fn admit(&self) -> Result<Option<StartGate>> {
         Ok(None)
     }
+    /// Its start was just queued on `max_live`, with `live` of `max`
+    /// running: tell whom it reports to (M22). Called with no lock held.
+    fn queued(&self, _live: u32, _max: u32) {}
     /// What its hooks last said, from the task in `task_dir`: the task's
     /// latest status, unless it is one of several sessions there.
     fn status(&self, task_dir: &Path) -> Option<status::SessionStatus> {
@@ -399,9 +402,14 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
         Route::Start => match agent.admit()? {
             None => None,
             Some(StartGate::Go(guard)) => Some(guard),
-            // Queued to start already: a drain starts it with its inbox.
-            Some(StartGate::Queue { live, max }) => {
+            // Queued to start: a drain starts it with its inbox. Its
+            // parent is told once, with the inbox no longer locked.
+            Some(StartGate::Queue { live, max, fresh }) => {
                 inbox.push_to(&message, me)?;
+                drop(inbox);
+                if fresh {
+                    agent.queued(live, max);
+                }
                 return Ok(Delivered::StartQueued { live, max });
             }
             // Held since it was asked above.
@@ -632,6 +640,10 @@ impl Agent for TmuxAgent<'_> {
         run::admit_start(self.app, self.task).map(Some)
     }
 
+    fn queued(&self, live: u32, max: u32) {
+        run::report_queued(self.app, self.task, live, max);
+    }
+
     fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
         let running = match guard {
             Some(guard) => {
@@ -678,6 +690,10 @@ mod tests {
         paused: bool,
         /// The start gate queues it, with this many live of this many.
         gate_full: Option<(u32, u32)>,
+        /// The gate has queued it before.
+        gate_queued: std::cell::Cell<bool>,
+        /// Whom it reports to was told its start is queued.
+        told_queued: RefCell<Vec<(u32, u32)>>,
         /// The user has text in its input box.
         draft: bool,
         typed: RefCell<Vec<String>>,
@@ -708,9 +724,14 @@ mod tests {
             Ok(self.paused)
         }
         fn admit(&self) -> Result<Option<StartGate>> {
-            Ok(self
-                .gate_full
-                .map(|(live, max)| StartGate::Queue { live, max }))
+            Ok(self.gate_full.map(|(live, max)| StartGate::Queue {
+                live,
+                max,
+                fresh: !self.gate_queued.replace(true),
+            }))
+        }
+        fn queued(&self, live: u32, max: u32) {
+            self.told_queued.borrow_mut().push((live, max));
         }
         fn start(&self, prompt: &str, _: Option<&StartGuard>) -> Result<Started> {
             if self.fail {
@@ -884,7 +905,14 @@ mod tests {
             Delivered::StartQueued { live: 3, max: 3 }
         );
         assert!(agent.started.borrow().is_empty());
-        assert_eq!(left(task.path()), ["now"]);
+        // Its parent is told once, not again for what queues after.
+        assert_eq!(*agent.told_queued.borrow(), [(3, 3)]);
+        assert_eq!(
+            deliver(task.path(), &agent, "later").unwrap(),
+            Delivered::StartQueued { live: 3, max: 3 }
+        );
+        assert_eq!(left(task.path()), ["now", "later"]);
+        assert_eq!(agent.told_queued.borrow().len(), 1);
     }
 
     #[test]

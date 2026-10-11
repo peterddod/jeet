@@ -100,7 +100,7 @@ pub fn ensure_running(
     let (guard, over) = match admission {
         Admission::Gate => match run::admit_start(app, task)? {
             StartGate::Go(guard) => (guard, None),
-            StartGate::Queue { live, max } => {
+            StartGate::Queue { live, max, .. } => {
                 return Ok(Running {
                     tmux_session: name,
                     started: Started::Queued {
