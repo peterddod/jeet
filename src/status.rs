@@ -142,6 +142,9 @@ pub fn launched_at(task_dir: &Path) -> Option<i64> {
     crate::agent::mtime_secs(&std::fs::metadata(launched_path(task_dir)).ok()?)
 }
 
+/// The event of a status [`mark_startup_prompt`] wrote.
+pub const STARTUP_PROMPT_EVENT: &str = "StartupPrompt";
+
 /// Mark session `session_id` as waiting for the user at its startup:
 /// `detail` says on what. Its first hook replaces this.
 pub fn mark_startup_prompt(
@@ -156,7 +159,7 @@ pub fn mark_startup_prompt(
             session_id: session_id.to_string(),
             state: State::Waiting,
             detail: Some(detail.to_string()),
-            event: "StartupPrompt".to_string(),
+            event: STARTUP_PROMPT_EVENT.to_string(),
             at: now,
         },
     )

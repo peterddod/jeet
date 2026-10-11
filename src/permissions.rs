@@ -164,11 +164,15 @@ const ALWAYS_DENY: &[&str] = &[
     "git push * +*",
     "git push --mirror",
     "git push * --mirror",
+    "git push --all",
+    "git push * --all",
     "gh pr merge",
     "gh api *pulls/*/merge*",
+    "gh api *repos/*/merges*",
     "gh api graphql *mergePullRequest*",
     "gh api graphql *enablePullRequestAutoMerge*",
     "curl *pulls/*/merge*",
+    "curl *repos/*/merges*",
 ];
 
 /// Default branches assumed whatever the index says.
@@ -522,6 +526,7 @@ pub fn denied_commands(branches: &[String]) -> Vec<String> {
     for branch in branches {
         for pattern in [
             format!("git push * {branch}"),
+            format!("git push * refs/heads/{branch}"),
             format!("git push * *:{branch}"),
             format!("git push * *:refs/heads/{branch}"),
         ] {
@@ -1355,13 +1360,19 @@ mod tests {
             "git push origin HEAD:main",
             "git push origin :main",
             "git push origin HEAD:refs/heads/master",
+            "git push origin refs/heads/main",
             "git push origin --delete main",
+            "git push --all",
+            "git push --all origin",
+            "git push origin --all",
             "gh pr merge",
             "gh pr merge 3 --squash",
             "gh api -X PUT repos/o/r/pulls/3/merge",
             "gh api graphql -f query='mutation{mergePullRequest(input:{})}'",
             "gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'",
             "curl -X PUT https://api.github.com/repos/o/r/pulls/3/merge",
+            "gh api -X POST repos/o/r/merges -f base=main -f head=task-x",
+            "curl -X POST https://api.github.com/repos/o/r/merges -d '{}'",
             "gh pr comment 3 -b hi",
             "gh pr review 3 --approve",
         ] {
@@ -1371,6 +1382,7 @@ mod tests {
             "git push -u origin HEAD",
             "git push origin task-x",
             "git push origin main-fix",
+            "git push origin refs/heads/main:refs/heads/task-x",
             "git push --follow-tags",
             "gh pr create",
             "gh pr view 3",
@@ -1391,6 +1403,11 @@ mod tests {
             "git -c a=b push --force",
             "sh -c 'git push --force'",
             "git push -uf origin x",
+            "git push origin x --mirr",
+            "git push origin \"HEAD:main\"",
+            "git push origin 'refs/heads/*:refs/heads/*'",
+            "gh pr --repo o/r merge 3",
+            "gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc",
         ];
         for command in KNOWN_GAPS {
             assert!(!denied(command), "now denied, update the docs: {command}");

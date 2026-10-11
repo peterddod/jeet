@@ -25,7 +25,7 @@ jeet does without that feature:
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (#33 adds `Sandbox`) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported (never at a startup prompt) | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary) | the assistant starts without its summary |
@@ -95,14 +95,19 @@ the reporting itself is jeet's.
 `HookSetup::deny` lists commands the agent must not run. jeet fills it for
 the assistant and for every task with a parent; top-level tasks the user
 made get none, so a user's own `git push --force-with-lease` keeps working.
+The `[review] command` of a review task the assistant starts is the
+exception: it is the user's own command, run by `jeet review-job` rather
+than launched through a harness, so it gets no deny rules, and `jeet
+review` warns when it starts one.
 The list is:
 
-- force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), and pushes
-  naming a default branch: `main`, `master` and the default branch of every
-  repo jeet has indexed, as a destination (`git push * main`, `*:main`,
-  `*:refs/heads/main`);
-- merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoint
-  through `gh api` or `curl`, and the GraphQL `mergePullRequest` and
+- force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`,
+  and pushes naming a default branch: `main`, `master` and the default
+  branch of every repo jeet has indexed, as a destination (`git push *
+  main`, `refs/heads/main`, `*:main`, `*:refs/heads/main`);
+- merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
+  (`pulls/*/merge`, and `repos/*/merges`, which merges branches) through
+  `gh api` or `curl`, and the GraphQL `mergePullRequest` and
   `enablePullRequestAutoMerge` mutations;
 - for a parented task only, the commands of each capability it does not
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
@@ -133,10 +138,15 @@ unanchored `*gh pr merge*` would also refuse `git commit -m "… gh pr merge
 a gate. They do not catch:
 
 - global options before the subcommand: `git -C . push -f`,
-  `git -c a=b push --force`;
+  `git -c a=b push --force`, `gh pr --repo o/r merge 3`;
 - a command inside another: `sh -c 'git push --force'`, `xargs`, `env`;
-- combined short flags (`git push -uf`) and git or shell aliases;
-- a bare `git push` whose upstream is a default branch;
+- combined short flags (`git push -uf`), abbreviated long options
+  (`git push x --mirr`), and git or shell aliases;
+- a bare `git push` whose upstream is a default branch, a quoted refspec
+  (`"HEAD:main"`), and a wildcard one (`'refs/heads/*:refs/heads/*'`);
+- moving a branch through the REST refs endpoint
+  (`gh api -X PATCH repos/o/r/git/refs/heads/main`): denying it would also
+  refuse reading the ref;
 - scripts the agent writes and runs, MCP tools, and `!` commands typed in
   the session (only the agent's Bash tool is checked);
 - anything outside the agent's own tools: a deny on `Edit` covers Claude

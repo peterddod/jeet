@@ -6715,7 +6715,14 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
         ("JEET_ASSISTANT", "1"),
         ("JEET_TASK_ID", assistant.as_str()),
     ];
-    succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    // No harness launches it, so it gets no deny rules, and says so.
+    assert!(
+        stderr_of(&output).contains("review command runs outside a harness launch"),
+        "{}",
+        stderr_of(&output)
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !seen.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -7364,6 +7371,19 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     );
     assert!(calls_of(&tmux, "send-keys").is_empty());
 
+    // Still no hook a minute after launch: likely held at the trust dialog,
+    // where Esc would exit the agent.
+    let launched = task.join(".jeet").join("launched");
+    std::fs::File::options()
+        .write(true)
+        .open(&launched)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .unwrap();
+    let said = interrupt();
+    assert!(said.contains("may be at a startup prompt"), "{said}");
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+
     // Running: one Escape, never repeated.
     std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
     hook_ok(&lab.hook(
@@ -7396,7 +7416,7 @@ fn interrupt_presses_escape_once_and_only_while_working() {
 #[test]
 fn interrupt_refuses_the_assistant_a_harness_that_cannot_and_a_node() {
     let lab = StoreLab::new();
-    lab.new_task("fix-x");
+    let fix = task_id(&lab.new_task("fix-x"));
     let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
@@ -7431,6 +7451,30 @@ fn interrupt_refuses_the_assistant_a_harness_that_cannot_and_a_node() {
         &["task", "interrupt", "fix-x"],
         &node,
         "never message each other",
+    );
+    // Its own agent, which is no node, or a window in its session: the
+    // press would end the turn running this jeet.
+    let own = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_TASK_ID", fix.as_str()),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &own,
+        "interrupt it from outside that session",
+    );
+    std::fs::write(tmux.parent().unwrap().join("current"), "jeet-fix-x\n").unwrap();
+    let in_tmux = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("TMUX", "/tmp/tmux-1/default,1,0"),
+        ("TMUX_PANE", "%3"),
+    ];
+    failed_with(
+        &["task", "interrupt", "fix-x"],
+        &in_tmux,
+        "interrupt it from outside that session",
     );
     assert!(calls_of(&tmux, "send-keys").is_empty());
 }

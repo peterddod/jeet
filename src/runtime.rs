@@ -280,6 +280,9 @@ pub enum Interrupted {
     /// Its input box holds what the user typed and has not sent, which a
     /// key could clear, so nothing was pressed.
     UserTyping,
+    /// It is held at a startup prompt, such as the trust dialog, where the
+    /// keys would answer the prompt (Esc exits), so nothing was pressed.
+    AtStartup,
 }
 
 /// End the turn the task's agent is running, keeping its session: its
@@ -307,6 +310,9 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if !interruptible(&activity) {
         return Ok(Interrupted::NotWorking(activity));
     }
+    if at_startup(status::current_status(&tasks::task_dir(app, task)).as_ref()) {
+        return Ok(Interrupted::AtStartup);
+    }
     if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
         return Ok(Interrupted::UserTyping);
     }
@@ -314,12 +320,21 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     Ok(Interrupted::Sent)
 }
 
-/// Whether an agent doing `activity` has a turn to interrupt.
+/// Whether an agent doing `activity` may have a turn to interrupt; one
+/// Waiting is still [`at_startup`] when no hook has said so.
 fn interruptible(activity: &Activity) -> bool {
     matches!(
         activity,
         Activity::Running { .. } | Activity::Waiting { .. }
     )
+}
+
+/// Whether the agent whose latest status is `current` may be at a startup
+/// prompt rather than in a turn: no hook has reported yet (a live agent
+/// with no status shows as Waiting once it has been starting a while), or
+/// the startup watcher marked it at one.
+fn at_startup(current: Option<&status::SessionStatus>) -> bool {
+    current.is_none_or(|s| s.event == status::STARTUP_PROMPT_EVENT)
 }
 
 /// Fail when this jeet runs inside the task's agent session, whether as the
@@ -477,6 +492,34 @@ mod tests {
         ];
         assert!(working.iter().all(interruptible));
         assert!(!not.iter().any(interruptible));
+    }
+
+    #[test]
+    fn a_startup_prompt_is_never_interrupted() {
+        // No hook yet: a live agent past its start reads as Waiting.
+        assert!(matches!(
+            status::activity_since(None, true, Some(0), 60),
+            Activity::Waiting { .. }
+        ));
+        assert!(at_startup(None));
+        // The startup watcher marked it at the trust dialog: Waiting too.
+        let dir = tempfile::tempdir().unwrap();
+        status::mark_startup_prompt(dir.path(), "s", "trust folder", 60).unwrap();
+        let marked = status::current_status(dir.path());
+        assert!(matches!(
+            status::activity_since(marked.as_ref(), true, Some(0), 60),
+            Activity::Waiting { .. }
+        ));
+        assert!(at_startup(marked.as_ref()));
+        // A hook reported: past the startup.
+        let hooked = status::SessionStatus {
+            session_id: "s".into(),
+            state: status::State::Waiting,
+            detail: Some("Bash".into()),
+            event: "Notification".into(),
+            at: 61,
+        };
+        assert!(!at_startup(Some(&hooked)));
     }
 
     #[test]

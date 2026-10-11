@@ -610,9 +610,10 @@ jeet task interrupt fix-login
 its window would, and leaves its session open for the next message. It
 presses the key once, and only while the agent is working or waiting on you
 (at a permission prompt, Esc refuses the pending tool call): an idle agent,
-one starting up, or one whose prompt holds text you have not sent is left
-alone, since Esc there would clear your text or rewind the conversation, and
-the command says why nothing was sent. The task's status may read `running`
+one starting up or held at a startup prompt such as the trust dialog, or one
+whose prompt holds text you have not sent is left alone, since Esc there
+would clear your text, rewind the conversation or exit the agent, and the
+command says why nothing was sent. The task's status may read `running`
 for about a minute afterwards, until Claude reports it sits idle, as after a
 manual Esc. The assistant is yours to interrupt in its own window, and a
 harness that cannot be interrupted is refused. Under the assistant it needs
@@ -1123,8 +1124,9 @@ jeet refuses the index.
 
 On a harness with deny rules (Claude Code), the assistant and every task
 with a parent are also denied, even with your approval at the prompt:
-force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), pushes to
-any indexed repository's default branch or `main`/`master`, and merging
+force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
+--all`, pushes to any indexed repository's default branch or `main`/`master`,
+and merging
 other than through `jeet pr merge` (`gh pr merge`, and the merge endpoints
 through `gh api` and `curl`). A task with a parent is also denied `gh pr
 comment`, `gh issue comment` and `gh pr review` unless it holds
@@ -1132,7 +1134,9 @@ comment`, `gh issue comment` and `gh pr review` unless it holds
 prompt. Top-level tasks get no deny rules. The rules match the start of a
 command only (`git -C . push -f` or `sh -c '…'` get past them): they catch
 mistakes, and branch protection on GitHub is the real control. A task with
-a parent on a harness without deny rules starts with a warning.
+a parent on a harness without deny rules starts with a warning, as does the
+`[review] command` of a review task the assistant starts: no harness
+launches it, so it gets no deny rules.
 
 ```toml
 [managers]
