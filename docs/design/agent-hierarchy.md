@@ -588,6 +588,7 @@ local agent that sets out to escape:
 | Forged `task-hook --task <other>` | closed for reports up; status files remain writable |
 | Orphaning (`nohup … & exit`, `setsid`, double fork) with the env stripped | **open locally**: resolves as the user |
 | Spawning through tmux (`new-window`, `split-window`, `new-session`, or `send-keys` into another pane, including the assistant's) | **open locally**: the process has no anchor, or acts as the other pane |
+| Driving jeet's interactive screens (`jeet tasks`, `projects`, `chat`) through a fake terminal (`script`, a pty) | **open locally**: an interactive command needs only a terminal, kept so a person at a pane's own terminal still gets the screen; the screen then acts ungated |
 | Direct edits to `index.db` or `config.toml`; a forged `JEET_HOME` (acts only on a fake index) | **open locally** / harmless |
 | User windows opened inside a parented task's or the assistant's session | refused for gated commands (inherited hint, no anchor), by design |
 | jeet's own helpers (`watch --once`, `task-startup`) while their parent is alive | may resolve as the task; they are Free and must never ask for identity |

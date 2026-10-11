@@ -7970,25 +7970,33 @@ fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
         let bin = stub_history_gh(&lab.home());
         let path = path_with(&bin);
         let env = [("PATH", path.as_str())];
-        succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
+        for pr in ["7", "8"] {
+            succeeded(&lab.jeet_at(&["review", pr, "--no-command"], &trunk, &env));
+        }
         let task = task_id(&lab.home().join("tasks/review-widget-7"));
         assert_eq!(lab.parent_of(&task), None);
 
-        let started = lab.home().join("started");
-        let ran = lab.home().join("ran");
+        let started = |pr: u32| lab.home().join(format!("started-{pr}"));
+        let ran = |pr: u32| lab.home().join(format!("ran-{pr}"));
+        let marker = |name: &str| sh_quote(&lab.home().join(name).to_string_lossy());
         std::fs::write(
             lab.home().join("config.toml"),
             format!(
                 "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
-                 [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
-                sh_quote(&started.to_string_lossy()),
-                sh_quote(&ran.to_string_lossy()),
+                 [review]\ncommand = \"touch {}-{{pr}} && sleep 3 && touch {}-{{pr}}\"\nnotify = false\n",
+                marker("started"),
+                marker("ran"),
             ),
         )
         .unwrap();
         let mut root = lab.assistant_pane();
-        succeeded(&root.jeet(&["review", "7"], &trunk, &env));
-        wait_until("the job to start", || started.exists());
+        // A job for each of two top-level tasks: ending one spares the other.
+        for pr in ["7", "8"] {
+            succeeded(&root.jeet(&["review", pr], &trunk, &env));
+        }
+        wait_until("the jobs to start", || {
+            started(7).exists() && started(8).exists()
+        });
         let jobs = || -> i64 {
             lab.index()
                 .query_row(
@@ -7998,12 +8006,12 @@ fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
                 )
                 .unwrap()
         };
-        assert_eq!(jobs(), 1, "{verb}");
+        assert_eq!(jobs(), 2, "{verb}");
         let flag = if verb == "delete" { "-f" } else { "--force" };
         succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
-        assert_eq!(jobs(), 0, "{verb}: the job is still the assistant's");
-        std::thread::sleep(std::time::Duration::from_secs(4));
-        assert!(!ran.exists(), "the job outlived its task's {verb}");
+        assert_eq!(jobs(), 1, "{verb}: the job is still the assistant's");
+        wait_until("the other task's job to finish", || ran(8).exists());
+        assert!(!ran(7).exists(), "the job outlived its task's {verb}");
     }
 }
 

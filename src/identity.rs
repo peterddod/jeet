@@ -144,6 +144,12 @@ fn ancestry() -> (Vec<(u32, i64)>, Option<u32>) {
     (chain, None)
 }
 
+/// When process `pid` started, as an anchor records it, or nothing for a
+/// process that is gone or cannot be read.
+pub fn start_of(pid: u32) -> Option<i64> {
+    proc_info(pid).map(|info| info.start)
+}
+
 /// Whether `anchor`'s process is still the one recorded.
 pub fn live(anchor: &Anchor) -> bool {
     proc_info(anchor.pid).is_some_and(|info| info.start == anchor.start)

@@ -41,6 +41,10 @@ pub struct Job {
     pub started_at: i64,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// When the runner started, as [`identity`] reads it: with `pid`, the
+    /// one process that runs the job, which a reused pid is not.
+    #[serde(default)]
+    pub runner_start: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
     #[serde(default)]
@@ -232,6 +236,7 @@ pub fn start(
         log: log.clone(),
         started_at: now_secs(),
         pid: None,
+        runner_start: None,
         finished_at: None,
         exit_code: None,
         lost: false,
@@ -309,8 +314,9 @@ pub fn stop_jobs(db: &Database, task_id: &str) -> Result<()> {
 /// End the review jobs still running in a worktree under `dir`, whoever
 /// they run as: one the assistant started for a top-level review task is
 /// recorded as the assistant's, not the task's, so [`stop_jobs`] does not
-/// find it. Only a runner jeet recorded after the job was written, while
-/// it is still that process; its record goes with it. Best effort.
+/// find it. Only the runner the job recorded as its own, by pid and start
+/// (a pid reused by another job's runner is not it), while it is still
+/// that process; its record goes with it. Best effort.
 pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
     let jobs: Vec<Job> = recorded_jobs(app)
         .filter(|job| job.exit_code.is_none() && job.worktree.starts_with(dir))
@@ -320,7 +326,7 @@ pub fn stop_jobs_in(app: &App, dir: &Path) -> Result<()> {
         let ours = anchor.kind == AnchorKind::Job
             && jobs
                 .iter()
-                .any(|job| job.pid == Some(anchor.pid) && anchor.created_at >= job.started_at);
+                .any(|job| job.pid == Some(anchor.pid) && job.runner_start == Some(anchor.start));
         if ours && identity::live(&anchor) {
             end_group(&anchor);
             app.db.delete_anchor(anchor.pid, anchor.start)?;
@@ -393,6 +399,7 @@ pub fn run_job(path: &Path) -> Result<()> {
     let mut job = read(path)?;
     // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
     job.pid = Some(std::process::id());
+    job.runner_start = identity::start_of(std::process::id());
     write(path, &job)?;
     println!("$ {}", job.command);
     let mut cmd = Command::new("sh");
@@ -493,6 +500,7 @@ mod tests {
             log: PathBuf::from("/tmp/7.log"),
             started_at: 0,
             pid: None,
+            runner_start: None,
             finished_at: exit_code.map(|_| 0),
             exit_code,
             lost: false,
@@ -541,6 +549,7 @@ mod tests {
             Some(std::process::id()),
             "the runner records itself"
         );
+        assert_eq!(done.runner_start, identity::start_of(std::process::id()));
         assert!(done.finished_at.is_some());
     }
 
@@ -593,5 +602,84 @@ mod tests {
         stop_jobs(&db, "t").unwrap();
         let status = other.wait().unwrap();
         assert!(!status.success(), "the job's group was not ended");
+    }
+
+    /// Archiving or deleting one task's dir ends the job running there and
+    /// only it: not another task's, and not a runner whose pid a stale job
+    /// file in the dir still names.
+    #[cfg(unix)]
+    #[test]
+    fn stop_jobs_in_ends_only_the_dirs_own_runner() {
+        use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+        use crate::placement::Placement;
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: Database::open(&crate::config::index_path(&home)).unwrap(),
+            home: home.clone(),
+        };
+        app.db
+            .insert_task(&TaskRecord {
+                id: "a".into(),
+                slug: "a".into(),
+                name: "a".into(),
+                project: None,
+                kind: TaskKind::Assistant,
+                state: TaskState::Active,
+                created_at: 0,
+                last_activity: 0,
+                parent_id: None,
+                placement: Placement::Local,
+            })
+            .unwrap();
+        let group = || {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let reviews = home.join("reviews/widget");
+        std::fs::create_dir_all(&reviews).unwrap();
+        let x = home.join("tasks/x");
+        let y = home.join("tasks/y");
+        // The assistant's runner for a job in `x`, and one for a job in `y`.
+        let mut mine = group();
+        let mut other = group();
+        let state = |name: &str, worktree: &Path, pid: u32, start: Option<i64>| {
+            let mut j = job(None, "abc");
+            j.worktree = worktree.join("widget");
+            j.pid = Some(pid);
+            j.runner_start = start;
+            write(&reviews.join(name), &j).unwrap();
+        };
+        let start = |child: &std::process::Child| identity::start_of(child.id()).unwrap();
+        state("1.json", &x, mine.id(), Some(start(&mine)));
+        state("2.json", &y, other.id(), Some(start(&other)));
+        // A job in `x` its runner never finished, whose pid is now `other`'s,
+        // and one from before runners recorded their start.
+        state("3.json", &x, other.id(), Some(start(&other) + 1));
+        state("4.json", &x, other.id(), None);
+        for child in [&mine, &other] {
+            identity::record(&app.db, "a", AnchorKind::Job, None, child.id()).unwrap();
+        }
+
+        stop_jobs_in(&app, &x).unwrap();
+        let status = mine.wait().unwrap();
+        assert!(!status.success(), "the dir's own job was not ended");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "another task's job was ended"
+        );
+        let left = app.db.task_anchors("a", AnchorKind::Job).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].pid, other.id());
+        let _ = other.kill();
+        let _ = other.wait();
     }
 }
