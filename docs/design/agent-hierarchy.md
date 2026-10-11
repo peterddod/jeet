@@ -796,8 +796,12 @@ RFC left open, or departed from it:
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch, and capped at
   twelve (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
-  repos use. Each costs about 100 bytes of the inline settings, which
-  share tmux's 16KB command limit with the first prompt (E9).
+  repos use, none longer than 40 bytes (`MAX_BRANCH_NAME`). Each costs
+  about 100 bytes of the inline settings, which share tmux's 16KB command
+  limit with the first prompt (E9). A repo's `default_branch` is
+  `origin/HEAD` at clone or import, or else the branch then checked out,
+  and is not refreshed, so a wrong guess denies pushing to that branch
+  name everywhere; harnesses.md says so.
 - **E6** `Capability.external` names the `gh` commands a capability
   stands for (`pr.comment`: `gh pr comment`, `gh issue comment`;
   `pr.review`: `gh pr review`). A held one is allowed. A parented node is
@@ -805,7 +809,11 @@ RFC left open, or departed from it:
   holds them by default (5.1), and a deny would refuse them even with the
   user's approval. The root's denies are force pushes, default-branch
   pushes and merging. No `gh api -X/-f/-F` write denies: they would break
-  `gh api graphql -f query=` reads.
+  `gh api graphql -f query=` reads. So a node without `pr.comment` or
+  `pr.review` can still ask the user to approve the same through `gh api`
+  (`issues/*/comments`, `pulls/*/reviews`, `addComment`,
+  `addPullRequestReview`): a documented gap, pinned in `KNOWN_GAPS`, as
+  are commits through the contents endpoint and `createCommitOnBranch`.
 - **E7** Merging is denied to the root and nodes: `gh pr merge`, the REST
   merge endpoints through `gh api` or `curl`, and the GraphQL
   `mergePullRequest`, `enablePullRequestAutoMerge`, `mergeBranch` and

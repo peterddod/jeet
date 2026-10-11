@@ -417,7 +417,8 @@ mod tests {
     use crate::harness::Harness;
 
     fn branches(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("{i:0>30}")).collect()
+        let len = crate::permissions::MAX_BRANCH_NAME;
+        (0..n).map(|i| format!("{i:0>len$}")).collect()
     }
 
     #[test]
@@ -468,8 +469,8 @@ mod tests {
     fn a_first_prompt_fits_in_one_tmux_command_with_the_settings() {
         // tmux refuses a command over 16KB; the prompt shares new-session's
         // with the settings, a long path to jeet, every capability or none,
-        // and the pushes denied to as many long default branches as jeet
-        // denies.
+        // and the pushes denied to as many default branches as jeet denies,
+        // each as long as it denies.
         let every = crate::permissions::CAPABILITIES
             .iter()
             .map(|c| c.name.to_string())
