@@ -506,6 +506,29 @@ mod tests {
     }
 
     #[test]
+    fn one_charge_spending_a_node_and_its_parent_pauses_both() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("w", None, Some(10)).unwrap();
+        app.db.set_budget_max("m", None, Some(10)).unwrap();
+        app.db.charge("w", 0, 10).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        for id in ["w", "m"] {
+            let t = get(&app, id);
+            assert_eq!(
+                (t.run_state, t.run_state_by),
+                (RunState::Paused, Some(Setter::Budget)),
+                "{id}"
+            );
+        }
+        // w's own Stop hook reports it; m is reported here.
+        assert!(budget_reports(&app, "w").is_empty());
+        assert_eq!(
+            budget_reports(&app, "m"),
+            ["budget used up (10 of 10turns); paused"]
+        );
+    }
+
+    #[test]
     fn a_spent_budget_leaves_a_users_stop_as_it_is() {
         let (_dir, app) = lab();
         app.db.set_budget_max("m", None, Some(10)).unwrap();

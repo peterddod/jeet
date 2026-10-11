@@ -574,13 +574,16 @@ pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32) {
 /// each under its inbox lock, then the start lock. A task held or gone
 /// active stays queued or leaves the queue; one that fails to start stays
 /// queued. Nothing from a background job with no tmux server to start on.
-/// Returns what to warn of, for the caller to show where it can (the
-/// TUI's status line, not stderr).
+/// Once the tree is full nothing more starts, but a task found running and
+/// not held still leaves the queue, wherever it sits. Returns what to warn
+/// of, for the caller to show where it can (the TUI's status line, not
+/// stderr).
 pub fn drain(app: &App) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     if !tmux::may_start_session() {
         return Ok(warnings);
     }
+    let mut full = false;
     for task in app.db.queued_starts()? {
         if task.state != TaskState::Active {
             app.db.unqueue(&task.id)?;
@@ -599,11 +602,24 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             ));
             continue;
         }
+        // Running, and resumed: the start a held message queued in case
+        // its agent ended first is not needed. Left behind a row a full
+        // tree keeps, it would start the agent again once that one ended.
+        if tmux::pane_alive(&runtime::session_name(&task)) && hold(app, &task)?.is_none() {
+            app.db.unqueue(&task.id)?;
+            continue;
+        }
+        if full {
+            continue;
+        }
         let inbox = Inbox::lock(&dir)?;
         let guard = match admit_start(app, &task)? {
             StartGate::Go(guard) => guard,
             StartGate::Held(_) => continue,
-            StartGate::Queue { .. } => break,
+            StartGate::Queue { .. } => {
+                full = true;
+                continue;
+            }
         };
         // Started meanwhile some other way: what queued waits for its Stop.
         if tmux::pane_alive(&runtime::session_name(&task)) {

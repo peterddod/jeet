@@ -8859,6 +8859,15 @@ fn stopping_a_review_task_ends_its_job_until_resumed() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("review-widget-7"));
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!started.exists(), "a stopped review task's job started");
+
+    // Resumed, a rerun starts its job again.
+    succeeded(&lab.jeet_at(&["manager", "resume", "review-widget-7"], &lab.home(), &[]));
+    let output = root.jeet(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(!said.contains("not reviewing"), "{said}");
+    wait_until("the resumed task's job to start", || started.exists());
+    wait_until("the resumed task's job to finish", || ran.exists());
 }
 
 /// The assistant reviewing a PR whose review task the user made, top
@@ -10024,8 +10033,17 @@ fn interrupting_a_worker_mid_turn_charges_its_turn_so_far() {
     charged_mid_turn(&["task", "interrupt", "w"]);
 }
 
+/// And deleting it: the turn goes up to its parent with the rest of its
+/// spend.
+#[cfg(unix)]
+#[test]
+fn deleting_a_worker_mid_turn_charges_its_parent_the_turn_so_far() {
+    charged_mid_turn(&["task", "delete", "w", "--force"]);
+}
+
 /// Run `args` on worker `w`, under the assistant with an hour's budget, ten
-/// minutes into a turn no sweep has charged, and check it was charged.
+/// minutes into a turn no sweep has charged, and check it was charged: to
+/// `w`, or to its parent once `w` is deleted.
 #[cfg(unix)]
 fn charged_mid_turn(args: &[&str]) {
     let lab = StoreLab::new();
@@ -10058,6 +10076,13 @@ fn charged_mid_turn(args: &[&str]) {
     let stub = tmux.parent().unwrap();
     std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
 
+    let parent: String = lab
+        .index()
+        .query_row("SELECT parent_id FROM tasks WHERE id = ?1", [&w], |r| {
+            r.get(0)
+        })
+        .unwrap();
+
     let output = lab.jeet_at(args, &lab.home(), &env);
     succeeded(&output);
     let said = stderr_of(&output);
@@ -10065,8 +10090,8 @@ fn charged_mid_turn(args: &[&str]) {
     let used: i64 = lab
         .index()
         .query_row(
-            "SELECT used_secs FROM task_budgets WHERE task_id = ?1",
-            [&w],
+            "SELECT COALESCE(SUM(used_secs), 0) FROM task_budgets WHERE task_id IN (?1, ?2)",
+            [&w, &parent],
             |r| r.get(0),
         )
         .unwrap();
@@ -10252,6 +10277,72 @@ fn a_budget_past_what_is_left_above_is_refused() {
     let output = lab.jeet_at(&["manager", "budget", "kid", "+31m"], &lab.home(), &env);
     assert!(!output.status.success());
     assert_eq!(lab.budget_of(&kid), Some((Some(1800), None)));
+}
+
+/// A held message queues the start of a worker whose agent runs, in case
+/// it ends before the resume. Resumed while running, its start is let go
+/// even behind an older one a full tree keeps waiting: left, it would
+/// start the agent again, with no prompt, once that one had started.
+#[cfg(unix)]
+#[test]
+fn a_resume_lets_a_running_workers_start_go_behind_one_still_waiting() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\n[managers]\nmax_live = 1\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let jeet = |args: &[&str]| {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output)
+    };
+    let w = lab.new_task_with("w", &["--parent", "assistant"]);
+    let w_dir = lab.home().join("tasks/w");
+    let mut w_agent = session_pane(&lab, &tmux, "w", &w);
+    jeet(&["task", "open", "w"]);
+    let session = "11111111-2222-4333-8444-555555555555";
+    hook_ok(&w_agent.hook(
+        &lab,
+        Some(&w),
+        "Stop",
+        &hook_input("Stop", session, &w_dir),
+        &[("JEET_BACKGROUND", "1")],
+    ));
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    jeet(&["manager", "pause", "w"]);
+
+    // x waits on w's slot; then a message held for w queues w's start
+    // behind it.
+    let said = jeet(&[
+        "task",
+        "new",
+        "x",
+        "--parent",
+        "assistant",
+        "--prompt",
+        "build it",
+    ]);
+    assert!(said.contains("queued"), "{said}");
+    let x = task_id(&lab.home().join("tasks/x"));
+    jeet(&["task", "send", "w", "carry on"]);
+    assert_eq!(lab.start_queue(), [x.as_str(), w.as_str()]);
+
+    let said = jeet(&["manager", "resume", "w"]);
+    assert!(said.contains("w: resumed"), "{said}");
+    let typed = pasted(&tmux);
+    assert!(
+        typed.iter().any(|(_, text)| text.contains("carry on")),
+        "{typed:?}"
+    );
+    assert_eq!(lab.start_queue(), [x.as_str()]);
+    assert!(!stub.join("alive/jeet-x").exists());
 }
 
 /// Over `[managers] max_live` a start waits: the parent is told, and the

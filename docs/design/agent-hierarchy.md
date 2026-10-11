@@ -1389,7 +1389,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   and says how the start went (`Started`); a delivery whose start is
   queued keeps the whole message queue in the inbox, in order. `task new`
   takes its inbox lock before the start lock, puts a queued brief in the
-  inbox and reports `queued, n/max live` to the parent (`StatusEvent::
+  inbox (`messages::brief` refuses one over `MAX_MESSAGE` once marked
+  `Message: `, which the inbox would drop) and reports `queued, n/max live` to the parent (`StatusEvent::
   Queued`); under a held parent it puts the brief in the inbox, queues the
   start for the resume's drain and succeeds, whether the hold is seen
   before the start or only by the start gate (a pause in between). A drain returns what a start
@@ -1402,7 +1403,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   whatever it is doing (`Delivered::Paused`), queueing its start
   (`Agent::queue_held_start`) when the message may start it, whether or
   not its agent runs then (it may end while held; a drain that finds it
-  running only unqueues it), so the drain a resume runs starts it with
+  running and not held only unqueues it, wherever it sits in the queue:
+  once the tree is full a drain starts nothing more, but still goes on
+  through the rows for such stale ones), so the drain a resume runs starts it with
   its queue if need be; only then, for a start, does
   it ask `Agent::admit`, which takes the start lock after the inbox lock
   and is `None` for an agent the gate does not count (the assistant's).

@@ -609,7 +609,8 @@ running is started with the message as its first prompt. `jeet task new
 A message holds at most 8,000 bytes, which keeps what is typed in under
 tmux's limit on a command; queued messages that do not fit with it wait for
 the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
-as a shell command, a slash command or a memory, is sent as `Message: …`.
+as a shell command, a slash command or a memory, is sent as `Message: …`; a
+`--prompt` brief must fit in 8,000 bytes with that.
 
 ### Interrupting an agent
 

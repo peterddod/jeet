@@ -379,9 +379,17 @@ pub fn checked(text: &str) -> Result<String> {
 }
 
 /// `text` as the first prompt of a new task's agent, checked and marked the
-/// way a message is.
+/// way a message is. Not too long once marked: a held or queued brief waits
+/// in the inbox, which takes no longer message.
 pub fn brief(text: &str) -> Result<String> {
-    checked(text).map(|t| marked(&t))
+    let brief = marked(&checked(text)?);
+    if brief.len() > MAX_MESSAGE {
+        bail!(
+            "the message is too long ({} bytes marked as a message; at most {MAX_MESSAGE})",
+            brief.len()
+        );
+    }
+    Ok(brief)
 }
 
 /// Get `message` to the agent of the task in `task_dir`.
@@ -1333,6 +1341,10 @@ mod tests {
         };
         assert!(deliver(task.path(), &agent, &"x".repeat(MAX_MESSAGE + 1)).is_err());
         assert!(brief(&"x".repeat(MAX_MESSAGE + 1)).is_err());
+        // Marked, a brief must still fit the inbox it may wait in.
+        assert!(brief(&format!("#{}", "x".repeat(MAX_MESSAGE - 1))).is_err());
+        let fits = brief(&format!("#{}", "x".repeat(MAX_MESSAGE - 1 - MARKER.len()))).unwrap();
+        assert_eq!(fits.len(), MAX_MESSAGE);
 
         let long = |c: char| c.to_string().repeat(3000);
         for c in ['a', 'b', 'c'] {
