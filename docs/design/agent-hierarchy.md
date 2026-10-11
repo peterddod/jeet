@@ -1254,6 +1254,15 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `blocked` or `question`. `jeet manager grant` warns of each running task
   below that lost a capability with commands outside jeet: jeet refuses it
   at once, but its harness deny rules change only when it next starts.
+- **P14** Reports (5.5) go to a manager parent through its pane, as a
+  message does: typed in when it sits idle, queued while it is busy, and,
+  when it is not running, started only by a `done`, `blocked` or
+  `question` from a caller that may start it; anything else is held in its
+  inbox. Pause and `max_live` gate it once they land. `<jeet-report>` names the sender as `task <slug>`
+  or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
+  (`the assistant`, `manager <slug>`) with the task's tree path, and its
+  last line says whom to report to. A broken chain that hides what a task
+  may do costs the brief its list, with a warning, not the brief.
 
 ## 11. Placement
 

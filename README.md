@@ -649,7 +649,11 @@ claim, `<jeet-report … untrusted="true">`; the assistant's session context
 lists each such task with its last report. Reports hold at most 2,000 bytes:
 put detail in the pull request or a file and say where. `done`, `blocked` and
 `question` start an assistant session when none is running; `progress`
-waits for the next one.
+waits for the next one. A task under a manager reports to that manager the
+same way, fenced with its path in the tree (`path="assistant/backend/fix-x"`):
+typed into the manager's pane when it sits idle, queued while it is busy, and
+held in its inbox when it is not running, unless the report is one that
+starts it.
 
 jeet reports for the task too, as `status`: when its agent waits on a prompt
 only you can answer, sits idle longer than `[managers] idle_report_mins`

@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::context::App;
-use crate::db::tasks::TaskRecord;
+use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::instructions;
 use crate::messages::{self, Queued};
 use crate::status;
@@ -106,6 +106,16 @@ pub fn tree_path(app: &App, task: &TaskRecord) -> Result<String> {
         .collect();
     slugs.push(task.slug.clone());
     Ok(slugs.join("/"))
+}
+
+/// Who `task` is, to the tasks around it: `the assistant`, `manager
+/// backend` or `task fix-x`.
+pub fn label(task: &TaskRecord) -> String {
+    match task.kind {
+        TaskKind::Assistant => "the assistant".to_string(),
+        TaskKind::Manager => format!("manager {}", task.slug),
+        TaskKind::Work | TaskKind::Review => format!("task {}", task.slug),
+    }
 }
 
 /// `YYYY-MM-DD`, in UTC, for unix seconds `at`.
