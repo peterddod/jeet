@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.8.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.8.1
 ```
 
 ## Quick start
@@ -955,6 +955,30 @@ into tasks.
   ended.
 - **tmux**: Shift+Enter reaches agents running in tmux, and
   `jeet task send` pastes long messages whole, never onto a draft.
+
+v0.8.1: the first steps toward [hierarchical agents](docs/design/agent-hierarchy.md).
+
+- **Tasks report to the assistant that made them.** `jeet report
+  progress|done|blocked|question`, automatic status reports when a task
+  waits on you, idles or ends, and a "Your tasks" section in the
+  assistant's context. Tasks with a parent are gated to what their parent
+  allows ([Reporting to the assistant](#reporting-to-the-assistant)).
+- `jeet task interrupt` ends an agent's current turn and keeps its session.
+  The assistant and tasks under it are denied force-pushes, pushes to a
+  default branch and PR merges.
+- jeet knows which agent is calling by the process it launched, not by
+  `$JEET_TASK_ID` alone. Claude Code's settings now go in a private file
+  under `$JEET_HOME/run/`.
+- Deleting a task with children, or archiving one with active children, is
+  refused.
+- `auto_trust` waits for the trust prompt to redraw before pressing Enter.
+
+**Upgrading to v0.8.1:** jeet migrates the index to schema v6 the first
+time it runs, and an older jeet refuses it after that (copy
+`$JEET_HOME/index.db` first if you may go back). Reopen running tasks (stop
+them and `jeet task open` again) and assistant windows (close them and
+`jeet chat`): agents started by an older jeet were never recorded, so their
+`jeet report` and `jeet worktree add` are refused.
 
 ## What's new in v0.7
 
