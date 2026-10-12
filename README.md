@@ -279,8 +279,13 @@ From anywhere inside a repository, `jeet review` finds or makes the PR's
 the task already has it, brings that checkout up to date if it is clean, and
 brings an archived task back), opens it in the review viewer, and `cd`s you
 into the worktree when you leave. The review task is a task like any other: it
-shows in the tasks list, where `v` opens the viewer again, and archiving or
-deleting it frees the disk (and stops its review if that is still running). A PR from a fork is checked out as `pr/<number>`,
+shows in the tasks list as `review <repo>#<number>` (in `jeet task ls` too),
+reading `running – review of #<number>` while its review command runs, and
+there `v` opens the viewer again. Archiving or deleting it frees the disk (and
+stops its review if that is still running). Once the review command has
+finished, `⏎` on the task (or `jeet task open`) resumes the session it left —
+Claude Code files it under the PR's worktree, and jeet picks it up from there;
+while it still runs, headless, there is nothing to attach to, and jeet says so. A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -468,8 +473,8 @@ read from its files on a thread of its own, like the statuses.
 | `D` | delete the task, after listing any work that would be lost |
 | `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
-| `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser |
-| `v` | on a review task, its pull request in the review viewer |
+| `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser, `v` in the review viewer |
+| `v` | the task's pull request in the review viewer: a review task's own, else the task's one open PR, else the `p` list to pick one |
 | `c` | talk to the assistant: attach to its most recently active session, starting one if need be |
 | `C` | the assistant's sessions: `⏎` attach, `n` new, `R` rename, `x` end, `*` primary |
 | `t` | the todo list: `space` ticks an item off (or back), `⏎` goes to the task it links, `a` adds one |

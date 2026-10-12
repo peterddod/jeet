@@ -22,6 +22,7 @@ use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
 use crate::messages;
 use crate::pr_history;
 use crate::status::{first_line, Activity};
+use crate::tasks;
 use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
@@ -35,9 +36,12 @@ pub const HELP: [(&str, &str); 28] = [
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),
     (
         "p",
-        "the task's pull requests; ⏎ or o opens one in the browser",
+        "the task's pull requests; ⏎ or o opens one in the browser, v in the review viewer",
     ),
-    ("v", "a review task's pull request in the review viewer"),
+    (
+        "v",
+        "the task's pull request in the review viewer (a review's own, else its open one)",
+    ),
     (
         "n",
         "new task: blank for an empty canvas, or a project/repos",
@@ -447,7 +451,9 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
         ),
     ];
     let name = match row.task.kind {
-        TaskKind::Review => format!("{} (review)", row.task.name),
+        // Which PR it reviews, when its checkout says.
+        TaskKind::Review => tasks::review_label(&row.task, &row.worktrees)
+            .unwrap_or_else(|| format!("{} (review)", row.task.name)),
         TaskKind::Manager => format!("{} (manager)", row.task.name),
         TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
@@ -820,8 +826,9 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 return Vec::new();
             }
             let looking = if *looking { " · looking…" } else { "" };
-            let title =
-                format!(" {name} · pull requests{looking} · ⏎/o open in the browser  esc close ");
+            let title = format!(
+                " {name} · pull requests{looking} · ⏎/o open in the browser · v view  esc close "
+            );
             return draw_prs(frame, area, title, prs, *selected);
         }
         Panel::Assistant(picker) => {
@@ -1315,6 +1322,7 @@ mod tests {
             last_activity: crate::worktrees::now_secs() - 120,
             size: Some(3 * 1024 * 1024),
             report: None,
+            review_jobs: Vec::new(),
         }
     }
 
@@ -1346,6 +1354,17 @@ mod tests {
         assert!(screen.contains("3.0M"), "{screen}");
         assert!(screen.contains("2m ago"), "{screen}");
         assert!(screen.contains("active 1"), "{screen}");
+    }
+
+    #[test]
+    fn a_review_row_names_its_pr() {
+        let mut review = row("review-api-55", None);
+        review.task.kind = TaskKind::Review;
+        review.worktrees[0].pr_number = Some(55);
+        let mut ui = TasksUi::new(vec![review]);
+        let screen = render(&mut ui, 120, 12).join("\n");
+        assert!(screen.contains("review api#55"), "{screen}");
+        assert!(!screen.contains("review-api-55"), "{screen}");
     }
 
     #[test]

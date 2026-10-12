@@ -47,7 +47,10 @@ says everything else on stderr.
 - `jeet worktree add <repo> [--branch <b>] --task <task>` adds a worktree
   to a task.
 - `jeet review <pr> --repo <repo>` checks a pull request out into its review
-  task and starts the configured review.
+  task and starts the configured review. Review a pull request this way, not
+  with a task of your own (`jeet task new`): the review task is marked as a
+  review of that PR in the user's tasks list, and opening it resumes the
+  review's session.
 
 ## Your tasks
 

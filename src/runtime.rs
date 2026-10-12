@@ -245,6 +245,9 @@ fn start_tmux(
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
     }
+    // A review's session is filed under its worktree: picked up first, so
+    // it is the one resumed, not a blank one started beside it.
+    warnings.extend(crate::review::adopt_sessions(app, task));
     let (argv, session_id) = launch_argv(app, task, &spec, session, prompt)?;
     warnings.extend(spec.version_warning());
     if task.parent_id.is_some() && spec.harness.enforcement() == harness::Enforcement::None {
@@ -751,6 +754,16 @@ pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
 /// on a background thread, not in a draw.
 pub fn activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
     activity_at(&tasks::task_dir(app, task), &session_name(task), tmux_ok)
+}
+
+/// [`activity`] as lists show it: a review task's headless review job,
+/// still running, counts as its agent running. Only for display: what
+/// routes a delivery or charges a budget asks of the agent alone.
+pub fn shown_activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
+    crate::review::with_job(
+        activity(app, task, tmux_ok),
+        &crate::review::state_files_of_task(app, task),
+    )
 }
 
 /// [`activity`] for the task in `dir` whose tmux session is `session`, for

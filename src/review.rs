@@ -19,11 +19,12 @@ use serde::{Deserialize, Serialize};
 use crate::config::ReviewConfig;
 use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
-use crate::db::tasks::TaskKind;
+use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
 use crate::remote;
+use crate::status::Activity;
 use crate::tmux;
 use crate::worktrees::now_secs;
 
@@ -128,9 +129,142 @@ fn state_file(app: &App, repo: &RepoRecord, pr: u64) -> Result<PathBuf> {
 
 /// The job recorded for `pr`, if one was ever started.
 pub fn load(app: &App, repo: &RepoRecord, pr: u64) -> Option<Job> {
-    let mut job = read(&state_file(app, repo, pr).ok()?).ok()?;
+    load_at(&state_file(app, repo, pr).ok()?)
+}
+
+/// The job whose state file is `path`, if there is one.
+pub fn load_at(path: &Path) -> Option<Job> {
+    let mut job = read(path).ok()?;
     job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
     Some(job)
+}
+
+/// The state files of review task `task`'s jobs, started or not: one per
+/// worktree of it that holds a PR. None for any other kind of task.
+pub fn state_files_of_task(app: &App, task: &TaskRecord) -> Vec<PathBuf> {
+    if task.kind != TaskKind::Review {
+        return Vec::new();
+    }
+    let Ok(rows) = app.db.list_task_worktrees(&task.id) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let repo = app.db.get_repo(&row.repo_id).ok()??;
+            state_file(app, &repo, row.pr_number?).ok()
+        })
+        .collect()
+}
+
+/// The jobs recorded for review task `task`'s PRs.
+pub fn jobs_of_task(app: &App, task: &TaskRecord) -> Vec<Job> {
+    state_files_of_task(app, task)
+        .iter()
+        .filter_map(|path| load_at(path))
+        .collect()
+}
+
+/// `activity`, the task's agent's, with a review job still running in
+/// one of `jobs` (state files) taking the place of an agent that is not:
+/// the job is headless, with no pane or hooks to say it runs.
+pub fn with_job(activity: Activity, jobs: &[PathBuf]) -> Activity {
+    if !matches!(
+        activity,
+        Activity::NotStarted | Activity::NotRunning | Activity::Ended
+    ) {
+        return activity;
+    }
+    match jobs
+        .iter()
+        .filter_map(|path| load_at(path))
+        .find(|job| job.state() == JobState::Running)
+    {
+        Some(job) => Activity::Running {
+            detail: Some(format!("review of #{}", job.pr)),
+        },
+        None => activity,
+    }
+}
+
+/// The review job still running for review task `task`, if one is.
+pub fn running_job(app: &App, task: &TaskRecord) -> Option<Job> {
+    jobs_of_task(app, task)
+        .into_iter()
+        .find(|job| job.state() == JobState::Running)
+}
+
+/// Why review task `task`'s agent is not opened while its review command
+/// runs: the command is headless, with no pane to attach to, and an agent
+/// started beside it would be a blank session.
+pub fn running_refusal(task: &TaskRecord, job: &Job) -> String {
+    format!(
+        "the review of #{} in {} is still running in the background ({}), headless, so \
+         there is nothing to attach to yet; its output is in {}. Open the task once it has \
+         finished to resume its session",
+        job.pr,
+        task.name,
+        job.describe(),
+        job.log.display()
+    )
+}
+
+/// Make the sessions review task `task`'s review jobs left in its
+/// worktrees the task's own, so opening the task resumes them.
+///
+/// The review command runs in the PR's worktree, so its harness files its
+/// sessions under the worktree, while the task's agent runs in the task
+/// directory and finds only the sessions filed there and recorded for the
+/// task. Copied there and recorded, the latest is the one opening the task
+/// resumes. Only once the job has finished: until then it is still
+/// writing. Best effort: what fails is a warning. Nothing for any other
+/// kind of task, or a harness that keeps no sessions jeet knows of.
+pub fn adopt_sessions(app: &App, task: &TaskRecord) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if task.kind != TaskKind::Review {
+        return warnings;
+    }
+    let Ok(spec) = crate::agent::AgentSpec::from_config(&app.config) else {
+        return warnings;
+    };
+    if !spec.supports_sessions() {
+        return warnings;
+    }
+    let dir = crate::tasks::task_dir(app, task);
+    if !dir.is_dir() {
+        return warnings;
+    }
+    // Only a finished job's: a copy is never brought up to date, so one
+    // taken mid-review would miss the rest of it.
+    let finished = jobs_of_task(app, task)
+        .into_iter()
+        .filter(|job| job.state() != JobState::Running);
+    for job in finished {
+        let copied = match spec.harness.copy_sessions(&job.worktree, &dir) {
+            Ok(copied) => copied,
+            Err(e) => {
+                warnings.push(format!(
+                    "could not pick up the review of #{}'s {} sessions ({e:#})",
+                    job.pr,
+                    spec.harness.name()
+                ));
+                continue;
+            }
+        };
+        for session in copied {
+            let row = TaskSessionRecord {
+                session_id: session.id.clone(),
+                task_id: task.id.clone(),
+                parent_id: None,
+                name: format!("review of #{}", job.pr),
+                created_at: session.modified,
+                last_activity: session.modified,
+            };
+            if let Err(e) = app.db.upsert_task_session(&row) {
+                warnings.push(format!("could not record session {} ({e:#})", session.id));
+            }
+        }
+    }
+    warnings
 }
 
 /// The worktree of every review job ever recorded, under any repository.
@@ -612,6 +746,42 @@ mod tests {
         assert!(reason_to_skip(Some(&job(Some(1), "abc")), "abc").is_none());
         // Still running (no pid recorded yet counts as running).
         assert!(reason_to_skip(Some(&job(None, "abc")), "def").is_some());
+    }
+
+    #[test]
+    fn a_running_job_shows_as_its_review_tasks_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let finished = dir.path().join("1.json");
+        write(&finished, &job(Some(0), "abc")).unwrap();
+        let running = dir.path().join("7.json");
+        let mut j = job(None, "abc");
+        j.pid = Some(std::process::id());
+        write(&running, &j).unwrap();
+        let missing = dir.path().join("9.json");
+
+        let reviewing = Activity::Running {
+            detail: Some("review of #7".into()),
+        };
+        let idle = Activity::Idle { since: 5 };
+        for none in [Activity::NotStarted, Activity::NotRunning, Activity::Ended] {
+            assert_eq!(
+                with_job(none.clone(), &[missing.clone(), finished.clone()]),
+                none
+            );
+            assert_eq!(
+                with_job(none, &[finished.clone(), running.clone()]),
+                reviewing
+            );
+        }
+        // An agent of its own says what it does itself.
+        assert_eq!(with_job(idle.clone(), std::slice::from_ref(&running)), idle);
+        // A runner that is gone is not running.
+        j.pid = Some(u32::MAX - 1);
+        write(&running, &j).unwrap();
+        assert_eq!(
+            with_job(Activity::NotStarted, &[running]),
+            Activity::NotStarted
+        );
     }
 
     #[test]
