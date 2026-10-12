@@ -103,13 +103,18 @@ fn start_review(
     };
     // Run as a task, the job is its agent: a paused or stopped task, or
     // one under a held node, is not started again until resumed. Only the
-    // job is refused: the review and its worktree still open.
+    // job is refused: the review and its worktree still open. Checked under
+    // the start lock, held until the runner is recorded, so a stop landing
+    // meanwhile waits for it and ends it.
+    let mut _guard = None;
     if let Some(id) = as_task {
         if let Some(task) = app.db.get_task(id)? {
-            if let Some((holder, _)) = run::hold(app, &task)? {
+            let (guard, holder) = run::admit_job(app, &task)?;
+            if let Some(holder) = holder {
                 eprintln!("jeet: not reviewing: {}", run::held_refusal(&task, &holder));
                 return Ok(());
             }
+            _guard = Some(guard);
         }
     }
     let existing = review::load(app, repo, pr.number);

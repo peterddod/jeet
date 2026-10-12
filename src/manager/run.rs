@@ -517,6 +517,15 @@ pub fn admit_start(app: &App, task: &TaskRecord) -> Result<StartGate> {
     }
 }
 
+/// [`admit_start`] for a start `max_live` does not count, a review job run
+/// as `task`: the start lock, and what holds `task` (itself or above it)
+/// when it may not start. The guard is held until the job is recorded, so
+/// a stop either sees the job or is seen by it.
+pub fn admit_job(app: &App, task: &TaskRecord) -> Result<(StartGuard, Option<TaskRecord>)> {
+    let guard = start_lock(app)?;
+    Ok((guard, hold(app, task)?.map(|(holder, _)| holder)))
+}
+
 /// [`admit_start`] for the user opening `task` at a terminal, who asked
 /// for it (M22): a held task is refused still, but one over `max_live`
 /// goes, with how many run and the limit.
@@ -1196,6 +1205,52 @@ mod tests {
         // Ended, not left to run on.
         assert!(job.try_wait().unwrap().is_some());
         assert_eq!(get(&app, "r").run_state, RunState::Stopped);
+    }
+
+    /// A review job is admitted under the start lock, held until its runner
+    /// is recorded: a stop landing meanwhile waits for it, then ends it,
+    /// and the next is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_waits_for_an_admitted_review_job_and_ends_it() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let (dir, app) = lab();
+        let root = super::super::root(&app).unwrap();
+        app.db
+            .insert_task(&task("r", TaskKind::Review, &root.id))
+            .unwrap();
+        let (guard, holder) = admit_job(&app, &get(&app, "r")).unwrap();
+        assert!(holder.is_none());
+
+        let home = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let app = App {
+                config: config::load_or_create(&home).unwrap(),
+                db: Database::open(&config::index_path(&home)).unwrap(),
+                home,
+            };
+            let outcomes = stop(&app, &Caller::User, Some(&get(&app, "r"))).unwrap();
+            tx.send(outcomes[0].line.clone()).unwrap();
+        });
+        let wait = std::time::Duration::from_millis(300);
+        assert!(rx.recv_timeout(wait).is_err(), "the stop did not wait");
+
+        let mut job = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        crate::identity::record(&app.db, "r", AnchorKind::Job, None, job.id()).unwrap();
+        drop(guard);
+        let line = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+        assert_eq!(line, "stopped its review job");
+        assert!(job.try_wait().unwrap().is_some());
+        let (_guard, holder) = admit_job(&app, &get(&app, "r")).unwrap();
+        assert_eq!(holder.map(|h| h.id), Some("r".to_string()));
     }
 
     /// Run `f` on the index at `home` in a thread of its own, failing

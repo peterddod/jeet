@@ -216,14 +216,35 @@ pub fn cap(
     };
     if !fits(had.secs, want.secs, room.secs) || !fits(had.turns, want.turns, room.turns) {
         bail!(
-            "{} is more than {} may have: at most {}, what it has used and what is left \
-             above it",
+            "{} is more than {} may have: {}, what it has used and what is left above it",
             label(want),
             super::label(target),
-            label(room)
+            room_label(room)
         );
     }
     Ok(want)
+}
+
+/// `room` as limits `--budget` takes back: time down to whole minutes,
+/// as it is charged by the second; a unit with none of that left is said
+/// so, as `0m` is no limit to give.
+fn room_label(room: Limits) -> String {
+    let secs = room.secs.map(|secs| secs / 60 * 60);
+    let some = Limits {
+        secs: secs.filter(|&secs| secs > 0),
+        turns: room.turns.filter(|&turns| turns > 0),
+    };
+    let mut parts = Vec::new();
+    if some.secs.is_some() || some.turns.is_some() {
+        parts.push(format!("at most {}", label(some)));
+    }
+    if secs == Some(0) {
+        parts.push("no time".to_string());
+    }
+    if room.turns == Some(0) {
+        parts.push("no turns".to_string());
+    }
+    parts.join(" and ")
 }
 
 /// The budget threshold a check newly crossed (M21).
@@ -629,6 +650,33 @@ mod tests {
         // A node setting it is held to what it has left itself.
         let err = cap(&app, &m, &Caller::Node(m.clone()), none, want("2h")).unwrap_err();
         assert!(err.to_string().contains("at most 1h,20turns"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_gives_a_limit_the_budget_takes_back() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", Some(3600), None).unwrap();
+        // m's subtree has used 20m34s of its 1h, w 20m of that: w may
+        // have 59m26s, which charges by the second leave.
+        app.db.charge("w", 1200, 0).unwrap();
+        app.db.charge("m", 34, 0).unwrap();
+        let w = get(&app, "w");
+        let want = |b: &str| parse_limits(b).unwrap();
+        let none = Limits::default();
+        let err = cap(&app, &w, &Caller::User, none, want("2h")).unwrap_err();
+        assert!(err.to_string().contains(": at most 59m, what"), "{err}");
+        // Down to the minute, what is shown is allowed.
+        assert!(cap(&app, &w, &Caller::User, none, want("59m")).is_ok());
+        // Under a minute, or no turns, left is said so.
+        let (_dir, app) = lab();
+        app.db.set_budget_max("m", Some(3600), Some(5)).unwrap();
+        app.db.charge("m", 3570, 5).unwrap();
+        let w = get(&app, "w");
+        let err = cap(&app, &w, &Caller::User, none, want("1m,1turns")).unwrap_err();
+        assert!(
+            err.to_string().contains(": no time and no turns, what"),
+            "{err}"
+        );
     }
 
     #[test]

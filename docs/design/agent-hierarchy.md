@@ -1315,7 +1315,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   let go in between, until a hook reports or the window passes.
   A pause and a stop take the start lock once, after writing the row and
   before the walk, so a start admitted before the row was written has made
-  its session by then, and one after sees the hold. A pause or stop by a
+  its session by then, and one after sees the hold. A parented review
+  task's job is admitted the same way (`run::admit_job`, not counted
+  against `max_live`), the lock held until its runner is recorded, so a
+  stop meanwhile finds the job and ends it. A pause or stop by a
   caller who outranks the setter takes the hold over, even when it is less
   severe than the state it finds (which stays). `resume` is refused under a held ancestor, while
   the target's own subtree has used its budget, and to a caller ranked
