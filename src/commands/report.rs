@@ -52,6 +52,12 @@ pub fn run(app: &App, kind: ReportKind, message: &str) -> Result<()> {
         Ok(Delivered::Held) => {
             eprintln!("jeet: {to} is not running, so the report waits for its next session")
         }
+        Ok(Delivered::Paused) => {
+            eprintln!("jeet: {to} is paused or stopped, so the report waits until it is resumed")
+        }
+        Ok(Delivered::StartQueued { live, max }) => eprintln!(
+            "jeet: {to} waits to start ({live}/{max} live), so the report waits for its start"
+        ),
         Err(e) => eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}"),
     }
     Ok(())

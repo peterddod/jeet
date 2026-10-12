@@ -38,7 +38,7 @@ use crate::identity;
 use crate::messages::{self, Agent, Delivered, Queued};
 use crate::permissions;
 use crate::placement::Placement;
-use crate::runtime;
+use crate::runtime::{self, Started};
 use crate::status::{self, Activity, SessionStatus};
 use crate::tasks;
 use crate::tmux;
@@ -47,6 +47,7 @@ use crate::watch;
 use crate::worktrees::now_secs;
 
 use crate::manager::fence::fenced;
+use crate::manager::run::StartGuard;
 use crate::manager::{self, take_inbox, ChildLine, Role};
 
 pub use crate::manager::fence::{fence_brief, fence_message, fence_report};
@@ -551,7 +552,8 @@ impl Agent for SessionAgent<'_> {
         self.may_start && tmux::may_start_session()
     }
 
-    fn start(&self, prompt: &str) -> Result<bool> {
+    // The assistant is not counted against `max_live`: it starts unadmitted.
+    fn start(&self, prompt: &str, _: Option<&StartGuard>) -> Result<Started> {
         let name = format!("events {}", date(now_secs()));
         open(
             self.app,
@@ -561,7 +563,7 @@ impl Agent for SessionAgent<'_> {
                 prompt: Some(prompt),
             },
         )?;
-        Ok(true)
+        Ok(Started::Now)
     }
 
     fn status(&self, task_dir: &Path) -> Option<SessionStatus> {

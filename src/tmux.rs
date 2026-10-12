@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
+#[cfg_attr(test, allow(dead_code))]
 pub const BINARY_ENV: &str = "JEET_TMUX";
 
 /// Every tmux session jeet makes is named with this in front.
@@ -31,11 +32,21 @@ pub const BACKGROUND_ENV: &str = "JEET_BACKGROUND";
 pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not found; install it \
      (`brew install tmux` on macOS, `sudo apt install tmux` on Debian and Ubuntu)";
 
+#[cfg(not(test))]
 fn binary() -> String {
     std::env::var(BINARY_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "tmux".to_string())
+}
+
+/// Unit tests run in this process, where an environment variable set for
+/// one would reach every test at once: they never reach a tmux server, the
+/// user's or any other, whatever `$JEET_TMUX` says. To them tmux is not
+/// installed.
+#[cfg(test)]
+fn binary() -> String {
+    "/nonexistent/jeet-unit-test-tmux".to_string()
 }
 
 /// A tmux command that cannot read the terminal and says nothing on it.
@@ -99,6 +110,28 @@ fn refuse_new_server(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The names of the sessions on the tmux server: none when no server runs,
+/// or tmux cannot be run.
+pub fn list_sessions() -> Vec<String> {
+    let Ok(output) = Command::new(binary())
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn has_session(name: &str) -> bool {
@@ -198,7 +231,13 @@ fn record_agent_pane(name: &str, pane: &str) {
 /// session started before jeet noted the id falls back to the active pane
 /// of its first window, the one the agent was started in.
 fn agent_pane(name: &str) -> String {
-    let recorded = Command::new(binary())
+    pane_or_first_window(name, &recorded_agent_pane(name))
+}
+
+/// What session `name` holds as its agent's pane id, as noted; empty when
+/// nothing is.
+fn recorded_agent_pane(name: &str) -> String {
+    Command::new(binary())
         .args(["show-options", "-qv", "-t", &format!("{}:", target(name))])
         .arg(AGENT_PANE_OPTION)
         .stdin(Stdio::null())
@@ -207,8 +246,7 @@ fn agent_pane(name: &str) -> String {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    pane_or_first_window(name, &recorded)
+        .unwrap_or_default()
 }
 
 /// The pane `recorded` names, when it is a pane id, or else the active pane
@@ -984,6 +1022,42 @@ fn any_pane_alive(listing: &str) -> bool {
     listing.lines().any(|l| l.trim() == "0")
 }
 
+/// Whether the agent of session `name` still runs, in the pane
+/// [`new_session`] noted: a window the user opened there, a shell say,
+/// keeps the session up but is not the agent. A session with no pane
+/// noted falls back to [`pane_alive`].
+pub fn agent_alive(name: &str) -> bool {
+    let recorded = recorded_agent_pane(name);
+    let recorded = recorded.trim();
+    if pane_or_first_window(name, recorded) != recorded {
+        return pane_alive(name);
+    }
+    let Ok(output) = Command::new(binary())
+        .args([
+            "list-panes",
+            "-s",
+            "-t",
+            &target(name),
+            "-F",
+            "#{pane_id} #{pane_dead}",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && pane_listed_alive(&String::from_utf8_lossy(&output.stdout), recorded)
+}
+
+/// Whether `pane` is in `listing` (`#{pane_id} #{pane_dead}` lines) and
+/// alive: a pane closed as its agent exited is not listed at all.
+fn pane_listed_alive(listing: &str, pane: &str) -> bool {
+    listing
+        .lines()
+        .any(|l| l.split_whitespace().collect::<Vec<_>>() == [pane, "0"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,6 +1171,11 @@ mod tests {
         assert!(any_pane_alive("1\n0\n"));
         assert!(!any_pane_alive("1\n1\n"));
         assert!(!any_pane_alive(""));
+        // The agent's own pane, not a shell the user opened beside it.
+        assert!(pane_listed_alive("%3 0\n%7 1\n", "%3"));
+        assert!(!pane_listed_alive("%3 1\n%7 0\n", "%3"));
+        assert!(!pane_listed_alive("%7 0\n", "%3"));
+        assert!(!pane_listed_alive("%33 0\n", "%3"));
     }
 
     #[test]

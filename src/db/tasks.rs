@@ -294,6 +294,19 @@ pub struct BudgetRow {
     pub warned: u8,
 }
 
+/// What [`Database::check_budget`] read and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetCheck {
+    /// The row as it was before this check.
+    pub row: BudgetRow,
+    /// What its subtree has used: (seconds, turns).
+    pub used: (i64, i64),
+    /// The threshold it is at: 0, 80 or 100.
+    pub level: u8,
+    /// Whether this check recorded `level` as told: no other had.
+    pub newly: bool,
+}
+
 const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity, \
      parent_id, placement, run_state, run_state_by, max_children";
 
@@ -524,6 +537,65 @@ pub fn fan_out_full(parent: &str, active: usize, max: u32) -> String {
     )
 }
 
+/// [`Database::set_run_state`] within `tx`.
+fn set_run_state_in(tx: &Connection, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
+    let Some(task) = get_task_in(tx, id)? else {
+        bail!("task {id} is not in the index");
+    };
+    let (state, by) = match (state, by) {
+        (RunState::Run, None) => (state, None),
+        (RunState::Run, Some(_)) => bail!("a running task has no setter"),
+        (_, None) => bail!("a {} task needs a setter", state.as_str()),
+        (_, Some(by)) => match &task.run_state_by {
+            Some(old) if !outranks_in(tx, by, old)? => (state.max(task.run_state), Some(old)),
+            _ => (state.max(task.run_state), Some(by)),
+        },
+    };
+    if (state, by) != (task.run_state, task.run_state_by.as_ref()) {
+        tx.execute(
+            "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
+            params![id, state.as_str(), by.map(Setter::as_str)],
+        )?;
+    }
+    Ok(())
+}
+
+/// [`Database::budget`] on `conn`.
+fn budget_in(conn: &Connection, id: &str) -> Result<Option<BudgetRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT max_secs, max_turns, used_secs, used_turns, warned
+             FROM task_budgets WHERE task_id = ?1",
+            params![id],
+            |row| {
+                Ok(BudgetRow {
+                    max_secs: row.get(0)?,
+                    max_turns: row.get(1)?,
+                    used_secs: row.get(2)?,
+                    used_turns: row.get(3)?,
+                    warned: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// [`Database::subtree_used`] on `conn`.
+fn subtree_used_in(conn: &Connection, id: &str) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "WITH RECURSIVE sub(id, depth) AS (
+             SELECT ?1, 0
+             UNION
+             SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
+             WHERE sub.depth < ?2
+         )
+         SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
+         FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
+        params![id, MAX_HOPS],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
 /// How a run state's setter ranks when two hold a task at the same severity:
 /// whether `new` outranks `old`. Both are the task or its ancestors, so of two
 /// nodes the one nearer the root ranks higher.
@@ -633,10 +705,14 @@ impl Database {
     }
 
     /// Remove a task's rows: its worktrees, sessions and PR history go with
-    /// it. The caller deals with what is on disk.
+    /// it, and what it used goes to its parent ([`keep_spend_in`]). The
+    /// caller deals with what is on disk.
     pub fn delete_task(&self, id: &str) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        keep_spend_in(&tx, id)?;
+        tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -900,11 +976,13 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Record a `status` report about `task_id`, unless its last one starts
-    /// with `word` and was sent at or after `since`: the same event told
-    /// already. Checked and written in one write transaction, so two
-    /// processes telling the same event record it once. Returns the new
-    /// report's id, or None when it was told already.
+    /// Record a `status` report about `task_id`, unless its last one that
+    /// starts with `word` was sent at or after `since`: the same event told
+    /// already, whatever other events were told since (a `budget` report
+    /// between two sweeps of one idle spell does not make it news again).
+    /// Checked and written in one write transaction, so two processes
+    /// telling the same event record it once. Returns the new report's id,
+    /// or None when it was told already.
     pub fn insert_status_report_unless_told(
         &self,
         task_id: &str,
@@ -920,13 +998,15 @@ impl Database {
             .query_row(
                 &format!(
                     "SELECT {TASK_REPORT_COLUMNS} FROM task_reports
-                     WHERE task_id = ?1 AND kind = 'status' ORDER BY id DESC LIMIT 1"
+                     WHERE task_id = ?1 AND kind = 'status'
+                       AND substr(body, 1, length(?2)) = ?2
+                     ORDER BY id DESC LIMIT 1"
                 ),
-                params![task_id],
+                params![task_id, word],
                 task_report_from_row,
             )
             .optional()?;
-        if last.is_some_and(|r| r.body.starts_with(word) && r.at >= since) {
+        if last.is_some_and(|r| r.at >= since) {
             return Ok(None);
         }
         tx.execute(
@@ -1159,23 +1239,7 @@ impl Database {
 
     /// `id`'s own budget row, if it has a limit or has used anything.
     pub fn budget(&self, id: &str) -> Result<Option<BudgetRow>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT max_secs, max_turns, used_secs, used_turns, warned
-                 FROM task_budgets WHERE task_id = ?1",
-                params![id],
-                |row| {
-                    Ok(BudgetRow {
-                        max_secs: row.get(0)?,
-                        max_turns: row.get(1)?,
-                        used_secs: row.get(2)?,
-                        used_turns: row.get(3)?,
-                        warned: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?)
+        budget_in(&self.conn(), id)
     }
 
     /// Set `id`'s limits, keeping what it has used. The thresholds are told
@@ -1207,18 +1271,45 @@ impl Database {
 
     /// What `id` and everything below it have used: (seconds, turns).
     pub fn subtree_used(&self, id: &str) -> Result<(i64, i64)> {
-        Ok(self.conn().query_row(
-            "WITH RECURSIVE sub(id, depth) AS (
-                 SELECT ?1, 0
-                 UNION
-                 SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
-                 WHERE sub.depth < ?2
-             )
-             SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
-             FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
-            params![id, MAX_HOPS],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?)
+        subtree_used_in(&self.conn(), id)
+    }
+
+    /// The budget threshold `id` is at, by `level` of its row and what its
+    /// subtree has used, both read afresh under one write lock (M21): at
+    /// 100 it is paused, by its budget, and a threshold not told yet is
+    /// recorded as told. With what was read, and whether this call is the
+    /// one that recorded it; `None` with no budget row. So a limit changed
+    /// meanwhile is checked as it now is, and of two checks crossing the
+    /// same threshold at once only one tells it.
+    pub fn check_budget(
+        &self,
+        id: &str,
+        level: impl Fn(&BudgetRow, (i64, i64)) -> u8,
+    ) -> Result<Option<BudgetCheck>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(row) = budget_in(&tx, id)? else {
+            return Ok(None);
+        };
+        let used = subtree_used_in(&tx, id)?;
+        let at = level(&row, used);
+        if at >= 100 {
+            set_run_state_in(&tx, id, RunState::Paused, Some(&Setter::Budget))?;
+        }
+        let newly = at > row.warned;
+        if newly {
+            tx.execute(
+                "UPDATE task_budgets SET warned = ?2 WHERE task_id = ?1",
+                params![id, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(BudgetCheck {
+            row,
+            used,
+            level: at,
+            newly,
+        }))
     }
 
     /// Record the last threshold told about `id`'s budget: 0, 80 or 100.
@@ -1234,32 +1325,46 @@ impl Database {
     /// applies; whether the caller may is its own check. Otherwise the state
     /// never drops in severity, and the setter changes only to one that
     /// outranks it: user, then root, then the node nearest the root, then
-    /// budget. So a user's stop outlives a later pause, and a user's pause
-    /// made a stop by a node is still the user's to resume.
+    /// budget, whether or not the state rises. So a user's stop outlives a
+    /// later pause, a user's pause made a stop by a node is still the user's
+    /// to resume, and so is a node's stop the user then pauses.
     pub fn set_run_state(&self, id: &str, state: RunState, by: Option<&Setter>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        set_run_state_in(&tx, id, state, by)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Set `id` running again, if its own run state and setter are still
+    /// `checked`, what the caller's right to resume it was checked against,
+    /// and its subtree is still within its budget: false, and nothing
+    /// written, when a pause or stop changed them since, or a charge used
+    /// the budget up (a budget's pause of a row a node holds already leaves
+    /// the row as it was).
+    pub fn resume_run_state(&self, id: &str, checked: (RunState, Option<&Setter>)) -> Result<bool> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(task) = get_task_in(&tx, id)? else {
             bail!("task {id} is not in the index");
         };
-        let by = match (state, by) {
-            (RunState::Run, None) => None,
-            (RunState::Run, Some(_)) => bail!("a running task has no setter"),
-            (_, None) => bail!("a {} task needs a setter", state.as_str()),
-            (_, Some(_)) if state < task.run_state => return Ok(()),
-            (_, Some(by)) => match &task.run_state_by {
-                Some(old) if !outranks_in(&tx, by, old)? => Some(old),
-                _ => Some(by),
-            },
-        };
-        if (state, by) != (task.run_state, task.run_state_by.as_ref()) {
-            tx.execute(
-                "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
-                params![id, state.as_str(), by.map(Setter::as_str)],
-            )?;
+        if (task.run_state, task.run_state_by.as_ref()) != checked {
+            return Ok(false);
         }
+        if let Some(row) = budget_in(&tx, id)? {
+            let (secs, turns) = subtree_used_in(&tx, id)?;
+            if row.max_secs.is_some_and(|max| secs >= max)
+                || row.max_turns.is_some_and(|max| turns >= max)
+            {
+                return Ok(false);
+            }
+        }
+        tx.execute(
+            "UPDATE tasks SET run_state = ?2, run_state_by = NULL WHERE id = ?1",
+            params![id, RunState::Run.as_str()],
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// The run state that applies to `id`: the most severe over it and its
@@ -1283,14 +1388,14 @@ impl Database {
     }
 
     /// Queue `id` to start once a `max_live` slot frees; a task queued
-    /// already keeps its place.
-    pub fn queue_start(&self, id: &str, at: i64) -> Result<()> {
-        self.conn().execute(
+    /// already keeps its place. True when it was not queued already.
+    pub fn queue_start(&self, id: &str, at: i64) -> Result<bool> {
+        let inserted = self.conn().execute(
             "INSERT INTO task_start_queue (task_id, queued_at) VALUES (?1, ?2)
              ON CONFLICT(task_id) DO NOTHING",
             params![id, at],
         )?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     /// The queued tasks, oldest first.
@@ -1303,6 +1408,18 @@ impl Database {
         ))?;
         let rows = stmt.query_map([], task_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// When task `id`'s start was queued, if it is.
+    pub fn queued_at(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT queued_at FROM task_start_queue WHERE task_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     pub fn unqueue(&self, id: &str) -> Result<()> {
@@ -1319,11 +1436,30 @@ impl Database {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in ids {
+            keep_spend_in(&tx, id)?;
             tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Add what task `id` used to its parent's use, before `id`'s row goes and
+/// its budget row with it: what a deleted task spent still counts toward
+/// every budget above it.
+fn keep_spend_in(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_budgets (task_id, used_secs, used_turns)
+         SELECT t.parent_id, b.used_secs, b.used_turns
+         FROM tasks t JOIN task_budgets b ON b.task_id = t.id
+         WHERE t.id = ?1 AND t.parent_id IS NOT NULL
+           AND (b.used_secs > 0 OR b.used_turns > 0)
+         ON CONFLICT(task_id) DO UPDATE SET
+           used_secs = used_secs + excluded.used_secs,
+           used_turns = used_turns + excluded.used_turns",
+        params![id],
+    )?;
+    Ok(())
 }
 
 fn insert_grants_in(conn: &Connection, id: &str, caps: &[&str]) -> Result<()> {
@@ -1782,6 +1918,16 @@ mod tests {
             .insert_status_report_unless_told("c", "a", "idle", "idle 1m", 8, 8)
             .unwrap();
         assert!(idle > waiting);
+        // Another event told between two sweeps of the same spell does not
+        // make it news again.
+        db.insert_status_report_unless_told("c", "a", "budget", "budget 80% used", i64::MAX, 9)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.insert_status_report_unless_told("c", "a", "idle", "idle 2m", 8, 10)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2108,6 +2254,15 @@ mod tests {
                 warned: 0,
             }
         );
+        // A deleted task's use stays with its parent, and so above it.
+        db.delete_task("w2").unwrap();
+        assert_eq!(db.subtree_used("m").unwrap(), (135, 5));
+        assert_eq!(db.subtree_used("a").unwrap(), (1135, 14));
+        db.delete_rows_leaves_first(&["w3".into(), "n".into()])
+            .unwrap();
+        assert_eq!(db.subtree_used("m").unwrap(), (135, 5));
+        let own = db.budget("m").unwrap().unwrap();
+        assert_eq!((own.used_secs, own.used_turns), (135, 5));
         assert!(db.set_budget_max("m", Some(0), None).is_err());
     }
 
@@ -2195,6 +2350,13 @@ mod tests {
         db.set_run_state("w2", RunState::Stopped, Some(&Setter::Node("m".into())))
             .unwrap();
         assert_eq!(state("w2"), (RunState::Stopped, Some(Setter::User)));
+        // A node's stop the user then pauses stays a stop, the user's now.
+        db.set_run_state("w3", RunState::Run, None).unwrap();
+        db.set_run_state("w3", RunState::Stopped, Some(&Setter::Node("m".into())))
+            .unwrap();
+        db.set_run_state("w3", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        assert_eq!(state("w3"), (RunState::Stopped, Some(Setter::User)));
         // A higher setter raising it takes over.
         db.set_run_state("w1", RunState::Paused, Some(&Setter::Budget))
             .unwrap();
@@ -2215,14 +2377,63 @@ mod tests {
     }
 
     #[test]
+    fn a_resume_applies_only_to_the_run_state_it_checked() {
+        let (_dir, db) = open();
+        tree(&db);
+        let state = |id: &str| {
+            let t = db.get_task(id).unwrap().unwrap();
+            (t.run_state, t.run_state_by)
+        };
+        let by_m = Setter::Node("m".into());
+        db.set_run_state("n", RunState::Paused, Some(&by_m))
+            .unwrap();
+        // The user paused it again after m's right to resume was checked.
+        db.set_run_state("n", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        assert!(!db
+            .resume_run_state("n", (RunState::Paused, Some(&by_m)))
+            .unwrap());
+        assert_eq!(state("n"), (RunState::Paused, Some(Setter::User)));
+        assert!(db
+            .resume_run_state("n", (RunState::Paused, Some(&Setter::User)))
+            .unwrap());
+        assert_eq!(state("n"), (RunState::Run, None));
+    }
+
+    #[test]
+    fn a_resume_is_refused_once_a_charge_uses_the_budget_up() {
+        let (_dir, db) = open();
+        tree(&db);
+        let by_m = Setter::Node("m".into());
+        db.set_run_state("n", RunState::Paused, Some(&by_m))
+            .unwrap();
+        db.set_budget_max("n", None, Some(2)).unwrap();
+        db.charge("n", 0, 1).unwrap();
+        // Checked under the limit; then a turn below it uses the budget up.
+        // The budget's pause leaves m's row as it was, so only the budget
+        // itself tells the resume.
+        db.charge("n", 0, 1).unwrap();
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Budget))
+            .unwrap();
+        assert!(!db
+            .resume_run_state("n", (RunState::Paused, Some(&by_m)))
+            .unwrap());
+        let n = db.get_task("n").unwrap().unwrap();
+        assert_eq!(
+            (n.run_state, n.run_state_by),
+            (RunState::Paused, Some(by_m))
+        );
+    }
+
+    #[test]
     fn starts_wait_in_order_and_keep_their_place() {
         let (_dir, db) = open();
         tree(&db);
         assert!(db.queued_starts().unwrap().is_empty());
-        db.queue_start("w2", 20).unwrap();
-        db.queue_start("w3", 10).unwrap();
-        db.queue_start("w1", 20).unwrap();
-        db.queue_start("w3", 30).unwrap();
+        assert!(db.queue_start("w2", 20).unwrap());
+        assert!(db.queue_start("w3", 10).unwrap());
+        assert!(db.queue_start("w1", 20).unwrap());
+        assert!(!db.queue_start("w3", 30).unwrap());
         assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w2", "w1"]);
         db.unqueue("w2").unwrap();
         assert_eq!(ids(&db.queued_starts().unwrap()), ["w3", "w1"]);

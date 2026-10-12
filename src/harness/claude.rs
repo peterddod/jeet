@@ -752,7 +752,11 @@ mod tests {
     #[test]
     fn each_event_leaves_the_session_in_its_state() {
         let cases: [(&str, State, Option<&str>); 7] = [
-            ("SessionStart", State::Idle, None),
+            (
+                "SessionStart",
+                State::Idle,
+                Some(crate::status::STARTED_DETAIL),
+            ),
             (
                 "UserPromptSubmit",
                 State::Running,
@@ -848,6 +852,7 @@ mod tests {
             detail: detail.map(Into::into),
             event: event.into(),
             at: 1,
+            busy_since: None,
         };
         assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("AskUserQuestion"))));
         assert!(ClaudeCode.in_dialog(&status("PreToolUse", Some("ExitPlanMode"))));

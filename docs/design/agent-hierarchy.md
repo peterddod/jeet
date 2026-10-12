@@ -963,9 +963,12 @@ RFC left open, or departed from it:
   turn's end: a refusal, the safe direction). Known gap: a permission prompt
   reads as `Running` until Claude's notification, which it sends only
   once the user has left the prompt alone for some seconds, so an
-  attached user typing feedback into one may still have it discarded. No retry, no confirmation and no status
-  repair yet (the status reads `running` until the next hook, as after a
-  manual Esc); those come with pause. The assistant is refused (5.4).
+  attached user typing feedback into one may still have it discarded. No retry and no confirmation. Since
+  2-ii an interrupt that sent its keys charges the spell so far
+  (`run::charge_interrupted`, reporting `blocked: budget` if that uses the
+  budget up) and writes an idle status (`Interrupted`, or `Paused` for a
+  pause), as no Stop hook follows; a manual Esc still reads `running`
+  until the next hook. The assistant is refused (5.4).
   The draft check and the keys aim at the agent's own pane, by the id
   (`%3`) jeet notes in the session option `@jeet-agent-pane` when it
   starts the session, not the session's active pane, which may be a pane
@@ -1203,13 +1206,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   kind's default (`worker_default`) uncut, so widening `[assistant] allow`
   later reaches existing children, as in phase 1; a grant someone names
   must be within the parent's list and, for a node granting, its own.
-  New capabilities: `manager.create`, `manager.grant` (grant, and budget
-  when it lands) and `manager.stop` (pause, resume, stop). `git.push` is
+  New capabilities: `manager.create`, `manager.grant` (grant and budget)
+  and `manager.stop` (pause, resume, stop). `git.push` is
   deferred (§13).
 - **P8** Scope (5.1) is one table, `permissions::node_scope`, saying for
   each command what a node may name: itself (`worktree add`, `ls`,
   `path`), itself or below (`task last`, `path`, `prs`), strictly below
-  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`), a
+  (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`,
+  `budget`, `pause`, `resume`, `stop`), a
   manager at or below it as `--parent`, or no task at all (`jeet ls`,
   `jeet prs`, `report`, hooks, screens). A name is resolved within the
   node's subtree, so a prefix cannot reach outside it; delete and
@@ -1217,7 +1221,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   to every node, reads included (`worktree rm`, `projects`, `clone`, …).
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
-  only on a task under the assistant, for anyone. `task ls` lists a node's
+  only on a task under the assistant, for anyone, and `manager stop --all`
+  is refused to all but the user (M11). `task ls` lists a node's
   subtree only. `task send assistant` and `task interrupt assistant` mean
   the assistant to the user and the root only; to a node, `assistant` is a
   name like any other, found in its subtree, so a child named for it is
@@ -1271,7 +1276,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   message does: typed in when it sits idle, queued while it is busy, and,
   when it is not running, started only by a `done`, `blocked` or
   `question` from a caller that may start it; anything else is held in its
-  inbox. Pause and `max_live` gate it once they land. `<jeet-report>` names the sender as `task <slug>`
+  inbox. While the parent is held the report waits in its inbox, typed
+  into nothing (P18); a start it makes passes the start gate (P17), and is
+  queued, with the report in its inbox, over `max_live`.
+  `<jeet-report>` names the sender as `task <slug>`
   or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
   last line says whom to report to. A broken chain that hides what a task
@@ -1282,7 +1290,205 @@ Managers run locally in tmux, as the user, like any other task (I22).
   "reports to" line, in a report's sender and `jeet report`'s output, and
   (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
   manager `(manager)` after its name (M29); `jeet manager ls` has a kind
-  column. `max_live` is read once it gates starts.
+  column.
+- **P16** Run state (5.4) is changed by `manager/run.rs`. A pause writes
+  the target's row, then interrupts its subtree leaves first, through a
+  runtime lookup and an own-session check passed in (production:
+  `placement::runtime_for` and `runtime::is_own_session`, which
+  `runtime::interrupt` and `refuse_inside_session` share), so the walk is
+  tested with a fake runtime and no tmux. It skips the assistant and the
+  node this jeet runs in, turns each refusal or error into a line and goes
+  on, and marks an interrupted node idle (`Paused`), since an interrupted
+  turn has no Stop hook. Each node is interrupted under its inbox lock, so
+  a delivery that found it not held yet has typed its message in first.
+  A node handed input in the last `STARTING_SECS` (launched with hooks
+  and its brief on its command line, which `.jeet/launched` records, or
+  typed a message since its launch: `TmuxAgent::type_in` touches
+  `.jeet/typed` first; a launch with no first prompt hands it none, and
+  its pause waits for nothing) that no hook has reported on since
+  (`status::input_unreported`; a status in the same second does not
+  count, nor does a session start's, written before the prompt on its
+  command line is submitted however late it boots, and a startup-prompt
+  status ends the wait) is about to start a
+  turn its status does not show: while the interrupt finds it starting,
+  idle or at startup, it is tried again every 250 ms, with the inbox lock
+  let go in between, until a hook reports or the window passes.
+  A pause and a stop take the start lock once, after writing the row and
+  before the walk, so a start admitted before the row was written has made
+  its session by then, and one after sees the hold. A parented review
+  task's job is admitted the same way (`run::admit_job`, not counted
+  against `max_live`), the lock held until its runner is recorded, so a
+  stop meanwhile finds the job and ends it. A pause or stop by a
+  caller who outranks the setter takes the hold over, even when it is less
+  severe than the state it finds (which stays). `resume` is refused under a held ancestor, while
+  the target's own subtree has used its budget, and to a caller ranked
+  below the setter: the user, the assistant, a node above the caller, the
+  caller, a node below it, then `budget`. The resume is written only if
+  the target's run state and setter are still the ones checked, and its
+  subtree is still within its budget (`Database::resume_run_state`), so a
+  pause or stop made meanwhile, by someone who may outrank the caller,
+  stays, and so does a budget's pause folded into a row a node holds
+  already (the row is left as it was, so only the budget shows it). It then hands what queued to
+  each live, unheld node below that a delivery would type into (idle, or
+  running with no hooks: `messages::route` is `Type`), reading the hold
+  again under its inbox lock, then runs a drain, which starts each node
+  a held message queued the start of whose agent is not running. A
+  report to a node that is not running (`may_start` off) queues no start,
+  held or not, so a resume never starts a node for reports alone. A stop ends every node's
+  session in the subtree, live or not, and forgets its pane, through an
+  end function and own-session check passed in as for a pause
+  (`run::stop_with`; production: `run::end_agent`). It also ends the
+  review jobs running as the node or in its directory, as an archive does
+  (a review task's agent is its review command, with no session to end or
+  interrupt), and `jeet review` refuses to start a held review task's job, with a note,
+  and still opens the review and hands off its worktree. `max_live` counts the
+  active tasks below the assistant whose `jeet-<slug>` session one `tmux
+  list-sessions` lists and whose agent's pane (the `@jeet-agent-pane` jeet
+  notes when it starts the session; any pane, for a session with none
+  noted) is alive; a session the user's `remain-on-exit`, or a window
+  the user opened there, keeps after its agent exits does not count.
+  Everywhere else a session with any live pane is still running, so a
+  queued task whose session holds only such a window is left to it, not
+  started. The start gate is a
+  blocking lock beside the watch's: a held task is refused before any
+  count, and one over the limit is queued, keeping its place. A queued
+  task leaves the queue once its agent starts, however it was admitted
+  (`ensure_running_admitted` unqueues on `Started::Now`), so one that
+  fails to start stays queued, one the user opened past the gate is not
+  started again by a drain after it ends, and a drain from a background job with no tmux
+  server starts nothing. A budget check tells each threshold once, by
+  `task_budgets.warned` alone: 80% as a `budget` status report to the
+  parent and a note in the task's inbox; 100% pauses the task with the
+  `budget` setter, which leaves anyone else's pause or stop as it is, and
+  is reported to the parent for a task above the one charged, unless that
+  task is stopped, itself or above, as a stop's own charge may use it up (the charged
+  node's own Stop hook reports it, when the check newly holds it: its own
+  budget used up, or one above while nothing held it already, so a node
+  its own budget paused is not reported blocked again when its parent's
+  follows). The row and its subtree's use are read,
+  the pause written and the threshold claimed in one IMMEDIATE transaction
+  (`Database::check_budget`), so a limit changed meanwhile is checked as it
+  now is, and of two hooks crossing one threshold at once only one tells
+  it. A budget change that does not fit what
+  is left above is refused, not cut.
+- **P17** Every start of a task's agent but the assistant's is admitted by
+  `runtime::ensure_running` before `runtime_for` (M22), unless the agent
+  is running already: a live pane is attached to, held or not, and
+  nothing is started from that path (one gone meanwhile is not restarted
+  unadmitted). A held
+  task is refused ("`jeet manager resume <holder>` first") for every
+  caller. Over `max_live` a start is queued (`Started::Queued`, the
+  prompt handed back) for whoever asked, except the user's `jeet task
+  open` and the TUI's open, which start it anyway and warn "over
+  max_live". A start with no prompt (`task open`, the TUI's open, with a
+  session named or not) takes the task's inbox lock before the start lock
+  and starts it with what waits there, as a drain would, resuming the
+  session named if any (`runtime::start_with_inbox`): a brief queued on `max_live` is not left
+  behind by an open that starts it first. Under a harness that takes no
+  first prompt from jeet (`prompt_args` is `None`), it starts with none and
+  leaves the inbox for a delivery to type in, rather than fail every open.
+  On such a harness a start with a prompt (`task new --prompt`, a delivery
+  to an agent not running) is refused before it is held or queued
+  (`runtime::first_prompt_refusal`), as it is when made at once, so no
+  brief or message waits for a drain that would start it without one.
+  A drain skips, unqueues and warns of a queued task whose directory is
+  gone, before its inbox lock would make it again. A start made holding the start lock (a drain, or a delivery
+  admitted already) goes through `ensure_running_admitted` with the
+  guard, as the lock is not re-entrant. `Agent::start` takes that guard
+  and says how the start went (`Started`); a delivery whose start is
+  queued keeps the whole message queue in the inbox, in order. `task new`
+  takes its inbox lock before the start lock, puts a queued brief in the
+  inbox (`messages::brief` refuses one over `MAX_MESSAGE` once marked
+  `Message: `, which the inbox would drop) and reports `queued, n/max live` to the parent (`StatusEvent::
+  Queued`); under a held parent it puts the brief in the inbox, queues the
+  start for the resume's drain and succeeds, whether the hold is seen
+  before the start or only by the start gate (a pause in between). A drain returns what a start
+  warns of rather than print it (the TUI drains too). Unit tests never run tmux: under `cfg(test)`, `tmux::binary`
+  names one that does not exist, whatever `$JEET_TMUX` says.
+- **P18** A held task (5.4) is handed nothing, and `jeet task-startup`
+  accepts no trust prompt for it (asked before each key), which would let
+  a brief given before the pause run: the prompt is left for the user. `messages::deliver` asks
+  `Agent::held` first, under the inbox lock, and queues for a held agent
+  whatever it is doing (`Delivered::Paused`), queueing its start
+  (`Agent::queue_held_start`) when the message may start it, and the
+  harness takes a first prompt (on one that takes none, a start could not
+  give it the message: a resume finding the agent running types it in, one
+  finding it gone leaves it for a delivery, as `task open` does, and
+  `task send` says so), whether or not its agent runs then (it may end while held; a drain that finds it
+  running and not held only unqueues it, wherever it sits in the queue:
+  once the tree is full a drain starts nothing more, but still goes on
+  through the rows for such stale ones), so the drain a resume runs starts it with
+  its queue if need be; only then, for a start, does
+  it ask `Agent::admit`, which takes the start lock after the inbox lock
+  and is `None` for an agent the gate does not count (the assistant's).
+  Over `max_live` the message is queued with the start
+  (`Delivered::StartQueued { live, max }`, as `Delivered::Queued` already
+  means queued for a busy agent), and, once the inbox is unlocked, the
+  task's parent is told `queued, n/max live` (`Agent::queued`) when the
+  start was not queued already, so a run of messages tells it once. A
+  start a hold queued (a held message or brief) says nothing of
+  `max_live`; a drain that finds it waiting on a full tree tells the
+  parent then, once per queued start (`queued` debounced against
+  `queued_at`), and says so to its caller (a resume prints `task <slug> is
+  queued on max_live (n/max live)`). `jeet watch` notifies the user of a held
+  delivery only when the agent could not be started (`Held`), not when it
+  is paused or waits on `max_live`, and drains the start queue each poll.
+- **P19** Budgets (5.3) are charged in the hook, before it acts on the
+  event, by one helper (`status::hook_ctx`), which opens the index for
+  every hook of a task, found by `--task` or by its directory. A status
+  that is running or waiting keeps `busy_since`, when its busy spell
+  began. An attributed `Stopped` charges a turn and the spell's time, an
+  attributed `Ended`, or `Idle` after a spell no `Stopped` closed (Escape,
+  a refused permission), the time left; then the budgets are checked, and only
+  then is the run state read, so a turn that uses a budget up is held at
+  its own end: no `continue_output`, its queue left in the inbox, and its
+  parent told `blocked: budget` from the hook itself, with no `jeet`
+  spawned. The Stop hook and `idle_prompt` read the hold again once they
+  hold the inbox lock, before handing anything over, so a pause written
+  in between, whose walk interrupts under that lock, holds them too, and
+  a resume written in between, which reads each agent's activity under
+  that lock to hand over what queued, leaves it to them. How far a session's time is charged is kept beside its status
+  (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
+  assistant's turns), a pause's interrupt and a stop, which each charge a
+  spell still going, never charge the same time as the hook that ends it.
+  A sweep, a stop, an archive and a delete charge only an agent whose own
+  pane is alive, and an interrupt is sent to no other (so charges none) (`tmux::agent_alive`; a window the user opened keeps its
+  session up but is no agent), and only a task in the tree (`fold_busy`
+  charges no top-level task, as `task interrupt` would otherwise): one that
+  died with no `Ended` (a crash, a reboot) leaves a status that still says
+  busy, which is no busy time, nor is it once a new agent is launched and
+  has not reported yet (a status older than `.jeet/launched`). Archiving
+  or deleting a task in the tree charges its live agent's spell so far
+  before its session ends, as a stop does, since no hook or sweep charges
+  it after. A sweep, and a pause's or `task interrupt`'s interrupt, that use a budget up report `blocked: budget` themselves; a stop's does not, as a stopped node's end is not reported. A status report is debounced against the last one of the same event (its word), so a `budget` or `queued` report between two sweeps of one idle spell does not make it news again. Deleting a task adds what it used to its parent's use, in the same transaction, so its spend still counts toward every budget above it. An
+  `Ended` that no new session replaces starts a detached `jeet manager
+  drain` (output to `drain.log` in jeet's home) when a start waits on
+  `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
+  reported to its parent. A harness with no hooks, or no `Ended`, has
+  nothing drain when its agent exits: a queued start waits for the next
+  drain from `run_once`, the TUI refresh, a stop or a resume (M22's list).
+- **P20** `jeet manager budget <task> +…|=…` (`manager.grant`) raises
+  a limit the task has (`+` on a unit with no limit is refused: there is
+  no cap to raise) or sets one, keeping the unit not given; the result
+  must fit what is left above the task and, for a node, what it has left
+  itself, in each unit it raises or newly limits (one kept or lowered is
+  not checked: siblings' spend may leave less above than a limit given
+  before), and the 80%/100% reports start over, then the budgets are
+  checked at once (`budget::enforce`), so a limit set at or below what
+  the task has used pauses it now, not after a turn past it. Otherwise it
+  leaves the run state alone: a task its budget paused runs again only once resumed, and the
+  command says so. There is no `BRIEF.md` to rewrite yet (2-iii). `jeet
+  manager pause`, `resume` and `stop` (`manager.stop`) print one line per
+  node the walk touched. `stop --all` is the user's alone, refused before
+  any scope check to the assistant and to a node (M11); the assistant may
+  still stop one task. `manager show` names a node that set a run state
+  by its slug. The hidden `jeet manager drain` takes `--after <task id>`:
+  the `Ended` hook runs before its agent exits, so the drain it leaves
+  behind waits up to ten seconds for that task's agent's pane to go before it
+  counts, or the ending session would still fill the slot it frees. A
+  drain returns what it warns of instead of printing it, so the TUI,
+  which drains on a full refresh (opening, and `r`), shows the first in
+  its status line rather than on the screen it draws.
 
 ## 11. Placement
 

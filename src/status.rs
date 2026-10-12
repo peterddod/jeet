@@ -19,18 +19,27 @@
 //! queued into its pane instead, as does a turn ending for a harness that
 //! cannot carry on. And the assistant's session start prints the summary of
 //! the user's work it starts every session with.
+//!
+//! A task in the tree is charged for what its agent spends (M19): a turn
+//! for each turn its own agent ends, and the time it was busy (running, or
+//! waiting on a prompt) from `busy_since`. A task paused or stopped, itself
+//! or above it, is handed nothing when its turn ends or it sits idle.
 
-use std::io::{IsTerminal, Read};
+use std::fs::OpenOptions;
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::assistant;
 use crate::context::App;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
+use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::identity;
+use crate::manager::budget::{self, Threshold};
+use crate::manager::run;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
@@ -68,6 +77,10 @@ pub struct SessionStatus {
     pub event: String,
     /// Unix seconds of that event: for `idle`, idle since when.
     pub at: i64,
+    /// For `running` and `waiting`: when the busy spell it is part of
+    /// began, which the task's budget is charged from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_since: Option<i64>,
 }
 
 /// The status `event` leaves a session in, or `None` for an event that
@@ -75,7 +88,7 @@ pub struct SessionStatus {
 pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
     let session_id = event.session_id.clone()?;
     let (state, detail) = match event.kind.clone()? {
-        EventKind::SessionStarted(_) => (State::Idle, None),
+        EventKind::SessionStarted(_) => (State::Idle, Some(STARTED_DETAIL.to_string())),
         EventKind::Working(detail) => (State::Running, detail),
         EventKind::Idle => (State::Idle, None),
         EventKind::NeedsInput(detail) => (State::Waiting, detail),
@@ -88,8 +101,13 @@ pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
         detail,
         event: event.name.clone(),
         at: now,
+        busy_since: None,
     })
 }
+
+/// The detail of the status a session start leaves: written before the
+/// first prompt is submitted, so it says nothing of the input it was given.
+pub const STARTED_DETAIL: &str = "session started";
 
 /// The first non-blank line of `text`, cut to `max` characters.
 pub fn first_line(text: &str, max: usize) -> Option<String> {
@@ -124,9 +142,13 @@ fn launched_path(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("launched")
 }
 
+/// What the launch marker holds for a launch given a first prompt.
+const LAUNCHED_WITH_PROMPT: &[u8] = b"prompt";
+
 /// Note that the task's agent was just launched, `hooks` saying whether its
-/// harness reports its status.
-pub fn mark_launched(task_dir: &Path, hooks: bool) -> Result<()> {
+/// harness reports its status, and `prompted` whether it was given a first
+/// prompt.
+pub fn mark_launched(task_dir: &Path, hooks: bool, prompted: bool) -> Result<()> {
     let path = launched_path(task_dir);
     if !hooks {
         return match std::fs::remove_file(&path) {
@@ -135,12 +157,57 @@ pub fn mark_launched(task_dir: &Path, hooks: bool) -> Result<()> {
         };
     }
     std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
-    std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
+    let content = if prompted { LAUNCHED_WITH_PROMPT } else { b"" };
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))
 }
 
 /// When an agent with hooks was last launched in the task.
 pub fn launched_at(task_dir: &Path) -> Option<i64> {
     crate::agent::mtime_secs(&std::fs::metadata(launched_path(task_dir)).ok()?)
+}
+
+/// Touched when jeet types a message into the task's agent, so a pause can
+/// tell a turn about to start from an idle agent.
+fn typed_path(task_dir: &Path) -> PathBuf {
+    task_dir.join(tasks::MARKER_DIR).join("typed")
+}
+
+/// Note that a message was just typed into the task's agent.
+pub fn mark_typed(task_dir: &Path) -> Result<()> {
+    let path = typed_path(task_dir);
+    std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
+    std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
+}
+
+/// Whether the task's agent was handed input in the last [`STARTING_SECS`]
+/// (launched with hooks and its first prompt on its command line, or typed
+/// a message) that no hook has reported on since: a turn that may be about
+/// to start, though its status does not say so yet. Not one the startup
+/// watcher found held at a startup prompt.
+pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
+    let launched = launched_at(task_dir);
+    // Typed into the agent running now, not one launched before it.
+    let typed = std::fs::metadata(typed_path(task_dir))
+        .ok()
+        .and_then(|m| crate::agent::mtime_secs(&m))
+        .filter(|t| launched.is_none_or(|l| *t >= l));
+    // A launch with no first prompt hands it nothing to start a turn on.
+    let prompted =
+        std::fs::read(launched_path(task_dir)).is_ok_and(|content| content == LAUNCHED_WITH_PROMPT);
+    let Some(given) = launched.filter(|_| prompted).max(typed) else {
+        return false;
+    };
+    if now - given >= STARTING_SECS {
+        return false;
+    }
+    // A session start's status comes before the prompt it was launched
+    // with is submitted, however much later; and in whole seconds, any
+    // status from the second it was given may be from before it, so only a
+    // later one of another kind has seen it.
+    current_status(task_dir).is_none_or(|s| {
+        s.event != STARTUP_PROMPT_EVENT
+            && (s.at <= given || s.detail.as_deref() == Some(STARTED_DETAIL))
+    })
 }
 
 /// The event of a status [`mark_startup_prompt`] wrote.
@@ -162,6 +229,38 @@ pub fn mark_startup_prompt(
             detail: Some(detail.to_string()),
             event: STARTUP_PROMPT_EVENT.to_string(),
             at: now,
+            busy_since: None,
+        },
+    )
+}
+
+/// The event of the status a pause leaves an interrupted session in.
+pub const PAUSED_EVENT: &str = "Paused";
+
+/// The event of the status `jeet task interrupt` leaves a session in.
+pub const INTERRUPTED_EVENT: &str = "Interrupted";
+
+/// Mark the task's latest session idle, its turn ended by a pause.
+pub fn mark_paused(task_dir: &Path, now: i64) -> Result<()> {
+    mark_interrupted(task_dir, PAUSED_EVENT, "paused", now)
+}
+
+/// Mark the task's latest session idle, as `event` with `detail`: a turn
+/// jeet interrupted ends with no Stop hook to say so, and its busy spell is
+/// closed here. Nothing for a task with no status.
+pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) -> Result<()> {
+    let Some(current) = current_status(task_dir) else {
+        return Ok(());
+    };
+    write_status(
+        task_dir,
+        &SessionStatus {
+            session_id: current.session_id,
+            state: State::Idle,
+            detail: Some(detail.to_string()),
+            event: event.to_string(),
+            at: now,
+            busy_since: None,
         },
     )
 }
@@ -206,21 +305,10 @@ fn handle_hook(
         // Not a jeet task: nothing to report to.
         return Ok(());
     };
-    // What the session was doing before this event, for what to tell a
-    // parent about it.
-    let prev = match hook.kind {
-        Some(EventKind::NeedsInput(_) | EventKind::Ended { .. }) => {
-            read_status(&task_dir, session_id)
-        }
-        _ => None,
-    };
+    let ctx = hook_ctx(app, &task_dir, &task_id, launched_for, &hook, now)?;
 
-    if let Some(EventKind::SessionStarted(source)) = hook.kind {
-        let app = match app.take() {
-            Some(app) => app,
-            None => App::open()?,
-        };
-        if let Some(task) = app.db.get_task(&task_id)? {
+    if let (Some(EventKind::SessionStarted(source)), app) = (&hook.kind, &ctx.app) {
+        if let Some(task) = &ctx.task {
             let assistant = task.kind == TaskKind::Assistant;
             // The window this session runs in names the one it follows on
             // from, and from now on is found by this one.
@@ -236,11 +324,11 @@ fn handle_hook(
                     eprintln!("jeet task-hook {event}: {e:#}");
                 }
             }
-            record_session(&app, &task, session_id, source, before.as_deref(), now)?;
+            record_session(app, task, session_id, *source, before.as_deref(), now)?;
             // The harness adds this to the conversation; a summary that
             // cannot be made costs the session its context, not its start.
             if assistant && harness.session_context_output("").is_some() {
-                match assistant::session_context(&app, &task, session_id, now) {
+                match assistant::session_context(app, task, session_id, now) {
                     Ok(context) => {
                         if let Some(output) = harness.session_context_output(&context) {
                             println!("{output}");
@@ -250,11 +338,11 @@ fn handle_hook(
                 }
             } else if task.parent_id.is_some()
                 && harness.session_context_output("").is_some()
-                && attributed(launched_for, &task.id, &app)
+                && attributed(launched_for, &task.id, app)
             {
                 // What its parent asked of it, each time a session starts,
                 // /clear included.
-                match reports::brief_context(&app, &task) {
+                match reports::brief_context(app, task) {
                     Ok(brief) => {
                         if let Some(output) = harness.session_context_output(&brief) {
                             println!("{output}");
@@ -266,37 +354,300 @@ fn handle_hook(
         }
         // A compaction can happen mid-prompt; the session carries on in
         // whatever state it was in.
-        if source == StartSource::Compact && read_status(&task_dir, session_id).is_some() {
+        if *source == StartSource::Compact && read_status(&task_dir, session_id).is_some() {
             return Ok(());
         }
     }
     // The assistant's turn ending is when tasks idle too long are reported
     // to it, whatever its harness: before its inbox is handed over, so what
-    // this queues comes with it. Its app is open already (by `--task`, or
-    // by `$JEET_TASK_ID` from an older hook).
-    if let (Some(EventKind::Stopped), Some(app)) = (&hook.kind, &app) {
-        if let Err(e) = sweep_if_assistant(app, &task_id, now) {
+    // this queues comes with it.
+    if let Some(EventKind::Stopped) = &hook.kind {
+        if let Err(e) = sweep_if_assistant(&ctx.app, &task_id, now) {
             eprintln!("jeet task-hook {event}: {e:#}");
         }
     }
     let result = match hook.kind {
         // A harness that cannot carry on past a turn's end is idle at it.
         Some(EventKind::Stopped) if harness.continue_output("").is_some() => {
-            stop(harness, &task_dir, &hook, session_id, now)
+            stop(harness, &task_dir, &hook, session_id, &ctx, now).map(|output| {
+                if let Some(output) = output {
+                    println!("{output}");
+                }
+            })
         }
-        Some(EventKind::Stopped | EventKind::Idle) => {
-            idle_prompt(&task_dir, &task_id, &hook, app, now)
-        }
-        _ => match status_for(&hook, now) {
-            Some(status) => write_status(&task_dir, &status),
-            None => Ok(()),
-        },
+        Some(EventKind::Stopped | EventKind::Idle) => idle_prompt(&task_dir, &hook, &ctx, now),
+        _ => write_event_status(&task_dir, &hook, &ctx, now),
     };
     // Only now, with the task's inbox no longer locked.
-    if let Err(e) = report_step(&hook, &task_id, launched_for, prev, now) {
+    if let (Threshold::Hit100, Some(task)) = (ctx.threshold, &ctx.task) {
+        budget::report_blocked(&ctx.app, task);
+    }
+    if let Err(e) = report_step(&hook, &ctx, launched_for, now) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
+    // A slot under `max_live` may be free now.
+    if let Some(EventKind::Ended { cleared: false }) = hook.kind {
+        if let Err(e) = spawn_drain(&ctx.app, &task_id) {
+            eprintln!("jeet task-hook {event}: {e:#}");
+        }
+    }
     result
+}
+
+/// What [`handle_hook`] knows of the hook's task before it acts on the
+/// event, worked out in one step before any of it ([`hook_ctx`]).
+struct HookCtx {
+    app: App,
+    /// The task, unless its row is gone.
+    task: Option<TaskRecord>,
+    /// Whether the hook is the task's own agent's ([`attributed`]): asked
+    /// only of a task in the tree, for an event that charges it or that its
+    /// parent hears of.
+    attributed: bool,
+    /// The session's status before this event.
+    prev: Option<SessionStatus>,
+    /// The `busy_since` of a running or waiting status this event writes:
+    /// the spell it carries on, or one that starts now.
+    busy_since: i64,
+    /// What holds the task, itself or above, once this event has charged
+    /// it: asked at a turn's end, sitting idle and the session's end.
+    hold: Option<RunState>,
+    /// The budget threshold this event's charge newly crossed.
+    threshold: Threshold,
+}
+
+/// The [`HookCtx`] for the hook of task `task_id`: opening the app when the
+/// task was found without it (by the session's directory), and, for an
+/// attributed turn's end, charging the task a turn and the time it was
+/// busy, or at the session's end, or sitting idle after a spell no turn's
+/// end closed, the busy time left, and checking its budget ([`budget::enforce`]) before what holds it is read, so a pause
+/// the charge makes holds this same turn's end.
+fn hook_ctx(
+    app: Option<App>,
+    task_dir: &Path,
+    task_id: &str,
+    launched_for: Option<&str>,
+    hook: &HookEvent,
+    now: i64,
+) -> Result<HookCtx> {
+    let ours = |app: &App| attributed(launched_for, task_id, app);
+    hook_ctx_with(app, &App::open, task_dir, task_id, hook, now, &ours)
+}
+
+/// [`hook_ctx`], opening the app with `open` and asking `ours` whether the
+/// hook is the task's own agent's.
+fn hook_ctx_with(
+    app: Option<App>,
+    open: &dyn Fn() -> Result<App>,
+    task_dir: &Path,
+    task_id: &str,
+    hook: &HookEvent,
+    now: i64,
+    ours: &dyn Fn(&App) -> bool,
+) -> Result<HookCtx> {
+    let app = match app {
+        Some(app) => app,
+        None => open()?,
+    };
+    let task = app.db.get_task(task_id)?;
+    let session_id = hook.session_id.as_deref().unwrap_or_default();
+    let prev = read_status(task_dir, session_id);
+    let busy = prev
+        .as_ref()
+        .filter(|p| matches!(p.state, State::Running | State::Waiting))
+        .and_then(|p| p.busy_since);
+    let kind = hook.kind.as_ref();
+    // A turn's end, the session's, or sitting idle after a busy spell no
+    // Stop closed (the user pressed Escape, or refused a permission).
+    let charges = match kind {
+        Some(EventKind::Stopped | EventKind::Ended { .. }) => true,
+        Some(EventKind::Idle) => busy.is_some(),
+        _ => false,
+    };
+    let in_tree = task.as_ref().is_some_and(|t| t.parent_id.is_some());
+    // Asked only when needed: it walks the process tree.
+    let attributed =
+        in_tree && (charges || matches!(kind, Some(EventKind::NeedsInput(_)))) && ours(&app);
+    let mut threshold = Threshold::None;
+    if let (true, Some(task)) = (charges && attributed, &task) {
+        let turns = i64::from(matches!(kind, Some(EventKind::Stopped)));
+        let charged = charge_busy(&app, task, task_dir, session_id, busy, turns, now)
+            .and_then(|()| budget::enforce(&app, task));
+        match charged {
+            Ok(crossed) => threshold = crossed,
+            Err(e) => eprintln!(
+                "jeet task-hook {}: could not charge its budget: {e:#}",
+                hook.name
+            ),
+        }
+    }
+    let asks = matches!(
+        kind,
+        Some(EventKind::Stopped | EventKind::Idle | EventKind::Ended { .. })
+    );
+    let hold = match &task {
+        Some(task) if in_tree && asks => match run::hold(&app, task) {
+            Ok(hold) => hold.map(|(_, state)| state),
+            Err(e) => {
+                eprintln!("jeet task-hook {}: {e:#}", hook.name);
+                None
+            }
+        },
+        _ => None,
+    };
+    // A turn's end closes the spell it charged: what carries on is new.
+    let busy_since = match (charges, busy) {
+        (false, Some(since)) => since,
+        _ => now,
+    };
+    Ok(HookCtx {
+        app,
+        task,
+        attributed,
+        prev,
+        busy_since,
+        hold,
+        threshold,
+    })
+}
+
+/// Write the status an event that neither ends a turn nor sits idle
+/// leaves, with the busy spell it carries on or starts.
+fn write_event_status(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Result<()> {
+    match status_for(hook, now) {
+        Some(status) => write_status(task_dir, &with_busy(status, ctx)),
+        None => Ok(()),
+    }
+}
+
+/// `status` with its `busy_since`, for one running or waiting.
+fn with_busy(status: SessionStatus, ctx: &HookCtx) -> SessionStatus {
+    let busy = matches!(status.state, State::Running | State::Waiting);
+    SessionStatus {
+        busy_since: busy.then_some(ctx.busy_since),
+        ..status
+    }
+}
+
+/// Charge `task` `turns`, and the time session `session_id` has been busy
+/// since `busy_since` (none: it is not busy) that is not charged yet. How far
+/// a session is charged is kept beside its status, under a lock, so a
+/// turn's end and a sweep never charge the same time twice.
+fn charge_busy(
+    app: &App,
+    task: &TaskRecord,
+    task_dir: &Path,
+    session_id: &str,
+    busy_since: Option<i64>,
+    turns: i64,
+    now: i64,
+) -> Result<()> {
+    let dir = status_dir(task_dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!(".{session_id}.charged"));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock {}", path.display()))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("read {}", path.display()))?;
+    let charged = text.trim().parse::<i64>().unwrap_or(0);
+    let secs = busy_since.map_or(0, |since| (now - since.max(charged)).max(0));
+    if secs == 0 && turns == 0 {
+        return Ok(());
+    }
+    app.db.charge(&task.id, secs, turns)?;
+    if secs > 0 {
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(now.to_string().as_bytes()))
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Charge `task`, in the tree, the time its agent's busy spell has run so
+/// far, and check its budget: for a sweep, so a long turn is held to its
+/// budget before it ends, and for a pause or a stop, which end a spell with
+/// no hook to say so. Returns the threshold newly crossed. Nothing for an
+/// agent that is not `alive`: a status left running by one that died with
+/// no `Ended` hook (a crash, a reboot, a killed server) is no busy time,
+/// nor is it once a new agent is alive but has not reported yet: a status
+/// older than the latest launch is that dead agent's. Nothing for a task
+/// not in the tree, which has no budget (M19).
+pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<Threshold> {
+    if !alive || task.parent_id.is_none() {
+        return Ok(Threshold::None);
+    }
+    let task_dir = tasks::task_dir(app, task);
+    let Some(status) = current_status(&task_dir) else {
+        return Ok(Threshold::None);
+    };
+    if launched_at(&task_dir).is_some_and(|l| status.at < l) {
+        return Ok(Threshold::None);
+    }
+    let busy = matches!(status.state, State::Running | State::Waiting);
+    let Some(since) = status.busy_since.filter(|_| busy) else {
+        return Ok(Threshold::None);
+    };
+    if !valid_session_id(&status.session_id) {
+        return Ok(Threshold::None);
+    }
+    charge_busy(
+        app,
+        task,
+        &task_dir,
+        &status.session_id,
+        Some(since),
+        0,
+        now,
+    )?;
+    budget::enforce(app, task)
+}
+
+/// Where a detached drain's output goes, in jeet's home.
+const DRAIN_LOG: &str = "drain.log";
+
+/// Start what waits on `max_live` now that task `task_id`'s session is
+/// ending: a detached `jeet manager drain --after <task_id>`, as
+/// [`crate::startup::launch`] starts its job, since a hook has seconds to
+/// run and the pane it runs in may be going; the drain waits for it to go.
+/// Nothing when nothing waits.
+fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
+    // The test binary is no jeet.
+    if cfg!(test) || app.db.queued_starts()?.is_empty() {
+        return Ok(());
+    }
+    let log = app.home.join(DRAIN_LOG);
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .with_context(|| format!("open {}", log.display()))?;
+    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let mut cmd = Command::new("nohup");
+    cmd.arg(exe)
+        .args(["manager", "drain", "--after", task_id])
+        .env("JEET_HOME", &app.home)
+        .env_remove(crate::permissions::ASSISTANT_ENV)
+        .env_remove(tasks::TASK_ID_ENV)
+        .current_dir(&app.home)
+        .stdin(Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().context("start jeet manager drain")?;
+    Ok(())
 }
 
 fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
@@ -340,52 +691,82 @@ fn auto_body(
 }
 
 /// Tell the task's parent what this hook means for it, if anything.
-/// Nothing for a task jeet stopped itself (archived or deleted) and, as
-/// ever, nothing on stdout.
+/// Nothing for a task jeet stopped itself (archived or deleted, or stopped
+/// with `jeet manager stop`, whose caller says so) and, as ever, nothing on
+/// stdout.
 fn report_step(
     hook: &HookEvent,
-    task_id: &str,
-    task: Option<&str>,
-    prev: Option<SessionStatus>,
+    ctx: &HookCtx,
+    launched_for: Option<&str>,
     now: i64,
 ) -> Result<()> {
     // A hook from before `--task` is never attributed: no need to look.
-    if task.is_none() {
+    if launched_for.is_none() {
         return Ok(());
     }
-    let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev.as_ref())) else {
+    let prev = ctx.prev.as_ref();
+    let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev)) else {
         return Ok(());
     };
-    let app = App::open()?;
-    if !attributed(task, task_id, &app) {
+    let Some(task) = ctx.task.as_ref().filter(|_| ctx.attributed) else {
+        return Ok(());
+    };
+    if ctx.hold == Some(RunState::Stopped) {
         return Ok(());
     }
-    let Some(task) = app.db.get_task(task_id)? else {
-        return Ok(());
-    };
     let since = match event {
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
-        StatusEvent::Waiting | StatusEvent::Idle => now,
+        StatusEvent::Waiting | StatusEvent::Idle | StatusEvent::Budget | StatusEvent::Queued => now,
     };
-    reports::auto_status(&app, &task, event, body, since, 0)?;
+    reports::auto_status(&ctx.app, task, event, body, since, 0)?;
     Ok(())
+}
+
+/// Whether the hook's task is held, as its row says now, or as
+/// [`HookCtx::hold`] read it if the row cannot be read. Asked again under
+/// the task's inbox lock, before handing anything over: a pause written
+/// since `ctx` was made interrupts the task under that same lock, so it
+/// either holds this event or comes after it; and a resume since has
+/// written its row, and hands over under that lock only what it sees
+/// typed in, so what queued is handed over here.
+fn held_now(ctx: &HookCtx) -> bool {
+    match &ctx.task {
+        Some(task) if task.parent_id.is_some() => match run::hold(&ctx.app, task) {
+            Ok(hold) => hold.is_some(),
+            Err(e) => {
+                eprintln!("jeet task-hook: {e:#}");
+                ctx.hold.is_some()
+            }
+        },
+        _ => ctx.hold.is_some(),
+    }
 }
 
 /// Stop: hand over what `jeet task send` queued, else go idle. The inbox
 /// stays locked until the status is written, so a message is either taken
-/// here or sent after the session is idle, and typed in.
+/// here or sent after the session is idle, and typed in. Returns the
+/// harness's [`Harness::continue_output`] to print, if it carries on. A
+/// held task goes idle with its queue left where it is (M16), and so does
+/// one whose turn this charge used its budget up: its pause holds it.
 fn stop(
     harness: &dyn Harness,
     task_dir: &Path,
     hook: &HookEvent,
     session_id: &str,
+    ctx: &HookCtx,
     now: i64,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let event = hook.name.as_str();
     // A broken inbox must not keep the status from being written.
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
         .ok();
+    if held_now(ctx) {
+        if let Some(status) = status_for(hook, now) {
+            write_status(task_dir, &status)?;
+        }
+        return Ok(None);
+    }
     // Only what is for this session: the assistant's sessions share an
     // inbox, and what was sent to one of them is that one's to deal with.
     // What was sent to one that has ended is let go by the next send or
@@ -399,37 +780,40 @@ fn stop(
         None => Vec::new(),
     };
     if !queued.is_empty() {
-        if let Some(output) = harness.continue_output(&messages::queued_reason(&queued)) {
-            println!("{output}");
-        }
-        // Not stopping after all: on to the messages.
-        return write_status(
+        let output = harness.continue_output(&messages::queued_reason(&queued));
+        // Not stopping after all: on to the messages. They are out of the
+        // inbox now, so a status that fails to write is warned of, not
+        // failed on: failing would never print them, and they would be lost.
+        let written = write_status(
             task_dir,
-            &SessionStatus {
-                session_id: session_id.to_string(),
-                state: State::Running,
-                detail: Some("reading queued messages".to_string()),
-                event: event.to_string(),
-                at: now,
-            },
+            &with_busy(
+                SessionStatus {
+                    session_id: session_id.to_string(),
+                    state: State::Running,
+                    detail: Some("reading queued messages".to_string()),
+                    event: event.to_string(),
+                    at: now,
+                    busy_since: None,
+                },
+                ctx,
+            ),
         );
+        if let Err(e) = written {
+            eprintln!("jeet task-hook {event}: {e:#}");
+        }
+        return Ok(output);
     }
-    match status_for(hook, now) {
-        Some(status) => write_status(task_dir, &status),
-        None => Ok(()),
+    if let Some(status) = status_for(hook, now) {
+        write_status(task_dir, &status)?;
     }
+    Ok(None)
 }
 
 /// The agent has sat idle at its prompt. A turn the user interrupted, or a
 /// permission they refused, ends with no Stop, so anything queued while it
-/// was busy is typed in now, or it would wait for good.
-fn idle_prompt(
-    task_dir: &Path,
-    task_id: &str,
-    hook: &HookEvent,
-    app: Option<App>,
-    now: i64,
-) -> Result<()> {
+/// was busy is typed in now, or it would wait for good; unless it is held
+/// (M16), when it waits for the resume.
+fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Result<()> {
     let event = hook.name.as_str();
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
@@ -450,24 +834,21 @@ fn idle_prompt(
     let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
-    if inbox.read_for(Some(session_id))?.is_empty() {
+    if held_now(ctx) || inbox.read_for(Some(session_id))?.is_empty() {
         return Ok(());
     }
-    let app = match app {
-        Some(app) => app,
-        None => App::open()?,
-    };
-    let Some(task) = app.db.get_task(task_id)? else {
+    let Some(task) = &ctx.task else {
         return Ok(());
     };
+    let app = &ctx.app;
     match task.kind {
         // Typed into the window of the session that sat idle.
         TaskKind::Assistant => messages::hand_over_queue(
             &inbox,
-            &assistant::SessionAgent::for_session(&app, &task, session_id),
+            &assistant::SessionAgent::for_session(app, task, session_id),
         ),
         TaskKind::Work | TaskKind::Review | TaskKind::Manager => {
-            messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(&app, &task))
+            messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(app, task))
         }
     }
     .map(|_| ())
@@ -748,6 +1129,442 @@ impl Activity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
+    use crate::db::tasks::TaskState;
+    use crate::db::Database;
+
+    /// The app of the index in `home`.
+    fn app_at(home: &Path) -> App {
+        App {
+            config: config::load_or_create(home).unwrap(),
+            db: Database::open(&config::index_path(home)).unwrap(),
+            home: home.to_path_buf(),
+        }
+    }
+
+    /// An index in a tempdir with the assistant and worker `w` under it.
+    fn lab() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_at(&dir.path().canonicalize().unwrap());
+        let root = crate::manager::root(&app).unwrap();
+        app.db
+            .insert_task(&TaskRecord {
+                id: "w".into(),
+                slug: "w".into(),
+                name: "w".into(),
+                project: None,
+                kind: TaskKind::Work,
+                state: TaskState::Active,
+                created_at: 0,
+                last_activity: 0,
+                parent_id: Some(root.id),
+                placement: crate::placement::for_new(),
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
+            })
+            .unwrap();
+        (dir, app)
+    }
+
+    /// A context that knows of no task and charges nothing.
+    fn quiet_ctx(app: App) -> HookCtx {
+        HookCtx {
+            app,
+            task: None,
+            attributed: false,
+            prev: None,
+            busy_since: 0,
+            hold: None,
+            threshold: Threshold::None,
+        }
+    }
+
+    fn hook(name: &str, kind: EventKind) -> HookEvent {
+        HookEvent {
+            name: name.into(),
+            session_id: Some("s".into()),
+            cwd: None,
+            kind: Some(kind),
+        }
+    }
+
+    /// `w`'s directory, with session `s` busy since 100.
+    fn busy_w(app: &App) -> PathBuf {
+        let dir = tasks::task_dir(app, &app.db.get_task("w").unwrap().unwrap());
+        let running = SessionStatus {
+            session_id: "s".into(),
+            state: State::Running,
+            detail: None,
+            event: "UserPromptSubmit".into(),
+            at: 100,
+            busy_since: Some(100),
+        };
+        write_status(&dir, &running).unwrap();
+        dir
+    }
+
+    fn used(app: &App, id: &str) -> (i64, i64) {
+        let row = app.db.budget(id).unwrap().unwrap();
+        (row.used_secs, row.used_turns)
+    }
+
+    #[test]
+    fn an_unattributed_stop_charges_nothing() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", None, Some(10)).unwrap();
+        let dir = busy_w(&app);
+        let stop = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop, 400, &|_| false).unwrap();
+        assert!(!ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (0, 0));
+        assert_eq!(ctx.threshold, Threshold::None);
+    }
+
+    #[test]
+    fn a_hook_found_without_the_app_opens_it_and_charges() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", None, Some(10)).unwrap();
+        let dir = busy_w(&app);
+        let home = app.home.clone();
+        // A sweep charged the spell so far: the turn's end charges the rest.
+        let w = app.db.get_task("w").unwrap().unwrap();
+        fold_busy(&app, &w, true, 250).unwrap();
+        assert_eq!(used(&app, "w"), (150, 0));
+
+        let stop = hook("Stop", EventKind::Stopped);
+        let open = || Ok(app_at(&home));
+        let ctx = hook_ctx_with(None, &open, &dir, "w", &stop, 400, &|_| true).unwrap();
+        assert!(ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (300, 1));
+        // What carries on after the turn's end is a new spell.
+        assert_eq!(ctx.busy_since, 400);
+        assert_eq!(ctx.hold, None);
+    }
+
+    #[test]
+    fn a_stop_that_uses_the_budget_up_hands_nothing_over() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+
+        // Within its budget, what queued is handed over and it carries on.
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", None, Some(2)).unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.threshold, Threshold::None);
+        assert!(stop(harness, &dir, &stop_hook, "s", &ctx, 400)
+            .unwrap()
+            .is_some());
+
+        // Its last turn: paused by its budget, so it stops, with what
+        // queued left for the resume.
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", None, Some(1)).unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.threshold, Threshold::Hit100);
+        assert_eq!(ctx.hold, Some(RunState::Paused));
+        let w = ctx.app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(w.run_state_by, Some(crate::db::tasks::Setter::Budget));
+        assert_eq!(
+            stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap(),
+            None
+        );
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stop_hands_over_what_it_took_though_its_status_fails_to_write() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        // A directory where the status goes: its rename fails.
+        let status = status_dir(&dir).join("s.json");
+        std::fs::remove_file(&status).unwrap();
+        std::fs::create_dir(&status).unwrap();
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("more")));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_turns_busy_spell_runs_from_its_prompt_through_tools_and_waits() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), Some(10)).unwrap();
+        let dir = tasks::task_dir(&app, &app.db.get_task("w").unwrap().unwrap());
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let mut app = Some(app);
+        for (name, kind, at) in [
+            ("UserPromptSubmit", EventKind::Working(None), 100),
+            ("PreToolUse", EventKind::Working(Some("Bash".into())), 200),
+            ("Notification", EventKind::NeedsInput(None), 250),
+            ("PostToolUse", EventKind::Working(None), 300),
+        ] {
+            let event = hook(name, kind);
+            let ctx = hook_ctx_with(app.take(), &open, &dir, "w", &event, at, &|_| true).unwrap();
+            write_event_status(&dir, &event, &ctx, at).unwrap();
+            let status = read_status(&dir, "s").unwrap();
+            assert_eq!(status.busy_since, Some(100), "{name}");
+            assert_eq!(status.at, at, "{name}");
+            assert_eq!(used(&ctx.app, "w"), (0, 0), "{name}");
+            app = Some(ctx.app);
+        }
+        // Its end charges the whole spell and the one turn.
+        let stop = hook("Stop", EventKind::Stopped);
+        let ctx = hook_ctx_with(app.take(), &open, &dir, "w", &stop, 400, &|_| true).unwrap();
+        assert_eq!(used(&ctx.app, "w"), (300, 1));
+    }
+
+    #[test]
+    fn a_sessions_end_charges_the_time_left_and_no_turn() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), Some(10)).unwrap();
+        let dir = busy_w(&app);
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
+        assert!(ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_resume_since_the_hook_began_is_asked_again_under_the_inbox_lock() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        app.db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Paused));
+        // Resumed after the hook read its hold, while its status still said
+        // running: the resume left what queued to this hook.
+        ctx.app.db.set_run_state("w", RunState::Run, None).unwrap();
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("more")));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_pause_since_the_hook_began_is_asked_again_under_the_inbox_lock() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, None);
+        // Paused after the hook read its hold, before it took the inbox.
+        ctx.app
+            .db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        assert_eq!(
+            stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap(),
+            None
+        );
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        // Handed over, it would be typed into a tmux unit tests never have.
+        idle_prompt(&dir, &idle, &ctx, 500).unwrap();
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_tasks_end_is_not_reported() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let prev = read_status(&dir, "s");
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let w = app.db.get_task("w").unwrap().unwrap();
+        let mut ctx = HookCtx {
+            task: Some(w),
+            attributed: true,
+            prev,
+            hold: Some(RunState::Stopped),
+            ..quiet_ctx(app)
+        };
+        // `jeet manager stop`, which ended it, said so to whoever asked.
+        report_step(&ended, &ctx, Some("w"), 500).unwrap();
+        assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
+        // Paused, or running, its end is news to its parent.
+        ctx.hold = Some(RunState::Paused);
+        report_step(&ended, &ctx, Some("w"), 500).unwrap();
+        let report = ctx.app.db.last_status_report("w").unwrap().unwrap();
+        assert!(report.body.contains("ended"), "{}", report.body);
+    }
+
+    #[test]
+    fn sitting_idle_after_a_spell_no_stop_closed_charges_it() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), None).unwrap();
+        let dir = busy_w(&app);
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        // The user pressed Escape: no Stop, then idle.
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        assert!(ctx.attributed);
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        // Idle again: nothing more to charge, and nobody is asked whose it is.
+        let ctx = hook_ctx_with(Some(ctx.app), &open, &dir, "w", &idle, 500, &|_| {
+            panic!("asked whose an idle with no spell is")
+        })
+        .unwrap();
+        assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_held_agent_sitting_idle_is_handed_nothing() {
+        let (_home, app) = lab();
+        app.db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Paused));
+        // Handed over, it would be typed into a tmux unit tests never have.
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_tasks_end_asks_what_holds_it() {
+        let (_home, app) = lab();
+        app.db
+            .set_run_state(
+                "w",
+                RunState::Stopped,
+                Some(&crate::db::tasks::Setter::User),
+            )
+            .unwrap();
+        let dir = busy_w(&app);
+        let ended = hook("SessionEnd", EventKind::Ended { cleared: false });
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Stopped));
+        report_step(&ended, &ctx, Some("w"), 400).unwrap();
+        assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_dead_agents_stale_status_is_not_charged() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(10), None).unwrap();
+        busy_w(&app);
+        let w = app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(
+            fold_busy(&app, &w, false, 100_000).unwrap(),
+            Threshold::None
+        );
+        assert_eq!(used(&app, "w"), (0, 0));
+        assert_eq!(
+            app.db.get_task("w").unwrap().unwrap().run_state,
+            RunState::Run
+        );
+    }
+
+    #[test]
+    fn a_dead_agents_stale_status_is_not_charged_once_a_new_one_is_alive() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(10), None).unwrap();
+        // Left running at 100 by an agent that died; one launched since
+        // is alive and has not reported yet.
+        let dir = busy_w(&app);
+        mark_launched(&dir, true, true).unwrap();
+        let w = app.db.get_task("w").unwrap().unwrap();
+        assert_eq!(
+            fold_busy(&app, &w, true, now_secs()).unwrap(),
+            Threshold::None
+        );
+        assert_eq!(used(&app, "w"), (0, 0));
+        assert_eq!(
+            app.db.get_task("w").unwrap().unwrap().run_state,
+            RunState::Run
+        );
+    }
+
+    #[test]
+    fn input_no_hook_has_reported_on_is_a_turn_about_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let now = now_secs();
+        // Nothing handed it: nothing to wait for.
+        assert!(!input_unreported(dir, now));
+        // Launched with no first prompt: no turn is coming.
+        mark_launched(dir, true, false).unwrap();
+        assert!(!input_unreported(dir, now));
+        // Launched with its first prompt, no hook yet.
+        mark_launched(dir, true, true).unwrap();
+        assert!(input_unreported(dir, now));
+        // Long since: whatever it is doing, it would have said.
+        assert!(!input_unreported(dir, now + STARTING_SECS));
+        let status = |state, event: &str, at| SessionStatus {
+            session_id: "s".into(),
+            state,
+            detail: None,
+            event: event.into(),
+            at,
+            busy_since: None,
+        };
+        // Its SessionStart, in the second it was launched, is from before
+        // its prompt was submitted.
+        write_status(dir, &status(State::Idle, "SessionStart", now)).unwrap();
+        assert!(input_unreported(dir, now));
+        // Its SessionStart seconds on, as an agent slow to boot writes it,
+        // is still from before its prompt was submitted.
+        let started = SessionStatus {
+            detail: Some(STARTED_DETAIL.into()),
+            ..status(State::Idle, "SessionStart", now + 2)
+        };
+        write_status(dir, &started).unwrap();
+        assert!(input_unreported(dir, now + 2));
+        // Its prompt submitted, seconds on.
+        write_status(dir, &status(State::Running, "UserPromptSubmit", now + 3)).unwrap();
+        assert!(!input_unreported(dir, now + 3));
+        // Or its turn ended before a poll saw it running.
+        write_status(dir, &status(State::Idle, "Stop", now + 3)).unwrap();
+        assert!(!input_unreported(dir, now + 3));
+        // Typed a message since its last hook: not reported on until the
+        // next.
+        std::fs::remove_file(launched_path(dir)).unwrap();
+        write_status(dir, &status(State::Idle, "Stop", now - 1)).unwrap();
+        assert!(!input_unreported(dir, now));
+        mark_typed(dir).unwrap();
+        assert!(input_unreported(dir, now));
+        // Held at a startup prompt the watcher found: no turn is coming.
+        mark_startup_prompt(dir, "s", "trust", now - 1).unwrap();
+        assert!(!input_unreported(dir, now));
+    }
 
     #[test]
     fn a_new_session_follows_on_from_the_one_its_window_ran() {
@@ -805,6 +1622,7 @@ mod tests {
             detail: None,
             event: "Stop".into(),
             at,
+            busy_since: None,
         };
         write_status(task, &at("old", State::Idle, 10)).unwrap();
         write_status(task, &at("cleared", State::Ended, 20)).unwrap();
@@ -842,6 +1660,7 @@ mod tests {
             detail: None,
             event: "x".into(),
             at: 1,
+            busy_since: None,
         };
         let waiting = EventKind::NeedsInput(None);
         let word = |kind: &EventKind, before: Option<&SessionStatus>| {
@@ -865,22 +1684,18 @@ mod tests {
     #[test]
     fn idle_is_since_the_turn_ended_however_often_it_is_said() {
         let dir = tempfile::tempdir().unwrap();
-        let hook = |name: &str, kind: EventKind| HookEvent {
-            name: name.into(),
-            session_id: Some("s".into()),
-            cwd: None,
-            kind: Some(kind),
-        };
+        let (_home, app) = lab();
+        let ctx = quiet_ctx(app);
         let stop = hook("Stop", EventKind::Stopped);
         write_status(dir.path(), &status_for(&stop, 100).unwrap()).unwrap();
         let idle = hook("Notification", EventKind::Idle);
-        idle_prompt(dir.path(), "t", &idle, None, 160).unwrap();
+        idle_prompt(dir.path(), &idle, &ctx, 160).unwrap();
         let status = read_status(dir.path(), "s").unwrap();
         assert_eq!((status.state, status.at), (State::Idle, 100));
         // A turn since starts the clock again.
         let run = hook("UserPromptSubmit", EventKind::Working(None));
         write_status(dir.path(), &status_for(&run, 200).unwrap()).unwrap();
-        idle_prompt(dir.path(), "t", &idle, None, 300).unwrap();
+        idle_prompt(dir.path(), &idle, &ctx, 300).unwrap();
         assert_eq!(read_status(dir.path(), "s").unwrap().at, 300);
     }
 
@@ -892,6 +1707,7 @@ mod tests {
             detail: detail.map(Into::into),
             event: "x".into(),
             at: crate::worktrees::now_secs() - 120,
+            busy_since: None,
         };
         let label = |status: Option<&SessionStatus>, alive| activity(status, alive).label();
 
@@ -938,6 +1754,7 @@ mod tests {
             detail: None,
             event: "Stop".into(),
             at: 400,
+            busy_since: None,
         };
         assert!(matches!(
             activity_since(Some(&idle), true, Some(100), 500),
@@ -949,11 +1766,11 @@ mod tests {
     fn the_launch_marker_is_kept_only_for_agents_with_hooks() {
         let dir = tempfile::tempdir().unwrap();
         assert!(launched_at(dir.path()).is_none());
-        mark_launched(dir.path(), true).unwrap();
+        mark_launched(dir.path(), true, false).unwrap();
         assert!(launched_at(dir.path()).is_some());
-        mark_launched(dir.path(), false).unwrap();
+        mark_launched(dir.path(), false, false).unwrap();
         assert!(launched_at(dir.path()).is_none());
-        mark_launched(dir.path(), false).unwrap();
+        mark_launched(dir.path(), false, false).unwrap();
         mark_startup_prompt(dir.path(), "s", "trust folder", 7).unwrap();
         let status = current_status(dir.path()).unwrap();
         assert_eq!(

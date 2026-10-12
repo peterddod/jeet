@@ -14,11 +14,13 @@ use crate::cli::Delegation;
 use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
-use crate::messages::{self, Delivered};
+use crate::manager::run;
+use crate::messages::{self, Delivered, Inbox};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
 use crate::projects;
-use crate::runtime::{self, Interrupted};
+use crate::runtime::{self, Admission, Interrupted, Started};
+use crate::status;
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::worktrees::now_secs;
@@ -96,26 +98,67 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let Some(prompt) = prompt else {
         return Ok(());
     };
-    match runtime::ensure_running(app, &created.task, None, Some(&prompt)) {
+    // A brief its agent could never start with is not left waiting for a
+    // held or queued start.
+    if let Some(why) = runtime::first_prompt_refusal(app, &created.task) {
+        bail!(
+            "task {} was made, but its agent did not start: {why}",
+            created.task.name
+        );
+    }
+    // Its inbox, then the start lock (M22): a brief queued on `max_live` is
+    // in the inbox before a drain can start the agent with it.
+    let inbox = Inbox::lock(&dir)?;
+    // Under a paused or stopped manager: its brief waits in its inbox, and
+    // its start for the resume.
+    let held = |holder: &TaskRecord| -> Result<()> {
+        inbox.push_to(&prompt, None)?;
+        app.db.queue_start(&created.task.id, now_secs())?;
+        eprintln!(
+            "jeet: not started: {}; it starts with its brief then",
+            run::held_refusal(&created.task, holder)
+        );
+        Ok(())
+    };
+    if let Some((holder, _)) = run::hold(app, &created.task)? {
+        return held(&holder);
+    }
+    match runtime::ensure_running(app, &created.task, None, Some(&prompt), Admission::Gate) {
         Ok(running) => {
             warn_all(&running.warnings);
             match running.started {
-                true => eprintln!(
+                Started::Now => eprintln!(
                     "jeet: started the agent with its brief in tmux session {}",
                     running.tmux_session
                 ),
-                false => eprintln!(
+                Started::AlreadyRunning => eprintln!(
                     "jeet: an agent was already running in tmux session {}, so it was not \
                      given the brief; `jeet task send {}` sends it",
                     running.tmux_session, created.task.slug
                 ),
+                Started::Queued { live, max, prompt } => {
+                    if let Some(prompt) = prompt {
+                        inbox.push_to(&prompt, None)?;
+                    }
+                    drop(inbox);
+                    run::report_queued(app, &created.task, live, max, i64::MAX);
+                    eprintln!(
+                        "jeet: queued (tasks in the tree running: {live}/{max}, [managers] \
+                         max_live); the agent starts with its brief when one ends"
+                    );
+                }
             }
             Ok(())
         }
-        Err(e) => bail!(
-            "task {} was made, but its agent did not start: {e:#}",
-            created.task.name
-        ),
+        Err(e) => match run::hold(app, &created.task)? {
+            // Paused since it was asked above, before the start gate asked
+            // again: held the same way.
+            Some((holder, _)) => held(&holder),
+            None => bail!(
+                "task {} was made, but its agent did not start: {e:#}",
+                created.task.name
+            ),
+        },
     }
 }
 
@@ -172,6 +215,23 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
              is queued; it gets it when it next runs",
             task.name
         ),
+        // Its harness takes no first prompt: a resume finding its agent
+        // gone cannot start it with the message.
+        Delivered::Paused if runtime::first_prompt_refusal(app, &task).is_some() => eprintln!(
+            "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
+             resumed while its agent runs, or else when a message next reaches it",
+            task.name
+        ),
+        Delivered::Paused => eprintln!(
+            "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
+             resumed",
+            task.name
+        ),
+        Delivered::StartQueued { live, max } => eprintln!(
+            "jeet: task {}'s start waits on max_live ({live}/{max} live), so the message is \
+             queued; it starts with it when a task in the tree ends",
+            task.name
+        ),
     }
     Ok(())
 }
@@ -192,6 +252,14 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
     let why = match runtime::interrupt(app, &task)? {
         Interrupted::Sent => {
             eprintln!("jeet: interrupted task {}'s turn", task.name);
+            // Its busy spell is closed now, not left charged until the
+            // harness says it sits idle.
+            run::charge_interrupted(app, &task);
+            let dir = tasks::task_dir(app, &task);
+            let event = status::INTERRUPTED_EVENT;
+            if let Err(e) = status::mark_interrupted(&dir, event, "interrupted", now_secs()) {
+                eprintln!("jeet: could not mark task {} idle: {e:#}", task.name);
+            }
             return Ok(());
         }
         Interrupted::NotWorking(activity) => {
@@ -229,6 +297,10 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
             "jeet: no session of the assistant's is running and none can be started from here, \
              so the message is queued; the next session starts with it"
         ),
+        // The assistant is never held, nor counted by the start gate.
+        Delivered::Paused | Delivered::StartQueued { .. } => {
+            eprintln!("jeet: the message is queued for the assistant")
+        }
     }
     Ok(())
 }
@@ -344,14 +416,28 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         );
     }
     let dir = tasks::task_dir(app, &task);
-    let running = runtime::ensure_running(app, &task, session, None)?;
+    // The user at a terminal asked for it: over `max_live` it starts anyway
+    // (M22). Anyone else waits for a slot like any start.
+    let admission = match permissions::caller(app)? {
+        Caller::User => Admission::Bypass,
+        Caller::Root | Caller::Node(_) => Admission::Gate,
+    };
+    let running = runtime::ensure_running(app, &task, session, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
-    if running.started {
-        eprintln!(
+    match running.started {
+        Started::Now => eprintln!(
             "jeet: started {} in tmux session {tmux_session}",
             AgentSpec::from_config(&app.config)?.display()
-        );
+        ),
+        Started::AlreadyRunning => {}
+        Started::Queued { live, max, .. } => {
+            eprintln!(
+                "jeet: queued (tasks in the tree running: {live}/{max}, [managers] max_live); \
+                 its agent starts when one ends"
+            );
+            return Ok(());
+        }
     }
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         eprintln!("jeet: `tmux attach -t {tmux_session}` to talk to the agent");

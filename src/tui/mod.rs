@@ -38,7 +38,7 @@ use crate::db::tasks::{TaskRecord, TaskState};
 use crate::db::RepoRecord;
 use crate::github::{self, Verdict};
 use crate::review::{self as review_job, JobState};
-use crate::runtime;
+use crate::runtime::{self, Admission};
 use crate::tmux;
 use crate::worktrees::{self, WorktreeStatus};
 
@@ -1555,7 +1555,8 @@ fn open_agent(
         terminal,
         explorer,
         &format!("starting {}'s agent", task.name),
-        || runtime::ensure_running(app, &task, session.as_deref(), None),
+        // The user at the terminal asked for it: past `max_live` too (M22).
+        || runtime::ensure_running(app, &task, session.as_deref(), None, Admission::Bypass),
     )?;
     let running = match running {
         Ok(running) => running,

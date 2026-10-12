@@ -287,8 +287,6 @@ pub const HELD_FLOOR: &[&str] = &["pr.merge", "pr.comment", "pr.review", "task.d
 pub struct ManagerPolicy {
     pub max_depth: u32,
     pub max_children: u32,
-    // Read once `max_live` gates starts.
-    #[allow(dead_code)]
     pub max_live: u32,
     pub default_budget: Limits,
     pub worker_default: Vec<&'static str>,

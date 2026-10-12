@@ -755,8 +755,11 @@ mod tests {
         db.charge("c", 5, 1).unwrap();
         db.delete_task("c").unwrap();
         assert!(db.budget("c").unwrap().is_none());
+        // What it used stays with its parent.
+        let kept = db.budget("a").unwrap().unwrap();
+        assert_eq!((kept.used_secs, kept.used_turns), (5, 1));
+        assert_eq!(count("task_budgets"), 1);
         for table in [
-            "task_budgets",
             "task_worktrees",
             "task_sessions",
             "task_prs",

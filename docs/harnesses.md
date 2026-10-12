@@ -22,11 +22,11 @@ jeet does without that feature:
 | `tested_version` | the latest version you tested; older ones get a warning | no version check |
 | `new_session_args(id, name)` | starts a session under an id jeet picks | no recorded sessions, no resume, no assistant |
 | `resume_args(id)` | resumes a recorded session | as above |
-| `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt`, and `task send` to an agent that is not running, fail with a clear message |
+| `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt` (the task is still made), and `task send` to an agent that is not running, fail with a clear message, also when the start would wait on a pause, stop or `max_live`, so nothing waits for a start that could not give it; a message held for a paused task whose agent runs waits for the resume to type it in, or, if the agent is gone by then, for the next delivery |
 | `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`; for a manager, also the read-only jeet commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and (phase 2) `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and pausing a subtree (phase 2) waits for the turn to end |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and `jeet manager pause` says it could not interrupt the task and leaves its turn to end, after which it is handed nothing until resumed (with no hooks, what waited is then typed in, as `task send` would) |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
@@ -92,9 +92,30 @@ the user when it does not.
 
 For a task with a parent (one the assistant made), some events also become
 `status` reports to the parent: `NeedsInput` (once until the prompt is
-answered), `Ended` unless `cleared`, and `Idle` for longer than `[managers]
+answered), `Ended` unless `cleared` or the task was stopped (`jeet manager
+stop`), and `Idle` for longer than `[managers]
 idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
-for. The same task's `SessionStarted` prints its brief through
+for. A task with a budget is charged from its own hooks (attributed, as
+these reports are): a turn for each `Stopped`, and the time from the first
+`Working` or `NeedsInput` of a busy spell to the `Stopped`, `Ended` or
+`Idle` that closes it (the status file keeps when the spell began, and
+`jeet watch` charges a long one as it goes, while its agent's pane is
+alive: an agent that died with no `Ended` is charged no more). A turn jeet
+ends with `interrupt_keys` (`jeet task interrupt`, `jeet manager pause`) is
+charged, while its agent's pane is alive, and its status set idle, by jeet
+itself; one the user interrupts
+stays charged until the harness's `Idle` or next `Stopped`, so a harness
+that maps no `Idle` charges it until its next turn ends. A harness
+with no `Stopped` event is charged no turns. A task that is paused
+or stopped, or that its turn's charge used its budget up, is handed nothing
+at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays
+in its inbox. An `Ended` that is not `cleared` frees a slot under `[managers]
+max_live`: when a start waits on it, the hook leaves a detached `jeet manager
+drain --after <task>` behind, which waits a few seconds for the task's pane
+to go and then starts what waits. On a harness with no hooks, or one that
+maps no `Ended`, nothing drains when its agent exits: a queued start waits
+for the next `jeet watch` poll, TUI refresh, `jeet manager stop` or
+`resume`, or a `jeet manager drain`. The same task's `SessionStarted` prints its brief through
 `session_context_output`; a harness that returns `None` there gets none.
 Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
 descendant of the process jeet starts in the task's pane: jeet reports and

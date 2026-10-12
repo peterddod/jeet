@@ -91,7 +91,8 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
-jeet manager ls                          # the tree under it; show <task>, grant <task> <caps>
+jeet manager ls                          # the tree under it; show, grant, budget <task> …
+jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 
@@ -581,7 +582,8 @@ trusting `~/.jeet/tasks` once, by running `claude` there, covers every task
 to come. Until then, jeet watches each agent it starts for the question for
 about 30 seconds: the task shows `needs input – trust folder`, with a
 notification unless you are attached to it, or, with
-[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you.
+[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you
+(never for a task paused or stopped).
 
 ### Messaging an agent
 
@@ -607,7 +609,8 @@ running is started with the message as its first prompt. `jeet task new
 A message holds at most 8,000 bytes, which keeps what is typed in under
 tmux's limit on a command; queued messages that do not fit with it wait for
 the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
-as a shell command, a slash command or a memory, is sent as `Message: …`.
+as a shell command, a slash command or a memory, is sent as `Message: …`; a
+`--prompt` brief must fit in 8,000 bytes with that.
 
 ### Interrupting an agent
 
@@ -628,9 +631,10 @@ its session (you may be typing an answer into it; once a question or plan is
 answered, this lasts until the agent's next tool call or the end of its turn,
 as Claude reports no answer) is left alone, since Esc there
 would clear your text, rewind the conversation or exit the agent, and the
-command says why nothing was sent. The task's status may read `running`
-for about a minute afterwards, until Claude reports it sits idle, as after a
-manual Esc. The assistant is yours to interrupt in its own window, and a
+command says why nothing was sent. Once the key is pressed the task's
+status reads idle (`Interrupted`), and the turn's time so far is charged to
+its budget then; a turn you end with Esc yourself may read `running`, and be
+charged, for about a minute, until Claude reports it sits idle. The assistant is yours to interrupt in its own window, and a
 harness that cannot be interrupted is refused. Under the assistant it needs
 `task.send` (which pre-approves it, as it does `jeet task send`), and an
 interrupt that sent nothing is logged as `skipped`, with why, and not
@@ -664,12 +668,60 @@ the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
 worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
-wait). For now a budget is recorded, and checked against what is left above
-when a task is made, but not yet charged or enforced: a task runs past it.
+wait). A budget is charged with the time the task's agent is busy (running,
+or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
+every budget above it too, even once the task is deleted (archiving or
+deleting a task mid-turn charges the turn so far first). At 80% the parent is told and the task gets a
+note; at 100% the task is paused and its parent told `blocked: budget`: its
+turn ends with nothing more handed to it, and messages for it wait in its
+inbox until the budget is raised and it is resumed.
+At most `[managers] max_live` tasks under the assistant run at once: a
+start past it is queued and the task's parent told, and it starts when a
+running one's agent ends (a window you opened in its session does not hold
+the slot) (its session's end hook starts it; on a harness without
+that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
+from your terminal (or the TUI's open) starts it anyway, with a warning, and
+with its brief and whatever waited for it, in the session you picked if any (an agent jeet cannot give a first prompt starts
+without it, and what waited is typed in with the next message). A queued
+task whose directory has gone is dropped from the queue with a warning.
 `jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
 state and children, and `jeet manager grant <task> <caps>|--none` replaces
 its grant (`manager.grant`); what a task loses, the tasks below it lose too.
+`jeet manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
+sets one (`manager.grant`), within what is left above it (a unit kept or
+lowered is not checked); the 80% and 100%
+reports start over, and a limit set at or below what the task has used
+pauses it at once.
+
+```bash
+jeet manager pause fix-x       # interrupt its turn, and every task's below it
+jeet manager resume fix-x      # hand over what waited, and let it start again
+jeet manager stop fix-x        # end its agent and every one below it
+jeet manager stop --all        # every task under the assistant (only you)
+```
+
+These need `manager.stop`. A paused or stopped task, and every task below
+it, is handed nothing: messages and reports to it wait in its inbox, its
+turn's end hands it nothing, and nothing starts it; `jeet task open`
+attaches to it while its agent still runs, and otherwise says to resume it.
+Pause interrupts the turn of each of their agents that is working (one
+Escape, never over what you typed), and says, task by task, what it did; an
+agent started with a prompt or typed a message in the last few seconds,
+whose turn has not begun yet, is waited for and then interrupted. Stop ends their
+tmux sessions, and any review job running for them or in their worktrees
+(a review task's agent is its review command, which pause cannot
+interrupt), and their ending is not reported; `jeet review` does not
+start a held review task's job again (it says so, and still opens the
+review and its worktree). Resume is refused while a
+task above holds it, while its budget is used up (`manager budget` first),
+and to anyone ranked below whoever paused or stopped it: you, then the
+assistant, then a manager above, so what you stop only you resume. Once
+resumed, a task a message was held for starts with what waited for it if
+its agent is not running, and one still running is handed it; reports
+(progress, idle and the like) never start it, and wait for its next start.
+`task new --prompt` under a paused manager makes the task and keeps its
+brief for then.
 
 ### Archiving and deleting
 
@@ -1161,7 +1213,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
-`pr.comment`, `pr.review` and `pr.merge` (`jeet pr merge`). Nothing is
+`pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
+(`jeet manager grant` and `budget`) and `manager.stop` (`jeet manager
+pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
@@ -1244,6 +1298,7 @@ idle_report_mins = 10   # tell the assistant when a task of its sits idle this l
 max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
+max_live = 8            # tasks under the assistant running at once; a start past it waits
 worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
 manager_default = []    # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete
@@ -1252,8 +1307,8 @@ held = []               # added to pr.merge, pr.comment, pr.review, task.delete
 The tree's settings are checked when they are used, not when config.toml
 is read: a mistake in them (an unknown capability, a held one in a default
 you set, a limit of 0, a `$` budget) refuses making tasks under the
-assistant, `jeet manager grant` and unarchiving a task under a manager, and
-nothing else.
+assistant, starting one, `jeet manager grant` and unarchiving a task under
+a manager, and nothing else.
 
 ### Keeping the store fetched
 

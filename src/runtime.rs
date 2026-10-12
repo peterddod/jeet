@@ -22,6 +22,8 @@ use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, HookSetup};
 use crate::identity;
+use crate::manager::run::{self, StartGate, StartGuard};
+use crate::messages::{self, Delivered, Inbox, TmuxAgent};
 use crate::permissions;
 use crate::placement::{self, NodeRuntime};
 use crate::projects;
@@ -43,25 +45,154 @@ pub fn session_name(task: &TaskRecord) -> String {
 /// The outcome of [`ensure_running`].
 pub struct Running {
     pub tmux_session: String,
-    /// False when the agent was already running.
-    pub started: bool,
+    pub started: Started,
     pub warnings: Vec<String>,
+}
+
+/// Whether [`ensure_running`] started the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Started {
+    /// It was not running, and was started now.
+    Now,
+    /// It was running already, and was given no prompt.
+    AlreadyRunning,
+    /// `live` of `max` tasks in the tree run already (`[managers]
+    /// max_live`): it is queued to start when one ends, and `prompt` is
+    /// handed back for its inbox.
+    Queued {
+        live: u32,
+        max: u32,
+        prompt: Option<String>,
+    },
+}
+
+/// How a start gets past `[managers] max_live` (M22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Queued while it is full.
+    Gate,
+    /// Started anyway, with a warning: the user opening it at a terminal
+    /// asked for it. A held task is refused either way.
+    Bypass,
 }
 
 /// Make sure the task's agent is running where its placement says, starting
 /// it if not: resuming `session` when given, else the task's latest
 /// session, else a new one. An agent this starts gets `prompt` as its first
-/// prompt; one already running does not.
+/// prompt; one already running does not. Given none, it starts with what
+/// waits in its inbox, as a drain would (a brief queued on `max_live`, a
+/// message held while it could not start), in `session` when one is named. A start is admitted first
+/// ([`run::admit_start`]): refused while the task is held, and by
+/// `admission` while `max_live` tasks run.
 pub fn ensure_running(
     app: &App,
     task: &TaskRecord,
     session: Option<&str>,
     prompt: Option<&str>,
+    admission: Admission,
 ) -> Result<Running> {
     if task.kind == TaskKind::Assistant {
         bail!("the assistant's sessions are opened with `jeet chat`");
     }
-    placement::runtime_for(task)?.start(app, task, session, prompt)
+    // Running already: nothing starts, so there is nothing to admit, and a
+    // held task's live pane is still there to attach to (M16). Attached to
+    // only: one gone meanwhile is not started here, unadmitted.
+    let name = session_name(task);
+    if tmux::has_session(&name) && tmux::pane_alive(&name) {
+        placement::runtime_for(task)?;
+        return already_running(app, task, &name, session);
+    }
+    // Its inbox, then the start lock (M22), as a drain takes them. Only for
+    // a task directory that is there: a missing one is the start's to refuse.
+    // Refused now, not once a queued or held start comes to be made.
+    if prompt.is_some() {
+        if let Some(why) = first_prompt_refusal(app, task) {
+            bail!(why);
+        }
+    }
+    let dir = tasks::task_dir(app, task);
+    let inbox = match prompt {
+        None if dir.is_dir() => Some(Inbox::lock(&dir)?),
+        _ => None,
+    };
+    let (guard, over) = match admission {
+        Admission::Gate => match run::admit_start(app, task)? {
+            StartGate::Go(guard) => (guard, None),
+            StartGate::Queue { live, max, .. } => {
+                return Ok(Running {
+                    tmux_session: name,
+                    started: Started::Queued {
+                        live,
+                        max,
+                        prompt: prompt.map(str::to_string),
+                    },
+                    warnings: Vec::new(),
+                })
+            }
+            StartGate::Held(holder) => bail!(run::held_refusal(task, &holder)),
+        },
+        Admission::Bypass => run::admit_over(app, task)?,
+    };
+    let mut running = match &inbox {
+        Some(inbox) => start_with_inbox(app, task, session, inbox, &guard)?,
+        None => ensure_running_admitted(app, task, session, prompt, &guard)?,
+    };
+    if let Some((live, max)) = over {
+        running.warnings.push(format!(
+            "over max_live ({live}/{max} tasks in the tree run already)"
+        ));
+    }
+    Ok(running)
+}
+
+/// [`ensure_running`] for a start admitted already, under `_guard`: what
+/// holds it passes it down, as the start lock is not taken twice.
+pub fn ensure_running_admitted(
+    app: &App,
+    task: &TaskRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+    _guard: &StartGuard,
+) -> Result<Running> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant's sessions are opened with `jeet chat`");
+    }
+    let running = placement::runtime_for(task)?.start(app, task, session, prompt)?;
+    // Started, however it was admitted: no longer waits on `max_live` or a
+    // resume, or a drain would start it again once it ends.
+    if running.started == Started::Now {
+        app.db.unqueue(&task.id)?;
+    }
+    Ok(running)
+}
+
+/// Start `task`, admitted under `guard`, resuming `session` when given,
+/// with what waits for it in its locked `inbox` as its first prompt, as much of it as fits, or with none
+/// when nothing does, or when its harness takes no first prompt from jeet
+/// (what waits is left for a delivery to type in once it runs).
+pub fn start_with_inbox(
+    app: &App,
+    task: &TaskRecord,
+    session: Option<&str>,
+    inbox: &Inbox,
+    guard: &StartGuard,
+) -> Result<Running> {
+    let takes_prompt = AgentSpec::from_config(&app.config)
+        .is_ok_and(|spec| spec.harness.prompt_args("").is_some());
+    if !takes_prompt || inbox.read_for(None)?.is_empty() {
+        return ensure_running_admitted(app, task, session, None, guard);
+    }
+    let agent = TmuxAgent::new(app, task).keep_warnings().resuming(session);
+    let started = match messages::start_with_queue(inbox, &agent, Some(guard))? {
+        // It came up meanwhile, and was typed the queue.
+        Delivered::Typed => Started::AlreadyRunning,
+        _ => Started::Now,
+    };
+    Ok(Running {
+        tmux_session: session_name(task),
+        started,
+        warnings: agent.warnings(),
+    })
 }
 
 /// A task's agent in a tmux session on this machine: the runtime of
@@ -100,27 +231,7 @@ fn start_tmux(
         tmux::kill(&name)?;
     }
     if tmux::has_session(&name) {
-        // Only a pane jeet started is the task's agent: one made some other
-        // way, or by a jeet from before anchors, is never adopted as it.
-        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
-        if !anchors.iter().any(identity::live) {
-            warnings.push(format!(
-                "tmux session {name} was started by an older jeet or outside jeet, so jeet \
-                 cannot confirm its agent is task {}'s; stop it and open the task again",
-                task.name
-            ));
-        }
-        if let Some(id) = session {
-            warnings.push(format!(
-                "the agent is already running in tmux session {name}, so session {id} was not \
-                 resumed; end it there and open the task again to switch"
-            ));
-        }
-        return Ok(Running {
-            tmux_session: name,
-            started: false,
-            warnings,
-        });
+        return already_running(app, task, &name, session);
     }
 
     let mut spec = AgentSpec::from_config(&app.config)?;
@@ -145,7 +256,7 @@ fn start_tmux(
         ));
     }
     let hooks = spec.has_hooks();
-    if let Err(e) = status::mark_launched(&dir, hooks) {
+    if let Err(e) = status::mark_launched(&dir, hooks, prompt.is_some()) {
         warnings.push(format!("could not note the agent's launch: {e:#}"));
     }
     let home = app.home.to_string_lossy();
@@ -177,9 +288,63 @@ fn start_tmux(
     let _ = app.db.touch_task(&task.id, now_secs());
     Ok(Running {
         tmux_session: name,
-        started: true,
+        started: Started::Now,
         warnings,
     })
+}
+
+/// The task's agent, running already in tmux session `name`: attached to,
+/// not started, with what to warn of.
+fn already_running(
+    app: &App,
+    task: &TaskRecord,
+    name: &str,
+    session: Option<&str>,
+) -> Result<Running> {
+    let mut warnings = Vec::new();
+    // Only a pane jeet started is the task's agent: one made some other
+    // way, or by a jeet from before anchors, is never adopted as it.
+    let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
+    if !anchors.iter().any(identity::live) {
+        warnings.push(format!(
+            "tmux session {name} was started by an older jeet or outside jeet, so jeet \
+             cannot confirm its agent is task {}'s; stop it and open the task again",
+            task.name
+        ));
+    }
+    if let Some(id) = session {
+        warnings.push(format!(
+            "the agent is already running in tmux session {name}, so session {id} was not \
+             resumed; end it there and open the task again to switch"
+        ));
+    }
+    Ok(Running {
+        tmux_session: name.to_string(),
+        started: Started::AlreadyRunning,
+        warnings,
+    })
+}
+
+/// Why `task`'s agent cannot be started with a first prompt on `spec`.
+fn no_first_prompt(spec: &AgentSpec, task: &TaskRecord) -> String {
+    format!(
+        "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
+         the message once it is running",
+        spec.display(),
+        task.slug
+    )
+}
+
+/// Why `task`'s agent cannot be started with a first prompt, when its
+/// harness takes none from jeet: asked before a start with one is queued
+/// or held, as well as made, so a brief or message is never left waiting
+/// for a start that would not give it.
+pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
+    let spec = AgentSpec::from_config(&app.config).ok()?;
+    match spec.harness.prompt_args("") {
+        Some(_) => None,
+        None => Some(no_first_prompt(&spec, task)),
+    }
 }
 
 /// The agent's command line. When its harness supports it, it resumes or
@@ -194,11 +359,7 @@ fn launch_argv(
 ) -> Result<(Vec<String>, Option<String>)> {
     let mut argv = spec.argv.clone();
     if prompt.is_some() && spec.harness.prompt_args("").is_none() {
-        bail!(
-            "{} takes no first prompt from jeet; start it with `jeet task open {}` and send              the message once it is running",
-            spec.display(),
-            task.slug
-        );
+        bail!(no_first_prompt(spec, task));
     }
     if !spec.supports_sessions() {
         if let Some(id) = session {
@@ -497,16 +658,22 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if task.kind == TaskKind::Assistant {
         bail!("only the user interrupts the assistant, in its own window");
     }
-    let name = session_name(task);
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
-    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+    if is_own_session(task) {
         bail!(
-            "this jeet runs inside tmux session {name}, task {}'s agent session; interrupt it \
+            "this jeet runs inside tmux session {}, task {}'s agent session; interrupt it \
              from outside that session",
+            session_name(task),
             task.name
         );
     }
     placement::runtime_for(task)?.interrupt(app, task)
+}
+
+/// Whether this jeet runs inside the task's agent session: as the agent's
+/// own command (`$JEET_TASK_ID`), or in a window the user opened there.
+pub fn is_own_session(task: &TaskRecord) -> bool {
+    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
+    in_task || tmux::current_session().is_some_and(|s| s == session_name(task))
 }
 
 /// [`interrupt`] in the task's tmux session.
@@ -519,6 +686,12 @@ fn interrupt_tmux(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     let activity = activity(app, task, tmux::available());
     if !interruptible(&activity) {
         return Ok(Interrupted::NotWorking(activity));
+    }
+    // A session kept up by a window the user opened, its agent's pane dead
+    // (`remain-on-exit`): keys sent there would "succeed", and the crashed
+    // agent's stale status be charged as a turn.
+    if !tmux::agent_alive(&name) {
+        return Ok(Interrupted::NotWorking(Activity::NotRunning));
     }
     let dir = tasks::task_dir(app, task);
     let current = status::current_status(&dir);
@@ -563,12 +736,11 @@ fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) ->
 /// session to `verb` the task would end this jeet with it, before it had
 /// done anything.
 pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
-    let name = session_name(task);
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
-    if in_task || tmux::current_session().is_some_and(|s| s == name) {
+    if is_own_session(task) {
         bail!(
-            "this jeet runs inside tmux session {name}, the agent's session for task {}, \
+            "this jeet runs inside tmux session {}, the agent's session for task {}, \
              which ending the agent would end too; {verb} the task from outside that session",
+            session_name(task),
             task.name
         );
     }
@@ -879,6 +1051,7 @@ mod tests {
             detail: Some("Bash".into()),
             event: "Notification".into(),
             at: 61,
+            busy_since: None,
         };
         assert!(!at_startup(Some(&hooked), Some(0)));
         assert!(!at_startup(Some(&hooked), Some(61)));
