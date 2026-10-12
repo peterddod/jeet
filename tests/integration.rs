@@ -9510,6 +9510,19 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     let text = read(&brief);
     assert!(!text.contains("task.resync"), "{text}");
     assert!(text.contains("task.create"), "{text}");
+
+    // Its next start pre-approves only what it holds now: the allow list
+    // is recomputed on each start (M37), not kept from `manager new`.
+    let starts = calls_of(&tmux, "new-session").len();
+    std::fs::write(stub.join("dead/jeet-api"), "").unwrap();
+    succeeded(&lab.jeet_at(&["task", "open", "api"], &lab.home(), &env));
+    assert_eq!(calls_of(&tmux, "new-session").len(), starts + 1);
+    let api_settings = session_settings(&lab, &tmux, "jeet-api");
+    let allow = api_settings["permissions"]["allow"].as_array().unwrap();
+    for gone in ["Bash(gh pr comment:*)", "Bash(gh issue comment:*)"] {
+        assert!(!allow.contains(&gone.into()), "{gone}: {allow:?}");
+    }
+    assert!(allow.contains(&"Bash(jeet task new:*)".into()), "{allow:?}");
     drop(w_agent);
 }
 
