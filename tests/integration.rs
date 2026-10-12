@@ -8416,8 +8416,12 @@ fn manager_new_makes_a_manager_under_the_assistant_and_starts_it() {
     .unwrap();
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
     let tmux_env = tmux.to_string_lossy().to_string();
     let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    // What runs in its pane once it starts, unnamed: jeet anchors it.
+    let mut mp = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    mp.as_session_pane(&tmux, "jeet-api");
     let brief = scratch.path().join("brief.md");
     std::fs::write(&brief, "Start with the token refresh.\n").unwrap();
     let brief = brief.to_string_lossy().to_string();
@@ -8484,7 +8488,39 @@ fn manager_new_makes_a_manager_under_the_assistant_and_starts_it() {
     assert!(std::fs::read_to_string(home.join("AGENTS.md"))
         .unwrap()
         .contains("untrusted"));
-    assert!(home.join(".claude/skills/jeet-manager/SKILL.md").is_file());
+    for file in [
+        ".claude/skills/jeet-manager/SKILL.md",
+        "notes/worklog.md",
+        "todo.md",
+    ] {
+        assert!(home.join(file).is_file(), "{file}");
+    }
+    let by: String = lab
+        .index()
+        .query_row(
+            "SELECT created_by FROM task_briefs WHERE task_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(by, "user");
+
+    // Its pane is anchored as its: what runs there, with no $JEET_TASK_ID,
+    // is the manager, and sees only itself.
+    let anchors: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(anchors, 1);
+    let output = mp.jeet(&["manager", "ls", "--json"], &home, &[]);
+    succeeded(&output);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["task"], "api");
 
     let started = calls_of(&tmux, "new-session");
     assert_eq!(started.len(), 1, "{started:?}");
@@ -8547,6 +8583,669 @@ fn manager_new_keeps_the_manager_when_its_agent_does_not_start() {
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listed[0]["task"], "api");
     assert_eq!(listed[0]["kind"], "manager");
+}
+
+/// A manager needs a harness with hooks and the rest (M36): on one without,
+/// `manager new` is refused by what is missing and nothing is made, while a
+/// worker under the same harness is made and runs, with today's warning.
+#[cfg(unix)]
+#[test]
+fn manager_new_is_refused_on_a_harness_a_manager_cannot_run_on() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\nagent = \"sleep 300\"\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+
+    let output = lab.jeet_at(&["manager", "new", "api", "--goal", "g"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(said.contains("hook events"), "{said}");
+    assert!(said.contains("deny rules"), "{said}");
+    assert!(!lab.home().join("tasks/api").exists());
+    let made: i64 = lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM tasks WHERE slug = 'api'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(made, 0);
+    assert!(calls_of(&tmux, "new-session").is_empty());
+
+    lab.new_task_with("w", &["--parent", "assistant"]);
+    let output = lab.jeet_at(&["task", "open", "w"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("the agent has no deny rules"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+}
+
+/// The assistant makes a manager only when `[assistant] allow` holds
+/// `manager.create`; one it makes is its, by its id.
+#[cfg(unix)]
+#[test]
+fn the_assistant_makes_a_manager_only_with_manager_create() {
+    let lab = StoreLab::new();
+    let config = |allow: &str| {
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!("scan_roots = []\n[assistant]\nnotify = false\nallow = [{allow}]\n"),
+        )
+        .unwrap();
+    };
+    config("\"task.create\"");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let mut root = lab.assistant_pane();
+    let api_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    api_agent.as_session_pane(&tmux, "jeet-api");
+
+    let output = root.jeet(&["manager", "new", "api", "--goal", "g"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(said.contains("`manager.create`"), "{said}");
+    assert!(!lab.home().join("tasks/api").exists());
+    assert!(calls_of(&tmux, "new-session").is_empty());
+
+    config("\"task.create\", \"manager.create\"");
+    let output = root.jeet(&["manager", "new", "api", "--goal", "g"], &lab.home(), &env);
+    succeeded(&output);
+    let api = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&api), Some(lab.assistant_id()));
+    let (goal, _, by) = lab.brief_of(&api).unwrap();
+    assert_eq!(goal, "g");
+    assert_eq!(by, lab.assistant_id());
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert!(started[0].iter().any(|a| a == "jeet-api"), "{started:?}");
+}
+
+/// A manager made past `[managers] max_live` is made, and its start waits
+/// in the queue, its parent told; a drain once a slot is free starts it on
+/// its first prompt.
+#[cfg(unix)]
+#[test]
+fn manager_new_past_max_live_queues_its_start() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\n[managers]\nmax_live = 1\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    // The user's own session keeps the server up once the tasks' go.
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let a = lab.new_task_with("a", &["--parent", "assistant"]);
+    let _a_agent = session_pane(&lab, &tmux, "a", &a);
+    succeeded(&lab.jeet_at(&["task", "open", "a"], &lab.home(), &env));
+    let api_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    api_agent.as_session_pane(&tmux, "jeet-api");
+
+    let output = lab.jeet_at(&["manager", "new", "api", "--goal", "g"], &lab.home(), &env);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(said.contains("queued"), "{said}");
+    let api = task_id(&path_from(&output));
+    assert!(!stub.join("alive/jeet-api").exists());
+    assert_eq!(lab.start_queue(), [api.as_str()]);
+    let reports = lab.reports_of(&api);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].1, lab.assistant_id());
+    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+
+    // Nothing starts it while the slot is taken.
+    succeeded(&lab.jeet_at(&["manager", "drain"], &lab.home(), &env));
+    assert!(!stub.join("alive/jeet-api").exists());
+    std::fs::write(stub.join("dead/jeet-a"), "").unwrap();
+    succeeded(&lab.jeet_at(&["manager", "drain"], &lab.home(), &env));
+    assert!(stub.join("alive/jeet-api").exists());
+    assert!(lab.start_queue().is_empty());
+    let started = calls_of(&tmux, "new-session");
+    let api_start = started.last().unwrap();
+    assert!(api_start.contains(&"jeet-api".to_string()), "{api_start:?}");
+    assert!(
+        api_start.last().unwrap().contains("BRIEF.md"),
+        "{api_start:?}"
+    );
+}
+
+/// A manager the user made with `jeet manager new`, its agent running in
+/// the [`PaneShell`] returned, under `tmux`, a [`multi_session`] stub; its
+/// id. `args` follow `manager new api`.
+#[cfg(unix)]
+fn running_manager(lab: &StoreLab, tmux: &std::path::Path, args: &[&str]) -> (String, PaneShell) {
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let mp = PaneShell::spawn(lab, &[("JEET_TMUX", &tmux_env)]);
+    mp.as_session_pane(tmux, "jeet-api");
+    let mut full = vec!["manager", "new", "api"];
+    full.extend_from_slice(args);
+    let output = lab.jeet_at(
+        &full,
+        &lab.home(),
+        &[("JEET_TMUX", &tmux_env), ("JEET_AGENT", "claude")],
+    );
+    succeeded(&output);
+    let api = task_id(&path_from(&output));
+    let alive = tmux.parent().unwrap().join("alive/jeet-api");
+    assert!(alive.exists(), "{}", stderr_of(&output));
+    (api, mp)
+}
+
+/// The settings session `session`'s agent was last started with.
+#[cfg(unix)]
+fn session_settings(lab: &StoreLab, tmux: &std::path::Path, session: &str) -> serde_json::Value {
+    let calls = calls_of(tmux, "new-session");
+    let start = calls
+        .iter()
+        .rev()
+        .find(|c| c.iter().any(|a| a == session))
+        .unwrap();
+    settings_file(lab, value_after(&agent_argv(start), "--settings"))
+}
+
+/// A manager made with `jeet manager new` runs its subtree from its own
+/// pane: it makes and starts workers and sub-managers under itself within
+/// its grant, budget and depth, reaches nothing outside, reads its
+/// children fenced, holds read-only worktrees, may not push, has what it
+/// holds pre-approved and nothing else, and hears from its workers.
+#[cfg(unix)]
+#[test]
+fn a_manager_runs_its_own_subtree_and_nothing_else() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"task.send\", \"task.open\", \"task.archive\", \"task.delete\", \"task.resync\", \
+         \"worktree.add\", \"review.start\", \"manager.create\", \"manager.grant\", \
+         \"manager.stop\", \"pr.comment\"]\n",
+    )
+    .unwrap();
+    lab.clone_repo("widget");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let sib = lab.new_task_with("sib", &["--parent", "assistant"]);
+    let top = lab.new_task_with("top", &[]);
+    let held = "task.create,task.send,task.open,task.archive,task.delete,task.resync,\
+                worktree.add,manager.create,manager.grant,manager.stop,pr.comment";
+    let (api, mut mp) = running_manager(
+        &lab,
+        &tmux,
+        &["--goal", "Ship the API", "--budget", "2h", "--allow", held],
+    );
+    let api_dir = lab.home().join("tasks/api");
+    let slugs = |slug: &str| -> i64 {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM tasks WHERE slug = ?1", [slug], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+
+    // A worker under itself by default, granted `worker_default`, given
+    // what is left of its budget, and started on its prompt.
+    let mut w_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    w_agent.as_session_pane(&tmux, "jeet-w");
+    let output = mp.jeet(
+        &[
+            "task", "new", "w", "--repo", "widget", "--prompt", "build it",
+        ],
+        &api_dir,
+        &env,
+    );
+    succeeded(&output);
+    let w = task_id(&path_from(&output));
+    let w_dir = lab.home().join("tasks/w");
+    assert_eq!(lab.parent_of(&w), Some(api.clone()));
+    assert_eq!(lab.grants_of(&w), ["worktree.add"]);
+    assert_eq!(lab.budget_of(&w), Some((Some(7200), None)));
+    assert!(stub.join("alive/jeet-w").exists());
+    let started = calls_of(&tmux, "new-session");
+    let w_start = started.last().unwrap();
+    assert!(w_start.contains(&"jeet-w".to_string()), "{w_start:?}");
+    assert!(
+        w_start.iter().any(|a| a.contains("build it")),
+        "{w_start:?}"
+    );
+
+    // A sub-manager below it, while it holds `manager.create`, and none
+    // deeper than `max_depth` lets a manager sit.
+    let sub_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    sub_agent.as_session_pane(&tmux, "jeet-sub");
+    let output = mp.jeet(&["manager", "new", "sub", "--goal", "g"], &api_dir, &env);
+    succeeded(&output);
+    let sub = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&sub), Some(api.clone()));
+    let output = lab.jeet_at(&["manager", "show", "sub", "--json"], &lab.home(), &[]);
+    succeeded(&output);
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["path"], "assistant/api/sub");
+    assert_eq!(shown["kind"], "manager");
+    assert!(stub.join("alive/jeet-sub").exists());
+    let output = mp.jeet(
+        &["manager", "new", "deep", "--parent", "sub", "--goal", "g"],
+        &api_dir,
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("`[managers] max_depth` is 3"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(slugs("deep"), 0);
+
+    // Every reach outside its subtree is refused, and leaves things as
+    // they were.
+    for name in ["sib", "top"] {
+        for args in [
+            &["task", "send", name, "hi"][..],
+            &["task", "interrupt", name],
+            &["task", "archive", name, "--force"],
+            &["task", "delete", name, "--force"],
+            &["task", "open", name],
+            &["task", "resync", name],
+            &["task", "last", name],
+        ] {
+            let output = mp.jeet(args, &api_dir, &env);
+            assert!(!output.status.success(), "{args:?}");
+            let stderr = stderr_of(&output);
+            let verb = format!("may not run `jeet task {}`", args[1]);
+            assert!(stderr.contains(&verb), "{args:?}: {stderr}");
+            assert!(stderr.contains("jeet report"), "{args:?}: {stderr}");
+        }
+    }
+    for args in [
+        &["task", "new", "x", "--parent", "sib"][..],
+        &["task", "new", "x", "--parent", "assistant"],
+        &["manager", "new", "x", "--parent", "assistant"],
+    ] {
+        let output = mp.jeet(args, &api_dir, &env);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("may not run `jeet"), "{args:?}: {stderr}");
+    }
+    for id in [&sib, &top] {
+        assert_eq!(lab.run_state_of(id).0, "run");
+    }
+    assert!(lab.home().join("tasks/sib").is_dir());
+    assert!(lab.home().join("tasks/top").is_dir());
+    assert!(!lab.home().join("tasks/sib/.jeet/inbox.jsonl").exists());
+    assert!(!stub.join("alive/jeet-sib").exists());
+    assert!(!stub.join("alive/jeet-top").exists());
+
+    // Above what it holds, or past what is left of its budget: refused,
+    // and nothing is written.
+    for (args, says) in [
+        (
+            &["task", "new", "x", "--allow", "review.start"][..],
+            "`review.start`",
+        ),
+        (&["task", "new", "x", "--budget", "3h"], "more than is left"),
+        (
+            &["manager", "new", "x", "--allow", "review.start"],
+            "`review.start`",
+        ),
+    ] {
+        let output = mp.jeet(args, &api_dir, &env);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(says), "{args:?}: {stderr}");
+    }
+    assert!(!lab.home().join("tasks/x").exists());
+    assert_eq!(slugs("x"), 0);
+
+    // What its worker last said, it reads fenced.
+    let claude = scratch.path().join("claude");
+    let session: String = lab
+        .index()
+        .query_row(
+            "SELECT session_id FROM task_sessions WHERE task_id = ?1",
+            [&w],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let project: String = w_dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = claude.join("projects").join(project);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/transcripts/claude-code/finished.jsonl"),
+        transcripts.join(format!("{session}.jsonl")),
+    )
+    .unwrap();
+    let claude_env = claude.to_string_lossy().to_string();
+    let output = mp.jeet(
+        &["task", "last", "w"],
+        &api_dir,
+        &[("CLAUDE_CONFIG_DIR", &claude_env)],
+    );
+    succeeded(&output);
+    let said = stdout_of(&output);
+    assert!(
+        said.contains(
+            "<jeet-message from=\"task assistant/api/w\" untrusted=\"true\">\n\
+             The cookie had no `Max-Age`"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "I set it to 30 days and pushed fix/login-cookie; tests pass.\n</jeet-message>"
+        ),
+        "{said}"
+    );
+
+    // Its worktrees are read-only: no branch, detached, marked so.
+    let output = mp.jeet(
+        &["worktree", "add", "widget", "--branch", "x"],
+        &api_dir,
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("read-only worktrees"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = mp.jeet(&["worktree", "add", "widget"], &api_dir, &env);
+    succeeded(&output);
+    let checkout = path_from(&output);
+    assert_eq!(checkout, api_dir.join("widget"));
+    assert!(is_detached(&checkout));
+    let read_only: bool = lab
+        .index()
+        .query_row(
+            "SELECT read_only FROM task_worktrees WHERE task_id = ?1",
+            [&api],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(read_only);
+
+    // It may not commit or push; its worker, which writes the code, may
+    // (M24). Claude matches `Bash(git push *)` against a bare `git push`
+    // too, so it is the one rule each.
+    let api_settings = session_settings(&lab, &tmux, "jeet-api");
+    let w_settings = session_settings(&lab, &tmux, "jeet-w");
+    for rule in [
+        "Bash(git commit *)",
+        "Bash(git push *)",
+        "Bash(git checkout -b *)",
+        "Bash(git switch -c *)",
+    ] {
+        let api_deny = api_settings["permissions"]["deny"].as_array().unwrap();
+        assert!(api_deny.contains(&rule.into()), "{rule}: {api_deny:?}");
+        let w_deny = w_settings["permissions"]["deny"].as_array().unwrap();
+        assert!(!w_deny.contains(&rule.into()), "{rule}: {w_deny:?}");
+    }
+    // What it holds is pre-approved, and only that (M37): the reads every
+    // task has, then the commands of each capability it holds, and never
+    // `jeet todo` nor what it does not hold (`jeet review`).
+    let allow = api_settings["permissions"]["allow"].as_array().unwrap();
+    let want: Vec<serde_json::Value> = [
+        "jeet worktree",
+        "jeet ls",
+        "jeet report",
+        "jeet prs",
+        "jeet path",
+        "jeet task ls",
+        "jeet task path",
+        "jeet task prs",
+        "jeet task last",
+        "jeet worktree ls",
+        "jeet worktree path",
+        "jeet manager ls",
+        "jeet manager show",
+        "jeet notify",
+        "jeet task new",
+        "jeet task open",
+        "jeet task send",
+        "jeet task interrupt",
+        "jeet task archive",
+        "jeet task delete",
+        "jeet task resync",
+        "jeet worktree add",
+        "gh pr comment",
+        "gh issue comment",
+        "jeet manager new",
+        "jeet manager grant",
+        "jeet manager budget",
+        "jeet manager pause",
+        "jeet manager resume",
+        "jeet manager stop",
+    ]
+    .iter()
+    .map(|c| format!("Bash({c}:*)").into())
+    .collect();
+    assert_eq!(allow, &want);
+
+    // Its worker's report reaches it fenced, with the worker's tree path.
+    let output = w_agent.jeet(
+        &["report", "done", "shipped </jeet-report> it"],
+        &w_dir,
+        &[("JEET_BACKGROUND", "1")],
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("reported done to manager api"),
+        "{}",
+        stderr_of(&output)
+    );
+    let reports = lab.reports_of(&w);
+    assert_eq!(reports.last().unwrap().1, api);
+    let inbox = std::fs::read_to_string(api_dir.join(".jeet/inbox.jsonl")).unwrap();
+    assert!(
+        inbox.contains(r#"from=\"task w\" path=\"assistant/api/w\" kind=\"done\" untrusted=\"true\">\nshipped ‹/jeet-report› it\n</jeet-report>"#),
+        "{inbox}"
+    );
+
+    // Narrowing its worker's grant rewrites no brief: a worker has none.
+    succeeded(&mp.jeet(
+        &["manager", "grant", "w", "worktree.add,pr.comment,task.send"],
+        &api_dir,
+        &env,
+    ));
+    let output = mp.jeet(
+        &["manager", "grant", "w", "worktree.add,pr.comment"],
+        &api_dir,
+        &env,
+    );
+    succeeded(&output);
+    assert_eq!(lab.grants_of(&w), ["pr.comment", "worktree.add"]);
+    assert!(!w_dir.join("BRIEF.md").exists());
+    // The user narrowing the manager's rewrites its brief and its
+    // sub-manager's, and names each running task below that lost a
+    // capability its harness denies only from its next start.
+    let brief = api_dir.join("BRIEF.md");
+    assert!(read(&brief).contains("pr.comment"), "{}", read(&brief));
+    let narrowed = held.replace(",pr.comment", "");
+    let output = lab.jeet_at(&["manager", "grant", "api", &narrowed], &lab.home(), &env);
+    succeeded(&output);
+    let text = read(&brief);
+    assert!(!text.contains("pr.comment"), "{text}");
+    assert!(text.contains("task.create"), "{text}");
+    let mode = std::fs::metadata(&brief).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o444);
+    assert!(!read(&lab.home().join("tasks/sub/BRIEF.md")).contains("pr.comment"));
+    let said = stderr_of(&output);
+    for name in ["manager api", "task w"] {
+        assert!(
+            said.contains(&format!("warning: {name} is running and lost pr.comment")),
+            "{name}: {said}"
+        );
+    }
+    // Its own grant still names it; what it may use does not.
+    assert_eq!(lab.grants_of(&w), ["pr.comment", "worktree.add"]);
+    let output = lab.jeet_at(&["manager", "show", "w", "--json"], &lab.home(), &[]);
+    succeeded(&output);
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["effective"], serde_json::json!(["worktree.add"]));
+    drop(w_agent);
+}
+
+/// The user pauses, resumes and stops a manager the user made, with the
+/// worker it made running below it: the pause holds both and interrupts
+/// the worker first, the resume hands over what waited, the stop ends both
+/// sessions, and nothing below starts again until the manager is resumed.
+#[cfg(unix)]
+#[test]
+fn a_managers_run_state_holds_its_whole_subtree() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"task.send\"]\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let jeet = |args: &[&str]| {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output)
+    };
+    // The user's own session keeps the server up once the tasks' go.
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let (api, mut mp) = running_manager(
+        &lab,
+        &tmux,
+        &["--goal", "g", "--allow", "task.create,task.send"],
+    );
+    let api_dir = lab.home().join("tasks/api");
+    let mut w_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    w_agent.as_session_pane(&tmux, "jeet-w");
+    let output = mp.jeet(
+        &["task", "new", "w", "--prompt", "build it"],
+        &api_dir,
+        &env,
+    );
+    succeeded(&output);
+    let w = task_id(&path_from(&output));
+    let w_dir = lab.home().join("tasks/w");
+    assert!(stub.join("alive/jeet-w").exists());
+
+    // Both at work, mid-turn.
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    let background = [("JEET_BACKGROUND", "1")];
+    let (api_session, w_session) = (
+        "11111111-2222-4333-8444-555555555555",
+        "22222222-3333-4444-8555-666666666666",
+    );
+    hook_ok(&mp.hook(
+        &lab,
+        Some(&api),
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", api_session, &api_dir),
+        &background,
+    ));
+    hook_ok(&w_agent.hook(
+        &lab,
+        Some(&w),
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", w_session, &w_dir),
+        &background,
+    ));
+    let pane = |session: &str| {
+        read(&stub.join("agent-pane").join(session))
+            .trim()
+            .to_string()
+    };
+    let (api_pane, w_pane) = (pane("jeet-api"), pane("jeet-w"));
+    assert_ne!(api_pane, w_pane);
+
+    // Paused: the row is the manager's alone, and each pane below it gets
+    // one Escape, the worker's first.
+    let said = jeet(&["manager", "pause", "api"]);
+    assert!(said.contains("paused manager api"), "{said}");
+    assert!(said.contains("w: interrupted"), "{said}");
+    assert!(said.contains("api: interrupted"), "{said}");
+    assert_eq!(
+        calls_of(&tmux, "send-keys"),
+        [
+            ["send-keys", "-t", w_pane.as_str(), "Escape"],
+            ["send-keys", "-t", api_pane.as_str(), "Escape"],
+        ]
+    );
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("paused".into(), Some("user".into()))
+    );
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    // A message for the worker is held, typed into nothing.
+    let said = jeet(&["task", "send", "w", "carry on"]);
+    assert!(said.contains("paused or stopped"), "{said}");
+    assert!(pasted(&tmux).is_empty());
+    let inbox = w_dir.join(".jeet/inbox.jsonl");
+    assert!(read(&inbox).contains("carry on"));
+
+    // Resumed: what waited is handed over.
+    let said = jeet(&["manager", "resume", "api"]);
+    assert!(said.contains("api: resumed"), "{said}");
+    assert_eq!(lab.run_state_of(&api), ("run".into(), None));
+    let typed = pasted(&tmux);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0].0, w_pane);
+    assert!(typed[0].1.contains("carry on"), "{typed:?}");
+    assert!(!inbox.exists());
+
+    // Stopped: each session is ended by its own name.
+    let said = jeet(&["manager", "stop", "api"]);
+    assert!(said.contains("stopped manager api"), "{said}");
+    let mut killed: Vec<String> = calls_of(&tmux, "kill-session")
+        .iter()
+        .map(|c| value_after(c, "-t").to_string())
+        .collect();
+    killed.sort();
+    assert_eq!(killed, ["=jeet-api", "=jeet-w"]);
+    assert!(!stub.join("alive/jeet-api").exists());
+    assert!(!stub.join("alive/jeet-w").exists());
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+    let output = lab.jeet_at(&["task", "open", "w"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("`jeet manager resume api` first"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!stub.join("alive/jeet-w").exists());
+    jeet(&["manager", "resume", "api"]);
+    let _w_again = session_pane(&lab, &tmux, "w", &w);
+    jeet(&["task", "open", "w"]);
+    assert!(stub.join("alive/jeet-w").exists());
 }
 
 #[cfg(unix)]
