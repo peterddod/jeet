@@ -263,7 +263,7 @@ meanwhile cannot slip past. `--recursive` comes later in phase 2;
 jeet manager new backend \
   --goal "Ship the v2 auth API" \
   --done "PRs open for api#120 and web#88, CI green, summary in worklog" \
-  --brief-file /tmp/backend-brief.md \
+  --brief-file backend-brief.md \
   --allow task.create,task.send,task.archive,worktree.add \
   --budget 6h,400turns \
   --max-children 4
@@ -1304,7 +1304,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   its slug alone: a manager may name it from text it read. `jeet task ls`
   (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
   agent, which sees names only of tasks with no parent, under the root, or
-  under itself.
+  under itself; `send`, `interrupt`, `archive`, `unarchive`, `delete`,
+  `resync`, `prs` and `last` name any other by its slug in what they
+  print, as do the start warnings they pass on.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1602,7 +1604,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `brief TEXT` is not added): its text follows `--goal` in the brief's
   goal, or is the goal without one, so it is checked, kept, fenced and
   shown with it (the two together at most a message's 8,000 bytes, refused
-  as `--brief-file`'s when over). The command prints the manager's slug, tree path and
+  as `--brief-file`'s when over). The file is a regular file, read no
+  further than that limit; named by an agent (the root or a node), it must
+  resolve inside that agent's own home, links followed, since its
+  `manager new` is pre-approved and `manager show` hands the brief back. The command prints the manager's slug, tree path and
   parent to stderr and its home on stdout (without changing directory, as
   `task new` asks the shell to), then starts it with
   `manager::first_prompt` through the start gate as `task new --prompt`

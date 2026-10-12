@@ -12,7 +12,7 @@ pub mod run;
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::context::App;
@@ -131,8 +131,18 @@ pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let dir = tasks::task_dir(app, node);
+    // Never made again here: a home gone (deleted, or not restored) stays
+    // gone, so a start queued for it is refused rather than run in an
+    // empty one without its role's files.
+    if !dir.is_dir() {
+        bail!("{} is missing", dir.display());
+    }
     let marker = dir.join(tasks::MARKER_DIR);
-    std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
+    match std::fs::create_dir(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
+    }
     let lock = marker.join("brief.lock");
     let _lock = std::fs::OpenOptions::new()
         .create(true)
@@ -470,6 +480,16 @@ mod tests {
             first_prompt(&app, &api).unwrap(),
             "You are manager `assistant/api`. Read BRIEF.md, then plan and delegate."
         );
+    }
+
+    #[test]
+    fn a_missing_home_is_not_made_again_by_its_brief() {
+        let (_dir, app, api) = manager_lab("ship the API");
+        let home = tasks::task_dir(&app, &api);
+        std::fs::remove_dir_all(&home).unwrap();
+        let e = write_brief(&app, &api).unwrap_err();
+        assert!(format!("{e:#}").contains("is missing"), "{e:#}");
+        assert!(!home.exists());
     }
 
     #[test]

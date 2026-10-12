@@ -44,9 +44,9 @@ pub struct NewManager<'a> {
 /// A start that fails leaves it made and is an error.
 pub fn new(app: &App, args: &NewManager) -> Result<()> {
     let mut d = args.delegation.clone();
+    let caller = permissions::caller(app)?;
     if let Some(path) = args.brief_file {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        let text = read_brief_file(app, &caller, path)?;
         if text.trim().is_empty() {
             bail!("--brief-file: {} is empty", path.display());
         }
@@ -70,7 +70,6 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         }
         d.goal = Some(goal);
     }
-    let caller = permissions::caller(app)?;
     let plan = tasks::plan_child(
         app,
         &caller,
@@ -109,6 +108,54 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
     }
     println!("{}", dir.display());
     start_new(app, &task, &manager::first_prompt(app, &task)?)
+}
+
+/// The text of `--brief-file`: a regular file, read no further than a
+/// brief may be long. An agent's command is pre-approved and its brief
+/// shown back to it by `manager show`, so an agent names only a file in its
+/// own home: through `--brief-file` it reads nothing it could not already.
+fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let home = match caller {
+        Caller::User => None,
+        Caller::Root => Some(tasks::task_dir(app, &manager::root(app)?)),
+        Caller::Node(node) => Some(tasks::task_dir(app, node)),
+    };
+    let real = std::fs::canonicalize(path)
+        .with_context(|| format!("--brief-file: read {}", path.display()))?;
+    if let Some(home) = home {
+        let inside = std::fs::canonicalize(&home).is_ok_and(|home| real.starts_with(home));
+        if !inside {
+            bail!(
+                "--brief-file: {} is outside your home {}; write the brief there",
+                path.display(),
+                home.display()
+            );
+        }
+    }
+    // Asked before opening it too: opening a FIFO would wait for a writer.
+    let regular = |meta: std::io::Result<std::fs::Metadata>| meta.is_ok_and(|m| m.is_file());
+    if !regular(std::fs::metadata(&real)) {
+        bail!("--brief-file: {} is not a regular file", path.display());
+    }
+    let file = std::fs::File::open(&real)
+        .with_context(|| format!("--brief-file: read {}", path.display()))?;
+    if !regular(file.metadata()) {
+        bail!("--brief-file: {} is not a regular file", path.display());
+    }
+    let mut bytes = Vec::new();
+    file.take(messages::MAX_MESSAGE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("--brief-file: read {}", path.display()))?;
+    if bytes.len() > messages::MAX_MESSAGE {
+        bail!(
+            "--brief-file: the brief is too long (over {} bytes)",
+            messages::MAX_MESSAGE
+        );
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("--brief-file: {} is not UTF-8", path.display()))
 }
 
 /// One task in `jeet manager ls`.

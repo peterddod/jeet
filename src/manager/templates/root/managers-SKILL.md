@@ -24,7 +24,8 @@ time; a single change is a plain `jeet task new`.
     `[managers] default_budget`.
   - `--max-children` caps how many tasks it keeps under it at once.
   - `--brief-file <file>` adds a longer brief after the goal; the two
-    together are at most 8,000 bytes.
+    together are at most 8,000 bytes. The file must be in your own
+    directory: write the brief there first.
 - Write the goal and when it is done so a newcomer could act on them: the
   manager reads them in `BRIEF.md`, which jeet keeps, at every session.
 

@@ -285,7 +285,7 @@ fn start_tmux(
         Some(&pane.id),
         pane.pid,
     ) {
-        warnings.push(identity::unidentified(&task.name, &e));
+        warnings.push(identity::unidentified(&task.slug, &e));
     }
     // Something to see it through a startup prompt, which no hook reports.
     if hooks {
@@ -319,7 +319,7 @@ fn already_running(
              cannot confirm its agent is task {}'s and refuses its jeet commands; `jeet task \
              restart {}` resumes it in a new one, or from a terminal outside jeet's tmux \
              sessions, `jeet task adopt {}` vouches for it",
-            task.name, task.slug, task.slug
+            task.slug, task.slug, task.slug
         ));
     }
     if let Some(id) = session {
@@ -430,7 +430,7 @@ fn pick_session(
                 bail!(
                     "task {} has no session {id} that jeet or {} knows of; `jeet task ls` \
                      shows its tasks, and ctrl-s in a task's explorer its sessions",
-                    task.name,
+                    task.slug,
                     spec.harness.name()
                 );
             }

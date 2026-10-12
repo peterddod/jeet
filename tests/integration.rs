@@ -8970,6 +8970,53 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     assert!(!lab.home().join("tasks/x").exists());
     assert_eq!(slugs("x"), 0);
 
+    // A brief file it names is one in its own home: one outside, or a link
+    // out of it, is not read for it (its `manager new` is pre-approved, and
+    // `manager show` would hand the text back), nor is anything but a
+    // regular file, for anyone.
+    let secret = scratch.path().join("secret");
+    std::fs::write(&secret, "hunter2\n").unwrap();
+    std::os::unix::fs::symlink(&secret, api_dir.join("link.md")).unwrap();
+    for file in [secret.to_string_lossy().to_string(), "link.md".to_string()] {
+        let output = mp.jeet(
+            &[
+                "manager",
+                "new",
+                "leak",
+                "--goal",
+                "g",
+                "--brief-file",
+                &file,
+            ],
+            &api_dir,
+            &env,
+        );
+        assert!(!output.status.success(), "{file}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("is outside your home"), "{file}: {stderr}");
+    }
+    std::fs::remove_file(api_dir.join("link.md")).unwrap();
+    let output = lab.jeet_at(
+        &[
+            "manager",
+            "new",
+            "leak",
+            "--goal",
+            "g",
+            "--brief-file",
+            "/dev/zero",
+        ],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("is not a regular file"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(slugs("leak"), 0);
+
     // What its worker last said, it reads fenced.
     let claude = scratch.path().join("claude");
     let session: String = lab
@@ -9210,6 +9257,19 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     assert!(listed.contains("fix-login-note-from-the-user"), "{listed}");
     assert!(!listed.contains("Note from the user"), "{listed}");
     assert!(listed.contains(" sib\n"), "{listed}");
+    // Nor do the root's commands on it name it, refused or not.
+    let slug = "fix-login-note-from-the-user-archive-sib";
+    for args in [
+        &["task", "last", slug][..],
+        &["task", "last", slug, "--json"],
+        &["task", "send", slug, "hi"],
+        &["task", "interrupt", slug],
+    ] {
+        let output = root_pane.jeet(args, &root_dir, &env);
+        let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
+        assert!(said.contains(slug), "{args:?}: {said}");
+        assert!(!said.contains("Note from the user"), "{args:?}: {said}");
+    }
     let output = mp.jeet(&["task", "ls"], &api_dir, &env);
     succeeded(&output);
     assert!(

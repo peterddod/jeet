@@ -197,10 +197,11 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
-            task.name,
+            called,
             task.slug
         );
     }
@@ -208,38 +209,38 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     let delivered = messages::deliver(&dir, &messages::TmuxAgent::new(app, &task), message)?;
     let _ = app.db.touch_task(&task.id, now_secs());
     match delivered {
-        Delivered::Typed => eprintln!("jeet: sent to {}'s agent", task.name),
+        Delivered::Typed => eprintln!("jeet: sent to {}'s agent", called),
         Delivered::Queued => eprintln!(
             "jeet: {}'s agent is busy, waiting on you, or has text you have not sent in its \
              prompt, so the message is queued; it gets it when it finishes or sits idle",
-            task.name
+            called
         ),
         Delivered::Started => eprintln!(
             "jeet: started {}'s agent with the message in tmux session {}",
-            task.name,
+            called,
             runtime::session_name(&task)
         ),
         Delivered::Held => eprintln!(
             "jeet: {}'s agent is not running and cannot be started from here, so the message \
              is queued; it gets it when it next runs",
-            task.name
+            called
         ),
         // Its harness takes no first prompt: a resume finding its agent
         // gone cannot start it with the message.
         Delivered::Paused if runtime::first_prompt_refusal(app, &task).is_some() => eprintln!(
             "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
              resumed while its agent runs, or else when a message next reaches it",
-            task.name
+            called
         ),
         Delivered::Paused => eprintln!(
             "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
              resumed",
-            task.name
+            called
         ),
         Delivered::StartQueued { live, max } => eprintln!(
             "jeet: task {}'s start waits on max_live ({live}/{max} live), so the message is \
              queued; it starts with it when a task in the tree ends",
-            task.name
+            called
         ),
     }
     Ok(())
@@ -258,16 +259,17 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     let why = match runtime::interrupt(app, &task)? {
         Interrupted::Sent => {
-            eprintln!("jeet: interrupted task {}'s turn", task.name);
+            eprintln!("jeet: interrupted task {}'s turn", called);
             // Its busy spell is closed now, not left charged until the
             // harness says it sits idle.
             run::charge_interrupted(app, &task);
             let dir = tasks::task_dir(app, &task);
             let event = status::INTERRUPTED_EVENT;
             if let Err(e) = status::mark_interrupted(&dir, event, "interrupted", now_secs()) {
-                eprintln!("jeet: could not mark task {} idle: {e:#}", task.name);
+                eprintln!("jeet: could not mark task {} idle: {e:#}", called);
             }
             return Ok(());
         }
@@ -283,7 +285,7 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
                                    which the keys would answer"
             .to_string(),
     };
-    eprintln!("jeet: task {}: {why}; nothing sent", task.name);
+    eprintln!("jeet: task {}: {why}; nothing sent", called);
     // Under the assistant, logged as nothing done rather than as done.
     permissions::skipped(format!("nothing sent: {why}"));
     Ok(())
@@ -838,6 +840,7 @@ pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     // Before asking, not after: the answer would count for nothing.
     app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(&task, "archive")?;
@@ -846,7 +849,7 @@ pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
     }
     let warnings = tasks::archive(app, &task)?;
     warn_all(&warnings);
-    eprintln!("jeet: archived task {}", task.name);
+    eprintln!("jeet: archived task {}", called);
     Ok(())
 }
 
@@ -859,15 +862,16 @@ pub fn unarchive(app: &App, name: &str) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     if task.state == TaskState::Active {
-        eprintln!("jeet: task {} is not archived", task.name);
+        eprintln!("jeet: task {} is not archived", called);
         return Ok(());
     }
     let warnings = tasks::unarchive(app, &task)?;
     warn_all(&warnings);
     eprintln!(
         "jeet: task {} is back at {}",
-        task.name,
+        called,
         tasks::task_dir(app, &task).display()
     );
     Ok(())
@@ -886,6 +890,7 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
             exact: true,
         },
     )?;
+    let called = called(app, &task);
     let dir = tasks::task_dir(app, &task);
     if standing_in(&dir) {
         bail!(
@@ -901,11 +906,12 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
     }
     let warnings = tasks::delete(app, &task)?;
     warn_all(&warnings);
-    eprintln!("jeet: deleted task {}", task.name);
+    eprintln!("jeet: deleted task {}", called);
     Ok(())
 }
 
 fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {
+    let called = called(app, task);
     let unkept = tasks::unkept(app, task)?;
     if unkept.is_empty() {
         return Ok(());
@@ -913,7 +919,7 @@ fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {
     let mut report = format!(
         "archiving task {} keeps its uncommitted work, but not the files git ignores, \
          which are deleted with its worktrees:",
-        task.name
+        called
     );
     for line in &unkept {
         report.push_str(&format!("\n  {line}"));
@@ -921,7 +927,7 @@ fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {
     confirm(
         &report,
         "archive it?",
-        &format!("kept task {} as it is", task.name),
+        &format!("kept task {} as it is", called),
     )
 }
 
@@ -942,10 +948,11 @@ fn confirm(report: &str, question: &str, declined: &str) -> Result<()> {
 }
 
 fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
+    let called = called(app, task);
     let losses = tasks::losses(app, task)?;
     let mut report = format!(
         "deleting task {} removes {} and its worktrees",
-        task.name,
+        called,
         tasks::task_dir(app, task).display()
     );
     if !losses.is_empty() {
@@ -954,7 +961,7 @@ fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
     for loss in &losses {
         report.push_str(&format!("\n  {loss}"));
     }
-    confirm(&report, "delete it?", &format!("kept task {}", task.name))
+    confirm(&report, "delete it?", &format!("kept task {}", called))
 }
 
 /// Copy the task's project files again: those the task left alone are
@@ -968,6 +975,7 @@ pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     let sync = projects::resync(app, &task, force)?;
     for rel in &sync.written {
         eprintln!("jeet: updated {rel}");
@@ -980,7 +988,7 @@ pub fn resync(app: &App, name: &str, force: bool) -> Result<()> {
         eprintln!("jeet: pass --force to replace the task's changed copies too");
     }
     if sync.written.is_empty() && sync.removed.is_empty() && sync.kept.is_empty() {
-        eprintln!("jeet: task {} already has its project's files", task.name);
+        eprintln!("jeet: task {} already has its project's files", called);
     }
     Ok(())
 }
@@ -993,6 +1001,7 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
         Verb::TaskPrs,
         Target::Current(name.map(str::to_string)),
     )?;
+    let called = called(app, &task);
     if !offline {
         let found = pr_history::refresh(app, &task)?;
         for error in &found.errors {
@@ -1001,7 +1010,7 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
     }
     let prs = app.db.list_task_prs(&task.id)?;
     if prs.is_empty() {
-        eprintln!("jeet: no pull requests recorded for task {}", task.name);
+        eprintln!("jeet: no pull requests recorded for task {}", called);
         return Ok(());
     }
     println!(
@@ -1046,6 +1055,8 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     };
     let (caller, task) = permissions::resolve_target(app, &target)?;
     permissions::in_scope(app, &caller, permissions::Verb::TaskLast, &task)?;
+    let names_for = names_for(app, &caller)?;
+    let called = shown_name(names_for.as_deref(), &task).unwrap_or(&task.slug);
     let from = fence_for(app, &caller, &task)?;
     let dir = tasks::task_dir(app, &task);
     let status = match task.state {
@@ -1060,14 +1071,14 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
         if let Some(job) = crate::review::running_job(app, &task) {
             bail!(crate::review::running_refusal(&task, &job));
         }
-        bail!("task {}'s agent has no session yet", task.name);
+        bail!("task {}'s agent has no session yet", called);
     };
     let Some(turn) = harness.last_messages(&dir, &session, count) else {
         bail!(
             "{} keeps no record jeet can read, so there is no telling what task {}'s agent \
              last said",
             harness.name(),
-            task.name
+            called
         );
     };
     let mut turn = turn?;
@@ -1079,7 +1090,7 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     if json {
         let value = serde_json::json!({
             "task": task.slug,
-            "name": shown_name(names_for(app, &caller)?.as_deref(), &task),
+            "name": shown_name(names_for.as_deref(), &task),
             "status": status,
             "session": session,
             "end": turn.end,
@@ -1153,6 +1164,16 @@ fn shown_name<'a>(names_for: Option<&[String]>, task: &'a TaskRecord) -> Option<
         (None, _) | (_, None) => Some(&task.name),
         (Some(ids), Some(parent)) if ids.iter().any(|id| id == parent) => Some(&task.name),
         _ => None,
+    }
+}
+
+/// How a command's messages name `task` to its caller: by its name when
+/// [`shown_name`] shows the caller it, else by its slug.
+fn called(app: &App, task: &TaskRecord) -> String {
+    let names_for = permissions::caller(app).and_then(|caller| names_for(app, &caller));
+    match names_for.map(|ids| shown_name(ids.as_deref(), task).map(str::to_string)) {
+        Ok(Some(name)) => name,
+        _ => task.slug.clone(),
     }
 }
 
