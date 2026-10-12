@@ -4,7 +4,9 @@
 //! The jeet that starts a task's pane, an assistant window or a review job
 //! records the process it started as the task's anchor: its pid and start
 //! time, read from the kernel, never re-bound. A process never records its
-//! own. The caller is the task of the nearest anchor among this process and
+//! own. The one other writer is [`adopt`]: the user, at a terminal outside
+//! every pane of jeet's, vouching for an agent an older jeet started. The
+//! caller is the task of the nearest anchor among this process and
 //! its ancestors. `$JEET_TASK_ID` and `$JEET_ASSISTANT` are hints: one that
 //! disagrees with the anchor, or claims a task with a parent or the
 //! assistant with no anchor behind it, is refused.
@@ -216,6 +218,13 @@ pub fn runs_under(anchor: &Anchor) -> bool {
     ancestry().0.contains(&(anchor.pid, anchor.start))
 }
 
+/// Whether this jeet runs in any of `pids` or below one: the live
+/// processes tmux started in panes, say. Only as far up as [`ancestry`] can
+/// read.
+pub fn runs_under_any(pids: &[u32]) -> bool {
+    ancestry().0.iter().any(|(pid, _)| pids.contains(pid))
+}
+
 /// What the environment says the caller is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Hint {
@@ -386,12 +395,19 @@ pub fn identify(app: &App) -> Result<Identity> {
                     ))
                     .into())
                 }
-                (Some(id), Some(Some(t))) if t.kind != TaskKind::Assistant => {
-                    (format!("{}'s agent", label(&id)), "reopen the task")
-                }
+                (Some(id), Some(Some(t))) if t.kind != TaskKind::Assistant => (
+                    format!("{}'s agent", label(&id)),
+                    format!(
+                        "the user can restart it (`jeet task restart {0}`, which keeps its \
+                         conversation) or adopt it (`jeet task adopt {0}`)",
+                        t.slug
+                    ),
+                ),
                 _ => (
                     "the assistant".to_string(),
-                    "exit the assistant in its window and run `jeet chat` again",
+                    "the user can restart it (`jeet task restart assistant`, which keeps its \
+                     conversation) or adopt it (`jeet task adopt assistant`)"
+                        .to_string(),
                 ),
             };
             let advice = match unreadable {
@@ -401,8 +417,8 @@ pub fn identify(app: &App) -> Result<Identity> {
                      if the agent runs its commands in a sandbox, exclude jeet from it"
                 ),
                 None => format!(
-                    "{reopen} (agents started before this jeet must be restarted), or run this \
-                     outside the agent's tmux session; if the agent runs its commands in a \
+                    "jeet has no record of starting it, as for an agent an older jeet \
+                     started: {reopen}; or run this outside the agent's tmux session; if the agent runs its commands in a \
                      sandbox with its own process ids (Claude Code's on Linux), exclude jeet \
                      from it"
                 ),
@@ -465,6 +481,42 @@ pub fn record(
     // Recorded: a sweep that fails costs only stale rows.
     let _ = prune(db);
     Ok(())
+}
+
+/// Record process `pid`, the agent an older jeet started in tmux pane
+/// `pane_id` for task `task_id`, as its anchor, on the user's word: what
+/// `jeet task adopt` writes once the user has confirmed it. `jeet_panes`
+/// are the processes in the panes of jeet's tmux sessions. Refused unless
+/// this jeet runs outside every one of them, so no agent, nor anything it
+/// starts in its pane, adopts itself or another; and when a live process
+/// is anchored to the task already (`per_window`: that process only, for
+/// the assistant, whose windows each have one), so none is ever re-bound or
+/// doubled. What gets past this is what gets past identity anyway (design
+/// §5.7): a process orphaned with its environment stripped, or started
+/// through tmux, which already runs as the user.
+pub fn adopt(
+    db: &Database,
+    task_id: &str,
+    pane_id: &str,
+    pid: u32,
+    jeet_panes: &[u32],
+    per_window: bool,
+) -> Result<()> {
+    if runs_under_any(jeet_panes) || runs_under_any(&[pid]) {
+        bail!(
+            "this jeet runs in a pane of jeet's tmux sessions; adopt an agent from a terminal \
+             of your own, outside them"
+        );
+    }
+    let anchored = db
+        .task_anchors(task_id, AnchorKind::Pane)?
+        .into_iter()
+        .filter(live)
+        .any(|a| !per_window || a.pid == pid);
+    if anchored {
+        bail!("jeet already knows this agent's process");
+    }
+    record(db, task_id, AnchorKind::Pane, Some(pane_id), pid)
 }
 
 /// The warning for task `name`'s agent that [`record`] failed on. With no
@@ -711,6 +763,38 @@ mod tests {
         assert_eq!(rows[0].pid, second.id());
         second.kill().unwrap();
         second.wait().unwrap();
+    }
+
+    #[test]
+    fn the_user_adopts_an_agent_only_from_outside_its_pane_and_only_once() {
+        let (_dir, db) = db();
+        let mut agent = sleeper();
+        let pid = agent.id();
+        // From a pane of jeet's: this test's own process stands in for it.
+        let here = std::process::id();
+        let e = adopt(&db, "t", "%1", pid, &[here], false).unwrap_err();
+        assert!(e.to_string().contains("outside"), "{e}");
+        // Or from under the very process to adopt.
+        let parent = std::os::unix::process::parent_id();
+        assert!(adopt(&db, "t", "%1", parent, &[], false).is_err());
+        assert!(db.all_anchors().unwrap().is_empty());
+
+        adopt(&db, "t", "%1", pid, &[], false).unwrap();
+        let rows = db.task_anchors("t", AnchorKind::Pane).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, pid);
+        // A task has one agent: another process is not adopted beside it,
+        // nor the same one twice.
+        let mut other = sleeper();
+        assert!(adopt(&db, "t", "%2", other.id(), &[], false).is_err());
+        assert!(adopt(&db, "t", "%1", pid, &[], true).is_err());
+        // The assistant's windows each have their own.
+        adopt(&db, "t", "%2", other.id(), &[], true).unwrap();
+        assert_eq!(db.task_anchors("t", AnchorKind::Pane).unwrap().len(), 2);
+        for child in [&mut agent, &mut other] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
     }
 
     /// A row whose start is not its process's, as one from an earlier boot

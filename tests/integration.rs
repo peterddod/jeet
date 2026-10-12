@@ -2492,15 +2492,27 @@ case "$1" in
     esac ;;
   kill-session)
     rm -f "$here/alive" "$here/agent-pane"
-    if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi ;;
+    if [ -e "$here/pid" ]; then kill -HUP "$(cat "$here/pid")"; fi
+    # The process the next session's pane runs, when the test gives one.
+    if [ -e "$here/next-pid" ]; then mv "$here/next-pid" "$here/pid"; fi ;;
   list-panes)
     [ -e "$here/alive" ] || exit 1
     case "$*" in
+      # Every pane on the server (`-a`), as the session `jeet-stub`'s.
+      *session_name*) printf 'jeet-stub\t0 %s\n' "$(cat "$here/pid" 2>/dev/null)" ;;
       *pane_pid*) echo "0 $(cat "$here/pid" 2>/dev/null)" ;;
       *pane_id*) echo "$(cat "$here/agent-pane" 2>/dev/null) 0" ;;
       *) echo 0 ;;
     esac ;;
-  display-message) cat "$here/current" 2>/dev/null ;;
+  display-message)
+    case "$*" in
+      # The agent's pane, while the session runs.
+      *pane_current_command*)
+        [ -e "$here/alive" ] || exit 1
+        printf '0\t%s\t%s\tclaude\n' "$(cat "$here/agent-pane" 2>/dev/null || echo %1)" \
+          "$(cat "$here/pid" 2>/dev/null || echo 0)" ;;
+      *) cat "$here/current" 2>/dev/null ;;
+    esac ;;
   # Someone is attached while the test leaves a `client` file.
   list-clients) [ -e "$here/client" ] && echo /dev/ttys001 ;;
   show-options)
@@ -9151,7 +9163,7 @@ fn an_assistant_window_jeet_did_not_record_is_flagged() {
     let output = root.jeet(&["todo", "ls"], &lab.home(), &[]);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
-    assert!(stderr.contains("run `jeet chat` again"), "{stderr}");
+    assert!(stderr.contains("jeet task restart assistant"), "{stderr}");
 }
 
 /// Every node runs locally, a manager's child as much as the root's: none
@@ -10840,4 +10852,153 @@ fn a_brief_under_a_paused_manager_starts_once_it_is_resumed() {
         started[1]
     );
     assert!(lab.start_queue().is_empty());
+}
+
+/// `jeet task restart` ends a task's agent and resumes its latest session
+/// in a new one, recorded as the task's: not while it starts or is
+/// mid-turn, unless forced.
+#[cfg(unix)]
+#[test]
+fn restarting_a_task_resumes_its_session_once_its_turn_is_done() {
+    let lab = StoreLab::new();
+    let dir = lab.new_task("t");
+    let t = task_id(&dir);
+    let mut agent = PaneShell::spawn(&lab, &[("JEET_TASK_ID", &t)]);
+    let tmux = stub_tmux(agent.dir.path());
+    agent.as_pane_of(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "t"], &lab.home(), &env));
+    let session: String = lab
+        .index()
+        .query_row(
+            "SELECT session_id FROM task_sessions WHERE task_id = ?1",
+            [&t],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let restart = |args: &[&str]| {
+        let mut full = vec!["task", "restart", "t"];
+        full.extend_from_slice(args);
+        lab.jeet_at(&full, &lab.home(), &env)
+    };
+    let refused = |output: std::process::Output, why: &str| {
+        assert!(!output.status.success());
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(why), "{stderr}");
+        assert!(stderr.contains("--force"), "{stderr}");
+        assert!(calls_of(&tmux, "kill-session").is_empty());
+    };
+    // No hook yet: it may be at a startup prompt.
+    refused(restart(&[]), "is starting");
+    let background = [("JEET_BACKGROUND", "1")];
+    let hook = |agent: &mut PaneShell, event: &str| {
+        succeeded(&agent.hook(
+            &lab,
+            Some(&t),
+            event,
+            &hook_input(event, &session, &dir),
+            &background,
+        ))
+    };
+    hook(&mut agent, "UserPromptSubmit");
+    refused(restart(&[]), "is mid-turn");
+    hook(&mut agent, "Stop");
+
+    // Its next agent, which the new pane runs.
+    let next = PaneShell::spawn(&lab, &[("JEET_TASK_ID", &t)]);
+    let next_pid = next.child.id().to_string();
+    std::fs::write(tmux.parent().unwrap().join("next-pid"), &next_pid).unwrap();
+    let output = restart(&[]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains(&format!("resuming session {session}")),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(calls_of(&tmux, "kill-session").len(), 1);
+    let starts = calls_of(&tmux, "new-session");
+    assert_eq!(starts.len(), 2);
+    assert!(starts[1].contains(&session), "{:?}", starts[1]);
+    let anchored: Vec<String> = {
+        let db = lab.index();
+        let mut stmt = db
+            .prepare("SELECT pid FROM task_anchors WHERE task_id = ?1")
+            .unwrap();
+        stmt.query_map([&t], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .map(|pid| pid.unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(anchored, [next_pid]);
+}
+
+/// An agent jeet has no record of starting, as an older jeet's, is marked
+/// unanchored in `jeet task ls`, with how to fix it; the user may adopt it
+/// only from a terminal, never the agent from its own pane.
+#[cfg(unix)]
+#[test]
+fn an_unanchored_agent_is_listed_with_its_fix_and_cannot_adopt_itself() {
+    let lab = StoreLab::new();
+    let w = lab.new_task_with("w", &["--parent", "assistant"]);
+    let mut agent = PaneShell::spawn(&lab, &[("JEET_TASK_ID", &w)]);
+    let tmux = stub_tmux(agent.dir.path());
+    agent.as_pane_of(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "w"], &lab.home(), &env));
+    let ls = || {
+        let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+        succeeded(&output);
+        (stdout_of(&output), stderr_of(&output))
+    };
+    let (out, err) = ls();
+    assert!(!out.contains("unanchored"), "{out}");
+    assert!(!err.contains("unanchored"), "{err}");
+
+    // As if an older jeet had started it.
+    lab.index().execute("DELETE FROM task_anchors", []).unwrap();
+    let (out, err) = ls();
+    assert!(out.contains("(unanchored)"), "{out}");
+    assert!(err.contains("jeet task restart <task>"), "{err}");
+    assert!(err.contains("jeet task adopt <task>"), "{err}");
+    let refused = agent.jeet(&["report", "progress", "x"], &lab.home(), &[]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr_of(&refused).contains("jeet task adopt w"),
+        "{}",
+        stderr_of(&refused)
+    );
+
+    let count = || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM task_anchors", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    // The agent itself, never: with its claim, which jeet cannot confirm,
+    // nor with it dropped, as it runs in a pane of jeet's.
+    for (env, why) in [
+        (vec![("JEET_TMUX", tmux_env.as_str())], "can't confirm"),
+        (
+            vec![("JEET_TMUX", tmux_env.as_str()), ("JEET_TASK_ID", "")],
+            "outside jeet's tmux sessions",
+        ),
+    ] {
+        let output = agent.jeet(&["task", "adopt", "w"], &lab.home(), &env);
+        assert!(!output.status.success());
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(why), "{stderr}");
+        assert!(!stderr.contains("confirm it at a terminal"), "{stderr}");
+    }
+    // Nor anyone with no terminal to confirm it at.
+    let output = lab.jeet_at(&["task", "adopt", "w"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("confirm"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(count(), 0);
 }

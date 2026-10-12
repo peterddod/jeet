@@ -697,6 +697,9 @@ fn task_gate(command: &TaskCommands) -> Gate {
             format!("messaged task {name}: {}", first_line(message, 80)),
         ),
         TaskCommands::Interrupt { name } => needs("task.send", format!("interrupted task {name}")),
+        TaskCommands::Restart { name, .. } => needs("task.open", format!("restarted task {name}")),
+        // The user's word, at a terminal: never an agent's.
+        TaskCommands::Adopt { .. } => Gate::Interactive,
         TaskCommands::Archive { name, .. } => {
             needs("task.archive", format!("archived task {name}"))
         }
@@ -1292,6 +1295,9 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             TaskCommands::Send { name, .. } => verb(Verb::TaskSend, key(name)),
             TaskCommands::Interrupt { name } => verb(Verb::TaskInterrupt, key(name)),
             TaskCommands::Open { name, .. } => verb(Verb::TaskOpen, key(name)),
+            TaskCommands::Restart { name, .. } => verb(Verb::TaskOpen, key(name)),
+            // Only the user vouches for an agent.
+            TaskCommands::Adopt { .. } => None,
             TaskCommands::Archive { name, .. } => verb(Verb::TaskArchive, key(name)),
             TaskCommands::Unarchive { name } => verb(Verb::TaskUnarchive, key(name)),
             TaskCommands::Delete { name, .. } => verb(
@@ -1599,6 +1605,11 @@ mod tests {
             ),
             (&["task", "open", "x"], "task.open", "opened task x"),
             (
+                &["task", "restart", "x", "--force"],
+                "task.open",
+                "restarted task x",
+            ),
+            (
                 &["worktree", "add", "api", "-b", "feat", "--task", "x"],
                 "worktree.add",
                 "added a worktree of api on feat of task x",
@@ -1736,6 +1747,7 @@ mod tests {
             &["projects", "edit", "w"],
             &["chat"],
             &["chat", "--new", "plan"],
+            &["task", "adopt", "api"],
         ] {
             assert_eq!(gate_of(args), Gate::Interactive, "{args:?}");
         }
@@ -2535,6 +2547,8 @@ mod tests {
             (&["task", "open", "x"], true),
             (&["task", "send", "x", "m"], true),
             (&["task", "interrupt", "x"], true),
+            (&["task", "restart", "x"], true),
+            (&["task", "adopt", "x"], false),
             (&["task", "archive", "x"], true),
             (&["task", "unarchive", "x"], true),
             (&["task", "delete", "x"], true),

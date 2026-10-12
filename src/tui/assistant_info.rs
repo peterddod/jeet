@@ -46,23 +46,27 @@ pub struct Probe {
     /// Its sessions, as the index has them; none before its first.
     pub records: Vec<TaskSessionRecord>,
     pub primary: Option<String>,
+    /// Its task id; none before its first session.
+    pub task_id: Option<String>,
 }
 
 /// The assistant's [`Probe`], from the index. Quick: no tmux, no files.
 pub fn probe(app: &App) -> Result<Probe> {
-    let (dir, records, primary) = match app.db.get_assistant_task()? {
+    let (dir, records, primary, task_id) = match app.db.get_assistant_task()? {
         Some(task) => (
             tasks::task_dir(app, &task),
             app.db.list_task_sessions(&task.id)?,
             app.db.primary_session(&task.id)?,
+            Some(task.id),
         ),
-        None => (assistant::home_dir(&app.home), Vec::new(), None),
+        None => (assistant::home_dir(&app.home), Vec::new(), None, None),
     };
     Ok(Probe {
         home: app.home.clone(),
         dir,
         records,
         primary,
+        task_id,
     })
 }
 
@@ -79,6 +83,9 @@ pub struct Info {
     pub todo_error: Option<String>,
     /// Newest first.
     pub feed: Vec<FeedEntry>,
+    /// How many of its running windows jeet has no record of starting
+    /// ([`assistant::unanchored_windows`]).
+    pub unanchored: usize,
 }
 
 impl Info {
@@ -152,6 +159,7 @@ pub fn gather(probe: &Probe, windows: &[tmux::Window]) -> Info {
         todo,
         todo_error,
         feed,
+        unanchored: 0,
     }
 }
 
@@ -397,6 +405,7 @@ mod tests {
             dir: home.path().join("assistant"),
             records: Vec::new(),
             primary: None,
+            task_id: None,
         };
         assert_eq!(gather(&probe, &[]), Info::default());
         assert!(!probe.dir.exists(), "looking makes nothing");
@@ -441,6 +450,7 @@ mod tests {
             dir: dir.clone(),
             records: vec![record("a", 10), record("b", 20)],
             primary: Some("a".into()),
+            task_id: None,
         };
         let windows = [tmux::Window {
             id: "@1".into(),
@@ -551,6 +561,7 @@ mod tests {
             dir: home.path().join("assistant"),
             records: Vec::new(),
             primary: None,
+            task_id: None,
         };
         let feed = gather(&probe, &[]).feed;
         assert_eq!(feed.len(), FEED_MAX);

@@ -145,9 +145,14 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     ui.list_area = chunks[2];
     draw_list(frame, chunks[2], ui);
 
+    // What was last done says more than a standing hint.
+    let status = match ui.status_line.is_empty() {
+        true => unanchored_hint(ui.selected_row()).unwrap_or_default(),
+        false => ui.status_line.clone(),
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            ui.status_line.clone(),
+            status,
             Style::default().fg(Color::Yellow),
         ))),
         chunks[3],
@@ -274,6 +279,15 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
                 spans.push(dim(format!("  +{}", running.len() - SESSIONS_SHOWN)));
             }
         }
+    }
+    if info.unanchored > 0 {
+        spans.push(Span::styled(
+            format!(
+                " · {} unanchored: jeet task restart assistant",
+                info.unanchored
+            ),
+            Style::default().fg(Color::Red),
+        ));
     }
     let inbox = format!(" · inbox {}", info.inbox);
     spans.push(match info.inbox {
@@ -430,11 +444,28 @@ pub fn status_text(row: &TaskRow) -> String {
     if row.task.state == TaskState::Archived {
         return "archived".to_string();
     }
-    match &row.activity {
+    let label = match &row.activity {
         // Not polled yet: the glyph says so, and a blank beats a guess.
         None => String::new(),
         Some(activity) => activity.label(),
+    };
+    match row.unanchored {
+        // First, so a narrow column cuts the activity, not this.
+        true => format!("unanchored · {label}"),
+        false => label,
     }
+}
+
+/// What to do about the selected task's agent, when jeet refuses its
+/// commands for want of a record of starting it.
+pub fn unanchored_hint(row: Option<&TaskRow>) -> Option<String> {
+    let row = row.filter(|row| row.unanchored)?;
+    let slug = &row.task.slug;
+    Some(format!(
+        "{slug}'s agent is unanchored (an older jeet started it), so jeet refuses its \
+         commands: `jeet task restart {slug}` when idle, or `jeet task adopt {slug}` from a \
+         terminal outside jeet's tmux sessions"
+    ))
 }
 
 fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
@@ -1315,7 +1346,43 @@ mod tests {
             last_activity: crate::worktrees::now_secs() - 120,
             size: Some(3 * 1024 * 1024),
             report: None,
+            unanchored: false,
         }
+    }
+
+    #[test]
+    fn an_unanchored_agent_says_so_first_with_its_fix() {
+        let mut r = row("api", Some(Activity::Idle { since: 0 }));
+        assert_eq!(unanchored_hint(Some(&r)), None);
+        r.unanchored = true;
+        assert!(
+            status_text(&r).starts_with("unanchored · idle"),
+            "{}",
+            status_text(&r)
+        );
+        let hint = unanchored_hint(Some(&r)).unwrap();
+        assert!(hint.contains("jeet task restart api"), "{hint}");
+        assert!(hint.contains("jeet task adopt api"), "{hint}");
+        assert_eq!(unanchored_hint(None), None);
+    }
+
+    #[test]
+    fn the_assistant_line_counts_its_unanchored_windows() {
+        let text = |info: &AssistantInfo| {
+            assistant_line(Some(info))
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let mut i = info();
+        assert!(!text(&i).contains("unanchored"));
+        i.unanchored = 2;
+        assert!(
+            text(&i).contains("2 unanchored: jeet task restart assistant"),
+            "{}",
+            text(&i)
+        );
     }
 
     fn render(ui: &mut TasksUi, width: u16, height: u16) -> Vec<String> {
@@ -1452,6 +1519,7 @@ mod tests {
                 place: "acme/api #4 → the assistant".into(),
                 url: Some("https://github.com/acme/api/pull/4".into()),
             }],
+            unanchored: 0,
         }
     }
 

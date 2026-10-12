@@ -608,7 +608,8 @@ sits in the tree.
 **Local identity.** A local caller is the task bound to the nearest
 `(pid, start time)` in its process ancestry that jeet recorded when it
 launched that pane or review job. The record is written only by the
-launching jeet, never re-bound, and ignored after a reboot. `JEET_TASK_ID`
+launching jeet, or by the user adopting an agent an older jeet launched
+(`jeet task adopt`, below), never re-bound, and ignored after a reboot. `JEET_TASK_ID`
 and `JEET_ASSISTANT` are hints. A hint that disagrees with the anchor is
 refused and logged. A hint that claims a parented task or the root with no
 anchor behind it is refused as unconfirmed. Hooks carry their task in argv
@@ -622,7 +623,8 @@ boundary against a local agent that sets out to escape:
 | Stripping the env inside the pane | closed (the anchor still binds); open for a pane whose anchor could not be recorded (jeet warns at start) |
 | A Node claiming Root | closed (mismatch) |
 | Pid reuse | closed (start time; on Linux tagged with the boot id) |
-| A pre-created `jeet-<slug>` session | closed (not adopted; warning) |
+| A pre-created `jeet-<slug>` session | closed (not adopted; warning), unless the user adopts it at a terminal outside jeet's panes, shown its pane's process first |
+| An agent adopting itself or another (`jeet task adopt`) | closed (user only, refused under any pane of jeet's sessions, typed confirmation at a terminal); open through the orphan, tmux and fake-terminal rows, which already run as the user |
 | Calling `review-job` directly | closed (go byte plus job anchor at the process itself) |
 | Forged `task-hook --task <other>` | closed for reports up; status files remain writable |
 | Orphaning (`nohup … & exit`, `setsid`, double fork) with the env stripped | **open locally**: resolves as the user |
@@ -634,7 +636,9 @@ boundary against a local agent that sets out to escape:
 
 The open rows close only when a confined placement exists, which is future
 work (§13); until then they stay open for every node. Agents started before
-#33 have no anchor and must be reopened.
+#33 have no anchor: the user restarts them (`jeet task restart`, which
+resumes their session) or adopts them (`jeet task adopt`); see the
+restart and adopt notes in §10.
 
 ## 6. Agents pane (TUI)
 
@@ -1061,7 +1065,8 @@ what this RFC left open, or departed from it:
   with no live anchor is not adopted; `task open` warns to stop and reopen
   it. `jeet chat` going back to an assistant window whose pane has no live
   anchor warns the same way (exit it there and `jeet chat` again). **Reopen running tasks after upgrading:** older agents are refused for
-  `report` and `worktree add`, and old hooks no longer report up.
+  `report` and `worktree add`, and old hooks no longer report up
+  (`jeet task restart` and `jeet task adopt` since, R1 and R2).
 - **I10** `jeet review` starts the runner with stdin piped, records its job
   anchor, then writes one go byte `g`. The anchor names the review task when
   it has a parent, else the assistant when the caller is the root (a
@@ -1162,6 +1167,59 @@ what this RFC left open, or departed from it:
   requirement: managers run locally in tmux like any other task, the
   placement seam stays (local only), and the cloud design moved to §13 as
   future work, with no probes run and no `hmac`/`sha2`.
+
+### Restart and adopt implementation notes
+
+Bringing agents an older jeet started onto this one, which has no anchor
+for them (I9):
+
+- **R1** `jeet task restart <task>` ends the agent (`tmux kill-session`,
+  which gives it `EXIT_GRACE` to exit, as a stop does), forgets its pane
+  anchors and starts it again through `ensure_running` with the session
+  `latest_session` picks, so it is resumed (or started afresh under the
+  same id when its harness has no transcript of it) and anchored like any
+  start. Its busy time is folded first, as a stop folds it. It is refused
+  while the agent is mid-turn, waiting on someone, starting, or has unsent
+  text in its prompt (`busy_reason`), unless `--force`; while the task is
+  held (a resume would be needed to start it again); for a harness without
+  sessions (the conversation would be lost); and inside the task's own
+  session (`refuse_inside_session`). It needs `task.open` and reaches what
+  `task open` reaches (`Verb::TaskOpen`). `restart assistant` does the same
+  for each running assistant window through `assistant::end` and
+  `assistant::open(Open::Session)`, user only, from outside its session;
+  busy windows are left and the command fails. Background work the agent
+  started (subagents, workflows, `/loop` schedules) ends with it, so adopt
+  exists too.
+- **R2** `jeet task adopt <task>` records the live process in the task's
+  agent pane (`#{pane_pid}`, the process a launch would have recorded) as a
+  `pane` anchor, on the user's word. It is sound against I1's rule that an
+  agent never anchors itself because every way an agent could run it is
+  already refused or already the user: the caller must resolve as the user
+  and carry no `$JEET_TASK_ID`/`$JEET_ASSISTANT` (an unanchored agent with
+  its hint is unconfirmed); it must not run under any live pane of jeet's
+  tmux sessions, nor under the pane being adopted (`identity::adopt` walks
+  the ancestry, which stripping the env does not change); it needs a
+  terminal on stdin and stderr (an agent's tool calls have none), and the
+  user types the task's name back after being shown the pane, its process
+  and its program. It is `Gate::Interactive` (refused to the assistant
+  without a terminal) and left out of `node_scope` (refused to every Node).
+  What gets past these is an orphan with its env stripped, a process
+  started through tmux outside jeet's sessions, or a fake terminal: the
+  open rows of §5.7, which already run as the user and can do more than
+  adopt. Adoption never re-binds: a task with a live pane anchor is not
+  adopted again, and an assistant window only when its own process has
+  none. A session pre-created under a task's name (I9's reason for no
+  backfill) is adopted only if the user, shown its process, confirms it.
+- **R3** An adopted agent keeps the hooks of the jeet that started it
+  (from before `--task`, I11), so its hooks write status but do not report
+  up until it is restarted; adopt says so.
+- **R4** `runtime::unanchored` (a live agent pane with no live anchor at its
+  pid) and `assistant::unanchored_windows` drive `jeet task ls`
+  (`(unanchored)` after the status, the fix on stderr) and the tasks list
+  (`unanchored ·` before the status, the fix on the status line for the
+  selected row, a count on the assistant's line). The tasks list's poller
+  threads open an index connection of their own for it, only when the index
+  exists.
 
 ### Phase 2 implementation notes
 
