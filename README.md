@@ -669,7 +669,7 @@ task.create,worktree.add` names what it may do instead of `[managers]
 worker_default`, refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
-or waiting on a prompt, while its pane is alive) and a turn for each turn it ends, and counts toward
+or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
 every budget above it too, even once the task is deleted (archiving or
 deleting a task mid-turn charges the turn so far first). At 80% the parent is told and the task gets a
 note; at 100% the task is paused and its parent told `blocked: budget`: its

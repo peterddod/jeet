@@ -1538,12 +1538,13 @@ fn split_task_path(root: &Path, path: &Path) -> Option<(String, String)> {
 /// before its session is ended for archiving or deleting: no hook charges
 /// it after (its pane is forgotten, or its row gone), and no sweep looks
 /// at it again. A charge that uses a budget up is not reported, as a
-/// stop's is not.
+/// stop's is not. Only while its agent's own pane runs: a window the user
+/// opened in its session is no agent's turn.
 fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
     if task.parent_id.is_none() {
         return;
     }
-    let alive = crate::tmux::available() && crate::tmux::pane_alive(&runtime::session_name(task));
+    let alive = crate::tmux::available() && crate::tmux::agent_alive(&runtime::session_name(task));
     if let Err(e) = crate::status::fold_busy(app, task, alive, now_secs()) {
         warnings.push(format!("could not charge its budget: {e:#}"));
     }

@@ -198,16 +198,29 @@ pub fn auto_status(
 /// and charge each task in the tree the time its agent has been busy so
 /// far, holding a long turn to its budget before it ends (M19). No event
 /// fires then, so this runs from `jeet watch` and the assistant's own Stop
-/// hook. Only a live agent is charged: one that died with no `Ended` hook
-/// left a status that says it is busy still. One task's failure does not
-/// stop the others.
+/// hook. Only a live agent is charged, in its own pane: one that died with
+/// no `Ended` hook left a status that says it is busy still, and a window
+/// the user opened in its session keeps that session up. One task's
+/// failure does not stop the others.
 pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
     let tmux_ok = tmux::available();
-    sweep_idle_with(app, now, |task| runtime::activity(app, task, tmux_ok))
+    sweep_idle_with(
+        app,
+        now,
+        |task| runtime::activity(app, task, tmux_ok),
+        |task| tmux_ok && tmux::agent_alive(&runtime::session_name(task)),
+    )
 }
 
-/// [`sweep_idle`], with what each task is doing from `activity`.
-fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activity) -> Result<()> {
+/// [`sweep_idle`], with what each task is doing from `activity`, and
+/// whether its agent's own pane runs from `agent_alive`, asked only of a
+/// busy one.
+fn sweep_idle_with(
+    app: &App,
+    now: i64,
+    activity: impl Fn(&TaskRecord) -> Activity,
+    agent_alive: impl Fn(&TaskRecord) -> bool,
+) -> Result<()> {
     let mins = app.config.idle_report_mins();
     for task in app.db.list_tasks(Some(TaskState::Active))? {
         if task.parent_id.is_none() {
@@ -218,7 +231,7 @@ fn sweep_idle_with(app: &App, now: i64, activity: impl Fn(&TaskRecord) -> Activi
             activity,
             Activity::Running { .. } | Activity::Waiting { .. }
         );
-        match status::fold_busy(app, &task, busy, now) {
+        match status::fold_busy(app, &task, busy && agent_alive(&task), now) {
             // No Stop hook of its own has said so yet.
             Ok(Threshold::Hit100) => budget::report_blocked(app, &task),
             Ok(_) => {}
@@ -608,7 +621,13 @@ mod tests {
             r#"{"session_id":"s","state":"idle","event":"Stop","at":0}"#,
         )
         .unwrap();
-        sweep_idle_with(&app, 1_000_000, |t| runtime::activity(&app, t, false)).unwrap();
+        sweep_idle_with(
+            &app,
+            1_000_000,
+            |t| runtime::activity(&app, t, false),
+            |_| false,
+        )
+        .unwrap();
         assert!(app.db.last_report("w").unwrap().is_none());
     }
 
@@ -619,14 +638,14 @@ mod tests {
         let since = 1_000_000;
         let idle = |_: &TaskRecord| Activity::Idle { since };
         // Just short of it: nothing.
-        sweep_idle_with(&app, since + mins * 60 - 1, idle).unwrap();
+        sweep_idle_with(&app, since + mins * 60 - 1, idle, |_| true).unwrap();
         assert!(app.db.last_report("w").unwrap().is_none());
 
         let (_, delivered) = send(&app, &w, ReportKind::Progress, "half way", false).unwrap();
         delivered.unwrap();
         let now = since + mins * 60;
-        sweep_idle_with(&app, now, idle).unwrap();
-        sweep_idle_with(&app, now + 600, idle).unwrap();
+        sweep_idle_with(&app, now, idle, |_| true).unwrap();
+        sweep_idle_with(&app, now + 600, idle, |_| true).unwrap();
         let last = app.db.last_status_report("w").unwrap().unwrap();
         assert_eq!(
             last.body,
@@ -655,7 +674,7 @@ mod tests {
         let (_dir, app, w) = lab();
         busy_on_a_budget(&app, &w);
         let running = |_: &TaskRecord| Activity::Running { detail: None };
-        sweep_idle_with(&app, 800, running).unwrap();
+        sweep_idle_with(&app, 800, running, |_| true).unwrap();
         assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 700);
         let w = app.db.get_task("w").unwrap().unwrap();
         assert_eq!(
@@ -665,7 +684,7 @@ mod tests {
         let told = app.db.last_status_report("w").unwrap().unwrap();
         assert!(told.body.contains("blocked: budget"), "{}", told.body);
         // Charged on, but told once.
-        sweep_idle_with(&app, 900, running).unwrap();
+        sweep_idle_with(&app, 900, running, |_| true).unwrap();
         assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 800);
         assert_eq!(last_status(&app, "w"), Some(told.id));
     }
@@ -675,8 +694,18 @@ mod tests {
         let (_dir, app, w) = lab();
         busy_on_a_budget(&app, &w);
         // Its status says running still, but its pane is gone.
-        sweep_idle_with(&app, 100_000, |_| Activity::NotRunning).unwrap();
-        sweep_idle_with(&app, 100_000, |t| runtime::activity(&app, t, false)).unwrap();
+        sweep_idle_with(&app, 100_000, |_| Activity::NotRunning, |_| false).unwrap();
+        sweep_idle_with(
+            &app,
+            100_000,
+            |t| runtime::activity(&app, t, false),
+            |_| false,
+        )
+        .unwrap();
+        // Nor while a window the user opened keeps its session up: the
+        // session runs, its agent's pane does not.
+        let running = |_: &TaskRecord| Activity::Running { detail: None };
+        sweep_idle_with(&app, 100_000, running, |_| false).unwrap();
         assert_eq!(app.db.budget("w").unwrap().unwrap().used_secs, 0);
         assert_eq!(
             app.db.get_task("w").unwrap().unwrap().run_state,

@@ -1358,7 +1358,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   parent and a note in the task's inbox; 100% pauses the task with the
   `budget` setter, which leaves anyone else's pause or stop as it is, and
   is reported to the parent for a task above the one charged (the charged
-  node's own Stop hook reports it). The row and its subtree's use are read,
+  node's own Stop hook reports it, when the check newly holds it: its own
+  budget used up, or one above while nothing held it already, so a node
+  its own budget paused is not reported blocked again when its parent's
+  follows). The row and its subtree's use are read,
   the pause written and the threshold claimed in one IMMEDIATE transaction
   (`Database::check_budget`), so a limit changed meanwhile is checked as it
   now is, and of two hooks crossing one threshold at once only one tells
@@ -1403,8 +1406,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a brief given before the pause run: the prompt is left for the user. `messages::deliver` asks
   `Agent::held` first, under the inbox lock, and queues for a held agent
   whatever it is doing (`Delivered::Paused`), queueing its start
-  (`Agent::queue_held_start`) when the message may start it, whether or
-  not its agent runs then (it may end while held; a drain that finds it
+  (`Agent::queue_held_start`) when the message may start it, and the
+  harness takes a first prompt (on one that takes none, a start could not
+  give it the message: a resume finding the agent running types it in, one
+  finding it gone leaves it for a delivery, as `task open` does, and
+  `task send` says so), whether or not its agent runs then (it may end while held; a drain that finds it
   running and not held only unqueues it, wherever it sits in the queue:
   once the tree is full a drain starts nothing more, but still goes on
   through the rows for such stale ones), so the drain a resume runs starts it with
@@ -1415,7 +1421,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`Delivered::StartQueued { live, max }`, as `Delivered::Queued` already
   means queued for a busy agent), and, once the inbox is unlocked, the
   task's parent is told `queued, n/max live` (`Agent::queued`) when the
-  start was not queued already, so a run of messages tells it once. `jeet watch` notifies the user of a held
+  start was not queued already, so a run of messages tells it once. A
+  start a hold queued (a held message or brief) says nothing of
+  `max_live`; a drain that finds it waiting on a full tree tells the
+  parent then, once per queued start (`queued` debounced against
+  `queued_at`), and says so to its caller (a resume prints `task <slug> is
+  queued on max_live (n/max live)`). `jeet watch` notifies the user of a held
   delivery only when the agent could not be started (`Held`), not when it
   is paused or waits on `max_live`, and drains the start queue each poll.
 - **P19** Budgets (5.3) are charged in the hook, before it acts on the
@@ -1434,7 +1445,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
   assistant's turns), a pause's interrupt and a stop, which each charge a
   spell still going, never charge the same time as the hook that ends it.
-  A sweep and a stop charge only an agent whose pane is alive: one that
+  A sweep, a stop, an archive and a delete charge only an agent whose own
+  pane is alive (`tmux::agent_alive`; a window the user opened keeps its
+  session up but is no agent), and only a task in the tree (`fold_busy`
+  charges no top-level task, as `task interrupt` would otherwise): one that
   died with no `Ended` (a crash, a reboot) leaves a status that still says
   busy, which is no busy time, nor is it once a new agent is launched and
   has not reported yet (a status older than `.jeet/launched`). Archiving

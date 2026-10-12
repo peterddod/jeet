@@ -1410,6 +1410,18 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// When task `id`'s start was queued, if it is.
+    pub fn queued_at(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT queued_at FROM task_start_queue WHERE task_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn unqueue(&self, id: &str) -> Result<()> {
         self.conn().execute(
             "DELETE FROM task_start_queue WHERE task_id = ?1",

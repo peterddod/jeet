@@ -559,15 +559,22 @@ fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
 }
 
 /// Tell `task`'s parent that its start waits on `max_live`, with `live` of
-/// `max` running: what goes wrong is warned of, not failed on. Each queued
-/// start is told, so no earlier report holds this one back.
-pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32) {
+/// `max` running, unless it was told at or after `since`: what goes wrong
+/// is warned of, not failed on. A start queued just now passes `i64::MAX`,
+/// so no earlier report holds it back; a drain passes when the start was
+/// queued, so one a hold queued, and nobody told, is told once. Returns
+/// whether it was told now.
+pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32, since: i64) -> bool {
     let body = format!("queued, {live}/{max} live: it starts when a task in the tree ends");
-    if let Err(e) = reports::auto_status(app, task, StatusEvent::Queued, &body, i64::MAX, 0) {
-        eprintln!(
-            "jeet: could not report task {}'s queued start: {e:#}",
-            task.slug
-        );
+    match reports::auto_status(app, task, StatusEvent::Queued, &body, since, 0) {
+        Ok(told) => told.is_some(),
+        Err(e) => {
+            eprintln!(
+                "jeet: could not report task {}'s queued start: {e:#}",
+                task.slug
+            );
+            false
+        }
     }
 }
 
@@ -576,15 +583,18 @@ pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32) {
 /// active stays queued or leaves the queue; one that fails to start stays
 /// queued. Nothing from a background job with no tmux server to start on.
 /// Once the tree is full nothing more starts, but a task found running and
-/// not held still leaves the queue, wherever it sits. Returns what to warn
-/// of, for the caller to show where it can (the TUI's status line, not
-/// stderr).
+/// not held still leaves the queue, wherever it sits, and one that waits
+/// on `max_live` with its parent not told so (its start was queued by a
+/// hold, which said nothing of `max_live`) is told now, once (M22).
+/// Returns what to warn of, for the caller to show where it can (the TUI's
+/// status line, not stderr).
 pub fn drain(app: &App) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     if !tmux::may_start_session() {
         return Ok(warnings);
     }
-    let mut full = false;
+    // `live` of `max` once the tree is found full.
+    let mut full: Option<(u32, u32)> = None;
     for task in app.db.queued_starts()? {
         if task.state != TaskState::Active {
             app.db.unqueue(&task.id)?;
@@ -610,15 +620,19 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        if full {
+        if let Some((live, max)) = full {
+            if hold(app, &task)?.is_none() {
+                tell_queued(app, &task, live, max, &mut warnings)?;
+            }
             continue;
         }
         let inbox = Inbox::lock(&dir)?;
         let guard = match admit_start(app, &task)? {
             StartGate::Go(guard) => guard,
             StartGate::Held(_) => continue,
-            StartGate::Queue { .. } => {
-                full = true;
+            StartGate::Queue { live, max, .. } => {
+                full = Some((live, max));
+                tell_queued(app, &task, live, max, &mut warnings)?;
                 continue;
             }
         };
@@ -636,6 +650,29 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
         }
     }
     Ok(warnings)
+}
+
+/// Tell `task`'s parent, for [`drain`], that its queued start waits on
+/// `max_live`, unless it was told since the start was queued; and say so
+/// among `warnings`, for whoever ran the drain (a resume, say), when told.
+fn tell_queued(
+    app: &App,
+    task: &TaskRecord,
+    live: u32,
+    max: u32,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let Some(since) = app.db.queued_at(&task.id)? else {
+        return Ok(());
+    };
+    if report_queued(app, task, live, max, since) {
+        warnings.push(format!(
+            "task {} is queued on max_live ({live}/{max} live): it starts when a task in the \
+             tree ends",
+            task.slug
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

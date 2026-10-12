@@ -579,9 +579,10 @@ fn charge_busy(
 /// agent that is not `alive`: a status left running by one that died with
 /// no `Ended` hook (a crash, a reboot, a killed server) is no busy time,
 /// nor is it once a new agent is alive but has not reported yet: a status
-/// older than the latest launch is that dead agent's.
+/// older than the latest launch is that dead agent's. Nothing for a task
+/// not in the tree, which has no budget (M19).
 pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<Threshold> {
-    if !alive {
+    if !alive || task.parent_id.is_none() {
         return Ok(Threshold::None);
     }
     let task_dir = tasks::task_dir(app, task);
@@ -780,8 +781,10 @@ fn stop(
     };
     if !queued.is_empty() {
         let output = harness.continue_output(&messages::queued_reason(&queued));
-        // Not stopping after all: on to the messages.
-        write_status(
+        // Not stopping after all: on to the messages. They are out of the
+        // inbox now, so a status that fails to write is warned of, not
+        // failed on: failing would never print them, and they would be lost.
+        let written = write_status(
             task_dir,
             &with_busy(
                 SessionStatus {
@@ -794,7 +797,10 @@ fn stop(
                 },
                 ctx,
             ),
-        )?;
+        );
+        if let Err(e) = written {
+            eprintln!("jeet task-hook {event}: {e:#}");
+        }
         return Ok(output);
     }
     if let Some(status) = status_for(hook, now) {
@@ -1272,6 +1278,28 @@ mod tests {
         assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
         let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
         assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stop_hands_over_what_it_took_though_its_status_fails_to_write() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        // A directory where the status goes: its rename fails.
+        let status = status_dir(&dir).join("s.json");
+        std::fs::remove_file(&status).unwrap();
+        std::fs::create_dir(&status).unwrap();
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("more")));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

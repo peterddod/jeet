@@ -726,12 +726,17 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn queued(&self, live: u32, max: u32) {
-        run::report_queued(self.app, self.task, live, max);
+        run::report_queued(self.app, self.task, live, max, i64::MAX);
     }
 
     fn queue_held_start(&self) -> Result<()> {
         // The assistant's sessions are opened with `jeet chat`, not started.
-        if self.task.kind == TaskKind::Assistant {
+        // Nor is a start queued on a harness that takes no first prompt (a
+        // message held while its agent runs): it would start the agent with
+        // none, the message left untyped. Running at the resume, it is
+        // typed what waited; gone by then, what waited waits for a
+        // delivery to type it in, as after a `task open` (P17).
+        if self.task.kind == TaskKind::Assistant || self.first_prompt_refusal().is_some() {
             return Ok(());
         }
         self.app.db.queue_start(&self.task.id, now_secs())?;

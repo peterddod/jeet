@@ -141,7 +141,7 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
                         inbox.push_to(&prompt, None)?;
                     }
                     drop(inbox);
-                    run::report_queued(app, &created.task, live, max);
+                    run::report_queued(app, &created.task, live, max, i64::MAX);
                     eprintln!(
                         "jeet: queued (tasks in the tree running: {live}/{max}, [managers] \
                          max_live); the agent starts with its brief when one ends"
@@ -213,6 +213,13 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
         Delivered::Held => eprintln!(
             "jeet: {}'s agent is not running and cannot be started from here, so the message \
              is queued; it gets it when it next runs",
+            task.name
+        ),
+        // Its harness takes no first prompt: a resume finding its agent
+        // gone cannot start it with the message.
+        Delivered::Paused if runtime::first_prompt_refusal(app, &task).is_some() => eprintln!(
+            "jeet: task {} is paused or stopped, so the message is queued; it gets it once \
+             resumed while its agent runs, or else when a message next reaches it",
             task.name
         ),
         Delivered::Paused => eprintln!(

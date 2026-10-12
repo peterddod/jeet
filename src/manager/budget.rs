@@ -243,9 +243,14 @@ pub enum Threshold {
 /// leaves a pause or stop by anyone else as it is; above `node`, its parent
 /// gets a `status` report, while `node`'s own Stop hook reports it. Each
 /// threshold is told once until the limit changes. Interrupts nothing:
-/// what runs finishes its turn and then gets nothing new. Returns the
-/// highest threshold newly crossed.
+/// what runs finishes its turn and then gets nothing new. Returns
+/// `Hit100` when this check newly holds `node` by a budget, for its
+/// parent to be told it is blocked ([`report_blocked`]): its own used up,
+/// or one above it while nothing held it already (a node its own budget
+/// paused, and reported, is not reported again when one above follows).
+/// Otherwise `Warn80` when an 80% was newly crossed, else `None`.
 pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
+    let held_before = super::run::hold(app, node)?.is_some();
     let mut crossed = Threshold::None;
     let mut chain = vec![node.clone()];
     chain.extend(app.db.ancestors(&node.id)?);
@@ -264,7 +269,9 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
         };
         let (row, used) = (&check.row, check.used);
         if check.level >= 100 {
-            crossed = crossed.max(Threshold::Hit100);
+            if task.id == node.id || !held_before {
+                crossed = crossed.max(Threshold::Hit100);
+            }
             if task.id != node.id {
                 tell_parent(
                     app,
@@ -529,6 +536,27 @@ mod tests {
     }
 
     #[test]
+    fn a_node_its_own_budget_held_is_not_blocked_again_by_one_above() {
+        let (_dir, app) = lab();
+        app.db.set_budget_max("w", None, Some(10)).unwrap();
+        app.db.set_budget_max("m", None, Some(15)).unwrap();
+        app.db.charge("w", 0, 10).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        // The rest of its turn uses m's up: m's parent is told of m, but w,
+        // reported blocked already, is not reported again.
+        app.db.charge("w", 0, 5).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::None);
+        assert_eq!(
+            (get(&app, "m").run_state, get(&app, "m").run_state_by),
+            (RunState::Paused, Some(Setter::Budget))
+        );
+        assert_eq!(
+            budget_reports(&app, "m"),
+            ["budget used up (15 of 15turns); paused"]
+        );
+    }
+
+    #[test]
     fn a_spent_budget_leaves_a_users_stop_as_it_is() {
         let (_dir, app) = lab();
         app.db.set_budget_max("m", None, Some(10)).unwrap();
@@ -536,7 +564,8 @@ mod tests {
             .set_run_state("m", RunState::Stopped, Some(&Setter::User))
             .unwrap();
         app.db.charge("w", 0, 10).unwrap();
-        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        // w, held by m's stop already, is not newly blocked by the budget.
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::None);
         let m = get(&app, "m");
         assert_eq!(
             (m.run_state, m.run_state_by),
