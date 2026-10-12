@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::agent;
 use crate::context::App;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
-use crate::messages::Queued;
+use crate::messages::{self, Queued};
 use crate::reports;
 use crate::runtime;
 use crate::tasks;
@@ -16,7 +16,7 @@ use crate::todo;
 
 use super::budget::{self, Limits};
 use super::fence::fenced;
-use super::{child_line, run, take_inbox, ChildLine, ReportLine};
+use super::{child_line, run, take_locked, ChildLine, ReportLine};
 
 /// Task `task`, which reports to the node, as its summary lists it: its
 /// brief and its last report.
@@ -165,19 +165,27 @@ pub fn session_context(app: &App, node: &TaskRecord, session_id: &str, now: i64)
     };
     // Written by hand (M39): read as `jeet todo` would read it.
     let todo = std::fs::read_to_string(todo::path(&dir)).unwrap_or_default();
+    let path = super::tree_path(app, node)?;
+    let brief = reports::brief_context(app, node)?;
+    let used = app.db.subtree_used(&node.id)?;
+    // Last, once nothing else can fail, so an error leaves the queue where
+    // it is; and the hold is read under the inbox lock, so a pause either
+    // holds this start or comes after it (M16), as at Stop.
+    let lock = messages::Inbox::lock(&dir)?;
     let inbox = match run::hold(app, node)? {
         Some(_) => None,
-        None => Some(take_inbox(&dir, session_id, Vec::new)?),
+        None => Some(take_locked(&lock, session_id, Vec::new)?),
     };
+    drop(lock);
     Ok(summary_text(&Summary {
         today: super::date(now),
-        path: super::tree_path(app, node)?,
-        brief: reports::brief_context(app, node)?,
+        path,
+        brief,
         below,
         more_below,
         children,
         limits,
-        used: app.db.subtree_used(&node.id)?,
+        used,
         todo: todo::parse(&todo).render(),
         inbox,
     }))

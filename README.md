@@ -732,7 +732,8 @@ its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 sets one (`manager.grant`), within what is left above it (a unit kept or
 lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
-pauses it at once. Both write a manager's `BRIEF.md` again.
+pauses it at once. Both write a manager's `BRIEF.md` again, as does each
+of its sessions starting.
 
 ```bash
 jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
@@ -752,7 +753,9 @@ all). It prints its home and its place in the tree, then starts it as any
 start is: now, queued over `max_live`, or held while its parent is paused.
 If its agent cannot start, the manager is kept and the command fails.
 A task made under a parent, by anyone, may not have a control character,
-a line break, `<` or `>` in its name: other agents read it.
+a line break, `<` or `>` in its name, nor more than 100 characters: other
+agents read it. The assistant's session summary lists a task a manager
+made by its slug alone, since its name is that manager's text.
 
 A manager's home is a task directory with a manager's role in place of
 the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your

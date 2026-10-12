@@ -610,7 +610,9 @@ const EVENTS_SINCE: i64 = 7 * 86_400;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLine {
     pub slug: String,
-    pub name: String,
+    /// `None` for a task a manager made: its name is a manager's text, and
+    /// the root sees only its slug.
+    pub name: Option<String>,
     pub status: String,
     pub active: String,
 }
@@ -690,7 +692,13 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
         let worktrees = app.db.list_task_worktrees(&t.id)?;
         task_lines.push(TaskLine {
             slug: t.slug.clone(),
-            name: tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone()),
+            name: match t.parent_id.as_deref() {
+                None => Some(tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone())),
+                Some(parent) if parent == task.id => {
+                    Some(tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone()))
+                }
+                Some(_) => None,
+            },
             status: runtime::shown_activity(app, t, tmux_ok).label(),
             active: agent::age_label(*at),
         });
@@ -748,12 +756,13 @@ pub fn context_text(
         out.push_str("None.\n");
     }
     for t in tasks.iter().take(MAX_TASKS) {
+        let name = match &t.name {
+            Some(name) => format!(" ({})", messages::clean(name).replace('\n', " ")),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "- {} ({}): {}, active {}\n",
-            t.slug,
-            messages::clean(&t.name).replace('\n', " "),
-            t.status,
-            t.active
+            "- {}{name}: {}, active {}\n",
+            t.slug, t.status, t.active
         ));
     }
     if tasks.len() > MAX_TASKS {
@@ -919,7 +928,7 @@ mod tests {
     fn the_summary_fences_what_others_wrote() {
         let tasks = [TaskLine {
             slug: "fix-login".into(),
-            name: "Fix login".into(),
+            name: Some("Fix login".into()),
             status: "idle 2m".into(),
             active: "5m ago".into(),
         }];
@@ -989,7 +998,7 @@ mod tests {
     fn the_summary_is_as_it_was_but_for_the_line_on_managers() {
         let tasks = [TaskLine {
             slug: "fix-login".into(),
-            name: "Fix login".into(),
+            name: Some("Fix login".into()),
             status: "idle 2m".into(),
             active: "5m ago".into(),
         }];

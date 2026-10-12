@@ -1298,7 +1298,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   close a fence or open one (as `jeet task ls`'s STATUS column does), and
   everyone without control characters. So does `jeet manager show`,
   for the children's reports and for the brief's goal and done-when, which
-  a manager writes from what it has read.
+  a manager writes from what it has read. A task made under a parent has a
+  name of at most 100 characters on one line with no `<` or `>`, and the
+  root's summary lists a task whose parent is neither the root nor none by
+  its slug alone: a manager may name it from text it read.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1565,7 +1568,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   writes it, mode 0444, when the manager is made, once its row is in (a
   failure is a warning: the session context has the brief too), and again
   on `manager grant` (for each active manager in the subtree, whose `You
-  may` the grant cuts) and `manager budget`. Each write makes a new
+  may` the grant cuts) and `manager budget`, and as each of its sessions
+  starts (its SessionStart hook, before its summary; a failure is a
+  warning), so a change made while it was archived, or to `[assistant]
+  allow` in config, is in it before it reads it. Each write makes a new
   read-only file beside it and renames it over the old one rather than
   editing it in place, so an agent never reads half of one and a link put
   in its place is replaced, not followed. A manager's `SessionStarted`

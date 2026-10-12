@@ -442,14 +442,21 @@ pub fn plan_child(
     })
 }
 
+/// Most characters a task made under a parent may have in its name.
+pub const MAX_CHILD_NAME: usize = 100;
+
 /// `name` as a task made under a parent may be called: a name the
 /// assistant or a manager may have written, which reaches other agents
-/// (their context lists it, its reports carry it), so on one line, with no
-/// control character and no `<` or `>` that could open or close a fence.
+/// (their context lists it, its reports carry it), so on one line, short,
+/// with no control character and no `<` or `>` that could open or close a
+/// fence.
 fn child_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() {
         bail!("a task needs a name");
+    }
+    if name.chars().count() > MAX_CHILD_NAME {
+        bail!("a task's name may be at most {MAX_CHILD_NAME} characters");
     }
     if let Some(c) = name
         .chars()

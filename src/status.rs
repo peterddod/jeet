@@ -345,6 +345,12 @@ fn handle_hook(
                 // /clear included; for a manager, with the state of its area.
                 let context = match task.kind {
                     TaskKind::Manager => {
+                        // Written again as each session starts, so what
+                        // changed while it was archived, or in config, is
+                        // in it before it is read.
+                        if let Err(e) = manager::write_brief(app, task) {
+                            eprintln!("jeet task-hook {event}: {e:#}");
+                        }
                         manager::context::session_context(app, task, session_id, now)
                     }
                     TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {

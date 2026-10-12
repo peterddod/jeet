@@ -12,7 +12,8 @@ carry over between sessions.
 
 `BRIEF.md` is what your parent asked of you: the goal, when it is done,
 your budget and what you may do. jeet writes it, and writes it again when
-your grant or budget changes. It is read-only: never edit it.
+your grant or budget changes and as each session starts. It is read-only:
+never edit it.
 
 Each session starts with your brief, the tasks below you and their last
 reports, your budget, your todo list and any queued messages. Read

@@ -118,7 +118,8 @@ pub fn ensure_files(dir: &Path, role: Role) -> Result<Vec<&'static str>> {
 
 /// Write manager `node`'s `BRIEF.md` (M27): its brief, fenced as its
 /// session context has it ([`reports::brief_context`]), read-only. Written
-/// afresh on each change (its grant, its budget), never edited in place:
+/// afresh on each change (its grant, its budget) and as each of its
+/// sessions starts, never edited in place:
 /// the new file is made beside it, read-only, and renamed over it, so an
 /// agent reading it never sees half of one, and a link put in its place is
 /// replaced, not followed. Read-only is a hint: the manager runs as the
@@ -130,7 +131,8 @@ pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
     let dir = tasks::task_dir(app, node);
     let text = format!(
         "# Brief\n\nWhat your parent asked of you. jeet writes this file, and writes it \
-         again when your grant or budget changes; do not edit it.\n\n{}\n",
+         again when your grant or budget changes and as each session starts; do not edit \
+         it.\n\n{}\n",
         reports::brief_context(app, node)?
     );
     let path = dir.join(BRIEF_MD);
@@ -222,6 +224,16 @@ pub fn take_inbox(
     running: impl FnOnce() -> Vec<String>,
 ) -> Result<Vec<Queued>> {
     let inbox = messages::Inbox::lock(dir)?;
+    take_locked(&inbox, session_id, running)
+}
+
+/// [`take_inbox`], under a lock the caller already holds, so it can decide
+/// to hand over under that same lock.
+pub fn take_locked(
+    inbox: &messages::Inbox,
+    session_id: &str,
+    running: impl FnOnce() -> Vec<String>,
+) -> Result<Vec<Queued>> {
     inbox.release_orphans(running)?;
     let me = Some(session_id);
     let queued = inbox.read_for(me)?;
@@ -286,6 +298,7 @@ pub fn child_line(child: &ChildLine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::tasks::{RunState, Setter};
     use crate::instructions::CLAUDE_SHIM;
     use crate::todo;
 
@@ -455,6 +468,34 @@ mod tests {
             summary.contains("\n## Your brief\n<jeet-brief from="),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn a_summary_that_fails_or_is_held_leaves_the_inbox_queued() {
+        let (_dir, app, api) = manager_lab("ship it");
+        let dir = tasks::task_dir(&app, &api);
+        messages::Inbox::lock(&dir).unwrap().push("news").unwrap();
+        let queued = || messages::Inbox::lock(&dir).unwrap().read().unwrap().len();
+        // Its brief cannot be read: the queue stays for the next start.
+        let orphan = TaskRecord {
+            parent_id: Some("gone".into()),
+            ..api.clone()
+        };
+        let err = context::session_context(&app, &orphan, "s", 0).unwrap_err();
+        assert!(format!("{err:#}").contains("no parent"), "{err:#}");
+        assert_eq!(queued(), 1);
+        // Held, it waits for the resume (M16).
+        app.db
+            .set_run_state(&api.id, RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        let summary = context::session_context(&app, &api, "s", 0).unwrap();
+        assert!(summary.contains("\n## Held\n"), "{summary}");
+        assert_eq!(queued(), 1);
+        // Running, it is handed over.
+        app.db.set_run_state(&api.id, RunState::Run, None).unwrap();
+        let summary = context::session_context(&app, &api, "s", 0).unwrap();
+        assert!(summary.contains("news"), "{summary}");
+        assert_eq!(queued(), 0);
     }
 
     #[test]
