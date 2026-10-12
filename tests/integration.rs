@@ -4058,6 +4058,83 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
     assert_eq!(git_stdout(&["branch", "--list", "wide-store"], &trunk), "");
 }
 
+/// The review command runs in the PR's worktree, so Claude files its
+/// session under the worktree, not the task directory the task's agent is
+/// opened in. Opening the review task resumes that session — it used to
+/// start a blank one — and, while the review is still running headless,
+/// says so instead of starting anything.
+#[cfg(unix)]
+#[test]
+fn opening_a_review_task_resumes_its_review_session() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let started = scratch.path().join("started");
+    let go = scratch.path().join("go");
+    let session = "5e55105e-aaaa-bbbb-cccc-000000000007";
+    // What `claude -p` does: its transcript goes under the directory it
+    // runs in, named as Claude names it.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        format!(
+            "scan_roots = []\n[review]\nnotify = false\ncommand = '''\
+             d=\"$CLAUDE_CONFIG_DIR/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')\" && \
+             mkdir -p \"$d\" && echo '{{}}' > \"$d/{session}.jsonl\" && touch {} && \
+             while [ ! -e {} ]; do sleep 0.1; done'''\n",
+            sh_quote(&started.to_string_lossy()),
+            sh_quote(&go.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+    let task = lab.home().join("tasks/review-widget-7");
+    let id = task_id(&task);
+    wait_until("the review to start", || started.exists());
+
+    // Listed as a review of its PR, running while its command does.
+    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
+    let line = listed
+        .lines()
+        .find(|l| l.starts_with("review-widget-7"))
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(line.contains("running – review of #7"), "{line}");
+    assert!(line.ends_with("review widget#7"), "{line}");
+
+    // Still running: there is nothing to attach to, and nothing starts.
+    let output = lab.jeet_at(&["task", "open", "review-widget-7"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("review of #7"), "{stderr}");
+    assert!(stderr.contains("still running"), "{stderr}");
+    assert!(calls_of(&tmux, "new-session").is_empty());
+
+    // Finished, its session is the task's, and opening resumes it.
+    std::fs::write(&go, "").unwrap();
+    let state = lab.home().join("reviews/github.com/acme/widget/7.json");
+    wait_until("the review to finish", || {
+        std::fs::read_to_string(&state).is_ok_and(|s| s.contains("\"exit_code\": 0"))
+    });
+    let output = lab.jeet_at(&["task", "open", "review-widget-7"], &lab.home(), &env);
+    succeeded(&output);
+    let opened = calls_of(&tmux, "new-session").pop().unwrap();
+    let dash = opened.iter().position(|a| a == "--").unwrap();
+    assert_eq!(opened[dash + 1..dash + 4], ["claude", "--resume", session]);
+    assert!(!opened.contains(&"--session-id".to_string()), "{opened:?}");
+    assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_review_of_a_branch_another_task_has_is_detached() {
@@ -4362,7 +4439,7 @@ fn the_tasks_list_shows_pr_history_with_links_and_opens_the_viewer() {
     let path = path_with(&viewer);
     succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
     let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[("PATH", &path)]);
-    screen.wait_for_text("review-widget-7 (review)");
+    screen.wait_for_text("review widget#7");
     screen.type_keys(b"/review\r");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"v");

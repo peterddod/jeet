@@ -880,6 +880,18 @@ pub fn review_task_name(repo: &RepoRecord, number: u64) -> String {
     format!("review-{}-{number}", repo_short_name(repo))
 }
 
+/// How a review task is shown in lists: `review jeet#55`, from the PR its
+/// worktree holds. None for any other task, or a review whose checkout is
+/// not recorded.
+pub fn review_label(task: &TaskRecord, worktrees: &[TaskWorktreeRecord]) -> Option<String> {
+    if task.kind != TaskKind::Review {
+        return None;
+    }
+    let row = worktrees.iter().find(|row| row.pr_number.is_some())?;
+    let repo = row.repo_id.rsplit('/').next().unwrap_or(&row.repo_id);
+    Some(format!("review {repo}#{}", row.pr_number?))
+}
+
 /// A PR's review task, ready to review in.
 pub struct ReviewCheckout {
     pub task: TaskRecord,
