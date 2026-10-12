@@ -149,7 +149,9 @@ pub fn session_context(app: &App, node: &TaskRecord, session_id: &str, now: i64)
             true => below.push(BelowLine {
                 path: super::tree_path(app, t)?,
                 kind: t.kind,
-                status: runtime::activity(app, t, tmux_ok).label(),
+                // Its own children's prompts it wrote; a deeper task's, a
+                // manager below it did.
+                status: runtime::activity(app, t, tmux_ok).label_with(*depth == 1),
                 run_state: t.run_state,
             }),
             false => more_below += 1,

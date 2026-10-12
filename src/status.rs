@@ -1139,6 +1139,19 @@ impl Activity {
             Activity::Ended => "ended".to_string(),
         }
     }
+
+    /// [`Activity::label`], and with a running or waiting agent's detail
+    /// only when `detail`. That detail is the first line of its last
+    /// prompt, which for a task below another manager that manager wrote
+    /// (its brief, its `task send`), so one not shown the task's name, or
+    /// a manager above its parent, gets the status without it (P9).
+    pub fn label_with(&self, detail: bool) -> String {
+        match (self, detail) {
+            (Activity::Running { .. }, false) => Activity::Running { detail: None }.label(),
+            (Activity::Waiting { .. }, false) => Activity::Waiting { detail: None }.label(),
+            _ => self.label(),
+        }
+    }
 }
 
 #[cfg(test)]

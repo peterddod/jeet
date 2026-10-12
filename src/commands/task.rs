@@ -692,8 +692,11 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     let mut unanchored: Vec<String> = Vec::new();
     for (at, task) in list {
         let rows = app.db.list_task_worktrees(&task.id)?;
+        let name = shown_name(names_for.as_deref(), &task);
         let status = match task.state {
-            TaskState::Active => runtime::shown_activity(app, &task, tmux_ok).label(),
+            TaskState::Active => {
+                runtime::shown_activity(app, &task, tmux_ok).label_with(name.is_some())
+            }
             TaskState::Archived => "archived".to_string(),
         };
         let mut status = shown_status(&caller, &status);
@@ -707,11 +710,8 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             _ => "",
         };
         // A review says so, and which PR it is of.
-        let name = tasks::review_label(&task, &rows).unwrap_or_else(|| {
-            shown_name(names_for.as_deref(), &task)
-                .unwrap_or("-")
-                .to_string()
-        });
+        let name =
+            tasks::review_label(&task, &rows).unwrap_or_else(|| name.unwrap_or("-").to_string());
         println!(
             "{:<28} {:<28} {:<10} {:<24} {name}{kind}",
             task.slug,
@@ -1056,11 +1056,14 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     let (caller, task) = permissions::resolve_target(app, &target)?;
     permissions::in_scope(app, &caller, permissions::Verb::TaskLast, &task)?;
     let names_for = names_for(app, &caller)?;
+    let named = shown_name(names_for.as_deref(), &task).is_some();
     let called = shown_name(names_for.as_deref(), &task).unwrap_or(&task.slug);
     let from = fence_for(app, &caller, &task)?;
     let dir = tasks::task_dir(app, &task);
     let status = match task.state {
-        TaskState::Active => runtime::shown_activity(app, &task, tmux::available()).label(),
+        TaskState::Active => {
+            runtime::shown_activity(app, &task, tmux::available()).label_with(named)
+        }
         TaskState::Archived => "archived".to_string(),
     };
     let harness = AgentSpec::from_config(&app.config)?.harness;
@@ -1328,5 +1331,64 @@ mod tests {
             from(&Caller::Root, &api).as_deref(),
             Some("manager assistant/api")
         );
+    }
+
+    /// Whose names each caller is shown: the user all; the root those of
+    /// tasks with no parent and its own children; a manager those and its
+    /// own children's, never a sub-manager's children's (P9).
+    #[test]
+    fn a_task_a_manager_below_named_is_shown_by_slug_alone() {
+        use crate::db::tasks::RunState;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let root = assistant::ensure(&app).unwrap();
+        let add = |slug: &str, kind, parent: Option<&TaskRecord>| {
+            let task = TaskRecord {
+                id: format!("{slug}-id"),
+                slug: slug.into(),
+                name: format!("{slug} name"),
+                project: None,
+                kind,
+                state: TaskState::Active,
+                created_at: 0,
+                last_activity: 0,
+                parent_id: parent.map(|p| p.id.clone()),
+                placement: crate::placement::for_new(),
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
+            };
+            app.db.insert_task(&task).unwrap();
+            task
+        };
+        let top = add("top", TaskKind::Work, None);
+        let api = add("api", TaskKind::Manager, Some(&root));
+        let w = add("w", TaskKind::Work, Some(&api));
+        let sub = add("sub", TaskKind::Manager, Some(&api));
+        let x = add("x", TaskKind::Work, Some(&sub));
+        let shown = |caller: &Caller, task: &TaskRecord| {
+            let ids = names_for(&app, caller).unwrap();
+            shown_name(ids.as_deref(), task).map(str::to_string)
+        };
+        let all = [&top, &api, &w, &sub, &x];
+        let named = |caller: &Caller| -> Vec<String> {
+            all.iter()
+                .filter(|t| shown(caller, t).is_some())
+                .map(|t| t.slug.clone())
+                .collect()
+        };
+        assert_eq!(named(&Caller::User), ["top", "api", "w", "sub", "x"]);
+        assert_eq!(named(&Caller::Root), ["top", "api"]);
+        assert_eq!(
+            named(&Caller::Node(api.clone())),
+            ["top", "api", "w", "sub"]
+        );
+        assert_eq!(named(&Caller::Node(sub.clone())), ["top", "api", "x"]);
+        assert_eq!(shown(&Caller::Node(api), &w).as_deref(), Some("w name"));
     }
 }
