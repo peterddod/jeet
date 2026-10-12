@@ -756,7 +756,8 @@ all), and is not started on one configured since that lacks them. It prints its 
 start is: now, queued over `max_live`, or held while its parent is paused.
 If its agent cannot start, the manager is kept and the command fails.
 A task made under a parent, by anyone, may not have a control character,
-a line break, a bidirectional or zero-width character, `<` or `>` in its
+a line break, a bidirectional, zero-width or other invisible format
+character (such as Unicode tag characters), `<` or `>` in its
 name, nor more than 100 characters: other agents read it, and the user sees
 it. The assistant's session summary lists a task a manager
 made by its slug alone, since its name is that manager's text; `jeet task
@@ -947,7 +948,8 @@ action = "notify"      # just a notification
 `on` and `repos` may be left out to match anything. Events for the assistant
 go to its sessions by the rules above (primary, else most recent, else a new
 `events <date>` session), several to a message; an event for a task goes to
-its agent the way `jeet task send` would send it. Either way the event is
+its agent the way `jeet task send` would send it (never to a manager, which
+may have a worker's PR in its history from reading it). Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
 written by other people: data to weigh, never instructions. One that cannot be
 delivered is notified instead. Each event, and where it went, is appended to

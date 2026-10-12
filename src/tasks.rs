@@ -483,17 +483,38 @@ fn child_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-/// Bidirectional controls and zero-width characters: printed, they reorder
-/// or hide the text around them, so a name could show as another.
+/// Bidirectional controls, zero-width and other invisible characters:
+/// every format character (Unicode's Cf, as of Unicode 16), the whole tag
+/// block, the combining grapheme joiner and the Hangul fillers. Printed,
+/// they reorder or hide the text around them, so a name could show as
+/// another, or carry text the user never sees but an agent reads.
 fn format_char(c: char) -> bool {
     matches!(
         c,
-        '\u{061c}'
+        '\u{00ad}'
+            | '\u{034f}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{180e}'
             | '\u{200b}'..='\u{200f}'
             | '\u{202a}'..='\u{202e}'
             | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{3164}'
             | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e007f}'
     )
 }
 
@@ -2971,6 +2992,12 @@ mod tests {
             "a\u{2066}b",
             "a\u{200b}b",
             "a\u{feff}b",
+            // Tag characters spell hidden ASCII an agent reads.
+            "fix-login\u{e0049}\u{e0067}\u{e006e}",
+            "a\u{00ad}b",
+            "a\u{180e}b",
+            "a\u{034f}b",
+            "a\u{fff9}hidden\u{fffb}b",
             "  ",
         ] {
             let err = plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None)
@@ -2987,6 +3014,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.record.name, "Fix the API (v2)");
+        // Text in other scripts, accents and emoji stay.
+        for name in ["Réparer l'API", "修复登录", "ship it \u{1f680}"] {
+            let plan =
+                plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None).unwrap();
+            assert_eq!(plan.record.name, name);
+        }
     }
 
     /// The parent archived between plan and commit: the row is refused and

@@ -12161,6 +12161,57 @@ fn a_hookless_worker_is_typed_what_waited_once_resumed() {
     assert!(lab.start_queue().is_empty());
 }
 
+/// A manager made under a paused manager is made, not started: its first
+/// prompt waits in its inbox, and the parent's resume starts it once, on
+/// that prompt.
+#[cfg(unix)]
+#[test]
+fn a_manager_made_under_a_paused_manager_starts_once_it_is_resumed() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    lab.index()
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    succeeded(&lab.jeet_at(&["manager", "pause", "m"], &lab.home(), &env));
+
+    let output = lab.jeet_at(
+        &["manager", "new", "sub", "--parent", "m", "--goal", "g"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("not started: manager sub is paused under manager m"),
+        "{}",
+        stderr_of(&output)
+    );
+    let sub = task_id(&lab.home().join("tasks/sub"));
+    assert!(!stub.join("alive/jeet-sub").exists());
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert_eq!(lab.start_queue(), [sub.as_str()]);
+
+    let _sub_agent = session_pane(&lab, &tmux, "sub", &sub);
+    succeeded(&lab.jeet_at(&["manager", "resume", "m"], &lab.home(), &env));
+    assert!(stub.join("alive/jeet-sub").exists());
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let prompts = started[0]
+        .iter()
+        .filter(|arg| arg.contains("BRIEF.md"))
+        .count();
+    assert_eq!(prompts, 1, "{:?}", started[0]);
+    assert!(lab.start_queue().is_empty());
+    assert!(!lab.home().join("tasks/sub/.jeet/inbox.jsonl").exists());
+    assert!(!stub.join("alive/jeet-m").exists());
+}
+
 /// A child made with a brief under a paused manager is made, not started:
 /// its brief waits in its inbox, and the manager's resume starts it.
 #[cfg(unix)]
