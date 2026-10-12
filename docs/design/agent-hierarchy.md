@@ -1308,7 +1308,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   under itself; `send`, `interrupt`, `archive`, `unarchive`, `delete`,
   `resync`, `prs`, `last` and `open`, and `jeet worktree ls`, `path`,
   `add` and `rm`, name any other by its slug in what they print, as do
-  the start warnings and errors they pass on. The root's summary, `jeet
+  the start warnings and errors they pass on, `jeet review`'s, and every
+  message that names the task holding a branch or the task whose
+  workspace a command was run in. The root's summary, `jeet
   task ls` and `jeet task last` give such a task's status without its
   detail (the first line of its last prompt, which a manager wrote), as a
   manager's summary does for every task below its own children, and every

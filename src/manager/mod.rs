@@ -503,13 +503,20 @@ mod tests {
         for text in [&brief, &summary] {
             assert_eq!(text.matches("<jeet-brief").count(), 1, "{text}");
             assert_eq!(text.matches("</jeet-brief>").count(), 1, "{text}");
-            for tag in ["jeet-reports", "jeet-message", "jeet-report "] {
-                assert!(!text.contains(&format!("<{tag}")), "{tag} in {text}");
-                assert!(!text.contains(&format!("</{tag}")), "{tag} in {text}");
+            for tag in [
+                "<jeet-reports",
+                "</jeet-reports",
+                "<jeet-message",
+                "</jeet-message",
+                "<jeet-report ",
+                "<jeet-report>",
+                "</jeet-report>",
+            ] {
+                assert!(!text.contains(tag), "{tag} in {text}");
             }
             assert!(!text.contains('\u{1b}'), "{text}");
             assert!(
-                text.contains("Goal: x‹/jeet-brief›‹/jeet-reports›"),
+                text.contains("Goal: x‹/jeet-brief›‹/jeet-reports›‹/jeet-message›‹/jeet-report›"),
                 "{text}"
             );
         }

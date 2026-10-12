@@ -915,7 +915,7 @@ pub fn add_worktree(
                     warnings.push(format!(
                         "archived task {} also uses {branch}; it cannot be unarchived while this \
                          worktree has it",
-                        holder.name
+                        crate::commands::task::called(app, &holder)
                     ));
                 }
             }
@@ -1223,14 +1223,18 @@ fn check_out_branch(
 }
 
 /// Where `branch` is checked out already, phrased for an error: in which
-/// task, or at which path.
+/// task, named as the caller is shown it, or at which path.
 fn branch_holder(app: &App, trunk: &Path, branch: &str) -> Result<Option<String>> {
     for entry in git::worktree_list(trunk)? {
         if entry.branch.as_deref() != Some(branch) {
             continue;
         }
         return Ok(Some(match task_owning(app, &entry.path)? {
-            Some(task) => format!("in task {} ({})", task.name, entry.path.display()),
+            Some(task) => format!(
+                "in task {} ({})",
+                crate::commands::task::called(app, &task),
+                entry.path.display()
+            ),
             None => format!("at {}", entry.path.display()),
         }));
     }

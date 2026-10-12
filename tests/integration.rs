@@ -9472,6 +9472,35 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         .find(|l| l.starts_with("- sib (sib): "))
         .unwrap_or_else(|| panic!("{context}"));
     assert!(line.contains("tidy the docs"), "{line}");
+    // Holding a branch the root wants, it is still its slug.
+    succeeded(&root_pane.jeet(
+        &[
+            "worktree", "add", "--task", slug, "widget", "--branch", "held",
+        ],
+        &root_dir,
+        &env,
+    ));
+    let output = root_pane.jeet(
+        &[
+            "worktree", "add", "--task", "sib", "widget", "--branch", "held",
+        ],
+        &root_dir,
+        &env,
+    );
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(
+        said.contains(&format!(
+            "branch held is already checked out in task {slug} ("
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("Note from the user"), "{said}");
+    succeeded(&root_pane.jeet(
+        &["worktree", "rm", "--task", slug, "widget"],
+        &root_dir,
+        &env,
+    ));
     // Archived, unarchived and deleted by the root, it is still its slug.
     for args in [
         &["task", "archive", slug, "--force"][..],
