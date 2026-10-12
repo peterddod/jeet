@@ -406,16 +406,7 @@ pub fn plan_child(
     let grant = permissions::check_grant(app, caller, &parent, kind, d.allow.as_deref(), &policy)?;
     let budget = child_budget(app, &parent, kind, d, &policy)?;
     if kind == TaskKind::Manager {
-        let spec = AgentSpec::from_config(&app.config)?;
-        let missing = crate::harness::manager_missing(spec.harness);
-        if !missing.is_empty() {
-            bail!(
-                "a manager needs what {} lacks: {}; configure a harness that has them \
-                 (see docs/harnesses.md)",
-                spec.harness.name(),
-                missing.join(", ")
-            );
-        }
+        manager_harness(AgentSpec::from_config(&app.config)?.harness)?;
     }
 
     let created_by = match caller {
@@ -440,6 +431,22 @@ pub fn plan_child(
         budget,
         fan_out,
     })
+}
+
+/// Refuse a manager on `harness` when it lacks what a manager needs: its
+/// hooks, its deny rules, its interrupt. Checked as one is made and again
+/// at each start, as the configured harness may have changed meanwhile.
+pub fn manager_harness(harness: &dyn crate::harness::Harness) -> Result<()> {
+    let missing = crate::harness::manager_missing(harness);
+    if !missing.is_empty() {
+        bail!(
+            "a manager needs what {} lacks: {}; configure a harness that has them \
+             (see docs/harnesses.md)",
+            harness.name(),
+            missing.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Most characters a task made under a parent may have in its name.
@@ -925,7 +932,12 @@ pub fn add_worktree(
 
 /// `review-<repo>-<n>`: what `jeet review` calls the task for a PR.
 pub fn review_task_name(repo: &RepoRecord, number: u64) -> String {
-    format!("review-{}-{number}", repo_short_name(repo))
+    // Within a child's name, as an agent's review is made under it: a
+    // repository's name may be as long.
+    let number = format!("-{number}");
+    let room = MAX_CHILD_NAME.saturating_sub("review-".len() + number.len());
+    let short: String = repo_short_name(repo).chars().take(room).collect();
+    format!("review-{short}{number}")
 }
 
 /// How a review task is shown in lists: `review jeet#55`, from the PR its
@@ -2251,6 +2263,22 @@ pub fn refuse_delete_with_children(app: &App, task: &TaskRecord) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_task_name_fits_a_child_name_however_long_the_repo() {
+        let repo = |id: &str| RepoRecord {
+            id: id.to_string(),
+            trunk_path: String::new(),
+            remote_url: String::new(),
+            default_branch: "main".to_string(),
+        };
+        assert_eq!(review_task_name(&repo("acme/api"), 12), "review-api-12");
+        let long = format!("acme/{}", "r".repeat(100));
+        let name = review_task_name(&repo(&long), 123_456);
+        assert!(name.ends_with("-123456"), "{name}");
+        assert_eq!(name.chars().count(), MAX_CHILD_NAME);
+        assert!(child_name(&name).is_ok());
+    }
 
     #[test]
     fn foreign_checkouts_are_the_outermost_ones_the_task_does_not_hold() {

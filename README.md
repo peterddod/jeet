@@ -745,17 +745,21 @@ It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
 `[managers] manager_default` and an unasked budget `[managers]
-default_budget`; `--brief-file` adds a longer brief after the goal, and
+default_budget`; `--brief-file` adds a longer brief after the goal (the two
+together at most 8,000 bytes), and
 `--max-children` lowers `[managers] max_children` for it. A manager sits at
 most `max_depth` − 1 below the assistant, and needs a harness with hooks,
 continue-turn output, `interrupt_keys` and deny rules (Claude Code has them
-all). It prints its home and its place in the tree, then starts it as any
+all), and is not started on one configured since that lacks them. It prints its home and its place in the tree, then starts it as any
 start is: now, queued over `max_live`, or held while its parent is paused.
 If its agent cannot start, the manager is kept and the command fails.
 A task made under a parent, by anyone, may not have a control character,
 a line break, `<` or `>` in its name, nor more than 100 characters: other
 agents read it. The assistant's session summary lists a task a manager
-made by its slug alone, since its name is that manager's text.
+made by its slug alone, since its name is that manager's text; `jeet task
+ls` and `jeet task last --json`, run by an agent, show only the names of
+tasks with no parent, made under the assistant, or made under itself
+(others get `-` and `null`).
 
 A manager's home is a task directory with a manager's role in place of
 the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your

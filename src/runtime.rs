@@ -235,6 +235,11 @@ fn start_tmux(
     }
 
     let mut spec = AgentSpec::from_config(&app.config)?;
+    // Made under a harness that had them, it is not started unguarded on
+    // one configured since that lacks them.
+    if task.kind == TaskKind::Manager {
+        tasks::manager_harness(spec.harness)?;
+    }
     // The project's own arguments; a project since deleted or broken costs
     // only those, not the task.
     match projects::agent_args(app, task) {

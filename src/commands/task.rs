@@ -682,6 +682,7 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
         return Ok(());
     }
     let tmux_ok = tmux::available();
+    let names_for = names_for(app, &caller)?;
     println!(
         "{:<28} {:<28} {:<10} {:<24} NAME",
         "TASK", "WORKTREES", "ACTIVE", "STATUS"
@@ -704,7 +705,11 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             _ => "",
         };
         // A review says so, and which PR it is of.
-        let name = tasks::review_label(&task, &rows).unwrap_or(task.name);
+        let name = tasks::review_label(&task, &rows).unwrap_or_else(|| {
+            shown_name(names_for.as_deref(), &task)
+                .unwrap_or("-")
+                .to_string()
+        });
         println!(
             "{:<28} {:<28} {:<10} {:<24} {name}{kind}",
             task.slug,
@@ -1074,7 +1079,7 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     if json {
         let value = serde_json::json!({
             "task": task.slug,
-            "name": task.name,
+            "name": shown_name(names_for(app, &caller)?.as_deref(), &task),
             "status": status,
             "session": session,
             "end": turn.end,
@@ -1125,6 +1130,29 @@ fn shown_status(caller: &Caller, label: &str) -> String {
     match caller {
         Caller::User => printable(label),
         Caller::Root | Caller::Node(_) => crate::manager::fence::fenced(label),
+    }
+}
+
+/// Whose children's names `caller` is shown, besides those of tasks with
+/// no parent: the root's and, for a manager, its own (the user's, the
+/// root's and its own words); None for the user, who sees them all.
+fn names_for(app: &App, caller: &Caller) -> Result<Option<Vec<String>>> {
+    Ok(match caller {
+        Caller::User => None,
+        Caller::Root => Some(vec![crate::manager::root(app)?.id]),
+        Caller::Node(node) => Some(vec![crate::manager::root(app)?.id, node.id.clone()]),
+    })
+}
+
+/// `task`'s name as one shown the names of `names_for`'s children is
+/// shown it ([`names_for`]), or None. A task made under another manager is
+/// named by that manager, maybe from text it read, so an agent gets it by
+/// its slug alone, as the root's summary lists it (P9).
+fn shown_name<'a>(names_for: Option<&[String]>, task: &'a TaskRecord) -> Option<&'a str> {
+    match (names_for, task.parent_id.as_deref()) {
+        (None, _) | (_, None) => Some(&task.name),
+        (Some(ids), Some(parent)) if ids.iter().any(|id| id == parent) => Some(&task.name),
+        _ => None,
     }
 }
 

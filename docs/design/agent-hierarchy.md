@@ -1301,7 +1301,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a manager writes from what it has read. A task made under a parent has a
   name of at most 100 characters on one line with no `<` or `>`, and the
   root's summary lists a task whose parent is neither the root nor none by
-  its slug alone: a manager may name it from text it read.
+  its slug alone: a manager may name it from text it read. `jeet task ls`
+  (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
+  agent, which sees names only of tasks with no parent, under the root, or
+  under itself.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1324,7 +1327,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   then checks its reach again.
 - **P12** A manager needs a harness with hook events, continue-turn
   output, `interrupt_keys` and deny rules (§7), and is refused, naming what
-  is missing, on one without. A worker starts without them; only a
+  is missing, on one without, as it is made and again at each start
+  (`runtime::start_tmux`), so one made before the configured harness
+  changed is not started on one that lacks them. A worker starts without
+  them; only a
   worker with a parent is warned, and only of missing deny rules.
   There is no `--harness` flag: the configured harness is checked.
 - **P13** `jeet manager ls [--json]` is the tree (a flat list with each
@@ -1574,7 +1580,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   allow` in config, is in it before it reads it. Each write makes a new
   read-only file beside it and renames it over the old one rather than
   editing it in place, so an agent never reads half of one and a link put
-  in its place is replaced, not followed. A manager's `SessionStarted`
+  in its place is replaced, not followed; each reads the brief and
+  renames under the task's `.jeet/brief.lock`, so a write that read the
+  brief before a grant or budget changed cannot land over a newer one. A
+  manager's `SessionStarted`
   (the hook path a worker's brief takes, switching on its kind) prints
   its summary (`manager::context::session_context`): its brief, the
   active tasks below it with their status and run state, the last
@@ -1592,7 +1601,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   is stored on the row. `--brief-file` has no column of its own (§2's
   `brief TEXT` is not added): its text follows `--goal` in the brief's
   goal, or is the goal without one, so it is checked, kept, fenced and
-  shown with it. The command prints the manager's slug, tree path and
+  shown with it (the two together at most a message's 8,000 bytes, refused
+  as `--brief-file`'s when over). The command prints the manager's slug, tree path and
   parent to stderr and its home on stdout (without changing directory, as
   `task new` asks the shell to), then starts it with
   `manager::first_prompt` through the start gate as `task new --prompt`

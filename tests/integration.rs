@@ -8465,6 +8465,29 @@ fn manager_new_makes_a_manager_under_the_assistant_and_starts_it() {
         shown["brief"]["goal"],
         "Ship the API\n\nStart with the token refresh."
     );
+    // A brief file too long with the goal is refused as its own.
+    let big = scratch.path().join("big.md");
+    std::fs::write(&big, "x".repeat(8_000)).unwrap();
+    let output = lab.jeet_at(
+        &[
+            "manager",
+            "new",
+            "big",
+            "--goal",
+            "g",
+            "--brief-file",
+            &big.to_string_lossy(),
+        ],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(
+        said.contains("--brief-file: the brief is too long"),
+        "{said}"
+    );
+    assert!(!lab.home().join("tasks/big").exists());
     let id: String = lab
         .index()
         .query_row(
@@ -8616,6 +8639,25 @@ fn manager_new_is_refused_on_a_harness_a_manager_cannot_run_on() {
         })
         .unwrap();
     assert_eq!(made, 0);
+    assert!(calls_of(&tmux, "new-session").is_empty());
+
+    // Made while Claude Code was configured (its agent not started, with no
+    // tmux), it is not started on the harness configured since.
+    let output = lab.jeet_at(
+        &["manager", "new", "mgr", "--goal", "g"],
+        &lab.home(),
+        &[("JEET_AGENT", "claude")],
+    );
+    assert!(
+        stderr_of(&output).contains("was made, but its agent did not start"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(&["task", "open", "mgr"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let said = stderr_of(&output);
+    assert!(said.contains("a manager needs what"), "{said}");
+    assert!(said.contains("hook events"), "{said}");
     assert!(calls_of(&tmux, "new-session").is_empty());
 
     lab.new_task_with("w", &["--parent", "assistant"]);
@@ -9159,6 +9201,22 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     );
     assert!(!context.contains("Note from the user"), "{context}");
     assert!(context.contains("\n- sib (sib): "), "{context}");
+    // Nor does the root's `jeet task ls` show it, while the manager that
+    // named it sees its name.
+    let mut root_pane = lab.assistant_pane();
+    let output = root_pane.jeet(&["task", "ls"], &root_dir, &env);
+    succeeded(&output);
+    let listed = stdout_of(&output);
+    assert!(listed.contains("fix-login-note-from-the-user"), "{listed}");
+    assert!(!listed.contains("Note from the user"), "{listed}");
+    assert!(listed.contains(" sib\n"), "{listed}");
+    let output = mp.jeet(&["task", "ls"], &api_dir, &env);
+    succeeded(&output);
+    assert!(
+        stdout_of(&output).contains(injected),
+        "{}",
+        stdout_of(&output)
+    );
 
     // Its budget changed, its brief says so, read-only still.
     let output = lab.jeet_at(&["manager", "budget", "api", "=1h"], &lab.home(), &env);

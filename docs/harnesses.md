@@ -39,7 +39,8 @@ jeet does without that feature:
 A manager needs four of these: `hook_args` or `hook_file`,
 `continue_output`, `interrupt_keys` and `Enforcement::Rules`. Making one
 on a harness without them all (`jeet manager new`) is refused, naming each that is missing ("hook
-events", "continue-turn output", "interrupt_keys", "deny rules"); a worker
+events", "continue-turn output", "interrupt_keys", "deny rules"), and so
+is starting one made before the configured harness changed; a worker
 starts without them. A manager is started with a first prompt, so its
 harness needs `prompt_args` too; without it the manager is made, and
 `jeet manager new` says its agent did not start. Only a worker with a parent is warned, and

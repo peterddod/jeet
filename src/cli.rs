@@ -396,7 +396,8 @@ pub enum ManagerCommands {
         #[command(flatten)]
         delegation: Delegation,
         /// A longer brief, read from this file: it follows --goal in the
-        /// manager's brief (or, with no --goal, is its goal)
+        /// manager's brief (or, with no --goal, is its goal); the two
+        /// together at most 8000 bytes
         #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         brief_file: Option<std::path::PathBuf>,
         /// How many active tasks it may have under it at once; at most

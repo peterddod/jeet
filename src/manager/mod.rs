@@ -122,13 +122,25 @@ pub fn ensure_files(dir: &Path, role: Role) -> Result<Vec<&'static str>> {
 /// sessions starts, never edited in place:
 /// the new file is made beside it, read-only, and renamed over it, so an
 /// agent reading it never sees half of one, and a link put in its place is
-/// replaced, not followed. Read-only is a hint: the manager runs as the
-/// user, so it is as cooperative as the rest.
+/// replaced, not followed. Each writer reads the brief and renames under a
+/// lock, so one that read it before a grant or budget changed cannot put
+/// its older copy over the newer. Read-only is a hint: the manager runs as
+/// the user, so it is as cooperative as the rest.
 pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
     let dir = tasks::task_dir(app, node);
+    let marker = dir.join(tasks::MARKER_DIR);
+    std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
+    let lock = marker.join("brief.lock");
+    let _lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)
+        .and_then(|file| file.lock().map(|()| file))
+        .with_context(|| format!("lock {}", lock.display()))?;
     let text = format!(
         "# Brief\n\nWhat your parent asked of you. jeet writes this file, and writes it \
          again when your grant or budget changes and as each session starts; do not edit \
@@ -406,7 +418,7 @@ mod tests {
     fn the_brief_is_written_read_only_and_written_again_over_itself() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_dir, app, api) = manager_lab("ship the API");
+        let (dir, app, api) = manager_lab("ship the API");
         write_brief(&app, &api).unwrap();
         let path = tasks::task_dir(&app, &api).join(BRIEF_MD);
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -434,8 +446,25 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(tasks::task_dir(&app, &api))
             .unwrap()
             .map(|e| e.unwrap().file_name())
+            .filter(|n| n != tasks::MARKER_DIR)
             .collect();
         assert_eq!(left, [BRIEF_MD], "{left:?}");
+
+        // A link put in its place is replaced, not followed: what it
+        // pointed at keeps its text and mode.
+        let target = dir.path().join("sentinel");
+        std::fs::write(&target, "mine").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_brief(&app, &api).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine");
+        assert_eq!(mode(&target), 0o644);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(mode(&path), 0o444);
 
         assert_eq!(
             first_prompt(&app, &api).unwrap(),

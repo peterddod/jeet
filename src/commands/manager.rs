@@ -23,6 +23,7 @@ use crate::db::tasks::{
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
+use crate::messages;
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::runtime;
 use crate::tasks::{self, NewTask};
@@ -49,11 +50,25 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         if text.trim().is_empty() {
             bail!("--brief-file: {} is empty", path.display());
         }
-        // Stored with the goal, so it is fenced, kept and shown with it.
-        d.goal = Some(match d.goal.take() {
+        if let Some(goal) = d.goal.as_deref() {
+            if let Err(e) = messages::checked(goal) {
+                bail!("--goal: {e:#}");
+            }
+        }
+        // Stored with the goal, so it is fenced, kept and shown with it,
+        // and held to a message's length with it.
+        let goal = match d.goal.take() {
             Some(goal) => format!("{}\n\n{}", goal.trim_end(), text.trim()),
             None => text,
-        });
+        };
+        let len = messages::clean(&goal).len();
+        if len > messages::MAX_MESSAGE {
+            bail!(
+                "--brief-file: the brief is too long ({len} bytes, with --goal; at most {})",
+                messages::MAX_MESSAGE
+            );
+        }
+        d.goal = Some(goal);
     }
     let caller = permissions::caller(app)?;
     let plan = tasks::plan_child(
