@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use crate::cd;
-use crate::commands::task::standing_in;
+use crate::commands::task::{called, standing_in};
 use crate::context::App;
 use crate::db::tasks::TaskState;
 use crate::git;
@@ -70,7 +70,7 @@ pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
     if rows.is_empty() {
         eprintln!(
             "jeet: task {} has no worktrees; `jeet worktree add <repo>` adds one",
-            task.name
+            called(app, &task)
         );
         return Ok(());
     }
@@ -146,7 +146,7 @@ pub fn rm(app: &App, task: Option<&str>, name: &str, force: bool) -> Result<()> 
     for warning in &warnings {
         eprintln!("jeet: {warning}");
     }
-    eprintln!("jeet: removed {name} from task {}", task.name);
+    eprintln!("jeet: removed {name} from task {}", called(app, &task));
     Ok(())
 }
 
@@ -159,7 +159,7 @@ pub fn path(app: &App, task: Option<&str>, name: &str) -> Result<()> {
     if app.db.get_task_worktree(&task.id, name)?.is_none() {
         bail!(
             "task {} has no worktree named {name}; `jeet worktree ls` lists them",
-            task.name
+            called(app, &task)
         );
     }
     let path: PathBuf = tasks::worktree_dir(app, &task, name);

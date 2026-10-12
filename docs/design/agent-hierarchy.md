@@ -1305,8 +1305,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
   agent, which sees names only of tasks with no parent, under the root, or
   under itself; `send`, `interrupt`, `archive`, `unarchive`, `delete`,
-  `resync`, `prs` and `last` name any other by its slug in what they
-  print, as do the start warnings they pass on.
+  `resync`, `prs`, `last` and `open`, and `jeet worktree ls`, `path`,
+  `add` and `rm`, name any other by its slug in what they print, as do
+  the start warnings and errors they pass on. The root's summary gives
+  such a task's status without its detail (the first line of its last
+  prompt, which a manager wrote), and every task's status there unable to
+  close a fence or open one.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1607,7 +1611,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   as `--brief-file`'s when over). The file is a regular file, read no
   further than that limit; named by an agent (the root or a node), it must
   resolve inside that agent's own home, links followed, since its
-  `manager new` is pre-approved and `manager show` hands the brief back. The command prints the manager's slug, tree path and
+  `manager new` is pre-approved and `manager show` hands the brief back.
+  It is opened, then its path resolved again: still inside the home and
+  leading to the file opened (same device and inode), which has no other
+  name (one link), or it is refused, so a link in the home swapped as it
+  is read reaches nothing outside. The command prints the manager's slug, tree path and
   parent to stderr and its home on stdout (without changing directory, as
   `task new` asks the shell to), then starts it with
   `manager::first_prompt` through the start gate as `task new --prompt`

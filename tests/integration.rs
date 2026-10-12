@@ -8712,6 +8712,57 @@ fn the_assistant_makes_a_manager_only_with_manager_create() {
     let started = calls_of(&tmux, "new-session");
     assert_eq!(started.len(), 1, "{started:?}");
     assert!(started[0].iter().any(|a| a == "jeet-api"), "{started:?}");
+
+    // A brief file it names is one in its own home, of one name: one
+    // outside, or a hard link, is not read for it.
+    let home = lab.home().join("assistant");
+    let secret = scratch.path().join("secret");
+    std::fs::write(&secret, "hunter2\n").unwrap();
+    std::fs::write(home.join("linked.md"), "hunter2\n").unwrap();
+    std::fs::hard_link(home.join("linked.md"), home.join("twin.md")).unwrap();
+    for (file, why) in [
+        (secret.to_string_lossy().to_string(), "is outside your home"),
+        ("linked.md".to_string(), "has another name"),
+    ] {
+        let output = root.jeet(
+            &[
+                "manager",
+                "new",
+                "leak",
+                "--goal",
+                "g",
+                "--brief-file",
+                &file,
+            ],
+            &home,
+            &env,
+        );
+        assert!(!output.status.success(), "{file}");
+        let said = stderr_of(&output);
+        assert!(said.contains(why), "{file}: {said}");
+        assert!(!said.contains("hunter2"), "{file}: {said}");
+    }
+    assert!(!lab.home().join("tasks/leak").exists());
+    assert_eq!(
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM tasks WHERE slug = 'leak'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    let ok_agent = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    ok_agent.as_session_pane(&tmux, "jeet-ok");
+    std::fs::write(home.join("brief.md"), "Ship it\n").unwrap();
+    let output = root.jeet(
+        &["manager", "new", "ok", "--brief-file", "brief.md"],
+        &home,
+        &env,
+    );
+    succeeded(&output);
+    let ok = task_id(&path_from(&output));
+    let (goal, _, _) = lab.brief_of(&ok).unwrap();
+    assert!(goal.contains("Ship it"), "{goal}");
 }
 
 /// A manager made past `[managers] max_live` is made, and its start waits
@@ -8815,8 +8866,8 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     std::fs::write(
         lab.home().join("config.toml"),
         "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
-         \"task.send\", \"task.open\", \"task.archive\", \"task.delete\", \"task.resync\", \
-         \"worktree.add\", \"review.start\", \"manager.create\", \"manager.grant\", \
+         \"task.send\", \"task.open\", \"task.archive\", \"task.unarchive\", \"task.delete\", \
+         \"task.resync\", \"worktree.add\", \"worktree.rm\", \"review.start\", \"manager.create\", \"manager.grant\", \
          \"manager.stop\", \"pr.comment\"]\n",
     )
     .unwrap();
@@ -9264,6 +9315,9 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         &["task", "last", slug, "--json"],
         &["task", "send", slug, "hi"],
         &["task", "interrupt", slug],
+        &["task", "resync", slug],
+        &["worktree", "ls", "--task", slug],
+        &["worktree", "path", "--task", slug, "x"],
     ] {
         let output = root_pane.jeet(args, &root_dir, &env);
         let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
@@ -9277,6 +9331,22 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "{}",
         stdout_of(&output)
     );
+    // Archived, unarchived and deleted by the root, it is still its slug.
+    for args in [
+        &["task", "archive", slug, "--force"][..],
+        &["task", "open", slug],
+        &["worktree", "add", "--task", slug, "widget"],
+        &["worktree", "rm", "--task", slug, "x"],
+        &["task", "unarchive", slug],
+        &["task", "unarchive", slug],
+        &["task", "delete", slug, "--force"],
+    ] {
+        let output = root_pane.jeet(args, &root_dir, &env);
+        let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
+        assert!(said.contains(slug), "{args:?}: {said}");
+        assert!(!said.contains("Note from the user"), "{args:?}: {said}");
+    }
+    assert_eq!(slugs(slug), 0);
 
     // Its budget changed, its brief says so, read-only still.
     let output = lab.jeet_at(&["manager", "budget", "api", "=1h"], &lab.home(), &env);

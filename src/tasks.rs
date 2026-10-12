@@ -807,8 +807,7 @@ pub fn add_worktree(
     }
     if task.state == TaskState::Archived {
         bail!(
-            "task {} is archived; `jeet task unarchive {}` first",
-            task.name,
+            "task {0} is archived; `jeet task unarchive {0}` first",
             task.slug
         );
     }
@@ -850,7 +849,7 @@ pub fn add_worktree(
     let dir_name = match name {
         Some(name) => {
             if taken.iter().any(|t| t == name) || dir.join(name).exists() {
-                bail!("{name} already exists in task {}", task.name);
+                bail!("{name} already exists in task {}", task.slug);
             }
             name.to_string()
         }
@@ -1392,8 +1391,7 @@ pub fn remove_worktree(
 ) -> Result<Vec<String>> {
     if task.state == TaskState::Archived {
         bail!(
-            "task {} is archived; `jeet task unarchive {}` first",
-            task.name,
+            "task {0} is archived; `jeet task unarchive {0}` first",
             task.slug
         );
     }
@@ -1404,7 +1402,7 @@ pub fn remove_worktree(
     let Some(row) = app.db.get_task_worktree(&task.id, name)? else {
         bail!(
             "task {} has no worktree named {name}; `jeet worktree ls` lists them",
-            task.name
+            task.slug
         );
     };
     let repo = repo_of(app, &row)?;

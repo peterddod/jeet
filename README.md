@@ -747,7 +747,7 @@ name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `[managers] manager_default` and an unasked budget `[managers]
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
-or a manager, one inside its own home), and
+or a manager, one inside its own home and of one name, no hard link), and
 `--max-children` lowers `[managers] max_children` for it. A manager sits at
 most `max_depth` − 1 below the assistant, and needs a harness with hooks,
 continue-turn output, `interrupt_keys` and deny rules (Claude Code has them

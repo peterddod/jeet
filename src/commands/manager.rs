@@ -9,7 +9,7 @@
 //! what is queued already.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -122,18 +122,25 @@ fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
         Caller::Root => Some(tasks::task_dir(app, &manager::root(app)?)),
         Caller::Node(node) => Some(tasks::task_dir(app, node)),
     };
-    let real = std::fs::canonicalize(path)
-        .with_context(|| format!("--brief-file: read {}", path.display()))?;
-    if let Some(home) = home {
-        let inside = std::fs::canonicalize(&home).is_ok_and(|home| real.starts_with(home));
-        if !inside {
+    // Where `path` leads now, if inside `home`: asked again once it is
+    // open, since a link in the home can be swapped in between.
+    let inside = |home: &Path| -> Result<PathBuf> {
+        let real = std::fs::canonicalize(path)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        if !std::fs::canonicalize(home).is_ok_and(|home| real.starts_with(home)) {
             bail!(
                 "--brief-file: {} is outside your home {}; write the brief there",
                 path.display(),
                 home.display()
             );
         }
-    }
+        Ok(real)
+    };
+    let real = match &home {
+        Some(home) => inside(home)?,
+        None => std::fs::canonicalize(path)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?,
+    };
     // Asked before opening it too: opening a FIFO would wait for a writer.
     let regular = |meta: std::io::Result<std::fs::Metadata>| meta.is_ok_and(|m| m.is_file());
     if !regular(std::fs::metadata(&real)) {
@@ -141,8 +148,24 @@ fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
     }
     let file = std::fs::File::open(&real)
         .with_context(|| format!("--brief-file: read {}", path.display()))?;
-    if !regular(file.metadata()) {
-        bail!("--brief-file: {} is not a regular file", path.display());
+    let opened = file
+        .metadata()
+        .ok()
+        .filter(|m| m.is_file())
+        .with_context(|| format!("--brief-file: {} is not a regular file", path.display()))?;
+    // The file opened is the one inside the home: where the path leads now
+    // is that very file, its only name (a hard link would be a second).
+    if let Some(home) = &home {
+        use std::os::unix::fs::MetadataExt;
+        let now = std::fs::metadata(inside(home)?)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        if (now.dev(), now.ino()) != (opened.dev(), opened.ino()) || opened.nlink() != 1 {
+            bail!(
+                "--brief-file: {} changed as it was read, or has another name; write \
+                 the brief to a file of its own in your home",
+                path.display()
+            );
+        }
     }
     let mut bytes = Vec::new();
     file.take(messages::MAX_MESSAGE as u64 + 1)

@@ -779,7 +779,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
-            task.name,
+            called(app, &task),
             task.slug
         );
     }
@@ -1169,7 +1169,7 @@ fn shown_name<'a>(names_for: Option<&[String]>, task: &'a TaskRecord) -> Option<
 
 /// How a command's messages name `task` to its caller: by its name when
 /// [`shown_name`] shows the caller it, else by its slug.
-fn called(app: &App, task: &TaskRecord) -> String {
+pub(crate) fn called(app: &App, task: &TaskRecord) -> String {
     let names_for = permissions::caller(app).and_then(|caller| names_for(app, &caller));
     match names_for.map(|ids| shown_name(ids.as_deref(), task).map(str::to_string)) {
         Ok(Some(name)) => name,

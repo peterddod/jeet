@@ -437,7 +437,7 @@ pub fn copy_files(project: &Project, task_dir: &Path, force: bool) -> Result<Fil
 /// [`copy_files`]. The built-in jeet skill is put back too.
 pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
     let Some(name) = &task.project else {
-        bail!("task {} was not made from a project", task.name);
+        bail!("task {} was not made from a project", task.slug);
     };
     let project = load(app, name)?;
     let dir = tasks::task_dir(app, task);
