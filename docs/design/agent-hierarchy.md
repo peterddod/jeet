@@ -990,7 +990,7 @@ RFC left open, or departed from it:
   fail).
 - **E14** The manager refusal, `missing(h, &[Feature]) -> Vec<Feature>`
   with `Feature::label` naming the piece ("deny rules", "interrupt"),
-  lands with phase 2's `manager new`; it has no caller in #32.
+  lands with phase 2's `manager new` (P12, P22); it has no caller in #32.
 - **E15** Deny rules are a lint, not a gate (5.6). They cover only the
   agent's Bash and file tools, not MCP tools, `!` commands or scripts.
   Branch protection is the real control; #33 is the boundary.
@@ -1235,8 +1235,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   manager can be made, and apply to every task with children.
 - **P3** Every `Manager` arm that restricts a manager lands before
   `jeet manager new` can make one: teardown refusals (P2), read-only
-  worktrees and git denies (P4) and the trust scope (P5). Until then no
-  manager row exists for a report or a `--parent` to reach (P11, P14).
+  worktrees and git denies (P4) and the trust scope (P5). Until it lands
+  (P22) no manager row exists for a report or a `--parent` to reach (P11,
+  P14).
 - **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
   #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
   chmod, since a manager runs unconfined anyway. `git branch` is not
@@ -1577,6 +1578,28 @@ Managers run locally in tmux, as the user, like any other task (I22).
   one line, pointing to a new `jeet-managers` skill, a path of its own so
   existing homes get it (the write-once templates reach them no other
   way); it is otherwise unchanged to the byte.
+- **P22** `jeet manager new <name>` (`manager.create`) is planned and
+  made as a child (P11) of kind manager, under the assistant for the user
+  and the assistant, under itself for a manager, or under `--parent`; a
+  node's `--parent` has `task new`'s scope row (itself or a manager below
+  it). `--max-children` (at least 1, at most `[managers] max_children`)
+  is stored on the row. `--brief-file` has no column of its own (§2's
+  `brief TEXT` is not added): its text follows `--goal` in the brief's
+  goal, or is the goal without one, so it is checked, kept, fenced and
+  shown with it. The command prints the manager's slug, tree path and
+  parent to stderr and its home on stdout (without changing directory, as
+  `task new` asks the shell to), then starts it with
+  `manager::first_prompt` through the start gate as `task new --prompt`
+  does (one function, `commands::task::start_new`): started, queued over
+  `max_live` with its parent told, or held under a paused parent with the
+  prompt in its inbox. A start that fails keeps the manager, says it was
+  made but its agent did not start, and exits 1 (M35). A child's name
+  (whatever makes it under a parent: `task new --parent`, `manager new`,
+  a review task made for the assistant) is refused when it holds a control
+  character, whitespace other than a space, `<` or `>`: the assistant's
+  summary lists names, and a manager now writes them. A top-level task's
+  name is unchanged. 2-ib's test pinning `manager new` as no command is
+  gone; a worker running it is refused as for `task new`.
 
 ## 11. Placement
 

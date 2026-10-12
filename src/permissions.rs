@@ -129,8 +129,7 @@ pub const CAPABILITIES: &[Capability] = &[
         "install or remove the background GitHub watcher",
         &["jeet watch install", "jeet watch uninstall"],
     ),
-    // `jeet manager new` is listed here once it lands.
-    cap("manager.create", "make managers", &[]),
+    cap("manager.create", "make managers", &["jeet manager new"]),
     cap(
         "manager.grant",
         "change what tasks under it may do and spend",
@@ -598,6 +597,10 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         },
         Commands::Task { command } => task_gate(command),
         Commands::Manager { command } => match command {
+            ManagerCommands::New { name, .. } => needs(
+                "manager.create",
+                format!("created manager {name} and started its agent"),
+            ),
             // Each checks who asks and shows only what it may see.
             ManagerCommands::Ls { .. } | ManagerCommands::Show { .. } => Gate::Free,
             // Starts only what is queued already, each through the same
@@ -1159,6 +1162,7 @@ pub enum Verb {
     TaskDelete,
     TaskResync,
     TaskNew,
+    ManagerNew,
     ManagerShow,
     ManagerGrant,
     ManagerBudget,
@@ -1200,6 +1204,7 @@ impl Verb {
             Verb::TaskDelete => "task delete",
             Verb::TaskResync => "task resync",
             Verb::TaskNew => "task new",
+            Verb::ManagerNew => "manager new",
             Verb::ManagerShow => "manager show",
             Verb::ManagerGrant => "manager grant",
             Verb::ManagerBudget => "manager budget",
@@ -1220,7 +1225,7 @@ impl Verb {
             | Verb::TaskUnarchive
             | Verb::TaskDelete
             | Verb::TaskResync => Reach::Below,
-            Verb::TaskNew => Reach::Parent,
+            Verb::TaskNew | Verb::ManagerNew => Reach::Parent,
             Verb::ManagerShow
             | Verb::ManagerGrant
             | Verb::ManagerBudget
@@ -1315,6 +1320,10 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             ),
         },
         Commands::Manager { command } => match command {
+            ManagerCommands::New { delegation, .. } => verb(
+                Verb::ManagerNew,
+                Target::Parent(delegation.parent.clone()),
+            ),
             ManagerCommands::Ls { .. } => Some(Scope::Listed),
             ManagerCommands::Show { name, .. } => verb(Verb::ManagerShow, key(name)),
             ManagerCommands::Grant { name, .. } => verb(Verb::ManagerGrant, key(name)),
@@ -1357,14 +1366,16 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
         Reach::OwnOrBelow => own || below,
         Reach::Below | Reach::Tree => below,
         Reach::Parent if own && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet task new`: a task with a parent cannot make tasks \
+            "task {} may not run `jeet {}`: a task with a parent cannot make tasks \
              unless it is a manager; {ASK}",
-            node.slug
+            node.slug,
+            verb.name()
         ),
         Reach::Parent if below && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet task new` under task {}: only a manager has tasks \
+            "task {} may not run `jeet {}` under task {}: only a manager has tasks \
              under it; {ASK}",
             node.slug,
+            verb.name(),
             target.slug
         ),
         Reach::Parent => own || below,
@@ -2147,6 +2158,10 @@ mod tests {
             (Verb::TaskDelete, line(&["task", "delete", "{}"])),
             (Verb::TaskResync, line(&["task", "resync", "{}"])),
             (Verb::TaskNew, line(&["task", "new", "x", "--parent", "{}"])),
+            (
+                Verb::ManagerNew,
+                line(&["manager", "new", "x", "--parent", "{}"]),
+            ),
             (Verb::ManagerShow, line(&["manager", "show", "{}"])),
             (
                 Verb::ManagerGrant,
@@ -2208,7 +2223,9 @@ mod tests {
         let in_reach = |verb: Verb, caller: &str, target: &str| {
             let target = match target {
                 // Delete and `--parent` take a task named exactly.
-                "fix" if matches!(verb, Verb::TaskDelete | Verb::TaskNew) => return false,
+                "fix" if matches!(verb, Verb::TaskDelete | Verb::TaskNew | Verb::ManagerNew) => {
+                    return false
+                }
                 "fix" if caller == "m" => "fix-a",
                 "fix" if caller == "s" => "fix-b",
                 "fix" => return false,
@@ -2233,7 +2250,7 @@ mod tests {
                 | Verb::ManagerPause
                 | Verb::ManagerResume
                 | Verb::ManagerStop => below,
-                Verb::TaskNew => (own || below) && manager(target),
+                Verb::TaskNew | Verb::ManagerNew => (own || below) && manager(target),
             }
         };
         for caller in ["m", "wk", "s"] {
@@ -2280,14 +2297,17 @@ mod tests {
         node_of(&app, &row("m"), &["task", "new", "x"], false).unwrap();
 
         // The user and the assistant reach any task, but the `jeet manager`
-        // verbs only a task under the assistant.
+        // verbs (but `new`) only a task under the assistant.
         for caller in [Caller::User, Caller::Root] {
             for target in targets {
                 for (verb, args) in verbs(target) {
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     let result = run_as(&app, &caller, &args, false);
                     let tree_node = !["assistant", "top", "fix"].contains(&target);
-                    let manager_verb = verb.name().starts_with("manager ");
+                    // `manager new` names a parent, which may be the
+                    // assistant; whether it may have one is for the command.
+                    let manager_verb =
+                        verb.name().starts_with("manager ") && verb != Verb::ManagerNew;
                     match !manager_verb || tree_node {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
@@ -2557,6 +2577,7 @@ mod tests {
             (&["task", "prs"], true),
             (&["task", "last", "x"], true),
             (&["task", "resync", "x"], true),
+            (&["manager", "new", "x"], true),
             (&["manager", "ls"], true),
             (&["manager", "show", "x"], true),
             (&["manager", "grant", "x", "--none"], true),

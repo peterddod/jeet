@@ -207,6 +207,20 @@ fn run(command: Option<Commands>) -> Result<()> {
         Commands::Manager { command } => {
             let app = context::App::open()?;
             match command {
+                ManagerCommands::New {
+                    name,
+                    delegation,
+                    brief_file,
+                    max_children,
+                } => commands::manager::new(
+                    &app,
+                    &commands::manager::NewManager {
+                        name: &name,
+                        delegation: &delegation,
+                        brief_file: brief_file.as_deref(),
+                        max_children,
+                    },
+                )?,
                 ManagerCommands::Ls { json } => commands::manager::ls(&app, json)?,
                 ManagerCommands::Show { name, json } => commands::manager::show(&app, &name, json)?,
                 ManagerCommands::Grant { name, caps, none } => {

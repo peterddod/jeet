@@ -1,17 +1,21 @@
 //! `jeet manager …`: the tree under the assistant, and what each task in it
 //! may do.
 //!
-//! `ls` and `show` are reads, free to every caller, but each checks who
-//! asks itself: a task with a parent sees only itself and the tasks below
-//! it. `grant` and `budget` are gated by `manager.grant`, `pause`, `resume`
-//! and `stop` by `manager.stop`, and each is scoped before it runs
-//! (`permissions`). `drain`, hidden, starts what is queued already.
+//! `new` is gated by `manager.create`. `ls` and `show` are reads, free to
+//! every caller, but each checks who asks itself: a task with a parent
+//! sees only itself and the tasks below it. `grant` and `budget` are gated
+//! by `manager.grant`, `pause`, `resume` and `stop` by `manager.stop`, and
+//! each is scoped before it runs (`permissions`). `drain`, hidden, starts
+//! what is queued already.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::cli::Delegation;
+use crate::commands::task::{start_new, warn_all};
 use crate::context::App;
 use crate::db::tasks::{
     ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState,
@@ -21,7 +25,76 @@ use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::runtime;
+use crate::tasks::{self, NewTask};
 use crate::tmux;
+
+/// What `jeet manager new` was given.
+pub struct NewManager<'a> {
+    pub name: &'a str,
+    pub delegation: &'a Delegation,
+    pub brief_file: Option<&'a Path>,
+    pub max_children: Option<u32>,
+}
+
+/// Make a manager under its parent (the assistant, unless `--parent` says)
+/// and start its agent (M35): through the start gate, so it may be queued
+/// on `[managers] max_live` or held by a paused parent. Its brief is its
+/// `BRIEF.md` and its session context; its first prompt only points there.
+/// A start that fails leaves it made and is an error.
+pub fn new(app: &App, args: &NewManager) -> Result<()> {
+    let mut d = args.delegation.clone();
+    if let Some(path) = args.brief_file {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        if text.trim().is_empty() {
+            bail!("--brief-file: {} is empty", path.display());
+        }
+        // Stored with the goal, so it is fenced, kept and shown with it.
+        d.goal = Some(match d.goal.take() {
+            Some(goal) => format!("{}\n\n{}", goal.trim_end(), text.trim()),
+            None => text,
+        });
+    }
+    let caller = permissions::caller(app)?;
+    let plan = tasks::plan_child(
+        app,
+        &caller,
+        TaskKind::Manager,
+        args.name,
+        &d,
+        args.max_children,
+    )?;
+    let created = tasks::create(
+        app,
+        &NewTask {
+            name: args.name,
+            project: None,
+            repos: &[],
+            branch: None,
+            child: Some((&caller, &plan)),
+        },
+    )?;
+    warn_all(&created.warnings);
+    let task = created.task;
+    let dir = tasks::task_dir(app, &task);
+    eprintln!(
+        "jeet: manager {} ({}) -> {}",
+        task.slug,
+        manager::fence::fenced(&manager::tree_path(app, &task)?),
+        dir.display()
+    );
+    if let Some(parent) = &task.parent_id {
+        if let Some(parent) = app.db.get_task(parent)? {
+            eprintln!(
+                "jeet: manager {} reports to {}",
+                task.slug,
+                manager::label(&parent)
+            );
+        }
+    }
+    println!("{}", dir.display());
+    start_new(app, &task, &manager::first_prompt(app, &task)?)
+}
 
 /// One task in `jeet manager ls`.
 #[derive(Debug, Serialize)]

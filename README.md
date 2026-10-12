@@ -93,6 +93,7 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+jeet manager new api --goal "Ship the v2 API" --budget 4h  # a manager under it, started
 jeet manager ls                          # the tree under it; show, grant, budget <task> …
 jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
@@ -733,6 +734,26 @@ lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
 pauses it at once. Both write a manager's `BRIEF.md` again.
 
+```bash
+jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
+  --brief-file brief.md --allow task.create,task.send --budget 6h --max-children 4
+```
+
+`jeet manager new` (`manager.create`) makes a manager and starts its agent.
+It goes under the assistant, or under `--parent` (a manager by its exact
+name); made by a manager, it goes under that manager. `--goal`, `--done`,
+`--allow` and `--budget` work as on `task new`, but an unasked grant is
+`[managers] manager_default` and an unasked budget `[managers]
+default_budget`; `--brief-file` adds a longer brief after the goal, and
+`--max-children` lowers `[managers] max_children` for it. A manager sits at
+most `max_depth` − 1 below the assistant, and needs a harness with hooks,
+continue-turn output, `interrupt_keys` and deny rules (Claude Code has them
+all). It prints its home and its place in the tree, then starts it as any
+start is: now, queued over `max_live`, or held while its parent is paused.
+If its agent cannot start, the manager is kept and the command fails.
+A task made under a parent, by anyone, may not have a control character,
+a line break, `<` or `>` in its name: other agents read it.
+
 A manager's home is a task directory with a manager's role in place of
 the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your
 subtree; worktrees are read-only; the limits are cooperative), the
@@ -1278,8 +1299,8 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
-(`jeet manager grant` and `budget`) and `manager.stop` (`jeet manager
-pause`, `resume` and `stop`). Nothing is
+(`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`)
+and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
@@ -1287,8 +1308,8 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
-assistant`; `--parent` also takes a manager by its exact name, once
-managers can be made) is gated more narrowly. It is granted `worktree.add`
+assistant`; `--parent` also takes a manager by its exact name) is gated
+more narrowly. It is granted `worktree.add`
 when made (`[managers] worker_default`, or what `--allow` names), and may
 use what its grant names only while the assistant may too: add
 `worktree.add` to `[assistant] allow` to let such tasks add worktrees.

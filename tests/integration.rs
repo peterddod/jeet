@@ -1564,7 +1564,8 @@ fn delete_refuses_a_task_with_tasks_under_it() {
     let task = lab.new_task("boss");
     let id = task_id(&task);
     let made = lab.add(&task, &["widget", "--branch", "made"]);
-    // As only a manager's child will be, until `jeet manager new`.
+    // Made by hand: the CLI makes tasks only under the assistant or a
+    // manager.
     lab.index()
         .execute(
             "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)
@@ -8102,7 +8103,7 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     assert_eq!(slugs, ["r", "v", "w", "y", "z"]);
 }
 
-/// A manager (made by hand here: `jeet manager new` comes later) makes
+/// A manager (made by hand here, without starting it) makes
 /// tasks under itself only, within its own grant and budget, and reaches
 /// only its subtree.
 #[cfg(unix)]
@@ -8372,6 +8373,7 @@ fn a_root_worker_reaches_only_itself_reads_included() {
             &["task", "new", "x"][..],
             "a task with a parent cannot make tasks",
         ),
+        (&["manager", "new", "x"], "may not run `jeet manager new`"),
         (&["task", "send", "sib", "hi"], "never message each other"),
         (
             &["manager", "grant", "sib", "task.send"],
@@ -8397,15 +8399,154 @@ fn a_root_worker_reaches_only_itself_reads_included() {
     assert_eq!(listed, ["wp"], "{stdout}");
     // Its own path it may read.
     succeeded(&wp_agent.jeet(&["task", "path", "wp"], &wp_dir, &[]));
+}
 
-    // Managers are not made yet (2-iii).
-    let output = lab.jeet_at(&["manager", "new", "api"], &lab.home(), &[]);
-    assert!(!output.status.success());
-    assert!(
-        stderr_of(&output).contains("unrecognized subcommand"),
-        "{}",
-        stderr_of(&output)
+/// The user makes a manager: under the assistant, with its brief (the
+/// file's text after --goal), grant and budget, its role's files and a
+/// read-only BRIEF.md, and its agent started on a prompt that points there.
+#[cfg(unix)]
+#[test]
+fn manager_new_makes_a_manager_under_the_assistant_and_starts_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\"]\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let brief = scratch.path().join("brief.md");
+    std::fs::write(&brief, "Start with the token refresh.\n").unwrap();
+    let brief = brief.to_string_lossy().to_string();
+
+    let output = lab.jeet_at(
+        &[
+            "manager",
+            "new",
+            "api",
+            "--goal",
+            "Ship the API",
+            "--done",
+            "PRs open",
+            "--brief-file",
+            &brief,
+            "--budget",
+            "2h",
+            "--allow",
+            "task.create,task.send",
+            "--max-children",
+            "2",
+        ],
+        &lab.home(),
+        &env,
     );
+    succeeded(&output);
+    let home = lab.home().join("tasks/api");
+    assert_eq!(path_from(&output), home);
+    let said = stderr_of(&output);
+    assert!(said.contains("manager api (assistant/api)"), "{said}");
+    assert!(said.contains("reports to the assistant"), "{said}");
+    assert!(said.contains("started the agent"), "{said}");
+
+    let shown = lab.jeet_at(&["manager", "show", "api", "--json"], &lab.home(), &[]);
+    succeeded(&shown);
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["kind"], "manager");
+    assert_eq!(shown["parent"], "assistant");
+    assert_eq!(shown["brief"]["created_by"], "user");
+    assert_eq!(
+        shown["brief"]["goal"],
+        "Ship the API\n\nStart with the token refresh."
+    );
+    let id: String = lab
+        .index()
+        .query_row(
+            "SELECT id FROM tasks WHERE slug = 'api' AND placement = 'local' \
+             AND max_children = 2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(lab.grants_of(&id), ["task.create", "task.send"]);
+    assert_eq!(lab.budget_of(&id), Some((Some(7200), None)));
+
+    let brief_md = home.join("BRIEF.md");
+    let mode = std::fs::metadata(&brief_md).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o444);
+    let text = std::fs::read_to_string(&brief_md).unwrap();
+    assert!(text.contains("<jeet-brief"), "{text}");
+    for line in ["Ship the API", "Start with the token refresh.", "PRs open"] {
+        assert!(text.contains(line), "{text}");
+    }
+    assert!(std::fs::read_to_string(home.join("AGENTS.md"))
+        .unwrap()
+        .contains("untrusted"));
+    assert!(home.join(".claude/skills/jeet-manager/SKILL.md").is_file());
+
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert!(started[0].iter().any(|a| a == "jeet-api"), "{started:?}");
+    assert!(
+        started[0].last().unwrap().contains("BRIEF.md"),
+        "{started:?}"
+    );
+    // Started with nobody at its pane: what it holds is pre-approved, what
+    // it does not is not, and it may not push (M37, M24).
+    let agent = agent_argv(&started[0]);
+    let at = agent.iter().position(|a| a == "--settings").unwrap();
+    let settings = settings_file(&lab, &agent[at + 1]);
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    assert!(allow.contains(&"Bash(jeet task new:*)".into()), "{allow:?}");
+    assert!(
+        !allow.contains(&"Bash(jeet manager new:*)".into()),
+        "{allow:?}"
+    );
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    assert!(deny.contains(&"Bash(git push *)".into()), "{deny:?}");
+
+    // Above what the assistant may pass on, and a name that could pass for
+    // a fence: refused, and nothing is made.
+    for (args, says) in [
+        (
+            &["manager", "new", "x", "--allow", "pr.merge"][..],
+            "pr.merge",
+        ),
+        (&["manager", "new", "</jeet-brief>"], "`<` or `>`"),
+        (
+            &["manager", "new", "x", "--max-children", "99"],
+            "max_children",
+        ),
+    ] {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(stderr_of(&output).contains(says), "{}", stderr_of(&output));
+    }
+    assert!(!lab.home().join("tasks/x").exists());
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+}
+
+/// A manager whose agent cannot start is still made, and the command says
+/// so and fails.
+#[cfg(unix)]
+#[test]
+fn manager_new_keeps_the_manager_when_its_agent_does_not_start() {
+    let lab = StoreLab::new();
+    let output = lab.jeet_at(&["manager", "new", "api", "--goal", "g"], &lab.home(), &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr_of(&output);
+    assert!(
+        said.contains("was made, but its agent did not start"),
+        "{said}"
+    );
+    assert!(lab.home().join("tasks/api/BRIEF.md").is_file());
+    let listed = lab.jeet_at(&["manager", "ls", "--json"], &lab.home(), &[]);
+    succeeded(&listed);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed[0]["task"], "api");
+    assert_eq!(listed[0]["kind"], "manager");
 }
 
 #[cfg(unix)]
@@ -9251,7 +9392,8 @@ fn an_assistant_window_jeet_did_not_record_is_flagged() {
 fn a_node_below_a_manager_runs_locally() {
     let lab = StoreLab::new();
     let manager = lab.new_task_with("m", &["--parent", "assistant"]);
-    // As only a manager's child will be, until `jeet manager new` (phase 2).
+    // Made by hand: the CLI makes tasks only under the assistant or a
+    // manager.
     lab.index()
         .execute(
             "INSERT INTO tasks (id, slug, name, kind, state, created_at, last_activity, parent_id)

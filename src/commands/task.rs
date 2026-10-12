@@ -96,35 +96,43 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     }
     println!("{}", dir.display());
     cd::request(&dir)?;
-    let Some(prompt) = prompt else {
-        return Ok(());
-    };
+    match prompt {
+        Some(prompt) => start_new(app, &created.task, &prompt),
+        None => Ok(()),
+    }
+}
+
+/// Start the agent of `task`, made a moment ago, with `prompt`: now, or,
+/// queued on `[managers] max_live` or held by a paused or stopped manager
+/// above it, with the prompt waiting in its inbox for the start. A start
+/// that fails leaves the task made and is an error.
+pub(crate) fn start_new(app: &App, task: &TaskRecord, prompt: &str) -> Result<()> {
     // A brief its agent could never start with is not left waiting for a
     // held or queued start.
-    if let Some(why) = runtime::first_prompt_refusal(app, &created.task) {
+    if let Some(why) = runtime::first_prompt_refusal(app, task) {
         bail!(
             "task {} was made, but its agent did not start: {why}",
-            created.task.name
+            task.name
         );
     }
     // Its inbox, then the start lock (M22): a brief queued on `max_live` is
     // in the inbox before a drain can start the agent with it.
-    let inbox = Inbox::lock(&dir)?;
+    let inbox = Inbox::lock(&tasks::task_dir(app, task))?;
     // Under a paused or stopped manager: its brief waits in its inbox, and
     // its start for the resume.
     let held = |holder: &TaskRecord| -> Result<()> {
-        inbox.push_to(&prompt, None)?;
-        app.db.queue_start(&created.task.id, now_secs())?;
+        inbox.push_to(prompt, None)?;
+        app.db.queue_start(&task.id, now_secs())?;
         eprintln!(
             "jeet: not started: {}; it starts with its brief then",
-            run::held_refusal(&created.task, holder)
+            run::held_refusal(task, holder)
         );
         Ok(())
     };
-    if let Some((holder, _)) = run::hold(app, &created.task)? {
+    if let Some((holder, _)) = run::hold(app, task)? {
         return held(&holder);
     }
-    match runtime::ensure_running(app, &created.task, None, Some(&prompt), Admission::Gate) {
+    match runtime::ensure_running(app, task, None, Some(prompt), Admission::Gate) {
         Ok(running) => {
             warn_all(&running.warnings);
             match running.started {
@@ -135,14 +143,14 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
                 Started::AlreadyRunning => eprintln!(
                     "jeet: an agent was already running in tmux session {}, so it was not \
                      given the brief; `jeet task send {}` sends it",
-                    running.tmux_session, created.task.slug
+                    running.tmux_session, task.slug
                 ),
                 Started::Queued { live, max, prompt } => {
                     if let Some(prompt) = prompt {
                         inbox.push_to(&prompt, None)?;
                     }
                     drop(inbox);
-                    run::report_queued(app, &created.task, live, max, i64::MAX);
+                    run::report_queued(app, task, live, max, i64::MAX);
                     eprintln!(
                         "jeet: queued (tasks in the tree running: {live}/{max}, [managers] \
                          max_live); the agent starts with its brief when one ends"
@@ -151,13 +159,13 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => match run::hold(app, &created.task)? {
+        Err(e) => match run::hold(app, task)? {
             // Paused since it was asked above, before the start gate asked
             // again: held the same way.
             Some((holder, _)) => held(&holder),
             None => bail!(
                 "task {} was made, but its agent did not start: {e:#}",
-                created.task.name
+                task.name
             ),
         },
     }
@@ -1156,7 +1164,7 @@ pub fn standing_in(dir: &std::path::Path) -> bool {
     cwd.starts_with(dir)
 }
 
-fn warn_all(warnings: &[String]) {
+pub(crate) fn warn_all(warnings: &[String]) {
     for warning in warnings {
         eprintln!("jeet: {warning}");
     }

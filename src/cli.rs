@@ -362,11 +362,11 @@ pub enum TaskCommands {
 }
 
 /// Where a new task sits in the tree, and what it is asked and allowed.
-#[derive(Args, Default)]
+#[derive(Args, Clone, Default)]
 pub struct Delegation {
     /// The task it reports to: `assistant`, or a manager by its exact name.
     /// Made by the assistant, a task reports to it without this; made by a
-    /// manager, to that manager
+    /// manager, to that manager; a manager the user makes, to the assistant
     #[arg(long, add = ArgValueCandidates::new(parent_candidates))]
     pub parent: Option<String>,
     /// What its parent wants of it, shown to its agent as each session
@@ -377,7 +377,8 @@ pub struct Delegation {
     #[arg(long = "done", allow_hyphen_values = true)]
     pub done_when: Option<String>,
     /// What it may do (comma-separated capabilities), within what its
-    /// parent holds; default `[managers] worker_default`
+    /// parent holds; default `[managers] worker_default`, or
+    /// `manager_default` for a manager
     #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
     pub allow: Option<Vec<String>>,
     /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
@@ -388,6 +389,22 @@ pub struct Delegation {
 
 #[derive(Subcommand)]
 pub enum ManagerCommands {
+    /// Make a manager and start its agent: under the assistant, or under
+    /// --parent; it reads its brief and delegates to tasks below it
+    New {
+        name: String,
+        #[command(flatten)]
+        delegation: Delegation,
+        /// A longer brief, read from this file: it follows --goal in the
+        /// manager's brief (or, with no --goal, is its goal)
+        #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+        brief_file: Option<std::path::PathBuf>,
+        /// How many active tasks it may have under it at once; at most
+        /// `[managers] max_children`, its default
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        max_children: Option<u32>,
+    },
+
     /// The tree under the assistant
     Ls {
         /// Print JSON

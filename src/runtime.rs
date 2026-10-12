@@ -892,7 +892,11 @@ mod tests {
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
             home,
         };
-        app.config.assistant.allow = vec!["task.create".into(), "task.send".into()];
+        app.config.assistant.allow = vec![
+            "task.create".into(),
+            "task.send".into(),
+            "manager.create".into(),
+        ];
         let root = crate::assistant::ensure(&app).unwrap();
         let row = |slug: &str, kind| TaskRecord {
             id: format!("{slug}-id"),
@@ -904,14 +908,19 @@ mod tests {
         };
         let (api, worker) = (row("api", TaskKind::Manager), row("wk", TaskKind::Work));
         for (task, grant) in [
-            (&api, ["task.create", "task.delete"]),
-            (&worker, ["task.create", "task.send"]),
+            (&api, ["task.create", "task.delete", "manager.create"]),
+            (&worker, ["task.create", "task.send", "manager.create"]),
         ] {
             app.db.insert_task(task).unwrap();
             app.db.set_grants(&task.id, &grant).unwrap();
         }
         let hooks = task_hooks(&app, &api, "/bin/jeet".into()).unwrap();
-        for allowed in ["jeet task new", "jeet report", "jeet manager show"] {
+        for allowed in [
+            "jeet task new",
+            "jeet manager new",
+            "jeet report",
+            "jeet manager show",
+        ] {
             assert!(
                 hooks.allow.contains(&allowed.to_string()),
                 "{:?}",

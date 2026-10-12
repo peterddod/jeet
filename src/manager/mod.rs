@@ -151,8 +151,6 @@ pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
 /// What manager `node` is started with (M35): where it sits, and to read
 /// its brief. The brief itself is in `BRIEF.md` and its session context,
 /// not on its command line.
-// `jeet manager new` is its caller once it lands.
-#[allow(dead_code)]
 pub fn first_prompt(app: &App, node: &TaskRecord) -> Result<String> {
     Ok(format!(
         "You are manager `{}`. Read BRIEF.md, then plan and delegate.",
