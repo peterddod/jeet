@@ -517,6 +517,9 @@ open         +3      -1 #131    Fix the flaky clone test                        
 ```
 
 Without `gh` there is nothing to ask, and the history is what was recorded.
+Run by an agent (the assistant or a task's), the table comes inside
+`<github-data untrusted="true">…</github-data>`, with `<` and `>` in a
+title shown as `‹` and `›`: a title is whatever its author typed.
 
 ### The agent
 
@@ -752,7 +755,9 @@ name); made by a manager, it goes under that manager. `--goal`, `--done`,
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
-`--max-children` lowers `[managers] max_children` for it. A manager sits at
+`--max-children` lowers `[managers] max_children` for it. A manager is
+not made without `--goal` or `--brief-file`: its brief is all it works
+towards. A manager sits at
 most `max_depth` − 1 below the assistant, and needs a harness with hooks,
 continue-turn output, `interrupt_keys` and deny rules (Claude Code has them
 all), and is not started on one configured since that lacks them. It prints its home and its place in the tree, then starts it as any

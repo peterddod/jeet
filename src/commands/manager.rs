@@ -78,6 +78,11 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         &d,
         args.max_children,
     )?;
+    // A worker has its prompt; a manager has only its brief to work
+    // towards, so it is not made without one.
+    if d.goal.is_none() {
+        bail!("a manager needs --goal or --brief-file: it is what it works towards");
+    }
     let created = tasks::create(
         app,
         &NewTask {

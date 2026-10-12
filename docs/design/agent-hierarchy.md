@@ -1289,9 +1289,11 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `.` or `..` segment, a control or invisible character, `<`, `>` or `\`
   (`remote::parse_remote_url`), so a clone stays under the store and its
   id prints as itself; and, since owners may nest, `clone_into_store`
-  refuses a trunk inside or above an indexed repository's trunk (compared
-  case-folded), so a clone cannot plant `.cargo/` or the like in another
-  checkout.
+  refuses a trunk inside or above an indexed repository's store trunk
+  (compared case-folded), so a clone cannot plant `.cargo/` or the like in
+  another checkout; a trunk registered in place before tasks (outside the
+  store, maybe above it) is not compared, so it blocks no clone, its own
+  `jeet import` included.
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`
@@ -1626,7 +1628,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `brief TEXT` is not added): its text follows `--goal` in the brief's
   goal, or is the goal without one, so it is checked, kept, fenced and
   shown with it (the two together at most a message's 8,000 bytes, refused
-  as `--brief-file`'s when over). The file is a regular file, read no
+  as `--brief-file`'s when over). One of the two is required: a manager's
+  brief is all it works towards, so one without a goal is refused before
+  anything is made. The file is a regular file, read no
   further than that limit; named by an agent (the root or a node), it must
   resolve inside that agent's own home, links followed, since its
   `manager new` is pre-approved and `manager show` hands the brief back.
@@ -1654,7 +1658,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   under a manager. A manager's summary introduces its queued messages as
   its own: what its parent or the user sent with `task send` is queued
   unfenced and is their instruction; whatever is fenced (jeet-report,
-  github-event, jeet-message) is a claim or data, never instructions.
+  github-event, github-data, jeet-message) is a claim or data, never
+  instructions. `task prs` run by an agent lists a task's PRs inside
+  `<github-data untrusted>`, titles unable to close it, as the root's
+  summary lists them.
   `jeet watch` sends an event for a pull request to the worker that owns
   it, never to a manager that came to have it recorded (say by checking
   out a worker's head to read it): routing events to managers is phase 4.
