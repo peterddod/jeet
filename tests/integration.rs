@@ -10055,6 +10055,15 @@ fn archiving_a_worker_whose_agent_died_mid_turn_charges_nothing() {
     assert_eq!(used_mid_turn(&["task", "archive", "w", "--force"], true), 0);
 }
 
+/// Nor does interrupting it, or pausing it, though tmux would take keys
+/// sent to its dead pane: its stale status is no turn to charge.
+#[cfg(unix)]
+#[test]
+fn interrupting_a_worker_whose_agent_died_mid_turn_charges_nothing() {
+    assert_eq!(used_mid_turn(&["task", "interrupt", "w"], true), 0);
+    assert_eq!(used_mid_turn(&["manager", "pause", "w"], true), 0);
+}
+
 /// Run `args` on worker `w`, under the assistant with an hour's budget, ten
 /// minutes into a turn no sweep has charged, and check it was charged: to
 /// `w`, or to its parent once `w` is deleted.
@@ -10114,7 +10123,9 @@ fn used_mid_turn(args: &[&str], agent_dead: bool) -> i64 {
     let output = lab.jeet_at(args, &lab.home(), &env);
     succeeded(&output);
     let said = stderr_of(&output);
-    assert!(!said.contains("not working"), "{said}");
+    if !agent_dead {
+        assert!(!said.contains("not working"), "{said}");
+    }
     lab.index()
         .query_row(
             "SELECT COALESCE(SUM(used_secs), 0) FROM task_budgets WHERE task_id IN (?1, ?2)",
@@ -10576,6 +10587,54 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     assert!(d_start.contains(&"jeet-d".to_string()), "{d_start:?}");
     assert!(d_start.iter().any(|arg| arg.contains("go")), "{d_start:?}");
     drop(b_agent);
+}
+
+/// A manager opening its own child waits on `max_live` as the assistant
+/// does (M22): only the user's open starts one past it.
+#[cfg(unix)]
+#[test]
+fn a_managers_open_of_its_child_waits_on_max_live() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.open\"]\nnotify = false\n[managers]\nmax_live = 1\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    // a takes the one slot.
+    let a = lab.new_task_with("a", &["--parent", "assistant"]);
+    let _a_agent = session_pane(&lab, &tmux, "a", &a);
+    succeeded(&lab.jeet_at(&["task", "open", "a"], &lab.home(), &env));
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    index
+        .execute(
+            "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, 'task.open')",
+            [&m],
+        )
+        .unwrap();
+    let c = lab.new_task_with("c", &["--parent", "m"]);
+    let m_dir = lab.home().join("tasks/m");
+    let mut mp = lab.task_pane("m");
+
+    let output = mp.jeet(&["task", "open", "c"], &m_dir, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("queued (tasks in the tree running: 1/1"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!stub.join("alive/jeet-c").exists());
+    assert_eq!(lab.start_queue(), [c.as_str()]);
 }
 
 /// A start a hold queued, which then waits on `max_live` once resumed, is

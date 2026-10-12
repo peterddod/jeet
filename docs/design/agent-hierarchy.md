@@ -1360,7 +1360,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `task_budgets.warned` alone: 80% as a `budget` status report to the
   parent and a note in the task's inbox; 100% pauses the task with the
   `budget` setter, which leaves anyone else's pause or stop as it is, and
-  is reported to the parent for a task above the one charged (the charged
+  is reported to the parent for a task above the one charged, unless that
+  task is stopped, itself or above, as a stop's own charge may use it up (the charged
   node's own Stop hook reports it, when the check newly holds it: its own
   budget used up, or one above while nothing held it already, so a node
   its own budget paused is not reported blocked again when its parent's
@@ -1444,12 +1445,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   parent told `blocked: budget` from the hook itself, with no `jeet`
   spawned. The Stop hook and `idle_prompt` read the hold again once they
   hold the inbox lock, before handing anything over, so a pause written
-  in between, whose walk interrupts under that lock, holds them too. How far a session's time is charged is kept beside its status
+  in between, whose walk interrupts under that lock, holds them too, and
+  a resume written in between, which reads each agent's activity under
+  that lock to hand over what queued, leaves it to them. How far a session's time is charged is kept beside its status
   (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
   assistant's turns), a pause's interrupt and a stop, which each charge a
   spell still going, never charge the same time as the hook that ends it.
   A sweep, a stop, an archive and a delete charge only an agent whose own
-  pane is alive (`tmux::agent_alive`; a window the user opened keeps its
+  pane is alive, and an interrupt is sent to no other (so charges none) (`tmux::agent_alive`; a window the user opened keeps its
   session up but is no agent), and only a task in the tree (`fold_busy`
   charges no top-level task, as `task interrupt` would otherwise): one that
   died with no `Ended` (a crash, a reboot) leaves a status that still says

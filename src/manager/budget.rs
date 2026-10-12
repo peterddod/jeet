@@ -6,7 +6,7 @@
 use anyhow::{bail, Result};
 
 use crate::context::App;
-use crate::db::tasks::{BudgetRow, TaskRecord};
+use crate::db::tasks::{BudgetRow, RunState, TaskRecord};
 use crate::messages::Inbox;
 use crate::permissions::Caller;
 use crate::reports::{self, StatusEvent};
@@ -293,7 +293,9 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
             if task.id == node.id || !held_before {
                 crossed = crossed.max(Threshold::Hit100);
             }
-            if task.id != node.id {
+            // Not of one being stopped: a stop's own charge would report it
+            // paused, and a stopped node's end is not reported (M18).
+            if task.id != node.id && !stopped(app, task)? {
                 tell_parent(
                     app,
                     task,
@@ -317,6 +319,11 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
         }
     }
     Ok(crossed)
+}
+
+/// Whether `task` is stopped, itself or above.
+fn stopped(app: &App, task: &TaskRecord) -> Result<bool> {
+    Ok(app.db.effective_run_state(&task.id)?.0 == RunState::Stopped)
 }
 
 /// Tell `node`'s parent that a budget it counts toward is used up and it
@@ -592,6 +599,8 @@ mod tests {
             (m.run_state, m.run_state_by),
             (RunState::Stopped, Some(Setter::User))
         );
+        // Nor is m, being stopped, reported paused by its budget.
+        assert!(budget_reports(&app, "m").is_empty());
         // Nor a user's pause.
         app.db.set_run_state("m", RunState::Run, None).unwrap();
         app.db

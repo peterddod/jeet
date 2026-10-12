@@ -102,7 +102,8 @@ these reports are): a turn for each `Stopped`, and the time from the first
 `jeet watch` charges a long one as it goes, while its agent's pane is
 alive: an agent that died with no `Ended` is charged no more). A turn jeet
 ends with `interrupt_keys` (`jeet task interrupt`, `jeet manager pause`) is
-charged, and its status set idle, by jeet itself; one the user interrupts
+charged, while its agent's pane is alive, and its status set idle, by jeet
+itself; one the user interrupts
 stays charged until the harness's `Idle` or next `Stopped`, so a harness
 that maps no `Idle` charges it until its next turn ends. A harness
 with no `Stopped` event is charged no turns. A task that is paused

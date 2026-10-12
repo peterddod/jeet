@@ -687,6 +687,12 @@ fn interrupt_tmux(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if !interruptible(&activity) {
         return Ok(Interrupted::NotWorking(activity));
     }
+    // A session kept up by a window the user opened, its agent's pane dead
+    // (`remain-on-exit`): keys sent there would "succeed", and the crashed
+    // agent's stale status be charged as a turn.
+    if !tmux::agent_alive(&name) {
+        return Ok(Interrupted::NotWorking(Activity::NotRunning));
+    }
     let dir = tasks::task_dir(app, task);
     let current = status::current_status(&dir);
     if at_startup(current.as_ref(), status::launched_at(&dir)) {

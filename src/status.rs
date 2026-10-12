@@ -722,23 +722,23 @@ fn report_step(
     Ok(())
 }
 
-/// Whether the hook's task is held: as [`HookCtx::hold`] read it, or as its
-/// row says now. Asked again under the task's inbox lock, before handing
-/// anything over: a pause written since `ctx` was made interrupts the task
-/// under that same lock, so it either holds this event or comes after it.
+/// Whether the hook's task is held, as its row says now, or as
+/// [`HookCtx::hold`] read it if the row cannot be read. Asked again under
+/// the task's inbox lock, before handing anything over: a pause written
+/// since `ctx` was made interrupts the task under that same lock, so it
+/// either holds this event or comes after it; and a resume since has
+/// written its row, and hands over under that lock only what it sees
+/// typed in, so what queued is handed over here.
 fn held_now(ctx: &HookCtx) -> bool {
-    if ctx.hold.is_some() {
-        return true;
-    }
     match &ctx.task {
         Some(task) if task.parent_id.is_some() => match run::hold(&ctx.app, task) {
             Ok(hold) => hold.is_some(),
             Err(e) => {
                 eprintln!("jeet task-hook: {e:#}");
-                false
+                ctx.hold.is_some()
             }
         },
-        _ => false,
+        _ => ctx.hold.is_some(),
     }
 }
 
@@ -1340,6 +1340,31 @@ mod tests {
         let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
         assert!(ctx.attributed);
         assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_resume_since_the_hook_began_is_asked_again_under_the_inbox_lock() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (_home, app) = lab();
+        app.db
+            .set_run_state("w", RunState::Paused, Some(&crate::db::tasks::Setter::User))
+            .unwrap();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(ctx.hold, Some(RunState::Paused));
+        // Resumed after the hook read its hold, while its status still said
+        // running: the resume left what queued to this hook.
+        ctx.app.db.set_run_state("w", RunState::Run, None).unwrap();
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("more")));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

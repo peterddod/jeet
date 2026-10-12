@@ -205,7 +205,8 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
 
 /// Charge `node` the turn jeet just interrupted: it ends with no Stop hook
 /// to charge it, or to report a charge that uses its budget up, so that is
-/// done and told here. Its status is the caller's to close.
+/// done and told here. Its status is the caller's to close. Only for an
+/// interrupt `Sent`, which needs the agent's own pane alive.
 pub fn charge_interrupted(app: &App, node: &TaskRecord) {
     match status::fold_busy(app, node, true, now_secs()) {
         Ok(Threshold::Hit100) => budget::report_blocked(app, node),
@@ -295,19 +296,21 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
             continue;
         }
         let agent = TmuxAgent::new(app, &node);
-        // As a delivery would type it in: to an idle agent, or to a running
-        // one with no hooks to queue for.
-        let activity = runtime::activity(app, &node, true);
-        if messages::route(&activity, agent.has_hooks()) != Route::Type {
-            continue;
-        }
-        // Asked again under its inbox lock: a pause since, whose walk takes
-        // that lock, holds it.
-        let handed =
-            Inbox::lock(&tasks::task_dir(app, &node)).and_then(|inbox| match hold(app, &node)? {
-                Some(_) => Ok(false),
-                None => messages::hand_over_queue(&inbox, &agent),
-            });
+        // Under its inbox lock: a pause since, whose walk takes that lock,
+        // holds it; and a Stop hook that read it held before the resume
+        // has written its status by then, so its turn's end is seen here.
+        let handed = Inbox::lock(&tasks::task_dir(app, &node)).and_then(|inbox| {
+            if hold(app, &node)?.is_some() {
+                return Ok(false);
+            }
+            // As a delivery would type it in: to an idle agent, or to a
+            // running one with no hooks to queue for.
+            let activity = runtime::activity(app, &node, true);
+            if messages::route(&activity, agent.has_hooks()) != Route::Type {
+                return Ok(false);
+            }
+            messages::hand_over_queue(&inbox, &agent)
+        });
         match handed {
             Ok(true) => outcomes.push(NodeOutcome::new(&node, "handed what queued while held")),
             Ok(false) => {}
