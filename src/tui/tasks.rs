@@ -103,6 +103,9 @@ pub struct TaskRow {
     pub size: Option<u64>,
     /// What a task with a parent last told it, or jeet did for it.
     pub report: Option<TaskReportRecord>,
+    /// A review task's review job state files: a job still running is
+    /// shown as its agent running.
+    pub review_jobs: Vec<PathBuf>,
 }
 
 impl TaskRow {
@@ -596,9 +599,15 @@ pub enum Action {
         repo_id: String,
         number: u64,
     },
-    /// `v`: a review task's PR in the review viewer.
+    /// `v`: the task's PR in the review viewer.
     ReviewViewer {
         task_id: String,
+    },
+    /// `v` in the PRs panel: that PR in the review viewer.
+    ViewPr {
+        task_id: String,
+        repo_id: String,
+        number: u64,
     },
     NewTaskForm {
         project: Option<String>,
@@ -1514,6 +1523,11 @@ impl TasksUi {
                             number: pr.number,
                         })
                     }
+                    KeyCode::Char('v') => prs.get(selected).map(|pr| Action::ViewPr {
+                        task_id: task_id.clone(),
+                        repo_id: pr.repo_id.clone(),
+                        number: pr.number,
+                    }),
                     code => {
                         selected = list_move(code, selected, prs.len());
                         None
@@ -1838,6 +1852,7 @@ pub struct Probe {
     pub session: String,
     pub touched: i64,
     pub active: bool,
+    pub review_jobs: Vec<PathBuf>,
 }
 
 /// The background threads: their inboxes, and the one channel they all
@@ -1904,6 +1919,7 @@ impl Background {
                 session: runtime::session_name(&row.task),
                 touched: row.task.last_activity,
                 active: row.task.state == TaskState::Active,
+                review_jobs: row.review_jobs.clone(),
             })
             .collect();
         let _ = self.probes.send(probes);
@@ -1940,9 +1956,12 @@ fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Sender<Update>) {
 pub fn probe_status(probe: &Probe, tmux_ok: bool) -> Update {
     Update::Status {
         id: probe.id.clone(),
-        activity: probe
-            .active
-            .then(|| runtime::activity_at(&probe.dir, &probe.session, tmux_ok)),
+        activity: probe.active.then(|| {
+            crate::review::with_job(
+                runtime::activity_at(&probe.dir, &probe.session, tmux_ok),
+                &probe.review_jobs,
+            )
+        }),
         last_activity: runtime::last_activity_at(&probe.dir, probe.touched),
     }
 }
@@ -2431,6 +2450,11 @@ impl Screen<'_> {
                 }
             }
             Action::ReviewViewer { task_id } => self.review_viewer(&task_id)?,
+            Action::ViewPr {
+                task_id,
+                repo_id,
+                number,
+            } => self.view_pr(&task_id, &repo_id, number)?,
             Action::NewTaskForm { project } => {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
@@ -2830,7 +2854,18 @@ impl Screen<'_> {
         // Before any picker: without tmux there is nothing to pick for.
         tmux::require()?;
         let name = runtime::session_name(&task);
-        if session.is_none() && !(tmux::has_session(&name) && tmux::pane_alive(&name)) {
+        let live = tmux::has_session(&name) && tmux::pane_alive(&name);
+        if !live {
+            if let Some(job) = crate::review::running_job(app, &task) {
+                self.ui.message(
+                    "review running",
+                    vec![crate::review::running_refusal(&task, &job)],
+                    None,
+                );
+                return Ok(());
+            }
+        }
+        if session.is_none() && !live {
             let spec = AgentSpec::from_config(&app.config)?;
             if spec.supports_sessions() {
                 let sessions = session_choices(app, &task, &row.dir)?;
@@ -2935,36 +2970,87 @@ impl Screen<'_> {
         Ok(())
     }
 
-    /// `v`: a review task's PR in the review viewer.
+    /// `v`: the task's PR in the review viewer: a review task's own, else
+    /// the one open PR recorded for it, else the PRs panel to pick from.
     fn review_viewer(&mut self, task_id: &str) -> Result<()> {
         let Some(row) = self.ui.row(task_id).cloned() else {
             return Ok(());
         };
-        if row.task.kind != TaskKind::Review {
-            self.ui.set_status(format!(
-                "{} is not a review task; `jeet review <pr>` makes one",
-                row.task.name
-            ));
-            return Ok(());
+        if row.task.kind == TaskKind::Review {
+            let Some((path, number)) = row
+                .worktrees
+                .iter()
+                .filter_map(|wt| Some((row.dir.join(&wt.dir_name), wt.pr_number?)))
+                .find(|(path, _)| path.is_dir())
+            else {
+                self.ui.set_status(format!(
+                    "{} has no checkout of its pull request on disk",
+                    row.task.name
+                ));
+                return Ok(());
+            };
+            return self.view_pr_at(&path, number);
         }
-        let Some((path, number)) = row
-            .worktrees
-            .iter()
-            .filter_map(|wt| Some((row.dir.join(&wt.dir_name), wt.pr_number?)))
-            .find(|(path, _)| path.is_dir())
-        else {
-            self.ui.set_status(format!(
-                "{} has no checkout of its pull request on disk",
-                row.task.name
-            ));
+        let prs = self.app.db.list_task_prs(&row.task.id)?;
+        match pr_to_view(&prs) {
+            PrToView::One(pr) => {
+                let (repo_id, number) = (pr.repo_id.clone(), pr.number);
+                self.view_pr(task_id, &repo_id, number)
+            }
+            PrToView::None => {
+                self.ui.set_status(format!(
+                    "{} has no pull request jeet knows of; p looks for them",
+                    row.task.name
+                ));
+                Ok(())
+            }
+            PrToView::Pick => {
+                self.prs(task_id)?;
+                self.ui.set_status("v views the selected pull request");
+                Ok(())
+            }
+        }
+    }
+
+    /// The task's PR `number` of `repo_id` in the review viewer, read from
+    /// a checkout of the task's of that repository — the PR's own when it
+    /// has one — else from the repository's trunk: the viewer asks GitHub
+    /// for the diff, so any checkout of the repository will do.
+    fn view_pr(&mut self, task_id: &str, repo_id: &str, number: u64) -> Result<()> {
+        let Some(row) = self.ui.row(task_id).cloned() else {
             return Ok(());
         };
+        let mut checkouts: Vec<_> = row
+            .worktrees
+            .iter()
+            .filter(|wt| wt.repo_id == repo_id)
+            .collect();
+        checkouts.sort_by_key(|wt| wt.pr_number != Some(number));
+        let path = match checkouts
+            .iter()
+            .map(|wt| row.dir.join(&wt.dir_name))
+            .find(|path| path.is_dir())
+        {
+            Some(path) => path,
+            None => match self.app.db.get_repo(repo_id)? {
+                Some(repo) => PathBuf::from(&repo.trunk_path),
+                None => {
+                    self.ui
+                        .set_status(format!("{repo_id} is no longer in the store"));
+                    return Ok(());
+                }
+            },
+        };
+        self.view_pr_at(&path, number)
+    }
+
+    fn view_pr_at(&mut self, path: &Path, number: u64) -> Result<()> {
         let pr = self
             .progress(&format!("reading #{number}"), || {
-                github::pr_view(&path, number)
+                github::pr_view(path, number)
             })
             .and_then(|inner| inner)?;
-        let outcome = super::review::view(self.terminal, &path, &pr)?;
+        let outcome = super::review::view(self.terminal, path, &pr)?;
         if outcome.exit == super::review::Exit::Quit {
             self.ui.quit(Exit::Stay);
         }
@@ -3091,10 +3177,31 @@ fn load_rows(app: &App) -> Result<Vec<TaskRow>> {
                     Some(_) => app.db.last_report(&task.id)?,
                     None => None,
                 },
+                review_jobs: crate::review::state_files_of_task(app, &task),
                 task,
             })
         })
         .collect()
+}
+
+/// Which of a task's PRs `v` shows.
+#[derive(Debug, PartialEq, Eq)]
+enum PrToView<'a> {
+    /// Its one open PR, or the only one it has.
+    One(&'a TaskPrRecord),
+    None,
+    /// Several: the PRs panel, to pick one.
+    Pick,
+}
+
+fn pr_to_view(prs: &[TaskPrRecord]) -> PrToView<'_> {
+    let mut open = prs.iter().filter(|pr| pr.state == "OPEN");
+    match (open.next(), open.next(), prs) {
+        (Some(pr), None, _) => PrToView::One(pr),
+        (None, _, [pr]) => PrToView::One(pr),
+        (None, _, []) => PrToView::None,
+        _ => PrToView::Pick,
+    }
 }
 
 /// The task's sessions for the picker, newest first.
@@ -3103,6 +3210,8 @@ pub(crate) fn session_choices(
     task: &TaskRecord,
     dir: &Path,
 ) -> Result<Vec<SessionChoice>> {
+    // A review's sessions, filed under its worktree, are listed too.
+    crate::review::adopt_sessions(app, task);
     let mut choices: Vec<SessionChoice> = app
         .db
         .list_task_sessions(&task.id)?
@@ -3205,6 +3314,38 @@ fn with_warnings(what: String, warnings: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pr_in(number: u64, state: &str) -> TaskPrRecord {
+        TaskPrRecord {
+            task_id: "t".into(),
+            repo_id: "github.com/acme/api".into(),
+            number,
+            title: String::new(),
+            url: String::new(),
+            state: state.into(),
+            is_draft: false,
+            additions: 0,
+            deletions: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn v_views_the_one_open_pr_else_asks() {
+        assert_eq!(pr_to_view(&[]), PrToView::None);
+        let merged = [pr_in(1, "MERGED")];
+        assert_eq!(pr_to_view(&merged), PrToView::One(&merged[0]));
+        let one_open = [pr_in(1, "MERGED"), pr_in(2, "OPEN")];
+        assert_eq!(pr_to_view(&one_open), PrToView::One(&one_open[1]));
+        assert_eq!(
+            pr_to_view(&[pr_in(1, "OPEN"), pr_in(2, "OPEN")]),
+            PrToView::Pick
+        );
+        assert_eq!(
+            pr_to_view(&[pr_in(1, "MERGED"), pr_in(2, "CLOSED")]),
+            PrToView::Pick
+        );
+    }
     use crate::db::tasks::{RunState, TaskKind};
 
     #[test]
@@ -3242,6 +3383,7 @@ mod tests {
             last_activity: last,
             size: None,
             report: None,
+            review_jobs: Vec::new(),
         }
     }
 
@@ -3876,6 +4018,7 @@ mod tests {
             session: "jeet-x".into(),
             touched: 77,
             active: false,
+            review_jobs: Vec::new(),
         };
         assert_eq!(
             probe_status(&probe, false),

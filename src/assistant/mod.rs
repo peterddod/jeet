@@ -665,10 +665,11 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
         .collect();
     active.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     for (at, t) in &active {
+        let worktrees = app.db.list_task_worktrees(&t.id)?;
         task_lines.push(TaskLine {
             slug: t.slug.clone(),
-            name: t.name.clone(),
-            status: runtime::activity(app, t, tmux_ok).label(),
+            name: tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone()),
+            status: runtime::shown_activity(app, t, tmux_ok).label(),
             active: agent::age_label(*at),
         });
         if t.parent_id.as_deref() == Some(task.id.as_str()) && children.len() < MAX_TASKS {

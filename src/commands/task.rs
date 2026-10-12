@@ -375,7 +375,7 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     for (at, task) in list {
         let rows = app.db.list_task_worktrees(&task.id)?;
         let status = match task.state {
-            TaskState::Active => runtime::activity(app, &task, tmux_ok).label(),
+            TaskState::Active => runtime::shown_activity(app, &task, tmux_ok).label(),
             TaskState::Archived => "archived".to_string(),
         };
         let status = shown_status(&caller, &status);
@@ -384,13 +384,14 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             TaskKind::Manager => " (manager)",
             _ => "",
         };
+        // A review says so, and which PR it is of.
+        let name = tasks::review_label(&task, &rows).unwrap_or(task.name);
         println!(
-            "{:<28} {:<28} {:<10} {:<24} {}{kind}",
+            "{:<28} {:<28} {:<10} {:<24} {name}{kind}",
             task.slug,
             tasks::worktree_summary(&rows),
             agent::age_label(at),
             status,
-            task.name
         );
     }
     Ok(())
@@ -422,6 +423,12 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         Caller::User => Admission::Bypass,
         Caller::Root | Caller::Node(_) => Admission::Gate,
     };
+    let name = runtime::session_name(&task);
+    if !(tmux::has_session(&name) && tmux::pane_alive(&name)) {
+        if let Some(job) = crate::review::running_job(app, &task) {
+            bail!(crate::review::running_refusal(&task, &job));
+        }
+    }
     let running = runtime::ensure_running(app, &task, session, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
@@ -677,12 +684,17 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     let from = fence_for(app, &caller, &task)?;
     let dir = tasks::task_dir(app, &task);
     let status = match task.state {
-        TaskState::Active => runtime::activity(app, &task, tmux::available()).label(),
+        TaskState::Active => runtime::shown_activity(app, &task, tmux::available()).label(),
         TaskState::Archived => "archived".to_string(),
     };
     let harness = AgentSpec::from_config(&app.config)?.harness;
+    // A review's session is filed under its worktree until picked up.
+    crate::review::adopt_sessions(app, &task);
     let known = app.db.list_task_sessions(&task.id)?;
     let Some(session) = runtime::latest_session(&dir, &known) else {
+        if let Some(job) = crate::review::running_job(app, &task) {
+            bail!(crate::review::running_refusal(&task, &job));
+        }
         bail!("task {}'s agent has no session yet", task.name);
     };
     let Some(turn) = harness.last_messages(&dir, &session, count) else {
