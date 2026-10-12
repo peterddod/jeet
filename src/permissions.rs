@@ -772,11 +772,22 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
 pub fn may_clone(app: &App, url: &str) -> Result<()> {
     let message = match caller(app)? {
         Caller::User => None,
-        Caller::Root => refusal(
-            "repo.clone",
-            &app.config.assistant.allow,
-            &config::config_path(&app.home),
-        ),
+        Caller::Root => {
+            let message = refusal(
+                "repo.clone",
+                &app.config.assistant.allow,
+                &config::config_path(&app.home),
+            );
+            // Logged as a refused `jeet clone` is ([`authorize_as`]).
+            if message.is_some() {
+                let log = actions_log(&app.home);
+                let tried = format!("cloned {url}");
+                if let Err(e) = append(&log, "repo.clone", &tried, Outcome::Denied, None) {
+                    eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+                }
+            }
+            message
+        }
         Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
             true => None,
             false => {
@@ -1306,6 +1317,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::StoreSync
         | Commands::TaskHook { .. }
         | Commands::TaskStartup { .. }
+        // Into the store, which no task owns: only with `repo.clone`.
+        | Commands::Clone { .. }
         | Commands::Tasks
         | Commands::Explore
         | Commands::Exec { .. }
@@ -2500,7 +2513,6 @@ mod tests {
             &["worktree", "ls", "--task", "sib"],
             &["worktree", "path", "r", "--task", "sib"],
             &["task", "new", "x"],
-            &["clone", "https://example.com/a/b"],
             &["sync"],
             &["review", "42"],
             &["projects", "new", "p"],
@@ -2543,6 +2555,8 @@ mod tests {
             &["task-hook", "Stop"],
             // Held, so only ever granted by name.
             &["pr", "merge", "42"],
+            // Into the store, as `worktree add` may clone.
+            &["clone", "https://example.com/a/b"],
         ];
         for args in allowed {
             node_of(&app, &w, args, false).unwrap_or_else(|e| panic!("{args:?}: {e}"));
@@ -2578,7 +2592,7 @@ mod tests {
         // One invocation of every command, and whether a task with a
         // parent may run it on something (listed in `node_scope`).
         let samples: &[(&[&str], bool)] = &[
-            (&["clone", "u"], false),
+            (&["clone", "u"], true),
             (&["import"], false),
             (&["ls"], true),
             (&["explore"], true),

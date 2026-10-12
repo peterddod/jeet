@@ -8106,7 +8106,8 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
 /// A repository the store lacks is cloned by `worktree add` or `task new
 /// --repo` only for a caller holding `repo.clone`, as `jeet clone` needs:
 /// neither a manager without it nor the assistant without it in `[assistant]
-/// allow` reaches the store that way.
+/// allow` reaches the store that way, and a manager holding it may also
+/// `jeet clone`.
 #[cfg(unix)]
 #[test]
 fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
@@ -8171,6 +8172,21 @@ fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
     assert!(stderr.contains("`[assistant] allow`"), "{stderr}");
     assert_eq!(repos(), 0);
     assert!(!lab.home().join("tasks/y").exists());
+    // Logged as a refused `jeet clone` would be.
+    let denied: Vec<_> = actions(&lab.home())
+        .into_iter()
+        .filter(|a| a["capability"] == "repo.clone")
+        .collect();
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    assert_eq!(denied[0]["outcome"], "denied");
+    assert_eq!(denied[0]["action"], format!("cloned {url}"));
+    // `jeet clone` itself is the same gate for a manager.
+    let gadget_url = "https://github.com/acme/gadget.git";
+    let output = mp.jeet(&["clone", gadget_url], &api_dir, &[]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("`repo.clone`"), "{stderr}");
+    assert_eq!(repos(), 0);
 
     // Held all the way up, it clones; the user needs nothing.
     config("\"task.create\", \"worktree.add\", \"repo.clone\"");
@@ -8182,8 +8198,8 @@ fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
         .unwrap();
     succeeded(&mp.jeet(&["worktree", "add", url], &api_dir, &[]));
     assert!(store.join("widget").is_dir());
-    let gadget = lab.new_task("g");
-    lab.add(&gadget, &["https://github.com/acme/gadget.git"]);
+    succeeded(&mp.jeet(&["clone", gadget_url], &api_dir, &[]));
+    assert!(store.join("gadget").is_dir());
     assert_eq!(repos(), 2);
 }
 
@@ -9480,11 +9496,45 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         assert!(!line.contains("SYSTEM"), "{who}: {line}");
         assert!(!line.contains("Note from sub"), "{who}: {line}");
     }
-    let output = mp.jeet(&["task", "last", &gx_slug], &api_dir, &env);
-    let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
-    assert!(said.contains(&gx_slug), "{said}");
-    assert!(!said.contains("Note from sub"), "{said}");
-    assert!(!said.contains("SYSTEM"), "{said}");
+    // `task last` on it, with a record to read, says neither either.
+    let project: String = gx_dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = claude.join("projects").join(project);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/transcripts/claude-code/finished.jsonl"),
+        transcripts.join(format!("{gx_session}.jsonl")),
+    )
+    .unwrap();
+    let claude_envs = [env[0], env[1], ("CLAUDE_CONFIG_DIR", claude_env.as_str())];
+    for (who, pane, dir) in [
+        ("api", &mut mp, &api_dir),
+        ("root", &mut root_pane, &root_dir),
+    ] {
+        let output = pane.jeet(&["task", "last", &gx_slug], dir, &claude_envs);
+        succeeded(&output);
+        let said = stdout_of(&output);
+        assert!(
+            said.starts_with(&format!("task:      {gx_slug} (running)\n")),
+            "{who}: {said}"
+        );
+        assert!(
+            said.contains("The cookie had no `Max-Age`"),
+            "{who}: {said}"
+        );
+        assert!(!said.contains("Note from sub"), "{who}: {said}");
+        assert!(!said.contains("SYSTEM"), "{who}: {said}");
+        let output = pane.jeet(&["task", "last", &gx_slug, "--json"], dir, &claude_envs);
+        succeeded(&output);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["task"], gx_slug.as_str(), "{who}: {value}");
+        assert_eq!(value["name"], serde_json::Value::Null, "{who}: {value}");
+        assert_eq!(value["status"], "running", "{who}: {value}");
+    }
     let output = mp.hook(
         &lab,
         Some(&api),

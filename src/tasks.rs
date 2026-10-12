@@ -71,7 +71,9 @@ worktrees inside this directory.
 - Get a repository: `cd "$(jeet worktree add <repo>)"`. It prints the new
   worktree's path and nothing else. `<repo>` is a name such as `api`, an
   `owner/repo`, or a clone URL; a repository jeet does not have yet is cloned
-  first. The worktree starts detached at the freshly fetched default branch.
+  first, if your task may clone (a task with a parent needs `repo.clone` in
+  its grant; without it, ask with `jeet report blocked "…"`). The worktree
+  starts detached at the freshly fetched default branch.
   - `--branch <name>` checks that branch out instead: an existing branch is
     reused, otherwise it is created from the default branch.
   - `--name <dir>` picks the directory name (default: the repository name).
@@ -3019,6 +3021,21 @@ mod tests {
             let err = plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None)
                 .unwrap_err();
             assert!(err.to_string().contains("name"), "{name:?}: {err:#}");
+        }
+        // Each invisible range on its own, refused as one.
+        for name in [
+            "fix login\u{e0100}\u{e01ef}",
+            "a\u{e0150}b",
+            "a\u{fe0f}b",
+            "a\u{200b}b",
+            "fix-login\u{e0049}",
+        ] {
+            let err = plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("would hide or reorder"),
+                "{name:?}: {err:#}"
+            );
         }
         let plan = plan_child(
             &app,
