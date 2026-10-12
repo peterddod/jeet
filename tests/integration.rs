@@ -8639,6 +8639,17 @@ fn manager_new_is_refused_on_a_harness_a_manager_cannot_run_on() {
         })
         .unwrap();
     assert_eq!(made, 0);
+    // Nor is the assistant it would have gone under made for it.
+    let roots: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE kind = 'assistant'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(roots, 0);
+    assert!(!lab.home().join("assistant").exists());
     assert!(calls_of(&tmux, "new-session").is_empty());
 
     // Made while Claude Code was configured (its agent not started, with no
@@ -9411,6 +9422,56 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "{context}"
     );
     assert!(!context.contains("SYSTEM"), "{context}");
+    // Nor does the root's next summary carry it; a task of the root's own
+    // keeps its detail there.
+    std::fs::write(stub.join("alive/jeet-sib"), "").unwrap();
+    let sib_dir = lab.home().join("tasks/sib");
+    let mut prompt: serde_json::Value = serde_json::from_str(&hook_input(
+        "UserPromptSubmit",
+        "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        &sib_dir,
+    ))
+    .unwrap();
+    prompt["prompt"] = "tidy the docs".into();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &prompt.to_string(),
+        &[("JEET_TASK_ID", sib.as_str())],
+    ));
+    let output = lab.hook(
+        "SessionStart",
+        &hook_input(
+            "SessionStart",
+            "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+            &root_dir,
+        ),
+        &[
+            ("JEET_ASSISTANT", "1"),
+            ("JEET_TASK_ID", root.as_str()),
+            ("JEET_TMUX", tmux_env.as_str()),
+        ],
+    );
+    succeeded(&output);
+    std::fs::remove_file(stub.join("alive/jeet-sib")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let line = context
+        .lines()
+        .find(|l| l.starts_with(&format!("- {gx_slug}: ")))
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(
+        line.starts_with(&format!("- {gx_slug}: running, active ")),
+        "{line}"
+    );
+    assert!(!context.contains("SYSTEM"), "{context}");
+    assert!(!context.contains("Note from sub"), "{context}");
+    let line = context
+        .lines()
+        .find(|l| l.starts_with("- sib (sib): "))
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(line.contains("tidy the docs"), "{line}");
     // Archived, unarchived and deleted by the root, it is still its slug.
     for args in [
         &["task", "archive", slug, "--force"][..],

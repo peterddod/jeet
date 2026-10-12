@@ -357,6 +357,12 @@ pub fn plan_child(
         );
     }
 
+    // Before the parent is resolved, which makes the assistant if the user's
+    // manager would be its first child: a harness that refuses managers
+    // leaves nothing behind.
+    if kind == TaskKind::Manager {
+        manager_harness(AgentSpec::from_config(&app.config)?.harness)?;
+    }
     let target = match (&d.parent, caller, kind) {
         // A manager the user makes goes under the assistant.
         (None, Caller::User, TaskKind::Manager) => {
@@ -405,9 +411,6 @@ pub fn plan_child(
     }
     let grant = permissions::check_grant(app, caller, &parent, kind, d.allow.as_deref(), &policy)?;
     let budget = child_budget(app, &parent, kind, d, &policy)?;
-    if kind == TaskKind::Manager {
-        manager_harness(AgentSpec::from_config(&app.config)?.harness)?;
-    }
 
     let created_by = match caller {
         Caller::User => "user".to_string(),
@@ -471,10 +474,27 @@ fn child_name(name: &str) -> Result<&str> {
     {
         bail!("a task's name may not contain {c:?}: keep it to one line of text");
     }
+    if let Some(c) = name.chars().find(|c| format_char(*c)) {
+        bail!("a task's name may not contain {c:?}: it would hide or reorder the text shown");
+    }
     if name.contains(['<', '>']) {
         bail!("a task's name may not contain `<` or `>`: they would read as a fence tag");
     }
     Ok(name)
+}
+
+/// Bidirectional controls and zero-width characters: printed, they reorder
+/// or hide the text around them, so a name could show as another.
+fn format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
 }
 
 /// A new child's budget: what `--budget` asks for, which must fit in what
@@ -2947,6 +2967,10 @@ mod tests {
             "a\u{2028}b",
             "a\u{1b}[2Jb",
             "a\tb",
+            "fix\u{202e}evil gol",
+            "a\u{2066}b",
+            "a\u{200b}b",
+            "a\u{feff}b",
             "  ",
         ] {
             let err = plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None)

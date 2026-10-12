@@ -1299,7 +1299,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   everyone without control characters. So does `jeet manager show`,
   for the children's reports and for the brief's goal and done-when, which
   a manager writes from what it has read. A task made under a parent has a
-  name of at most 100 characters on one line with no `<` or `>`, and the
+  name of at most 100 characters on one line with no `<` or `>` and no
+  bidirectional or zero-width character, and the
   root's summary lists a task whose parent is neither the root nor none by
   its slug alone: a manager may name it from text it read. `jeet task ls`
   (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
@@ -1626,10 +1627,15 @@ Managers run locally in tmux, as the user, like any other task (I22).
   made but its agent did not start, and exits 1 (M35). A child's name
   (whatever makes it under a parent: `task new --parent`, `manager new`,
   a review task made for the assistant) is refused when it holds a control
-  character, whitespace other than a space, `<` or `>`: the assistant's
-  summary lists names, and a manager now writes them. A top-level task's
-  name is unchanged. 2-ib's test pinning `manager new` as no command is
-  gone; a worker running it is refused as for `task new`.
+  character, whitespace other than a space, a bidirectional or zero-width
+  character, `<` or `>`: the assistant's summary lists names, the user's
+  `task ls` and TUI show them, and a manager now writes them. A top-level
+  task's name is unchanged. 2-ib's test pinning `manager new` as no command
+  is gone; a worker running it is refused as for `task new`. The TUI's
+  ` ↳ assistant` (D22) names a task's real parent: ` ↳ <slug>` for one
+  under a manager. A manager's summary introduces its queued messages as
+  its own: what its parent or the user sent with `task send` is queued
+  unfenced and is their instruction; only jeet-report is a claim.
 
 ## 11. Placement
 

@@ -449,7 +449,8 @@ jeet          # or `jeet tasks`
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-A task under the assistant shows ` ↳ assistant` after its name, and its last
+A task under the assistant shows ` ↳ assistant` after its name (a task under
+a manager, ` ↳ ` and that manager's slug), and its last
 report, dimmed, in what the name leaves of its column, before the worktrees
 (` · done: PR #12 is up`); a name that fills the column cuts the report short
 or hides it.
@@ -755,8 +756,9 @@ all), and is not started on one configured since that lacks them. It prints its 
 start is: now, queued over `max_live`, or held while its parent is paused.
 If its agent cannot start, the manager is kept and the command fails.
 A task made under a parent, by anyone, may not have a control character,
-a line break, `<` or `>` in its name, nor more than 100 characters: other
-agents read it. The assistant's session summary lists a task a manager
+a line break, a bidirectional or zero-width character, `<` or `>` in its
+name, nor more than 100 characters: other agents read it, and the user sees
+it. The assistant's session summary lists a task a manager
 made by its slug alone, since its name is that manager's text; `jeet task
 ls` and `jeet task last --json`, run by an agent, show only the names of
 tasks with no parent, made under the assistant, or made under itself
