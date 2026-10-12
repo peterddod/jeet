@@ -485,7 +485,8 @@ fn child_name(name: &str) -> Result<&str> {
 
 /// Bidirectional controls, zero-width and other invisible characters:
 /// every format character (Unicode's Cf, as of Unicode 16), the whole tag
-/// block, the combining grapheme joiner and the Hangul fillers. Printed,
+/// block, the combining grapheme joiner, the Hangul fillers and every
+/// variation selector (a run of them encodes any bytes). Printed,
 /// they reorder or hide the text around them, so a name could show as
 /// another, or carry text the user never sees but an agent reads.
 fn format_char(c: char) -> bool {
@@ -500,12 +501,13 @@ fn format_char(c: char) -> bool {
             | '\u{0890}'..='\u{0891}'
             | '\u{08e2}'
             | '\u{115f}'..='\u{1160}'
-            | '\u{180e}'
+            | '\u{180b}'..='\u{180f}'
             | '\u{200b}'..='\u{200f}'
             | '\u{202a}'..='\u{202e}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{206f}'
             | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}'
             | '\u{ffa0}'
             | '\u{fff9}'..='\u{fffb}'
@@ -515,6 +517,7 @@ fn format_char(c: char) -> bool {
             | '\u{1bca0}'..='\u{1bca3}'
             | '\u{1d173}'..='\u{1d17a}'
             | '\u{e0000}'..='\u{e007f}'
+            | '\u{e0100}'..='\u{e01ef}'
     )
 }
 
@@ -1270,12 +1273,17 @@ fn resolve_repo(app: &App, spec: &str) -> Result<RepoRecord> {
         if let Some(repo) = app.db.get_repo(&identity.id())? {
             return Ok(repo);
         }
+        permissions::may_clone(app, spec)?;
         return crate::commands::clone::clone_into_store(app, spec);
     }
     match remote::identity_from_id(spec) {
         Ok(id) if id.host.contains('.') => match app.db.get_repo(spec)? {
             Some(repo) => Ok(repo),
-            None => crate::commands::clone::clone_into_store(app, &format!("https://{spec}.git")),
+            None => {
+                let url = format!("https://{spec}.git");
+                permissions::may_clone(app, &url)?;
+                crate::commands::clone::clone_into_store(app, &url)
+            }
         },
         _ => resolve::resolve_repo_filter(&app.db, spec),
     }
@@ -3002,6 +3010,10 @@ mod tests {
             "a\u{180e}b",
             "a\u{034f}b",
             "a\u{fff9}hidden\u{fffb}b",
+            // Variation selectors, in a run, smuggle bytes the same way.
+            "fix login\u{fe00}\u{fe0f}\u{e0100}\u{e01ef}",
+            "a\u{180b}b",
+            "a\u{180f}b",
             "  ",
         ] {
             let err = plan_child(&app, &Caller::User, TaskKind::Work, name, &under("m"), None)

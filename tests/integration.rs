@@ -8103,6 +8103,90 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     assert_eq!(slugs, ["r", "v", "w", "y", "z"]);
 }
 
+/// A repository the store lacks is cloned by `worktree add` or `task new
+/// --repo` only for a caller holding `repo.clone`, as `jeet clone` needs:
+/// neither a manager without it nor the assistant without it in `[assistant]
+/// allow` reaches the store that way.
+#[cfg(unix)]
+#[test]
+fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
+    let lab = StoreLab::new();
+    lab.origin("widget");
+    lab.origin("gadget");
+    let config = |allow: &str| {
+        std::fs::write(
+            lab.home().join("config.toml"),
+            format!("scan_roots = []\n[assistant]\nnotify = false\nallow = [{allow}]\n"),
+        )
+        .unwrap();
+    };
+    config("\"task.create\", \"worktree.add\"");
+    let api = lab.new_task_with("api", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&api])
+        .unwrap();
+    for cap in ["task.create", "worktree.add"] {
+        index
+            .execute(
+                "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, ?2)",
+                [&api, cap],
+            )
+            .unwrap();
+    }
+    let repos = || -> i64 {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
+            .unwrap()
+    };
+    let store = lab.home().join("store/github.com/acme");
+    let api_dir = lab.home().join("tasks/api");
+    let mut mp = lab.task_pane("api");
+    let url = "https://github.com/acme/widget.git";
+    for args in [
+        &["worktree", "add", url][..],
+        &["worktree", "add", "github.com/acme/widget"],
+        &["task", "new", "x", "--repo", url],
+    ] {
+        let output = mp.jeet(args, &api_dir, &[]);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains("not in the store") && stderr.contains("`repo.clone`"),
+            "{args:?}: {stderr}"
+        );
+    }
+    assert_eq!(repos(), 0);
+    assert!(!store.join("widget").exists());
+    assert!(!lab.home().join("tasks/x").exists());
+
+    let mut root = lab.assistant_pane();
+    let output = root.jeet(
+        &["task", "new", "y", "--parent", "assistant", "--repo", url],
+        &lab.home(),
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("`[assistant] allow`"), "{stderr}");
+    assert_eq!(repos(), 0);
+    assert!(!lab.home().join("tasks/y").exists());
+
+    // Held all the way up, it clones; the user needs nothing.
+    config("\"task.create\", \"worktree.add\", \"repo.clone\"");
+    index
+        .execute(
+            "INSERT INTO task_grants (task_id, capability) VALUES (?1, 'repo.clone')",
+            [&api],
+        )
+        .unwrap();
+    succeeded(&mp.jeet(&["worktree", "add", url], &api_dir, &[]));
+    assert!(store.join("widget").is_dir());
+    let gadget = lab.new_task("g");
+    lab.add(&gadget, &["https://github.com/acme/gadget.git"]);
+    assert_eq!(repos(), 2);
+}
+
 /// A manager (made by hand here, without starting it) makes
 /// tasks under itself only, within its own grant and budget, and reaches
 /// only its subtree.

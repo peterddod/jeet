@@ -383,7 +383,8 @@ agent can `cd "$(jeet worktree add api)"`.
 `add` fetches the repository first, so a worktree starts from what origin has
 now; offline, it starts from the last fetch and says so. The repository can be
 a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
-is cloned into the store. Without `--branch` the worktree is detached at the
+is cloned into the store, which the assistant and a task with a parent may do
+only holding `repo.clone` (as for `jeet clone`; so too `jeet task new --repo`). Without `--branch` the worktree is detached at the
 default branch. With it, an existing local branch is checked out, a branch that
 exists only on origin is tracked, and anything else is created from the default
 branch. A branch already checked out elsewhere is refused, naming the task that
@@ -757,7 +758,7 @@ start is: now, queued over `max_live`, or held while its parent is paused.
 If its agent cannot start, the manager is kept and the command fails.
 A task made under a parent, by anyone, may not have a control character,
 a line break, a bidirectional, zero-width or other invisible format
-character (such as Unicode tag characters), `<` or `>` in its
+character (such as Unicode tag characters or variation selectors), `<` or `>` in its
 name, nor more than 100 characters: other agents read it, and the user sees
 it. The assistant's session summary lists a task a manager
 made by its slug alone, since its name is that manager's text; `jeet task

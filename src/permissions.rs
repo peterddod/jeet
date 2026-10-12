@@ -765,6 +765,38 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
     Some(message)
 }
 
+/// Check that the caller may clone `url` into the store, which `jeet
+/// worktree add` and `jeet task new --repo` do for a repository the store
+/// lacks: the same `repo.clone` that `jeet clone` needs, so no command
+/// reaches the store without it.
+pub fn may_clone(app: &App, url: &str) -> Result<()> {
+    let message = match caller(app)? {
+        Caller::User => None,
+        Caller::Root => refusal(
+            "repo.clone",
+            &app.config.assistant.allow,
+            &config::config_path(&app.home),
+        ),
+        Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
+            true => None,
+            false => {
+                let about = self::capability("repo.clone").map_or("do that", |c| c.about);
+                let cut = cut_by(app, &node, "repo.clone")?;
+                Some(node_refusal(
+                    &node.slug,
+                    about,
+                    "repo.clone",
+                    cut.as_deref(),
+                ))
+            }
+        },
+    };
+    match message {
+        None => Ok(()),
+        Some(message) => bail!("{url} is not in the store: {message}"),
+    }
+}
+
 /// The command prefixes the assistant's harness pre-approves: the read-only
 /// jeet commands, its own, and the commands, jeet's and others, of each
 /// allowed capability.

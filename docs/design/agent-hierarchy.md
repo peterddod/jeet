@@ -988,9 +988,11 @@ RFC left open, or departed from it:
   gets a warning that its agent is not stopped from force-pushing or
   merging, and only jeet's own commands are gated (§7, degrade, don't
   fail).
-- **E14** The manager refusal, `missing(h, &[Feature]) -> Vec<Feature>`
-  with `Feature::label` naming the piece ("deny rules", "interrupt"),
-  lands with phase 2's `manager new` (P12, P22); it has no caller in #32.
+- **E14** The manager refusal lands with phase 2's `manager new` (P12,
+  P22) as `harness::manager_missing(&dyn Harness) -> Vec<&'static str>`,
+  checked through `tasks::manager_harness`, naming "hook events",
+  "continue-turn output", "interrupt_keys" and "deny rules"; it has no
+  caller in #32.
 - **E15** Deny rules are a lint, not a gate (5.6). They cover only the
   agent's Bash and file tools, not MCP tools, `!` commands or scripts.
   Branch protection is the real control; #33 is the boundary.
@@ -1278,6 +1280,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   node's subtree, so a prefix cannot reach outside it; delete and
   `--parent` take exact names. A command the table leaves out is refused
   to every node, reads included (`worktree rm`, `projects`, `clone`, …).
+  `worktree add` and `task new --repo` naming a repository the store lacks
+  clone it only for a caller holding `repo.clone` (`permissions::may_clone`),
+  so neither reaches the store around `clone`'s gate.
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`
@@ -1630,7 +1635,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (whatever makes it under a parent: `task new --parent`, `manager new`,
   a review task made for the assistant) is refused when it holds a control
   character, whitespace other than a space, a bidirectional, zero-width
-  or other invisible format character (Unicode's Cf, the tag block),
+  or other invisible format character (Unicode's Cf, the tag block, the
+  variation selectors),
   `<` or `>`: the assistant's summary lists names, the user's
   `task ls` and TUI show them, and a manager now writes them. A top-level
   task's name is unchanged. 2-ib's test pinning `manager new` as no command
