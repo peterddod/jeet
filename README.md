@@ -78,6 +78,8 @@ jeet task open fix-login                 # the task's agent, in tmux (started if
 jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
 jeet task send fix-login "add tests too" # message the task's agent
 jeet task interrupt fix-login            # end the agent's current turn, keeping its session
+jeet task restart fix-login [--force]    # end the agent and resume its conversation in a new one
+jeet task adopt fix-login                # vouch for an agent an older jeet started (you, at a terminal)
 jeet task last fix-login [-n 3] [--json] # what the task's agent last said, and how its turn ended
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
@@ -645,6 +647,38 @@ harness that cannot be interrupted is refused. Under the assistant it needs
 interrupt that sent nothing is logged as `skipped`, with why, and not
 announced; a task with a parent may not interrupt another.
 
+### Restarting or adopting an agent
+
+```bash
+jeet task restart fix-login [--force]   # `assistant`: each of the assistant's windows
+jeet task adopt fix-login               # `assistant`: its windows jeet has no record of
+```
+
+`jeet task restart` ends the task's agent and starts it again in the same
+tmux session, resuming its latest session, so its conversation carries on
+with this jeet's hooks and settings. It is refused while the agent is
+mid-turn, waiting on you, starting up, or has text in its prompt you have
+not sent, unless you pass `--force`; and while the task is paused or
+stopped. Anything the agent left running in the background (subagents,
+workflows, `/loop` schedules) ends with it. `jeet task restart assistant`
+restarts each running assistant window, leaving busy ones alone (and
+failing, so you know) without `--force`; only you can restart the
+assistant. Under the assistant it needs `task.open`.
+
+jeet knows an agent by the process it launched for it ([who is
+calling](#reporting-to-the-assistant)). An agent started by an older jeet,
+or outside jeet, has no such record: `jeet task ls` marks it `(unanchored)`
+and says how to fix it, the tasks list shows `unanchored` beside its status
+(and the fix on the status line when it is selected), and its `jeet report`,
+`jeet worktree add` and the like are refused. Restart it when it is idle, or,
+to keep work in progress running, adopt it: `jeet task adopt <task>` shows
+you the process running in the task's agent pane and records it as the
+task's once you type the task's name back. Only you can adopt, from a
+terminal of your own: it is refused to the assistant and every task, and
+to anything running in a pane of jeet's tmux sessions, so an agent cannot
+vouch for itself or another. An adopted agent keeps the hooks it was started
+with, so its status reports to its parent may not work until it restarts.
+
 ### Reporting to the assistant
 
 ```bash
@@ -1032,10 +1066,25 @@ v0.8.1: the first steps toward [hierarchical agents](docs/design/agent-hierarchy
 
 **Upgrading to v0.8.1:** jeet migrates the index to schema v6 the first
 time it runs, and an older jeet refuses it after that (copy
-`$JEET_HOME/index.db` first if you may go back). Reopen running tasks (stop
-them and `jeet task open` again) and assistant windows (close them and
-`jeet chat`): agents started by an older jeet were never recorded, so their
-`jeet report` and `jeet worktree add` are refused.
+`$JEET_HOME/index.db` first if you may go back). Agents started by an older
+jeet were never recorded, so their `jeet report` and `jeet worktree add` are
+refused; `jeet task ls` marks them `(unanchored)`. Bring each onto the new
+jeet without losing its conversation: `jeet task restart <task>` once it is
+idle (and `jeet task restart assistant` for the assistant's windows), or,
+to leave work in progress running, `jeet task adopt <task>` (and `jeet task
+adopt assistant`) from a terminal outside jeet's tmux sessions, then restart
+it later for the new hooks.
+
+Unreleased, since v0.8.1:
+
+- `jeet task restart <task>` ends a task's agent and resumes its latest
+  session in a new one, keeping its conversation; refused while it is busy
+  unless `--force`. `jeet task restart assistant` does the same for the
+  assistant's windows.
+- `jeet task adopt <task>` lets you vouch, at a terminal, for an agent an
+  older jeet started, so its jeet commands work without a restart.
+- `jeet task ls` and the tasks list mark agents jeet has no record of as
+  unanchored, with the command that fixes it.
 
 ## What's new in v0.7
 
@@ -1268,11 +1317,16 @@ it. This stops mistakes and casual forging, not an agent that sets
 out to escape. Every agent, managers below the assistant included, runs
 locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
 
-**Upgrading to this version:** reopen running tasks (stop them and `jeet
-task open` again) and assistant windows (close them and `jeet chat`). Agents started by an older jeet were
-never recorded, so their `jeet report` and `jeet worktree add` are refused,
-and their hooks still write status but no longer report to the assistant.
-`jeet task open` on such a task warns instead of adopting it. After
+**Upgrading to this version:** agents started by an older jeet were never
+recorded, so their `jeet report` and `jeet worktree add` are refused, and
+their hooks still write status but no longer report to the assistant.
+`jeet task ls` marks them `(unanchored)`. Restart each once it is idle with
+`jeet task restart <task>` (`assistant` for the assistant's windows), which
+resumes its conversation; or adopt it with `jeet task adopt <task>` from a
+terminal outside jeet's tmux sessions to keep work in progress running, and
+restart it later for the new hooks ([Restarting or adopting an
+agent](#restarting-or-adopting-an-agent)). `jeet task open` on such a task
+warns instead of adopting it. After
 upgrading, an older jeet refuses the index.
 
 On a harness with deny rules (Claude Code), the assistant and every task

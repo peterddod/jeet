@@ -46,10 +46,12 @@ use super::term::{self, Tui};
 use crate::agent::{self, AgentSpec};
 use crate::assistant::{self, Open};
 use crate::commands::task::printable;
+use crate::config;
 use crate::context::App;
 use crate::db::tasks::{
     TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
 };
+use crate::db::Database;
 use crate::git;
 use crate::github;
 use crate::manager::run;
@@ -106,6 +108,9 @@ pub struct TaskRow {
     /// A review task's review job state files: a job still running is
     /// shown as its agent running.
     pub review_jobs: Vec<PathBuf>,
+    /// Its agent runs without jeet knowing its process, as the last poll
+    /// found ([`runtime::unanchored`]).
+    pub unanchored: bool,
 }
 
 impl TaskRow {
@@ -159,6 +164,7 @@ pub enum Update {
         id: String,
         activity: Option<Activity>,
         last_activity: i64,
+        unanchored: bool,
     },
     Size {
         id: String,
@@ -756,6 +762,7 @@ impl TasksUi {
                 if let Some(was) = old.iter().find(|o| o.task.id == row.task.id) {
                     if row.task.state == was.task.state {
                         row.activity = was.activity.clone();
+                        row.unanchored = was.unanchored;
                     }
                     row.size = was.size;
                     row.last_activity = row.last_activity.max(was.last_activity);
@@ -850,11 +857,13 @@ impl TasksUi {
                 id,
                 activity,
                 last_activity,
+                unanchored,
             } => {
                 let Some(row) = self.rows.iter_mut().find(|r| r.task.id == id) else {
                     return;
                 };
                 row.activity = activity;
+                row.unanchored = unanchored;
                 if last_activity > row.last_activity {
                     row.last_activity = last_activity;
                     self.resort(keep.as_deref());
@@ -1866,7 +1875,7 @@ struct Background {
 }
 
 impl Background {
-    fn start() -> Self {
+    fn start(home: &Path) -> Self {
         let (tx, updates) = mpsc::channel();
         let (probes, probe_rx) = mpsc::channel();
         let (sizes, size_rx) = mpsc::channel();
@@ -1875,9 +1884,10 @@ impl Background {
         let status_tx = tx.clone();
         let size_tx = tx.clone();
         let assistant_tx = tx.clone();
-        std::thread::spawn(move || poll_statuses(probe_rx, status_tx));
+        let (status_home, assistant_home) = (home.to_path_buf(), home.to_path_buf());
+        std::thread::spawn(move || poll_statuses(probe_rx, status_tx, &status_home));
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
-        std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx));
+        std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx, &assistant_home));
         std::thread::spawn(move || find_prs(pr_rx, tx));
         Background {
             probes,
@@ -1936,12 +1946,14 @@ impl Background {
 
 /// Read every task's agent status now and every [`POLL_EVERY`], and again at
 /// once whenever a new list of tasks arrives.
-fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Sender<Update>) {
+fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Sender<Update>, home: &Path) {
     let tmux_ok = tmux::available();
+    // Its own connection, for the anchors; without one, none is unanchored.
+    let db = open_index(home);
     let mut current: Vec<Probe> = Vec::new();
     loop {
         for probe in &current {
-            if tx.send(probe_status(probe, tmux_ok)).is_err() {
+            if tx.send(probe_status(probe, tmux_ok, db.as_ref())).is_err() {
                 return;
             }
         }
@@ -1953,7 +1965,14 @@ fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Sender<Update>) {
     }
 }
 
-pub fn probe_status(probe: &Probe, tmux_ok: bool) -> Update {
+/// A connection of a background thread's own to the index in `home`, if
+/// there is one: it never makes one.
+fn open_index(home: &Path) -> Option<Database> {
+    let path = config::index_path(home);
+    path.exists().then(|| Database::open(&path).ok()).flatten()
+}
+
+pub fn probe_status(probe: &Probe, tmux_ok: bool, db: Option<&Database>) -> Update {
     Update::Status {
         id: probe.id.clone(),
         activity: probe.active.then(|| {
@@ -1963,13 +1982,17 @@ pub fn probe_status(probe: &Probe, tmux_ok: bool) -> Update {
             )
         }),
         last_activity: runtime::last_activity_at(&probe.dir, probe.touched),
+        unanchored: probe.active
+            && tmux_ok
+            && db.is_some_and(|db| runtime::unanchored_in(db, &probe.id, &probe.session)),
     }
 }
 
 /// Look at the assistant now and every [`POLL_EVERY`], and again at once
 /// whenever a new probe arrives.
-fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>) {
+fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>, home: &Path) {
     let tmux_ok = tmux::available();
+    let db = open_index(home);
     let mut current: Option<assistant_info::Probe> = None;
     loop {
         if let Some(probe) = &current {
@@ -1977,7 +2000,10 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>) {
                 true => tmux::windows(assistant::TMUX_SESSION),
                 false => Vec::new(),
             };
-            let info = assistant_info::gather(probe, &windows);
+            let mut info = assistant_info::gather(probe, &windows);
+            if let (Some(db), Some(id)) = (&db, &probe.task_id) {
+                info.unanchored = assistant::unanchored_windows(db, id, &windows).len();
+            }
             if tx.send(Update::Assistant(Box::new(info))).is_err() {
                 return;
             }
@@ -2094,7 +2120,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         app,
         terminal: &mut terminal,
         ui: TasksUi::default(),
-        bg: Background::start(),
+        bg: Background::start(&app.home),
     };
     let result = screen.go(start);
     let exit = screen.ui.exit.take();
@@ -3173,6 +3199,7 @@ fn load_rows(app: &App) -> Result<Vec<TaskRow>> {
                 activity: None,
                 last_activity: task.last_activity,
                 size: None,
+                unanchored: false,
                 report: match task.parent_id {
                     Some(_) => app.db.last_report(&task.id)?,
                     None => None,
@@ -3384,6 +3411,7 @@ mod tests {
             size: None,
             report: None,
             review_jobs: Vec::new(),
+            unanchored: false,
         }
     }
 
@@ -3440,6 +3468,7 @@ mod tests {
             id: "a".into(),
             activity: Some(Activity::Running { detail: None }),
             last_activity: 99,
+            unanchored: false,
         });
         assert_eq!(shown(&ui), ["fix login", "api cleanup", "docs"]);
         assert_eq!(ui.selected_id(), Some("d"), "the cursor follows its task");
@@ -3448,6 +3477,7 @@ mod tests {
             id: "a".into(),
             activity: None,
             last_activity: 1,
+            unanchored: false,
         });
         assert_eq!(shown(&ui)[0], "fix login");
         ui.apply(Update::Size {
@@ -3468,11 +3498,13 @@ mod tests {
             id: "a".into(),
             activity: Some(Activity::Ended),
             last_activity: 5,
+            unanchored: true,
         });
         ui.set_rows(vec![task("a", "fix login", TaskState::Active, 10)]);
         let row = ui.row("a").unwrap();
         assert_eq!(row.size, Some(7));
         assert_eq!(row.activity, Some(Activity::Ended));
+        assert!(row.unanchored);
         // Archiving changes what the agent can be doing.
         ui.set_rows(vec![task("a", "fix login", TaskState::Archived, 10)]);
         assert_eq!(ui.row("a").unwrap().activity, None);
@@ -4021,18 +4053,19 @@ mod tests {
             review_jobs: Vec::new(),
         };
         assert_eq!(
-            probe_status(&probe, false),
+            probe_status(&probe, false, None),
             Update::Status {
                 id: "x".into(),
                 activity: None,
-                last_activity: 77
+                last_activity: 77,
+                unanchored: false
             }
         );
         let probe = Probe {
             active: true,
             ..probe
         };
-        match probe_status(&probe, false) {
+        match probe_status(&probe, false, None) {
             Update::Status { activity, .. } => assert_eq!(activity, Some(Activity::NotStarted)),
             other => panic!("{other:?}"),
         }
@@ -4042,7 +4075,7 @@ mod tests {
     fn the_background_threads_answer_and_stop_with_the_screen() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f"), [1u8; 9]).unwrap();
-        let bg = Background::start();
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
         let mut row = task("t", "t", TaskState::Archived, 3);
         row.dir = dir.path().to_path_buf();
         bg.watch(&[row]);
@@ -4162,7 +4195,7 @@ mod tests {
 
     #[test]
     fn the_pr_thread_answers_for_each_task() {
-        let bg = Background::start();
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
         bg.find_prs(vec![pr_history::Job {
             task_id: "t".into(),
             sources: Vec::new(),
@@ -4443,12 +4476,13 @@ mod tests {
         let dir = home.path().join("assistant");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("todo.md"), "- [ ] !p1 one\n").unwrap();
-        let bg = Background::start();
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
         bg.look_at_assistant(assistant_info::Probe {
             home: home.path().to_path_buf(),
             dir,
             records: Vec::new(),
             primary: None,
+            task_id: None,
         });
         loop {
             match bg.updates.recv_timeout(Duration::from_secs(10)).unwrap() {

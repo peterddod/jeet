@@ -1058,9 +1058,114 @@ fn pane_listed_alive(listing: &str, pane: &str) -> bool {
         .any(|l| l.split_whitespace().collect::<Vec<_>>() == [pane, "0"])
 }
 
+/// A pane whose program still runs, and what tmux says that program is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePane {
+    pub pane: Pane,
+    /// `#{pane_current_command}`: the program in the foreground there.
+    pub command: String,
+}
+
+const LIVE_PANE_FORMAT: &str = "#{pane_dead}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}";
+
+/// The pane of session `name` its agent runs in (see [`agent_pane`]),
+/// while its program runs.
+pub fn live_agent_pane(name: &str) -> Option<LivePane> {
+    let output = Command::new(binary())
+        .args(["display-message", "-p", "-t", &agent_pane(name)])
+        .arg(LIVE_PANE_FORMAT)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    parse_live_pane(String::from_utf8_lossy(&output.stdout).lines().next()?)
+}
+
+/// The first pane of window `id` (`@3`), the one [`new_window`] started
+/// its program in, while that program runs.
+pub fn live_window_pane(id: &str) -> Option<LivePane> {
+    let output = Command::new(binary())
+        .args(["list-panes", "-t", id, "-F", LIVE_PANE_FORMAT])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    parse_live_pane(String::from_utf8_lossy(&output.stdout).lines().next()?)
+}
+
+fn parse_live_pane(line: &str) -> Option<LivePane> {
+    let mut fields = line.trim_end_matches(['\n', '\r']).splitn(4, '\t');
+    if fields.next()? != "0" {
+        return None;
+    }
+    let pane = parse_pane(&[fields.next()?, fields.next()?]).ok()?;
+    Some(LivePane {
+        pane,
+        command: fields.next().unwrap_or_default().to_string(),
+    })
+}
+
+/// The processes tmux started in the live panes of jeet's sessions (those
+/// named [`SESSION_PREFIX`]…): every task's and the assistant's, and the
+/// windows the user opened in them.
+pub fn jeet_pane_pids() -> Vec<u32> {
+    let Ok(output) = Command::new(binary())
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_dead} #{pane_pid}",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_jeet_pane_pids(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
+    let ours: String = listing
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(session, _)| session.starts_with(SESSION_PREFIX))
+        .map(|(_, pane)| format!("{pane}\n"))
+        .collect();
+    parse_live_pane_pids(&ours)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_pane_is_read_with_its_program() {
+        assert_eq!(
+            parse_live_pane("0\t%3\t4242\tclaude\n"),
+            Some(LivePane {
+                pane: Pane {
+                    id: "%3".into(),
+                    pid: 4242
+                },
+                command: "claude".into()
+            })
+        );
+        assert_eq!(parse_live_pane("1\t%3\t4242\tclaude"), None);
+        assert_eq!(parse_live_pane("0\tx\t4242\tclaude"), None);
+        assert_eq!(parse_live_pane(""), None);
+    }
+
+    #[test]
+    fn only_the_live_panes_of_jeets_sessions_are_its() {
+        let listing = "jeet-api\t0 10\njeet-api\t1 11\nwork\t0 12\njeet-assistant\t0 13\n";
+        assert_eq!(parse_jeet_pane_pids(listing), vec![10, 13]);
+    }
 
     #[test]
     fn a_started_pane_is_read_with_its_process() {

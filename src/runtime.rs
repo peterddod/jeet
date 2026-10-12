@@ -311,8 +311,10 @@ fn already_running(
     if !anchors.iter().any(identity::live) {
         warnings.push(format!(
             "tmux session {name} was started by an older jeet or outside jeet, so jeet \
-             cannot confirm its agent is task {}'s; stop it and open the task again",
-            task.name
+             cannot confirm its agent is task {}'s and refuses its jeet commands; `jeet task \
+             restart {}` resumes it in a new one, or from a terminal outside jeet's tmux \
+             sessions, `jeet task adopt {}` vouches for it",
+            task.name, task.slug, task.slug
         ));
     }
     if let Some(id) = session {
@@ -750,6 +752,42 @@ pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the task's agent runs, in its tmux session, without jeet knowing
+/// its process: an older jeet started it, or something other than jeet.
+/// Its jeet commands that need to know who calls are refused, until it is
+/// restarted (`jeet task restart`) or adopted (`jeet task adopt`). Runs
+/// tmux, so it belongs where [`activity`] does.
+pub fn unanchored(app: &App, task: &TaskRecord) -> bool {
+    unanchored_in(&app.db, &task.id, &session_name(task))
+}
+
+/// [`unanchored`] for task `task_id`, whose tmux session is `session`. A
+/// lookup that fails says nothing.
+pub fn unanchored_in(db: &crate::db::Database, task_id: &str, session: &str) -> bool {
+    let Some(live) = tmux::live_agent_pane(session) else {
+        return false;
+    };
+    match db.task_anchors(task_id, AnchorKind::Pane) {
+        Ok(anchors) => !anchors
+            .iter()
+            .any(|a| a.pid == live.pane.pid && identity::live(a)),
+        Err(_) => false,
+    }
+}
+
+/// Why an agent doing `activity`, with unsent text in its prompt when
+/// `draft`, should not be ended now, if it should not: for a restart,
+/// which would cut off the turn, the question or what was typed.
+pub fn busy_reason(activity: &Activity, draft: bool) -> Option<String> {
+    match activity {
+        Activity::Running { .. } => Some(format!("is mid-turn ({})", activity.label())),
+        Activity::Waiting { .. } => Some(format!("waits on you ({})", activity.label())),
+        Activity::Starting => Some("is starting".to_string()),
+        _ if draft => Some("has text in its prompt that was not sent".to_string()),
+        _ => None,
+    }
+}
+
 /// What the task's agent is doing. Runs tmux and reads files, so it belongs
 /// on a background thread, not in a draw.
 pub fn activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
@@ -802,6 +840,19 @@ pub fn last_activity_at(dir: &Path, touched: i64) -> i64 {
 mod tests {
     use super::*;
     use crate::harness::Harness;
+
+    #[test]
+    fn a_restart_waits_for_a_turn_a_question_a_start_or_a_draft() {
+        let running = Activity::Running { detail: None };
+        let waiting = Activity::Waiting { detail: None };
+        for busy in [&running, &waiting, &Activity::Starting] {
+            assert!(busy_reason(busy, false).is_some(), "{busy:?}");
+        }
+        let idle = Activity::Idle { since: 0 };
+        assert_eq!(busy_reason(&idle, false), None);
+        assert_eq!(busy_reason(&Activity::Live, false), None);
+        assert!(busy_reason(&idle, true).is_some());
+    }
 
     #[test]
     fn the_assistant_is_pre_approved_what_it_is_allowed() {

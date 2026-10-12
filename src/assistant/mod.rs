@@ -265,17 +265,13 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
     {
         // Only a window jeet started is the assistant's: one from a jeet
         // before anchors has none, and every jeet command it runs is refused.
-        let pids = tmux::window_pane_pids(&window.id);
-        let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
         let mut warnings = Vec::new();
-        if !anchors
-            .iter()
-            .any(|a| pids.contains(&a.pid) && identity::live(a))
-        {
+        if !anchored(&app.db, &task.id, &window.id)? {
             warnings.push(
                 "the assistant's window was started by an older jeet or outside jeet, so jeet \
-                 cannot confirm it is the assistant and refuses its jeet commands; exit the \
-                 assistant there and run `jeet chat` again"
+                 cannot confirm it is the assistant and refuses its jeet commands; \
+                 `jeet task restart assistant` resumes it in a new one, or from a terminal \
+                 outside jeet's tmux sessions, `jeet task adopt assistant` vouches for it"
                     .to_string(),
             );
         }
@@ -333,6 +329,32 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         started: true,
         warnings,
     })
+}
+
+/// Whether a live process jeet started for the assistant `task_id` runs in
+/// window `window`'s panes.
+fn anchored(db: &crate::db::Database, task_id: &str, window: &str) -> Result<bool> {
+    let pids = tmux::window_pane_pids(window);
+    Ok(db
+        .task_anchors(task_id, AnchorKind::Pane)?
+        .iter()
+        .any(|a| pids.contains(&a.pid) && identity::live(a)))
+}
+
+/// Those of the assistant's `windows` whose program runs without jeet
+/// knowing its process (an older jeet started it): their jeet commands are
+/// refused until restarted or adopted. A lookup that fails says nothing.
+pub fn unanchored_windows(
+    db: &crate::db::Database,
+    task_id: &str,
+    windows: &[tmux::Window],
+) -> Vec<String> {
+    windows
+        .iter()
+        .filter(|w| w.alive)
+        .filter(|w| anchored(db, task_id, &w.id).is_ok_and(|known| !known))
+        .map(|w| w.id.clone())
+        .collect()
 }
 
 /// The agent's command line for session `id`: resumed or started under that

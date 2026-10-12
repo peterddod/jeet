@@ -5,13 +5,14 @@
 
 use std::io::{IsTerminal, Write};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::agent::{self, AgentSpec};
 use crate::assistant;
 use crate::cd;
 use crate::cli::Delegation;
 use crate::context::App;
+use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
 use crate::manager::run;
@@ -280,6 +281,311 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// End task `name`'s agent and resume its latest session in a new one, in
+/// the same tmux session: it keeps its conversation, and runs with this
+/// jeet's hooks and a record of its process. `assistant` restarts each of
+/// the assistant's running windows. Refused for an agent mid-turn, waiting
+/// on someone, starting, or holding text that was not sent, unless `force`.
+/// What it left running in the background ends with it.
+pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
+    if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
+        return restart_assistant(app, force);
+    }
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskOpen,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
+    if task.state == TaskState::Archived {
+        bail!(
+            "task {} is archived; `jeet task unarchive {}` first",
+            task.name,
+            task.slug
+        );
+    }
+    runtime::refuse_inside_session(&task, "restart")?;
+    let spec = AgentSpec::from_config(&app.config)?;
+    if !spec.supports_sessions() {
+        bail!(
+            "{} keeps no sessions jeet can resume, so a restart would lose task {}'s \
+             conversation; stop it and `jeet task open {}` if you want a fresh one",
+            spec.display(),
+            task.name,
+            task.slug
+        );
+    }
+    let tmux_session = runtime::session_name(&task);
+    if !(tmux::available() && tmux::agent_alive(&tmux_session)) {
+        bail!(
+            "task {}'s agent is not running; `jeet task open {}` starts it",
+            task.name,
+            task.slug
+        );
+    }
+    // Ended now, it would not start again until resumed.
+    if let Some((holder, _)) = run::hold(app, &task)? {
+        bail!(
+            "{}; resume it before restarting its agent",
+            run::held_refusal(&task, &holder)
+        );
+    }
+    if !force {
+        let activity = runtime::activity(app, &task, true);
+        let draft = spec
+            .harness
+            .has_draft(&tmux::capture_styled(&tmux_session).unwrap_or_default());
+        if let Some(why) = runtime::busy_reason(&activity, draft) {
+            bail!(
+                "task {}'s agent {why}, which a restart would cut off; wait for it, or pass \
+                 --force",
+                task.name
+            );
+        }
+    }
+    let dir = tasks::task_dir(app, &task);
+    let known = app.db.list_task_sessions(&task.id)?;
+    let Some(session) = runtime::latest_session(&dir, &known) else {
+        bail!(
+            "task {} has no session jeet knows of to resume; stop it and `jeet task open {}`",
+            task.name,
+            task.slug
+        );
+    };
+    // Its busy time so far, before its session ends, as a stop charges it.
+    if let Err(e) = status::fold_busy(app, &task, true, now_secs()) {
+        eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug);
+    }
+    runtime::stop(&task)?;
+    app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
+    let admission = match permissions::caller(app)? {
+        Caller::User => Admission::Bypass,
+        Caller::Root | Caller::Node(_) => Admission::Gate,
+    };
+    let running = runtime::ensure_running(app, &task, Some(&session), None, admission)
+        .with_context(|| {
+            format!(
+                "ended task {}'s agent, but could not start it again; `jeet task open {} \
+                 --session {session}` resumes it",
+                task.name, task.slug
+            )
+        })?;
+    warn_all(&running.warnings);
+    match running.started {
+        Started::Now => eprintln!(
+            "jeet: restarted task {}'s agent in tmux session {}, resuming session {session}",
+            task.name, running.tmux_session
+        ),
+        Started::AlreadyRunning => eprintln!(
+            "jeet: ended task {}'s agent, but another was started meanwhile in tmux session {}",
+            task.name, running.tmux_session
+        ),
+        Started::Queued { live, max, .. } => eprintln!(
+            "jeet: ended task {}'s agent; it waits on max_live ({live}/{max} live) to start \
+             again, resuming its latest session",
+            task.name
+        ),
+    }
+    Ok(())
+}
+
+/// [`restart`] for the assistant: each of its running windows, ended and
+/// resumed in a new one. Only the user does it, from outside them.
+fn restart_assistant(app: &App, force: bool) -> Result<()> {
+    if permissions::caller(app)? != Caller::User {
+        bail!("only the user restarts the assistant");
+    }
+    if permissions::assistant_mode()
+        || tmux::current_session().is_some_and(|s| s == assistant::TMUX_SESSION)
+    {
+        bail!(
+            "this jeet runs in tmux session {}, which a restart would end; run it from outside",
+            assistant::TMUX_SESSION
+        );
+    }
+    let Some(task) = app.db.get_assistant_task()? else {
+        bail!("the assistant has never run; `jeet chat` starts it");
+    };
+    let spec = AgentSpec::from_config(&app.config)?;
+    let running: Vec<assistant::Session> = assistant::sessions(app, &task)?
+        .into_iter()
+        .filter(assistant::Session::running)
+        .collect();
+    if running.is_empty() {
+        bail!("no session of the assistant's is running; `jeet chat` starts one");
+    }
+    let mut left = 0;
+    for session in &running {
+        let label = printable(&session.name);
+        let window = session.window.as_deref().unwrap_or_default();
+        if !force {
+            let draft = spec
+                .harness
+                .has_draft(&tmux::capture_window_styled(window).unwrap_or_default());
+            if let Some(why) = runtime::busy_reason(&session.activity, draft) {
+                eprintln!(
+                    "jeet: left the assistant's session {label} running: it {why}, which a \
+                     restart would cut off"
+                );
+                left += 1;
+                continue;
+            }
+        }
+        assistant::end(session)?;
+        let opened = assistant::open(app, &task, assistant::Open::Session(&session.id))
+            .with_context(|| {
+                format!(
+                    "ended the assistant's session {label}, but could not start it again; \
+                     `jeet chat --pick` resumes it"
+                )
+            })?;
+        warn_all(&opened.warnings);
+        eprintln!("jeet: restarted the assistant's session {label}");
+    }
+    if left > 0 {
+        bail!("{left} of the assistant's sessions not restarted; wait for them, or pass --force");
+    }
+    Ok(())
+}
+
+/// Record the agent running in task `name`'s tmux session as the task's,
+/// on the word of the user at a terminal outside every pane of jeet's:
+/// for an agent an older jeet started, which jeet has no record of, so its
+/// work goes on uninterrupted. `assistant` adopts each of the assistant's
+/// windows jeet has no record of. See [`identity::adopt`].
+pub fn adopt(app: &App, name: &str) -> Result<()> {
+    let outside = "run `jeet task adopt` from a terminal of your own, outside jeet's tmux sessions";
+    if permissions::caller(app)? != Caller::User
+        || permissions::assistant_mode()
+        || std::env::var_os(tasks::TASK_ID_ENV).is_some_and(|v| !v.is_empty())
+    {
+        bail!("only the user adopts an agent: {outside}");
+    }
+    tmux::require()?;
+    let jeet_panes = tmux::jeet_pane_pids();
+    if identity::runs_under_any(&jeet_panes) {
+        bail!("this jeet runs in a pane of jeet's tmux sessions: {outside}");
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        bail!("adopting an agent asks you to confirm it at a terminal: {outside}");
+    }
+    if name.trim() == assistant::SLUG {
+        return adopt_assistant(app, &jeet_panes);
+    }
+    let task = permissions::scoped_target(
+        app,
+        Verb::TaskOpen,
+        Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
+    let tmux_session = runtime::session_name(&task);
+    let Some(live) = tmux::live_agent_pane(&tmux_session) else {
+        bail!("task {}'s agent is not running", task.name);
+    };
+    if !runtime::unanchored(app, &task) {
+        eprintln!(
+            "jeet: jeet knows task {}'s agent already; nothing to adopt",
+            task.name
+        );
+        return Ok(());
+    }
+    confirm_typed(
+        &format!(
+            "jeet did not start what runs in pane {} of tmux session {tmux_session} (process {}, \
+             {}), so it cannot confirm that is task {}'s agent. Adopted, its jeet commands run \
+             as task {}, with what the task may do. Adopt it only if you know it is the \
+             task's agent, started by an older jeet.",
+            live.pane.id,
+            live.pane.pid,
+            printable(&live.command),
+            task.name,
+            task.name
+        ),
+        &task.slug,
+    )?;
+    identity::adopt(
+        &app.db,
+        &task.id,
+        &live.pane.id,
+        live.pane.pid,
+        &jeet_panes,
+        false,
+    )?;
+    eprintln!(
+        "jeet: adopted task {}'s agent. It keeps the hooks it was started with, so its status \
+         reports to its parent may not work until it restarts (`jeet task restart {}` when \
+         it is idle)",
+        task.name, task.slug
+    );
+    Ok(())
+}
+
+/// [`adopt`] for the assistant: each running window it has no record of.
+fn adopt_assistant(app: &App, jeet_panes: &[u32]) -> Result<()> {
+    let Some(task) = app.db.get_assistant_task()? else {
+        bail!("the assistant has never run; `jeet chat` starts it");
+    };
+    let windows = tmux::windows(assistant::TMUX_SESSION);
+    let unknown = assistant::unanchored_windows(&app.db, &task.id, &windows);
+    let panes: Vec<tmux::LivePane> = unknown
+        .iter()
+        .filter_map(|id| tmux::live_window_pane(id))
+        .collect();
+    if panes.is_empty() {
+        eprintln!("jeet: jeet knows every running window of the assistant's; nothing to adopt");
+        return Ok(());
+    }
+    let list: Vec<String> = panes
+        .iter()
+        .map(|p| {
+            format!(
+                "  pane {} (process {}, {})",
+                p.pane.id,
+                p.pane.pid,
+                printable(&p.command)
+            )
+        })
+        .collect();
+    confirm_typed(
+        &format!(
+            "jeet did not start what runs in these panes of tmux session {}, so it cannot \
+             confirm they are the assistant:\n{}\nAdopted, their jeet commands run as the \
+             assistant, with what `[assistant] allow` lets it do. Adopt them only if you know \
+             they are the assistant, started by an older jeet.",
+            assistant::TMUX_SESSION,
+            list.join("\n")
+        ),
+        assistant::SLUG,
+    )?;
+    for p in &panes {
+        identity::adopt(&app.db, &task.id, &p.pane.id, p.pane.pid, jeet_panes, true)
+            .with_context(|| format!("adopt pane {}", p.pane.id))?;
+    }
+    eprintln!(
+        "jeet: adopted {} of the assistant's windows. They keep the hooks they were started \
+         with until they restart (`jeet task restart assistant` when they are idle)",
+        panes.len()
+    );
+    Ok(())
+}
+
+/// Go on only once the user, at the terminal, has typed `word` back.
+fn confirm_typed(report: &str, word: &str) -> Result<()> {
+    eprintln!("jeet: {report}");
+    eprint!("type `{word}` to go ahead: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if answer.trim() != word {
+        bail!("nothing adopted");
+    }
+    Ok(())
+}
+
 fn send_to_assistant(app: &App, message: &str) -> Result<()> {
     let (delivered, session) = assistant::send(app, &sender(app), message)?;
     let session = session.map(|name| printable(&name)).unwrap_or_default();
@@ -372,13 +678,18 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
         "{:<28} {:<28} {:<10} {:<24} NAME",
         "TASK", "WORKTREES", "ACTIVE", "STATUS"
     );
+    let mut unanchored: Vec<String> = Vec::new();
     for (at, task) in list {
         let rows = app.db.list_task_worktrees(&task.id)?;
         let status = match task.state {
             TaskState::Active => runtime::shown_activity(app, &task, tmux_ok).label(),
             TaskState::Archived => "archived".to_string(),
         };
-        let status = shown_status(&caller, &status);
+        let mut status = shown_status(&caller, &status);
+        if task.state == TaskState::Active && tmux_ok && runtime::unanchored(app, &task) {
+            status.push_str(" (unanchored)");
+            unanchored.push(task.slug.clone());
+        }
         // A manager is said to be one (M29).
         let kind = match task.kind {
             TaskKind::Manager => " (manager)",
@@ -394,7 +705,48 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             status,
         );
     }
+    let assistant_windows = match (&caller, tmux_ok, app.db.get_assistant_task()?) {
+        (Caller::User | Caller::Root, true, Some(root)) => assistant::unanchored_windows(
+            &app.db,
+            &root.id,
+            &tmux::windows(assistant::TMUX_SESSION),
+        )
+        .len(),
+        _ => 0,
+    };
+    for line in unanchored_advice(&unanchored, assistant_windows) {
+        eprintln!("jeet: {line}");
+    }
     Ok(())
+}
+
+/// What to tell of the agents running without jeet knowing their process,
+/// the tasks `slugs` and `assistant_windows` of the assistant's: their
+/// jeet commands are refused, and how to bring each onto this jeet.
+pub fn unanchored_advice(slugs: &[String], assistant_windows: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !slugs.is_empty() {
+        let (which, its) = match slugs.len() {
+            1 => ("this agent".to_string(), "its"),
+            n => (format!("these {n} agents"), "their"),
+        };
+        lines.push(format!(
+            "unanchored: jeet has no record of starting {which} (an older jeet did), so it \
+             refuses {its} jeet commands. Restart each when idle, keeping its conversation \
+             (`jeet task restart <task>`), or vouch for it from a terminal outside jeet's tmux \
+             sessions (`jeet task adopt <task>`): {}",
+            slugs.join(", ")
+        ));
+    }
+    if assistant_windows > 0 {
+        lines.push(format!(
+            "unanchored: jeet has no record of starting {} of the assistant's windows, so it \
+             refuses their jeet commands: `jeet task restart assistant` when idle, or `jeet \
+             task adopt assistant`",
+            assistant_windows
+        ));
+    }
+    lines
 }
 
 /// Attach to the task's agent in its tmux session, starting the agent first

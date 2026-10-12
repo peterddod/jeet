@@ -276,6 +276,28 @@ pub enum TaskCommands {
         name: String,
     },
 
+    /// End the task's agent and resume its latest session in a new one, so
+    /// it runs on this jeet and keeps its conversation (`assistant`: each of
+    /// the assistant's windows). Whatever it left running in the background
+    /// (subagents, workflows, /loop schedules) ends with it
+    Restart {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Restart even while it is mid-turn, waiting on you, starting, or
+        /// has text in its prompt that was not sent
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Vouch for an agent an older jeet started, which jeet has no record
+    /// of, so its jeet commands work without restarting it (`assistant`:
+    /// the assistant's windows). Run it yourself, from a terminal outside
+    /// jeet's tmux sessions
+    Adopt {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+    },
+
     /// Remove a task's worktrees to free the disk, keeping what restores them
     Archive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
