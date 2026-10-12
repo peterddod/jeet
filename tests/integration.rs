@@ -8339,6 +8339,60 @@ fn a_clone_url_that_would_leave_the_store_is_refused() {
     assert!(!lab.home().join("tasks/x").exists());
 }
 
+/// Owners may nest, so a URL can name a repository whose trunk would sit
+/// inside, or above, an indexed repository's trunk. Neither is cloned; a
+/// sibling under the same nested owner still is.
+#[test]
+fn a_clone_that_would_nest_with_an_indexed_trunk_is_refused() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    lab.origin("widget/.cargo");
+    lab.origin("group/x");
+    lab.origin("group");
+    lab.origin("group/y");
+    let ok = |name: &str| {
+        let output = lab.clone_with_interval(name, "0");
+        assert!(output.status.success(), "{name}: {}", stderr_of(&output));
+    };
+    let refused = |name: &str, other: &str| {
+        let output = lab.clone_with_interval(name, "0");
+        assert!(!output.status.success(), "{name}");
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains("would nest with") && stderr.contains(other),
+            "{name}: {stderr}"
+        );
+    };
+    // Inside an indexed trunk.
+    refused("widget/.cargo", "github.com/acme/widget");
+    assert!(!lab
+        .home()
+        .join("store/github.com/acme/widget/.cargo")
+        .exists());
+    // Above one, whatever the case.
+    ok("group/x");
+    refused("group", "github.com/acme/group/x");
+    refused("GROUP", "github.com/acme/group/x");
+    // Beside one.
+    ok("group/y");
+    let repos: Vec<String> = lab
+        .index()
+        .prepare("SELECT id FROM repos ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        repos,
+        [
+            "github.com/acme/group/x",
+            "github.com/acme/group/y",
+            "github.com/acme/widget"
+        ]
+    );
+}
+
 /// A manager (made by hand here, without starting it) makes
 /// tasks under itself only, within its own grant and budget, and reaches
 /// only its subtree.

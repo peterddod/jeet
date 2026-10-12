@@ -1288,7 +1288,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   Every route refuses a URL or id whose host, owner or repo has an empty,
   `.` or `..` segment, a control or invisible character, `<`, `>` or `\`
   (`remote::parse_remote_url`), so a clone stays under the store and its
-  id prints as itself.
+  id prints as itself; and, since owners may nest, `clone_into_store`
+  refuses a trunk inside or above an indexed repository's trunk (compared
+  case-folded), so a clone cannot plant `.cargo/` or the like in another
+  checkout.
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`
