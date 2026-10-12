@@ -465,7 +465,9 @@ fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<H
                 .map(str::to_string)
                 .collect();
             for command in permissions::allowed_commands(&held) {
-                if !allow.contains(&command) {
+                // The assistant's todo list, which a manager keeps by hand.
+                let own = permissions::OWN.contains(&command.as_str());
+                if !own && !allow.contains(&command) {
                     allow.push(command);
                 }
             }
@@ -925,6 +927,7 @@ mod tests {
             );
         }
         assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
+        assert!(!hooks.allow.contains(&"jeet todo".to_string()));
         // A worker asks at the prompt, as before.
         let hooks = task_hooks(&app, &worker, "/bin/jeet".into()).unwrap();
         assert_eq!(hooks.allow, ALLOWED.map(str::to_string));

@@ -106,7 +106,7 @@ A manager's home is a task directory, so every task path keeps working:
   AGENTS.md  CLAUDE.md            # role (manager template) + #22's shim
   BRIEF.md                        # written by jeet from the parent's brief; read-only
   notes/worklog.md
-  todo.md                         # `jeet todo` works on the caller's own list
+  todo.md                         # edited by hand; `jeet todo` stays the assistant's (P21)
   actions.log
   .claude/skills/jeet-manager/SKILL.md
   api/                            # optional read-only worktree, detached
@@ -1535,7 +1535,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   checked at once (`budget::enforce`), so a limit set at or below what
   the task has used pauses it now, not after a turn past it. Otherwise it
   leaves the run state alone: a task its budget paused runs again only once resumed, and the
-  command says so. There is no `BRIEF.md` to rewrite yet (2-iii). `jeet
+  command says so. A manager's `BRIEF.md` is written again (P21). `jeet
   manager pause`, `resume` and `stop` (`manager.stop`) print one line per
   node the walk touched. `stop --all` is the user's alone, refused before
   any scope check to the assistant and to a node (M11); the assistant may
@@ -1547,6 +1547,36 @@ Managers run locally in tmux, as the user, like any other task (I22).
   drain returns what it warns of instead of printing it, so the TUI,
   which drains on a full refresh (opening, and `r`), shows the first in
   its status line rather than on the screen it draws.
+- **P21** A manager's role (§1 "Layout"): its home gets, in place of the
+  worker's `jeet` skill (which says what a worker may do), the manager's
+  `AGENTS.md` (read `BRIEF.md` first; the subtree only, no messages
+  sideways; report with `jeet report`; the budget, pause and stop;
+  read-only worktrees, so delegate code changes; jeet's limits are
+  cooperative, stay within them; the untrusted-fence paragraphs), the
+  `jeet-manager` skill, `notes/worklog.md` and `todo.md`, written once as
+  the assistant's are. `jeet todo` stays the assistant's list (D6) and is
+  refused to every task: a manager edits its `todo.md` by hand, its
+  templates never name `jeet todo`, its settings do not pre-approve it,
+  and its summary reads the file as `jeet todo` would parse it. Its
+  `BRIEF.md` is its brief as its session context has it
+  (`reports::brief_context`, fenced as `<jeet-brief>` with its tree path),
+  plus its budget, which a worker's brief leaves to its manager. jeet
+  writes it, mode 0444, when the manager is made, once its row is in (a
+  failure is a warning: the session context has the brief too), and again
+  on `manager grant` (for each active manager in the subtree, whose `You
+  may` the grant cuts) and `manager budget`. Each write makes a new
+  read-only file beside it and renames it over the old one rather than
+  editing it in place, so an agent never reads half of one and a link put
+  in its place is replaced, not followed. A manager's `SessionStarted`
+  (the hook path a worker's brief takes, switching on its kind) prints
+  its summary (`manager::context::session_context`): its brief, the
+  active tasks below it with their status and run state, the last
+  reports of those under it, its budget and what its subtree used, its
+  todo list and its inbox, which it hands over unless the manager is
+  held. Each agent-written part is fenced. The assistant's summary gains
+  one line, pointing to a new `jeet-managers` skill, a path of its own so
+  existing homes get it (the write-once templates reach them no other
+  way); it is otherwise unchanged to the byte.
 
 ## 11. Placement
 

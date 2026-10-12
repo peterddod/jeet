@@ -9,7 +9,8 @@ use anyhow::{bail, Result};
 use crate::assistant;
 use crate::context::App;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskState};
-use crate::manager::{self, budget, budget::Threshold};
+use crate::manager;
+use crate::manager::budget::{self, Limits, Threshold};
 use crate::messages::{self, Agent, Delivered, TmuxAgent};
 use crate::permissions;
 use crate::runtime;
@@ -264,7 +265,9 @@ fn idle_body(app: &App, task: &TaskRecord, idle: i64) -> Result<String> {
 }
 
 /// What `task`'s parent asked of it, fenced, for its agent's session
-/// context: the brief, what it may do, and how to report.
+/// context: the brief, a manager's budget, what it may do, and how to
+/// report. A manager's `BRIEF.md` holds the same
+/// ([`manager::write_brief`]).
 pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     let parent = match &task.parent_id {
         Some(id) => app.db.get_task(id)?,
@@ -279,6 +282,24 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
         if let Some(done_when) = brief.done_when {
             lines.push(format!("Done when: {done_when}"));
         }
+    }
+    // A worker's budget is its manager's to watch; a manager plans to its
+    // own.
+    if task.kind == TaskKind::Manager {
+        let limits = app
+            .db
+            .budget(&task.id)?
+            .map_or_else(Limits::default, |b| Limits {
+                secs: b.max_secs,
+                turns: b.max_turns,
+            });
+        lines.push(match limits == Limits::default() {
+            true => "Budget: none of your own; those above you still count".to_string(),
+            false => format!(
+                "Budget: {}, for you and the tasks below you together",
+                budget::label(limits)
+            ),
+        });
     }
     // What it may do is a hint here: every command is checked again as it
     // runs, so a broken chain costs the list, not the brief.
@@ -295,9 +316,13 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     may.push("report");
     lines.push(format!("You may: {}", may.join(", ")));
     let to = manager::label(&parent);
+    let own = match task.kind {
+        TaskKind::Manager => "the tasks below you",
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => "this task",
+    };
     lines.push(format!(
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
-         only way to reach anyone outside this task."
+         only way to reach anyone outside {own}."
     ));
     // The same broken chain that cost the list costs the path, not the
     // brief.

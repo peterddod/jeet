@@ -5907,6 +5907,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         "AGENTS.md",
         "CLAUDE.md",
         ".claude/skills/jeet-assistant/SKILL.md",
+        ".claude/skills/jeet-managers/SKILL.md",
         "notes/worklog.md",
         "todo.md",
     ] {

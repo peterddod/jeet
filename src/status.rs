@@ -38,6 +38,7 @@ use crate::context::App;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::identity;
+use crate::manager;
 use crate::manager::budget::{self, Threshold};
 use crate::manager::run;
 use crate::messages;
@@ -341,8 +342,16 @@ fn handle_hook(
                 && attributed(launched_for, &task.id, app)
             {
                 // What its parent asked of it, each time a session starts,
-                // /clear included.
-                match reports::brief_context(app, task) {
+                // /clear included; for a manager, with the state of its area.
+                let context = match task.kind {
+                    TaskKind::Manager => {
+                        manager::context::session_context(app, task, session_id, now)
+                    }
+                    TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {
+                        reports::brief_context(app, task)
+                    }
+                };
+                match context {
                     Ok(brief) => {
                         if let Some(output) = harness.session_context_output(&brief) {
                             println!("{output}");

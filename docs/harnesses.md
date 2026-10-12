@@ -30,7 +30,7 @@ jeet does without that feature:
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
-| `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary) | the assistant starts without its summary |
+| `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary, a manager's summary, a task's brief) | the assistant starts without its summary; a manager reads its `BRIEF.md`, as its `AGENTS.md` says |
 | `last_messages(dir, id, n)` | reads a session's last `n` messages and how its last turn ended (finished, interrupted, an API error, still running) from the agent's own record | `jeet task last` says the agent's record cannot be read |
 | `has_session`, `sessions`, `copy_sessions`, `latest_activity` | read the agent's own session store for a directory | sessions are only what jeet recorded; `jeet import` copies none |
 | `startup_prompt(pane)`, `accept_trust(pane)` | spot a prompt that blocks the agent before its first hook, and accept a trust prompt one key at a time | the task shows `needs input – startup prompt?` after 15s |
@@ -116,7 +116,9 @@ to go and then starts what waits. On a harness with no hooks, or one that
 maps no `Ended`, nothing drains when its agent exits: a queued start waits
 for the next `jeet watch` poll, TUI refresh, `jeet manager stop` or
 `resume`, or a `jeet manager drain`. The same task's `SessionStarted` prints its brief through
-`session_context_output`; a harness that returns `None` there gets none.
+`session_context_output` (a manager's: its summary, brief included, and
+what is queued for it, handed over unless it is held); a harness that
+returns `None` there gets none.
 Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
 descendant of the process jeet starts in the task's pane: jeet reports and
 briefs only when `--task` names the task found and jeet confirms, by walking

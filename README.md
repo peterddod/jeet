@@ -731,7 +731,17 @@ its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 sets one (`manager.grant`), within what is left above it (a unit kept or
 lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
-pauses it at once.
+pauses it at once. Both write a manager's `BRIEF.md` again.
+
+A manager's home is a task directory with a manager's role in place of
+the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your
+subtree; worktrees are read-only; the limits are cooperative), the
+`jeet-manager` skill, `notes/worklog.md`, `todo.md`, which it edits by
+hand (`jeet todo` stays the assistant's list), and `BRIEF.md`: its goal,
+done-when, budget and what it may do, fenced as its parent's brief and
+read-only. Each of its sessions starts with that brief, the tasks below it
+and their last reports, its budget, its todo list and what is queued for
+it. The assistant learns of managers from its `jeet-managers` skill.
 
 ```bash
 jeet manager pause fix-x       # interrupt its turn, and every task's below it
@@ -1408,6 +1418,9 @@ export JEET_HOME=/tmp/jeet-test
       .jeet/inbox.jsonl              # messages queued for its busy agent
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
+    backend/                         # a manager: AGENTS.md, notes/, todo.md,
+      BRIEF.md                       #   its brief, read-only, written by jeet
+      .claude/skills/jeet-manager/   #   the jeet commands it uses
   projects/<name>/                   # templates: AGENTS.md and skills/ copied into new tasks
     project.toml                     # its repositories and agent arguments
     AGENTS.md                        # instructions for the agent
@@ -1417,6 +1430,7 @@ export JEET_HOME=/tmp/jeet-test
     AGENTS.md                        # its role; yours to edit
     CLAUDE.md                        # `@AGENTS.md`
     .claude/skills/jeet-assistant/   # the jeet commands it uses
+    .claude/skills/jeet-managers/    # how it hands an area of work to a manager
     notes/worklog.md                 # its running memory
     todo.md                          # the todo list (`jeet todo`)
     actions.log                      # what it did, one JSON object per line

@@ -245,8 +245,9 @@ const READ_ONLY: &[&str] = &[
 ];
 
 /// The assistant's own files, which it keeps through jeet: pre-approved
-/// too, and needing no capability.
-const OWN: &[&str] = &["jeet todo"];
+/// too, and needing no capability. Refused to every task, a manager
+/// included (M39).
+pub const OWN: &[&str] = &["jeet todo"];
 
 pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)

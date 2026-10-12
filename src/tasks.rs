@@ -31,6 +31,7 @@ use crate::db::tasks::{
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
+use crate::manager;
 use crate::manager::budget::{self, Limits};
 use crate::messages;
 use crate::permissions::{self, Caller, Grant, Target, Verb};
@@ -502,7 +503,7 @@ pub fn commit_child(
         ..plan.record.clone()
     };
     let budget = plan.budget.map(|b| (b.secs, b.turns));
-    let notes = write_task(app, &task, project, || {
+    let mut notes = write_task(app, &task, project, || {
         app.db.insert_child(
             &task,
             &plan.grant.caps,
@@ -511,6 +512,17 @@ pub fn commit_child(
             plan.fan_out,
         )
     })?;
+    // Only now, with its row in: the brief names its place in the tree.
+    // Its session context carries the same, so a brief not written costs
+    // the file, not the manager.
+    if task.kind == TaskKind::Manager {
+        if let Err(e) = manager::write_brief(app, &task) {
+            notes.push(format!(
+                "could not write task {}'s BRIEF.md: {e:#}",
+                task.slug
+            ));
+        }
+    }
     Ok((task, notes))
 }
 
@@ -532,7 +544,9 @@ fn record_child_held(
     }
 }
 
-/// The marker, the project's files and the jeet skill. Returns notes on
+/// The marker, the project's files and the jeet skill, or for a manager
+/// its role's files ([`manager::ensure_files`]) in the skill's place: the
+/// worker's skill would tell it what a worker may do. Returns notes on
 /// project files that were not copied.
 fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
     write_marker(dir, &task.id)?;
@@ -545,7 +559,12 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
         None => Vec::new(),
     };
     // Last, so nothing of the project's can shadow it.
-    install_skill(dir)?;
+    match task.kind {
+        TaskKind::Manager => {
+            manager::ensure_files(dir, manager::Role::Manager)?;
+        }
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => install_skill(dir)?,
+    }
     Ok(notes)
 }
 
@@ -2775,7 +2794,7 @@ mod tests {
 
     /// A manager's own fan-out limit is at most `[managers] max_children`
     /// and is kept on its row; under the assistant, unasked, it gets
-    /// `default_budget`.
+    /// `default_budget`. Its home has its role's files and its brief.
     #[test]
     fn a_manager_keeps_its_own_fan_out_limit_and_gets_the_default_budget() {
         let (_dir, app, _trunk) = manager_lab();
@@ -2791,7 +2810,20 @@ mod tests {
         let plan = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(2)).unwrap();
         assert_eq!(plan.record.max_children, Some(2));
         assert_eq!(plan.budget, Some(policy.default_budget));
-        let (made, _) = commit_child(&app, &plan, None).unwrap();
+        let (made, notes) = commit_child(&app, &plan, None).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        // Its role in place of the worker's skill, and its brief.
+        let home = task_dir(&app, &made);
+        for rel in [
+            "AGENTS.md",
+            ".claude/skills/jeet-manager/SKILL.md",
+            "notes/worklog.md",
+            "todo.md",
+            crate::manager::BRIEF_MD,
+        ] {
+            assert!(home.join(rel).is_file(), "{rel}");
+        }
+        assert!(!home.join(".claude/skills/jeet").exists());
         let made = app.db.get_task(&made.id).unwrap().unwrap();
         assert_eq!(made.max_children, Some(2));
         assert_eq!(fan_out_of(&app, &made).unwrap(), Some(2));
