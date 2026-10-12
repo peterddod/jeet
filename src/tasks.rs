@@ -226,7 +226,10 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
         match add_worktree(app, &task, repo, branch, None) {
             Ok(added) => warnings.extend(added.warnings),
             Err(e) => {
-                let e = e.context(format!("could not add {repo} to the new task"));
+                let e = e.context(format!(
+                    "could not add {} to the new task",
+                    repo.escape_debug()
+                ));
                 return Err(match delete(app, &task) {
                     Ok(_) => e,
                     Err(undo) => e.context(format!(
@@ -491,7 +494,7 @@ fn child_name(name: &str) -> Result<&str> {
 /// variation selector (a run of them encodes any bytes). Printed,
 /// they reorder or hide the text around them, so a name could show as
 /// another, or carry text the user never sees but an agent reads.
-fn format_char(c: char) -> bool {
+pub(crate) fn format_char(c: char) -> bool {
     matches!(
         c,
         '\u{00ad}'
@@ -1275,20 +1278,29 @@ fn resolve_repo(app: &App, spec: &str) -> Result<RepoRecord> {
         if let Some(repo) = app.db.get_repo(&identity.id())? {
             return Ok(repo);
         }
-        permissions::may_clone(app, spec)?;
-        return crate::commands::clone::clone_into_store(app, spec);
+        return clone_gated(app, spec);
     }
     match remote::identity_from_id(spec) {
         Ok(id) if id.host.contains('.') => match app.db.get_repo(spec)? {
             Some(repo) => Ok(repo),
             None => {
                 let url = format!("https://{spec}.git");
-                permissions::may_clone(app, &url)?;
-                crate::commands::clone::clone_into_store(app, &url)
+                clone_gated(app, &url)
             }
         },
         _ => resolve::resolve_repo_filter(&app.db, spec),
     }
+}
+
+/// Clone `url` into the store for a caller [`permissions::may_clone`]
+/// lets, logged as `jeet clone` would be.
+fn clone_gated(app: &App, url: &str) -> Result<RepoRecord> {
+    let authorized = permissions::may_clone(app, url)?;
+    let cloned = crate::commands::clone::clone_into_store(app, url);
+    if let Some(authorized) = authorized {
+        authorized.record(cloned.as_ref().err().map(|e| format!("{e:#}")));
+    }
+    cloned
 }
 
 pub fn repo_short_name(repo: &RepoRecord) -> String {

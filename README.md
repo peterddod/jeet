@@ -384,7 +384,9 @@ agent can `cd "$(jeet worktree add api)"`.
 now; offline, it starts from the last fetch and says so. The repository can be
 a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
 is cloned into the store, which the assistant and a task with a parent may do
-only holding `repo.clone` (as for `jeet clone`; so too `jeet task new --repo`). Without `--branch` the worktree is detached at the
+only holding `repo.clone` (as for `jeet clone`; so too `jeet task new --repo`).
+A URL whose path has a `..` or `.` segment, or a control or invisible
+character, is refused, so a clone always lands under the store. Without `--branch` the worktree is detached at the
 default branch. With it, an existing local branch is checked out, a branch that
 exists only on origin is tracked, and anything else is created from the default
 branch. A branch already checked out elsewhere is refused, naming the task that

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::context::App;
 use crate::db::RepoRecord;
@@ -17,7 +17,20 @@ pub fn run(app: &App, url: &str) -> Result<()> {
 /// so callers that print a path keep stdout to themselves.
 pub fn clone_into_store(app: &App, url: &str) -> Result<RepoRecord> {
     let identity = remote::parse_remote_url_anyhow(url)?;
-    let trunk = paths::trunk_path(&app.store_root(), &identity);
+    let store = app.store_root();
+    let trunk = paths::trunk_path(&store, &identity);
+    // parse_remote_url refuses `..` and the like; a lexical `starts_with`
+    // would pass `store/../x`, so check every component is a plain name.
+    let inside = trunk.strip_prefix(store).is_ok_and(|rel| {
+        rel.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    });
+    if !inside {
+        bail!(
+            "refusing to clone {}: it would land outside the store",
+            url.escape_debug()
+        );
+    }
 
     git::clone_repo(url, &trunk).context("clone repository")?;
 

@@ -8188,19 +8188,155 @@ fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
     assert!(stderr.contains("`repo.clone`"), "{stderr}");
     assert_eq!(repos(), 0);
 
-    // Held all the way up, it clones; the user needs nothing.
-    config("\"task.create\", \"worktree.add\", \"repo.clone\"");
+    // Its own grant is not enough while a list above it cuts it.
     index
         .execute(
             "INSERT INTO task_grants (task_id, capability) VALUES (?1, 'repo.clone')",
             [&api],
         )
         .unwrap();
+    for args in [
+        &["worktree", "add", url][..],
+        &["task", "new", "x", "--repo", url],
+        &["clone", gadget_url],
+    ] {
+        let output = mp.jeet(args, &api_dir, &[]);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains("`repo.clone` is in its grant but cut by `[assistant] allow`"),
+            "{args:?}: {stderr}"
+        );
+    }
+    assert_eq!(repos(), 0);
+    assert!(!store.join("widget").exists());
+    assert!(!lab.home().join("tasks/x").exists());
+
+    // Held all the way up, it clones; the user needs nothing.
+    config("\"task.create\", \"worktree.add\", \"repo.clone\"");
     succeeded(&mp.jeet(&["worktree", "add", url], &api_dir, &[]));
     assert!(store.join("widget").is_dir());
     succeeded(&mp.jeet(&["clone", gadget_url], &api_dir, &[]));
     assert!(store.join("gadget").is_dir());
     assert_eq!(repos(), 2);
+    // Each clone is in its own log, as `jeet clone` puts it.
+    let cloned = |log: &std::path::Path| -> Vec<(String, String)> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|a| a["capability"] == "repo.clone")
+            .map(|a| {
+                let field = |k: &str| a[k].as_str().unwrap().to_string();
+                (field("outcome"), field("action"))
+            })
+            .collect()
+    };
+    let done = |u: &str| ("done".to_string(), format!("cloned {u}"));
+    assert_eq!(
+        cloned(&api_dir.join("actions.log")),
+        [done(url), done(gadget_url)]
+    );
+
+    // So is the assistant's, through `task new --repo`.
+    lab.origin("gizmo");
+    let gizmo_url = "https://github.com/acme/gizmo.git";
+    succeeded(&root.jeet(
+        &[
+            "task",
+            "new",
+            "z",
+            "--parent",
+            "assistant",
+            "--repo",
+            gizmo_url,
+        ],
+        &lab.home(),
+        &[],
+    ));
+    assert!(store.join("gizmo").is_dir());
+    let assistant_log = lab.home().join("assistant/actions.log");
+    assert_eq!(
+        cloned(&assistant_log),
+        [
+            ("denied".to_string(), format!("cloned {url}")),
+            done(gizmo_url)
+        ]
+    );
+}
+
+/// A clone URL whose path would leave the store (`..`), or whose id would
+/// print escape sequences or invisible text, is refused before git runs,
+/// whoever asks and by whichever command.
+#[cfg(unix)]
+#[test]
+fn a_clone_url_that_would_leave_the_store_is_refused() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"worktree.add\", \"repo.clone\"]\n",
+    )
+    .unwrap();
+    let api = lab.new_task_with("api", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&api])
+        .unwrap();
+    for cap in ["task.create", "worktree.add", "repo.clone"] {
+        index
+            .execute(
+                "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, ?2)",
+                [&api, cap],
+            )
+            .unwrap();
+    }
+    let api_dir = lab.home().join("tasks/api");
+    let mut mp = lab.task_pane("api");
+    let mut root = lab.assistant_pane();
+    let urls = [
+        "ssh://evil.com/../../out/o/r",
+        "https://evil.example/../../assistant/.claude/skills/pwn.git",
+        "git@evil:../../tasks/api/.claude/skills/pwn.git",
+        "ssh://evil.com/o/r\u{1b}[31mred",
+    ];
+    for url in urls {
+        for args in [
+            &["clone", url][..],
+            &["worktree", "add", url, "--task", "api"],
+            &["task", "new", "x", "--repo", url],
+        ] {
+            for (who, output) in [
+                ("manager", mp.jeet(args, &api_dir, &[])),
+                ("assistant", root.jeet(args, &api_dir, &[])),
+                ("user", lab.jeet_at(args, &api_dir, &[])),
+            ] {
+                assert!(!output.status.success(), "{who} {args:?}");
+                let stderr = stderr_of(&output);
+                assert!(
+                    stderr.contains("refusing repository") && !stderr.contains('\u{1b}'),
+                    "{who} {args:?}: {stderr}"
+                );
+            }
+        }
+    }
+    // An id naming such a path is not cloned either.
+    let output = lab.jeet_at(&["worktree", "add", "evil.com/../r"], &api_dir, &[]);
+    assert!(!output.status.success());
+    assert!(
+        !stderr_of(&output).contains("clone"),
+        "{}",
+        stderr_of(&output)
+    );
+    let repos: i64 = lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(repos, 0);
+    assert!(!lab.home().join("out").exists());
+    assert!(!lab.home().join("assistant/.claude/skills/pwn").exists());
+    assert!(!api_dir.join(".claude/skills/pwn").exists());
+    assert!(!lab.home().join("tasks/x").exists());
 }
 
 /// A manager (made by hand here, without starting it) makes

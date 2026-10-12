@@ -1283,8 +1283,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `jeet clone` names no task, so a node holding `repo.clone` may run it;
   `worktree add` and `task new --repo` naming a repository the store lacks
   clone it only for a caller holding `repo.clone` (`permissions::may_clone`),
-  so neither reaches the store around `clone`'s gate, and the assistant's
-  refused clone is logged as a refused `jeet clone` is.
+  so neither reaches the store around `clone`'s gate; the clone, made or
+  refused, is logged (and the assistant's announced) as `jeet clone`'s is.
+  Every route refuses a URL or id whose host, owner or repo has an empty,
+  `.` or `..` segment, a control or invisible character, `<`, `>` or `\`
+  (`remote::parse_remote_url`), so a clone stays under the store and its
+  id prints as itself.
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`

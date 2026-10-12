@@ -768,11 +768,15 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
 /// Check that the caller may clone `url` into the store, which `jeet
 /// worktree add` and `jeet task new --repo` do for a repository the store
 /// lacks: the same `repo.clone` that `jeet clone` needs, so no command
-/// reaches the store without it.
-pub fn may_clone(app: &App, url: &str) -> Result<()> {
-    let message = match caller(app)? {
-        Caller::User => None,
+/// reaches the store without it. Returns the clone to [`Authorized::record`]
+/// once it has run, logged (and for the assistant, announced) as `jeet
+/// clone` would be.
+pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
+    let action = format!("cloned {url}");
+    let (message, authorized) = match caller(app)? {
+        Caller::User => (None, None),
         Caller::Root => {
+            let log = actions_log(&app.home);
             let message = refusal(
                 "repo.clone",
                 &app.config.assistant.allow,
@@ -780,31 +784,39 @@ pub fn may_clone(app: &App, url: &str) -> Result<()> {
             );
             // Logged as a refused `jeet clone` is ([`authorize_as`]).
             if message.is_some() {
-                let log = actions_log(&app.home);
-                let tried = format!("cloned {url}");
-                if let Err(e) = append(&log, "repo.clone", &tried, Outcome::Denied, None) {
+                if let Err(e) = append(&log, "repo.clone", &action, Outcome::Denied, None) {
                     eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
                 }
             }
-            message
+            let authorized = Authorized {
+                capability: "repo.clone",
+                action,
+                log,
+                notify: app.config.assistant.notify(),
+            };
+            (message, Some(authorized))
         }
         Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
-            true => None,
+            true => {
+                let authorized = Authorized {
+                    capability: "repo.clone",
+                    action,
+                    log: actions_log_for(app, &node),
+                    notify: false,
+                };
+                (None, Some(authorized))
+            }
             false => {
                 let about = self::capability("repo.clone").map_or("do that", |c| c.about);
                 let cut = cut_by(app, &node, "repo.clone")?;
-                Some(node_refusal(
-                    &node.slug,
-                    about,
-                    "repo.clone",
-                    cut.as_deref(),
-                ))
+                let message = node_refusal(&node.slug, about, "repo.clone", cut.as_deref());
+                (Some(message), None)
             }
         },
     };
     match message {
-        None => Ok(()),
-        Some(message) => bail!("{url} is not in the store: {message}"),
+        None => Ok(authorized),
+        Some(message) => bail!("{} is not in the store: {message}", url.escape_debug()),
     }
 }
 
@@ -1490,6 +1502,21 @@ impl Authorized {
             (Ok(()), Some(why)) => (Outcome::Skipped, Some(why)),
             (Err(e), _) => (Outcome::Failed, Some(format!("{e:#}"))),
         };
+        self.write(outcome, error);
+    }
+
+    /// Record a step run inside another command, such as the store clone
+    /// `worktree add <url>` makes: done, or failed with `error`. Unlike
+    /// [`Authorized::finish`] it leaves a [`skipped`] note to the command.
+    pub fn record(self, error: Option<String>) {
+        let outcome = match error {
+            None => Outcome::Done,
+            Some(_) => Outcome::Failed,
+        };
+        self.write(outcome, error);
+    }
+
+    fn write(self, outcome: Outcome, error: Option<String>) {
         if let Err(e) = append(
             &self.log,
             self.capability,
