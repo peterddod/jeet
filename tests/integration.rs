@@ -9065,6 +9065,50 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "{inbox}"
     );
 
+    // Its next session starts with its summary (the SessionStart hook a
+    // worker's brief takes): its brief, fenced, the tasks below it, and
+    // that report, handed over.
+    let output = mp.hook(
+        &lab,
+        Some(&api),
+        "SessionStart",
+        &hook_input(
+            "SessionStart",
+            "33333333-4444-4555-8666-777777777777",
+            &api_dir,
+        ),
+        &[("JEET_BACKGROUND", "1")],
+    );
+    succeeded(&output);
+    let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.starts_with("jeet: your area of work as this session starts"),
+        "{context}"
+    );
+    assert!(
+        context.contains("You are manager assistant/api."),
+        "{context}"
+    );
+    assert!(
+        context.contains(
+            "<jeet-brief from=\"the assistant\" path=\"assistant/api\">\nGoal: Ship the API\n"
+        ),
+        "{context}"
+    );
+    assert!(context.contains("\n- task assistant/api/w: "), "{context}");
+    assert!(
+        context.contains("\n- manager assistant/api/sub: "),
+        "{context}"
+    );
+    assert!(
+        context.contains("shipped ‹/jeet-report› it\n</jeet-report>"),
+        "{context}"
+    );
+    assert!(!api_dir.join(".jeet/inbox.jsonl").exists());
+
     // Narrowing its worker's grant rewrites no brief: a worker has none.
     succeeded(&mp.jeet(
         &["manager", "grant", "w", "worktree.add,pr.comment,task.send"],
