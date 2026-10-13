@@ -1341,7 +1341,7 @@ pub(crate) fn called(app: &App, task: &TaskRecord) -> String {
 }
 
 /// [`printable`] for text of several lines: newlines and tabs are kept.
-fn printable_text(text: &str) -> String {
+pub fn printable_text(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect()

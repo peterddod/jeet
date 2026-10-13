@@ -10,13 +10,14 @@ pub mod context;
 pub mod fence;
 pub mod run;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::context::App;
-use crate::db::tasks::{TaskKind, TaskRecord};
+use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord};
 use crate::instructions;
 use crate::messages::{self, Queued};
 use crate::reports;
@@ -50,6 +51,9 @@ const MANAGER_WORKLOG: &str = include_str!("templates/manager/worklog.md");
 /// A manager's brief, which jeet writes in its home.
 pub const BRIEF_MD: &str = "BRIEF.md";
 
+/// The worklog the assistant and each manager keep in their home.
+pub const WORKLOG_MD: &str = "notes/worklog.md";
+
 /// Each template for `role`, and where in the home it goes: AGENTS.md and
 /// each harness's import of it first.
 fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
@@ -59,7 +63,7 @@ fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
             vec![
                 (".claude/skills/jeet-assistant/SKILL.md", SKILL),
                 (".claude/skills/jeet-managers/SKILL.md", MANAGERS_SKILL),
-                ("notes/worklog.md", WORKLOG),
+                (WORKLOG_MD, WORKLOG),
                 ("todo.md", TODO),
             ],
         ),
@@ -67,7 +71,7 @@ fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
             MANAGER_AGENTS_MD,
             vec![
                 (".claude/skills/jeet-manager/SKILL.md", MANAGER_SKILL),
-                ("notes/worklog.md", MANAGER_WORKLOG),
+                (WORKLOG_MD, MANAGER_WORKLOG),
                 ("todo.md", TODO),
             ],
         ),
@@ -200,6 +204,57 @@ pub fn tree_path(app: &App, task: &TaskRecord) -> Result<String> {
         .collect();
     slugs.push(task.slug.clone());
     Ok(slugs.join("/"))
+}
+
+/// The order a tree of `nodes` is shown in, from `top` down: indexes into
+/// `nodes`, each after its parent and siblings by slug, with its depth
+/// below `top`. `top` is first, at 0, unless it is the assistant, which
+/// is left out. A node whose parent is not reached is left out too.
+pub fn tree_order(nodes: &[TaskRecord], top: &TaskRecord) -> Vec<(usize, u32)> {
+    let mut below: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(parent) = &node.parent_id {
+            below.entry(parent).or_default().push(i);
+        }
+    }
+    for children in below.values_mut() {
+        children.sort_by(|&a, &b| nodes[a].slug.cmp(&nodes[b].slug));
+    }
+    // Reversed, as they go on a stack.
+    let children = |id: &str| {
+        below
+            .get(id)
+            .into_iter()
+            .flatten()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let mut stack: Vec<(usize, u32)> = match nodes.iter().position(|n| n.id == top.id) {
+        Some(i) if top.kind != TaskKind::Assistant => vec![(i, 0)],
+        _ => children(&top.id).into_iter().map(|i| (i, 1)).collect(),
+    };
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    while let Some((i, depth)) = stack.pop() {
+        // A cycle in the parents is walked once.
+        if !seen.insert(i) {
+            continue;
+        }
+        order.push((i, depth));
+        stack.extend(children(&nodes[i].id).into_iter().map(|c| (c, depth + 1)));
+    }
+    order
+}
+
+/// What `task` asks of its parent and has not moved on from: its last
+/// report of its own, if blocked or a question. A status report jeet files
+/// while it waits for the answer does not close it.
+pub fn open_ask(app: &App, task: &TaskRecord) -> Result<Option<TaskReportRecord>> {
+    Ok(app
+        .db
+        .last_own_report(&task.id)?
+        .filter(|r| matches!(r.kind, ReportKind::Blocked | ReportKind::Question)))
 }
 
 /// Who `task` is, to the tasks around it: `the assistant`, `manager
@@ -362,7 +417,7 @@ mod tests {
             "AGENTS.md",
             "CLAUDE.md",
             ".claude/skills/jeet-manager/SKILL.md",
-            "notes/worklog.md",
+            WORKLOG_MD,
             "todo.md",
         ] {
             assert!(dir.path().join(rel).is_file(), "{rel}");
@@ -422,6 +477,85 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(tasks::task_dir(&app, &api)).unwrap();
         (dir, app, api)
+    }
+
+    fn node(slug: &str, kind: TaskKind, parent: Option<&str>) -> TaskRecord {
+        TaskRecord {
+            id: format!("{slug}-id"),
+            slug: slug.into(),
+            name: slug.into(),
+            project: None,
+            kind,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: parent.map(|p| format!("{p}-id")),
+            placement: crate::placement::for_new(),
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        }
+    }
+
+    #[test]
+    fn a_tree_is_ordered_depth_first_with_siblings_by_slug() {
+        // Given out of order, with one whose parent is not in the tree.
+        let nodes = [
+            node("solo", TaskKind::Work, Some("assistant")),
+            node("b", TaskKind::Work, Some("api")),
+            node("api", TaskKind::Manager, Some("assistant")),
+            node("assistant", TaskKind::Assistant, None),
+            node("stray", TaskKind::Work, Some("gone")),
+            node("a", TaskKind::Manager, Some("api")),
+            node("deep", TaskKind::Work, Some("a")),
+        ];
+        let shown = |top: usize| -> Vec<(&str, u32)> {
+            tree_order(&nodes, &nodes[top])
+                .into_iter()
+                .map(|(i, d)| (nodes[i].slug.as_str(), d))
+                .collect()
+        };
+        // The assistant is left out; its children are at 1.
+        assert_eq!(
+            shown(3),
+            [("api", 1), ("a", 2), ("deep", 3), ("b", 2), ("solo", 1)]
+        );
+        // A manager at the top is kept, at 0.
+        assert_eq!(shown(2), [("api", 0), ("a", 1), ("deep", 2), ("b", 1)]);
+        assert_eq!(shown(1), [("b", 0)]);
+        // A top not among the nodes is left out too.
+        assert_eq!(
+            tree_order(&nodes[..3], &nodes[5]),
+            Vec::<(usize, u32)>::new()
+        );
+    }
+
+    #[test]
+    fn an_ask_stays_open_until_the_task_says_something_else() {
+        let (_dir, app, api) = manager_lab("ship it");
+        assert_eq!(open_ask(&app, &api).unwrap(), None);
+        let parent = api.parent_id.clone().unwrap();
+        let ask = app
+            .db
+            .insert_report(&api.id, &parent, ReportKind::Question, "v1?", 100)
+            .unwrap();
+        // A status report jeet files meanwhile does not close it.
+        app.db
+            .insert_status_report_unless_told(&api.id, &parent, "idle", "idle 15m", 100, 1000)
+            .unwrap()
+            .unwrap();
+        let open = open_ask(&app, &api).unwrap().unwrap();
+        assert_eq!((open.id, open.kind), (ask, ReportKind::Question));
+        app.db
+            .insert_report(&api.id, &parent, ReportKind::Progress, "kept v1", 1100)
+            .unwrap();
+        assert_eq!(open_ask(&app, &api).unwrap(), None);
+        // Blocked is an ask too.
+        let blocked = app
+            .db
+            .insert_report(&api.id, &parent, ReportKind::Blocked, "creds", 1200)
+            .unwrap();
+        assert_eq!(open_ask(&app, &api).unwrap().unwrap().id, blocked);
     }
 
     #[test]

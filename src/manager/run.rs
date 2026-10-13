@@ -89,7 +89,7 @@ pub fn outranks(app: &App, by: &Caller, setter: &Setter) -> Result<bool> {
 }
 
 /// Who `setter` is, for a refusal: `the user`, `manager backend`.
-fn setter_label(app: &App, setter: &Setter) -> Result<String> {
+pub fn setter_label(app: &App, setter: &Setter) -> Result<String> {
     Ok(match setter {
         Setter::User => "the user".to_string(),
         Setter::Root => "the assistant".to_string(),

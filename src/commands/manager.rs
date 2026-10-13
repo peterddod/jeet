@@ -17,9 +17,7 @@ use serde::Serialize;
 use crate::cli::Delegation;
 use crate::commands::task::{start_new, warn_all};
 use crate::context::App;
-use crate::db::tasks::{
-    ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState,
-};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
@@ -245,22 +243,14 @@ fn finish_ls(rows: &[Row], json: bool) -> Result<()> {
 }
 
 /// `top` (unless it is the assistant) and everything below it, each after
-/// its parent, siblings by slug.
+/// its parent, siblings by slug ([`manager::tree_order`]).
 fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
     let base = app.db.depth(&top.id)?;
-    let mut below: HashMap<String, Vec<TaskRecord>> = HashMap::new();
-    for (task, _) in app.db.descendants(&top.id)? {
-        if let Some(parent) = &task.parent_id {
-            below.entry(parent.clone()).or_default().push(task);
-        }
-    }
-    for children in below.values_mut() {
-        children.sort_by(|a, b| a.slug.cmp(&b.slug));
-    }
-    let mut slugs: HashMap<String, String> = below
-        .values()
-        .flatten()
-        .chain(std::iter::once(top))
+    // `descendants` already refused a cycle.
+    let mut nodes = vec![top.clone()];
+    nodes.extend(app.db.descendants(&top.id)?.into_iter().map(|(t, _)| t));
+    let mut slugs: HashMap<String, String> = nodes
+        .iter()
         .map(|t| (t.id.clone(), t.slug.clone()))
         .collect();
     // The top's own parent sits above the tree but is still its parent.
@@ -270,31 +260,18 @@ fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
         }
     }
     let mut rows = Vec::new();
-    // Depth first, from the top; `descendants` already refused a cycle.
-    let mut stack: Vec<(TaskRecord, u32)> = match top.kind {
-        TaskKind::Assistant => below
-            .get(&top.id)
-            .into_iter()
-            .flatten()
-            .rev()
-            .map(|t| (t.clone(), base + 1))
-            .collect(),
-        _ => vec![(top.clone(), base)],
-    };
-    while let Some((task, depth)) = stack.pop() {
+    for (i, depth) in manager::tree_order(&nodes, top) {
+        let task = &nodes[i];
         let (run, holder) = app.db.effective_run_state(&task.id)?;
         rows.push(Row {
             task: task.slug.clone(),
             parent: task.parent_id.as_ref().and_then(|p| slugs.get(p).cloned()),
-            depth,
+            depth: base + depth,
             kind: task.kind.as_str(),
             state: task.state.as_str(),
             run_state: run.as_str(),
             held_by: holder.map(|h| h.slug),
         });
-        for child in below.get(&task.id).into_iter().flatten().rev() {
-            stack.push((child.clone(), depth + 1));
-        }
     }
     Ok(rows)
 }
@@ -482,10 +459,8 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         };
         // Open asks come from what the child said itself: a status report
         // jeet files while it waits for the answer must not hide them.
-        if let Some(r) = app.db.last_own_report(&child.id)? {
-            if matches!(r.kind, ReportKind::Blocked | ReportKind::Question) {
-                open.push(shown_report(r));
-            }
+        if let Some(r) = manager::open_ask(app, &child)? {
+            open.push(shown_report(r));
         }
         let last_report = app.db.last_report(&child.id)?.map(shown_report);
         children.push(Child {
@@ -859,7 +834,7 @@ fn stale(
 mod tests {
     use super::*;
     use crate::config;
-    use crate::db::tasks::{RunState, Setter, TaskBriefRecord, TaskState};
+    use crate::db::tasks::{ReportKind, RunState, Setter, TaskBriefRecord, TaskState};
     use crate::db::Database;
 
     fn lab() -> (tempfile::TempDir, App, TaskRecord) {

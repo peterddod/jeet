@@ -85,6 +85,33 @@ pub fn inbox_path(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("inbox.jsonl")
 }
 
+/// What is queued in the inbox in `task_dir`, waiting for its lock. A home
+/// with no inbox is left without one: this only looks.
+pub fn peek(task_dir: &Path) -> Vec<Queued> {
+    if !inbox_path(task_dir).exists() {
+        return Vec::new();
+    }
+    Inbox::lock(task_dir)
+        .and_then(|inbox| inbox.read())
+        .unwrap_or_default()
+}
+
+/// [`peek`], without waiting on the lock a hook or a delivery holds:
+/// `None` while it is held, or when the inbox cannot be read.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the agents pane's tree thread counts inboxes with it"
+    )
+)]
+pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
+    if !inbox_path(task_dir).exists() {
+        return Some(Vec::new());
+    }
+    Inbox::try_lock(task_dir).ok()??.read().ok()
+}
+
 /// A task's inbox, locked for as long as this is held. `task send` looks at
 /// the agent's status and queues under the lock, and the Stop hook takes the
 /// queue and writes the status under it, so a message is never queued just
@@ -96,6 +123,32 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn lock(task_dir: &Path) -> Result<Self> {
+        let (file, path) = Self::lock_file(task_dir)?;
+        file.lock()
+            .with_context(|| format!("lock {}", path.display()))?;
+        Ok(Self {
+            path: inbox_path(task_dir),
+            _lock: file,
+        })
+    }
+
+    /// [`Inbox::lock`], without waiting: `None` while another holds it.
+    pub fn try_lock(task_dir: &Path) -> Result<Option<Self>> {
+        let (file, path) = Self::lock_file(task_dir)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self {
+                path: inbox_path(task_dir),
+                _lock: file,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("lock {}", path.display()))
+            }
+        }
+    }
+
+    /// The file the lock is taken on, made with its directory if need be.
+    fn lock_file(task_dir: &Path) -> Result<(File, PathBuf)> {
         let dir = task_dir.join(tasks::MARKER_DIR);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let path = dir.join("inbox.lock");
@@ -105,12 +158,7 @@ impl Inbox {
             .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock {}", path.display()))?;
-        Ok(Self {
-            path: inbox_path(task_dir),
-            _lock: file,
-        })
+        Ok((file, path))
     }
 
     /// Add `message` to the end, for whichever session takes it first.
@@ -1473,5 +1521,24 @@ mod tests {
         assert_eq!(got, Delivered::Typed);
         assert_eq!(typed, ["late"]);
         assert!(left(&dir).is_empty());
+    }
+
+    #[test]
+    fn peeking_only_looks_and_never_waits_on_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        // No inbox: nothing, and no `.jeet/` made for it.
+        assert!(peek(dir.path()).is_empty());
+        assert_eq!(try_peek(dir.path()), Some(Vec::new()));
+        assert!(!dir.path().join(tasks::MARKER_DIR).exists());
+
+        enqueue(dir.path(), "news").unwrap();
+        let said = |q: Vec<Queued>| q.into_iter().map(|q| q.message).collect::<Vec<_>>();
+        assert_eq!(said(peek(dir.path())), ["news"]);
+        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+        // While a hook holds it, the try gives up; the queue is untouched.
+        let held = Inbox::lock(dir.path()).unwrap();
+        assert_eq!(try_peek(dir.path()), None);
+        drop(held);
+        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
     }
 }

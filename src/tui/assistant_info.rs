@@ -130,7 +130,7 @@ pub fn gather(probe: &Probe, windows: &[tmux::Window]) -> Info {
         probe.primary.as_deref(),
         windows,
     );
-    let queued = queued(&probe.dir);
+    let queued = messages::peek(&probe.dir);
     let (todo, todo_error) = match read_todo(&probe.dir) {
         Ok(todo) => (todo, None),
         Err(e) => (Vec::new(), Some(format!("{e:#}"))),
@@ -166,17 +166,6 @@ pub fn gather(probe: &Probe, windows: &[tmux::Window]) -> Info {
 /// The todo list in `dir`; empty when there is none yet.
 fn read_todo(dir: &Path) -> Result<Vec<ItemView>> {
     Ok(todo::read(dir, "")?.views())
-}
-
-/// What is queued in the inbox in `dir`. A home with no inbox is left
-/// without one: the list only looks.
-fn queued(dir: &Path) -> Vec<Queued> {
-    if !messages::inbox_path(dir).exists() {
-        return Vec::new();
-    }
-    messages::Inbox::lock(dir)
-        .and_then(|inbox| inbox.read())
-        .unwrap_or_default()
 }
 
 fn event_entry(logged: Logged) -> FeedEntry {

@@ -363,13 +363,13 @@ fn blocked_body(app: &App, node: &TaskRecord) -> Result<String> {
 
 /// The most of any limit in `row` that `used` (seconds, turns) is, in per
 /// cent; `None` with no limit.
-fn percent(row: &BudgetRow, (secs, turns): (i64, i64)) -> Option<i64> {
+pub fn percent(row: &BudgetRow, (secs, turns): (i64, i64)) -> Option<i64> {
     let of = |used: i64, max: Option<i64>| max.map(|max| used.saturating_mul(100) / max.max(1));
     of(secs, row.max_secs).max(of(turns, row.max_turns))
 }
 
 /// `48m of 1h, 16 of 20turns`.
-fn usage(row: &BudgetRow, (secs, turns): (i64, i64)) -> String {
+pub fn usage(row: &BudgetRow, (secs, turns): (i64, i64)) -> String {
     let mut parts = Vec::new();
     if let Some(max) = row.max_secs {
         let max = label(Limits {
