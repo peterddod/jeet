@@ -15,7 +15,7 @@ use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
-use crate::manager::run;
+use crate::manager::{self, run};
 use crate::messages::{self, Delivered, Inbox};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
@@ -1073,6 +1073,87 @@ pub fn delete(app: &App, name: &str, force: bool, recursive: bool) -> Result<()>
         ),
     }
     Ok(())
+}
+
+/// Delete manager `name` alone, moving the tasks under it, archived ones
+/// too, to its parent (R21): once the user has seen what it would lose and
+/// where they go, and agreed, or passed --force. Every rule of the tree is
+/// checked before anything goes, and again as the move is written.
+pub fn delete_reparenting(app: &App, name: &str, force: bool) -> Result<()> {
+    // By exact name only, as delete is.
+    let (caller, task) = permissions::resolve_target(
+        app,
+        &Target::Key {
+            key: name.to_string(),
+            exact: true,
+        },
+    )?;
+    permissions::in_scope(app, &caller, Verb::TaskDelete, &task)?;
+    let called = called(app, &task);
+    let dir = tasks::task_dir(app, &task);
+    if standing_in(&dir) {
+        bail!(
+            "you are inside {}; cd out of it before deleting the task",
+            dir.display()
+        );
+    }
+    // Before asking, not after: the answer would count for nothing.
+    let plan = tasks::plan_reparent(app, &caller, &task)?;
+    tasks::refuse_inside_any(app, std::slice::from_ref(&task), "delete")?;
+    if !force {
+        confirm_delete_reparenting(app, &task, &plan)?;
+    }
+    let (moved, warnings) = tasks::delete_reparenting(app, &caller, plan)?;
+    warn_all(&warnings);
+    eprintln!(
+        "jeet: deleted task {called}; {} under it now under {}",
+        tasks::plural(moved.plan.movers.len(), "task"),
+        manager::label(&moved.plan.to)
+    );
+    if !moved.reports.is_empty() {
+        eprintln!(
+            "jeet: {} to {} kept, now as sent to {}",
+            tasks::plural(moved.reports.len(), "report"),
+            task.slug,
+            manager::label(&moved.plan.to)
+        );
+    }
+    warn_all(&moved.lines);
+    Ok(())
+}
+
+/// Ask before deleting `task` alone: what it would lose, and which tasks
+/// move to where, with what their grants drop. Slugs only.
+fn confirm_delete_reparenting(app: &App, task: &TaskRecord, plan: &tasks::MovePlan) -> Result<()> {
+    let called = called(app, task);
+    let losses = tasks::losses(app, task)?;
+    let mut report = format!(
+        "deleting task {} removes {} and its worktrees",
+        called,
+        tasks::task_dir(app, task).display()
+    );
+    match losses.is_empty() {
+        true => report.push_str(", losing nothing"),
+        false => {
+            report.push_str(", losing:");
+            report.extend(losses.iter().map(|loss| format!("\n  {loss}")));
+        }
+    }
+    report.push_str(&format!(
+        "\nthe {} under it move to {}:",
+        tasks::plural(plan.movers.len(), "task"),
+        manager::label(&plan.to)
+    ));
+    for mover in &plan.movers {
+        report.push_str(&format!("\n  {}", mover.slug));
+    }
+    for (slug, dropped) in &plan.lost {
+        report.push_str(&format!(
+            "\n{slug}'s grant drops {}, which it could not use where it was",
+            dropped.join(", ")
+        ));
+    }
+    confirm(&report, "delete it?", &format!("kept task {}", called))
 }
 
 fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {

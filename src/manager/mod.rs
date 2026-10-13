@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 use crate::context::App;
-use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord};
+use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::instructions;
 use crate::messages::{self, Queued};
 use crate::reports;
@@ -174,6 +174,23 @@ pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written.with_context(|| format!("write {}", path.display()))
+}
+
+/// Write again the `BRIEF.md` of each active manager in `nodes`, after a
+/// change to what it may do or spend, or where it sits. One not written is
+/// a warning: its session context still has the brief as it is now.
+pub fn write_briefs(app: &App, nodes: &[TaskRecord]) {
+    let managers = nodes
+        .iter()
+        .filter(|t| t.kind == TaskKind::Manager && t.state == TaskState::Active);
+    for node in managers {
+        if let Err(e) = write_brief(app, node) {
+            eprintln!(
+                "jeet: warning: could not write {}'s BRIEF.md: {e:#}",
+                label(node)
+            );
+        }
+    }
 }
 
 /// What manager `node` is started with (M35): where it sits, and to read

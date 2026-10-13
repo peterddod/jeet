@@ -368,6 +368,9 @@ pub enum TaskCommands {
         /// Delete every task under it too, leaves first, asking once
         #[arg(short, long)]
         recursive: bool,
+        /// Move the tasks under it to its parent, then delete it alone
+        #[arg(long, conflicts_with = "recursive")]
+        reparent: bool,
     },
 
     /// Print a task's directory

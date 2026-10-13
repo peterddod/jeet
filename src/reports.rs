@@ -37,6 +37,8 @@ pub enum StatusEvent {
     Budget,
     /// Its start waits on `[managers] max_live`.
     Queued,
+    /// It was moved under this parent.
+    Moved,
 }
 
 impl StatusEvent {
@@ -48,6 +50,7 @@ impl StatusEvent {
             StatusEvent::Ended => "ended",
             StatusEvent::Budget => "budget",
             StatusEvent::Queued => "queued",
+            StatusEvent::Moved => "moved",
         }
     }
 }
