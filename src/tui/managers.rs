@@ -949,6 +949,10 @@ mod tests {
             .db
             .insert_report("w1", "api", ReportKind::Question, "which db?", 5)
             .unwrap();
+        // Progress since leaves the question open (H3).
+        app.db
+            .insert_report("w1", "api", ReportKind::Progress, "still waiting", 5)
+            .unwrap();
         app.db.set_budget_max("api", Some(3600), None).unwrap();
         app.db.charge("w1", 600, 2).unwrap();
         app.db.charge("w2", 60, 1).unwrap();
