@@ -362,6 +362,10 @@ pub enum EventKind {
     SessionStarted(StartSource),
     /// Busy with a prompt; the detail says on what.
     Working(Option<String>),
+    /// A subagent's work: a tool it uses, or its end. Part of a turn
+    /// already running, which it keeps fresh; it never starts one, as a
+    /// subagent can outlive the turn that started it.
+    Subagent,
     /// Sitting at its prompt, waiting for the next one, without a turn
     /// having just ended: the queue is typed in.
     Idle,

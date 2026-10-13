@@ -85,13 +85,23 @@ describes it, and use `None` for events jeet does not use:
 | `EventKind` | Meaning | Status shown | Claude Code event |
 | --- | --- | --- | --- |
 | `SessionStarted(source)` | a session began; `source` is `Startup`, `Resume`, `Clear`, `Compact` or `Other` | `idle` | `SessionStart` |
-| `Working(detail)` | busy; `detail` is the prompt's first line or the tool in use | `running – <detail>` | `UserPromptSubmit`, `PreToolUse`, `SubagentStop` |
+| `Working(detail)` | busy; `detail` is the prompt's first line or the tool in use | `running – <detail>` | `UserPromptSubmit`, `PreToolUse` |
+| `Subagent` | a subagent's work (a tool it uses, or its end), which can outlive the turn that started it | a `running` status is kept, brought up to date, and a `waiting` one becomes `running` again; any other is left as it is | `SubagentStop`, `PreToolUse` with an `agent_id` |
 | `Idle` | sitting at its prompt without a turn having just ended | `idle`; the queue is typed in, unless a wake channel watches the session | `Notification` with `idle_prompt` |
 | `NeedsInput(detail)` | stopped mid-turn for a permission or a question | `needs input – <detail>` | `Notification` with `permission_prompt` or `elicitation_dialog` (or no type); others are ignored |
 | `Stopped` | a turn finished | `idle`; the queue is handed over | `Stop` |
 | `Ended { cleared }` | the session is over; `cleared` when a new one replaces it in the same window, as `/clear` does | `ended` | `SessionEnd` (`cleared` when its `reason` is `clear`) |
 
-Cut details with `status::first_line(text, status::DETAIL_MAX)`. A
+Cut details with `status::first_line(text, status::DETAIL_MAX)`. Map
+work that is not the session's own turn to `Subagent`, never `Working`: a
+background subagent ending after the turn's `Stopped` would otherwise mark
+an idle session running, where it stays, with every message to it queued
+as busy, until its next turn. The cost, accepted: a turn Claude Code
+starts itself when a background subagent finishes has no `UserPromptSubmit`,
+so it shows `idle` until the session's own first `PreToolUse` (the whole turn,
+if the reply is text only). Messages queued meanwhile are typed into that
+turn rather than held for its `Stop`, and the turn is not charged to the
+budget. It lasts one turn; the `Stop` corrects it. A
 `Clear` or `Other` start records the new session as following on from the
 task's previous one. A `Compact` start keeps whatever state the session was
 in. Map to `NeedsInput` only what blocks until the user answers: an

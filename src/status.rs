@@ -92,6 +92,8 @@ pub fn status_for(event: &HookEvent, now: i64) -> Option<SessionStatus> {
     let (state, detail) = match event.kind.clone()? {
         EventKind::SessionStarted(_) => (State::Idle, Some(STARTED_DETAIL.to_string())),
         EventKind::Working(detail) => (State::Running, detail),
+        // Says how the session is only together with how it was.
+        EventKind::Subagent => return None,
         EventKind::Idle => (State::Idle, None),
         EventKind::NeedsInput(detail) => (State::Waiting, detail),
         EventKind::Stopped => (State::Idle, None),
@@ -591,10 +593,49 @@ fn hook_ctx_with(
 /// Write the status an event that neither ends a turn nor sits idle
 /// leaves, with the busy spell it carries on or starts.
 fn write_event_status(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Result<()> {
+    if let Some(EventKind::Subagent) = hook.kind {
+        return refresh_running(task_dir, hook, now);
+    }
     match status_for(hook, now) {
         Some(status) => write_status(task_dir, &with_busy(status, ctx)),
         None => Ok(()),
     }
+}
+
+/// A subagent's tool or end: the turn it is part of is still going, so a
+/// running session's status is brought up to date, its detail and busy
+/// spell kept; a waiting one (a prompt the user has answered, the main
+/// session blocked on the subagent) is running again. Nothing for an idle
+/// or ended session: a subagent can
+/// outlive its turn (one in the background), and its end marking an idle
+/// session running would leave it so, every message to it queued as busy,
+/// until its next turn. Nor for the wake channel's running write, which
+/// only a hook of the turn it starts replaces. Read again here, not taken
+/// from [`HookCtx::prev`], which narrows, but without a lock does not close,
+/// the window in which a Stop written since is undone.
+fn refresh_running(task_dir: &Path, hook: &HookEvent, now: i64) -> Result<()> {
+    let Some(session_id) = hook.session_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(live) = read_status(task_dir, session_id)
+        .filter(|s| matches!(s.state, State::Running | State::Waiting) && s.event != WAKE_EVENT)
+    else {
+        return Ok(());
+    };
+    let (detail, state) = match live.state {
+        State::Waiting => (Some("waiting for subagents".to_string()), State::Running),
+        _ => (live.detail.clone(), live.state),
+    };
+    write_status(
+        task_dir,
+        &SessionStatus {
+            state,
+            detail,
+            event: hook.name.clone(),
+            at: now,
+            ..live
+        },
+    )
 }
 
 /// `status` with its `busy_since`, for one running or waiting.
@@ -1456,6 +1497,67 @@ mod tests {
         let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &ended, 400, &|_| true).unwrap();
         assert!(ctx.attributed);
         assert_eq!(used(&ctx.app, "w"), (300, 0));
+    }
+
+    #[test]
+    fn a_subagent_keeps_a_turn_fresh_but_never_wakes_an_idle_session() {
+        let (_home, app) = lab();
+        app.db.set_budget_max("w", Some(1000), Some(10)).unwrap();
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let subagent = hook("SubagentStop", EventKind::Subagent);
+
+        // During a turn: still running, its detail and busy spell kept.
+        let dir = busy_w(&app);
+        let mut waiting = read_status(&dir, "s").unwrap();
+        waiting.detail = Some("waiting for subagents".into());
+        write_status(&dir, &waiting).unwrap();
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &subagent, 200, &|_| true).unwrap();
+        write_event_status(&dir, &subagent, &ctx, 200).unwrap();
+        let status = read_status(&dir, "s").unwrap();
+        assert_eq!(status.state, State::Running);
+        assert_eq!(status.detail.as_deref(), Some("waiting for subagents"));
+        assert_eq!((status.event.as_str(), status.at), ("SubagentStop", 200));
+        assert_eq!(status.busy_since, Some(100));
+        assert_eq!(used(&ctx.app, "w"), (0, 0));
+
+        // Waiting on a prompt a subagent raised: a subagent's hook means it
+        // was answered, so running again, the busy spell kept.
+        let mut asking = read_status(&dir, "s").unwrap();
+        asking.state = State::Waiting;
+        asking.detail = Some("may I?".into());
+        write_status(&dir, &asking).unwrap();
+        let tool = hook("PreToolUse", EventKind::Subagent);
+        write_event_status(&dir, &tool, &ctx, 250).unwrap();
+        let status = read_status(&dir, "s").unwrap();
+        assert_eq!(status.state, State::Running);
+        assert_eq!(status.detail.as_deref(), Some("waiting for subagents"));
+        assert_eq!((status.event.as_str(), status.at), ("PreToolUse", 250));
+        assert_eq!(status.busy_since, Some(100));
+
+        // After the turn's Stop: idle it stays, idle since the Stop, with
+        // no busy spell begun and nothing charged.
+        let stop = hook("Stop", EventKind::Stopped);
+        let ctx = hook_ctx_with(Some(ctx.app), &open, &dir, "w", &stop, 300, &|_| true).unwrap();
+        write_status(&dir, &status_for(&stop, 300).unwrap()).unwrap();
+        let charged = used(&ctx.app, "w");
+        let mut app = Some(ctx.app);
+        for (name, at) in [("SubagentStop", 400), ("PreToolUse", 500)] {
+            let late = hook(name, EventKind::Subagent);
+            let ctx = hook_ctx_with(app.take(), &open, &dir, "w", &late, at, &|_| true).unwrap();
+            write_event_status(&dir, &late, &ctx, at).unwrap();
+            let status = read_status(&dir, "s").unwrap();
+            assert_eq!((status.state, status.at), (State::Idle, 300), "{name}");
+            assert_eq!(status.busy_since, None, "{name}");
+            assert_eq!(used(&ctx.app, "w"), charged, "{name}");
+            app = Some(ctx.app);
+        }
+        let ctx = quiet_ctx(app.unwrap());
+
+        // Nor does one undo the wake channel's write, which a lost wake
+        // is put back from.
+        wake_running(&dir, "s", 600).unwrap();
+        write_event_status(&dir, &subagent, &ctx, 610).unwrap();
+        assert!(revert_wake(&dir, "s", 600).unwrap());
     }
 
     #[test]
