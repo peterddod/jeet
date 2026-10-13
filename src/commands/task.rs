@@ -841,12 +841,15 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
 /// no agreeing, only --force. With `recursive`, every active task under it
 /// is archived first, leaves first, after one confirm for them all.
 pub fn archive(app: &App, name: &str, force: bool, recursive: bool) -> Result<()> {
+    // A subtree teardown names its root exactly, as delete does: with
+    // --force nothing asks, so a stale name must not land on a task it is
+    // only a prefix of.
     let task = permissions::scoped_target(
         app,
         Verb::TaskArchive,
         Target::Key {
             key: name.to_string(),
-            exact: false,
+            exact: recursive,
         },
     )?;
     let called = called(app, &task);

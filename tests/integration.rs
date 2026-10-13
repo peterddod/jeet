@@ -12336,6 +12336,36 @@ fn deleting_a_worker_mid_turn_charges_its_parent_the_turn_so_far() {
     charged_mid_turn(&["task", "delete", "w", "--force"]);
 }
 
+/// Recursive teardown charges it too: the charge comes before the agents
+/// are ended.
+#[cfg(unix)]
+#[test]
+fn recursive_teardown_of_a_worker_mid_turn_charges_its_turn_so_far() {
+    charged_mid_turn(&["task", "archive", "w", "--recursive", "--force"]);
+    charged_mid_turn(&["task", "delete", "w", "--recursive", "--force"]);
+}
+
+/// `archive --recursive` names its root exactly, as delete does: with
+/// --force nothing asks, so a prefix must not take a subtree down.
+#[cfg(unix)]
+#[test]
+fn archive_recursive_refuses_a_name_prefix() {
+    let lab = StoreLab::new();
+    lab.clone_repo("widget");
+    let id = lab.new_task_with("fix-lead", &[]);
+    let output = lab.jeet_at(
+        &["task", "archive", "fix", "--recursive", "--force"],
+        &lab.home(),
+        &[],
+    );
+    assert!(!output.status.success(), "{}", stderr_of(&output));
+    let state: String = lab
+        .index()
+        .query_row("SELECT state FROM tasks WHERE id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "active");
+}
+
 /// Archiving a worker whose agent died mid-turn, with no hook to say so,
 /// charges nothing, though a window the user opened keeps its session up.
 #[cfg(unix)]

@@ -1378,7 +1378,15 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             TaskCommands::Restart { name, .. } => verb(Verb::TaskOpen, key(name)),
             // Only the user vouches for an agent.
             TaskCommands::Adopt { .. } => None,
-            TaskCommands::Archive { name, .. } => verb(Verb::TaskArchive, key(name)),
+            TaskCommands::Archive {
+                name, recursive, ..
+            } => verb(
+                Verb::TaskArchive,
+                Target::Key {
+                    key: name.clone(),
+                    exact: *recursive,
+                },
+            ),
             TaskCommands::Unarchive { name, .. } => verb(Verb::TaskUnarchive, key(name)),
             TaskCommands::Delete { name, .. } => verb(
                 Verb::TaskDelete,
@@ -1667,6 +1675,23 @@ mod tests {
         match gate_of(args) {
             Gate::Needs { capability, action } => (capability, action),
             other => panic!("{args:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recursive_teardown_is_logged_as_taking_the_subtree() {
+        for (verb, past) in [
+            ("archive", "archived"),
+            ("unarchive", "unarchived"),
+            ("delete", "deleted"),
+        ] {
+            let (_, action) = needs_of(&["task", verb, "x"]);
+            assert_eq!(action.unwrap(), format!("{past} task x"));
+            let (_, action) = needs_of(&["task", verb, "x", "--recursive"]);
+            assert_eq!(
+                action.unwrap(),
+                format!("{past} task x and every task under it")
+            );
         }
     }
 
