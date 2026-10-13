@@ -8,9 +8,11 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::commands::task::shown_github;
 use crate::context::App;
 use crate::db::RepoRecord;
 use crate::github::{self, CheckState, MergeMethod, MergeSettings, MergeStatus};
+use crate::permissions;
 use crate::pr_history;
 use crate::resolve::repo_from_filter_or_cwd;
 
@@ -26,10 +28,13 @@ pub fn merge(
     let repo = repo_from_filter_or_cwd(app, filter.as_deref())?;
     let trunk = Path::new(&repo.trunk_path);
 
+    // A title, check names and a branch are written by whoever opened the
+    // PR, a fork's author included: an agent gets them fenced.
+    let caller = permissions::caller(app)?;
     eprintln!("jeet: looking up #{number}");
     let status = github::merge_status(trunk, number)?;
     if let Some(why) = refusal(&status) {
-        bail!("not merging: {why}");
+        bail!("not merging: {}", shown_github(&caller, &why));
     }
     let settings = github::merge_settings(trunk)?;
     let configured = app.config.merge.method;
@@ -44,18 +49,20 @@ pub fn merge(
 
     let pr = &status.history.pr;
     github::merge_pr(trunk, number, method, &pr.head_ref_oid)?;
-    eprintln!("jeet: merged #{number} {} ({})", pr.title, method.as_str());
+    eprintln!(
+        "jeet: merged #{number} {} ({})",
+        shown_github(&caller, &pr.title),
+        method.as_str()
+    );
 
     // As `gh pr merge --delete-branch` would, but only on GitHub: a task
     // may still have the branch checked out. A fork's branch is not ours to
     // delete, and a repository that deletes merged branches already has.
     if !keep_branch && !pr.is_cross_repository && !settings.delete_branch_on_merge {
+        let branch = shown_github(&caller, &pr.head_ref_name);
         match github::delete_remote_branch(trunk, &pr.head_ref_name) {
-            Ok(()) => eprintln!("jeet: deleted branch {} on GitHub", pr.head_ref_name),
-            Err(e) => eprintln!(
-                "jeet: warning: could not delete branch {}: {e:#}",
-                pr.head_ref_name
-            ),
+            Ok(()) => eprintln!("jeet: deleted branch {branch} on GitHub"),
+            Err(e) => eprintln!("jeet: warning: could not delete branch {branch}: {e:#}"),
         }
     }
 

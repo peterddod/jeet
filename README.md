@@ -354,7 +354,10 @@ The method is `--method`, else `[merge] method` in config.toml when the
 repository allows it, else the repository's default. The PR's branch is
 then deleted on GitHub (not locally: a task may have it checked out), unless
 `--keep-branch` or the repository deletes merged branches itself. Tasks
-holding the PR record it as merged in their PR history.
+holding the PR record it as merged in their PR history. Run by an agent, the
+PR's title, branch and check names come inside
+`<github-data untrusted="true">…</github-data>`, as `jeet review`'s title
+does; the user gets them without control characters.
 
 ```toml
 [merge]
@@ -759,7 +762,7 @@ or a manager, one inside its own home and of one name, no hard link), and
 `--max-children` lowers `[managers] max_children` for it. A manager is
 not made without `--goal` or `--brief-file`: its brief is all it works
 towards. A manager sits at
-most `max_depth` − 1 below the assistant, and needs a harness with hooks,
+most `max_depth` − 1 below the assistant, and needs a harness with recorded sessions, hooks,
 continue-turn output, `interrupt_keys` and deny rules (Claude Code has them
 all), and is not started on one configured since that lacks them. It prints its home and its place in the tree, then starts it as any
 start is: now, queued over `max_live`, or held while its parent is paused.

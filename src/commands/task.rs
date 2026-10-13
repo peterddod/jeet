@@ -1161,6 +1161,20 @@ pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
     }
 }
 
+/// Text from GitHub inside one of jeet's lines (a PR title, check names, a
+/// branch), as `caller` is shown it: whoever opened the PR wrote it, so the
+/// user gets it without control characters and an agent gets it fenced as
+/// untrusted, unable to close the fence.
+pub(crate) fn shown_github(caller: &Caller, text: &str) -> String {
+    match caller {
+        Caller::User => printable(text),
+        Caller::Root | Caller::Node(_) => format!(
+            "<github-data untrusted=\"true\">{}</github-data>",
+            crate::manager::fence::fenced(text)
+        ),
+    }
+}
+
 /// Whose children's names `caller` is shown, besides those of tasks with
 /// no parent: the root's and, for a manager, its own (the user's, the
 /// root's and its own words); None for the user, who sees them all.

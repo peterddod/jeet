@@ -990,8 +990,8 @@ RFC left open, or departed from it:
   fail).
 - **E14** The manager refusal lands with phase 2's `manager new` (P12,
   P22) as `harness::manager_missing(&dyn Harness) -> Vec<&'static str>`,
-  checked through `tasks::manager_harness`, naming "hook events",
-  "continue-turn output", "interrupt_keys" and "deny rules"; it has no
+  checked through `tasks::manager_harness`, naming "recorded sessions",
+  "hook events", "continue-turn output", "interrupt_keys" and "deny rules"; it has no
   caller in #32.
 - **E15** Deny rules are a lint, not a gate (5.6). They cover only the
   agent's Bash and file tools, not MCP tools, `!` commands or scripts.
@@ -1351,8 +1351,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   used up, whatever `--budget` names. A worker of the assistant's gets no budget unless
   asked. Every command naming a task finds it as the permission check did,
   then checks its reach again.
-- **P12** A manager needs a harness with hook events, continue-turn
-  output, `interrupt_keys` and deny rules (§7), and is refused, naming what
+- **P12** A manager needs a harness with recorded sessions (hooks, deny
+  rules and the first prompt are installed only on one), hook events,
+  continue-turn output, `interrupt_keys` and deny rules (§7), and is refused, naming what
   is missing, on one without, as it is made and again at each start
   (`runtime::start_tmux`), so one made before the configured harness
   changed is not started on one that lacks them. A worker starts without
