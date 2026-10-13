@@ -96,7 +96,12 @@ Cut details with `status::first_line(text, status::DETAIL_MAX)`. Map
 work that is not the session's own turn to `Subagent`, never `Working`: a
 background subagent ending after the turn's `Stopped` would otherwise mark
 an idle session running, where it stays, with every message to it queued
-as busy, until its next turn. A
+as busy, until its next turn. The cost, accepted: a turn Claude Code
+starts itself when a background subagent finishes has no `UserPromptSubmit`,
+so it shows `idle` until the session's own first `PreToolUse` (the whole turn,
+if the reply is text only). Messages queued meanwhile are typed into that
+turn rather than held for its `Stop`, and the turn is not charged to the
+budget. It lasts one turn; the `Stop` corrects it. A
 `Clear` or `Other` start records the new session as following on from the
 task's previous one. A `Compact` start keeps whatever state the session was
 in. Map to `NeedsInput` only what blocks until the user answers: an
