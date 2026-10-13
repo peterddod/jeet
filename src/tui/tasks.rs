@@ -1969,10 +1969,7 @@ impl TasksUi {
                 // Past the end is drawn as the end ([`tasks_ui::draw`]).
                 let scroll = match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => return None,
-                    KeyCode::Enter => match prs {
-                        Some(task_id) => return Some(Action::Prs { task_id }),
-                        None => return None,
-                    },
+                    KeyCode::Enter => return prs.map(|task_id| Action::Prs { task_id }),
                     KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1),
                     KeyCode::PageUp => scroll.saturating_sub(10),
