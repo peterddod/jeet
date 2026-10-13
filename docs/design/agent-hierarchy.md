@@ -2110,8 +2110,9 @@ TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
   text before an agent, so for anyone but the user at a terminal (H8) both
   `defang` it: `<jeet-` and `</jeet-`, in any ASCII case, become `‹jeet-`
   and `‹/jeet-`. Control characters are dropped first, as delivery drops
-  them, so `<\x01jeet-` cannot hide a tag. The user's own commands and the TUI's `n` form are
-  unchanged.
+  them, so `<\x01jeet-` cannot hide a tag, and invisible format
+  characters (a zero-width space, say) are looked past, though kept. The
+  user's own commands and the TUI's `n` form are unchanged.
 
 ### Phase 4 implementation notes: watch rules to a manager
 

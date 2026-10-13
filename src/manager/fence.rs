@@ -114,7 +114,14 @@ pub fn defang(text: &str) -> String {
     while let Some(at) = rest.find('<') {
         out.push_str(&rest[..at]);
         rest = &rest[at + 1..];
-        let tag = rest.strip_prefix('/').unwrap_or(rest);
+        // Invisible characters (a zero-width space, say) between `<`, `/`
+        // and `jeet-` hide nothing from a reader, so they are looked past.
+        let visible: String = rest
+            .chars()
+            .filter(|&c| !crate::tasks::format_char(c))
+            .take(6)
+            .collect();
+        let tag = visible.strip_prefix('/').unwrap_or(&visible);
         match tag
             .get(..5)
             .is_some_and(|p| p.eq_ignore_ascii_case("jeet-"))
@@ -224,6 +231,13 @@ mod tests {
     fn defang_sees_the_text_as_delivery_will_clean_it() {
         assert_eq!(defang("<\x01jeet-answer"), "‹jeet-answer");
         assert_eq!(defang("<j\x1beet-answer"), "‹jeet-answer");
+        // Invisible characters are looked past, and kept.
+        assert_eq!(defang("<\u{200b}jeet-answer"), "‹\u{200b}jeet-answer");
+        assert_eq!(
+            defang("<\u{2060}/je\u{200d}et-x"),
+            "‹\u{2060}/je\u{200d}et-x"
+        );
+        assert_eq!(defang("<\u{200b}div"), "<\u{200b}div");
         assert_eq!(defang("</\x07JEET-x"), "‹/JEET-x");
         assert_eq!(defang("a\tb\n<\x00c"), "a\tb\n<c");
     }
