@@ -747,10 +747,16 @@ fn task_gate(command: &TaskCommands) -> Gate {
             format!("unarchived task {name}{}", with_under(*recursive)),
         ),
         TaskCommands::Delete {
-            name, recursive, ..
+            name,
+            recursive,
+            reparent,
+            ..
         } => needs(
             "task.delete",
-            format!("deleted task {name}{}", with_under(*recursive)),
+            match reparent {
+                true => format!("deleted task {name}, moving the tasks under it to its parent"),
+                false => format!("deleted task {name}{}", with_under(*recursive)),
+            },
         ),
         TaskCommands::Resync { name, .. } => needs(
             "task.resync",
@@ -1725,6 +1731,13 @@ mod tests {
                 format!("{past} task x and every task under it")
             );
         }
+        // `--reparent` takes `task.delete`, as a delete does.
+        let (capability, action) = needs_of(&["task", "delete", "x", "--reparent"]);
+        assert_eq!(capability, "task.delete");
+        assert_eq!(
+            action.unwrap(),
+            "deleted task x, moving the tasks under it to its parent"
+        );
     }
 
     #[test]
@@ -2326,6 +2339,10 @@ mod tests {
             (Verb::TaskArchive, line(&["task", "archive", "{}"])),
             (Verb::TaskUnarchive, line(&["task", "unarchive", "{}"])),
             (Verb::TaskDelete, line(&["task", "delete", "{}"])),
+            (
+                Verb::TaskDelete,
+                line(&["task", "delete", "{}", "--reparent"]),
+            ),
             (Verb::TaskResync, line(&["task", "resync", "{}"])),
             (Verb::TaskNew, line(&["task", "new", "x", "--parent", "{}"])),
             (

@@ -26,18 +26,20 @@ use crate::cli::Delegation;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{
-    RunState, TaskBriefRecord, TaskKind, TaskRecord, TaskState, TaskWorktreeRecord,
+    MoveRows, RunState, Setter, TaskBriefRecord, TaskKind, TaskRecord, TaskState,
+    TaskWorktreeRecord,
 };
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
 use crate::manager;
 use crate::manager::budget::{self, Limits};
-use crate::messages;
+use crate::messages::{self, Delivered};
 use crate::permissions::{self, Caller, Grant, Target, Verb};
 use crate::placement;
 use crate::projects::{self, Project};
 use crate::remote;
+use crate::reports::{self, StatusEvent};
 use crate::resolve;
 use crate::review;
 use crate::runtime;
@@ -2490,6 +2492,298 @@ pub fn refuse_delete_with_children(app: &App, task: &TaskRecord) -> Result<()> {
     Ok(())
 }
 
+/// A move of tasks to a new parent, planned and checked, nothing written:
+/// what [`Database::apply_move`] writes, and what to say of it.
+///
+/// [`Database::apply_move`]: crate::db::Database::apply_move
+#[derive(Debug, Clone)]
+pub struct MovePlan {
+    /// As they were read, under their old parent.
+    pub movers: Vec<TaskRecord>,
+    pub to: TaskRecord,
+    /// The task being deleted, whose children the movers are.
+    pub deleting: Option<TaskRecord>,
+    /// Each node whose grant drops a capability, by slug, with what it
+    /// drops.
+    pub lost: Vec<(String, Vec<String>)>,
+    pub rows: MoveRows,
+}
+
+/// A move done: its plan, the reports moved with it, and what it told
+/// whom, one line each.
+#[derive(Debug, Clone)]
+pub struct Moved {
+    pub plan: MovePlan,
+    pub reports: Vec<i64>,
+    pub lines: Vec<String>,
+}
+
+/// Plan moving `movers`, with everything below them, under `to`, for
+/// `caller` (R21-R26), writing nothing. Every node of the subtrees is to
+/// keep only what it may do now and the new chain above it lets through,
+/// so stored equals effective and nothing widens, now or once a list above
+/// it grows (C14). A node held by a setter off the new chain is to be held
+/// by `caller` instead, if `caller` ranks as high; otherwise it would
+/// escape that hold, and the move is refused. Then the invariants are
+/// checked as [`Database::apply_move`] checks them again.
+///
+/// [`Database::apply_move`]: crate::db::Database::apply_move
+pub fn plan_move(
+    app: &App,
+    caller: &Caller,
+    movers: Vec<TaskRecord>,
+    to: TaskRecord,
+    deleting: Option<TaskRecord>,
+) -> Result<MovePlan> {
+    let mut subtree = Vec::new();
+    for mover in &movers {
+        subtree.push(mover.clone());
+        subtree.extend(app.db.descendants(&mover.id)?.into_iter().map(|(t, _)| t));
+    }
+    // What the chain from `to` up lets through.
+    let through = permissions::effective(app, &to)?;
+    let mut grants = Vec::new();
+    let mut lost = Vec::new();
+    for node in &subtree {
+        let stored = app.db.grants(&node.id)?;
+        let kept: Vec<String> = permissions::effective(app, node)?
+            .into_iter()
+            .filter(|c| through.contains(c))
+            .map(String::from)
+            .collect();
+        let dropped: Vec<String> = stored
+            .iter()
+            .filter(|c| !kept.contains(c))
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            lost.push((node.slug.clone(), dropped));
+        }
+        grants.push((node.id.clone(), stored, kept));
+    }
+
+    let mut chain = vec![to.id.clone()];
+    chain.extend(app.db.ancestors(&to.id)?.into_iter().map(|a| a.id));
+    let mut setters = Vec::new();
+    for node in &subtree {
+        let Some(Setter::Node(x)) = &node.run_state_by else {
+            continue;
+        };
+        if subtree.iter().any(|t| &t.id == x) || chain.contains(x) {
+            continue;
+        }
+        let old = Setter::Node(x.clone());
+        if !manager::run::outranks(app, caller, &old)? {
+            bail!(
+                "task {} is {} by {}, which ranks above you; it would escape that by moving, \
+                 so pause or resume first",
+                node.slug,
+                node.run_state.as_str(),
+                manager::run::setter_label(app, &old)?
+            );
+        }
+        setters.push((node.id.clone(), old, manager::run::setter_of(caller)));
+    }
+
+    let rows = MoveRows {
+        movers: movers.iter().map(|m| m.id.clone()).collect(),
+        to: to.id.clone(),
+        deleting: deleting.as_ref().map(|d| d.id.clone()),
+        fan_out: fan_out_of(app, &to)?,
+        grants,
+        setters,
+    };
+    app.db.check_move(&rows)?;
+    Ok(MovePlan {
+        movers,
+        to,
+        deleting,
+        lost,
+        rows,
+    })
+}
+
+/// Plan deleting `task` with `--reparent`: the tasks under it, archived
+/// ones too, move to its parent ([`plan_move`]). Refused for the
+/// assistant, and for a task with nothing under it, which a plain delete
+/// takes.
+pub fn plan_reparent(app: &App, caller: &Caller, task: &TaskRecord) -> Result<MovePlan> {
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant cannot be deleted");
+    }
+    let children = app.db.children(&task.id)?;
+    if children.is_empty() {
+        bail!(
+            "{} has no tasks under it to move; delete it without --reparent",
+            task.slug
+        );
+    }
+    let Some(parent_id) = &task.parent_id else {
+        bail!("{} has no parent to take the tasks under it", task.slug);
+    };
+    let Some(parent) = app.db.get_task(parent_id)? else {
+        bail!("the parent of task {} is gone", task.slug);
+    };
+    plan_move(app, caller, children, parent, Some(task.clone()))
+}
+
+/// Delete the task `plan` deletes, moving the tasks under it to its parent
+/// ([`plan_reparent`]): its agent is ended and its files go as a lone
+/// [`delete`]'s do, then the move is checked again and written with its row
+/// gone, in one transaction, and the moved tasks and their new parent are
+/// told ([`after_move`]). The caller has confirmed what [`losses`] lists.
+/// Returns the move and the warnings of the delete.
+pub fn delete_reparenting(
+    app: &App,
+    caller: &Caller,
+    plan: MovePlan,
+) -> Result<(Moved, Vec<String>)> {
+    let Some(task) = plan.deleting.clone() else {
+        bail!("this move deletes no task");
+    };
+    if task.slug.is_empty() || task.slug.starts_with('.') || task.slug.contains(['/', '\\']) {
+        bail!(
+            "refusing to delete a task whose directory name is {:?}",
+            task.slug
+        );
+    }
+    refuse_inside_any(app, std::slice::from_ref(&task), "delete")?;
+    // The agent ends first, since it could change the tree as it runs, and
+    // the move is checked again once it has: a plan gone stale during the
+    // confirmation is refused while nothing of the task is removed.
+    let mut warnings = end_agents(app, std::slice::from_ref(&task))?;
+    if let Err(e) = app.db.check_move(&plan.rows) {
+        bail!("{e:#}\nnothing was deleted, so run it again");
+    }
+    warnings.extend(remove_from_disk(app, &task)?);
+    let reports = app.db.apply_move(&plan.rows).with_context(|| {
+        format!(
+            "task {}'s files are removed but its row is kept: run the delete again",
+            task.slug
+        )
+    })?;
+    let lines = after_move(app, caller, &plan, &reports);
+    Ok((
+        Moved {
+            plan,
+            reports,
+            lines,
+        },
+        warnings,
+    ))
+}
+
+/// Once `plan` is written: each moved task's new place, and what each
+/// node's grant dropped; every active manager in the subtrees gets its
+/// `BRIEF.md` again (its path and who it reports to changed); a running
+/// mover is handed its new brief now, without starting one that is not;
+/// and each mover tells its new parent it moved there, in jeet's words,
+/// naming its open question if it has one; then each open ask among the
+/// reports `kept` from a deleted task is delivered to the new parent
+/// that holds it now. Slugs only: a node may run this, and a manager
+/// writes task names (C19). One line per thing said.
+fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let to = manager::label(&plan.to);
+    let by = match caller {
+        Caller::User => "the user".to_string(),
+        Caller::Root => "the assistant".to_string(),
+        Caller::Node(node) => manager::label(node),
+    };
+    let mut nodes = Vec::new();
+    for (id, _, _) in &plan.rows.grants {
+        match app.db.get_task(id) {
+            Ok(Some(node)) => nodes.push(node),
+            Ok(None) => {}
+            Err(e) => lines.push(format!("could not read task {id} again: {e:#}")),
+        }
+    }
+    // Each mover as it is now, with who it was under.
+    let mut moved = Vec::new();
+    for old in &plan.movers {
+        let Some(mover) = nodes.iter().find(|n| n.id == old.id) else {
+            continue;
+        };
+        let from = match (&plan.deleting, &old.parent_id) {
+            (Some(deleting), _) => manager::label(deleting),
+            (None, Some(id)) => match app.db.get_task(id) {
+                Ok(Some(parent)) => manager::label(&parent),
+                _ => "its parent".to_string(),
+            },
+            (None, None) => "its parent".to_string(),
+        };
+        let path = manager::tree_path(app, mover).unwrap_or_else(|_| mover.slug.clone());
+        lines.push(format!(
+            "moved {} from {from} to {to} ({path})",
+            manager::label(mover)
+        ));
+        moved.push((mover, from));
+    }
+    for (slug, dropped) in &plan.lost {
+        lines.push(format!(
+            "{slug}'s grant drops {}, which it could not use where it was",
+            dropped.join(", ")
+        ));
+    }
+    manager::write_briefs(app, &nodes);
+
+    for (mover, from) in moved {
+        if mover.state != TaskState::Active {
+            continue;
+        }
+        let who = manager::label(mover);
+        let agent = messages::TmuxAgent::new(app, mover).may_start(false);
+        if messages::Agent::alive(&agent) {
+            let told = reports::brief_context(app, mover)
+                .and_then(|brief| messages::deliver(&task_dir(app, mover), &agent, &brief));
+            lines.push(format!("{who}'s new brief: {}", delivered_words(&told)));
+        }
+        let mut body = format!("moved here from {from} by {by}");
+        match manager::open_ask(app, mover) {
+            Ok(Some(ask)) => body.push_str(&format!(
+                "; its open {} #{} is yours now",
+                ask.kind.as_str(),
+                ask.id
+            )),
+            Ok(None) => {}
+            Err(e) => lines.push(format!("could not read {who}'s open question: {e:#}")),
+        }
+        match reports::auto_status(app, mover, StatusEvent::Moved, &body, i64::MAX, 0) {
+            Ok(Some((id, told))) => lines.push(format!(
+                "told {to} of {who} (#{id}): {}",
+                delivered_words(&told)
+            )),
+            Ok(None) => {}
+            Err(e) => lines.push(format!("could not tell {to} of {who}: {e:#}")),
+        }
+    }
+    match reports::redeliver_moved(app, &plan.to, kept) {
+        Ok(asks) => lines.extend(asks.into_iter().map(|(id, told)| {
+            format!(
+                "handed {to} #{id}, which it holds now: {}",
+                delivered_words(&told)
+            )
+        })),
+        Err(e) => lines.push(format!("could not hand {to} the asks it holds now: {e:#}")),
+    }
+    lines
+}
+
+/// How a message went, as a line says it.
+fn delivered_words(delivered: &Result<Delivered>) -> String {
+    match delivered {
+        Ok(Delivered::Typed) => "typed into its session".to_string(),
+        Ok(Delivered::Queued) => "queued; it gets it when it finishes or sits idle".to_string(),
+        Ok(Delivered::Started) => "started a session with it".to_string(),
+        Ok(Delivered::Held) => "it waits for its next session".to_string(),
+        Ok(Delivered::Paused) => "it waits until it is resumed".to_string(),
+        Ok(Delivered::StartQueued { live, max }) => {
+            format!("it waits for its start ({live}/{max} live)")
+        }
+        Err(e) => format!("not delivered: {e:#}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3394,6 +3688,166 @@ mod tests {
         let refused = delete(&app, &lead, false).unwrap_err().to_string();
         assert!(refused.contains("archived ones included"), "{refused}");
         untouched("delete with the child archived");
+    }
+
+    /// `--reparent` plans every node of the moved subtrees down to what it
+    /// may use now, so a capability a deleted manager cut is dropped from
+    /// the grants below it, not freed (C14); a setter the deleted manager
+    /// was becomes the caller; and what it may use is unchanged.
+    #[test]
+    fn a_reparent_cuts_every_moved_grant_to_what_it_may_use() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        app.config.assistant.allow = ["task.create", "pr.merge", "worktree.add"]
+            .map(String::from)
+            .to_vec();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        app.db
+            .set_grants(&m.id, &["task.create", "worktree.add"])
+            .unwrap();
+        let sub = insert(&app, "sub", TaskKind::Manager, "m-id");
+        app.db
+            .set_grants(&sub.id, &["pr.merge", "task.create", "worktree.add"])
+            .unwrap();
+        let kid = insert(&app, "kid", TaskKind::Work, "sub-id");
+        app.db
+            .set_grants(&kid.id, &["pr.merge", "worktree.add"])
+            .unwrap();
+        let w2 = insert(&app, "w2", TaskKind::Work, "m-id");
+        app.db.set_grants(&w2.id, &["worktree.add"]).unwrap();
+        app.db
+            .set_run_state(&sub.id, RunState::Paused, Some(&Setter::Node(m.id.clone())))
+            .unwrap();
+        let effective = |id: &str| {
+            let node = app.db.get_task(id).unwrap().unwrap();
+            permissions::effective(&app, &node).unwrap()
+        };
+        let before: Vec<_> = ["sub-id", "kid-id", "w2-id"].map(effective).to_vec();
+
+        let plan = plan_reparent(&app, &Caller::User, &m).unwrap();
+        assert_eq!(plan.to.kind, TaskKind::Assistant);
+        let movers: Vec<&str> = plan.movers.iter().map(|t| t.slug.as_str()).collect();
+        assert_eq!(movers, ["sub", "w2"]);
+        assert_eq!(
+            plan.lost,
+            [
+                ("sub".to_string(), vec!["pr.merge".to_string()]),
+                ("kid".to_string(), vec!["pr.merge".to_string()]),
+            ]
+        );
+        assert_eq!(
+            plan.rows.setters,
+            [(sub.id.clone(), Setter::Node(m.id.clone()), Setter::User)]
+        );
+        // Planning wrote nothing.
+        assert_eq!(
+            app.db.get_task("sub-id").unwrap().unwrap().parent_id,
+            Some(m.id.clone())
+        );
+
+        app.db.apply_move(&plan.rows).unwrap();
+        assert_eq!(
+            app.db.grants(&sub.id).unwrap(),
+            ["task.create", "worktree.add"]
+        );
+        assert_eq!(app.db.grants(&kid.id).unwrap(), ["worktree.add"]);
+        assert_eq!(app.db.grants(&w2.id).unwrap(), ["worktree.add"]);
+        // The assistant holds `pr.merge`, and still nothing below it does.
+        let after: Vec<_> = ["sub-id", "kid-id", "w2-id"].map(effective).to_vec();
+        assert_eq!(before, after);
+    }
+
+    /// A plan gone stale between planning and deleting (a child made while
+    /// the confirmation was open) is refused before anything of the manager
+    /// is removed; a fresh plan then goes through.
+    #[test]
+    fn a_stale_reparent_plan_is_refused_with_the_files_untouched() {
+        let (_dir, app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        insert(&app, "w1", TaskKind::Work, "m-id");
+        let plan = plan_reparent(&app, &Caller::User, &m).unwrap();
+        insert(&app, "w2", TaskKind::Work, "m-id");
+        let dir = task_dir(&app, &m);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let e = delete_reparenting(&app, &Caller::User, plan)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("nothing was deleted"), "{e}");
+        assert!(dir.is_dir(), "the task directory went");
+        assert!(app.db.get_task("m-id").unwrap().is_some());
+        assert_eq!(app.db.child_count("m-id", false).unwrap(), 2);
+
+        let plan = plan_reparent(&app, &Caller::User, &m).unwrap();
+        delete_reparenting(&app, &Caller::User, plan).unwrap();
+        assert!(app.db.get_task("m-id").unwrap().is_none());
+        assert!(!dir.exists());
+    }
+
+    /// `--reparent` needs tasks under it, and a node does not free a task
+    /// from a hold set above it by moving it.
+    #[test]
+    fn a_move_is_refused_a_childless_task_and_a_hold_from_above() {
+        let (_dir, app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        let e = plan_reparent(&app, &Caller::User, &m)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("delete it without --reparent"), "{e}");
+        let root = app.db.get_assistant_task().unwrap().unwrap();
+        let e = plan_reparent(&app, &Caller::User, &root)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("the assistant cannot be deleted"), "{e}");
+
+        let n = insert(&app, "n", TaskKind::Work, "m-id");
+        app.db
+            .set_run_state(&n.id, RunState::Paused, Some(&Setter::Node(m.id.clone())))
+            .unwrap();
+        let n = app.db.get_task(&n.id).unwrap().unwrap();
+        let fe = insert(&app, "fe", TaskKind::Manager, &root.id);
+        let e = plan_move(
+            &app,
+            &Caller::Node(fe.clone()),
+            vec![n.clone()],
+            fe.clone(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("task n is paused by manager m, which ranks above you"),
+            "{e}"
+        );
+        // The user outranks it, so the hold becomes the user's.
+        let plan = plan_move(&app, &Caller::User, vec![n.clone()], fe, None).unwrap();
+        assert_eq!(
+            plan.rows.setters,
+            [(n.id.clone(), Setter::Node(m.id.clone()), Setter::User)]
+        );
+    }
+
+    /// A task moved twice within a second tells both new parents: `moved`
+    /// is a discrete event, not deduplicated by time.
+    #[test]
+    fn a_task_moved_twice_in_a_second_tells_both_new_parents() {
+        let (_dir, app, _trunk) = manager_lab();
+        let root = app.db.get_assistant_task().unwrap().unwrap();
+        let fe = insert(&app, "fe", TaskKind::Manager, &root.id);
+        let be = insert(&app, "be", TaskKind::Manager, &root.id);
+        let w = app.db.get_task("w-id").unwrap().unwrap();
+        for to in [&fe, &be] {
+            let w = app.db.get_task(&w.id).unwrap().unwrap();
+            let plan = plan_move(&app, &Caller::User, vec![w], to.clone(), None).unwrap();
+            app.db.apply_move(&plan.rows).unwrap();
+            let lines = after_move(&app, &Caller::User, &plan, &[]);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with(&format!("told {}", manager::label(to)))),
+                "{lines:?}"
+            );
+            assert_eq!(app.db.reports_for(&to.id, 10).unwrap().len(), 1);
+        }
     }
 
     /// A manager's own limit, else `[managers] max_children`; the assistant

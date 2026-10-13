@@ -736,7 +736,11 @@ fn report_step(
     }
     let since = match event {
         StatusEvent::Ended => prev.map_or(now, |p| p.at),
-        StatusEvent::Waiting | StatusEvent::Idle | StatusEvent::Budget | StatusEvent::Queued => now,
+        StatusEvent::Waiting
+        | StatusEvent::Idle
+        | StatusEvent::Budget
+        | StatusEvent::Queued
+        | StatusEvent::Moved => now,
     };
     reports::auto_status(&ctx.app, task, event, body, since, 0)?;
     Ok(())

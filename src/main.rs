@@ -284,7 +284,11 @@ fn run(command: Option<Commands>) -> Result<()> {
                     name,
                     force,
                     recursive,
-                } => commands::task::delete(&app, &name, force, recursive)?,
+                    reparent,
+                } => match reparent {
+                    true => commands::task::delete_reparenting(&app, &name, force)?,
+                    false => commands::task::delete(&app, &name, force, recursive)?,
+                },
                 TaskCommands::Path { name } => commands::task::path(&app, &name)?,
                 TaskCommands::Prs { name, offline } => {
                     commands::task::prs(&app, name.as_deref(), offline)?

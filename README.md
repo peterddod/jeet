@@ -85,6 +85,7 @@ jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
 jeet task delete api --recursive         # a task and every task under it (also archive, unarchive)
+jeet task delete api --reparent          # api alone; the tasks under it move to its parent
 jeet task prs fix-login                  # the PRs that came out of the task
 
 # The assistant — one organiser for everything, in tmux
@@ -918,6 +919,7 @@ jeet task archive fix-login          # -f: without asking about ignored files
 jeet task unarchive fix-login
 jeet task delete fix-login           # -f: without asking about what is lost
 jeet task delete api -r              # -r: every task under it too (archive, unarchive as well)
+jeet task delete api --reparent      # api alone: the tasks under it go to its parent
 ```
 
 **Archive** frees the disk and keeps the work: each worktree's uncommitted
@@ -956,6 +958,28 @@ and held to its parent's `max_children`. A failure
 part-way leaves what is done done, and running the command again finishes
 the job. In the tasks list, `a` and `D` on a task with tasks under it are
 recursive, and `a` in the archived view brings its tree back.
+
+**`delete --reparent`** deletes a manager alone and moves the tasks under
+it, archived ones too, with their own tasks, to its parent; it conflicts
+with `--recursive`, and a task with nothing under it is refused (a plain
+delete takes it). It needs what delete needs (`task.delete`, held, for an
+agent). It asks once, listing what the manager would lose and which tasks
+move where (`--force` without a terminal), and checks every rule of the
+tree before ending the manager's agent and removing its files, then again
+as it moves the tasks, all at once: the new parent's `max_children`
+(archived tasks do not count), and that no task's pause or stop would
+change. A manager whose pause holds the tasks under it is refused ("pause
+or resume first"), since deleting it would free them. Each moved task
+keeps only what it could use where it was and its new parent lets
+through, so nothing it may do changes, and a capability its grant drops is
+named. The reports sent to the manager are kept, as sent to its parent;
+what it used still counts toward every budget above it. The new parent is
+told of each task, in jeet's words, with the open question it now holds,
+and is handed each question the manager held, as passed on by jeet;
+a running task is handed its new brief, and every manager moved gets its
+`BRIEF.md` again. If the move is refused after the files are gone, the
+row is kept, and running the delete again once the cause is gone finishes
+the job. It is CLI only.
 
 ## The assistant
 

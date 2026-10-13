@@ -314,6 +314,28 @@ pub struct BudgetCheck {
     pub newly: bool,
 }
 
+/// A move of tasks to a new parent, as rows ([`crate::tasks::plan_move`]
+/// plans it): `movers` go under `to`, every node of their subtrees gets the
+/// grant planned for it, setters off the new chain of parents are
+/// rewritten, and with `deleting`, the task they were under goes: what was
+/// reported to it moves to `to`, and what it used is kept. Checked again
+/// and written in one go by [`Database::apply_move`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveRows {
+    pub movers: Vec<String>,
+    pub to: String,
+    /// The task being deleted; `movers` are all its children.
+    pub deleting: Option<String>,
+    /// How many active children `to` may have; `None`: no limit.
+    pub fan_out: Option<u32>,
+    /// Each node of the movers' subtrees: its id, its stored grant as
+    /// planned (sorted), and the grant it gets.
+    pub grants: Vec<(String, Vec<String>, Vec<String>)>,
+    /// Each node held by a setter off the new chain: its id, that setter,
+    /// and the one it gets.
+    pub setters: Vec<(String, Setter, Setter)>,
+}
+
 const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity, \
      parent_id, placement, run_state, run_state_by, max_children";
 
@@ -504,6 +526,29 @@ fn ancestors_in(conn: &Connection, id: &str) -> Result<Vec<TaskRecord>> {
     Ok(chain)
 }
 
+/// [`Database::descendants`] on `conn`.
+fn descendants_in(conn: &Connection, id: &str) -> Result<Vec<(TaskRecord, u32)>> {
+    let mut stmt = conn.prepare(&format!(
+        "WITH RECURSIVE sub(id, depth) AS (
+             SELECT id, 1 FROM tasks WHERE parent_id = ?1
+             UNION
+             SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
+             WHERE sub.depth <= ?2
+         )
+         SELECT {}, sub.depth FROM sub JOIN tasks t ON t.id = sub.id
+         ORDER BY sub.depth DESC, t.slug",
+        prefixed_columns("t")
+    ))?;
+    let rows = stmt.query_map(params![id, MAX_HOPS], |row| {
+        Ok((task_from_row(row)?, row.get::<_, u32>(13)?))
+    })?;
+    let found: Vec<(TaskRecord, u32)> = rows.collect::<rusqlite::Result<_>>()?;
+    if found.first().is_some_and(|(_, depth)| *depth > MAX_HOPS) {
+        bail!("the tree under task {id} is more than {MAX_HOPS} deep; it has a cycle");
+    }
+    Ok(found)
+}
+
 fn child_count_in(conn: &Connection, id: &str, active_only: bool) -> Result<usize> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM tasks WHERE parent_id = ?1 AND (?2 = 0 OR state = 'active')",
@@ -649,6 +694,190 @@ fn outranks_in(conn: &Connection, new: &Setter, old: &Setter) -> Result<bool> {
             Ok(ancestors_in(conn, old)?.iter().any(|a| &a.id == new))
         }
         _ => Ok(rank(new) > rank(old)),
+    }
+}
+
+/// What changed since a move was planned, in jeet's words.
+const MOVE_CHANGED: &str = "the tasks to move changed since jeet looked; try again";
+
+/// Why `rows` cannot be written, if it cannot: invariants 1, 2, 4, 6, 8 and
+/// 10 of a move, read on `conn`. The movers are tasks under the assistant
+/// and, with `deleting`, all of that task's children; `to` is active and
+/// takes tasks, and has room for the active movers (archived ones do not
+/// count); no node's run state would change; and the subtrees, their stored
+/// grants and the setters to rewrite are as planned. A `--reparent` moves
+/// to the grandparent, so it makes no cycle, nothing deeper and no budget
+/// fuller: those are not checked.
+fn move_refusal_in(conn: &Connection, rows: &MoveRows) -> Result<Option<String>> {
+    let Some(to) = get_task_in(conn, &rows.to)? else {
+        return Ok(Some(MOVE_CHANGED.into()));
+    };
+    if to.state != TaskState::Active {
+        return Ok(Some(format!("{} is archived; it takes no tasks", to.slug)));
+    }
+    if !matches!(to.kind, TaskKind::Assistant | TaskKind::Manager) {
+        return Ok(Some(format!(
+            "{} is no manager; only the assistant and managers have tasks under them",
+            to.slug
+        )));
+    }
+    let mut chain = vec![to.clone()];
+    chain.extend(ancestors_in(conn, &to.id)?);
+
+    let mut movers = Vec::new();
+    for id in &rows.movers {
+        let Some(mover) = get_task_in(conn, id)? else {
+            return Ok(Some(MOVE_CHANGED.into()));
+        };
+        if mover.kind == TaskKind::Assistant {
+            return Ok(Some("the assistant is the root; it is never moved".into()));
+        }
+        if mover.parent_id.is_none() {
+            return Ok(Some(format!(
+                "task {} has no parent; only a task under the assistant is moved",
+                mover.slug
+            )));
+        }
+        movers.push(mover);
+    }
+    if let Some(deleting) = &rows.deleting {
+        let Some(task) = get_task_in(conn, deleting)? else {
+            return Ok(Some(MOVE_CHANGED.into()));
+        };
+        let mut children: Vec<String> = conn
+            .prepare("SELECT id FROM tasks WHERE parent_id = ?1")?
+            .query_map(params![deleting], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        children.sort();
+        let mut planned = rows.movers.clone();
+        planned.sort();
+        if task.parent_id.as_deref() != Some(to.id.as_str()) || children != planned {
+            return Ok(Some(MOVE_CHANGED.into()));
+        }
+    }
+
+    if let Some(max) = rows.fan_out {
+        let staying = conn
+            .prepare("SELECT id FROM tasks WHERE parent_id = ?1 AND state = 'active'")?
+            .query_map(params![to.id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|id| Some(id) != rows.deleting.as_ref() && !rows.movers.contains(id))
+            .count();
+        let coming = movers
+            .iter()
+            .filter(|m| m.state == TaskState::Active)
+            .count();
+        if staying + coming > max as usize {
+            return Ok(Some(format!(
+                "{} may have {max} active {} under it; it has {staying}, and {coming} would \
+                 move in",
+                to.slug,
+                if max == 1 { "task" } else { "tasks" }
+            )));
+        }
+    }
+
+    let mut subtree = Vec::new();
+    for mover in &movers {
+        subtree.push(mover.clone());
+        subtree.extend(descendants_in(conn, &mover.id)?.into_iter().map(|(t, _)| t));
+    }
+    let ids: Vec<&str> = subtree.iter().map(|t| t.id.as_str()).collect();
+    let planned: Vec<&str> = rows.grants.iter().map(|(id, _, _)| id.as_str()).collect();
+    let (mut a, mut b) = (ids.clone(), planned);
+    a.sort();
+    b.sort();
+    if a != b {
+        return Ok(Some(MOVE_CHANGED.into()));
+    }
+    // What the new chain of managers lets through, as they hold it now: a
+    // grant narrowed meanwhile must not leave a node with more than its new
+    // parent has (C14). The assistant's list is config, fixed while jeet runs.
+    let mut through: Option<Vec<String>> = None;
+    for t in chain.iter().filter(|t| t.kind != TaskKind::Assistant) {
+        let held: Vec<String> = conn
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1")?
+            .query_map(params![t.id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        through = Some(match through {
+            Some(mut list) => {
+                list.retain(|c| held.contains(c));
+                list
+            }
+            None => held,
+        });
+    }
+    if let Some(through) = &through {
+        if rows
+            .grants
+            .iter()
+            .any(|(_, _, kept)| kept.iter().any(|c| !through.contains(c)))
+        {
+            return Ok(Some(MOVE_CHANGED.into()));
+        }
+    }
+    for (id, stored, _) in &rows.grants {
+        let now: Vec<String> = conn
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1 ORDER BY capability")?
+            .query_map(params![id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if &now != stored {
+            return Ok(Some(MOVE_CHANGED.into()));
+        }
+    }
+
+    let above = chain
+        .iter()
+        .map(|t| t.run_state)
+        .max()
+        .unwrap_or(RunState::Run);
+    for node in &subtree {
+        let old = ancestors_in(conn, &node.id)?;
+        // Its ancestors in the subtree come first; the rest change.
+        let inside = old.iter().take_while(|a| ids.contains(&a.id.as_str()));
+        let after = inside
+            .map(|a| a.run_state)
+            .chain([node.run_state, above])
+            .max()
+            .unwrap_or(RunState::Run);
+        let before = old
+            .iter()
+            .map(|a| a.run_state)
+            .chain([node.run_state])
+            .max()
+            .unwrap_or(RunState::Run);
+        if before != after {
+            return Ok(Some(format!(
+                "task {} is {} where it is, and would be {} under {}; pause or resume first",
+                node.slug,
+                run_word(before),
+                run_word(after),
+                to.slug
+            )));
+        }
+        let planned = rows.setters.iter().find(|(id, _, _)| id == &node.id);
+        let off_chain = match &node.run_state_by {
+            Some(Setter::Node(x)) => {
+                !ids.contains(&x.as_str()) && !chain.iter().any(|t| &t.id == x)
+            }
+            _ => false,
+        };
+        match (planned, off_chain) {
+            (Some((_, old, _)), true) if node.run_state_by.as_ref() == Some(old) => {}
+            (None, false) => {}
+            _ => return Ok(Some(MOVE_CHANGED.into())),
+        }
+    }
+    Ok(None)
+}
+
+/// A run state as a refusal says it.
+fn run_word(state: RunState) -> &'static str {
+    match state {
+        RunState::Run => "running",
+        RunState::Paused => "paused",
+        RunState::Stopped => "stopped",
     }
 }
 
@@ -1217,26 +1446,7 @@ impl Database {
     /// first and then by slug: the order to work a subtree leaves first. A
     /// subtree deeper than [`MAX_HOPS`] (a cycle) is an error.
     pub fn descendants(&self, id: &str) -> Result<Vec<(TaskRecord, u32)>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(&format!(
-            "WITH RECURSIVE sub(id, depth) AS (
-                 SELECT id, 1 FROM tasks WHERE parent_id = ?1
-                 UNION
-                 SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
-                 WHERE sub.depth <= ?2
-             )
-             SELECT {}, sub.depth FROM sub JOIN tasks t ON t.id = sub.id
-             ORDER BY sub.depth DESC, t.slug",
-            prefixed_columns("t")
-        ))?;
-        let rows = stmt.query_map(params![id, MAX_HOPS], |row| {
-            Ok((task_from_row(row)?, row.get::<_, u32>(13)?))
-        })?;
-        let found: Vec<(TaskRecord, u32)> = rows.collect::<rusqlite::Result<_>>()?;
-        if found.first().is_some_and(|(_, depth)| *depth > MAX_HOPS) {
-            bail!("the tree under task {id} is more than {MAX_HOPS} deep; it has a cycle");
-        }
-        Ok(found)
+        descendants_in(&self.conn(), id)
     }
 
     /// `id`'s ancestors, nearest first; see [`ancestors_in`].
@@ -1568,6 +1778,62 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Why `rows` cannot be written now, if it cannot (see
+    /// [`move_refusal_in`]). [`Database::apply_move`] checks again as it
+    /// writes; this is for refusing before any work.
+    pub fn check_move(&self, rows: &MoveRows) -> Result<()> {
+        match move_refusal_in(&self.conn(), rows)? {
+            Some(why) => bail!(why),
+            None => Ok(()),
+        }
+    }
+
+    /// Write the move `rows`, all or nothing, once it is checked again under
+    /// the write lock: the movers' parent, each node's grant, the setters
+    /// rewritten, and with `deleting`, its reports moved to `to`, what it
+    /// used kept, and its row gone. Returns the ids of the reports moved.
+    pub fn apply_move(&self, rows: &MoveRows) -> Result<Vec<i64>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(why) = move_refusal_in(&tx, rows)? {
+            bail!(why);
+        }
+        for id in &rows.movers {
+            tx.execute(
+                "UPDATE tasks SET parent_id = ?2 WHERE id = ?1",
+                params![id, rows.to],
+            )?;
+        }
+        for (id, _, grant) in &rows.grants {
+            tx.execute("DELETE FROM task_grants WHERE task_id = ?1", params![id])?;
+            let caps: Vec<&str> = grant.iter().map(String::as_str).collect();
+            insert_grants_in(&tx, id, &caps)?;
+        }
+        for (id, _, setter) in &rows.setters {
+            tx.execute(
+                "UPDATE tasks SET run_state_by = ?2 WHERE id = ?1",
+                params![id, setter.as_str()],
+            )?;
+        }
+        let mut moved = Vec::new();
+        if let Some(deleting) = &rows.deleting {
+            // Before its row goes, or the cascade takes its children's
+            // history with it.
+            moved = tx
+                .prepare("SELECT id FROM task_reports WHERE to_id = ?1 ORDER BY id")?
+                .query_map(params![deleting], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            tx.execute(
+                "UPDATE task_reports SET to_id = ?2 WHERE to_id = ?1",
+                params![deleting, rows.to],
+            )?;
+            keep_spend_in(&tx, deleting)?;
+            tx.execute("DELETE FROM tasks WHERE id = ?1", params![deleting])?;
+        }
+        tx.commit()?;
+        Ok(moved)
     }
 }
 
@@ -2763,6 +3029,179 @@ mod tests {
             .collect();
         db.delete_rows_leaves_first(&leaves_first).unwrap();
         assert_eq!(ids(&db.children("a").unwrap()), ["w1"]);
+    }
+
+    /// The move of `movers` under `to` as planned now: each subtree node
+    /// keeping its grant, no setter rewritten, no fan-out limit.
+    fn move_rows(db: &Database, movers: &[&str], to: &str, deleting: Option<&str>) -> MoveRows {
+        let mut grants = Vec::new();
+        for mover in movers {
+            let mut subtree = vec![mover.to_string()];
+            subtree.extend(
+                db.descendants(mover)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(t, _)| t.id),
+            );
+            for id in subtree {
+                let stored = db.grants(&id).unwrap();
+                grants.push((id, stored.clone(), stored));
+            }
+        }
+        MoveRows {
+            movers: movers.iter().map(|m| m.to_string()).collect(),
+            to: to.into(),
+            deleting: deleting.map(Into::into),
+            fan_out: None,
+            grants,
+            setters: Vec::new(),
+        }
+    }
+
+    /// Deleting `m` with `--reparent`: its children, the archived one too,
+    /// go under the assistant with the history sent to `m`, what `m` used
+    /// is kept, grants are cut as planned, a setter `m` was is rewritten,
+    /// and `m` itself goes; the archived child does not count toward the
+    /// fan-out.
+    #[test]
+    fn a_reparenting_delete_moves_the_children_and_what_was_sent_to_it() {
+        let (_dir, db) = open();
+        tree(&db);
+        db.set_task_state("w2", TaskState::Archived).unwrap();
+        let asked = db
+            .insert_report("w2", "m", ReportKind::Question, "v1?", 1)
+            .unwrap();
+        let heard = db
+            .insert_report("n", "m", ReportKind::Progress, "half", 2)
+            .unwrap();
+        db.insert_report("m", "a", ReportKind::Progress, "m's own", 3)
+            .unwrap();
+        let deep = db
+            .insert_report("w3", "n", ReportKind::Question, "deep?", 4)
+            .unwrap();
+        db.charge("m", 10, 2).unwrap();
+        db.set_grants("n", &["pr.merge", "task.create"]).unwrap();
+        db.set_run_state("n", RunState::Paused, Some(&Setter::Node("m".into())))
+            .unwrap();
+
+        let mut rows = move_rows(&db, &["n", "w2"], "a", Some("m"));
+        for (id, _, grant) in &mut rows.grants {
+            if id == "n" {
+                *grant = vec!["task.create".into()];
+            }
+        }
+        rows.setters = vec![("n".into(), Setter::Node("m".into()), Setter::User)];
+        // w1 and n are active under the assistant after: one too many for 1.
+        rows.fan_out = Some(1);
+        let e = db.apply_move(&rows).unwrap_err().to_string();
+        assert!(
+            e.contains("may have 1 active task under it; it has 1, and 1"),
+            "{e}"
+        );
+        assert!(db.get_task("m").unwrap().is_some());
+        rows.fan_out = Some(2);
+        db.check_move(&rows).unwrap();
+
+        assert_eq!(db.apply_move(&rows).unwrap(), [asked, heard]);
+        assert!(db.get_task("m").unwrap().is_none());
+        assert_eq!(ids(&db.children("a").unwrap()), ["n", "w1", "w2"]);
+        assert_eq!(
+            db.get_task("w2").unwrap().unwrap().state,
+            TaskState::Archived
+        );
+        let to_of = |id: i64| -> String {
+            db.conn()
+                .query_row("SELECT to_id FROM task_reports WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(to_of(asked), "a");
+        assert_eq!(to_of(heard), "a");
+        assert_eq!(to_of(deep), "n");
+        assert!(db.reports_for("m", 10).unwrap().is_empty());
+        assert_eq!(db.budget("a").unwrap().unwrap().used_secs, 10);
+        assert_eq!(db.grants("n").unwrap(), ["task.create"]);
+        let n = db.get_task("n").unwrap().unwrap();
+        assert_eq!(
+            (n.run_state, n.run_state_by),
+            (RunState::Paused, Some(Setter::User))
+        );
+    }
+
+    /// Each invariant refuses on its own, before and as it writes, and a
+    /// refusal writes nothing.
+    #[test]
+    fn a_move_is_refused_by_each_invariant_and_writes_nothing() {
+        let (_dir, db) = open();
+        tree(&db);
+        node(&db, "top", TaskKind::Manager, None);
+        node(&db, "fe", TaskKind::Manager, Some("a"));
+        node(&db, "old", TaskKind::Manager, Some("a"));
+        db.set_task_state("old", TaskState::Archived).unwrap();
+        let refused = |rows: &MoveRows, why: &str| {
+            let before: Vec<Option<String>> = ["w1", "w2", "n", "top"]
+                .iter()
+                .map(|id| db.get_task(id).unwrap().unwrap().parent_id)
+                .collect();
+            let e = db.check_move(rows).unwrap_err().to_string();
+            assert!(e.contains(why), "{why}: {e}");
+            let e = db.apply_move(rows).unwrap_err().to_string();
+            assert!(e.contains(why), "{why}: {e}");
+            let after: Vec<Option<String>> = ["w1", "w2", "n", "top"]
+                .iter()
+                .map(|id| db.get_task(id).unwrap().unwrap().parent_id)
+                .collect();
+            assert_eq!(before, after, "{why}");
+        };
+        refused(
+            &move_rows(&db, &["a"], "fe", None),
+            "the assistant is the root",
+        );
+        refused(
+            &move_rows(&db, &["top"], "fe", None),
+            "task top has no parent",
+        );
+        refused(&move_rows(&db, &["w2"], "w1", None), "w1 is no manager");
+        refused(&move_rows(&db, &["w2"], "old", None), "old is archived");
+        let mut full = move_rows(&db, &["w2", "n"], "fe", None);
+        full.fan_out = Some(1);
+        refused(&full, "fe may have 1 active task under it; it has 0, and 2");
+        // `m` must lose all its children, not some.
+        refused(&move_rows(&db, &["n"], "a", Some("m")), "changed since");
+
+        // A new parent narrowed since the plan: `fe` holds nothing, so a
+        // node planned to keep a capability would hold more than it.
+        let mut wide = move_rows(&db, &["w2"], "fe", None);
+        wide.grants[0].2 = vec!["task.create".into()];
+        refused(&wide, "changed since");
+
+        // Into a stopped manager, and out of a paused one.
+        db.set_run_state("fe", RunState::Stopped, Some(&Setter::User))
+            .unwrap();
+        refused(
+            &move_rows(&db, &["w1"], "fe", None),
+            "task w1 is running where it is, and would be stopped under fe",
+        );
+        db.set_run_state("m", RunState::Paused, Some(&Setter::Root))
+            .unwrap();
+        refused(
+            &move_rows(&db, &["n", "w2"], "a", Some("m")),
+            "task n is paused where it is, and would be running under a",
+        );
+        db.set_run_state("m", RunState::Run, None).unwrap();
+
+        // A grant, the subtree or a setter changed since the plan.
+        let rows = move_rows(&db, &["n", "w2"], "a", Some("m"));
+        db.set_grants("w3", &["pr.comment"]).unwrap();
+        refused(&rows, "changed since");
+        let rows = move_rows(&db, &["n", "w2"], "a", Some("m"));
+        node(&db, "w4", TaskKind::Work, Some("n"));
+        refused(&rows, "changed since");
+        let rows = move_rows(&db, &["n", "w2"], "a", Some("m"));
+        db.set_run_state("w3", RunState::Paused, Some(&Setter::Node("m".into())))
+            .unwrap();
+        refused(&rows, "changed since");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::cli::Delegation;
 use crate::commands::task::{start_new, warn_all};
 use crate::context::App;
-use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskReportRecord};
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
@@ -638,7 +638,7 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
     let had = app.db.grants(&task.id)?;
     app.db.set_grants(&task.id, &grant.caps)?;
     // What each manager below may do is in its brief too.
-    write_briefs(app, &subtree);
+    manager::write_briefs(app, &subtree);
 
     let new_held: Vec<&str> = grant
         .held
@@ -687,23 +687,6 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
     Ok(())
 }
 
-/// Write again the `BRIEF.md` of each active manager in `nodes`, after a
-/// change to what it may do or spend. One not written is a warning: its
-/// session context still has the brief as it is now.
-fn write_briefs(app: &App, nodes: &[TaskRecord]) {
-    let managers = nodes
-        .iter()
-        .filter(|t| t.kind == TaskKind::Manager && t.state == TaskState::Active);
-    for node in managers {
-        if let Err(e) = manager::write_brief(app, node) {
-            eprintln!(
-                "jeet: warning: could not write {}'s BRIEF.md: {e:#}",
-                manager::label(node)
-            );
-        }
-    }
-}
-
 /// Change what task `name` may spend (M19): `+` raises a limit it has,
 /// `=` sets one, a unit not given is kept. Within what is left above it
 /// and, for a task with a parent changing it, what it has left itself.
@@ -722,7 +705,7 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
         .with_context(|| format!("{}'s budget", manager::label(&task)))?;
     let want = budget::cap(app, &task, &caller, had, want)?;
     app.db.set_budget_max(&task.id, want.secs, want.turns)?;
-    write_briefs(app, std::slice::from_ref(&task));
+    manager::write_briefs(app, std::slice::from_ref(&task));
     let (secs, turns) = app.db.subtree_used(&task.id)?;
     eprintln!(
         "jeet: {}'s budget is {} ({}m and {turns} turns used, with the tasks below it)",

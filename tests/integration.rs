@@ -10954,6 +10954,318 @@ fn delete_recursive_asks_once_at_a_terminal() {
     assert_eq!(rows, 0);
 }
 
+/// `--reparent` deletes a manager alone: the tasks under it move to its
+/// parent with what they sent it, what a grant could not use under it is
+/// dropped and named, the new parent is told of each, in jeet's words and
+/// slugs, with the open question it now holds, which it is handed again,
+/// fenced `via="jeet (moved)"`, and a running one is handed
+/// its new brief. It is refused with `--recursive`, for a task with nothing
+/// under it, and while a hold on the manager holds the tasks under it.
+#[cfg(unix)]
+#[test]
+fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let (api, w, mut panes) = running_tree(&lab, &tmux);
+    let assistant = lab.assistant_id();
+    let output = panes[0].jeet(
+        &["task", "new", "Second Worker"],
+        &lab.home().join("tasks/api"),
+        &env,
+    );
+    succeeded(&output);
+    let w2 = task_id(&path_from(&output));
+    let output = lab.jeet_at(
+        &["manager", "new", "lead", "--parent", "api", "--goal", "g"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let lead = task_id(&path_from(&output));
+    let lead_brief = lab.home().join("tasks/lead/BRIEF.md");
+    assert!(std::fs::read_to_string(&lead_brief)
+        .unwrap()
+        .contains("Report to manager api"),);
+    let output = panes[1].jeet(&["report", "question", "keep v1?"], &lab.home(), &env);
+    succeeded(&output);
+    // The assistant may send; api may not, so w's grant may not use it.
+    lab.index()
+        .execute(
+            "INSERT INTO task_grants (task_id, capability) VALUES (?1, 'task.send')",
+            [&w],
+        )
+        .unwrap();
+    let api_dir = lab.home().join("tasks/api");
+
+    let output = lab.jeet_at(
+        &["task", "delete", "api", "--reparent", "--recursive"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("cannot be used with"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(
+        &["task", "delete", "second-worker", "--reparent", "--force"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("delete it without --reparent"),
+        "{}",
+        stderr_of(&output)
+    );
+    // Paused by the user, api holds w and w2: deleting it would free them.
+    let hold = |state: &str, by: Option<&str>| {
+        lab.index()
+            .execute(
+                "UPDATE tasks SET run_state = ?2, run_state_by = ?3 WHERE id = ?1",
+                rusqlite::params![api, state, by],
+            )
+            .unwrap();
+    };
+    hold("paused", Some("user"));
+    let output = lab.jeet_at(
+        &["task", "delete", "api", "--reparent", "--force"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("pause or resume first"), "{stderr}");
+    assert!(stderr.contains("is paused where it is"), "{stderr}");
+    hold("run", None);
+    // Without a terminal: what it loses and where they go, and --force.
+    let output = lab.jeet_at(&["task", "delete", "api", "--reparent"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("the 3 tasks under it move to the assistant:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(calls_of(&tmux, "kill-session").is_empty());
+    assert_eq!(lab.parent_of(&w), Some(api.clone()));
+
+    // In the background, as a hook runs it, the assistant's start is a
+    // session of its own.
+    let output = lab.jeet_at(
+        &["task", "delete", "api", "--reparent", "--force"],
+        &lab.home(),
+        &[env[0], env[1], ("JEET_BACKGROUND", "1")],
+    );
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("deleted task api; 3 tasks under it now under the assistant"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("moved task w from manager api to the assistant (assistant/w)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("w's grant drops task.send, which it could not use where it was"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("1 report to api kept"), "{stderr}");
+    // Slugs only, never a name a manager wrote.
+    assert!(!stderr.contains("Second Worker"), "{stderr}");
+    assert_eq!(lab.parent_of(&w), Some(assistant.clone()));
+    assert_eq!(lab.parent_of(&w2), Some(assistant.clone()));
+    assert_eq!(lab.parent_of(&lead), Some(assistant.clone()));
+    // A moved manager's BRIEF.md says where it sits now.
+    let text = std::fs::read_to_string(&lead_brief).unwrap();
+    assert!(text.contains("Report to the assistant"), "{text}");
+    assert!(text.contains("path=\"assistant/lead\""), "{text}");
+    let rows: i64 = lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = ?1", [&api], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+    assert!(!api_dir.exists());
+    let killed: Vec<String> = calls_of(&tmux, "kill-session")
+        .iter()
+        .map(|c| value_after(c, "-t").to_string())
+        .collect();
+    assert_eq!(killed, ["=jeet-api"]);
+    assert!(stub.join("alive/jeet-w").exists());
+    let grants: Vec<String> = {
+        let db = lab.index();
+        let mut stmt = db
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1 ORDER BY capability")
+            .unwrap();
+        stmt.query_map([&w], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(grants, ["worktree.add"]);
+
+    // w's question is kept, now as asked of the assistant, which is told of
+    // each task, and that the question is its own now.
+    let reports = lab.reports_of(&w);
+    let question = reports.iter().position(|r| r.2 == "keep v1?").unwrap() + 1;
+    assert_eq!(reports[question - 1].1, assistant);
+    let moved: Vec<&(String, String, String)> = reports
+        .iter()
+        .filter(|r| r.0 == "status" && r.2.starts_with("moved"))
+        .collect();
+    assert_eq!(moved.len(), 1, "{reports:?}");
+    assert_eq!(moved[0].1, assistant);
+    let ask_id: i64 = lab
+        .index()
+        .query_row(
+            "SELECT id FROM task_reports WHERE task_id = ?1 AND body = 'keep v1?'",
+            [&w],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        moved[0].2,
+        format!(
+            "moved here from manager api by the user; its open question #{ask_id} is yours now"
+        )
+    );
+    assert_eq!(
+        lab.reports_of(&w2),
+        [(
+            "status".into(),
+            assistant.clone(),
+            "moved here from manager api by the user".into()
+        )]
+    );
+    let inbox = std::fs::read_to_string(lab.home().join("assistant/.jeet/inbox.jsonl")).unwrap();
+    assert!(
+        inbox.contains(
+            r#"from=\"task second-worker\" path=\"assistant/second-worker\" kind=\"status\""#
+        ),
+        "{inbox}"
+    );
+    // w runs, so it is handed its new brief; w2 does not, and gets it as it
+    // starts.
+    let w_inbox =
+        std::fs::read_to_string(lab.home().join("tasks/w/.jeet/inbox.jsonl")).unwrap_or_default();
+    let handed = pasted(&tmux)
+        .into_iter()
+        .any(|(_, text)| text.contains("path=\"assistant/w\""))
+        || w_inbox.contains(r#"path=\"assistant/w\""#);
+    assert!(handed, "{w_inbox} {:?}", pasted(&tmux));
+    assert!(stderr.contains("task w's new brief:"), "{stderr}");
+    assert!(!stderr.contains("second-worker's new brief"), "{stderr}");
+    // The question api held is the assistant's now, and handed to it.
+    assert!(
+        stderr.contains(&format!(
+            "handed the assistant #{ask_id}, which it holds now:"
+        )),
+        "{stderr}"
+    );
+    let to_root = given(&lab.home().join("assistant"), &tmux, "assistant");
+    assert!(
+        to_root.contains(&format!(
+            "<jeet-report id=\"{ask_id}\" from=\"task w\" path=\"assistant/w\" \
+             kind=\"question\" via=\"jeet (moved)\" untrusted=\"true\">\nkeep v1?\n"
+        )),
+        "{stderr} {to_root}"
+    );
+}
+
+/// A manager holding `task.delete` deletes a manager below it with
+/// `--reparent`: the tasks under that one come up to it, it is told of
+/// each as the one that moved them, and a hold the deleted manager set is
+/// its own now.
+#[cfg(unix)]
+#[test]
+fn a_manager_reparents_a_manager_below_it() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"manager.create\", \"task.delete\"]\n",
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(tmux.parent().unwrap().join("alive/main"), "").unwrap();
+    let (api, mut mp) = running_manager(
+        &lab,
+        &tmux,
+        &[
+            "--goal",
+            "g",
+            "--allow",
+            "task.create,manager.create,task.delete",
+        ],
+    );
+    let sub_pane = PaneShell::spawn(&lab, &[("JEET_TMUX", &tmux_env)]);
+    sub_pane.as_session_pane(&tmux, "jeet-sub");
+    let output = lab.jeet_at(
+        &["manager", "new", "sub", "--parent", "api", "--goal", "g"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let sub = task_id(&path_from(&output));
+    let output = lab.jeet_at(&["task", "new", "x", "--parent", "sub"], &lab.home(), &env);
+    succeeded(&output);
+    let x = task_id(&path_from(&output));
+    lab.index()
+        .execute(
+            "UPDATE tasks SET run_state = 'paused', run_state_by = ?2 WHERE id = ?1",
+            [&x, &sub],
+        )
+        .unwrap();
+
+    let output = mp.jeet(
+        &["task", "delete", "sub", "--reparent", "--force"],
+        &lab.home().join("tasks/api"),
+        &env,
+    );
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("moved task x from manager sub to manager api (assistant/api/x)"),
+        "{stderr}"
+    );
+    assert_eq!(lab.parent_of(&x), Some(api.clone()));
+    assert_eq!(
+        lab.reports_of(&x),
+        [(
+            "status".into(),
+            api.clone(),
+            "moved here from manager sub by manager api".into()
+        )]
+    );
+    let by: Option<String> = lab
+        .index()
+        .query_row("SELECT run_state_by FROM tasks WHERE id = ?1", [&x], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(by, Some(api.clone()));
+    assert!(!lab.home().join("tasks/sub").exists());
+    // Logged in api's own log, as what it did.
+    let actions = std::fs::read_to_string(lab.home().join("tasks/api/actions.log")).unwrap();
+    assert!(
+        actions.contains("deleted task sub, moving the tasks under it to its parent"),
+        "{actions}"
+    );
+}
+
 /// A recursive archive ends the tree's agents and archives it leaves
 /// first; a task under it stays archived while it is, and a recursive
 /// unarchive brings the tree back top-down, worktrees and all.

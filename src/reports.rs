@@ -37,6 +37,8 @@ pub enum StatusEvent {
     Budget,
     /// Its start waits on `[managers] max_live`.
     Queued,
+    /// It was moved under this parent.
+    Moved,
 }
 
 impl StatusEvent {
@@ -48,6 +50,7 @@ impl StatusEvent {
             StatusEvent::Ended => "ended",
             StatusEvent::Budget => "budget",
             StatusEvent::Queued => "queued",
+            StatusEvent::Moved => "moved",
         }
     }
 }
@@ -288,6 +291,60 @@ fn notification_for(
         path.to_string(),
         row.body.clone(),
     )
+}
+
+/// What the holder of an ask moved to it, when the task holding it was
+/// deleted, is told the ask came by.
+const MOVED_VIA: &str = "jeet (moved)";
+
+/// Deliver to `to` each of the reports `moved`, re-addressed to it from a
+/// task deleted with `--reparent`, that is an open ask `to` holds now,
+/// fenced as [`escalate`] fences one and allowed to start `to` only as an
+/// escalation would. One the user holds stays with the user. Returns each
+/// ask delivered, by id, and how it went.
+pub fn redeliver_moved(
+    app: &App,
+    to: &TaskRecord,
+    moved: &[i64],
+) -> Result<Vec<(i64, Result<Delivered>)>> {
+    redeliver_moved_with(app, to, moved, &|to, text, may_start| {
+        deliver_to(app, to, text, may_start)
+    })
+}
+
+/// [`redeliver_moved`], delivering with `deliver`.
+fn redeliver_moved_with(
+    app: &App,
+    to: &TaskRecord,
+    moved: &[i64],
+    deliver: &DeliverFn,
+) -> Result<Vec<(i64, Result<Delivered>)>> {
+    let mut delivered = Vec::new();
+    for row in app.db.open_asks(Some(&to.id))? {
+        if row.needs_user || !moved.contains(&row.id) {
+            continue;
+        }
+        let told = app
+            .db
+            .get_task(&row.task_id)
+            .and_then(|asker| {
+                let Some(asker) = asker else {
+                    bail!("the task that asked #{} is gone", row.id);
+                };
+                let path = manager::tree_path(app, &asker)?;
+                Ok(assistant::fence_escalated(
+                    row.id,
+                    &manager::label(&asker),
+                    &path,
+                    row.kind,
+                    &row.body,
+                    MOVED_VIA,
+                ))
+            })
+            .and_then(|text| deliver(to, &text, wakes(row.kind)));
+        delivered.push((row.id, told));
+    }
+    Ok(delivered)
 }
 
 /// An ask answered with [`answer`], and how the answer went out.
@@ -1461,6 +1518,58 @@ mod tests {
         assert_eq!(escalated.row.to_id, escalated.to.unwrap().id);
         let held = app.db.get_report(id).unwrap().unwrap();
         assert_eq!(held.to_id, escalated.row.to_id);
+    }
+
+    /// Deleting manager api with `--reparent` hands the assistant the open
+    /// ask api held, fenced `via="jeet (moved)"`; an ask the user holds is
+    /// not delivered again, and an answer api gave shows as a deleted
+    /// task's (C11).
+    #[test]
+    fn a_deleted_managers_open_asks_go_to_its_parent() {
+        let (_dir, app) = ask_lab();
+        let held = asked_and_passed(&app, &[node(&app, "sub")]);
+        let sub = app.db.get_task("sub").unwrap().unwrap();
+        let (answered, _) = send(&app, &sub, ReportKind::Question, "split?", false).unwrap();
+        answer_by(&app, &node(&app, "api"), answered, "yes");
+        let fe = app.db.get_task("fe").unwrap().unwrap();
+        let (users, _) = send(&app, &fe, ReportKind::Blocked, "no key", false).unwrap();
+        escalate_with(
+            &app,
+            &Caller::Root,
+            users,
+            &recording(&Sent::default()),
+            &|_| {},
+        )
+        .unwrap();
+
+        let api = app.db.get_task("api").unwrap().unwrap();
+        let plan = tasks::plan_reparent(&app, &Caller::User, &api).unwrap();
+        let mut moved = app.db.apply_move(&plan.rows).unwrap();
+        assert_eq!(moved, [held, answered]);
+        moved.push(users);
+        let sent = Sent::default();
+        let asks = redeliver_moved_with(&app, &plan.to, &moved, &recording(&sent)).unwrap();
+        let ids: Vec<i64> = asks.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [held]);
+        assert!(asks[0].1.is_ok());
+        let sent = sent.into_inner();
+        assert_eq!(sent.len(), 1);
+        let (to, text, may_start) = &sent[0];
+        assert_eq!(to, "assistant");
+        assert!(may_start, "as an escalation, a question wakes its holder");
+        assert!(
+            text.starts_with(&format!(
+                "<jeet-report id=\"{held}\" from=\"task ww\" path=\"assistant/sub/ww\" \
+                 kind=\"question\" via=\"jeet (moved)\" untrusted=\"true\">\nkeep v1?\n"
+            )),
+            "{text}"
+        );
+        assert!(app.db.get_report(users).unwrap().unwrap().needs_user);
+
+        let row = app.db.get_report(answered).unwrap().unwrap();
+        assert_eq!(row.answered_by.as_deref(), Some("api"));
+        let by = row.answered_by.unwrap();
+        assert_eq!(answerer(&app, &by).unwrap(), "a deleted task");
     }
 
     #[test]
