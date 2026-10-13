@@ -5445,8 +5445,11 @@ mod tests {
     fn a_worklog_that_is_not_a_file_is_refused_not_waited_on() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("fifo");
-        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
         assert!(worklog_lines(&fifo).is_err());
         let real = dir.path().join("real");
         std::fs::write(&real, "x\n").unwrap();

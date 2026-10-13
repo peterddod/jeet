@@ -109,11 +109,10 @@ pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
 /// jeet reads, so a FIFO or a device there, or a link to one, must not make
 /// the open wait for a writer: it is refused, and a link is not followed.
 pub fn open_regular(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)?;
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file = File::open(path)?;
     match file.metadata()?.is_file() {
         true => Ok(file),
         false => Err(std::io::Error::other("not a regular file")),
@@ -161,13 +160,18 @@ impl Inbox {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let path = dir.join("inbox.lock");
         // The agent writes in this directory: a FIFO there, or a link to one,
-        // must not make the open wait for a reader.
-        use std::os::unix::fs::OpenOptionsExt;
+        // must not make the open wait for a reader, so only a regular file
+        // (or none yet) is opened.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_file() => {
+                anyhow::bail!("{} is not a regular file", path.display())
+            }
+            _ => {}
+        }
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         if !file.metadata()?.is_file() {
