@@ -678,30 +678,49 @@ allows.
 ┌ jeet · agents ──────────────────────────────────────────────────────────────┐
 │ live 5/8   needs you 1   / filter  ⇥ switch                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
- ✦ assistant           ● running              3 children   inbox 2  todo 4
+ ✦ assistant           ◆ needs you (1)        3 children   inbox 2  todo 4
  ├─ ▾ backend          ◆ needs you (1)        2h10/6h      inbox 1
- │  ├─ fix-token-ref…  ◆ needs input – Bash   0h40/2h      api#131
- │  └─ api-docs        ● running – Edit       0h05/1h
- ├─ ▸ frontend         ⏸ paused (2 below)     3h50/4h      budget 96%
- └─ fix-login          ✓ done                              web#88
+ │  ├─ api-docs        ● running – Edit       0h05/1h
+ │  └─ fix-token-ref…  ◆ needs input – Bash   0h40/2h      api#131
+ ├─ fix-login          ✓ done                              web#88
+ └─ ▸ frontend         ⏸ paused (2 below)     3h50/4h      budget 96%
 ```
+
+Siblings are in slug order, as `jeet manager ls` has them. The view holds
+the assistant and its **active** descendants only: top-level tasks are in
+*active*, archived ones in *archived*. A manager always shows `▾` or `▸`,
+so its kind is visible; everything starts open and nothing is persisted.
 
 **Rollup**: a manager shows the most urgent state in its subtree, in the
 order needs you > needs input > blocked > budget > running > idle > done. A
-count is shown when that state comes from below. Rollup is computed from
-status files and `task_reports` in the existing two-second refresh thread.
+count is shown when that state comes from below. A node's own prompt is
+*needs input*; above it, it becomes *needs you*, as only the user can answer
+one (§4). The assistant's own urgency comes from its sessions, so a prompt
+in its pane needs you too. A held node shows `⏸ paused (n below)` or
+`■ stopped (n below)`, *n* the nodes it holds, and appends what rolled up
+from below when that is blocked or worse: a pause answers no prompt. Rollup
+is computed on the screen's thread from what agents are doing (status files,
+read by the existing status poller) and from the index (`task_reports`,
+budgets, run states, inboxes, PRs, the start queue and the live set), read
+by a tree thread of its own every two seconds while the view is shown. There
+is no cost column (#26) and no wake cell (§12).
 
 | Key | |
 |---|---|
 | `⏎` | attach to the node's coding agent (the assistant picks a session, as `C`) |
-| `→` / `←` | expand / collapse |
-| `l` | the worklog (`notes/worklog.md`), read-only, scrollable |
-| `i` | the node's inbox and reports, newest first; `⏎` opens a linked PR |
-| `a` | answer the open question nearest this node (§4, "Questions and the user") |
-| `b` | brief, grant, effective allow-list, budget |
+| `→` / `←` | expand / collapse; on a node with nothing to open or close, to its first child / its parent; collapse is ignored while a filter is set |
+| `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, read-only, scrollable |
+| `i` | the node's open ask, inbox and reports by and to it, newest first; `⏎` opens the node's PRs (a report carries no link, D18) |
+| `a` | answer the open question nearest this node (§4, "Questions and the user"): phase 4 (#36) |
+| `b` | brief, grant, effective allow-list, budget, run state and its own open ask |
 | `p` / `P` | pause / resume the subtree |
 | `x` | stop the subtree (asks first, listing what is running) |
 | `n` | new task or manager under this node (#21's form, plus parent, goal, done, budget, allow) |
+
+The pane acts as the user: `l`, `i` and `b` (and the keys that change
+something) refuse when jeet runs inside an agent's pane, or when who runs it
+cannot be told. `c`, `C` and `t` are the assistant's, as in the other views;
+the worktree, PR, archive and delete keys are the active view's alone.
 
 ## 7. Harness neutrality
 
@@ -1774,6 +1793,107 @@ Managers run locally in tmux, as the user, like any other task (I22).
     new` and their children from the manager's own pane, against a stub
     tmux with several sessions and a temporary `JEET_HOME`; raw SQL is
     left only for states the CLI refuses to make.
+
+### Phase 3 implementation notes
+
+Where phase 3 (#35, the agents pane) settled what this RFC left open, or
+departed from it. An *A* number records the phase 3 plan's decision of the
+same *Q* number. It lands in two PRs: the read-only pane (this part), then
+the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
+
+- **A1** Two stacked PRs, for review size alone: neither widens what an
+  agent can do. Until the second lands, `p`, `P`, `x` and `n` in the agents
+  view give A22's status line, as the other keys it does not take do.
+- **A2** The pane acts as the user. `tui::tasks::run` asks
+  `permissions::caller` once, and the agents view's keys that show an
+  agent's text (`l`, `i`, `b`) work only for `Caller::User`; an identity
+  error counts as not the user. Anything else gets "the agents pane acts as
+  you; open jeet from your own terminal, not from an agent's pane". The
+  tree, `⏎` and moving about stay open, as the active view is. Known gap,
+  left as it is: the other views' `a` and `D` still run with no caller.
+- **A3** A third view between *active* and *archived*: `⇥` cycles active →
+  agents → archived, `⇧⇥` goes back. The title is `jeet · agents`, and the
+  assistant's pinned line is not drawn: it is the root. The tab counts the
+  tree's nodes; the list's title says how many of them a closed manager or
+  the filter leaves shown.
+- **A4** One ordering for `manager ls` and the pane:
+  `manager::tree_order`, depth first, siblings by slug.
+- **A5** `→` opens a closed manager, else goes to the first line under the
+  node; `←` closes an open manager, else goes to the parent. A closed node
+  still rolls its subtree up. A typed filter keeps the matches and their
+  ancestors, whatever is closed; it matches the slug each row shows
+  ("assistant" for the root). Files the pane reads from an agent's home
+  (worklog, inbox) are opened without waiting or following links, and only
+  if regular.
+- **A6** Rollup reads what agents do from the status poller
+  (`TaskRow.activity`) and the assistant's thread, never again per node, so
+  the views cannot disagree; the index facts come from a tree thread
+  (`tui/managers.rs::gather`) on a connection of its own, started on
+  entering the view and stopped on leaving it, gathering when asked and
+  every two seconds. It never makes the assistant. Each ask carries a
+  sequence number and older answers are dropped. A failed gather keeps the
+  last read and says so once (the index has no `busy_timeout`). An inbox is
+  counted with a non-blocking lock; while a hook holds it the last count
+  stands. The rollup itself (`managers::retree`) is pure and runs on the
+  screen's thread, so the draw reads no index and no tmux.
+- **A7** A node's own urgency: a prompt is *needs input*; else an open ask
+  (its last own report blocked or a question, `manager::open_ask`) is
+  *blocked*; else a budget at 80% or a budget's pause is *budget*; else a
+  running agent is *running*; else a last own report of done is *done*;
+  else *idle*. A *needs input* lifts to *needs you* above it, with the count
+  of descendants at the shown state when it comes from below. Before phase
+  4 the only *needs you* is a prompt. The assistant's own state is its
+  sessions': one waiting is *needs input*, one running *running*. A held
+  node shows its hold (A9) and appends what rolled up when that is blocked
+  or worse; a node held by an ancestor shows `⏸ paused` or `■ stopped` with
+  no count.
+- **A8** The header: `live n/max` (the live set against `max_live`, `live
+  n` when the policy has an error, nothing before the first gather), `needs
+  you n` (each prompt once: the nodes' own and the assistant's sessions')
+  and `queued n` (starts waiting on `max_live`), the last two only when not
+  0. No wake cell.
+- **A9** The columns: the tree's rails, `▾`/`▸` for a manager and the
+  slug (jeet's, never a name an agent wrote), `✦ assistant` at the root;
+  the status, glyph and words with the agent's detail (`● running – Edit`,
+  `◆ needs input – Bash`, `! question`, `$ budget`, `✓ done`); the budget,
+  `0h40/2h` against a time limit, else `12/40 turns`, and for the
+  assistant `n children`; the notes `inbox n`, `todo n` (the assistant),
+  the newest open PR as `repo#n`, `budget n%` from 80% and `queued`,
+  dropped from the right as room runs out. Narrower, the notes go first
+  (under 80 columns), then the budget (under 64), then the status's detail
+  is cut. A node made since the last gather draws its activity, with no
+  budget or notes.
+- **A10** Nothing is fenced: the pane is the user. Every string an agent
+  wrote goes through `printable` (a line) or `printable_text` (a text), and
+  a text panel drops control characters again and expands tabs, which
+  ratatui would draw with no width.
+- **A11** `⏎` on a node is the active view's open: a held node's live pane
+  is attached, one not live is refused (P17), `max_live` is passed with its
+  warning (M22). On the assistant it is `C`'s session picker.
+- **A12** `l` reads the last 256 KiB of the assistant's or a manager's
+  `notes/worklog.md` (`manager::WORKLOG_MD`), decoded lossily and from the
+  first whole line, into a scrollable panel (`↑↓`, `PgUp`/`PgDn`, `g`/`G`;
+  the draw keeps the scroll within the text). A worker "keeps no
+  worklog"; a missing file is "no worklog yet", on the status line.
+- **A13** `i` shows the node's open ask with its id and whom it asks, what
+  is queued in its inbox (`messages::peek`, which waits on the lock: it is
+  a key press, under the spinner), and the last 50 reports by and to it,
+  newest first (`Database::reports_for`). On the assistant it lists its
+  children's reports to it. `⏎` opens the node's PRs when it has some: a
+  report carries no link (D18), so there is no "linked PR".
+- **A14** `b` is `jeet manager show`'s text (`commands::manager::shown`
+  and `shown_text`) as the user, unfenced, with the node's own open ask
+  after it. On the assistant too: it is a read for the user, so
+  `manager show`'s scope, which refuses the assistant, is not asked.
+- **A18** `a` in the agents view says "answering comes with #36; i shows the
+  open question and ⏎ attaches to the asker"; it does not archive there.
+- **A19** Nothing about wake: no cell, field or read of watcher state.
+- **A21** `?` and the hints follow the view (`HELP_AGENTS`,
+  `HINTS_AGENTS`).
+- **A22** The agents view's keys are its own: moving, `/`, `?`, `r`, `q`,
+  `⇥`, `c`, `C` and `t` as everywhere; `⏎`, `→`, `←`, `l`, `i`, `b` and `a`
+  as above; `e`, `w`, `v`, `o`, `D` and `S` (and, until the actions land,
+  `p`, `P`, `x` and `n`) say "not in the agents view; ⇥ to active".
 
 ## 11. Placement
 

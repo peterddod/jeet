@@ -5,10 +5,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
+use super::managers::{At, NodeInfo, TreeLine, Urgency};
 use super::state::human_size;
 use super::tasks::{
     AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
@@ -18,7 +19,8 @@ use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
 use crate::commands::task::printable;
-use crate::db::tasks::{TaskKind, TaskPrRecord, TaskState};
+use crate::db::tasks::{RunState, TaskKind, TaskPrRecord, TaskState};
+use crate::manager::budget;
 use crate::messages;
 use crate::pr_history;
 use crate::status::{first_line, Activity};
@@ -27,7 +29,7 @@ use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
-pub const HELP: [(&str, &str); 28] = [
+pub const HELP: &[(&str, &str)] = &[
     (
         "⏎",
         "open the task's agent in tmux (Ctrl-Q comes back here, leaving it running)",
@@ -75,7 +77,10 @@ pub const HELP: [(&str, &str); 28] = [
         "sort tasks by todo priority, or back by latest activity",
     ),
     ("", ""),
-    ("⇥", "switch between active and archived tasks"),
+    (
+        "⇥ / ⇧⇥",
+        "next / previous view: active, agents (the tree under the assistant), archived",
+    ),
     ("/", "filter by name; ⏎ keeps the filter, esc drops it"),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
     ("r", "refresh: re-read tasks and the worktrees on disk"),
@@ -91,10 +96,87 @@ pub const HELP: [(&str, &str); 28] = [
     ),
 ];
 
+/// The agents view's key list (Q21, Q22).
+pub const HELP_AGENTS: &[(&str, &str)] = &[
+    (
+        "⏎",
+        "attach to the node's agent; on the assistant, pick one of its sessions",
+    ),
+    (
+        "→ / ←",
+        "open / close a manager; else to the first task under it / to its parent",
+    ),
+    (
+        "l",
+        "the worklog (notes/worklog.md) of the assistant or a manager",
+    ),
+    (
+        "i",
+        "its open ask, inbox and reports, newest first; ⏎ its pull requests",
+    ),
+    (
+        "b",
+        "its brief, grant, what it may do, budget, run state and tasks",
+    ),
+    ("a", "answering a question comes with #36"),
+    (
+        "",
+        "l, i and b only from your own terminal, not an agent's pane",
+    ),
+    ("", ""),
+    (
+        "c",
+        "talk to the assistant: its latest session (Ctrl-Q comes back)",
+    ),
+    (
+        "C",
+        "the assistant's sessions: ⏎ attach, n new, R rename, x end, * primary",
+    ),
+    ("t", "its todo list: space done, ⏎ go to the task, a add"),
+    ("", ""),
+    ("⇥ / ⇧⇥", "next / previous view: active, agents, archived"),
+    (
+        "/",
+        "filter by name, keeping the managers above a match; esc drops it",
+    ),
+    ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
+    ("r", "refresh: re-read tasks and the worktrees on disk"),
+    ("?", "this list"),
+    ("q / esc", "quit, leaving the shell where it is"),
+    (
+        "ctrl-q",
+        "quit, leaving the shell in the selected node's directory",
+    ),
+    ("", ""),
+    (
+        "status",
+        "◆ needs you / needs input  ! blocked or a question  $ budget",
+    ),
+    ("", "● running  ○ idle  ✓ done  ⏸ paused  ■ stopped"),
+    ("", "(n): how many below it are so; held: how many it holds"),
+    (
+        "columns",
+        "node · status · budget used/limit · inbox, todo, PR, budget %, queued",
+    ),
+    ("", ""),
+    (
+        "",
+        "worktree, PR, archive and delete keys are the active view's: ⇥ to it",
+    ),
+];
+
+/// The key list of `view`.
+pub fn help(view: View) -> &'static [(&'static str, &'static str)] {
+    match view {
+        View::Agents => HELP_AGENTS,
+        View::Active | View::Archived => HELP,
+    }
+}
+
 /// Width of the key column in the help panel.
 const KEY_WIDTH: usize = 10;
 
-const HINTS: [&str; 16] = [
+const HINTS: &[&str] = &[
     "⏎ open",
     "e explore",
     "w worktrees",
@@ -108,16 +190,34 @@ const HINTS: [&str; 16] = [
     "P projects",
     "S resync",
     "/ filter",
-    "⇥ archived",
+    "⇥ switch",
     "? help",
     "q quit",
 ];
 
-/// As many hints as fit, always ending with help and quit.
-fn hints(width: u16) -> String {
+const HINTS_AGENTS: &[&str] = &[
+    "⏎ attach",
+    "→← open/close",
+    "l worklog",
+    "i inbox",
+    "b brief",
+    "c assistant",
+    "t todo",
+    "/ filter",
+    "⇥ switch",
+    "? help",
+    "q quit",
+];
+
+/// As many of `view`'s hints as fit, always ending with help and quit.
+fn hints(width: u16, view: View) -> String {
+    let hints = match view {
+        View::Agents => HINTS_AGENTS,
+        View::Active | View::Archived => HINTS,
+    };
     let width = width as usize;
-    let tail = &HINTS[HINTS.len() - 2..];
-    let head = &HINTS[..HINTS.len() - 2];
+    let tail = &hints[hints.len() - 2..];
+    let head = &hints[..hints.len() - 2];
     (0..=head.len())
         .rev()
         .map(|keep| {
@@ -133,11 +233,16 @@ fn hints(width: u16) -> String {
 }
 
 pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
+    // In the agents view the assistant is the tree's root, not pinned.
+    let pinned = match ui.view {
+        View::Agents => 0,
+        View::Active | View::Archived => 1,
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(pinned),
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -145,12 +250,17 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
         .split(frame.area());
 
     draw_header(frame, chunks[0], ui);
-    frame.render_widget(
-        Paragraph::new(assistant_line(ui.assistant.as_ref())),
-        chunks[1],
-    );
+    if pinned > 0 {
+        frame.render_widget(
+            Paragraph::new(assistant_line(ui.assistant.as_ref())),
+            chunks[1],
+        );
+    }
     ui.list_area = chunks[2];
-    draw_list(frame, chunks[2], ui);
+    match ui.view {
+        View::Agents => draw_tree(frame, chunks[2], ui),
+        View::Active | View::Archived => draw_list(frame, chunks[2], ui),
+    }
 
     // What was last done says more than a standing hint.
     let status = match ui.status_line.is_empty() {
@@ -166,12 +276,19 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(chunks[4].width),
+            hints(chunks[4].width, ui.view),
             Style::default().fg(Color::DarkGray),
         ))),
         chunks[4],
     );
 
+    // Scrolled no further than its end, which only the draw knows.
+    if let Some(Panel::Text { lines, scroll, .. }) = &mut ui.panel {
+        let area = text_area(frame.area());
+        let rows = text_lines(lines, area.width.saturating_sub(2)).len();
+        let room = area.height.saturating_sub(2) as usize;
+        *scroll = (*scroll).min(rows.saturating_sub(room).min(u16::MAX as usize) as u16);
+    }
     ui.links = match &ui.panel {
         Some(panel) => draw_panel(frame, ui, panel),
         None => Vec::new(),
@@ -199,9 +316,14 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     let mut spans = vec![
         tab(View::Active, "active"),
         Span::raw(" "),
+        tab(View::Agents, "agents"),
+        Span::raw(" "),
         tab(View::Archived, "archived"),
         Span::raw("   "),
     ];
+    if ui.view == View::Agents {
+        spans.extend(agents_cells(ui));
+    }
     match (ui.filtering, ui.filter.is_empty()) {
         (true, _) => {
             spans.push(Span::styled(
@@ -235,8 +357,12 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
             Style::default().fg(Color::DarkGray),
         )),
     }
+    let title = match ui.view {
+        View::Agents => " jeet · agents ",
+        View::Active | View::Archived => " jeet · tasks ",
+    };
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        " jeet · tasks ",
+        title,
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
@@ -318,8 +444,9 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
+    // The agents view draws its tree instead ([`draw_tree`]).
     let which = match ui.view {
-        View::Active => "active",
+        View::Active | View::Agents => "active",
         View::Archived => "archived",
     };
     let total = ui.count(ui.view);
@@ -568,6 +695,441 @@ fn row_line(row: &TaskRow, parent: Option<&str>, columns: &Columns) -> Line<'sta
     Line::from(spans)
 }
 
+/// The agents view's header cells (Q8): how many agents are live against
+/// `max_live`, how many prompts wait on the user, how many starts wait on
+/// `max_live`. The last two only when there are some.
+fn agents_cells(ui: &TasksUi) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some(info) = &ui.tree_info {
+        let live = match info.max_live {
+            Some(max) => format!("live {}/{max}   ", info.live.len()),
+            None => format!("live {}   ", info.live.len()),
+        };
+        spans.push(Span::styled(live, Style::default().fg(Color::Green)));
+    }
+    let needs_you = needs_you(ui);
+    if needs_you > 0 {
+        spans.push(Span::styled(
+            format!("needs you {needs_you}   "),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let queued = ui.tree_info.as_ref().map_or(0, |info| info.queued);
+    if queued > 0 {
+        spans.push(Span::styled(
+            format!("queued {queued}   "),
+            Style::default().fg(Color::Blue),
+        ));
+    }
+    spans
+}
+
+/// The prompts in the tree waiting on the user, each once: its nodes' own,
+/// and the assistant's sessions'.
+fn needs_you(ui: &TasksUi) -> usize {
+    let waiting = |a: Option<&Activity>| matches!(a, Some(Activity::Waiting { .. }));
+    let nodes = ui
+        .rows
+        .iter()
+        .filter(|row| ui.shown.contains_key(&row.task.id) && waiting(row.activity.as_ref()))
+        .count();
+    let root = match (&ui.assistant_row, &ui.assistant) {
+        (Some(_), Some(info)) => info
+            .sessions
+            .iter()
+            .filter(|s| waiting(Some(&s.activity)))
+            .count(),
+        _ => 0,
+    };
+    nodes + root
+}
+
+/// The agents view: the assistant and the active tasks under it, as a tree
+/// (design §6).
+fn draw_tree(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
+    let total = ui.count(View::Agents);
+    let title = match (ui.filter.is_empty(), ui.tree.len()) {
+        (true, 0) => " no agents ".to_string(),
+        (true, n) if n == total => format!(" {n} agent{} ", if n == 1 { "" } else { "s" }),
+        // Closed managers hide the rest.
+        (true, n) => format!(" {n} of {total} agents shown "),
+        (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
+        (false, n) => format!(" {n} of {total} shown for \"{}\" ", ui.filter),
+    };
+    let block = list_block(title);
+    if ui.tree.is_empty() {
+        let hint = match ui.assistant_row {
+            None => vec![
+                "no assistant yet.".to_string(),
+                String::new(),
+                "c starts it; the managers and tasks it makes, and theirs, show here".to_string(),
+                "as a tree, with what each needs rolled up to the nodes above it.".to_string(),
+            ],
+            Some(_) => vec!["⌫ or esc widens the filter".into()],
+        };
+        let lines: Vec<Line> = hint.into_iter().map(|l| Line::from(dim(l))).collect();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let columns = TreeColumns::for_width(area.width.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = ui
+        .tree
+        .iter()
+        .map(|line| ListItem::new(tree_line(ui, line, &columns)))
+        .collect();
+    let list = List::new(items).block(block).highlight_style(highlighted());
+    let mut state = std::mem::take(&mut ui.list);
+    state.select(Some(ui.selected.min(ui.tree.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
+    ui.list = state;
+}
+
+/// How wide each column of the agents view is at a given width; zero
+/// drops it. Narrower, the notes go first, then the budget, then the
+/// status's detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeColumns {
+    pub name: usize,
+    pub status: usize,
+    pub budget: usize,
+    pub notes: usize,
+}
+
+impl TreeColumns {
+    pub fn for_width(width: usize) -> TreeColumns {
+        // Room, when there is some, for a hold and what is below it.
+        let (status, budget, notes) = match width {
+            w if w >= 120 => (36, 12, true),
+            w if w >= 80 => (24, 12, true),
+            w if w >= 64 => (24, 12, false),
+            w if w >= 44 => (22, 0, false),
+            _ => (12, 0, false),
+        };
+        // A space after each column but the last.
+        let gaps = 1 + usize::from(budget > 0) + usize::from(notes);
+        let rest = width.saturating_sub(status + budget + gaps);
+        let name = match notes {
+            true => rest.saturating_sub(16).clamp(16, 32),
+            false => rest.max(6),
+        };
+        TreeColumns {
+            name,
+            status,
+            budget,
+            notes: match notes {
+                true => rest.saturating_sub(name),
+                false => 0,
+            },
+        }
+    }
+}
+
+/// One node of the tree: its place and name, what it shows (Q7), its
+/// budget and its notes (Q9).
+fn tree_line(ui: &TasksUi, line: &TreeLine, columns: &TreeColumns) -> Line<'static> {
+    let row = match line.at {
+        At::Root => ui.assistant_row.as_ref(),
+        At::Row(i) => ui.rows.get(i),
+    };
+    let Some(row) = row else {
+        return Line::from("");
+    };
+    let id = row.task.id.as_str();
+    let node = ui.tree_info.as_ref().and_then(|info| info.nodes.get(id));
+    let shown = ui.shown.get(id).copied().unwrap_or((Urgency::Idle, 0));
+    // A slug, which jeet made, never a name a manager wrote.
+    let name = match line.at {
+        At::Root => "✦ assistant".to_string(),
+        At::Row(_) => {
+            let rails: String = line
+                .rails
+                .iter()
+                .map(|&on| if on { "│  " } else { "   " })
+                .collect();
+            let branch = if line.last { "└─ " } else { "├─ " };
+            let marker = match (line.manager, line.open) {
+                (true, true) => "▾ ",
+                (true, false) => "▸ ",
+                (false, _) => "",
+            };
+            format!("{rails}{branch}{marker}{}", printable(&row.task.slug))
+        }
+    };
+    let name_style = match line.at {
+        At::Root => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        At::Row(_) => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    };
+    let (status, color) = node_status(ui, line.at, row, node, shown);
+    let mut spans = vec![
+        Span::styled(cell(&name, columns.name), name_style),
+        Span::styled(
+            format!(" {}", cell(&status, columns.status)),
+            Style::default().fg(color),
+        ),
+    ];
+    if columns.budget > 0 {
+        spans.push(Span::styled(
+            format!(" {}", cell(&budget_cell(line.at, node), columns.budget)),
+            Style::default().fg(Color::Blue),
+        ));
+    }
+    if columns.notes > 0 {
+        spans.push(dim(format!(
+            " {}",
+            fitted_notes(&notes(ui, line.at, node), columns.notes)
+        )));
+    }
+    Line::from(spans)
+}
+
+/// What a node's status column says (Q7), and in what colour: held first,
+/// with what rolled up from below if it needs looking at; else the most
+/// urgent of its own and its subtree's, with how many below are so.
+fn node_status(
+    ui: &TasksUi,
+    at: At,
+    row: &TaskRow,
+    node: Option<&NodeInfo>,
+    (urgency, below): (Urgency, u32),
+) -> (String, Color) {
+    let (glyph, color) = urgency_glyph(urgency);
+    let rolled = match below {
+        0 => own_status(ui, at, row, node, urgency),
+        n => (
+            glyph.to_string(),
+            format!("{} ({n})", urgency_label(urgency)),
+        ),
+    };
+    if let Some(node) = node.filter(|n| n.run != RunState::Run) {
+        let (held, word, held_color) = match node.run {
+            RunState::Paused => ("⏸", "paused", Color::Magenta),
+            _ => ("■", "stopped", Color::Red),
+        };
+        let mut text = match node.held {
+            0 => format!("{held} {word}"),
+            n => format!("{held} {word} ({n} below)"),
+        };
+        // A pause does not answer a prompt.
+        if urgency >= Urgency::Blocked {
+            text.push_str(&format!(" · {}", rolled.1));
+            return (text, color);
+        }
+        return (text, held_color);
+    }
+    let (glyph, text) = rolled;
+    let color = match (below, urgency) {
+        // Its own idle: as the active view colours what its agent is doing.
+        (0, Urgency::Idle) => match at {
+            At::Root => Color::Cyan,
+            At::Row(_) => activity_glyph(row.activity.as_ref()).1,
+        },
+        _ => color,
+    };
+    match text.is_empty() {
+        true => (glyph, color),
+        false => (format!("{glyph} {text}"), color),
+    }
+}
+
+/// A node's own state, as its glyph and words: what its agent is doing,
+/// with its detail (the user may see it, Q10), or what it asks.
+fn own_status(
+    ui: &TasksUi,
+    at: At,
+    row: &TaskRow,
+    node: Option<&NodeInfo>,
+    urgency: Urgency,
+) -> (String, String) {
+    let (glyph, _) = urgency_glyph(urgency);
+    let glyph = glyph.to_string();
+    if at == At::Root {
+        let sessions = ui.assistant.as_ref().map_or(&[][..], |a| &a.sessions[..]);
+        let waiting = sessions
+            .iter()
+            .find(|s| matches!(s.activity, Activity::Waiting { .. }));
+        let running = sessions.iter().filter(|s| s.running()).count();
+        return match (ui.assistant.is_some(), waiting, running) {
+            (false, _, _) => ("…".into(), String::new()),
+            (true, Some(s), _) => (glyph, printable(&s.activity.label_with(true))),
+            (true, None, 0) if sessions.is_empty() => ("·".into(), "no sessions".into()),
+            (true, None, 0) => (glyph, "idle".into()),
+            (true, None, 1) => (glyph, "running".into()),
+            (true, None, n) => (glyph, format!("{n} running")),
+        };
+    }
+    let activity = || match &row.activity {
+        Some(activity) => printable(&activity.label_with(true)),
+        None => String::new(),
+    };
+    match urgency {
+        Urgency::Blocked => {
+            let kind = node
+                .and_then(|n| n.ask)
+                .map_or("blocked", |(_, k)| k.as_str());
+            (glyph, kind.to_string())
+        }
+        Urgency::Budget => (glyph, "budget".into()),
+        Urgency::Done => (glyph, "done".into()),
+        Urgency::Idle => (
+            activity_glyph(row.activity.as_ref()).0.to_string(),
+            activity(),
+        ),
+        Urgency::NeedsYou | Urgency::NeedsInput | Urgency::Running => (glyph, activity()),
+    }
+}
+
+fn urgency_glyph(urgency: Urgency) -> (&'static str, Color) {
+    match urgency {
+        Urgency::NeedsYou | Urgency::NeedsInput => ("◆", Color::Yellow),
+        Urgency::Blocked => ("!", Color::Red),
+        Urgency::Budget => ("$", Color::Magenta),
+        Urgency::Running => ("●", Color::Green),
+        Urgency::Idle => ("○", Color::Cyan),
+        Urgency::Done => ("✓", Color::Green),
+    }
+}
+
+fn urgency_label(urgency: Urgency) -> &'static str {
+    match urgency {
+        Urgency::NeedsYou => "needs you",
+        Urgency::NeedsInput => "needs input",
+        Urgency::Blocked => "blocked",
+        Urgency::Budget => "budget",
+        Urgency::Running => "running",
+        Urgency::Idle => "idle",
+        Urgency::Done => "done",
+    }
+}
+
+/// `0h40/2h` against a time limit, else `12/40 turns`, else nothing; for
+/// the assistant, which has no budget, its children.
+fn budget_cell(at: At, node: Option<&NodeInfo>) -> String {
+    let Some(node) = node else {
+        return String::new();
+    };
+    if at == At::Root {
+        return match node.children {
+            1 => "1 child".into(),
+            n => format!("{n} children"),
+        };
+    }
+    let hours = |secs: i64, short: bool| {
+        let (h, m) = (secs / 3600, secs % 3600 / 60);
+        match (short, m) {
+            (true, 0) => format!("{h}h"),
+            _ => format!("{h}h{m:02}"),
+        }
+    };
+    match &node.budget {
+        Some((row, (secs, turns))) => match (row.max_secs, row.max_turns) {
+            (Some(max), _) => format!("{}/{}", hours(*secs, false), hours(max, true)),
+            (None, Some(max)) => format!("{turns}/{max} turns"),
+            (None, None) => String::new(),
+        },
+        None => String::new(),
+    }
+}
+
+/// What else is worth knowing of a node, most first.
+fn notes(ui: &TasksUi, at: At, node: Option<&NodeInfo>) -> Vec<String> {
+    let mut notes = Vec::new();
+    let Some(node) = node else {
+        return notes;
+    };
+    if let Some(n) = node.inbox.filter(|&n| n > 0) {
+        notes.push(format!("inbox {n}"));
+    }
+    if at == At::Root {
+        let open = ui.assistant.as_ref().map_or(0, |a| a.open_todo());
+        if open > 0 {
+            notes.push(format!("todo {open}"));
+        }
+    }
+    if let Some(pr) = &node.pr {
+        notes.push(printable(pr));
+    }
+    let pct = node
+        .budget
+        .as_ref()
+        .and_then(|(row, used)| budget::percent(row, *used));
+    if let Some(pct) = pct.filter(|&pct| pct >= 80) {
+        notes.push(format!("budget {pct}%"));
+    }
+    if node.queued {
+        notes.push("queued".into());
+    }
+    notes
+}
+
+/// As many of `notes` as fit in `width`, dropped from the right.
+fn fitted_notes(notes: &[String], width: usize) -> String {
+    let mut out = String::new();
+    for note in notes {
+        let next = match out.is_empty() {
+            true => note.clone(),
+            false => format!("{out}  {note}"),
+        };
+        if next.width() > width {
+            break;
+        }
+        out = next;
+    }
+    out
+}
+
+/// Where a [`Panel::Text`] is drawn in `full`.
+fn text_area(full: Rect) -> Rect {
+    centered_rect(90, 80, full)
+}
+
+/// Columns between tab stops in a [`Panel::Text`].
+const TAB: usize = 8;
+
+/// `lines` as drawn `width` wide: tabs expanded (ratatui gives them no
+/// width), control characters dropped, long lines wrapped.
+fn text_lines(lines: &[String], width: u16) -> Vec<String> {
+    let width = (width as usize).max(1);
+    let mut out = Vec::new();
+    for line in lines {
+        let mut expanded = String::new();
+        let mut col = 0;
+        for c in line.chars() {
+            if c == '\t' {
+                let n = TAB - col % TAB;
+                expanded.push_str(&" ".repeat(n));
+                col += n;
+            } else if !c.is_control() {
+                expanded.push(c);
+                col += c.width().unwrap_or(0);
+            }
+        }
+        let mut part = String::new();
+        let mut used = 0;
+        for c in expanded.chars() {
+            let w = c.width().unwrap_or(0);
+            if used + w > width && !part.is_empty() {
+                out.push(std::mem::take(&mut part));
+                used = 0;
+            }
+            part.push(c);
+            used += w;
+        }
+        out.push(part);
+    }
+    out
+}
+
 fn list_block(title: String) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -626,7 +1188,8 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
     let full = frame.area();
     match panel {
         Panel::Help { scroll } => {
-            let lines: Vec<Line> = HELP
+            let help = help(ui.view);
+            let lines: Vec<Line> = help
                 .iter()
                 .map(|(key, what)| {
                     Line::from(vec![
@@ -640,12 +1203,12 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                     ])
                 })
                 .collect();
-            let widest = HELP
+            let widest = help
                 .iter()
                 .map(|(_, what)| KEY_WIDTH + what.width())
                 .max()
                 .unwrap_or(0);
-            let area = fitted_rect(widest, HELP.len(), full);
+            let area = fitted_rect(widest, help.len(), full);
             frame.render_widget(Clear, area);
             frame.render_widget(
                 Paragraph::new(lines)
@@ -978,6 +1541,29 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             }
             let items = ui.feed().iter().map(feed_line).collect();
             render_list(frame, area, title, items, *selected);
+        }
+        Panel::Text {
+            title,
+            lines,
+            scroll,
+            prs,
+        } => {
+            let area = text_area(full);
+            let keys = match prs {
+                Some(_) => "↑↓ PgUp PgDn g G scroll · ⏎ its pull requests · esc close",
+                None => "↑↓ PgUp PgDn g G scroll · esc close",
+            };
+            let body: Vec<Line> = text_lines(lines, area.width.saturating_sub(2))
+                .into_iter()
+                .map(Line::from)
+                .collect();
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(list_block(format!(" {} · {keys} ", printable(title))))
+                    .scroll((*scroll, 0)),
+                area,
+            );
         }
     }
     Vec::new()
@@ -1483,7 +2069,37 @@ mod tests {
             row("b", None),
             child,
         ]);
-        let panels = vec![
+        for info in [None, Some(info())] {
+            ui.assistant = info;
+            for panel in all_panels() {
+                ui.panel = panel;
+                for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
+                    let screen = render(&mut ui, w, h);
+                    if (w, ui.panel.is_none()) == (160, true) {
+                        let all = screen.join("\n");
+                        assert!(all.contains("c ↳ assistant · blocked: [2J"), "{all}");
+                    }
+                    assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
+                }
+            }
+        }
+        // The agents view, with and without a tree.
+        for mut ui in [agents_ui(), TasksUi::new(Vec::new())] {
+            ui.view = View::Agents;
+            ui.set_rows(ui.rows.clone());
+            for panel in all_panels() {
+                ui.panel = panel;
+                for (w, h) in [(160, 40), (80, 24), (60, 20), (50, 12), (20, 6), (1, 1)] {
+                    let screen = render(&mut ui, w, h);
+                    assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
+                }
+            }
+        }
+    }
+
+    /// No panel, and one of each.
+    fn all_panels() -> Vec<Option<Panel>> {
+        vec![
             None,
             Some(Panel::Help { scroll: 3 }),
             Some(Panel::NewTask(NewTaskForm::new(
@@ -1510,21 +2126,19 @@ mod tests {
                 adding: Some("half".into()),
             }),
             Some(Panel::Inbox { selected: 9 }),
-        ];
-        for info in [None, Some(info())] {
-            ui.assistant = info;
-            for panel in panels.clone() {
-                ui.panel = panel;
-                for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
-                    let screen = render(&mut ui, w, h);
-                    if (w, ui.panel.is_none()) == (160, true) {
-                        let all = screen.join("\n");
-                        assert!(all.contains("c ↳ assistant · blocked: [2J"), "{all}");
-                    }
-                    assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
-                }
-            }
-        }
+            Some(Panel::Text {
+                title: "w \u{1b}[2J· worklog".into(),
+                lines: vec![format!("{}\twide\u{7}", "漢字".repeat(200)); 80],
+                scroll: u16::MAX,
+                prs: Some("w".into()),
+            }),
+            Some(Panel::Text {
+                title: String::new(),
+                lines: Vec::new(),
+                scroll: 3,
+                prs: None,
+            }),
+        ]
     }
 
     #[test]
@@ -1821,13 +2435,374 @@ mod tests {
         assert_eq!(pr_state_color(&pr), Color::Red);
     }
 
+    /// A node under `parent`.
+    fn node(name: &str, kind: TaskKind, parent: &str, activity: Option<Activity>) -> TaskRow {
+        let mut r = row(name, activity);
+        r.task.kind = kind;
+        r.task.parent_id = Some(parent.into());
+        r
+    }
+
+    fn node_info(budget: Option<(i64, i64)>) -> NodeInfo {
+        NodeInfo {
+            run: RunState::Run,
+            held: 0,
+            setter: None,
+            budget: budget.map(|(max, used)| {
+                let row = crate::db::tasks::BudgetRow {
+                    max_secs: Some(max),
+                    max_turns: None,
+                    used_secs: 0,
+                    used_turns: 0,
+                    warned: 0,
+                };
+                (row, (used, 0))
+            }),
+            inbox: Some(0),
+            pr: None,
+            queued: false,
+            ask: None,
+            done: false,
+            children: 0,
+        }
+    }
+
+    /// The tree of §6's mock, in the agents view: frontend paused and
+    /// closed, a prompt under backend.
+    fn agents_ui() -> TasksUi {
+        let h = 3600;
+        let mut root = row("assistant", None);
+        root.task.kind = TaskKind::Assistant;
+        let rows = vec![
+            node(
+                "backend",
+                TaskKind::Manager,
+                "assistant",
+                Some(Activity::Running { detail: None }),
+            ),
+            node(
+                "fix-token-refresh",
+                TaskKind::Work,
+                "backend",
+                Some(Activity::Waiting {
+                    detail: Some("Bash".into()),
+                }),
+            ),
+            node(
+                "api-docs",
+                TaskKind::Work,
+                "backend",
+                Some(Activity::Running {
+                    detail: Some("Edit".into()),
+                }),
+            ),
+            node(
+                "frontend",
+                TaskKind::Manager,
+                "assistant",
+                Some(Activity::Idle { since: 0 }),
+            ),
+            node("fe-a", TaskKind::Work, "frontend", None),
+            node("fe-b", TaskKind::Work, "frontend", None),
+            node(
+                "fix-login",
+                TaskKind::Work,
+                "assistant",
+                Some(Activity::Idle { since: 0 }),
+            ),
+            // Not in the tree.
+            row("top-level", Some(Activity::Idle { since: 0 })),
+        ];
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "assistant".to_string(),
+            NodeInfo {
+                children: 3,
+                inbox: Some(2),
+                ..node_info(None)
+            },
+        );
+        nodes.insert(
+            "backend".into(),
+            NodeInfo {
+                inbox: Some(1),
+                ..node_info(Some((6 * h, 2 * h + 600)))
+            },
+        );
+        nodes.insert(
+            "fix-token-refresh".into(),
+            NodeInfo {
+                pr: Some("api#131".into()),
+                ..node_info(Some((2 * h, 2400)))
+            },
+        );
+        nodes.insert("api-docs".into(), node_info(Some((h, 300))));
+        let paused = |held, budget| NodeInfo {
+            run: RunState::Paused,
+            held,
+            setter: Some("the user".into()),
+            ..node_info(budget)
+        };
+        nodes.insert(
+            "frontend".into(),
+            paused(2, Some((4 * h, 3 * h + 50 * 60 + 30))),
+        );
+        nodes.insert("fe-a".into(), paused(0, None));
+        nodes.insert("fe-b".into(), paused(0, None));
+        nodes.insert(
+            "fix-login".into(),
+            NodeInfo {
+                done: true,
+                pr: Some("web#88".into()),
+                ..node_info(None)
+            },
+        );
+        let mut ui = TasksUi::new(Vec::new());
+        ui.view = View::Agents;
+        ui.assistant = Some(info());
+        ui.tree_info = Some(crate::tui::managers::TreeInfo {
+            live: [
+                "assistant",
+                "backend",
+                "fix-token-refresh",
+                "api-docs",
+                "fix-login",
+            ]
+            .map(String::from)
+            .into(),
+            max_live: Some(8),
+            queued: 0,
+            nodes,
+        });
+        ui.collapsed.insert("frontend".into());
+        ui.assistant_row = Some(root);
+        ui.set_rows(rows);
+        ui
+    }
+
+    /// The screen line that holds `what`.
+    fn line_of<'a>(screen: &'a [String], what: &str) -> &'a str {
+        screen
+            .iter()
+            .find(|l| l.contains(what))
+            .unwrap_or_else(|| panic!("no {what} in {screen:#?}"))
+    }
+
+    #[test]
+    fn the_agents_view_draws_the_tree_with_what_rolls_up() {
+        let mut ui = agents_ui();
+        let screen = render(&mut ui, 120, 20);
+        let all = screen.join("\n");
+        assert!(all.contains("jeet · agents"), "{all}");
+        assert!(all.contains("live 5/8   needs you 1"), "{all}");
+        assert!(!all.contains("queued"), "{all}");
+        // The assistant is the root, not pinned above the list.
+        assert!(!all.contains("C sessions"), "{all}");
+        // Siblings by slug, as `manager ls` has them.
+        let root = line_of(&screen, "✦ assistant");
+        assert!(root.contains("◆ needs you (1)"), "{root}");
+        assert!(root.contains("3 children"), "{root}");
+        assert!(root.contains("inbox 2  todo 2"), "{root}");
+        let backend = line_of(&screen, "├─ ▾ backend");
+        assert!(backend.contains("◆ needs you (1)"), "{backend}");
+        assert!(backend.contains("2h10/6h"), "{backend}");
+        assert!(backend.contains("inbox 1"), "{backend}");
+        let asking = line_of(&screen, "│  └─ fix-token-refresh");
+        assert!(asking.contains("◆ needs input – Bash"), "{asking}");
+        assert!(asking.contains("0h40/2h"), "{asking}");
+        assert!(asking.contains("api#131"), "{asking}");
+        let docs = line_of(&screen, "│  ├─ api-docs");
+        assert!(docs.contains("● running – Edit"), "{docs}");
+        assert!(docs.contains("0h05/1h"), "{docs}");
+        let frontend = line_of(&screen, "└─ ▸ frontend");
+        assert!(frontend.contains("⏸ paused (2 below)"), "{frontend}");
+        assert!(frontend.contains("3h50/4h"), "{frontend}");
+        assert!(frontend.contains("budget 96%"), "{frontend}");
+        assert!(!all.contains("fe-a"), "closed: {all}");
+        let login = line_of(&screen, "├─ fix-login");
+        assert!(login.contains("✓ done"), "{login}");
+        assert!(login.contains("web#88"), "{login}");
+        assert!(!all.contains("top-level"), "{all}");
+        assert!(all.contains("agents 8"), "{all}");
+        assert!(all.contains("6 of 8 agents shown"), "{all}");
+        // With its own session waiting and nothing below, the assistant
+        // needs input itself.
+        ui.assistant.as_mut().unwrap().sessions[0].activity = Activity::Waiting {
+            detail: Some("Edit".into()),
+        };
+        ui.apply(crate::tui::tasks::Update::Status {
+            id: "fix-token-refresh".into(),
+            activity: Some(Activity::Idle { since: 0 }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        let screen = render(&mut ui, 120, 20);
+        let root = line_of(&screen, "✦ assistant");
+        assert!(root.contains("◆ needs input – Edit"), "{root}");
+        assert!(screen.join("\n").contains("needs you 1"));
+    }
+
+    #[test]
+    fn a_held_node_still_shows_a_prompt_below_it() {
+        let mut ui = agents_ui();
+        ui.collapsed.clear();
+        ui.set_rows(ui.rows.clone());
+        ui.apply(crate::tui::tasks::Update::Status {
+            id: "fe-a".into(),
+            activity: Some(Activity::Waiting { detail: None }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        let screen = render(&mut ui, 140, 20);
+        let frontend = line_of(&screen, "└─ ▾ frontend");
+        assert!(
+            frontend.contains("⏸ paused (2 below) · needs you (1)"),
+            "{frontend}"
+        );
+        let fe_a = line_of(&screen, "   ├─ fe-a");
+        assert!(fe_a.contains("⏸ paused · needs input"), "{fe_a}");
+        assert!(render(&mut ui, 140, 20).join("\n").contains("needs you 2"));
+    }
+
+    #[test]
+    fn a_node_not_gathered_yet_draws_its_activity_alone() {
+        let mut ui = agents_ui();
+        ui.tree_info.as_mut().unwrap().nodes.remove("api-docs");
+        ui.retree();
+        let screen = render(&mut ui, 120, 20);
+        let docs = line_of(&screen, "│  ├─ api-docs");
+        assert!(docs.contains("● running – Edit"), "{docs}");
+        assert!(!docs.contains('/'), "no budget: {docs}");
+        assert!(
+            docs.trim_end_matches(['│', ' '])
+                .ends_with("running – Edit"),
+            "no notes: {docs}"
+        );
+        // Nothing gathered at all: no live cell, and every node still drawn.
+        ui.tree_info = None;
+        ui.retree();
+        let all = render(&mut ui, 120, 20).join("\n");
+        assert!(!all.contains("live "), "{all}");
+        assert!(all.contains("needs you 1"), "{all}");
+        assert!(line_of(&render(&mut ui, 120, 20), "└─ ▸ frontend").contains("○ idle"));
+    }
+
+    #[test]
+    fn a_narrow_tree_drops_the_notes_then_the_budget_before_the_status() {
+        let mut ui = agents_ui();
+        let screen = render(&mut ui, 72, 20);
+        let asking = line_of(&screen, "fix-token-refresh");
+        assert!(asking.contains("needs input – Bash"), "{asking}");
+        assert!(asking.contains("0h40/2h"), "{asking}");
+        assert!(!asking.contains("api#131"), "{asking}");
+        let screen = render(&mut ui, 60, 20);
+        let asking = line_of(&screen, "fix-token-refresh");
+        assert!(asking.contains("needs input – Bash"), "{asking}");
+        assert!(!asking.contains("0h40"), "{asking}");
+        for width in [20, 44, 60, 64, 80, 120, 200] {
+            let c = TreeColumns::for_width(width);
+            let used = c.name + c.status + c.budget + c.notes;
+            assert!(c.name >= 6, "{width}: {c:?}");
+            assert!(used <= width.max(18), "{width}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn nothing_an_agent_wrote_reaches_the_terminal_raw() {
+        let mut ui = agents_ui();
+        let mut rows = ui.rows.clone();
+        let asking = rows
+            .iter_mut()
+            .find(|r| r.task.id == "fix-token-refresh")
+            .unwrap();
+        asking.task.slug = "evil\u{1b}[2J\u{7}".into();
+        ui.set_rows(rows);
+        ui.apply(crate::tui::tasks::Update::Status {
+            id: "fix-token-refresh".into(),
+            activity: Some(Activity::Waiting {
+                detail: Some("\u{1b}[2JBash\u{7}".into()),
+            }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        let screen = render(&mut ui, 120, 20).join("\n");
+        assert!(screen.contains("evil[2J"), "{screen}");
+        assert!(screen.contains("needs input – [2JBash"), "{screen}");
+        assert!(
+            !screen.contains('\u{1b}') && !screen.contains('\u{7}'),
+            "{screen}"
+        );
+
+        ui.user = true;
+        ui.panel = Some(Panel::Text {
+            title: "manager backend · worklog".into(),
+            lines: vec![
+                "## \u{1b}[2Jtoday\u{7}".into(),
+                "a\tb".into(),
+                "    #12 question · body\u{1b}]8;;x\u{7}".into(),
+            ],
+            scroll: 0,
+            prs: None,
+        });
+        let screen = render(&mut ui, 120, 30).join("\n");
+        assert!(screen.contains("manager backend · worklog"), "{screen}");
+        assert!(screen.contains("## [2Jtoday"), "{screen}");
+        assert!(
+            screen.contains("a       b"),
+            "a tab to the next stop: {screen}"
+        );
+        assert!(screen.contains("#12 question · body]8;;x"), "{screen}");
+        assert!(
+            !screen.contains('\u{1b}') && !screen.contains('\u{7}'),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_text_panel_scrolls_no_further_than_its_end() {
+        let mut ui = agents_ui();
+        ui.panel = Some(Panel::Text {
+            title: "t".into(),
+            lines: (1..=100).map(|n| format!("line {n}")).collect(),
+            scroll: u16::MAX,
+            prs: Some("backend".into()),
+        });
+        let screen = render(&mut ui, 100, 30).join("\n");
+        assert!(screen.contains("line 100"), "{screen}");
+        assert!(!screen.contains("line 1 "), "{screen}");
+        assert!(screen.contains("⏎ its pull requests"), "{screen}");
+        let Some(Panel::Text { scroll, .. }) = &ui.panel else {
+            panic!();
+        };
+        // 30 rows at 80%, less the border.
+        assert_eq!(*scroll, 100 - 22);
+        // A long line wraps, and counts as the lines it takes.
+        assert_eq!(text_lines(&["abcdef".into()], 4), ["abcd", "ef"]);
+        assert_eq!(
+            text_lines(&["\t漢字".into(), String::new()], 9),
+            ["        ", "漢字", ""]
+        );
+    }
+
+    #[test]
+    fn the_help_lists_the_keys_of_the_view() {
+        let mut ui = agents_ui();
+        ui.panel = Some(Panel::Help { scroll: 0 });
+        let screen = render(&mut ui, 120, 60).join("\n");
+        assert!(screen.contains("the worklog"), "{screen}");
+        assert!(!screen.contains("explore the task"), "{screen}");
+        assert!(help(View::Active).iter().any(|(k, _)| *k == "e"));
+    }
+
     #[test]
     fn hints_always_keep_help_and_quit() {
         for width in [10u16, 20, 40, 80, 200] {
-            let line = hints(width);
+            let line = hints(width, View::Active);
             assert!(line.width() <= width as usize, "{width}: {line}");
         }
-        assert!(hints(20).contains("q quit"));
-        assert!(hints(200).contains("⏎ open"));
+        assert!(hints(20, View::Active).contains("q quit"));
+        assert!(hints(200, View::Active).contains("⏎ open"));
+        assert!(hints(200, View::Agents).contains("l worklog"));
+        assert!(!hints(200, View::Agents).contains("archive"));
     }
 }

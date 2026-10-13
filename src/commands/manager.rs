@@ -17,9 +17,7 @@ use serde::Serialize;
 use crate::cli::Delegation;
 use crate::commands::task::{start_new, warn_all};
 use crate::context::App;
-use crate::db::tasks::{
-    ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState,
-};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
@@ -70,12 +68,8 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         }
         d.goal = Some(goal);
     }
-    // A worker has its prompt; a manager has only its brief to work
-    // towards, so it is not made without one —
-    // checked before the parent is resolved, which may make the assistant.
-    if d.goal.is_none() {
-        bail!("a manager needs --goal or --brief-file: it is what it works towards");
-    }
+    // `plan_child` refuses a manager with no goal, so the brief file is
+    // folded into it first.
     let plan = tasks::plan_child(
         app,
         &caller,
@@ -245,22 +239,14 @@ fn finish_ls(rows: &[Row], json: bool) -> Result<()> {
 }
 
 /// `top` (unless it is the assistant) and everything below it, each after
-/// its parent, siblings by slug.
+/// its parent, siblings by slug ([`manager::tree_order`]).
 fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
     let base = app.db.depth(&top.id)?;
-    let mut below: HashMap<String, Vec<TaskRecord>> = HashMap::new();
-    for (task, _) in app.db.descendants(&top.id)? {
-        if let Some(parent) = &task.parent_id {
-            below.entry(parent.clone()).or_default().push(task);
-        }
-    }
-    for children in below.values_mut() {
-        children.sort_by(|a, b| a.slug.cmp(&b.slug));
-    }
-    let mut slugs: HashMap<String, String> = below
-        .values()
-        .flatten()
-        .chain(std::iter::once(top))
+    // `descendants` already refused a cycle.
+    let mut nodes = vec![top.clone()];
+    nodes.extend(app.db.descendants(&top.id)?.into_iter().map(|(t, _)| t));
+    let mut slugs: HashMap<String, String> = nodes
+        .iter()
         .map(|t| (t.id.clone(), t.slug.clone()))
         .collect();
     // The top's own parent sits above the tree but is still its parent.
@@ -270,109 +256,96 @@ fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
         }
     }
     let mut rows = Vec::new();
-    // Depth first, from the top; `descendants` already refused a cycle.
-    let mut stack: Vec<(TaskRecord, u32)> = match top.kind {
-        TaskKind::Assistant => below
-            .get(&top.id)
-            .into_iter()
-            .flatten()
-            .rev()
-            .map(|t| (t.clone(), base + 1))
-            .collect(),
-        _ => vec![(top.clone(), base)],
-    };
-    while let Some((task, depth)) = stack.pop() {
+    for (i, depth) in manager::tree_order(&nodes, top) {
+        let task = &nodes[i];
         let (run, holder) = app.db.effective_run_state(&task.id)?;
         rows.push(Row {
             task: task.slug.clone(),
             parent: task.parent_id.as_ref().and_then(|p| slugs.get(p).cloned()),
-            depth,
+            depth: base + depth,
             kind: task.kind.as_str(),
             state: task.state.as_str(),
             run_state: run.as_str(),
             held_by: holder.map(|h| h.slug),
         });
-        for child in below.get(&task.id).into_iter().flatten().rev() {
-            stack.push((child.clone(), depth + 1));
-        }
     }
     Ok(rows)
 }
 
 /// Everything `jeet manager show` says about a task (M29).
 #[derive(Debug, Serialize)]
-struct Shown {
-    task: String,
-    path: String,
-    kind: &'static str,
-    state: &'static str,
-    parent: Option<String>,
-    brief: Option<Brief>,
+pub struct Shown {
+    pub task: String,
+    pub path: String,
+    pub kind: &'static str,
+    pub state: &'static str,
+    pub parent: Option<String>,
+    pub brief: Option<Brief>,
     /// What its grant names, as stored.
-    grant: Vec<String>,
+    pub grant: Vec<String>,
     /// What it may do: its grant cut by every list above it.
-    effective: Vec<&'static str>,
+    pub effective: Vec<&'static str>,
     /// Each capability its grant names that it may not use, and who cut it.
-    cut: Vec<Cut>,
-    budget: Budget,
-    run: Run,
-    children: Vec<Child>,
+    pub cut: Vec<Cut>,
+    pub budget: Budget,
+    pub run: Run,
+    pub children: Vec<Child>,
     /// Its children's last reports that ask for something: blocked, or a
     /// question.
-    open: Vec<Report>,
+    pub open: Vec<Report>,
 }
 
 #[derive(Debug, Serialize)]
-struct Brief {
-    goal: String,
-    done_when: Option<String>,
-    created_by: String,
+pub struct Brief {
+    pub goal: String,
+    pub done_when: Option<String>,
+    pub created_by: String,
 }
 
 #[derive(Debug, Serialize)]
-struct Cut {
-    capability: String,
-    by: String,
+pub struct Cut {
+    pub capability: String,
+    pub by: String,
 }
 
 #[derive(Debug, Serialize)]
-struct Budget {
-    max_secs: Option<i64>,
-    max_turns: Option<i64>,
+pub struct Budget {
+    pub max_secs: Option<i64>,
+    pub max_turns: Option<i64>,
     /// What it and everything below it have used.
-    used_secs: i64,
-    used_turns: i64,
+    pub used_secs: i64,
+    pub used_turns: i64,
     /// Why nothing is counted, when nothing can be.
-    note: Option<&'static str>,
+    pub note: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
-struct Run {
+pub struct Run {
     /// Its own run state, and who set it.
-    state: &'static str,
-    by: Option<String>,
+    pub state: &'static str,
+    pub by: Option<String>,
     /// The one that applies: the most severe of it and its ancestors'.
-    effective: &'static str,
-    held_by: Option<String>,
+    pub effective: &'static str,
+    pub held_by: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct Child {
-    task: String,
-    kind: &'static str,
-    state: &'static str,
-    last_report: Option<Report>,
+pub struct Child {
+    pub task: String,
+    pub kind: &'static str,
+    pub state: &'static str,
+    pub last_report: Option<Report>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct Report {
-    task: String,
-    id: i64,
-    kind: &'static str,
-    at: i64,
+pub struct Report {
+    pub task: String,
+    pub id: i64,
+    pub kind: &'static str,
+    pub at: i64,
     /// The task's own words: fenced as untrusted for any caller but the
     /// user.
-    body: String,
+    pub body: String,
 }
 
 /// A task under the assistant: its brief, grant, budget, run state and
@@ -393,7 +366,10 @@ pub fn show(app: &App, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
+/// What `jeet manager show` says about `task`, to `caller`: what other
+/// tasks wrote is fenced for any caller but the user. No scope is checked
+/// here.
+pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
     let path = manager::tree_path(app, task)?;
     let parent = match &task.parent_id {
         Some(id) => app.db.get_task(id)?.map(|p| p.slug),
@@ -482,10 +458,8 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         };
         // Open asks come from what the child said itself: a status report
         // jeet files while it waits for the answer must not hide them.
-        if let Some(r) = app.db.last_own_report(&child.id)? {
-            if matches!(r.kind, ReportKind::Blocked | ReportKind::Question) {
-                open.push(shown_report(r));
-            }
+        if let Some(r) = manager::open_ask(app, &child)? {
+            open.push(shown_report(r));
         }
         let last_report = app.db.last_report(&child.id)?.map(shown_report);
         children.push(Child {
@@ -512,7 +486,8 @@ fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
     })
 }
 
-fn shown_text(s: &Shown) -> String {
+/// [`Shown`] as `jeet manager show` prints it.
+pub fn shown_text(s: &Shown) -> String {
     let list = |items: &[String]| match items.is_empty() {
         true => "nothing".to_string(),
         false => items.join(", "),
@@ -737,19 +712,10 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
 pub fn pause(app: &App, name: &str) -> Result<()> {
     let (caller, task) = scoped(app, name, Verb::ManagerPause)?;
     let outcomes = run::pause(app, &caller, &task)?;
-    // A stop stays a stop, though a pause may take it over.
-    let state = app
-        .db
-        .get_task(&task.id)?
-        .map_or(RunState::Paused, |t| t.run_state);
-    eprintln!(
-        "jeet: {} {}; it and the tasks below it are handed nothing until it is resumed",
-        match state {
-            RunState::Stopped => "kept stopped",
-            _ => "paused",
-        },
-        manager::label(&task)
-    );
+    let after = app.db.get_task(&task.id)?.map(|t| t.run_state);
+    if let Some(summary) = outcome_summary(Verb::ManagerPause, Some(&task), after) {
+        eprintln!("jeet: {summary}");
+    }
     print_outcomes(&outcomes);
     Ok(())
 }
@@ -770,18 +736,16 @@ pub fn stop(app: &App, name: Option<&str>, all: bool) -> Result<()> {
         (Some(name), false) => {
             let (caller, task) = scoped(app, name, Verb::ManagerStop)?;
             let outcomes = run::stop(app, &caller, Some(&task))?;
-            eprintln!(
-                "jeet: stopped {}; nothing below it starts until it is resumed",
-                manager::label(&task)
-            );
+            if let Some(summary) = outcome_summary(Verb::ManagerStop, Some(&task), None) {
+                eprintln!("jeet: {summary}");
+            }
             outcomes
         }
         (None, true) => {
             let outcomes = run::stop(app, &permissions::caller(app)?, None)?;
-            eprintln!(
-                "jeet: stopped every task under the assistant; each starts again only once \
-                 you resume it"
-            );
+            if let Some(summary) = outcome_summary(Verb::ManagerStop, None, None) {
+                eprintln!("jeet: {summary}");
+            }
             outcomes
         }
         // clap allows exactly one.
@@ -789,6 +753,37 @@ pub fn stop(app: &App, name: Option<&str>, all: bool) -> Result<()> {
     };
     print_outcomes(&outcomes);
     Ok(())
+}
+
+/// What `pause` or `stop` says of `task` once its walk is done, before
+/// each node's line; with no task, of `stop --all`. `after` is `task`'s own
+/// run state then: a stop stays a stop, though a pause may take it over.
+/// `resume` says nothing of its own.
+pub fn outcome_summary(
+    verb: Verb,
+    task: Option<&TaskRecord>,
+    after: Option<RunState>,
+) -> Option<String> {
+    match (verb, task) {
+        (Verb::ManagerPause, Some(task)) => Some(format!(
+            "{} {}; it and the tasks below it are handed nothing until it is resumed",
+            match after {
+                Some(RunState::Stopped) => "kept stopped",
+                _ => "paused",
+            },
+            manager::label(task)
+        )),
+        (Verb::ManagerStop, Some(task)) => Some(format!(
+            "stopped {}; nothing below it starts until it is resumed",
+            manager::label(task)
+        )),
+        (Verb::ManagerStop, None) => Some(
+            "stopped every task under the assistant; each starts again only once you \
+             resume it"
+                .to_string(),
+        ),
+        _ => None,
+    }
 }
 
 /// How long a drain waits for the session that is ending to go.
@@ -859,7 +854,7 @@ fn stale(
 mod tests {
     use super::*;
     use crate::config;
-    use crate::db::tasks::{RunState, Setter, TaskBriefRecord, TaskState};
+    use crate::db::tasks::{ReportKind, RunState, Setter, TaskBriefRecord, TaskState};
     use crate::db::Database;
 
     fn lab() -> (tempfile::TempDir, App, TaskRecord) {
@@ -1133,6 +1128,33 @@ mod tests {
                 ("w".to_string(), vec!["pr.comment"]),
             ]
         );
+    }
+
+    /// `pause` says when it kept a stop; `resume` says nothing of its own.
+    #[test]
+    fn the_summary_says_what_a_pause_or_stop_came_to() {
+        let (_dir, app, root) = lab();
+        let api = add(&app, "api", TaskKind::Manager, &root, &[]);
+        let summary = |verb, task, after| outcome_summary(verb, task, after);
+        assert_eq!(
+            summary(Verb::ManagerPause, Some(&api), Some(RunState::Paused)).unwrap(),
+            "paused manager api; it and the tasks below it are handed nothing until it is \
+             resumed"
+        );
+        assert!(
+            summary(Verb::ManagerPause, Some(&api), Some(RunState::Stopped))
+                .unwrap()
+                .starts_with("kept stopped manager api; ")
+        );
+        assert_eq!(
+            summary(Verb::ManagerStop, Some(&api), None).unwrap(),
+            "stopped manager api; nothing below it starts until it is resumed"
+        );
+        assert_eq!(
+            summary(Verb::ManagerStop, None, None).unwrap(),
+            "stopped every task under the assistant; each starts again only once you resume it"
+        );
+        assert_eq!(summary(Verb::ManagerResume, Some(&api), None), None);
     }
 
     /// `manager ls` walks the tree depth first; a node sees its subtree.

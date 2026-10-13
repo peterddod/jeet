@@ -1050,6 +1050,18 @@ impl Database {
         self.last_report_where(task_id, "kind <> 'status'")
     }
 
+    /// The reports about `id` and those sent to it, newest first, at most
+    /// `limit`.
+    pub fn reports_for(&self, id: &str, limit: u32) -> Result<Vec<TaskReportRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TASK_REPORT_COLUMNS} FROM task_reports
+             WHERE task_id = ?1 OR to_id = ?1 ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![id, limit], task_report_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn insert_brief(&self, brief: &TaskBriefRecord) -> Result<()> {
         insert_brief_in(&self.conn(), brief)
     }
@@ -1963,6 +1975,35 @@ mod tests {
         assert_eq!((own.id, own.kind), (second, ReportKind::Progress));
         // Another task's reports are its own.
         assert_eq!(db.last_report("a").unwrap(), None);
+    }
+
+    #[test]
+    fn reports_for_a_node_are_those_by_and_to_it_newest_first() {
+        let (_dir, db) = open();
+        parent_and_child(&db);
+        let mut sibling = task("s", "sibling", 1);
+        sibling.parent_id = Some("a".into());
+        db.insert_task(&sibling).unwrap();
+        let mut grandchild = task("g", "grandchild", 1);
+        grandchild.parent_id = Some("c".into());
+        db.insert_task(&grandchild).unwrap();
+        let by = db
+            .insert_report("c", "a", ReportKind::Progress, "half", 5)
+            .unwrap();
+        db.insert_report("s", "a", ReportKind::Done, "theirs", 6)
+            .unwrap();
+        let to = db
+            .insert_report("g", "c", ReportKind::Question, "which?", 7)
+            .unwrap();
+        let last = db
+            .insert_report("c", "a", ReportKind::Status, "idle", 8)
+            .unwrap();
+        let ids = |rows: Vec<TaskReportRecord>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(db.reports_for("c", 50).unwrap()), [last, to, by]);
+        assert_eq!(ids(db.reports_for("c", 2).unwrap()), [last, to]);
+        // The parent sees everything sent to it.
+        assert_eq!(db.reports_for("a", 50).unwrap().len(), 3);
+        assert!(db.reports_for("nobody", 50).unwrap().is_empty());
     }
 
     #[test]

@@ -102,11 +102,59 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     }
 }
 
+/// How the start of a new task's agent went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// Started now, in tmux session `session`, with the prompt.
+    Now { session: String },
+    /// Its agent ran already, in `session`, and was not given the prompt.
+    AlreadyRunning { session: String },
+    /// Queued on `[managers] max_live`, with `live` of `max` running: it
+    /// starts with the prompt, from its inbox, when one ends.
+    Queued { live: u32, max: u32 },
+    /// Held by a paused or stopped manager (`why`, its held refusal): it
+    /// starts with the prompt, from its inbox, once resumed.
+    Held { why: String },
+}
+
+/// What [`start`] did, and what it warns of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    pub outcome: StartOutcome,
+    pub warnings: Vec<String>,
+}
+
+impl Start {
+    /// What the user is told of it, the warnings first: the CLI prints each
+    /// after `jeet: `.
+    pub fn lines(&self, task: &TaskRecord) -> Vec<String> {
+        let mut lines = self.warnings.clone();
+        lines.push(match &self.outcome {
+            StartOutcome::Now { session } => {
+                format!("started the agent with its brief in tmux session {session}")
+            }
+            StartOutcome::AlreadyRunning { session } => format!(
+                "an agent was already running in tmux session {session}, so it was not \
+                 given the brief; `jeet task send {}` sends it",
+                task.slug
+            ),
+            StartOutcome::Queued { live, max } => format!(
+                "queued (tasks in the tree running: {live}/{max}, [managers] max_live); the \
+                 agent starts with its brief when one ends"
+            ),
+            StartOutcome::Held { why } => {
+                format!("not started: {why}; it starts with its brief then")
+            }
+        });
+        lines
+    }
+}
+
 /// Start the agent of `task`, made a moment ago, with `prompt`: now, or,
 /// queued on `[managers] max_live` or held by a paused or stopped manager
 /// above it, with the prompt waiting in its inbox for the start. A start
 /// that fails leaves the task made and is an error.
-pub(crate) fn start_new(app: &App, task: &TaskRecord, prompt: &str) -> Result<()> {
+pub fn start(app: &App, task: &TaskRecord, prompt: &str) -> Result<Start> {
     // A brief its agent could never start with is not left waiting for a
     // held or queued start.
     if let Some(why) = runtime::first_prompt_refusal(app, task) {
@@ -120,44 +168,38 @@ pub(crate) fn start_new(app: &App, task: &TaskRecord, prompt: &str) -> Result<()
     let inbox = Inbox::lock(&tasks::task_dir(app, task))?;
     // Under a paused or stopped manager: its brief waits in its inbox, and
     // its start for the resume.
-    let held = |holder: &TaskRecord| -> Result<()> {
+    let held = |holder: &TaskRecord| -> Result<Start> {
         inbox.push_to(prompt, None)?;
         app.db.queue_start(&task.id, now_secs())?;
-        eprintln!(
-            "jeet: not started: {}; it starts with its brief then",
-            run::held_refusal(task, holder)
-        );
-        Ok(())
+        Ok(Start {
+            outcome: StartOutcome::Held {
+                why: run::held_refusal(task, holder),
+            },
+            warnings: Vec::new(),
+        })
     };
     if let Some((holder, _)) = run::hold(app, task)? {
         return held(&holder);
     }
     match runtime::ensure_running(app, task, None, Some(prompt), Admission::Gate) {
         Ok(running) => {
-            warn_all(&running.warnings);
-            match running.started {
-                Started::Now => eprintln!(
-                    "jeet: started the agent with its brief in tmux session {}",
-                    running.tmux_session
-                ),
-                Started::AlreadyRunning => eprintln!(
-                    "jeet: an agent was already running in tmux session {}, so it was not \
-                     given the brief; `jeet task send {}` sends it",
-                    running.tmux_session, task.slug
-                ),
+            let session = running.tmux_session;
+            let outcome = match running.started {
+                Started::Now => StartOutcome::Now { session },
+                Started::AlreadyRunning => StartOutcome::AlreadyRunning { session },
                 Started::Queued { live, max, prompt } => {
                     if let Some(prompt) = prompt {
                         inbox.push_to(&prompt, None)?;
                     }
                     drop(inbox);
                     run::report_queued(app, task, live, max, i64::MAX);
-                    eprintln!(
-                        "jeet: queued (tasks in the tree running: {live}/{max}, [managers] \
-                         max_live); the agent starts with its brief when one ends"
-                    );
+                    StartOutcome::Queued { live, max }
                 }
-            }
-            Ok(())
+            };
+            Ok(Start {
+                outcome,
+                warnings: running.warnings,
+            })
         }
         Err(e) => match run::hold(app, task)? {
             // Paused since it was asked above, before the start gate asked
@@ -169,6 +211,14 @@ pub(crate) fn start_new(app: &App, task: &TaskRecord, prompt: &str) -> Result<()
             ),
         },
     }
+}
+
+/// [`start`], saying how it went on stderr.
+pub(crate) fn start_new(app: &App, task: &TaskRecord, prompt: &str) -> Result<()> {
+    for line in start(app, task, prompt)?.lines(task) {
+        eprintln!("jeet: {line}");
+    }
+    Ok(())
 }
 
 /// The assistant, as a parent: made now if it never was.
@@ -1341,7 +1391,7 @@ pub(crate) fn called(app: &App, task: &TaskRecord) -> String {
 }
 
 /// [`printable`] for text of several lines: newlines and tabs are kept.
-fn printable_text(text: &str) -> String {
+pub fn printable_text(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect()
@@ -1386,6 +1436,72 @@ pub(crate) fn warn_all(warnings: &[String]) {
 mod tests {
     use super::*;
     use crate::harness::AgentMessage;
+
+    /// Each way a start goes is said as `start_new` has always said it,
+    /// the warnings first.
+    #[test]
+    fn a_start_is_told_as_the_cli_tells_it() {
+        let task = TaskRecord {
+            id: "w-id".into(),
+            slug: "w".into(),
+            name: "w".into(),
+            project: None,
+            kind: TaskKind::Work,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: None,
+            placement: crate::placement::for_new(),
+            run_state: crate::db::tasks::RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        let told = |outcome, warnings: &[&str]| -> String {
+            let start = Start {
+                outcome,
+                warnings: warnings.iter().map(|w| w.to_string()).collect(),
+            };
+            start
+                .lines(&task)
+                .iter()
+                .map(|line| format!("jeet: {line}\n"))
+                .collect()
+        };
+        assert_eq!(
+            told(
+                StartOutcome::Now {
+                    session: "jeet-w".into()
+                },
+                &["careful"]
+            ),
+            "jeet: careful\njeet: started the agent with its brief in tmux session jeet-w\n"
+        );
+        assert_eq!(
+            told(
+                StartOutcome::AlreadyRunning {
+                    session: "jeet-w".into()
+                },
+                &[]
+            ),
+            "jeet: an agent was already running in tmux session jeet-w, so it was not given \
+             the brief; `jeet task send w` sends it\n"
+        );
+        assert_eq!(
+            told(StartOutcome::Queued { live: 8, max: 8 }, &[]),
+            "jeet: queued (tasks in the tree running: 8/8, [managers] max_live); the agent \
+             starts with its brief when one ends\n"
+        );
+        assert_eq!(
+            told(
+                StartOutcome::Held {
+                    why: "task w is paused; `jeet manager resume w` first".into()
+                },
+                &[]
+            ),
+            "jeet: not started: task w is paused; `jeet manager resume w` first; it starts \
+             with its brief then\n"
+        );
+    }
 
     #[test]
     fn what_a_task_said_reaches_an_agent_fenced_and_the_user_as_it_is() {

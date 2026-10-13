@@ -342,6 +342,12 @@ pub fn plan_child(
     d: &Delegation,
     max_children: Option<u32>,
 ) -> Result<NewNode> {
+    // A worker has its prompt; a manager has only its brief to work
+    // towards, so it is not made without one. First of all, before the
+    // parent is resolved, which may make the assistant.
+    if kind == TaskKind::Manager && d.goal.is_none() {
+        bail!("a manager needs --goal or --brief-file: it is what it works towards");
+    }
     let name = child_name(name)?;
     let goal = match d.goal.as_deref().map(messages::checked).transpose() {
         Ok(goal) => goal,
@@ -2898,6 +2904,14 @@ mod tests {
         }
     }
 
+    /// [`under`], with the goal a manager cannot be made without.
+    fn briefed(parent: &str) -> Delegation {
+        Delegation {
+            goal: Some("g".into()),
+            ..under(parent)
+        }
+    }
+
     /// Each check `plan_child` makes refuses on its own, in the order M2
     /// gives, and a refusal writes nothing.
     #[test]
@@ -2931,7 +2945,7 @@ mod tests {
         refused(&user, TaskKind::Work, &under("w"), "not a manager");
         // Depth: a worker sits at most 3 below the assistant, a manager 2.
         refused(&user, TaskKind::Work, &under("m3"), "4 levels below");
-        refused(&user, TaskKind::Manager, &under("m2"), "3 levels below");
+        refused(&user, TaskKind::Manager, &briefed("m2"), "3 levels below");
         plan_child(&app, &user, TaskKind::Work, "x", &under("m2"), None).unwrap();
         // Fan-out: m holds m2 and four more, room for a sixth; a seventh is
         // too many.
@@ -2990,7 +3004,7 @@ mod tests {
         });
         let user = Caller::User;
         let refused = |kind, parent: &str, says: &str| {
-            let err = plan_child(&app, &user, kind, "x", &under(parent), None).unwrap_err();
+            let err = plan_child(&app, &user, kind, "x", &briefed(parent), None).unwrap_err();
             let err = format!("{err:#}");
             assert!(err.contains(says), "{says}: {err}");
             assert!(err.contains("`[managers] max_depth` is 2"), "{err}");
@@ -3003,7 +3017,7 @@ mod tests {
             &user,
             TaskKind::Manager,
             "x",
-            &under("assistant"),
+            &briefed("assistant"),
             None,
         )
         .unwrap();
@@ -3051,13 +3065,52 @@ mod tests {
         }
     }
 
+    /// First of the checks: a manager needs a goal, refused before its
+    /// parent is resolved, so no assistant is made for it; a worker does
+    /// without.
+    #[test]
+    fn plan_child_refuses_a_manager_without_a_goal_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let user = Caller::User;
+        // Even an invalid name or a done-when with no goal is reported
+        // after it.
+        let d = Delegation {
+            done_when: Some("shipped".into()),
+            ..Default::default()
+        };
+        let err = plan_child(&app, &user, TaskKind::Manager, "Bad Name", &d, None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "a manager needs --goal or --brief-file: it is what it works towards"
+        );
+        let err = plan_child(
+            &app,
+            &user,
+            TaskKind::Manager,
+            "x",
+            &under("assistant"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs --goal"), "{err:#}");
+        assert!(app.db.get_assistant_task().unwrap().is_none());
+        // A worker needs none.
+        plan_child(&app, &user, TaskKind::Work, "x", &under("assistant"), None).unwrap();
+    }
+
     /// Last of the checks: a manager needs a harness with hooks and the
     /// rest (M36); a worker does without.
     #[test]
     fn plan_child_refuses_a_manager_on_a_harness_without_hooks() {
         let (_dir, mut app, _trunk) = manager_lab();
         app.config.agent = Some("aider".into());
-        let d = under("assistant");
+        let d = briefed("assistant");
         let err = plan_child(&app, &Caller::User, TaskKind::Manager, "x", &d, None).unwrap_err();
         let err = err.to_string();
         assert!(err.contains("hook events"), "{err}");
@@ -3073,7 +3126,7 @@ mod tests {
         let (_dir, app, _trunk) = manager_lab();
         let policy = app.config.manager_policy().unwrap();
         let user = Caller::User;
-        let d = under("assistant");
+        let d = briefed("assistant");
         let above = policy.max_children + 1;
         let err = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(above)).unwrap_err();
         let err = err.to_string();

@@ -14,6 +14,7 @@
 mod assistant_info;
 pub mod chat;
 pub mod command;
+mod managers;
 pub mod review;
 pub mod state;
 pub mod tasks;

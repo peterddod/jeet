@@ -38,7 +38,7 @@
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -85,6 +85,40 @@ pub fn inbox_path(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("inbox.jsonl")
 }
 
+/// What is queued in the inbox in `task_dir`, waiting for its lock. A home
+/// with no inbox is left without one: this only looks.
+pub fn peek(task_dir: &Path) -> Vec<Queued> {
+    if !inbox_path(task_dir).exists() {
+        return Vec::new();
+    }
+    Inbox::lock(task_dir)
+        .and_then(|inbox| inbox.read())
+        .unwrap_or_default()
+}
+
+/// [`peek`], without waiting on the lock a hook or a delivery holds:
+/// `None` while it is held, or when the inbox cannot be read.
+pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
+    if !inbox_path(task_dir).exists() {
+        return Some(Vec::new());
+    }
+    Inbox::try_lock(task_dir).ok()??.read().ok()
+}
+
+/// `path` opened for reading, if it is a regular file. The agent writes where
+/// jeet reads, so a FIFO or a device there, or a link to one, must not make
+/// the open wait for a writer: it is refused, and a link is not followed.
+pub fn open_regular(path: &Path) -> std::io::Result<File> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file = File::open(path)?;
+    match file.metadata()?.is_file() {
+        true => Ok(file),
+        false => Err(std::io::Error::other("not a regular file")),
+    }
+}
+
 /// A task's inbox, locked for as long as this is held. `task send` looks at
 /// the agent's status and queues under the lock, and the Stop hook takes the
 /// queue and writes the status under it, so a message is never queued just
@@ -96,21 +130,54 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn lock(task_dir: &Path) -> Result<Self> {
-        let dir = task_dir.join(tasks::MARKER_DIR);
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        let path = dir.join("inbox.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
+        let (file, path) = Self::lock_file(task_dir)?;
         file.lock()
             .with_context(|| format!("lock {}", path.display()))?;
         Ok(Self {
             path: inbox_path(task_dir),
             _lock: file,
         })
+    }
+
+    /// [`Inbox::lock`], without waiting: `None` while another holds it.
+    pub fn try_lock(task_dir: &Path) -> Result<Option<Self>> {
+        let (file, path) = Self::lock_file(task_dir)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self {
+                path: inbox_path(task_dir),
+                _lock: file,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("lock {}", path.display()))
+            }
+        }
+    }
+
+    /// The file the lock is taken on, made with its directory if need be.
+    fn lock_file(task_dir: &Path) -> Result<(File, PathBuf)> {
+        let dir = task_dir.join(tasks::MARKER_DIR);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("inbox.lock");
+        // The agent writes in this directory: a FIFO there, or a link to one,
+        // must not make the open wait for a reader, so only a regular file
+        // (or none yet) is opened.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_file() => {
+                anyhow::bail!("{} is not a regular file", path.display())
+            }
+            _ => {}
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
+        Ok((file, path))
     }
 
     /// Add `message` to the end, for whichever session takes it first.
@@ -138,7 +205,12 @@ impl Inbox {
     /// The messages waiting, oldest first. Lines that are not one, or hold
     /// more than a message may, are skipped.
     pub fn read(&self) -> Result<Vec<Queued>> {
-        let text = match std::fs::read_to_string(&self.path) {
+        let read = open_regular(&self.path).and_then(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text)?;
+            Ok(text)
+        });
+        let text = match read {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| format!("read {}", self.path.display())),
@@ -1473,5 +1545,48 @@ mod tests {
         assert_eq!(got, Delivered::Typed);
         assert_eq!(typed, ["late"]);
         assert!(left(&dir).is_empty());
+    }
+
+    #[test]
+    fn peeking_only_looks_and_never_waits_on_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        // No inbox: nothing, and no `.jeet/` made for it.
+        assert!(peek(dir.path()).is_empty());
+        assert_eq!(try_peek(dir.path()), Some(Vec::new()));
+        assert!(!dir.path().join(tasks::MARKER_DIR).exists());
+
+        enqueue(dir.path(), "news").unwrap();
+        let said = |q: Vec<Queued>| q.into_iter().map(|q| q.message).collect::<Vec<_>>();
+        assert_eq!(said(peek(dir.path())), ["news"]);
+        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+        // While a hook holds it, the try gives up; the queue is untouched.
+        let held = Inbox::lock(dir.path()).unwrap();
+        assert_eq!(try_peek(dir.path()), None);
+        drop(held);
+        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+    }
+
+    #[test]
+    fn a_fifo_or_link_for_the_lock_is_refused_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(tasks::MARKER_DIR);
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(inbox_path(dir.path()), "").unwrap();
+        let lock = marker.join("inbox.lock");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(Inbox::lock(dir.path()).is_err());
+        assert!(Inbox::try_lock(dir.path()).is_err());
+        assert!(peek(dir.path()).is_empty());
+        assert_eq!(try_peek(dir.path()), None);
+        // A link is not followed, nor created through.
+        std::fs::remove_file(&lock).unwrap();
+        let target = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(Inbox::lock(dir.path()).is_err());
+        assert!(!target.exists());
     }
 }
