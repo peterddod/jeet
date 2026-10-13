@@ -130,10 +130,13 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "n",
         "a task or manager under the assistant or a manager; a manager starts at once",
     ),
-    ("a", "answering a question comes with #36"),
+    (
+        "a",
+        "answer the open question here or nearest below; one with you first",
+    ),
     (
         "",
-        "l, i, b, p, P, x and n only from your own terminal, not an agent's pane",
+        "l, i, b, p, P, x, n and a only from your own terminal, not a pane of jeet's",
     ),
     ("", ""),
     (
@@ -742,7 +745,8 @@ fn agents_cells(ui: &TasksUi) -> Vec<Span<'static>> {
 }
 
 /// The prompts in the tree waiting on the user, each once: its nodes' own,
-/// and the assistant's sessions'.
+/// and the assistant's sessions'; and the questions passed to the user
+/// (R16).
 fn needs_you(ui: &TasksUi) -> usize {
     let waiting = |a: Option<&Activity>| matches!(a, Some(Activity::Waiting { .. }));
     let nodes = ui
@@ -758,7 +762,15 @@ fn needs_you(ui: &TasksUi) -> usize {
             .count(),
         _ => 0,
     };
-    nodes + root
+    let asks = ui.tree_info.as_ref().map_or(0, |info| {
+        info.nodes
+            .iter()
+            .filter(|(id, node)| {
+                ui.shown.contains_key(*id) && node.ask.is_some_and(|(_, _, user)| user)
+            })
+            .count()
+    });
+    nodes + root + asks
 }
 
 /// The agents view: the assistant and the active tasks under it, as a tree
@@ -991,16 +1003,21 @@ fn own_status(
         Urgency::Blocked => {
             let kind = node
                 .and_then(|n| n.ask)
-                .map_or("blocked", |(_, k)| k.as_str());
+                .map_or("blocked", |(_, k, _)| k.as_str());
             (glyph, kind.to_string())
         }
+        // Only a question passed to the user is its own.
+        Urgency::NeedsYou => match node.and_then(|n| n.ask) {
+            Some((_, kind, _)) => (glyph, format!("needs you – {}", kind.as_str())),
+            None => (glyph, activity()),
+        },
         Urgency::Budget => (glyph, "budget".into()),
         Urgency::Done => (glyph, "done".into()),
         Urgency::Idle => (
             activity_glyph(row.activity.as_ref()).0.to_string(),
             activity(),
         ),
-        Urgency::NeedsYou | Urgency::NeedsInput | Urgency::Running => (glyph, activity()),
+        Urgency::NeedsInput | Urgency::Running => (glyph, activity()),
     }
 }
 
@@ -1563,6 +1580,42 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             }
             let items = ui.feed().iter().map(feed_line).collect();
             render_list(frame, area, title, items, *selected);
+        }
+        Panel::Answer {
+            title,
+            question,
+            input,
+            error,
+            ..
+        } => {
+            // The question, wrapped, as much of it as leaves room for the
+            // input, the error and the keys.
+            let width = content_rect(70, 0, full).width.saturating_sub(2);
+            let room = (full.height as usize).saturating_sub(8).max(1);
+            let mut asked = text_lines(question, width);
+            if asked.len() > room {
+                asked.truncate(room.saturating_sub(1));
+                asked.push("…".into());
+            }
+            let mut body: Vec<Line> = asked.into_iter().map(Line::from).collect();
+            body.push(Line::from(""));
+            body.push(field_line("answer", &printable(input), true, ""));
+            body.push(match error {
+                Some(error) => Line::from(Span::styled(
+                    printable(error),
+                    Style::default().fg(Color::Red),
+                )),
+                None => Line::from(""),
+            });
+            body.push(Line::from(dim("⏎ answer as you · esc cancel")));
+            let area = content_rect(70, body.len() + 2, full);
+            render_text(
+                frame,
+                area,
+                format!(" {} ", printable(title)),
+                Color::Yellow,
+                body,
+            );
         }
         Panel::Text {
             title,
@@ -2305,6 +2358,13 @@ mod tests {
                 scroll: 3,
                 prs: None,
             }),
+            Some(Panel::Answer {
+                id: 42,
+                title: "#42 question from task \u{1b}[2Jw".into(),
+                question: vec![format!("{}\twide\u{7}", "漢字".repeat(200)); 80],
+                input: "漢字".repeat(100),
+                error: Some("漢字".repeat(100)),
+            }),
         ]
     }
 
@@ -2807,6 +2867,56 @@ mod tests {
         let root = line_of(&screen, "✦ assistant");
         assert!(root.contains("◆ needs input – Edit"), "{root}");
         assert!(screen.join("\n").contains("needs you 1"));
+    }
+
+    #[test]
+    fn a_question_with_the_user_needs_you_on_its_asker_and_above() {
+        let mut ui = agents_ui();
+        // The prompt goes; api-docs's question is passed to the user.
+        ui.apply(crate::tui::tasks::Update::Status {
+            id: "fix-token-refresh".into(),
+            activity: Some(Activity::Idle { since: 0 }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        let all = render(&mut ui, 120, 20).join("\n");
+        assert!(!all.contains("needs you"), "{all}");
+        ui.tree_info
+            .as_mut()
+            .unwrap()
+            .nodes
+            .get_mut("api-docs")
+            .unwrap()
+            .ask = Some((42, ReportKind::Question, true));
+        ui.retree();
+        let screen = render(&mut ui, 120, 20);
+        assert!(screen.join("\n").contains("needs you 1"), "{screen:#?}");
+        let docs = line_of(&screen, "│  ├─ api-docs");
+        assert!(docs.contains("◆ needs you – question"), "{docs}");
+        let backend = line_of(&screen, "├─ ▾ backend");
+        assert!(backend.contains("◆ needs you (1)"), "{backend}");
+        let root = line_of(&screen, "✦ assistant");
+        assert!(root.contains("◆ needs you (1)"), "{root}");
+    }
+
+    #[test]
+    fn the_answer_form_shows_the_question_without_its_escapes() {
+        let mut ui = agents_ui();
+        ui.panel = Some(Panel::Answer {
+            id: 42,
+            title: "#42 question from task assistant/backend/api-docs · with you".into(),
+            question: vec!["keep v1?\u{1b}[2J or drop it".into()],
+            input: "drop it".into(),
+            error: Some("#42 was answered by the user".into()),
+        });
+        let all = render(&mut ui, 70, 24).join("\n");
+        assert!(all.contains("#42 question from task"), "{all}");
+        assert!(all.contains("api-docs"), "{all}");
+        assert!(all.contains("keep v1?[2J or drop it"), "{all}");
+        assert!(!all.contains('\u{1b}'), "{all}");
+        assert!(all.contains("answer   drop it"), "{all}");
+        assert!(all.contains("#42 was answered by the user"), "{all}");
+        assert!(all.contains("⏎ answer as you · esc cancel"), "{all}");
     }
 
     #[test]

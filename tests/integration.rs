@@ -14465,6 +14465,109 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
     assert_eq!(notes(&notifier), told);
 }
 
+/// The agents tab answers, as the user, the question that climbed to
+/// them: `a` on the root opens it, the answer goes to the asker with a copy
+/// to each node on its way, and once the tree is read again nothing is
+/// open. From a top-level task's pane, the tab will not answer.
+#[cfg(unix)]
+#[test]
+fn agents_tab_answers_a_question_that_reached_you() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let (_api, _w, mut panes) = asking_tree(&lab, &tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_BACKGROUND", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let (api_dir, w_dir) = (lab.home().join("tasks/api"), lab.home().join("tasks/w"));
+    succeeded(&panes[1].jeet(&["report", "question", "keep v1?"], &w_dir, &env));
+    let id = lab.last_report_id();
+    succeeded(&panes[0].jeet(&["report", "escalate", &id], &api_dir, &env));
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["report", "escalate", &id], &lab.home(), &env));
+    assert!(lab.ask_of(&id).1);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.wait_for_words("needs you – question");
+    let plain = screen.plain();
+    let line = |what: &str| {
+        plain
+            .lines()
+            .rfind(|l| l.contains(what))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("✦ assistant").contains("◆ needs you (1)"), "{plain}");
+    assert!(line("▾ api").contains("◆ needs you (1)"), "{plain}");
+    assert!(screen.shows("needs you 1"), "{plain}");
+
+    // On the root, the question with the user.
+    screen.type_keys(b"a");
+    screen.wait_for_words(&format!(
+        "#{id} question from task assistant/api/w · with you"
+    ));
+    assert!(screen.shows("keep v1?"), "{}", screen.plain());
+    screen.type_keys(b"drop it\r");
+    screen.wait_for_words(&format!("answered #{id} for task w"));
+    assert_eq!(lab.ask_of(&id).2.as_deref(), Some("drop it"));
+    assert_eq!(lab.ask_of(&id).3.as_deref(), Some("user"));
+    let to_w = given(&w_dir, &tmux, "w");
+    assert!(
+        to_w.contains(&format!(
+            "<jeet-answer to=\"{id}\" from=\"user\">\ndrop it\n</jeet-answer>"
+        )),
+        "{to_w}"
+    );
+    let copy = format!("<jeet-answer to=\"{id}\" from=\"user\" copy=\"true\">\ndrop it");
+    let to_api = given(&api_dir, &tmux, "api");
+    assert!(to_api.contains(&copy), "{to_api}");
+
+    // Once the tree is read again, nothing is open below the root.
+    screen.esc();
+    wait_until("the answered question to close in the tree", || {
+        screen.type_keys(b"a");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Drawn over the last status line, so matched by its start.
+        screen.shows("no open question")
+    });
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+
+    // A top-level task's agent is the user to the gate, but not at the
+    // user's terminal.
+    let top = lab.new_task_with("top", &[]);
+    let mut screen = Pty::open(
+        &lab,
+        "tasks",
+        &lab.home(),
+        &[
+            ("JEET_TMUX", &tmux_env),
+            ("JEET_AGENT", "claude"),
+            ("JEET_TASK_ID", &top),
+        ],
+    );
+    screen.wait_for_text("jeet · tasks");
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"a");
+    screen.wait_for_words("the agents pane acts as you");
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
 /// A manager answers what it holds: the answer is from it, and nobody
 /// above, who never saw the question, hears of it.
 #[cfg(unix)]

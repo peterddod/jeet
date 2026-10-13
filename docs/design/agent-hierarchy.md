@@ -744,7 +744,8 @@ so its kind is visible; everything starts open and nothing is persisted.
 order needs you > needs input > blocked > budget > running > idle > done. A
 count is shown when that state comes from below. A node's own prompt is
 *needs input*; above it, it becomes *needs you*, as only the user can answer
-one (§4). The assistant's own urgency comes from its sessions, so a prompt
+one (§4). A question passed to the user is *needs you* on its asker too, and
+above it (H16). The assistant's own urgency comes from its sessions, so a prompt
 in its pane needs you too. A held node shows `⏸ paused (n below)` or
 `■ stopped (n below)`, *n* the nodes it holds, and appends what rolled up
 from below when that is blocked or worse: a pause answers no prompt. Rollup
@@ -760,15 +761,16 @@ is no cost column (#26) and no wake cell (§12).
 | `→` / `←` | expand / collapse; on a node with nothing to open or close, to its first child / its parent; collapse is ignored while a filter is set |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, read-only, scrollable |
 | `i` | the node's open ask, inbox and reports by and to it, newest first; `⏎` opens the node's PRs (a report carries no link, D18) |
-| `a` | answer the open question nearest this node (§4, "Questions and the user"): phase 4 (#36) |
+| `a` | answer the open question at this node or nearest below it, one with the user first (§4, "Questions and the user"; H15), as `jeet report answer` does as the user |
 | `b` | brief, grant, effective allow-list, budget, run state and its own open ask |
 | `p` / `P` | pause / resume the subtree; refused on the assistant, as `jeet manager pause` refuses it |
 | `x` | stop the subtree (asks first, listing what is running); on the assistant, every task under it (`stop --all`, P8) |
 | `n` | new task or manager under the assistant or a manager (#21's form, plus kind, goal, done, budget, allow; a manager has no repositories). A manager starts at once; a worker is made but not started, as `n` in the active view starts none, and `⏎` starts it. On a worker `n` is refused |
 
 The pane acts as the user: `l`, `i` and `b` (and the keys that change
-something) refuse when jeet runs inside an agent's pane, or when who runs it
-cannot be told. `c`, `C` and `t` are the assistant's, as in the other views;
+something, `a` among them) refuse unless jeet runs at the user's own
+terminal (H8, H17): not inside an agent's or a top-level task's pane, nor a
+window of jeet's tmux sessions, nor when who runs it cannot be told. `c`, `C` and `t` are the assistant's, as in the other views;
 the worktree, PR, archive and delete keys are the active view's alone.
 
 ## 7. Harness neutrality
@@ -873,8 +875,8 @@ row, so past the last column it would never show).
   `commands/{report,task,manager}.rs`, `permissions.rs`, `config.rs`,
   `watch.rs`, `tasks.rs`, `tui/{managers,tasks,tasks_ui}.rs` and the
   templates. Answers, copies and watch events use today's delivery (no
-  phase 2a). As built so far: escalation and answers without the TUI, see
-  the phase 4 implementation notes.
+  phase 2a). As built so far: escalation and answers, with the agents
+  pane's `a` and needs-you rollup; see the phase 4 implementation notes.
 - Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
   `watch.rs` (dispatch) and the manager template (H18-H20).
 
@@ -1871,7 +1873,8 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   agent's text (`l`, `i`, `b`) work only for `Caller::User`; an identity
   error counts as not the user. So do the actions (`p`, `P`, `x`, `n`),
   which pass `Caller::User` to the library. Anything else gets "the agents pane
-  acts as you; open jeet from your own terminal, not from an agent's pane". The
+  acts as you; open jeet from your own terminal, not from an agent's pane"
+  (phase 4 made the check and the words stricter: H17). The
   tree, `⏎` and moving about stay open, as the active view is. Known gap,
   left as it is: the other views' `a` and `D` still run with no caller.
 - **A3** A third view between *active* and *archived*: `⇥` cycles active →
@@ -1981,8 +1984,8 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   Warnings (the create's and the start's) go to a message. On a worker `n`
   is refused at the key, in `plan_child`'s words. `max_children` is not
   offered: it is the config default. In the active view `n` is unchanged.
-- **A18** `a` in the agents view says "answering comes with #36; i shows the
-  open question and ⏎ attaches to the asker"; it does not archive there.
+- **A18** `a` in the agents view does not archive there. Until phase 4 it
+  said "answering comes with #36"; it now answers (H15).
 - **A19** Nothing about wake: no cell, field or read of watcher state.
 - **A20** No capture of stderr. The actions return what they did as data
   (`NodeOutcome` lines, `drain`'s warnings, the create's warnings and the
@@ -2006,14 +2009,12 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
 
 Where phase 4 (#36) settled what this RFC left open, or departed from it.
 An *H* number records the phase 4 plan's decision of the same *R* number
-(*E* and *R* were taken). This part is escalation and answers without the
-TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
+(*E* and *R* were taken). Escalation and answers came first, without the
+TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
 
 - **H1** Phase 4 lands in parts, for review size: escalation and answers
   (library, CLI, what agents read); then the agents pane's `a` and
-  needs-you rollup; watch rules to a manager; `delete --reparent`. Until
-  the TUI's part lands, the agents view's `a` still says A18's "answering
-  comes with #36", and the pane's *needs you* does not count `needs_user`.
+  needs-you rollup; watch rules to a manager; `delete --reparent`.
 - **H2** No migration: v4's `needs_user`, `answer`, `answered_by` and the
   `task_reports_to(to_id, answer)` index suffice. Escalation moves
   `to_id`; an answer is one guarded `UPDATE`; the path an ask took is the
@@ -2113,6 +2114,35 @@ TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
   them, so `<\x01jeet-` cannot hide a tag, and invisible format
   characters (a zero-width space, say) are looked past, though kept. The
   user's own commands and the TUI's `n` form are unchanged.
+- **H15** `a` in the agents view answers the open ask at the node or
+  nearest below it, as the tree thread last read them
+  (`managers::nearest_ask`, pure): among the asks with the user, the
+  node's own, else the shallowest, ties in tree order; with none, the
+  same over every open ask. So `a` on the root after a notification opens
+  the question the user was notified about, not a nearer one a manager
+  still holds (§6 said only "nearest"). It then reads the asker's open ask
+  from the index under the spinner (`manager::open_ask`), and opens a form
+  with the id, kind, the asker's tree path, `with you` when it is, and the
+  question (`printable_text`), with a one-line input. `⏎` calls
+  `reports::answer` with `Caller::User`, as `jeet report answer` does at
+  the user's terminal, and shows how the answer and each copy went in a
+  message; then the tree thread gathers again. An empty answer says "type
+  an answer"; a refusal (answered or withdrawn meanwhile) stays on the
+  form; `esc` cancels. With nothing open: "no open question at or below
+  <slug>". The other views' `a` (archive, unarchive) is unchanged.
+- **H16** `NodeInfo.ask` carries `needs_user`. An ask with the user is
+  *needs you* on its asker, before the prompt check, since *needs you*
+  outranks *needs input*, and the rollup carries it up as before. Its
+  status reads `◆ needs you – question` (or `– blocked`). The header's
+  `needs you n` counts each such ask besides the prompts. An answered or
+  withdrawn ask stops counting at the next gather (H3).
+- **H17** The pane's user check is stricter: `ui.user` is
+  `Caller::User` **and** `permissions::at_terminal` (H8), so a top-level
+  task's agent, `Caller::User` to the gate, gets none of the agents view's
+  keys that read or act (`l`, `i`, `b`, `p`, `P`, `x`, `n`, `a`). The
+  refusal reads "the agents pane acts as you; open jeet from your own
+  terminal, outside jeet's tmux sessions and any task's pane". `?` lists
+  `a` and puts it on the "only from your own terminal" line.
 
 ### Phase 4 implementation notes: watch rules to a manager
 
