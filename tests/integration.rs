@@ -29,6 +29,16 @@ fn jeet_bin() -> Command {
     // because the suite runs inside its session.
     cmd.env("JEET_NOTIFY_CMD", "true")
         .env_remove("JEET_ASSISTANT");
+    // Nor post into the Claude session the suite runs in: a wake channel's
+    // watcher takes its socket from these.
+    for name in [
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_PID",
+        "CLAUDE_CODE_SESSION_ID",
+    ] {
+        cmd.env_remove(name);
+    }
     cmd
 }
 
@@ -15250,4 +15260,279 @@ fn a_top_level_tasks_agent_cannot_forge_an_answer_with_task_send() {
         .join(" ");
     assert!(start.contains("‹jeet-answer"), "{start}");
     assert!(!start.contains("<jeet-answer"), "{start}");
+}
+
+/// A stand-in for a Claude session's messaging socket, under `/tmp`, as a
+/// socket's path is short; removed on drop.
+#[cfg(unix)]
+struct FakeSocket {
+    path: std::path::PathBuf,
+    listener: std::os::unix::net::UnixListener,
+}
+
+#[cfg(unix)]
+impl FakeSocket {
+    fn bind() -> FakeSocket {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path =
+            std::path::PathBuf::from(format!("/tmp/jeet-wake-{}-{n}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        FakeSocket { path, listener }
+    }
+
+    fn env(&self) -> String {
+        self.path.to_string_lossy().to_string()
+    }
+
+    /// The lines of the next post, waiting up to 10 s for it.
+    fn post(&self) -> Vec<serde_json::Value> {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut stream = loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "no post came");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        // macOS refuses the option once the poster has closed its end,
+        // which is what a post does.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut text = String::new();
+        stream.read_to_string(&mut text).unwrap();
+        text.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Whether anything has connected that was not read.
+    fn posted(&self) -> bool {
+        self.listener.accept().is_ok()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A process the test started in the background, killed on drop, so a
+/// failing assert leaves no watcher polling.
+#[cfg(unix)]
+struct Background(u32);
+
+#[cfg(unix)]
+impl Drop for Background {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-9", &self.0.to_string()])
+            .output();
+    }
+}
+
+/// Whether `path`, a wait lock, is held by a watcher.
+#[cfg(unix)]
+fn lock_held(path: &std::path::Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+/// The nonce a post's batch ends with.
+#[cfg(unix)]
+fn nonce_of(post: &[serde_json::Value]) -> String {
+    let content = post[1]["message"]["content"].as_str().unwrap();
+    let last = content.lines().last().unwrap();
+    last.strip_prefix("jeet delivery ").unwrap().to_string()
+}
+
+#[cfg(unix)]
+fn append(path: &std::path::Path, text: &str) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{text}").unwrap();
+}
+
+/// `jeet inbox watch`, run as the agent's session-start hook runs it, posts
+/// what is queued for the session into its socket, and what `task send`
+/// sends from then on, typing nothing; it is confirmed by the transcript,
+/// and ends with the agent. Started anywhere else, or for a session already
+/// watched, it does nothing, and it never prints.
+#[cfg(unix)]
+#[test]
+fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("w");
+    let id = task_id(&task);
+    lab.new_task("y");
+    let mut w_agent = lab.task_pane("w");
+    let mut y_agent = lab.task_pane("y");
+    let tmux = w_agent.dir.path().join("tmux-stub/tmux");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    let session = "11111111-2222-4333-8444-555555555555";
+    let socket = FakeSocket::bind();
+    let token = "00000000000000000000000000000000";
+    let scratch = TempDir::new().unwrap();
+    let transcript = scratch.path().join(format!("{session}.jsonl"));
+    std::fs::write(&transcript, "").unwrap();
+    let mut start: serde_json::Value =
+        serde_json::from_str(&hook_input("SessionStart", session, &task)).unwrap();
+    start["transcript_path"] = transcript.to_string_lossy().to_string().into();
+    let stdin = scratch.path().join("start.json");
+    std::fs::write(&stdin, start.to_string()).unwrap();
+    let stdin = sh_quote(&stdin.to_string_lossy());
+    let wait = task.join(".jeet/wait");
+    let lock = wait.join(format!("{session}.lock"));
+    let inbox = task.join(".jeet/inbox.jsonl");
+    let queued = || std::fs::read_to_string(&inbox).unwrap_or_default();
+
+    // Busy: a message waits in the queue.
+    hook_ok(&w_agent.hook(
+        &lab,
+        Some(&id),
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", session, &task),
+        &[],
+    ));
+    succeeded(&lab.jeet_at(&["task", "send", "w", "early"], &lab.home(), &env));
+    assert!(queued().contains("early"));
+
+    // Run under another task's agent, or told of no socket, it does
+    // nothing.
+    let y_pid = y_agent.child.id().to_string();
+    let w_pid = w_agent.child.id().to_string();
+    let watch = ["inbox", "watch", "--task", id.as_str()];
+    let refused = [
+        y_agent.jeet_with_input(
+            &watch,
+            &lab.home(),
+            &[
+                ("CLAUDE_PID", &y_pid),
+                ("CLAUDE_CODE_MESSAGING_SOCKET", &socket.env()),
+                ("CLAUDE_CODE_MESSAGING_TOKEN", token),
+            ],
+            &stdin,
+        ),
+        w_agent.jeet_with_input(&watch, &lab.home(), &[("CLAUDE_PID", &w_pid)], &stdin),
+    ];
+    for output in refused {
+        succeeded(&output);
+        assert_eq!(stdout_of(&output), "");
+    }
+    assert!(!wait.exists());
+    assert!(!socket.posted());
+    assert!(queued().contains("early"));
+
+    // Under its own agent, it posts what waits at once.
+    let out = scratch.path().join("watch.out");
+    let pid_file = scratch.path().join("watch.pid");
+    w_agent.send(&format!(
+        r#"env CLAUDE_PID={w_pid} CLAUDE_CODE_MESSAGING_SOCKET={} CLAUDE_CODE_MESSAGING_TOKEN={token} "$JEET" inbox watch --task {id} <{stdin} >{} 2>/dev/null & echo $! >{}.tmp; mv {2}.tmp {2}"#,
+        sh_quote(&socket.env()),
+        sh_quote(&out.to_string_lossy()),
+        sh_quote(&pid_file.to_string_lossy()),
+    ));
+    wait_until("the watcher to start", || pid_file.exists());
+    let _watcher = Background(read(&pid_file).trim().parse().unwrap());
+    let post = socket.post();
+    assert_eq!(post.len(), 2, "{post:?}");
+    assert_eq!(post[0], serde_json::json!({"type": "auth", "token": token}));
+    assert_eq!(post[1]["type"], "user");
+    let content = post[1]["message"]["content"].as_str().unwrap();
+    assert!(content.starts_with("jeet: "), "{content}");
+    assert!(content.contains("early"), "{content}");
+    assert!(lock_held(&lock));
+    assert!(!queued().contains("early"));
+    let inflight = wait.join(format!("{session}.inflight"));
+    assert!(inflight.is_file());
+    append(&transcript, &nonce_of(&post));
+    wait_until("the post to be confirmed", || !inflight.exists());
+
+    // Idle: `task send` leaves it to the watcher, which posts it; nothing
+    // is typed.
+    hook_ok(&w_agent.hook(
+        &lab,
+        Some(&id),
+        "Stop",
+        &hook_input("Stop", session, &task),
+        &[],
+    ));
+    let output = lab.jeet_at(&["task", "send", "w", "hi"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("through its wake channel"),
+        "{}",
+        stderr_of(&output)
+    );
+    let post = socket.post();
+    let content = post[1]["message"]["content"].as_str().unwrap();
+    assert!(content.contains("hi"), "{content}");
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+    assert!(pasted(&tmux).is_empty());
+    let status = status_file(&task, session);
+    assert_eq!(status["state"], "running", "{status}");
+    assert_eq!(status["event"], "wake", "{status}");
+    append(&transcript, &nonce_of(&post));
+    wait_until("the post to be confirmed", || !inflight.exists());
+
+    // A second watcher for the session gives up on its lock.
+    let output = w_agent.jeet_with_input(
+        &watch,
+        &lab.home(),
+        &[
+            ("CLAUDE_PID", &w_pid),
+            ("CLAUDE_CODE_MESSAGING_SOCKET", &socket.env()),
+            ("CLAUDE_CODE_MESSAGING_TOKEN", token),
+        ],
+        &stdin,
+    );
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "");
+    assert!(lock_held(&lock));
+    assert!(!socket.posted());
+
+    // The token is in none of its files.
+    for entry in std::fs::read_dir(&wait).unwrap() {
+        let path = entry.unwrap().path();
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        assert!(!text.contains(token), "{}", path.display());
+    }
+
+    // The agent gone, the watcher goes, and a message is typed as before.
+    w_agent.child.kill().unwrap();
+    w_agent.child.wait().unwrap();
+    let gone = std::time::Instant::now();
+    while lock_held(&lock) {
+        assert!(gone.elapsed() < std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    hook_ok(&lab.hook("Stop", &hook_input("Stop", session, &task), &[]));
+    let output = lab.jeet_at(&["task", "send", "w", "after"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("wake channel"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(pasted(&tmux).len(), 1);
+    assert!(!socket.posted());
+    assert_eq!(read(&out), "");
+}
+
+#[test]
+fn the_wake_channels_verb_is_hidden() {
+    let output = jeet_bin().arg("--help").output().unwrap();
+    succeeded(&output);
+    assert!(!stdout_of(&output).contains("inbox"));
 }

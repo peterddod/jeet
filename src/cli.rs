@@ -146,6 +146,13 @@ pub enum Commands {
         task: Option<String>,
     },
 
+    /// Hand a task's agent its messages as they come (run by the agent)
+    #[command(hide = true)]
+    Inbox {
+        #[command(subcommand)]
+        command: InboxCommands,
+    },
+
     /// Watch a task's agent start, for a trust prompt (run by jeet)
     #[command(hide = true)]
     TaskStartup {
@@ -257,6 +264,20 @@ pub enum ReportCommands {
     },
     /// The open questions you hold (every one in the tree, for the user)
     Ls,
+}
+
+#[derive(Subcommand)]
+pub enum InboxCommands {
+    /// Hand the agent of the session whose start hook runs this what is
+    /// queued for it, through its wake channel, until the session ends
+    Watch {
+        /// The task jeet launched the agent for
+        #[arg(long)]
+        task: String,
+        /// The harness whose hook runs it
+        #[arg(long, default_value = "claude-code")]
+        harness: String,
+    },
 }
 
 #[derive(Subcommand)]

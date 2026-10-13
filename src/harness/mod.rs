@@ -25,6 +25,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::agent::AgentSession;
+use crate::waiter::WakeEnv;
 
 /// Every harness jeet knows, the default first.
 pub static HARNESSES: &[&dyn Harness] = &[&claude::ClaudeCode, &Generic];
@@ -178,6 +179,14 @@ pub trait Harness: Sync {
     /// as the hook command named it (may be empty), `raw` its stdin.
     fn parse_hook(&self, _event: &str, _raw: &str) -> Result<HookEvent> {
         Ok(HookEvent::default())
+    }
+
+    /// The wake channel (`jeet inbox watch`) of the session whose hook this
+    /// runs in, from the hook's environment, which loses it so nothing this
+    /// starts inherits it. `None` when the harness has none, or the hook
+    /// was told of none. Called first thing, before anything starts a thread.
+    fn wake_env(&self) -> Option<WakeEnv> {
+        None
     }
 
     /// What a hook prints for a turn that is ending to carry on instead,

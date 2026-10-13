@@ -33,8 +33,6 @@ mod tasks;
 mod tmux;
 mod todo;
 mod tui;
-// The watcher is run by the `inbox watch` verb that follows (#34).
-#[allow(dead_code)]
 mod waiter;
 mod watch;
 mod worktrees;
@@ -44,14 +42,23 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands, TodoCommands,
-    WatchCommands, WorktreeArgs, WorktreeCommands,
+    Cli, Commands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands,
+    TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
+
+    // The wake channel's token leaves the environment before anything runs
+    // that could pass it on.
+    let wake = match &cli.command {
+        Some(Commands::Inbox {
+            command: InboxCommands::Watch { harness, .. },
+        }) => harness::by_id(harness).and_then(|h| h.wake_env()),
+        _ => None,
+    };
 
     // Only once `jeet review` has recorded the runner as its task's does the
     // runner go on to find out who it is. One that never gets it, its
@@ -73,14 +80,14 @@ fn main() -> Result<()> {
             return Err(e);
         }
     };
-    let result = run(cli.command);
+    let result = run(cli.command, wake);
     if let Some(action) = authorized {
         action.finish(&result);
     }
     result
 }
 
-fn run(command: Option<Commands>) -> Result<()> {
+fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
     let Some(command) = command else {
         let app = context::App::open()?;
         return commands::tasks::run(&app);
@@ -201,6 +208,19 @@ fn run(command: Option<Commands>) -> Result<()> {
         } => {
             let _ =
                 std::panic::catch_unwind(|| status::run_hook(&harness, &event, task.as_deref()));
+        }
+        // Started in the background by the agent's session-start hook, whose
+        // stdout is the agent's context: says nothing, and never fails.
+        Commands::Inbox {
+            command: InboxCommands::Watch { task, harness },
+        } => {
+            let (Some(found), Some(env)) = (harness::by_id(&harness), wake) else {
+                return Ok(());
+            };
+            let watch = std::panic::AssertUnwindSafe(|| waiter::run(found, &task, env));
+            if let Ok(Err(e)) = std::panic::catch_unwind(watch) {
+                eprintln!("jeet inbox watch: {e:#}");
+            }
         }
         // Launched in the background with a task's agent; says nothing.
         Commands::TaskStartup { task, session } => {

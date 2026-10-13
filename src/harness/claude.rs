@@ -151,6 +151,10 @@ impl Harness for ClaudeCode {
         })
     }
 
+    fn wake_env(&self) -> Option<WakeEnv> {
+        wake_env()
+    }
+
     /// Claude reads the Stop hook's `block` decision as "do not stop yet",
     /// and the reason as what to do next.
     fn continue_output(&self, reason: &str) -> Option<String> {
@@ -746,8 +750,6 @@ const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
 /// hook's environment, which loses the variables, so nothing this starts
 /// inherits the token. `None` when one is missing, as for `--bare`, which
 /// binds no socket. Called first thing, before anything starts a thread.
-// Called by `jeet inbox watch`, which follows it (#34).
-#[allow(dead_code)]
 pub fn wake_env() -> Option<WakeEnv> {
     let read = |name: &str| {
         let value = std::env::var(name).ok();

@@ -2323,6 +2323,10 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   `UnixStream`, polling rather than inotify or kqueue, and `uuid` for
   nonces. The inbox stays the queue, `Inbox::lock` the only place a
   message is taken, and the Stop hand-over stays.
+- **K2** Two PRs. The first, inert, has the watcher, its verb, the
+  routing and the recovery; nothing starts a watcher, so delivery is
+  unchanged unless one is started by hand. The second installs the hook
+  entry that starts it and rewrites §12.
 - **K3** Its files are in `<task>/.jeet/wait/`: `<session>.lock`, an
   flock held for the watcher's life (`waiter::watched` is a non-blocking
   lock that fails; it opens without creating, so a probe makes nothing);
@@ -2345,7 +2349,10 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   is then recovered (K11); one of its own session too young to recover is
   carried on with, not posted over. The plan's comparison of
   `CLAUDE_CODE_SESSION_ID` with stdin is not made, so `WakeEnv` has no
-  field for it.
+  field for it. `main` asks the `--harness` named for the `WakeEnv`
+  (`Harness::wake_env`, `None` by default, Claude Code's from
+  `claude::wake_env`) right after parsing the command line, before the
+  gate or anything else runs; with none, the verb ends there.
 - **K5** Each 500 ms tick: `CLAUDE_PID`'s start time is checked, the
   status read for its end every 4th tick, the inbox file's inode, length
   and mtime compared, and the inbox locked only when that changed or
@@ -2421,6 +2428,15 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
 - **K14** The token is in no file (not `.inflight`, not the lock file),
   argv or log line; `WakeEnv`'s `Debug` prints `…` for it, and a failed
   post's error names the socket only. No worklog note per delivery.
+- **K16** The verb is `jeet inbox watch --task <id> [--harness <id>]`
+  (default `claude-code`), hidden from `--help`; §12's `take` is not
+  built. It is `Free` in the gate and `NoTarget` in a node's scope, as
+  `task-hook` is, so the gate opens no index for it. `main` runs it under
+  `catch_unwind`, always exits 0 and prints nothing on stdout (a
+  session-start hook's stdout is the agent's context); an error is one
+  line on stderr. It calls `identity::identify` only to refuse a watcher
+  that is not the agent of `--task`, as `task-hook`'s `attributed` does;
+  §5.7's row for jeet's helpers is reworded with the second PR.
 - **K17** No wake indicator. `jeet task send` says "sent to w's agent;
   it gets it now, through its wake channel" (for the assistant, "sent to
   the assistant's session <id>, through its wake channel"); a report or
@@ -2431,10 +2447,25 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   transcripts, the test process or a killed `sleep` for `CLAUDE_PID`,
   time passed to `Watcher::step`, and a recording `Agent` for the
   fallback's typing, which `run` gets from `status::idle_agent` (shared
-  with `idle_prompt`).
-- **K2, K15, K16, K18, K20, K21** The hidden `jeet inbox watch` verb,
-  the hook entry that starts it, the docs of §12 and the live check
-  follow, as the plan has them.
+  with `idle_prompt`). The verb is tested end to end with the stub tmux
+  and a temp `JEET_HOME`: a watcher started from a task's pane shell
+  (standing in for `CLAUDE_PID`) posts what was queued and what `task
+  send` sends, auth line first, typing nothing; it is confirmed by
+  appending the nonce to a temp transcript; a second watcher for the
+  session, one under another task's agent and one told of no socket do
+  nothing; the token is in no file of `wait/`; and with the shell killed
+  the lock frees and `task send` types as before. The suite's `jeet`
+  loses `CLAUDE_CODE_MESSAGING_SOCKET`, `_TOKEN`, `CLAUDE_PID` and
+  `CLAUDE_CODE_SESSION_ID`, so a watcher under test never posts into the
+  Claude session the suite runs in; a watcher a test starts is killed on
+  drop.
+- **K18** The assistant: its `SessionAgent` is watched by its own
+  session's lock. A batch its watcher posted just before a `/clear` and
+  never seen goes back readdressed as session start readdresses the
+  queue: to the session recorded as following on from it, if any.
+- **K15, K20, K21** The hook entry that starts the watcher
+  (`Harness::wake_hook`, `HookSetup.wake`), the docs of §12 and the live
+  check follow with the second PR, as the plan has them.
 
 ## 11. Placement
 
