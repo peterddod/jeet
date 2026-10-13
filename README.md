@@ -544,13 +544,18 @@ index every two seconds while the tab is shown.
 | `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
 | `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
 | `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
+| `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a task also takes a project, repositories and a branch |
 | `c` `C` `t` | the assistant, as in the active tab |
 
-What each node made of a pause, resume or stop is shown when it is done.
-`l`, `i` and `b` show what agents wrote, unfenced, and `p`, `P` and `x` act
-as you, so they work only when you run jeet from your own terminal, not
-inside an agent's pane. Answering a
-question (`a`) comes with #36. The worktree, PR, archive and delete keys are
+What each node made of a pause, resume or stop is shown when it is done. A
+manager made with `n` starts at once, with its brief, and the status line
+says whether it started, was queued on `max_live` or is held by a paused
+manager above it; a task made with `n` is not started (`⏎` starts it), as
+in the active tab. What jeet refuses (a manager with no goal, a capability
+the parent does not hold) is shown on the form. `l`, `i` and `b` show what
+agents wrote, unfenced, and `p`, `P`, `x` and `n` act as you, so they work
+only when you run jeet from your own terminal, not inside an agent's pane.
+Answering a question (`a`) comes with #36. The worktree, PR, archive and delete keys are
 the active tab's: `⇥` back to it.
 
 ### Pull request history

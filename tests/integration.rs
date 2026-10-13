@@ -12549,6 +12549,187 @@ fn agents_tab_refuses_the_assistant_for_pause() {
     assert!(screen.wait_for_exit().success());
 }
 
+/// `n` on a manager makes a manager under it, as `jeet manager new
+/// --parent` does, as the user: `plan_child`'s refusals stay on the form,
+/// and once made it starts at once with its brief.
+#[cfg(unix)]
+#[test]
+fn agents_tab_makes_a_manager_under_a_node() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (api, _w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    // A manager, called sub, with no goal yet.
+    screen.type_keys(b" ");
+    screen.wait_for_text("‹ manager ›");
+    screen.type_keys(b"\tsub\r");
+    screen.wait_for_words("a manager needs --goal or --brief-file");
+    // A goal, and more than api holds to give.
+    screen.type_keys(b"\tship the v2 api\t\t\ttask.archive\r");
+    screen.wait_for_words("cannot grant `task.archive`: its parent, manager api, does not hold it");
+    let made = || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM tasks WHERE slug = 'sub'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(made(), 0);
+    screen.type_keys(b"\x15task.create\r");
+    screen.wait_for_words("made manager sub under manager api");
+    screen.wait_for_words("started the agent with its brief in tmux session jeet-sub");
+
+    let (sub, parent, kind) = lab
+        .index()
+        .query_row(
+            "SELECT id, parent_id, kind FROM tasks WHERE slug = 'sub'",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (parent.as_deref(), kind.as_str()),
+        (Some(api.as_str()), "manager")
+    );
+    let (goal, _, by) = lab.brief_of(&sub).unwrap();
+    assert_eq!((goal.as_str(), by.as_str()), ("ship the v2 api", "user"));
+    let brief = std::fs::read_to_string(lab.home().join("tasks/sub/BRIEF.md")).unwrap();
+    assert!(brief.contains("ship the v2 api"), "{brief}");
+    let started: Vec<_> = calls_of(&tmux, "new-session")
+        .into_iter()
+        .filter(|c| c.iter().any(|a| a == "jeet-sub"))
+        .collect();
+    assert_eq!(started.len(), 1, "{started:?}");
+
+    // What the start warns of (the stub's pane has no process) is in a
+    // message; under it, the cursor is on the new node.
+    screen.wait_for_words("cannot be identified");
+    screen.esc();
+    screen.wait_for_words("├─ ▾ sub");
+    screen.type_keys(b"b");
+    screen.wait_for_words("goal (from user): ship the v2 api");
+    assert!(screen.shows("may: task.create"), "{}", screen.plain());
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `l` reads a manager's worklog, and `i` a worker's open question, which
+/// rolls up to its manager as blocked.
+#[cfg(unix)]
+#[test]
+fn agents_tab_reads_worklog_and_reports() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (_api, _w, mut panes) = running_tree(&lab, &tmux);
+    let notes = lab.home().join("tasks/api/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(notes.join("worklog.md"), "kept the v1 routes for now\n").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_BACKGROUND", "1"),
+    ];
+    succeeded(&panes[1].jeet(
+        &["report", "question", "keep v1?"],
+        &lab.home().join("tasks/w"),
+        &env,
+    ));
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.wait_for_words("! blocked (1)");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"l");
+    screen.wait_for_words("kept the v1 routes for now");
+    screen.esc();
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"i");
+    screen.wait_for_words("open ask");
+    screen.wait_for_words("question to manager api");
+    assert!(screen.shows("keep v1?"), "{}", screen.plain());
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// A manager made with `n` over `max_live` is queued, and says so on the
+/// status line rather than on stderr under the screen.
+#[cfg(unix)]
+#[test]
+fn agents_tab_shows_a_queued_start() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (_api, _w, _panes) = running_tree(&lab, &tmux);
+    // api and w run; one is the most that may.
+    let config = lab.home().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[managers]\nmax_live = 1\n");
+    std::fs::write(&config, text).unwrap();
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    screen.type_keys(b" \tlater\tdo it later\r");
+    screen.wait_for_words("made manager later under manager api");
+    screen.wait_for_words("queued (tasks in the tree running: 2/1");
+    assert!(!screen.plain().contains("jeet:"), "{}", screen.plain());
+    assert!(calls_of(&tmux, "new-session")
+        .iter()
+        .all(|c| !c.iter().any(|a| a == "jeet-later")));
+    let later = lab
+        .index()
+        .query_row("SELECT id FROM tasks WHERE slug = 'later'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    assert_eq!(lab.start_queue(), [later]);
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
 /// Archiving a worker mid-turn charges it the turn's time so far before
 /// its session ends: no hook or sweep charges it after.
 #[cfg(unix)]

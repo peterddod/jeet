@@ -126,10 +126,14 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "x",
         "stop it and everything below it, after a confirm; on the assistant, all",
     ),
+    (
+        "n",
+        "a task or manager under the assistant or a manager; a manager starts at once",
+    ),
     ("a", "answering a question comes with #36"),
     (
         "",
-        "l, i, b, p, P and x only from your own terminal, not an agent's pane",
+        "l, i, b, p, P, x and n only from your own terminal, not an agent's pane",
     ),
     ("", ""),
     (
@@ -211,6 +215,7 @@ const HINTS_AGENTS: &[&str] = &[
     "b brief",
     "p/P pause/resume",
     "x stop",
+    "n new under",
     "c assistant",
     "t todo",
     "/ filter",
@@ -1387,8 +1392,14 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
         }
         Panel::NewTask(form) => {
             let body = new_task_lines(form);
-            let area = content_rect(74, body.len() + 1, full);
-            render_text(frame, area, " new task ".into(), Color::Green, body);
+            // Room for the hint, and for a refusal, to wrap.
+            let slack = 1 + 3 * usize::from(form.error.is_some());
+            let area = content_rect(74, body.len() + slack, full);
+            let title = match &form.parent {
+                Some((_, label)) => format!(" new task under {label} "),
+                None => " new task ".into(),
+            };
+            render_text(frame, area, title, Color::Green, body);
         }
         Panel::Projects { lines, selected } => {
             let area = centered_rect(85, 60, full);
@@ -1879,50 +1890,102 @@ fn new_project_lines(form: &NewProjectForm) -> Vec<Line<'static>> {
 
 fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
     let focus = form.field;
-    let project = match form.project_name() {
-        Some(name) => format!("‹ {name} ›"),
-        None => "‹ none ›".to_string(),
-    };
-    let repos_value = chosen_names(&form.repos);
-    let mut lines = vec![
-        field_line(
-            "name",
-            &form.name,
-            focus == Field::Name,
-            &format!("blank: {}", form.default_name),
-        ),
+    // A value chosen with ←→ or space, rather than typed.
+    let choice = |label: &str, value: String, field: Field, hint: &'static str| {
         Line::from(vec![
             Span::styled(
-                format!("{:<9}", "project"),
-                if focus == Field::Project {
+                format!("{label:<9}"),
+                if focus == field {
                     Style::default().fg(Color::Magenta)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 },
             ),
-            Span::styled(project, Style::default().fg(Color::Yellow)),
-            dim(if form.projects.is_empty() {
-                "  no projects yet (P makes one)"
-            } else {
-                "  ←→ choose"
-            }),
-        ]),
-        field_line(
-            "repos",
-            &repos_value,
-            focus == Field::Repos,
-            "none: the agent adds worktrees as it goes",
-        ),
-    ];
-    if focus == Field::Repos {
-        lines.extend(repos_picker_lines(&form.repos));
+            Span::styled(value, Style::default().fg(Color::Yellow)),
+            dim(hint),
+        ])
+    };
+    let manager = form.kind == TaskKind::Manager;
+    let mut lines = Vec::new();
+    for &field in form.fields() {
+        let focused = focus == field;
+        match field {
+            Field::Kind => lines.push(choice(
+                "kind",
+                match manager {
+                    true => "‹ manager ›".to_string(),
+                    false => "‹ task ›".to_string(),
+                },
+                field,
+                match manager {
+                    true => "  space switches · starts at once with its brief",
+                    false => "  space switches · ⏎ on it later starts its agent",
+                },
+            )),
+            Field::Name => lines.push(field_line(
+                "name",
+                &form.name,
+                focused,
+                &format!("blank: {}", form.default_name),
+            )),
+            Field::Goal => lines.push(field_line(
+                "goal",
+                &form.goal,
+                focused,
+                match manager {
+                    true => "what it works towards (needed)",
+                    false => "what its parent wants of it",
+                },
+            )),
+            Field::Done => lines.push(field_line(
+                "done",
+                &form.done,
+                focused,
+                "when the goal is met",
+            )),
+            Field::Budget => lines.push(field_line(
+                "budget",
+                &form.budget,
+                focused,
+                "e.g. 2h,40turns; blank: the default",
+            )),
+            Field::Allow => lines.push(field_line(
+                "allow",
+                &form.allow,
+                focused,
+                "capabilities, comma-separated; blank: the default",
+            )),
+            Field::Project => lines.push(choice(
+                "project",
+                match form.project_name() {
+                    Some(name) => format!("‹ {name} ›"),
+                    None => "‹ none ›".to_string(),
+                },
+                field,
+                match form.projects.is_empty() {
+                    true => "  no projects yet (P makes one)",
+                    false => "  ←→ choose",
+                },
+            )),
+            Field::Repos => {
+                lines.push(field_line(
+                    "repos",
+                    &chosen_names(&form.repos),
+                    focused,
+                    "none: the agent adds worktrees as it goes",
+                ));
+                if focused {
+                    lines.extend(repos_picker_lines(&form.repos));
+                }
+            }
+            Field::Branch => lines.push(field_line(
+                "branch",
+                &form.branch,
+                focused,
+                "only with a single repository",
+            )),
+        }
     }
-    lines.push(field_line(
-        "branch",
-        &form.branch,
-        focus == Field::Branch,
-        "only with a single repository",
-    ));
     lines.push(Line::from(""));
     if let Some(error) = &form.error {
         lines.push(Line::from(Span::styled(
@@ -1930,9 +1993,10 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
             Style::default().fg(Color::Red),
         )));
     }
-    lines.push(Line::from(dim(
-        "⇥ next field · ⏎ create · esc cancel · all blank: an empty canvas",
-    )));
+    lines.push(Line::from(dim(match form.parent {
+        Some(_) => "⇥ next field · ⏎ create · esc cancel",
+        None => "⇥ next field · ⏎ create · esc cancel · all blank: an empty canvas",
+    })));
     lines
 }
 
@@ -2137,16 +2201,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_form_under_a_node_shows_a_managers_fields_or_a_workers() {
+        let mut ui = agents_ui();
+        ui.view = View::Agents;
+        ui.set_rows(ui.rows.clone());
+        let mut form = NewTaskForm::new(
+            "task 1".into(),
+            Vec::new(),
+            None,
+            vec!["github.com/acme/api".into()],
+        )
+        .under("backend".into(), "manager backend".into());
+        ui.panel = Some(Panel::NewTask(Box::new(form.clone())));
+        let worker = render(&mut ui, 100, 30).join("\n");
+        for want in [
+            "new task under manager backend",
+            "‹ task ›",
+            "goal",
+            "done",
+            "budget",
+            "allow",
+            "repos",
+            "branch",
+        ] {
+            assert!(worker.contains(want), "{want}: {worker}");
+        }
+        form.kind = TaskKind::Manager;
+        form.error =
+            Some("a manager needs --goal or --brief-file: it is what it works towards".into());
+        ui.panel = Some(Panel::NewTask(Box::new(form)));
+        let manager = render(&mut ui, 70, 30).join("\n");
+        for want in [
+            "‹ manager ›",
+            "goal",
+            "done",
+            "budget",
+            "allow",
+            "a manager needs --goal",
+            "esc cancel",
+        ] {
+            assert!(manager.contains(want), "{want}: {manager}");
+        }
+        for unwanted in ["repos", "branch", "project"] {
+            assert!(!manager.contains(unwanted), "{unwanted}: {manager}");
+        }
+    }
+
     /// No panel, and one of each.
     fn all_panels() -> Vec<Option<Panel>> {
         vec![
             None,
             Some(Panel::Help { scroll: 3 }),
-            Some(Panel::NewTask(NewTaskForm::new(
+            Some(Panel::NewTask(Box::new(NewTaskForm::new(
                 "task 1".into(),
                 vec!["web".into()],
                 None,
                 vec!["github.com/acme/api".into()],
+            )))),
+            Some(Panel::NewTask(Box::new(
+                NewTaskForm::new("task 1".into(), Vec::new(), None, Vec::new())
+                    .under("assistant".into(), "the assistant".into()),
             ))),
             Some(Panel::Projects {
                 lines: Vec::new(),

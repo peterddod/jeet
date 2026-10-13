@@ -427,6 +427,10 @@ root's behalf:
 
 Managers and workers below the root lose `jeet notify`. For them it becomes a report.
 
+Until phase 4 there is no `needs_user`, so the only *needs you* the agents
+pane (§6) shows is a prompt: one in the assistant's own pane, or one rolled
+up from below.
+
 **Phase 1 (as built).** `jeet report` takes no `--link`/`--option` (D18).
 A report holds at most 2000 bytes once cleaned, so even fenced it fits a
 message (D16). The row is kept when delivery fails, and the command says so
@@ -715,7 +719,7 @@ is no cost column (#26) and no wake cell (§12).
 | `b` | brief, grant, effective allow-list, budget, run state and its own open ask |
 | `p` / `P` | pause / resume the subtree |
 | `x` | stop the subtree (asks first, listing what is running) |
-| `n` | new task or manager under this node (#21's form, plus parent, goal, done, budget, allow) |
+| `n` | new task or manager under the assistant or a manager (#21's form, plus kind, goal, done, budget, allow; a manager has no repositories). A manager starts at once; a worker is made but not started, as `n` in the active view starts none, and `⏎` starts it. On a worker `n` is refused |
 
 The pane acts as the user: `l`, `i` and `b` (and the keys that change
 something) refuse when jeet runs inside an agent's pane, or when who runs it
@@ -805,15 +809,21 @@ row, so past the last column it would never show).
   `startup.rs` (`auto_trust` covers manager homes, P5), `cli.rs`.
 
 **Phase 3: the agents pane.** (#35)
-- The agents tab, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
-  parent fields.
-- Touch points: `tui/tasks.rs`, `tui/tasks_ui.rs`, `tui/state.rs`, a new
-  `tui/managers.rs`, and #21's form (`tui/tasks.rs` new-task form).
+- The agents tab, rollup, `l`/`i`/`b`, pause/stop keys, and `n` with
+  parent fields. `a` moved to phase 4, which builds what it answers with.
+- Touch points: `tui/tasks.rs` (with #21's new-task form),
+  `tui/tasks_ui.rs`, a new `tui/managers.rs`, `tui/term.rs` (`blank`);
+  `commands/task.rs` (`start`), `commands/manager.rs` (pub `shown`,
+  `outcome_summary`); `manager/mod.rs` (`tree_order`, `open_ask`,
+  `WORKLOG_MD`), `db/tasks.rs` (`reports_for`), `messages.rs` (`peek`,
+  `try_peek`). As built: see the phase 3 implementation notes.
 
 **Phase 4: escalation to the user and the rest.** (#36)
 - `needs_user`, `jeet report answer|escalate`, answers from the user (with
   copies to each manager on the path), `jeet watch` rules targeting
   managers, and `--reparent`.
+- `a` in the agents pane: answer the node's open ask, or the nearest one
+  below it (moved from phase 3).
 - Touch points: `commands/` (report), `notify.rs`, `watch.rs` (routing), and
   the TUI answer flow.
 
@@ -1798,17 +1808,17 @@ Managers run locally in tmux, as the user, like any other task (I22).
 
 Where phase 3 (#35, the agents pane) settled what this RFC left open, or
 departed from it. An *A* number records the phase 3 plan's decision of the
-same *Q* number. It lands in two PRs: the read-only pane (this part), then
-the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
+same *Q* number. It landed in two PRs: the read-only pane, then the
+actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
 
 - **A1** Two stacked PRs, for review size alone: neither widens what an
-  agent can do. Until the second lands, `n` in the agents view gives A22's
-  status line, as the other keys it does not take do.
+  agent can do, and every action calls the library functions the CLI
+  calls, with its checks.
 - **A2** The pane acts as the user. `tui::tasks::run` asks
   `permissions::caller` once, and the agents view's keys that show an
   agent's text (`l`, `i`, `b`) work only for `Caller::User`; an identity
-  error counts as not the user. So do the actions (`p`, `P`, `x`), which
-  pass `Caller::User` to the library. Anything else gets "the agents pane
+  error counts as not the user. So do the actions (`p`, `P`, `x`, `n`),
+  which pass `Caller::User` to the library. Anything else gets "the agents pane
   acts as you; open jeet from your own terminal, not from an agent's pane". The
   tree, `⏎` and moving about stay open, as the active view is. Known gap,
   left as it is: the other views' `a` and `D` still run with no caller.
@@ -1901,11 +1911,30 @@ the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   `run::stop`, `n` changes nothing. There is no force. On the assistant,
   `x` is `stop --all` (`run::stop` with no task, the user's alone, P8),
   listing every active task under it.
+- **A17** `n` on the assistant or a manager opens the new-task form with
+  the node as parent and more fields: kind (task or manager, `space`),
+  name, goal, done, budget (`2h,40turns`) and allow (comma-separated); a
+  task also has project, repositories and branch, a manager none (`manager
+  new` takes none). The form parses the budget (`budget::parse_part`) and
+  the capabilities (`permissions::parse_capability`) as clap would, then
+  `⏎` runs what `jeet task new --parent` and `jeet manager new` run, as the
+  user: `tasks::plan_child`, then `tasks::create`. `--parent` is
+  `assistant` for the root and the node's id below it (`find_exact` never
+  finds the assistant, even by id). What `plan_child` refuses (a manager
+  with no goal, a capability its parent does not hold, a full fan-out)
+  stays on the form, which stays up. A manager starts at once
+  (`commands::task::start` with `manager::first_prompt`, M35), and how
+  (started, queued on `max_live`, held) goes to the status line; a worker
+  is not started, as `n` in the active view starts none, and `⏎` starts it.
+  Warnings (the create's and the start's) go to a message. On a worker `n`
+  is refused at the key, in `plan_child`'s words. `max_children` is not
+  offered: it is the config default. In the active view `n` is unchanged.
 - **A18** `a` in the agents view says "answering comes with #36; i shows the
   open question and ⏎ attaches to the asker"; it does not archive there.
 - **A19** Nothing about wake: no cell, field or read of watcher state.
 - **A20** No capture of stderr. The actions return what they did as data
-  (`NodeOutcome` lines and `drain`'s warnings), shown in the message; after
+  (`NodeOutcome` lines, `drain`'s warnings, the create's warnings and the
+  start's `Start`), shown in a message or on the status line; after
   each the screen is blanked and painted whole (`term::blank`), so a line
   a deep error path wrote (a budget charge or a report that failed) cannot
   stay on screen. Its text is lost to the TUI: a known gap, shared with the
@@ -1916,8 +1945,10 @@ the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   `HINTS_AGENTS`).
 - **A22** The agents view's keys are its own: moving, `/`, `?`, `r`, `q`,
   `⇥`, `c`, `C` and `t` as everywhere; `⏎`, `→`, `←`, `l`, `i`, `b`, `p`,
-  `P`, `x` and `a` as above; `e`, `w`, `v`, `o`, `D` and `S` (and, until
-  it lands, `n`) say "not in the agents view; ⇥ to active".
+  `P`, `x`, `n` and `a` as above; `e`, `w`, `v`, `o`, `D` and `S` say "not
+  in the agents view; ⇥ to active".
+- **A23** This section, §4, §6, §8 and §12 were brought in line with the
+  pane as built, and the README has an agents-tab section.
 
 ## 11. Placement
 
@@ -2083,7 +2114,7 @@ session wakes whichever watcher wins the lock. `@internal` fields
 |---|---|
 | Before 2a | the spike; no code |
 | 2a (#34) | `Harness::wake_hook`, `HookSetup.wake`, the settings entry, `src/waiter.rs`, `Delivered::Watched` routing in `messages.rs`, the idle skip and ack in `status.rs`, hidden `jeet inbox watch --task`/`take`. It does not block phase 2 |
-| 3 (#35) | the `i` view becomes required; rows show `wake: armed/none` and inbox depth |
+| 3 (#35) | the `i` view (built) and inbox depth on each row (built); `wake: armed/none` comes with 2a, so the pane as built shows nothing for wake (A19) |
 | 4 (#36) | answers, copies up the path and watch rules to managers may arrive mid-turn; the wake cap and turn accounting must exist first |
 
 §9 gains: "a per-agent watcher replacing typing: accepted as an optional
