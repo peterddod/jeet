@@ -2746,7 +2746,7 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan) -> Vec<String> {
             Ok(None) => {}
             Err(e) => lines.push(format!("could not read {who}'s open question: {e:#}")),
         }
-        match reports::auto_status(app, mover, StatusEvent::Moved, &body, now_secs(), 0) {
+        match reports::auto_status(app, mover, StatusEvent::Moved, &body, i64::MAX, 0) {
             Ok(Some((id, told))) => lines.push(format!(
                 "told {to} of {who} (#{id}): {}",
                 delivered_words(&told)
@@ -3813,6 +3813,30 @@ mod tests {
             plan.rows.setters,
             [(n.id.clone(), Setter::Node(m.id.clone()), Setter::User)]
         );
+    }
+
+    /// A task moved twice within a second tells both new parents: `moved`
+    /// is a discrete event, not deduplicated by time.
+    #[test]
+    fn a_task_moved_twice_in_a_second_tells_both_new_parents() {
+        let (_dir, app, _trunk) = manager_lab();
+        let root = app.db.get_assistant_task().unwrap().unwrap();
+        let fe = insert(&app, "fe", TaskKind::Manager, &root.id);
+        let be = insert(&app, "be", TaskKind::Manager, &root.id);
+        let w = app.db.get_task("w-id").unwrap().unwrap();
+        for to in [&fe, &be] {
+            let w = app.db.get_task(&w.id).unwrap().unwrap();
+            let plan = plan_move(&app, &Caller::User, vec![w], to.clone(), None).unwrap();
+            app.db.apply_move(&plan.rows).unwrap();
+            let lines = after_move(&app, &Caller::User, &plan);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with(&format!("told {}", manager::label(to)))),
+                "{lines:?}"
+            );
+            assert_eq!(app.db.reports_for(&to.id, 10).unwrap().len(), 1);
+        }
     }
 
     /// A manager's own limit, else `[managers] max_children`; the assistant

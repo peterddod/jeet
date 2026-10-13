@@ -791,6 +791,32 @@ fn move_refusal_in(conn: &Connection, rows: &MoveRows) -> Result<Option<String>>
     if a != b {
         return Ok(Some(MOVE_CHANGED.into()));
     }
+    // What the new chain of managers lets through, as they hold it now: a
+    // grant narrowed meanwhile must not leave a node with more than its new
+    // parent has (C14). The assistant's list is config, fixed while jeet runs.
+    let mut through: Option<Vec<String>> = None;
+    for t in chain.iter().filter(|t| t.kind != TaskKind::Assistant) {
+        let held: Vec<String> = conn
+            .prepare("SELECT capability FROM task_grants WHERE task_id = ?1")?
+            .query_map(params![t.id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        through = Some(match through {
+            Some(mut list) => {
+                list.retain(|c| held.contains(c));
+                list
+            }
+            None => held,
+        });
+    }
+    if let Some(through) = &through {
+        if rows
+            .grants
+            .iter()
+            .any(|(_, _, kept)| kept.iter().any(|c| !through.contains(c)))
+        {
+            return Ok(Some(MOVE_CHANGED.into()));
+        }
+    }
     for (id, stored, _) in &rows.grants {
         let now: Vec<String> = conn
             .prepare("SELECT capability FROM task_grants WHERE task_id = ?1 ORDER BY capability")?
@@ -3143,6 +3169,12 @@ mod tests {
         refused(&full, "fe may have 1 active task under it; it has 0, and 2");
         // `m` must lose all its children, not some.
         refused(&move_rows(&db, &["n"], "a", Some("m")), "changed since");
+
+        // A new parent narrowed since the plan: `fe` holds nothing, so a
+        // node planned to keep a capability would hold more than it.
+        let mut wide = move_rows(&db, &["w2"], "fe", None);
+        wide.grants[0].2 = vec!["task.create".into()];
+        refused(&wide, "changed since");
 
         // Into a stopped manager, and out of a paused one.
         db.set_run_state("fe", RunState::Stopped, Some(&Setter::User))

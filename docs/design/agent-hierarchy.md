@@ -2232,8 +2232,9 @@ check, depth, budget room above, a node-scoped `--parent`).
   the active movers, the deleted task not counted, fit its `max_children`
   (archived movers do not count; the assistant has no limit); no node's
   effective run state changes (H26); and the subtrees, their stored grants
-  and the setters to rewrite are as planned. Anything that changed since
-  the plan is "the tasks to move changed since jeet looked; try again".
+  and the setters to rewrite are as planned, and no planned grant is
+  wider than the new chain of managers holds now (a narrowing meanwhile,
+  C14). Anything that changed since the plan is "the tasks to move changed since jeet looked; try again".
   `check_move` runs it before anything is asked or removed, and
   `apply_move` again in one IMMEDIATE transaction before it writes. A
   reparent moves to the grandparent, so it cannot make a cycle, every
@@ -2283,7 +2284,8 @@ check, depth, budget room above, a node-scoped `--parent`).
   `status` report to its new parent, "moved here from manager api by the
   user; its open question #42 is yours now" (`StatusEvent::Moved`,
   through `reports::auto_status` as the hooks' status events, so it never
-  starts the parent). The open question is `manager::open_ask`'s. Every
+  starts the parent; it is never deduplicated by time, as a budget report
+  is not, so a task moved twice in a second tells both parents). The open question is `manager::open_ask`'s. Every
   line printed names tasks by slug and path, never by a task's name, which
   a manager writes. A delivery that fails is a line in the output; the
   move stands.
