@@ -5183,6 +5183,24 @@ fn notes(script: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// The notes once `landed` holds of them. jeet gives a notifier two seconds
+/// and then leaves it running, so on a loaded machine a note can land after
+/// jeet has exited: a check that something was announced waits for it, up
+/// to 30 seconds, and then gets the notes as they are for its assertion to
+/// show. A check that nothing was announced reads [`notes`] at once, as a
+/// late note could only make it pass.
+#[cfg(unix)]
+fn notes_once(script: &std::path::Path, landed: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let notes = notes(script);
+        if landed(&notes) || std::time::Instant::now() > deadline {
+            return notes;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn actions(home: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(home.join("assistant/actions.log"))
         .unwrap_or_default()
@@ -5230,7 +5248,10 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     assert_eq!(log.len(), 2);
     assert_eq!(log[1]["outcome"], "done");
     assert_eq!(log[1]["action"], "created task fix-login");
-    assert_eq!(notes(&notifier), ["Assistant|created task fix-login|"]);
+    assert_eq!(
+        notes_once(&notifier, |n| !n.is_empty()),
+        ["Assistant|created task fix-login|"]
+    );
 
     // Still refused: what was not listed.
     let output = root.jeet(&["task", "delete", "fix-login", "-f"], &lab.home(), &env);
@@ -5514,7 +5535,10 @@ fn the_assistant_merges_a_pr_only_when_allowed_and_ready() {
     let last = log.last().unwrap();
     assert_eq!(last["outcome"], "done");
     assert_eq!(last["action"], "merged #9 of widget");
-    assert_eq!(notes(&notifier), ["Assistant|merged #9 of widget|"]);
+    assert_eq!(
+        notes_once(&notifier, |n| !n.is_empty()),
+        ["Assistant|merged #9 of widget|"]
+    );
     let output = lab.jeet_at(&["task", "prs", "--offline"], &task, &[]);
     succeeded(&output);
     let history = stdout_of(&output);
@@ -5574,7 +5598,7 @@ fn notify_reports_through_the_notifier() {
     succeeded(&output);
     assert_eq!(stdout_of(&output), "");
     assert_eq!(
-        notes(&notifier),
+        notes_once(&notifier, |n| !n.is_empty()),
         ["3 reviews waiting|acme/api #4, #5 and #6|https://github.com/pulls"]
     );
 
@@ -6954,7 +6978,9 @@ action = "task"
     );
 
     // The rest match no rule: notified, the hostile title as plain text.
-    let notes = notes(&notifier);
+    // Each notifier runs on its own, so they may land in either order.
+    let mut notes = notes_once(&notifier, |n| n.len() >= 2);
+    notes.sort();
     assert_eq!(notes.len(), 2, "{notes:?}");
     assert_eq!(
         notes[0],
@@ -7073,7 +7099,7 @@ action = "task"
     );
 
     // And the user hears of them now, with the rest.
-    let notes = notes(&notifier);
+    let notes = notes_once(&notifier, |n| !n.is_empty());
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].starts_with("GitHub: 5 new events|"), "{notes:?}");
     assert!(
@@ -7168,8 +7194,9 @@ action = "task"
         "{message}"
     );
 
-    // The project's items, which no rule takes: notified.
-    let notes = notes(&notifier);
+    // The project's items, which no rule takes: notified, in either order.
+    let mut notes = notes_once(&notifier, |n| n.len() >= 2);
+    notes.sort();
     assert_eq!(
         notes,
         [
@@ -7317,7 +7344,7 @@ action = "manager:api"
     let to_api: Vec<&serde_json::Value> =
         events.iter().filter(|e| e["to"] == "manager api").collect();
     assert_eq!(to_api.len(), 3, "{events:?}");
-    let notes = notes(&notifier);
+    let notes = notes_once(&notifier, |n| n.len() >= 2);
     assert_eq!(notes.len(), 2, "{notes:?}");
 }
 
@@ -8556,13 +8583,12 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{:?}",
         actions(&lab.home())
     );
-    assert!(
-        notes(&notifier)
-            .iter()
-            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task w|")),
-        "{:?}",
-        notes(&notifier)
-    );
+    let granted = |n: &[String]| {
+        n.iter()
+            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task w|"))
+    };
+    let said = notes_once(&notifier, granted);
+    assert!(granted(&said), "{said:?}");
     // Granted again while still held, it is neither logged nor announced
     // a second time.
     let held_w = |log: &[serde_json::Value]| {
@@ -8610,13 +8636,12 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         "{:?}",
         actions(&lab.home())
     );
-    assert!(
-        notes(&notifier)
-            .iter()
-            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task z|")),
-        "{:?}",
-        notes(&notifier)
-    );
+    let granted = |n: &[String]| {
+        n.iter()
+            .any(|n| n.starts_with("Assistant|granted held `pr.merge` to task z|"))
+    };
+    let said = notes_once(&notifier, granted);
+    assert!(granted(&said), "{said:?}");
     // A task undone after its row was made (a repository it cannot add)
     // leaves no entry and no notification naming it.
     let output = root.jeet(
@@ -8833,7 +8858,7 @@ fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
         &[("JEET_NOTIFY_CMD", notifier_env.as_str())],
     ));
     assert!(store.join("gizmo").is_dir());
-    let said = notes(&notifier);
+    let said = notes_once(&notifier, |n| n.iter().any(|n| n.contains("|cloned ")));
     let clones: Vec<_> = said.iter().filter(|n| n.contains("|cloned ")).collect();
     assert_eq!(
         clones,
@@ -9160,13 +9185,12 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
             "{:?}",
             actions(&lab.home())
         );
-        assert!(
-            notes(&notifier)
-                .iter()
-                .any(|n| n.starts_with(&format!("Manager api|{action}|"))),
-            "{:?}",
-            notes(&notifier)
-        );
+        let granted = |n: &[String]| {
+            n.iter()
+                .any(|n| n.starts_with(&format!("Manager api|{action}|")))
+        };
+        let said = notes_once(&notifier, granted);
+        assert!(granted(&said), "{said:?}");
     }
 }
 
@@ -12888,7 +12912,7 @@ fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
     assert_eq!(log[1]["outcome"], "done");
     assert_eq!(log[1]["action"], "interrupted task fix-x");
     assert!(log[1].get("error").is_none_or(|e| e.is_null()), "{log:?}");
-    assert_eq!(notes(&notifier).len(), 1);
+    assert_eq!(notes_once(&notifier, |n| !n.is_empty()).len(), 1);
 }
 
 #[cfg(unix)]
@@ -14933,7 +14957,7 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
         stderr_of(&output)
     );
     assert_eq!(lab.ask_of(&id), (root_id.clone(), true, None, None));
-    let told = notes(&notifier);
+    let told = notes_once(&notifier, |n| !n.is_empty());
     assert_eq!(told, [format!("jeet: task w asks you (#{id})|keep v1?|")]);
 
     // The user, at a terminal of their own.
