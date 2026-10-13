@@ -5367,7 +5367,7 @@ mod tests {
         // Longer than is read: the cut falls inside "é" and inside a line.
         let mut long = "é".repeat(WORKLOG_TAIL as usize);
         long.push_str("\nlast\n");
-        std::fs::write(&path, &long).unwrap();
+        std::fs::write(&path, long).unwrap();
         let lines = worklog_lines(&path).unwrap().unwrap();
         assert_eq!(lines, ["last"]);
     }
