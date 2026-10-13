@@ -527,8 +527,9 @@ report), budget (`$`, 80% used or paused by it), running, idle, done; with a
 count when it comes from below. A permission prompt is *needs input* on the
 task that shows it and *needs you* above it, since only you can answer it; a
 prompt in the assistant's own pane counts too, and so does a question the
-assistant passed to you (`◆ needs you – question` on the task that asked it). A paused or stopped node shows
-how many it holds, and what below it still needs you. Then its budget used
+assistant passed to you (`◆ needs you – question` on the task that asked
+it). A paused or stopped node shows how many it holds, and what below it
+still needs you. Then its budget used
 against its limit (the assistant: how many tasks are under it) and notes: its
 inbox, the assistant's open todo items, its newest open PR, a budget past 80%
 and a start waiting on `max_live`. The header counts the agents live against

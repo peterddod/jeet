@@ -744,9 +744,9 @@ so its kind is visible; everything starts open and nothing is persisted.
 order needs you > needs input > blocked > budget > running > idle > done. A
 count is shown when that state comes from below. A node's own prompt is
 *needs input*; above it, it becomes *needs you*, as only the user can answer
-one (§4). A question passed to the user is *needs you* on its asker too, and
-above it (H16). The assistant's own urgency comes from its sessions, so a prompt
-in its pane needs you too. A held node shows `⏸ paused (n below)` or
+one (§4). A question passed to the user is *needs you* on its asker too,
+and above it (H16). The assistant's own urgency comes from its sessions, so
+a prompt in its pane needs you too. A held node shows `⏸ paused (n below)` or
 `■ stopped (n below)`, *n* the nodes it holds, and appends what rolled up
 from below when that is blocked or worse: a pause answers no prompt. Rollup
 is computed on the screen's thread from what agents are doing (status files,
@@ -770,8 +770,9 @@ is no cost column (#26) and no wake cell (§12).
 The pane acts as the user: `l`, `i` and `b` (and the keys that change
 something, `a` among them) refuse unless jeet runs at the user's own
 terminal (H8, H17): not inside an agent's or a top-level task's pane, nor a
-window of jeet's tmux sessions, nor when who runs it cannot be told. `c`, `C` and `t` are the assistant's, as in the other views;
-the worktree, PR, archive and delete keys are the active view's alone.
+window of jeet's tmux sessions, nor when who runs it cannot be told. `c`,
+`C` and `t` are the assistant's, as in the other views; the worktree, PR,
+archive and delete keys are the active view's alone.
 
 ## 7. Harness neutrality
 
@@ -2121,8 +2122,10 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   same over every open ask. So `a` on the root after a notification opens
   the question the user was notified about, not a nearer one a manager
   still holds (§6 said only "nearest"). It then reads the asker's open ask
-  from the index under the spinner (`manager::open_ask`), and opens a form
-  with the id, kind, the asker's tree path, `with you` when it is, and the
+  from the index under the spinner (`manager::open_ask`, rather than the
+  report by id, so one asked since in its place is the one shown; with
+  none, "that question was answered or withdrawn meanwhile"), and opens a
+  form with the id, kind, the asker's tree path, `with you` when it is, and the
   question (`printable_text`), with a one-line input. `⏎` calls
   `reports::answer` with `Caller::User`, as `jeet report answer` does at
   the user's terminal, and shows how the answer and each copy went in a
@@ -2142,7 +2145,9 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   keys that read or act (`l`, `i`, `b`, `p`, `P`, `x`, `n`, `a`). The
   refusal reads "the agents pane acts as you; open jeet from your own
   terminal, outside jeet's tmux sessions and any task's pane". `?` lists
-  `a` and puts it on the "only from your own terminal" line.
+  `a` and puts it on the "only from your own terminal" line. The check is
+  made once, when the tasks screen starts; `⏎` in the answer form does not
+  make it again, since where jeet runs does not change while it runs.
 
 ### Phase 4 implementation notes: watch rules to a manager
 
