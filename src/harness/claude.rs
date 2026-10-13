@@ -392,6 +392,9 @@ struct HookInput {
     /// The session's transcript file.
     #[serde(default)]
     transcript_path: Option<String>,
+    /// Set when the hook fires inside a subagent.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
@@ -409,12 +412,15 @@ fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
                 .as_deref()
                 .and_then(|p| first_line(p, DETAIL_MAX)),
         ),
+        // A subagent's, which may run on in the background after the turn
+        // that started it has ended.
+        "PreToolUse" if input.agent_id.is_some() => EventKind::Subagent,
         "PreToolUse" => EventKind::Working(input.tool_name.as_deref().map(|tool| match tool {
             "Workflow" => "running workflow".to_string(),
             "Agent" | "Task" => "waiting for subagents".to_string(),
             other => other.to_string(),
         })),
-        "SubagentStop" => EventKind::Working(None),
+        "SubagentStop" => EventKind::Subagent,
         "Notification" if is_idle_prompt(input) => EventKind::Idle,
         "Notification" if asks_the_user(input) => EventKind::NeedsInput(
             input
@@ -877,7 +883,7 @@ mod tests {
 
     #[test]
     fn each_event_leaves_the_session_in_its_state() {
-        let cases: [(&str, State, Option<&str>); 7] = [
+        let cases: [(&str, State, Option<&str>); 6] = [
             (
                 "SessionStart",
                 State::Idle,
@@ -889,7 +895,6 @@ mod tests {
                 Some("Fix the login page so that the session cookie survives a pa…"),
             ),
             ("PreToolUse", State::Running, Some("Bash")),
-            ("SubagentStop", State::Running, None),
             (
                 "Notification",
                 State::Waiting,
@@ -906,8 +911,14 @@ mod tests {
             assert_eq!(status.session_id, "3f1c2a9e-5b7d-4e61-9a0b-2c4d6e8f0a1b");
             assert_eq!(status.at, 1000);
         }
-        // Every installed event is covered.
-        assert_eq!(cases.map(|c| c.0), HOOK_EVENTS);
+        // A subagent's end says nothing by itself; it only keeps a running
+        // session fresh. Every installed event is covered.
+        let subagent = parsed("SubagentStop", &raw_fixture("SubagentStop"));
+        assert_eq!(subagent.kind, Some(EventKind::Subagent));
+        assert!(status_for(&subagent, 1000).is_none());
+        let mut covered = cases.map(|c| c.0).to_vec();
+        covered.insert(3, "SubagentStop");
+        assert_eq!(covered, HOOK_EVENTS);
         // A session /clear ends is over too, though another replaces it.
         let cleared = status_for(
             &parsed("SessionEnd", &raw_fixture("SessionEnd-clear")),
@@ -968,6 +979,21 @@ mod tests {
                 Some(EventKind::Working(Some(detail.into())))
             );
         }
+    }
+
+    #[test]
+    fn a_subagents_tools_never_start_a_turn() {
+        // A background subagent's tool calls carry on after its turn ended.
+        let tool = parsed("PreToolUse", &raw_fixture("PreToolUse-subagent"));
+        assert_eq!(tool.kind, Some(EventKind::Subagent));
+        assert!(status_for(&tool, 1000).is_none());
+        // The session's own still mark it running.
+        let mut input = fixture("PreToolUse-subagent");
+        input.agent_id = None;
+        assert_eq!(
+            event_kind("PreToolUse", &input),
+            Some(EventKind::Working(Some("Read".into())))
+        );
     }
 
     #[test]
