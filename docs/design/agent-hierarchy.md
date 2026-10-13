@@ -1,7 +1,8 @@
 # Hierarchical agents
 
-Status: **draft, for review**. Phase 1 (#31), #32 and #33 are built; the
-notes after §10 say where they departed from this text. Every node runs
+Status: **draft, for review**. Phase 1 (#31), #32, #33 and phase 2 (#34,
+managers) are built; the notes after §10 say where they departed from this
+text. Every node runs
 locally in tmux (5.7, §11); a confined or cloud placement is future work
 (§13), not planned.
 Designed against `main` at v0.7.2, plus the open PRs #21 (projects form), #22
@@ -61,7 +62,8 @@ A manager is "the assistant, but made by a parent, with a brief, a budget and a
 narrower allow-list". The code that is assistant-specific today (`ensure_files`,
 `session_context`, `fence_message`, multi-session windows, `actions.log`)
 becomes manager code, and the assistant is the one manager with no parent and
-the user's `[assistant] allow`.
+the user's `[assistant] allow`. (As built, only what a manager started in
+one tmux session needs moved; the assistant keeps its windows: P24.)
 
 Why one concept rather than two:
 
@@ -277,12 +279,12 @@ jeet task new fix-token-refresh --repo api \
   --done "PR open against api main with a passing test" \
   --budget 2h
 
-# Or places it lower in its own subtree
-jeet task new api-docs --parent backend/docs --prompt "…"
+# Or places it lower in its own subtree, under a manager below it named by slug
+jeet task new api-docs --parent docs --prompt "…"
 
 # Read the tree
 jeet manager ls                  # the caller's subtree (the whole tree for the user)
-jeet manager tree --json
+jeet manager ls --json            # the same, each task with its parent and depth
 jeet manager show backend         # brief, grant, effective allow, budget, children, open reports
 ```
 
@@ -301,6 +303,24 @@ jeet manager show backend         # brief, grant, effective allow, budget, child
   of its parent's. There are no cost budgets until #26 (5.3).
 - `jeet task new --prompt` keeps working as today. `--goal`/`--done` add a
   brief row for any parented task.
+
+**Phase 2 (as built).** `manager tree --json` is `manager ls --json` (P13).
+`--parent` takes `assistant` or a manager's exact slug, never an `a/b` path;
+a node may name itself or a manager below it (P8, P11). The parent
+defaults to the assistant for the assistant, to itself for a manager, and,
+for the user, to the assistant on `manager new` and to none on `task new`.
+`--allow` unasked is `[managers] worker_default` or `manager_default`, not
+none, and `--budget` unasked is `default_budget` only for a manager and a
+manager's child: the assistant's and the user's workers get none (P11).
+`manager new` needs `--goal` or `--brief-file` (its text follows the goal;
+there is no `brief` column) and starts the manager at once, through the
+start gate (P22). `manager show [--json]` prints the brief, the stored grant,
+the effective list with what cut each named capability it lacks, the
+budget's limits and use (a review job, with no hooks, is not counted), the
+run state with who set it and which task holds it, the children with their
+state and last report, and the open reports (P13). The brief is fenced as
+`<jeet-brief>`, unable to close or open a fence, and not marked untrusted:
+the child still acts on it (P21).
 
 ### What the child sees
 
@@ -454,7 +474,7 @@ located, so a worker in its sibling's directory reports as neither (D14).
   grant`) for a child. jeet logs each such grant to the granter's
   `actions.log` and notifies the user.
 - **New capabilities:** `manager.create`, `manager.stop`, `manager.grant` and
-  `git.push`. `pr.merge` comes from #25 (below). `bash_allow` emits each
+  `git.push` (deferred, P7). `pr.merge` comes from #25 (below). `bash_allow` emits each
   node's harness rules from its effective list.
 
 **Phase 1 (as built).** The root keeps today's reach: any task, the user's
@@ -509,6 +529,13 @@ get a `status` report. At 100% jeet **pauses** the node's subtree and reports
 `blocked: budget`. The parent can `jeet manager budget fix-x +1h` within its
 own remaining budget, or stop it. (`jeet manager budget` works on any
 descendant, workers included.)
+
+**Phase 2 (as built).** Time is busy time only, while the agent runs or
+waits on a prompt (P19), not while its pane is merely alive: an idle
+manager waiting on reports spends nothing. At 100% jeet pauses the node and
+each ancestor whose own subtree is at or over its limit, not the subtree:
+running descendants finish their turn and get nothing new (P16). A review
+job runs no hooks, so nothing is charged against it.
 
 ### 5.4 Stopping a runaway subtree
 
@@ -679,8 +706,9 @@ status files and `task_reports` in the existing two-second refresh thread.
 ## 7. Harness neutrality
 
 Managers run on any harness that implements the #23 trait. A harness that
-lacks a **required** item refuses `jeet manager new --harness <id>` with the
-missing piece named. Workers keep #23's degrade-don't-fail rule.
+lacks a **required** item refuses `jeet manager new` with the missing piece
+named. As built there is no `--harness` flag: the configured harness is
+checked, as the manager is made and at each start (P12). Workers keep #23's degrade-don't-fail rule.
 
 | Need | #23 trait today | Required for a manager? |
 |---|---|---|
@@ -748,12 +776,14 @@ row, so past the last column it would never show).
   archive/delete.
 - Generalise `assistant/` into `manager/`: `ensure_files` with a manager
   template, `session_context`, multi-session windows. The assistant becomes
-  `manager::root()`.
+  `manager::root()`. As built, the move is minimal (P24): a manager is a
+  single-session node, so multi-session windows and the assistant's session
+  machinery stay in `assistant/`.
 - Touch points: new `src/manager/` (from `assistant/mod.rs`),
   `permissions.rs`, `config.rs` (`[managers]`), `tasks.rs`
   (archive/delete/unarchive cascade), `worktrees.rs` and `db/tasks.rs`
   (`read_only`), `harness/` (`interrupt`, deny rules),
-  `startup.rs` (#23 trust scope: managers follow `auto_trust` as workers do), `cli.rs`.
+  `startup.rs` (`auto_trust` covers manager homes, P5), `cli.rs`.
 
 **Phase 3: the agents pane.** (#35)
 - The agents tab, rollup, `l`/`i`/`b`/`a`, pause/stop keys, and `n` with
@@ -1694,6 +1724,52 @@ Managers run locally in tmux, as the user, like any other task (I22).
   it was, so a child made after a lone task's confirm is refused, not
   swept up; `a` in the archived view brings the tree back. The log line
   of a recursive teardown says `and every task under it`.
+- **P24** The M numbers cited above are the phase 2 plan's decisions.
+  Where each is recorded: M0 I22 and §11; M1 here; M2 P11; M3 5.7; M4
+  (`Caller` stays user, root or node: a manager is a node, told apart by
+  its kind); M5 P7; M6 §2; M7-M8 P7; M9 P6, P9; M10-M11 P8; M12 §3, P11;
+  M13-M14 P11; M15 P16, here; M16-M18 P16-P18; M19 5.3, P19; M20 P11,
+  here; M21 5.3, P16; M22 P16-P18, here; M23 P2, P23; M24 P4; M25 here;
+  M26-M27 P21; M28 5.7, P5; M29 P13, P15, here; M30 P16, here; M31 P13;
+  M32 P6; M33 the README; M34 P3; M35 P22; M36 P12; M37 P10; M38 P18;
+  M39 P21. What the notes above leave out:
+  - M1: there is no boundary rule. `placement::for_new()` gives `local`
+    for every kind and depth; a `[managers] placement` key left in
+    config.toml from an earlier design is ignored, not an error (a test
+    pins it).
+  - M15: the assistant, which has no budget of its own, may raise a
+    budget after an automatic 100% pause (within what is left above the
+    task) and then resume it, since `budget` ranks lowest among setters.
+    This is intended. `manager budget` never changes the run state, so it
+    needs no rank check; `resume` is the only way back to `run`.
+  - M20: `default_budget` goes to a manager and a manager's child only,
+    not to every child as §3 had it, so the assistant's workers, the
+    user's and tasks made before phase 2 keep running with no budget.
+  - M22, a change in behaviour: `max_live` counts every running task under
+    the assistant, the assistant's own workers included (top-level tasks
+    are not counted). At the default 8, the assistant's ninth running
+    worker is queued where it used to start. The user's own open starts it
+    anyway, with a warning.
+  - M25: the move into `src/manager/` is minimal, not §1's and §8's
+    "generalise `session_context`, multi-session windows". A manager is
+    started by its parent into one `jeet-<slug>` session and typed into
+    through `TmuxAgent`, as a worker is; it needs none of the windows that
+    let the user talk to the assistant in several sessions. So
+    `src/manager/` holds the templates by role, `ensure_files`, the
+    fences, the inbox take, `context_text` by role, `write_brief`,
+    `tree_path`, `first_prompt` and `root()`, while `assistant/` keeps
+    its windows, `SessionAgent` and session machinery, re-exporting what
+    moved. The assistant's output is unchanged to the byte, and a
+    manager's session context comes through the `kind` switch in the
+    SessionStart hook (P21).
+  - M29: the commands are `jeet manager …`, not #34's `jeet agent …`, by
+    decision 1 (the code says manager; UI text may say agent).
+  - M30: tests use real rows, never a placement fake. Unit tests insert
+    rows of any kind; the pause and stop walks take the runtime lookup as
+    a parameter (P16). Integration tests make managers with `jeet manager
+    new` and their children from the manager's own pane, against a stub
+    tmux with several sessions and a temporary `JEET_HOME`; raw SQL is
+    left only for states the CLI refuses to make.
 
 ## 11. Placement
 

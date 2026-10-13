@@ -659,6 +659,10 @@ harness that cannot be interrupted is refused. Under the assistant it needs
 `task.send` (which pre-approves it, as it does `jeet task send`), and an
 interrupt that sent nothing is logged as `skipped`, with why, and not
 announced; a task with a parent may not interrupt another.
+To hold a task under the assistant and everything below it rather than end
+one turn, use `jeet manager pause`, `resume` and `stop` ([Reporting to the
+parent](#reporting-to-the-parent)): a pause interrupts every working agent in
+the subtree and hands them nothing until it is resumed.
 
 ### Restarting or adopting an agent
 
@@ -679,7 +683,7 @@ failing, so you know) without `--force`; only you can restart the
 assistant. Under the assistant it needs `task.open`.
 
 jeet knows an agent by the process it launched for it ([who is
-calling](#reporting-to-the-assistant)). An agent started by an older jeet,
+calling](#the-assistants-permissions)). An agent started by an older jeet,
 or outside jeet, has no such record: `jeet task ls` marks it `(unanchored)`
 and says how to fix it, the tasks list shows `unanchored` beside its status
 (and the fix on the status line when it is selected), and its `jeet report`,
@@ -692,7 +696,7 @@ to anything running in a pane of jeet's tmux sessions, so an agent cannot
 vouch for itself or another. An adopted agent keeps the hooks it was started
 with, so its status reports to its parent may not work until it restarts.
 
-### Reporting to the assistant
+### Reporting to the parent
 
 ```bash
 jeet report progress|done|blocked|question "…"
@@ -1101,6 +1105,54 @@ into tasks.
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
 
+## What's new in v0.9
+
+Unreleased. Managers, the second phase of [hierarchical
+agents](docs/design/agent-hierarchy.md).
+
+- **`jeet manager new`** makes a manager, an agent that takes an area of
+  work, plans it and hands it to tasks (and managers) of its own under it,
+  which report to it as tasks report to the assistant. It gets a home with
+  its role, a read-only `BRIEF.md`, a worklog and a todo list, and starts at
+  once. `jeet task new --parent <manager>`, `--allow` and `--budget` place
+  and limit a task; `jeet manager ls`, `show`, `grant` and `budget` read
+  and steer the tree ([Reporting to the parent](#reporting-to-the-parent)).
+- **Managers run locally in tmux, as you, unconfined**, as every task
+  does. Their limits (what they may reach, what they are granted, their
+  budgets, `max_live`, read-only worktrees and the git denies) are
+  cooperative: they stop honest mistakes, not an agent that sets out to get
+  around jeet. A confined placement may come later.
+- **Budgets, pause and stop** for every task under the assistant: a budget
+  of busy time and turns (no cost yet), `jeet manager pause`, `resume` and
+  `stop` on a task and everything below it, and `jeet manager stop --all`,
+  whose stops only you can undo.
+- **`[managers] max_live` (default 8) now applies to the assistant's own
+  tasks:** at most that many tasks under the assistant run at once, and a
+  start past it is queued, with the parent told, until one ends. The
+  assistant's ninth running task used to start; now it waits. Raise
+  `max_live` to keep the old behaviour. Your own `jeet task open` starts
+  one anyway, with a warning.
+- **Cloning into the store needs `repo.clone`:** `jeet worktree add` and
+  `jeet task new --repo` naming a repository jeet does not have clone it,
+  for the assistant and a task with a parent, only when they hold
+  `repo.clone`, as `jeet clone` does. Add it to `[assistant] allow` if the
+  assistant should keep cloning that way. A clone URL that would land
+  outside the store is refused for everyone.
+- `--recursive` (`-r`) on `jeet task archive`, `unarchive` and `delete` takes
+  a task and every task under it, with one confirm.
+- `jeet task restart <task>` ends a task's agent and resumes its latest
+  session in a new one, keeping its conversation; refused while it is busy
+  unless `--force`. `jeet task restart assistant` does the same for the
+  assistant's windows.
+- `jeet task adopt <task>` lets you vouch, at a terminal, for an agent an
+  older jeet started, so its jeet commands work without a restart.
+- `jeet task ls` and the tasks list mark agents jeet has no record of as
+  unanchored, with the command that fixes it.
+
+**Upgrading:** the index stays at schema v6, so v0.8.1 still opens it.
+`[managers]` is checked when it is used, so a mistake there refuses work
+under the assistant, not jeet.
+
 ## What's new in v0.8
 
 - **Harnesses**: the coding agent now runs behind a harness interface, so
@@ -1124,7 +1176,7 @@ v0.8.1: the first steps toward [hierarchical agents](docs/design/agent-hierarchy
   progress|done|blocked|question`, automatic status reports when a task
   waits on you, idles or ends, and a "Your tasks" section in the
   assistant's context. Tasks with a parent are gated to what their parent
-  allows ([Reporting to the assistant](#reporting-to-the-assistant)).
+  allows ([Reporting to the parent](#reporting-to-the-parent)).
 - `jeet task interrupt` ends an agent's current turn and keeps its session.
   The assistant and tasks under it are denied force-pushes, pushes to a
   default branch and PR merges.
@@ -1145,17 +1197,6 @@ idle (and `jeet task restart assistant` for the assistant's windows), or,
 to leave work in progress running, `jeet task adopt <task>` (and `jeet task
 adopt assistant`) from a terminal outside jeet's tmux sessions, then restart
 it later for the new hooks.
-
-Unreleased, since v0.8.1:
-
-- `jeet task restart <task>` ends a task's agent and resumes its latest
-  session in a new one, keeping its conversation; refused while it is busy
-  unless `--force`. `jeet task restart assistant` does the same for the
-  assistant's windows.
-- `jeet task adopt <task>` lets you vouch, at a terminal, for an agent an
-  older jeet started, so its jeet commands work without a restart.
-- `jeet task ls` and the tasks list mark agents jeet has no record of as
-  unanchored, with the command that fixes it.
 
 ## What's new in v0.7
 
@@ -1362,7 +1403,19 @@ prs`, `worktree ls`/`path`), and `jeet task ls` lists only it. The reads
 that name no task (`jeet ls`, `jeet prs`, …) are free. Anything else is
 refused, whatever the assistant holds, `project.read` (`jeet projects ls`)
 included, as are `jeet notify`, `jeet todo` and review jobs; the refusal
-tells it to ask with `jeet report`. When the assistant reads what a task
+tells it to ask with `jeet report`.
+
+A manager (`jeet manager new`) is gated the same way, by its own grant
+(`--allow`, or `[managers] manager_default`) cut by every list above it,
+but it reaches its subtree rather than only itself: it makes tasks and
+managers under itself (`--parent` names itself or a manager below it), and
+the `jeet task` and `jeet manager` commands its grant allows act on tasks
+below it, never on its parent, a sibling or another subtree. `jeet manager
+stop --all` is yours alone. Its settings pre-approve the `jeet` commands of
+what it holds, read at each start, since nobody sits at its pane. Its
+worktrees are read-only, and on a harness with deny rules it is also denied
+`git commit`, `git push`, `git checkout -b` and `git switch -c`: it hands
+code changes to a worker. When the assistant reads what a task
 said with `jeet task last`, it gets it fenced as untrusted, as it gets
 reports, and the status beside it (which the task's agent can write) unable
 to close or open a fence. The assistant's own
