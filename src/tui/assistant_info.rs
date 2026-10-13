@@ -416,6 +416,7 @@ mod tests {
                 .push_to(
                     &assistant::fence_message("task fix-login", "please \x1b[2Jlook"),
                     None,
+                    messages::Sender::Agent,
                 )
                 .unwrap();
         }

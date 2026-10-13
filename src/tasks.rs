@@ -34,7 +34,7 @@ use crate::git;
 use crate::identity;
 use crate::manager;
 use crate::manager::budget::{self, Limits};
-use crate::messages::{self, Delivered};
+use crate::messages::{self, Delivered, Sender};
 use crate::permissions::{self, Caller, Grant, Target, Verb};
 use crate::placement;
 use crate::projects::{self, Project};
@@ -2735,8 +2735,9 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<
         let who = manager::label(mover);
         let agent = messages::TmuxAgent::new(app, mover).may_start(false);
         if messages::Agent::alive(&agent) {
-            let told = reports::brief_context(app, mover)
-                .and_then(|brief| messages::deliver(&task_dir(app, mover), &agent, &brief));
+            let told = reports::brief_context(app, mover).and_then(|brief| {
+                messages::deliver(&task_dir(app, mover), &agent, &brief, Sender::Agent)
+            });
             lines.push(format!("{who}'s new brief: {}", delivered_words(&told)));
         }
         let mut body = format!("moved here from {from} by {by}");

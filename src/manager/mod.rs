@@ -773,8 +773,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let inbox = messages::Inbox::lock(dir.path()).unwrap();
-            inbox.push_to("for p", Some("p")).unwrap();
-            inbox.push_to("for one that ended", Some("gone")).unwrap();
+            inbox
+                .push_to("for p", Some("p"), messages::Sender::Agent)
+                .unwrap();
+            inbox
+                .push_to("for one that ended", Some("gone"), messages::Sender::Agent)
+                .unwrap();
             inbox.push("for anyone").unwrap();
         }
         let running = || vec!["p".to_string(), "s".to_string()];

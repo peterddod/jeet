@@ -42,6 +42,12 @@ pub const HOOK_EVENTS: [&str; 7] = [
 /// Seconds Claude gives a hook before giving up on it.
 const HOOK_TIMEOUT_SECS: u64 = 10;
 
+/// The `timeout` of the wake channel's hook, which runs in the background
+/// for the session's life: a day. Should Claude end it at this, its lock
+/// goes with it and what it was posting is recovered, so delivery falls
+/// back to the Stop hand-over and typing, as without one.
+pub const WAKE_TIMEOUT_SECS: u64 = 86_400;
+
 /// The trust prompt Claude shows once for a folder not under one already
 /// trusted, before any hook runs:
 ///
@@ -149,6 +155,13 @@ impl Harness for ClaudeCode {
             cwd: input.cwd,
             transcript: input.transcript_path.map(PathBuf::from),
         })
+    }
+
+    /// Its messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`), which takes a
+    /// peer session's message as a turn when idle and at the next tool call
+    /// when busy.
+    fn wake_hook(&self) -> bool {
+        true
     }
 
     fn wake_env(&self) -> Option<WakeEnv> {
@@ -439,8 +452,10 @@ fn asks_the_user(input: &HookInput) -> bool {
 }
 
 /// The `--settings` JSON: a hook per event running `jeet task-hook` for the
-/// task, permission to run the commands `allow` names, as `Bash(…)` rules,
-/// and, when there are any, `Bash(…)` rules denying those `deny` names.
+/// task, with `wake` a second at session start running `jeet inbox watch`
+/// in the background (`async`, so the session does not wait on it),
+/// permission to run the commands `allow` names, as `Bash(…)` rules, and,
+/// when there are any, `Bash(…)` rules denying those `deny` names.
 /// `jeet` runs outside Claude's sandbox, should the user turn it on: jeet
 /// knows its caller by the processes above it, which a sandbox with its own
 /// process ids (bubblewrap's, on Linux) hides, and on every platform it
@@ -451,13 +466,20 @@ fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
     for event in HOOK_EVENTS {
-        let mut group = serde_json::json!({
-            "hooks": [{
+        let mut commands = vec![serde_json::json!({
+            "type": "command",
+            "command": format!("{program} task-hook --task {} {event}", hooks.task_id),
+            "timeout": HOOK_TIMEOUT_SECS,
+        })];
+        if event == "SessionStart" && hooks.wake {
+            commands.push(serde_json::json!({
                 "type": "command",
-                "command": format!("{program} task-hook --task {} {event}", hooks.task_id),
-                "timeout": HOOK_TIMEOUT_SECS,
-            }]
-        });
+                "command": format!("{program} inbox watch --task {}", hooks.task_id),
+                "async": true,
+                "timeout": WAKE_TIMEOUT_SECS,
+            }));
+        }
+        let mut group = serde_json::json!({ "hooks": commands });
         if event == "PreToolUse" {
             group["matcher"] = serde_json::json!("*");
         }
@@ -1007,8 +1029,10 @@ mod tests {
             exe: "/opt/it's here/jeet".into(),
             task_id: "t-1".into(),
             allow: vec!["jeet worktree".into(), "jeet ls".into()],
+            wake: true,
             ..Default::default()
         };
+        assert!(ClaudeCode.wake_hook());
         let args = ClaudeCode.hook_args(&hooks).unwrap();
         assert_eq!(args[0], "--settings");
         let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
@@ -1021,7 +1045,20 @@ mod tests {
                 hook["command"],
                 format!(r"'/opt/it'\''s here/jeet' task-hook --task t-1 {event}")
             );
+            assert_eq!(hook["timeout"], HOOK_TIMEOUT_SECS, "{event}");
+            assert!(hook.get("async").is_none(), "{event}");
+            let n = groups[0]["hooks"].as_array().unwrap().len();
+            assert_eq!(n, if event == "SessionStart" { 2 } else { 1 }, "{event}");
         }
+        // The wake channel, in the background beside the session's own hook.
+        let watch = &value["hooks"]["SessionStart"][0]["hooks"][1];
+        assert_eq!(watch["type"], "command");
+        assert_eq!(
+            watch["command"],
+            r"'/opt/it'\''s here/jeet' inbox watch --task t-1"
+        );
+        assert_eq!(watch["async"], true);
+        assert_eq!(watch["timeout"], WAKE_TIMEOUT_SECS);
         assert_eq!(value["hooks"]["PreToolUse"][0]["matcher"], "*");
         assert!(value["hooks"]["Stop"][0].get("matcher").is_none());
         assert_eq!(
@@ -1037,6 +1074,26 @@ mod tests {
     }
 
     #[test]
+    fn settings_start_no_wake_channel_unless_asked() {
+        let hooks = HookSetup {
+            exe: "/bin/jeet".into(),
+            task_id: "t".into(),
+            ..Default::default()
+        };
+        let args = ClaudeCode.hook_args(&hooks).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        let start = value["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(start.len(), 1);
+        assert_eq!(
+            start[0]["command"],
+            "'/bin/jeet' task-hook --task t SessionStart"
+        );
+        assert!(!args[1].contains("inbox watch"));
+    }
+
+    #[test]
     fn settings_carry_deny_rules() {
         let hooks = HookSetup {
             exe: "/bin/jeet".into(),
@@ -1047,6 +1104,7 @@ mod tests {
                 "git push --force*".into(),
                 "git push * main".into(),
             ],
+            wake: false,
         };
         assert_eq!(ClaudeCode.enforcement(), Enforcement::Rules);
         let args = ClaudeCode.hook_args(&hooks).unwrap();

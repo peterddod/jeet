@@ -181,6 +181,15 @@ pub trait Harness: Sync {
         Ok(HookEvent::default())
     }
 
+    /// Whether it can have a wake channel: a background hook at session
+    /// start running `jeet inbox watch`, which hands it what is queued
+    /// as soon as it is queued (see `src/waiter.rs`). Optional: without it,
+    /// what is queued waits for its Stop or is typed in once it is idle.
+    /// Installed when [`HookSetup::wake`] asks for it.
+    fn wake_hook(&self) -> bool {
+        false
+    }
+
     /// The wake channel (`jeet inbox watch`) of the session whose hook this
     /// runs in, from the hook's environment, which loses it so nothing this
     /// starts inherits it. `None` when the harness has none, or the hook
@@ -326,6 +335,9 @@ pub struct HookSetup {
     /// `git push --force*`. Kept only by a harness with
     /// [`Enforcement::Rules`].
     pub deny: Vec<String>,
+    /// Install the wake channel's hook too: set from
+    /// [`Harness::wake_hook`] and `[harness] wake`.
+    pub wake: bool,
 }
 
 /// One hook report, in jeet's terms.
@@ -557,6 +569,8 @@ mod tests {
         assert!(h.accept_trust("Yes, I trust this folder").is_none());
         assert!(h.tested_version().is_none());
         assert!(h.last_messages(Path::new("/"), "x", 1).is_none());
+        assert!(!h.wake_hook());
+        assert!(h.wake_env().is_none());
     }
 
     /// A harness with everything a manager needs, less what `drop` names.
@@ -598,6 +612,8 @@ mod tests {
     #[test]
     fn a_manager_needs_sessions_hooks_continue_output_interrupt_and_rules() {
         assert!(manager_missing(&claude::ClaudeCode).is_empty());
+        // The wake channel is optional: a harness without one lacks nothing.
+        assert!(!Partial("").wake_hook());
         assert!(manager_missing(&Partial("")).is_empty());
         assert_eq!(
             manager_missing(&Generic),

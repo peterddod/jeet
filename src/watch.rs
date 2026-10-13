@@ -42,7 +42,7 @@ use crate::context::App;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::manager::run;
-use crate::messages::{self, Delivered, TmuxAgent};
+use crate::messages::{self, Delivered, Sender, TmuxAgent};
 use crate::notify;
 use crate::reports;
 use crate::store;
@@ -869,7 +869,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                 Ok(Some(task)) => {
                     let dir = tasks::task_dir(app, &task);
                     let agent = TmuxAgent::new(app, &task);
-                    match messages::deliver(&dir, &agent, &task_message(event)) {
+                    match messages::deliver(&dir, &agent, &task_message(event), Sender::Agent) {
                         Ok(delivered) => {
                             sent[i] = Sent::Task(task.slug.clone());
                             held[i] = still_notified(delivered);
@@ -913,7 +913,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         // rule is there so that it acts on them.
         let agent = TmuxAgent::new(app, &manager);
         for (text, carried) in batched(MANAGER_HEAD, theirs) {
-            match messages::deliver(&dir, &agent, &text) {
+            match messages::deliver(&dir, &agent, &text, Sender::Agent) {
                 Ok(delivered) => {
                     for &i in &carried {
                         sent[i] = Sent::Manager(manager.slug.clone());

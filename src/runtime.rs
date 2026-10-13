@@ -400,7 +400,7 @@ fn launch_argv(
     };
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let hooks = task_hooks(app, task, exe)?;
+    let hooks = task_hooks(app, task, spec.harness, exe)?;
     // The task's agent is not running, so no other session's file is in use.
     argv.extend(hook_args(&app.home, spec.harness, &hooks, &id, &[])?);
     if let Some(prompt) = prompt {
@@ -457,11 +457,23 @@ pub fn latest_session(dir: &Path, known: &[TaskSessionRecord]) -> Option<String>
         .map(|s| s.session_id.clone())
 }
 
-/// jeet's hooks for a task's agent, with what it is denied (nothing for a
-/// top-level task). A manager, started with nobody at its pane, also has
-/// the commands of what it holds pre-approved, read at each start, as the
-/// assistant has those of `[assistant] allow`.
-fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<HookSetup> {
+/// Whether an agent run by `harness` gets a wake channel: when the harness
+/// has one and `[harness] wake` is not off.
+pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
+    harness.wake_hook() && app.config.wake()
+}
+
+/// jeet's hooks for a task's agent run by `harness`, with what it is denied
+/// (nothing for a top-level task) and its wake channel ([`wake`]). A
+/// manager, started with nobody at its pane, also has the commands of what
+/// it holds pre-approved, read at each start, as the assistant has those of
+/// `[assistant] allow`.
+fn task_hooks(
+    app: &App,
+    task: &TaskRecord,
+    harness: &dyn harness::Harness,
+    exe: std::path::PathBuf,
+) -> Result<HookSetup> {
     let mut allow = ALLOWED.map(str::to_string).to_vec();
     match task.kind {
         TaskKind::Manager => {
@@ -484,24 +496,28 @@ fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<H
         task_id: task.id.clone(),
         allow,
         deny: permissions::task_deny(app, task)?,
+        wake: wake(app, harness),
     })
 }
 
 /// jeet's hooks for the assistant, pre-approving the read-only jeet
 /// commands and those of each capability `[assistant] allow` lists, so
 /// allowed actions do not prompt, and denying force-pushes, merges outside
-/// `jeet pr merge` and pushes to any of `branches`.
+/// `jeet pr merge` and pushes to any of `branches`; with its wake channel
+/// when `wake` (see [`wake`]).
 pub fn assistant_hooks(
     exe: std::path::PathBuf,
     settings: &AssistantConfig,
     branches: &[String],
     task_id: &str,
+    wake: bool,
 ) -> HookSetup {
     HookSetup {
         exe,
         task_id: task_id.to_string(),
         allow: permissions::allowed_commands(&settings.allow),
         deny: permissions::denied_commands(branches),
+        wake,
     }
 }
 
@@ -891,7 +907,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a");
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
         assert!(
             hooks.allow.contains(&"jeet task send".into()),
             "{:?}",
@@ -942,7 +958,9 @@ mod tests {
             app.db.insert_task(task).unwrap();
             app.db.set_grants(&task.id, &grant).unwrap();
         }
-        let hooks = task_hooks(&app, &api, "/bin/jeet".into()).unwrap();
+        let claude = harness::default_harness();
+        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        assert!(hooks.wake);
         for allowed in [
             "jeet task new",
             "jeet manager new",
@@ -966,8 +984,30 @@ mod tests {
         assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
         assert!(!hooks.allow.contains(&"jeet todo".to_string()));
         // A worker asks at the prompt, as before.
-        let hooks = task_hooks(&app, &worker, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
         assert_eq!(hooks.allow, ALLOWED.map(str::to_string));
+        assert!(hooks.wake);
+        // No wake channel for a harness without one, nor with
+        // `[harness] wake = false`.
+        let generic = &harness::Generic;
+        assert!(
+            !task_hooks(&app, &worker, generic, "/bin/jeet".into())
+                .unwrap()
+                .wake
+        );
+        app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: None,
+            command: None,
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: Some(false),
+        });
+        assert!(!wake(&app, claude));
+        assert!(
+            !task_hooks(&app, &worker, claude, "/bin/jeet".into())
+                .unwrap()
+                .wake
+        );
     }
 
     #[test]
@@ -977,7 +1017,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a");
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
         for denied in ["gh pr merge", "git push --force*", "git push * main"] {
             assert!(hooks.deny.contains(&denied.into()), "{:?}", hooks.deny);
         }
@@ -1009,7 +1049,7 @@ mod tests {
             rules: Vec::new(),
         };
         let exe = format!("/{}/jeet", "d".repeat(200));
-        let hooks = assistant_hooks(exe.into(), &settings, &branches, &task);
+        let hooks = assistant_hooks(exe.into(), &settings, &branches, &task, true);
         let claude = &crate::harness::claude::ClaudeCode;
         let args = hook_args(home.path(), claude, &hooks, &session, &[]).unwrap();
         let path = settings_dir(home.path(), &task).join(format!("{session}.json"));
@@ -1038,7 +1078,7 @@ mod tests {
             assert!(deny.as_array().unwrap().contains(&rule), "{branch}");
         }
         // A relaunch replaces it whole, and leaves nothing else behind.
-        let fewer = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task);
+        let fewer = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task, true);
         hook_args(home.path(), claude, &fewer, &session, &[]).unwrap();
         assert!(!read().to_string().contains(&long));
         assert_eq!(mode(&path), 0o600);
@@ -1070,7 +1110,7 @@ mod tests {
             notify: None,
             rules: Vec::new(),
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task);
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task, true);
         let claude = &crate::harness::claude::ClaudeCode;
         let dir = settings_dir(home.path(), &task);
         let launch = |session: &str, running: &[String]| {
