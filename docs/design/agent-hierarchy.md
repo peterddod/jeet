@@ -717,8 +717,8 @@ is no cost column (#26) and no wake cell (§12).
 | `i` | the node's open ask, inbox and reports by and to it, newest first; `⏎` opens the node's PRs (a report carries no link, D18) |
 | `a` | answer the open question nearest this node (§4, "Questions and the user"): phase 4 (#36) |
 | `b` | brief, grant, effective allow-list, budget, run state and its own open ask |
-| `p` / `P` | pause / resume the subtree |
-| `x` | stop the subtree (asks first, listing what is running) |
+| `p` / `P` | pause / resume the subtree; refused on the assistant, as `jeet manager pause` refuses it |
+| `x` | stop the subtree (asks first, listing what is running); on the assistant, every task under it (`stop --all`, P8) |
 | `n` | new task or manager under the assistant or a manager (#21's form, plus kind, goal, done, budget, allow; a manager has no repositories). A manager starts at once; a worker is made but not started, as `n` in the active view starts none, and `⏎` starts it. On a worker `n` is refused |
 
 The pane acts as the user: `l`, `i` and `b` (and the keys that change

@@ -555,8 +555,8 @@ in the active tab. What jeet refuses (a manager with no goal, a capability
 the parent does not hold) is shown on the form. `l`, `i` and `b` show what
 agents wrote, unfenced, and `p`, `P`, `x` and `n` act as you, so they work
 only when you run jeet from your own terminal, not inside an agent's pane.
-Answering a question (`a`) comes with #36. The worktree, PR, archive and delete keys are
-the active tab's: `⇥` back to it.
+Answering a question (`a`) comes with #36. The worktree, PR, archive and
+delete keys are the active tab's: `⇥` back to it.
 
 ### Pull request history
 

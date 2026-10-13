@@ -12473,8 +12473,13 @@ fn agents_tab_stops_after_a_confirm() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"x");
     screen.wait_for_text("stop manager api");
-    // Each on a line of its own, leaves first (as the unit tests check).
+    // Each on a line of its own, between the panel's borders, leaves first.
     screen.wait_for_words("running now:");
+    assert!(
+        screen.shows("running now: │ │ w │ │ api │"),
+        "{}",
+        screen.plain()
+    );
     assert!(screen.shows("only you can resume it"), "{}", screen.plain());
     screen.type_keys(b"n");
     screen.wait_for_text("nothing changed");
@@ -12675,8 +12680,12 @@ fn agents_tab_reads_worklog_and_reports() {
     screen.type_keys(b"j");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"i");
+    let asked: i64 = lab
+        .index()
+        .query_row("SELECT MAX(id) FROM task_reports", [], |r| r.get(0))
+        .unwrap();
     screen.wait_for_words("open ask");
-    screen.wait_for_words("question to manager api");
+    screen.wait_for_words(&format!("#{asked} question to manager api"));
     assert!(screen.shows("keep v1?"), "{}", screen.plain());
 
     screen.esc();
