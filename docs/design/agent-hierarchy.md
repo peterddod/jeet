@@ -240,7 +240,7 @@ child made after the migration is left without it.
 | **stop** | every coding agent in the subtree is ended; rows and work kept |
 | **archive** | refused while it has active children, unless `--recursive`. With it, jeet lists everything the subtree would lose (the existing per-task archive check, for each worker), asks once, then archives leaves first |
 | **unarchive** | only itself; `--recursive` brings the subtree back. A child cannot be unarchived under an archived parent |
-| **delete** | refused while it has children (active or archived), unless `--recursive` (same listing, leaves first) or `--reparent` (children move to the grandparent, keeping grants ∩ the new parent's) |
+| **delete** | refused while it has children (active or archived), unless `--recursive` (same listing, leaves first) or `--reparent` (children move to the grandparent, each grant in the moved subtrees cut to what it may use there) |
 
 A manager can archive or delete only its own descendants. Archiving a worker
 is unchanged.
@@ -255,7 +255,8 @@ parent or when the parent already has its `max_children` active children
 (the root has no limit). Each of these two checks once before any work and
 again with the state change, in one IMMEDIATE transaction, so a child made
 meanwhile cannot slip past. `--recursive` takes the tree instead (P23);
-`--reparent` is phase 4.
+`--reparent`, which deletes the manager alone and moves its children to its
+parent, came with phase 4 (H21-H30).
 
 ## 3. Delegation
 
@@ -880,6 +881,11 @@ row, so past the last column it would never show).
   pane's `a` and needs-you rollup; see the phase 4 implementation notes.
 - Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
   `watch.rs` (dispatch) and the manager template (H18-H20).
+- `--reparent`, as built: `db/tasks.rs` (`MoveRows`, `move_refusal_in`,
+  `check_move`, `apply_move`), `tasks.rs` (`plan_move`, `plan_reparent`,
+  `delete_reparenting`, `after_move`), `manager/mod.rs` (`write_briefs`,
+  moved from `commands/manager.rs`), `reports.rs` (`StatusEvent::Moved`),
+  `cli.rs`, `commands/task.rs` and `permissions.rs` (H21-H30).
 
 **Later: cost budgets**, once #26 gives a harness `usage()`. They need a
 migration for the cost columns, `$<n>` in `--budget`, and a cost column in the
@@ -2187,6 +2193,107 @@ Notes H18-H20, numbered as the phase 4 plan maps them (its R18-R20).
   reaches new homes only (`ensure_files` never replaces a template, P21),
   so what an existing manager needs to know is in `MANAGER_HEAD`, which
   every message carries.
+
+### Phase 4 implementation notes: --reparent
+
+Notes H21-H30, numbered as the phase 4 plan maps them (its R21-R30). Only
+`jeet task delete <manager> --reparent` is built; `jeet task move`, which
+the plan left to the user's say, is not, nor what only it needs (a cycle
+check, depth, budget room above, a node-scoped `--parent`).
+
+- **H21** One library path, general enough for a move. `tasks::plan_move`
+  plans moving tasks, each with its subtree, under a new parent, writing
+  nothing; `plan_reparent` calls it with the manager's children (archived
+  ones too) and its parent, and `delete_reparenting` deletes the manager
+  and writes the move. The rows to write are a plain `db::tasks::MoveRows`
+  (movers, new parent, the task deleted, the new parent's fan-out, each
+  subtree node's grant before and after, the setters rewritten), so `db`
+  does not depend on `tasks`; there is no `MoveLimits`, since the depth
+  and budget checks it would carry are only a move's. `--reparent`
+  conflicts with `--recursive`, and a task with no children is refused
+  ("delete it without --reparent"), as is the assistant. It is CLI only:
+  the tasks list's `D` stays recursive, and the agents pane has no key for
+  it (R31).
+- **H22** Who may: what may `delete`. The gate asks `task.delete`, which
+  is held, so a manager runs it only when a parent named it in its grant;
+  it names the manager by exact slug, strictly below itself
+  (`Verb::TaskDelete`), and the action is logged to its `actions.log` as
+  "deleted task x, moving the tasks under it to its parent". The user, and
+  the assistant within `[assistant] allow`, may so delete any manager in
+  the tree.
+- **H23** Inside the tree. The movers are a manager's children, so each
+  has a parent and goes to the assistant or a manager; nothing moves to or
+  from the top level, and the movers' gating does not change.
+- **H24** Invariants, checked twice. `move_refusal_in` checks, on the
+  connection it is given: the new parent exists, is active, and is the
+  assistant or a manager; no mover is the assistant and each has a parent;
+  for a delete, the deleted task is still under the new parent and its
+  children are exactly the movers; the new parent's active children plus
+  the active movers, the deleted task not counted, fit its `max_children`
+  (archived movers do not count; the assistant has no limit); no node's
+  effective run state changes (H26); and the subtrees, their stored grants
+  and the setters to rewrite are as planned. Anything that changed since
+  the plan is "the tasks to move changed since jeet looked; try again".
+  `check_move` runs it before anything is asked or removed, and
+  `apply_move` again in one IMMEDIATE transaction before it writes. A
+  reparent moves to the grandparent, so it cannot make a cycle, every
+  moved node becomes shallower, and spend stays above the movers: those
+  are not checked, and `insert_child` has no depth re-check yet, since
+  nothing else can make a node deeper than its creation did.
+- **H25** Grants never widen, now or later. Every node of the moved
+  subtrees, archived ones too, has its stored grant replaced by its
+  effective list before the move, less what the new chain cuts. For a
+  reparent the new chain is the old one less the deleted manager, so the
+  effective lists are unchanged: what goes is only what a node's grant
+  named and the deleted manager cut. That is dropped, not freed, so it
+  cannot become effective unannounced if the new parent is later granted
+  it. Each node that drops something is named in the confirm and the
+  output ("w's grant drops pr.comment, which it could not use where it
+  was"). With effective lists unchanged, no harness rules go stale and no
+  `record_held` is needed.
+- **H26** Run state. A reparent is refused if it would change any moved
+  node's effective run state, which for a delete means the manager's own
+  pause or stop held the tasks under it: "task w is paused where it is,
+  and would be running under assistant; pause or resume first". A node
+  paused or stopped by a setter
+  off the new chain (the deleted manager, say) is held by the caller
+  instead when the caller ranks as high (`run::outranks`); otherwise the
+  move is refused, so no node escapes a hold by moving.
+- **H27** Budgets. The deleted manager's use is folded into its parent
+  (`keep_spend_in`) and its children's use is still below it, so no
+  total above changes and no budget is checked or enforced.
+- **H28** Reports. In the transaction, every report addressed to the
+  deleted manager, open or not, is re-addressed to its parent before its
+  row goes, so the `ON DELETE CASCADE` on `to_id` does not take the
+  children's history or their open questions; the output says how many
+  were kept. The manager's own reports go with its row. A moved task's
+  open question is named to its new holder in the status report of H29,
+  but not delivered to it again: re-delivering each open ask, fenced as an
+  escalated question `via="jeet (moved)"`, needs phase 4's definition of
+  an open ask and its escalation fence (PR A1), and is a follow-up once
+  those are in.
+- **H29** Telling the tree. After the commit (`tasks::after_move`): every
+  active manager in the moved subtrees gets its `BRIEF.md` again, since
+  its path changed (`manager::write_briefs`, moved from the CLI module so
+  the library can call it); a running mover is handed its new brief
+  (`reports::brief_context`) with `may_start(false)`, and one not running
+  gets it as it starts; and each active mover files a jeet-worded
+  `status` report to its new parent, "moved here from manager api by the
+  user; its open question #42 is yours now" (`StatusEvent::Moved`,
+  through `reports::auto_status` as the hooks' status events, so it never
+  starts the parent). The open question is `manager::open_ask`'s. Every
+  line printed names tasks by slug and path, never by a task's name, which
+  a manager writes. A delivery that fails is a line in the output; the
+  move stands.
+- **H30** Order and accepted gaps. The plan and the confirm come first,
+  then the manager's agent is ended and its files removed as a lone
+  delete's are, then the move is written. A refusal at that point leaves
+  the row ("task api's files are removed but its row is kept: run the
+  delete again"), as `--recursive` does (P23). Unfenced messages the
+  deleted manager queued in a mover's inbox stay; the new parent's summary
+  introduces them as its parent's or the user's, which is no longer
+  exact. The tasks list's and agents pane's `x`/`D` confirms act on the
+  ids they recorded, even if a task moved in between.
 
 ## 11. Placement
 
