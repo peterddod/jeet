@@ -7347,7 +7347,7 @@ action = "manager:Fe API"
 /// start waits in the queue with the event, and the user is not notified.
 #[cfg(unix)]
 #[test]
-fn a_rule_starts_a_manager_through_the_gate() {
+fn a_rule_starts_a_stopped_manager_through_the_gate() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
