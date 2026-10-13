@@ -202,7 +202,8 @@ it to survive a hand-over that empties the inbox.
 **Phase 1 (as built, D0).** v4 is additive only: `ALTER TABLE tasks ADD
 COLUMN parent_id … REFERENCES tasks(id) ON DELETE RESTRICT`, the
 `tasks_parent` index, `task_briefs`, and `task_reports` as above (with the
-phase-4 columns `needs_user`/`answer`/`answered_by`, unread for now). The
+phase-4 columns `needs_user`/`answer`/`answered_by`, read from phase 4 on,
+H2). The
 `manager` kind, `run_state`, `task_grants`, `task_budgets` and `read_only`
 were to move to v5. #33 took v5 instead, also additive: `tasks.placement`
 (only `local` for now, the default, checked by a `CHECK`)
@@ -408,8 +409,10 @@ root's behalf:
    question is within the parent's own brief:
    `jeet report answer 42 "drop it"`. jeet delivers the answer to the asker
    as `<jeet-answer to="42" from="manager backend">`.
-2. Otherwise the parent escalates: `jeet report escalate 42 [--note "…"]`.
-   `to_id` moves to the grandparent, and the original row keeps its origin.
+2. Otherwise the parent escalates: `jeet report escalate 42`. `to_id`
+   moves to the grandparent, and the original row keeps its origin. There
+   is no `--note`: an escalating manager that wants to add context sends
+   its own `jeet report progress "re #42: …"` (H6).
    The root's only escalation is to the user: `jeet report escalate 42` at the
    root sets `needs_user = 1`.
 3. With `needs_user = 1`, every ancestor shows **needs you** in the pane, and
@@ -427,9 +430,35 @@ root's behalf:
 
 Managers and workers below the root lose `jeet notify`. For them it becomes a report.
 
-Until phase 4 there is no `needs_user`, so the only *needs you* the agents
-pane (§6) shows is a prompt: one in the assistant's own pane, or one rolled
-up from below.
+Until the agents pane reads `needs_user` (the TUI half of phase 4, still to
+come), the only *needs you* it shows (§6) is a prompt: one in the
+assistant's own pane, or one rolled up from below.
+
+**Phase 4 (as built, without the TUI).**
+- An ask is a `question` or `blocked` report (`blocked` is answered and
+  escalated like a question). It is *open* while it is unanswered and is
+  the asker's last report other than jeet's own `status`: a task that
+  reports again, asks again included, has moved on and the old ask closes.
+  An answer closes it at once (H3), and so does archiving the asker.
+- Only the holder (`to_id`) answers or escalates, and never once it has
+  passed the ask to the user. The user may answer any open ask in the tree,
+  even one a manager still holds. A worker holds nothing, and a node never
+  answers sideways or above itself (H5, H7).
+- The answer reaches the asker by today's delivery and may start it. A copy,
+  the question (still untrusted, cut so the whole fits a message) then the
+  answer, goes to each manager on the path the ask took, from the asker's
+  parent up to and including its holder, but the answerer. Managers above a
+  holder the user answered past never saw the question and get nothing
+  (H10).
+- `answered_by` is the answerer's task id, or `user` (§2); a deleted
+  answerer shows as "a deleted task" (H9).
+- The needs-you notification is sent whatever `[assistant] notify` says:
+  that flag mutes the assistant's own `jeet notify` (H11).
+- `jeet report ls` lists the open asks the caller holds; for the user, at
+  their own terminal, every one in the tree, those with the user first
+  (H12).
+- An answer is kept even when its delivery fails, and is not sent again
+  (H10).
 
 **Phase 1 (as built).** `jeet report` takes no `--link`/`--option` (D18).
 A report holds at most 2000 bytes once cleaned, so even fenced it fits a
@@ -572,6 +601,19 @@ power.
 - **The real control is the allow-list, not the fence.** A worker that was
   fooled can at most report. A manager that was fooled can at most do what
   its effective list allows, and only to its subtree.
+- An answer is fenced as `<jeet-answer to="42" from="…"[ copy="true"]>`. It
+  is the asker's own chain speaking, or the user, so it is not marked
+  untrusted, but its body still cannot close the fence; `from` is `user` or
+  the answerer's slug-based label, as jeet resolved it. An ask passed on is
+  `<jeet-report … via="manager backend" untrusted="true">` (H9).
+- No agent can forge one: `jeet task send` and `jeet task new --prompt` by
+  anyone but the user at a terminal turn every `<jeet-` and `</jeet-`, in
+  any case, into `‹jeet-` and `‹/jeet-` (`manager::fence::defang`, H14).
+- "At a terminal" is `task adopt`'s bar, in one helper
+  (`permissions::at_terminal`): no task found for the caller, no
+  `JEET_TASK_ID`, not `JEET_ASSISTANT`, and no pane of jeet's own tmux
+  sessions above it. A top-level task's agent is `Caller::User` too, and
+  fails it (H8).
 - `jeet watch` routes to the root, to the task a PR belongs to, and to a
   manager a rule names (`action = "manager:backend"`, phase 4). The slug
   is resolved as each poll sends, by slug alone (a manager writes names);
@@ -827,8 +869,12 @@ row, so past the last column it would never show).
   managers, and `--reparent`.
 - `a` in the agents pane: answer the node's open ask, or the nearest one
   below it (moved from phase 3).
-- Touch points: `commands/` (report), `notify.rs`, `watch.rs` (routing), and
-  the TUI answer flow.
+- Touch points: `db/tasks.rs`, `reports.rs`, `manager/{mod,fence,context}.rs`,
+  `commands/{report,task,manager}.rs`, `permissions.rs`, `config.rs`,
+  `watch.rs`, `tasks.rs`, `tui/{managers,tasks,tasks_ui}.rs` and the
+  templates. Answers, copies and watch events use today's delivery (no
+  phase 2a). As built so far: escalation and answers without the TUI, see
+  the phase 4 implementation notes.
 - Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
   `watch.rs` (dispatch) and the manager template (H18-H20).
 
@@ -1956,6 +2002,118 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
 - **A23** This section, §4, §6, §8 and §12 were brought in line with the
   pane as built, and the README has an agents-tab section.
 
+### Phase 4 implementation notes
+
+Where phase 4 (#36) settled what this RFC left open, or departed from it.
+An *H* number records the phase 4 plan's decision of the same *R* number
+(*E* and *R* were taken). This part is escalation and answers without the
+TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
+
+- **H1** Phase 4 lands in parts, for review size: escalation and answers
+  (library, CLI, what agents read); then the agents pane's `a` and
+  needs-you rollup; watch rules to a manager; `delete --reparent`. Until
+  the TUI's part lands, the agents view's `a` still says A18's "answering
+  comes with #36", and the pane's *needs you* does not count `needs_user`.
+- **H2** No migration: v4's `needs_user`, `answer`, `answered_by` and the
+  `task_reports_to(to_id, answer)` index suffice. Escalation moves
+  `to_id`; an answer is one guarded `UPDATE`; the path an ask took is the
+  asker's ancestors up to `to_id`. No `answered_at`, no trail, no new
+  kind.
+- **H3** One meaning of open (`OPEN_ASK` in `db/tasks.rs`, behind
+  `open_asks` and `manager::open_ask`): a `question` or `blocked`, with no
+  answer, that is the asker's last report other than `status`. So an
+  answer now closes an ask for A7, A13, A14 and `manager show`, and a
+  `progress` report withdraws one, even one with the user.
+- **H4** A question reaches the user only by escalation: there is no
+  `--to-user`, since each manager above may be able to answer within its
+  brief. When the assistant passes one up, `needs_user` becomes 1 and
+  `to_id` stays the assistant.
+- **H5** `jeet report escalate <id>`: the caller must hold the ask, open,
+  not yet with the user. A manager's goes to its parent, fenced as
+  `fence_escalated(.., via = "manager <slug>")`, which a question or
+  blocked may wake (P14). The assistant's sets `needs_user` and notifies.
+  A worker gets "you hold no question #42"; the user "you are the top;
+  answer #42 …". Check and write are one IMMEDIATE transaction, so of two
+  escalations, or an escalation and an answer, one wins; the loser gets
+  "#42 changed meanwhile; it is no longer yours to act on".
+- **H6** No `--note` on escalate: no column would keep it, and a note sent
+  only with the delivery would never reach the user. Context goes in the
+  escalator's own `progress` report.
+- **H7** The user answers any open ask in the tree. The assistant and a
+  manager answer only what they hold and have not passed to the user. Both
+  commands refuse in jeet's words: no such report, not an ask ("#41 is a
+  progress report"), answered ("#42 was answered by the user"), superseded
+  ("task w has reported since (#57); #42 is no longer open"), held by
+  another ("#42 is held by manager backend"), with the user, and an
+  archived asker ("unarchive it first").
+- **H8** Acting as the user (answering, or listing every open ask) needs
+  `permissions::at_terminal`, the bar `task adopt` set and now shares: no
+  task identified, `JEET_TASK_ID` unset or blank, not assistant mode, and
+  no pane of jeet's tmux sessions above the process (so a window an agent
+  opens in its own `jeet-<slug>` session with the env cleared fails). No
+  stdin-is-a-terminal check. An identity error fails closed. Otherwise:
+  "answering as you runs at your own terminal, outside jeet's tmux
+  sessions and any task's pane". An orphaned, env-stripped process still
+  passes, as 5.7 records.
+- **H9** `fence_answer` and `fence_escalated` in `manager/fence.rs`. An
+  answer is not marked untrusted; its body goes through `fence_body`.
+  `from` is `user` or `manager::label` of the answerer (a slug, never a
+  name). `answered_by` stores the answerer's task id or `user`; every
+  display resolves it, or says "a deleted task" (it has no FK).
+- **H10** The answer row is written first, then delivered to the asker
+  (`messages::deliver` with an agent that may start, through the start
+  gate and `max_live`; the assistant through its sessions), then the
+  copies, never started (`may_start = false`; the assistant's through
+  `assistant::deliver(.., false)`). Copies go to the asker's ancestors from
+  its parent up to and including the holder, less the answerer. A copy is
+  the question, fenced as `fence_escalated(.., via = "jeet (copy)")`, then
+  `fence_answer(.., copy = true)`. Fencing triples each `<`/`>`, so a long
+  question and a long answer could exceed `MAX_MESSAGE`; the answer is kept
+  whole and the question cut to fit, ending "… (cut; #42 is kept in
+  full)". An answer is cleaned, trimmed, non-empty and at most
+  `MAX_REPORT` bytes. A failed delivery leaves the row answered: the
+  command says so and exits 0, and nothing re-sends it.
+- **H11** When `needs_user` becomes 1, one desktop notification: title
+  `jeet: task w asks you (#42)`, subtitle the asker's tree path, body the
+  question as written (not passed through `printable` first: the notifier
+  already drops control characters and cuts it at `BODY_MAX`), no url.
+  It ignores `[assistant] notify`. A question that reaches only the assistant
+  notifies nobody. The notifier and the delivery are parameters of
+  `reports::escalate`/`answer`'s cores, so no unit test reaches tmux or a
+  real notifier; end to end it is tested with `JEET_NOTIFY_CMD` pointed at
+  a recording stub.
+- **H12** `jeet report ls`. The user, at a terminal (H8), sees every open
+  ask, those with the user first, marked `with you`, bodies made printable;
+  a top-level task's agent is refused, or it would read every question
+  unfenced. The assistant or a manager sees what it holds, its `needs_user`
+  ones marked `with the user`, bodies fenced as `<jeet-report>`. A worker
+  sees its own open ask. A line is `#42 question task assistant/api/w 12m
+  ago[, with you]`, then the question. No `--json`. `jeet report` became a
+  subcommand; `jeet report <kind> "…"` parses and prints as before.
+- **H13** What agents read. The assistant's and each manager's summary have
+  "## Questions you hold" (fenced in `<jeet-reports untrusted>`, with how
+  to answer and escalate), and nothing when they hold none, so the summary
+  is otherwise unchanged. `manager show`'s `open` is what the node holds,
+  however deep the asker, marked `escalated from <path>` and `with the
+  user`. Every parented node's brief says what a `<jeet-answer>` is, and a
+  manager's how to answer and escalate: templates reach new homes only
+  (`ensure_files` never replaces one), so the brief, read at every
+  SessionStart, carries the meaning. The brief's body goes through
+  `fence_body`, which would turn a spelled-out tag into `‹…›`, so those
+  lines name the fence in words ("fenced in jeet-answer, to= its id") and
+  not as `<jeet-answer …>`. The inbox texts explain a queued answer, and
+  only when one is queued. The TUI's `i` marks each report `answered by …` or `with the
+  user`, with the answer under it. The templates and the `jeet`,
+  `jeet-manager` and `jeet-managers` skills say how to answer, escalate
+  and act on an answer.
+- **H14** `jeet task send` and `jeet task new --prompt` put a sender's raw
+  text before an agent, so for anyone but the user at a terminal (H8) both
+  `defang` it: `<jeet-` and `</jeet-`, in any ASCII case, become `‹jeet-`
+  and `‹/jeet-`. Control characters are dropped first, as delivery drops
+  them, so `<\x01jeet-` cannot hide a tag, and invisible format
+  characters (a zero-width space, say) are looked past, though kept. The
+  user's own commands and the TUI's `n` form are unchanged.
+
 ### Phase 4 implementation notes: watch rules to a manager
 
 Notes H18-H20, numbered as the phase 4 plan maps them (its R18-R20).
@@ -2160,7 +2318,7 @@ session wakes whichever watcher wins the lock. `@internal` fields
 | Before 2a | the spike; no code |
 | 2a (#34) | `Harness::wake_hook`, `HookSetup.wake`, the settings entry, `src/waiter.rs`, `Delivered::Watched` routing in `messages.rs`, the idle skip and ack in `status.rs`, hidden `jeet inbox watch --task`/`take`. It does not block phase 2 |
 | 3 (#35) | the `i` view (built) and inbox depth on each row (built); `wake: armed/none` comes with 2a, so the pane as built shows nothing for wake (A19) |
-| 4 (#36) | answers, copies up the path and watch rules to managers may arrive mid-turn; the wake cap and turn accounting must exist first |
+| 4 (#36) | answers, copies and watch events use today's delivery; with no 2a, the wake-cap condition does not apply (were 2a built, they could arrive mid-turn, and the wake cap and turn accounting would have to exist first) |
 
 §9 gains: "a per-agent watcher replacing typing: accepted as an optional
 harness wake capability; the inbox, its lock and the Stop hand-over stay."

@@ -248,13 +248,13 @@ pub fn tree_order(nodes: &[TaskRecord], top: &TaskRecord) -> Vec<(usize, u32)> {
 }
 
 /// What `task` asks of its parent and has not moved on from: its last
-/// report of its own, if blocked or a question. A status report jeet files
-/// while it waits for the answer does not close it.
+/// report of its own, if blocked or a question and not answered yet. A
+/// status report jeet files while it waits for the answer does not close
+/// it. The same rule as [`crate::db::tasks::Database::open_asks`].
 pub fn open_ask(app: &App, task: &TaskRecord) -> Result<Option<TaskReportRecord>> {
-    Ok(app
-        .db
-        .last_own_report(&task.id)?
-        .filter(|r| matches!(r.kind, ReportKind::Blocked | ReportKind::Question)))
+    Ok(app.db.last_own_report(&task.id)?.filter(|r| {
+        matches!(r.kind, ReportKind::Blocked | ReportKind::Question) && r.answer.is_none()
+    }))
 }
 
 /// Who `task` is, to the tasks around it: `the assistant`, `manager
@@ -557,6 +557,11 @@ mod tests {
             .insert_report(&api.id, &parent, ReportKind::Blocked, "creds", 1200)
             .unwrap();
         assert_eq!(open_ask(&app, &api).unwrap().unwrap().id, blocked);
+        // An answer closes it.
+        app.db
+            .answer_report(blocked, None, "use these", "user")
+            .unwrap();
+        assert_eq!(open_ask(&app, &api).unwrap(), None);
     }
 
     #[test]

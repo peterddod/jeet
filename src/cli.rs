@@ -196,12 +196,11 @@ pub enum Commands {
         url: Option<String>,
     },
 
-    /// Tell this task's parent how it is going (progress, done, blocked, question)
+    /// Tell this task's parent how it is going (progress, done, blocked,
+    /// question), or answer, pass on and list the questions that reach you
     Report {
-        #[arg(value_enum)]
-        kind: crate::db::tasks::ReportKind,
-        #[arg(allow_hyphen_values = true)]
-        message: String,
+        #[command(subcommand)]
+        what: ReportCommands,
     },
 
     /// Print shell integration snippet for native cd command
@@ -218,6 +217,46 @@ pub enum Commands {
 
     /// Query & list completion candidates (repos, branches)
     Complete { what: String },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum ReportCommands {
+    /// A milestone worth knowing about
+    Progress {
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+    /// The work is finished: say where it is
+    Done {
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+    /// Stuck: say on what
+    Blocked {
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+    /// A decision this task needs from above
+    Question {
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+    /// Answer an open question you hold (any in the tree, at your own
+    /// terminal); the task that asked gets it, each manager in between a copy
+    Answer {
+        /// The question's report id, as `jeet report ls` shows it
+        id: i64,
+        #[arg(allow_hyphen_values = true)]
+        message: String,
+    },
+    /// Pass an open question you hold to your parent; from the assistant,
+    /// to the user
+    Escalate {
+        /// The question's report id
+        id: i64,
+    },
+    /// The open questions you hold (every one in the tree, for the user)
+    Ls,
 }
 
 #[derive(Subcommand)]

@@ -90,9 +90,9 @@ fn run(command: Option<Commands>) -> Result<()> {
         Commands::Notify { title, body, url } => {
             commands::notify::run(&title, body.as_deref(), url.as_deref())?
         }
-        Commands::Report { kind, message } => {
+        Commands::Report { what } => {
             let app = context::App::open()?;
-            commands::report::run(&app, kind, &message)?
+            commands::report::run(&app, what)?
         }
         Commands::InstallShell => commands::install_shell::run()?,
         Commands::Watch { once, command } => {

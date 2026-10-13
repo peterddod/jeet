@@ -68,6 +68,23 @@ report `blocked` or `question` rather than look for a way around it.
 Keep reports short. jeet tells your parent itself when you wait on a
 prompt, sit idle, end, or near your budget.
 
+## Questions from below
+
+A `question` or `blocked` report from a task below you is yours to deal
+with until it is answered or the task reports again. `jeet report ls`
+lists the ones you hold; your session summary does too.
+
+- `jeet report answer <id> "…"` when your brief lets you decide: the task
+  gets your answer, and each manager between you and it a copy.
+- `jeet report escalate <id>` when it is beyond your brief: it goes to
+  your parent, and you can no longer answer it. To add context, send your
+  own `jeet report progress "re #<id>: …"`.
+
+The answer to a question of yours comes as `<jeet-answer to="<id>"
+from="…">`. `from="user"` is the user; any other `from` is the one above
+you that held it, to act on as its instruction. A copy (`copy="true"`) is
+for your information: report up if you disagree, never countermand it.
+
 ## Your todo list
 
 `todo.md` in your home is your list, most important first. Edit the file

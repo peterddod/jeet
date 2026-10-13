@@ -100,6 +100,11 @@ starts, says so. Tell it how the task is going:
 Keep reports short; put detail in the pull request or a file and say where.
 jeet tells the parent itself when you wait on a prompt, sit idle or end.
 
+The answer to your question comes as `<jeet-answer to="<id>" from="…">`.
+`from="user"` is the user; any other `from` is the manager or the
+assistant above you, to act on as its instruction. Asking again, or any
+other report but jeet's own, withdraws a question still open.
+
 Such a task may only add worktrees to itself (when its parent may) and
 report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
 are refused. Ask your parent instead.

@@ -309,6 +309,38 @@ pub fn caller(app: &App) -> Result<Caller> {
     Ok(classify(identity::identify(app)?.task.as_ref()))
 }
 
+/// Whether this jeet runs at the user's own terminal, the bar for acting as
+/// the user where a top-level task's agent, also [`Caller::User`], must
+/// not: it runs under no task, says it runs for none, and runs in no pane
+/// of jeet's tmux sessions, so an agent's window with its environment
+/// cleared does not pass. An identity error is an error, so it fails
+/// closed.
+pub fn at_terminal(app: &App) -> Result<bool> {
+    let task = identity::identify(app)?.task;
+    let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
+    Ok(at_terminal_of(
+        task.as_ref(),
+        env_task.as_deref(),
+        assistant_mode(),
+        || identity::runs_under_any(&crate::tmux::jeet_pane_pids()),
+    ))
+}
+
+/// [`at_terminal`], given the task this jeet runs under, `$JEET_TASK_ID`,
+/// whether it says it runs for the assistant, and whether it runs in a pane
+/// of jeet's, which tmux is asked only when nothing else says no.
+fn at_terminal_of(
+    task: Option<&TaskRecord>,
+    env_task: Option<&str>,
+    assistant: bool,
+    under_jeet_pane: impl FnOnce() -> bool,
+) -> bool {
+    task.is_none()
+        && env_task.is_none_or(|v| v.trim().is_empty())
+        && !assistant
+        && !under_jeet_pane()
+}
+
 /// The capabilities `[assistant] allow` lists that jeet knows: the root's
 /// list, which every list below it is cut by.
 fn root_list(app: &App) -> Vec<&'static str> {
@@ -1887,6 +1919,15 @@ mod tests {
         for kind in ["progress", "done", "blocked", "question"] {
             assert_eq!(gate_of(&["report", kind, "x"]), Gate::Free, "{kind}");
         }
+        // The library checks who holds a question, and the command who is
+        // the user.
+        for args in [
+            &["report", "answer", "4", "x"][..],
+            &["report", "escalate", "4"],
+            &["report", "ls"],
+        ] {
+            assert_eq!(gate_of(args), Gate::Free, "{args:?}");
+        }
         // jeet's own kind is not the task's to send.
         assert!(crate::cli::Cli::try_parse_from(["jeet", "report", "status", "x"]).is_err());
     }
@@ -1920,6 +1961,21 @@ mod tests {
         assert_eq!(classify(Some(&root)), Caller::Root);
         assert_eq!(classify(Some(&task(None))), Caller::User);
         assert_eq!(classify(None), Caller::User);
+    }
+
+    #[test]
+    fn only_a_terminal_under_no_task_and_no_jeet_pane_is_the_users() {
+        let no = || false;
+        assert!(at_terminal_of(None, None, false, no));
+        assert!(at_terminal_of(None, Some(" "), false, no));
+        // A top-level task's agent is the user to the gate, but not here;
+        // and tmux is not asked once the answer is known.
+        let unasked = || panic!("tmux asked");
+        assert!(!at_terminal_of(Some(&task(None)), None, false, unasked));
+        assert!(!at_terminal_of(None, Some("t"), false, unasked));
+        assert!(!at_terminal_of(None, None, true, unasked));
+        // An agent's own window with its environment cleared.
+        assert!(!at_terminal_of(None, None, false, || true));
     }
 
     /// An index in a tempdir with the assistant, `w` and `sib` under it, and
@@ -2722,6 +2778,12 @@ mod tests {
             (&["watch", "status"], true),
             (&["notify", "t"], true),
             (&["report", "done", "x"], true),
+            (&["report", "progress", "x"], true),
+            (&["report", "blocked", "x"], true),
+            (&["report", "question", "x"], true),
+            (&["report", "answer", "4", "x"], true),
+            (&["report", "escalate", "4"], true),
+            (&["report", "ls"], true),
             (&["init-shell"], true),
             (&["install-shell"], false),
             (&["completions", "zsh"], true),

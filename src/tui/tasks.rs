@@ -4625,15 +4625,25 @@ fn report_lines(app: &App, task: &TaskRecord, dir: &Path) -> Result<(Vec<String>
             .map(|line| format!("    {line}"))
             .collect()
     };
+    // Where an ask stands: answered, with the user, or with its holder,
+    // who `→` names.
+    let state = |r: &crate::db::tasks::TaskReportRecord| -> Result<String> {
+        Ok(match (&r.answered_by, r.needs_user) {
+            (Some(by), _) => format!(" · answered by {}", crate::reports::answerer(app, by)?),
+            (None, true) => " · with the user".to_string(),
+            (None, false) => String::new(),
+        })
+    };
     let mut lines = vec!["open ask".to_string()];
     match manager::open_ask(app, task)? {
         Some(r) => {
             lines.push(format!(
-                "  #{} {} to {} · {}",
+                "  #{} {} to {} · {}{}",
                 r.id,
                 r.kind.as_str(),
                 who(&r.to_id)?,
-                age_label(r.at)
+                age_label(r.at),
+                state(&r)?
             ));
             lines.extend(body(&r.body));
         }
@@ -4654,14 +4664,19 @@ fn report_lines(app: &App, task: &TaskRecord, dir: &Path) -> Result<(Vec<String>
     }
     for r in &reports {
         lines.push(format!(
-            "  #{} {} · {} → {} · {}",
+            "  #{} {} · {} → {} · {}{}",
             r.id,
             r.kind.as_str(),
             who(&r.task_id)?,
             who(&r.to_id)?,
-            age_label(r.at)
+            age_label(r.at),
+            state(r)?
         ));
         lines.extend(body(&r.body));
+        if let Some(answer) = &r.answer {
+            lines.push("    answer:".into());
+            lines.extend(body(answer).into_iter().map(|line| format!("  {line}")));
+        }
     }
     let prs = !app.db.list_task_prs(&task.id)?.is_empty();
     Ok((lines, prs))
@@ -6331,6 +6346,46 @@ mod tests {
         // The CLI's `manager show` refuses the assistant; `b` reads it.
         let text = brief_lines(&app, &root).unwrap().join("\n");
         assert!(text.contains("- api (manager, active)"), "{text}");
+
+        // Where an ask stands: with the user, then answered, with the
+        // answer, which is kept whether or not it reached the asker.
+        app.db.escalate_report(asked, "api", "root", false).unwrap();
+        app.db.escalate_report(asked, "root", "root", true).unwrap();
+        let (lines, _) = report_lines(&app, &w, &w_dir).unwrap();
+        let text = lines.join("\n");
+        assert!(
+            text.contains(&format!("#{asked} question to the assistant · ")),
+            "{text}"
+        );
+        assert!(text.contains(" ago · with the user\n"), "{text}");
+        app.db
+            .answer_report(asked, None, "drop it\x1b[2J", "user")
+            .unwrap();
+        let (lines, _) = report_lines(&app, &w, &w_dir).unwrap();
+        let text = lines.join("\n");
+        assert!(text.starts_with("open ask\n  none"), "{text}");
+        assert!(
+            text.contains(&format!("#{asked} question · task w → the assistant · ")),
+            "{text}"
+        );
+        assert!(text.contains(" ago · answered by the user\n"), "{text}");
+        assert!(text.contains("    answer:\n      drop it[2J"), "{text}");
+        app.db
+            .insert_report(
+                "w",
+                "api",
+                crate::db::tasks::ReportKind::Question,
+                "next?",
+                3,
+            )
+            .unwrap();
+        let next = app.db.last_own_report("w").unwrap().unwrap().id;
+        app.db.answer_report(next, Some("api"), "x", "api").unwrap();
+        let (lines, _) = report_lines(&app, &w, &w_dir).unwrap();
+        assert!(
+            lines.join("\n").contains("answered by manager api"),
+            "{lines:?}"
+        );
     }
 
     fn pr(number: u64) -> TaskPrRecord {

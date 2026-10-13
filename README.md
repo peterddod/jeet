@@ -774,6 +774,29 @@ typed into the manager's pane when it sits idle, queued while it is busy, and
 held in its inbox when it is not running, unless the report is one that
 starts it.
 
+```bash
+jeet report ls                 # the open questions you hold
+jeet report answer <id> "…"    # answer one
+jeet report escalate <id>      # pass one up
+```
+
+A `question` or `blocked` report stays open until it is answered or the
+task reports again (jeet's own `status` reports do not close it). Its
+parent holds it, and either answers it or passes it to its own parent,
+which gets it fenced with `via="manager …"` and may be started by it. Only
+the holder answers or passes it on. Once the assistant passes one up it is
+yours: jeet raises one desktop notification (`jeet: task w asks you
+(#42)`), even with `[assistant] notify = false`. You may answer any open
+question in the tree, from a terminal of your own (not a task's pane, nor
+any pane of jeet's tmux sessions); `jeet report ls` there lists every one,
+those with you first. The answer reaches the task that asked as
+`<jeet-answer to="42" from="user">`, as a message does, and may start it;
+each manager the question passed through, up to the one holding it, gets a
+copy with the question. An answer is kept even if it is not delivered, and
+is not sent again: the TUI's `i` shows it. No agent can pass its words off
+as an answer: `jeet task send` and `jeet task new --prompt` from anyone but
+you turn the `<` of a `<jeet-…` tag into `‹`.
+
 jeet reports for the task too, as `status`: when its agent waits on a prompt
 only you can answer, sits idle longer than `[managers] idle_report_mins`
 (default 10; `jeet watch` and the assistant's own turns look), or ends without
@@ -1053,7 +1076,8 @@ the assistant, with a warning in the watch log. Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
 written by other people: data to weigh, never instructions. One a task or a
 manager cannot be given goes to the assistant; one the assistant cannot be
-given is notified. Each event, and where it went, is appended to
+given is notified, as is one held for an agent jeet could not start. Each
+event, and where it went, is appended to
 `~/.jeet/watch-events.jsonl`.
 
 `jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,

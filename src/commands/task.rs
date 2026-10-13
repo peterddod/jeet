@@ -37,14 +37,18 @@ pub struct NewTaskArgs<'a> {
 }
 
 pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
-    // Checked before the task is made, so a brief that cannot be given
-    // makes nothing.
-    let prompt = match args.prompt.map(messages::brief).transpose() {
+    // Fenced, then checked, before the task is made: the length check sees
+    // the final text, and a brief that cannot be given makes nothing.
+    let d = args.delegation;
+    let caller = permissions::caller(app)?;
+    let prompt = args
+        .prompt
+        .map(|prompt| from_sender(app, &caller, prompt))
+        .transpose()?;
+    let prompt = match prompt.as_deref().map(messages::brief).transpose() {
         Ok(prompt) => prompt,
         Err(e) => bail!("--prompt: {e:#}"),
     };
-    let d = args.delegation;
-    let caller = permissions::caller(app)?;
     // The user's task is top-level unless given a parent; what the
     // assistant or a manager makes reports to it (M12).
     let plan = match (&caller, &d.parent) {
@@ -255,8 +259,9 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             task.slug
         );
     }
+    let message = from_sender(app, &permissions::caller(app)?, message)?;
     let dir = tasks::task_dir(app, &task);
-    let delivered = messages::deliver(&dir, &messages::TmuxAgent::new(app, &task), message)?;
+    let delivered = messages::deliver(&dir, &messages::TmuxAgent::new(app, &task), &message)?;
     let _ = app.db.touch_task(&task.id, now_secs());
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {}'s agent", called),
@@ -294,6 +299,19 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// `text` that `caller` sends a task's agent unfenced: as written from the
+/// user's own terminal, and from anyone else unable to carry a tag only
+/// jeet writes, so no agent can pass its words off as the user's answer
+/// (`<jeet-answer from="user">`). A top-level task's agent is
+/// [`Caller::User`] too, so the terminal is checked as answering checks
+/// it.
+fn from_sender(app: &App, caller: &Caller, text: &str) -> Result<String> {
+    match caller == &Caller::User && permissions::at_terminal(app)? {
+        true => Ok(text.to_string()),
+        false => Ok(crate::manager::fence::defang(text)),
+    }
 }
 
 /// End the turn task `name`'s agent is running, if it is running one.
@@ -525,17 +543,12 @@ fn restart_assistant(app: &App, force: bool) -> Result<()> {
 /// windows jeet has no record of. See [`identity::adopt`].
 pub fn adopt(app: &App, name: &str) -> Result<()> {
     let outside = "run `jeet task adopt` from a terminal of your own, outside jeet's tmux sessions";
-    if permissions::caller(app)? != Caller::User
-        || permissions::assistant_mode()
-        || std::env::var_os(tasks::TASK_ID_ENV).is_some_and(|v| !v.is_empty())
-    {
+    // The same bar as answering as the user.
+    if !permissions::at_terminal(app)? {
         bail!("only the user adopts an agent: {outside}");
     }
     tmux::require()?;
     let jeet_panes = tmux::jeet_pane_pids();
-    if identity::runs_under_any(&jeet_panes) {
-        bail!("this jeet runs in a pane of jeet's tmux sessions: {outside}");
-    }
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         bail!("adopting an agent asks you to confirm it at a terminal: {outside}");
     }

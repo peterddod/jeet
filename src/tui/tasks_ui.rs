@@ -2138,6 +2138,9 @@ mod tests {
             kind: ReportKind::Blocked,
             body: format!("\u{1b}[2J{}\twide\u{1b}]8;;x\u{7}", "漢字".repeat(200)),
             at: 0,
+            needs_user: false,
+            answer: None,
+            answered_by: None,
         });
         let mut ui = TasksUi::new(vec![
             row("a", Some(Activity::Waiting { detail: None })),

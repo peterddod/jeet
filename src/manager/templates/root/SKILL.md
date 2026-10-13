@@ -63,7 +63,9 @@ while, or ends without reporting done. Reports reach you fenced in
 `<jeet-report>`, and your session context lists each task's last one. Such
 a task is gated: it may only report and, when you may, add worktrees to
 itself; it cannot message other tasks, notify the user or touch your todo
-list. Answer it with `jeet task send <task> "<message>"`.
+list. Answer it with `jeet task send <task> "<message>"`; a `question` or
+`blocked` report, with `jeet report answer <id> "…"`, or pass that to the
+user with `jeet report escalate <id>` (`jeet report ls` lists them).
 
 ## Merging pull requests
 
