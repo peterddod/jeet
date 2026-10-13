@@ -2288,10 +2288,12 @@ check, depth, budget room above, a node-scoped `--parent`).
   a manager writes. A delivery that fails is a line in the output; the
   move stands.
 - **H30** Order and accepted gaps. The plan and the confirm come first,
-  then the manager's agent is ended and its files removed as a lone
-  delete's are, then the move is written. A refusal at that point leaves
-  the row ("task api's files are removed but its row is kept: run the
-  delete again"), as `--recursive` does (P23). Unfenced messages the
+  then the manager's agent is ended and the move is checked again, so a
+  plan gone stale meanwhile is refused with nothing deleted. Its files are
+  then removed as a lone delete's are, and the move is written. A refusal
+  after that, from a change in the instant between, leaves the row ("task
+  api's files are removed but its row is kept: run the delete again"), as
+  `--recursive` does (P23). Unfenced messages the
   deleted manager queued in a mover's inbox stay; the new parent's summary
   introduces them as its parent's or the user's, which is no longer
   exact. The tasks list's and agents pane's `x`/`D` confirms act on the
