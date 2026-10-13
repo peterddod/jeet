@@ -180,9 +180,9 @@ pub enum EventKind {
     ProjectItemChanged,
 }
 
-/// What a rule does with the events it matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// What a rule does with the events it matches: `action = "assistant"`,
+/// `"task"`, `"notify"` or `"manager:<slug>"` in config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleAction {
     /// Hand it to the assistant, which decides what to do within what it is
     /// allowed.
@@ -192,6 +192,57 @@ pub enum RuleAction {
     Task,
     /// A desktop notification, nothing more.
     Notify,
+    /// Hand it to the manager with this slug, which acts within its own
+    /// grant and subtree. The slug is looked up as each event is sent, not
+    /// when config.toml is read: with no active manager of that slug, the
+    /// event goes to the assistant.
+    Manager(String),
+}
+
+impl RuleAction {
+    /// The action `text` names, as config.toml writes it.
+    pub fn parse(text: &str) -> Result<Self> {
+        match text {
+            "assistant" => return Ok(RuleAction::Assistant),
+            "task" => return Ok(RuleAction::Task),
+            "notify" => return Ok(RuleAction::Notify),
+            _ => {}
+        }
+        let Some(slug) = text.strip_prefix("manager:") else {
+            bail!(
+                "unknown rule action `{text}`: expected assistant, task, notify or manager:<slug>"
+            );
+        };
+        let slug = slug.trim();
+        if slug.is_empty() {
+            bail!("rule action `{text}` names no manager: write manager:<slug>");
+        }
+        Ok(RuleAction::Manager(slug.to_string()))
+    }
+}
+
+impl std::fmt::Display for RuleAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuleAction::Assistant => f.write_str("assistant"),
+            RuleAction::Task => f.write_str("task"),
+            RuleAction::Notify => f.write_str("notify"),
+            RuleAction::Manager(slug) => write!(f, "manager:{slug}"),
+        }
+    }
+}
+
+impl Serialize for RuleAction {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for RuleAction {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        RuleAction::parse(&text).map_err(|e| serde::de::Error::custom(format!("{e:#}")))
+    }
 }
 
 /// `[watch]` in config.toml.
@@ -898,5 +949,32 @@ action = "task"
         assert!(toml::from_str::<Config>(bad).is_err());
         let bad = "[[assistant.rules]]\naction = \"merge\"\n";
         assert!(toml::from_str::<Config>(bad).is_err());
+    }
+
+    #[test]
+    fn a_rule_may_name_a_manager_by_slug() {
+        let text = "[[assistant.rules]]\non = [\"ci_failed\"]\naction = \"manager:backend\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(
+            config.assistant.rules[0].action,
+            RuleAction::Manager("backend".into())
+        );
+        // Written back as it was read.
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(out.contains("action = \"manager:backend\""), "{out}");
+        let again: Config = toml::from_str(&out).unwrap();
+        assert_eq!(again.assistant.rules, config.assistant.rules);
+        for action in ["assistant", "task", "notify"] {
+            assert_eq!(RuleAction::parse(action).unwrap().to_string(), action);
+        }
+
+        // A manager with no slug is an error, as is an action jeet does
+        // not know.
+        for bad in ["manager:", "manager: ", "manager", "Manager:api", "bogus"] {
+            let text = format!("[[assistant.rules]]\naction = \"{bad}\"\n");
+            assert!(toml::from_str::<Config>(&text).is_err(), "{bad}");
+        }
+        let err = RuleAction::parse("manager: ").unwrap_err();
+        assert!(format!("{err:#}").contains("names no manager"), "{err:#}");
     }
 }

@@ -1031,6 +1031,11 @@ on = ["ci_failed"]
 action = "task"        # tell the task whose PR it is (by its PR history); else the assistant
 
 [[assistant.rules]]
+on = ["comment"]
+repos = ["acme/api"]
+action = "manager:backend"   # hand it to the manager with that slug; else the assistant
+
+[[assistant.rules]]
 on = ["mention"]
 action = "notify"      # just a notification
 ```
@@ -1039,10 +1044,16 @@ action = "notify"      # just a notification
 go to its sessions by the rules above (primary, else most recent, else a new
 `events <date>` session), several to a message; an event for a task goes to
 its agent the way `jeet task send` would send it (never to a manager, which
-may have a worker's PR in its history from reading it). Either way the event is
+may have a worker's PR in its history from reading it). A `manager:<slug>`
+rule hands its events to the active manager with exactly that slug (not its
+name), several to a message under a line in jeet's words, and may start it
+through the start gate, as an event for a task may; the slug is looked up at
+each poll, and one with no active manager of that slug sends its events to
+the assistant, with a warning in the watch log. Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
-written by other people: data to weigh, never instructions. One that cannot be
-delivered is notified instead. Each event, and where it went, is appended to
+written by other people: data to weigh, never instructions. One a task or a
+manager cannot be given goes to the assistant; one the assistant cannot be
+given is notified. Each event, and where it went, is appended to
 `~/.jeet/watch-events.jsonl`.
 
 `jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,

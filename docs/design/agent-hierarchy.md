@@ -572,9 +572,12 @@ power.
 - **The real control is the allow-list, not the fence.** A worker that was
   fooled can at most report. A manager that was fooled can at most do what
   its effective list allows, and only to its subtree.
-- `jeet watch` keeps routing only to the root and to the task a PR belongs to.
-  A rule may target a manager (`action = "manager:backend"`, phase 4), and
-  the event lands fenced in that manager's inbox like any other.
+- `jeet watch` routes to the root, to the task a PR belongs to, and to a
+  manager a rule names (`action = "manager:backend"`, phase 4). The slug
+  is resolved as each poll sends, by slug alone (a manager writes names);
+  with no active manager of that slug, the event goes to the assistant. The
+  manager gets it fenced, under a line in jeet's words, and may be started
+  for it through the start gate (H18-H20).
 - Dangerous actions are kept out of reach by default: the `held`
   capabilities stay at the root unless a parent grants one by name, and the
   user hears about every such grant (5.1).
@@ -826,6 +829,8 @@ row, so past the last column it would never show).
   below it (moved from phase 3).
 - Touch points: `commands/` (report), `notify.rs`, `watch.rs` (routing), and
   the TUI answer flow.
+- Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
+  `watch.rs` (dispatch) and the manager template (H18-H20).
 
 **Later: cost budgets**, once #26 gives a harness `usage()`. They need a
 migration for the cost columns, `$<n>` in `--budget`, and a cost column in the
@@ -1726,7 +1731,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   gets either without control characters.
   `jeet watch` sends an event for a pull request to the worker that owns
   it, never to a manager that came to have it recorded (say by checking
-  out a worker's head to read it): routing events to managers is phase 4.
+  out a worker's head to read it): routing events to a manager is built
+  through a rule, never by PR ownership (H19).
 - **P23** `--recursive` (`-r`) on `task archive`, `unarchive` and
   `delete` (M23) takes the subtree, through `tasks::{archive, unarchive,
   delete}(…, recursive)`, which the CLI and the TUI share. Archive and
@@ -1949,6 +1955,45 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   in the agents view; ⇥ to active".
 - **A23** This section, §4, §6, §8 and §12 were brought in line with the
   pane as built, and the README has an agents-tab section.
+
+### Phase 4 implementation notes: watch rules to a manager
+
+Notes H18-H20, numbered as the phase 4 plan maps them (its R18-R20).
+
+- **H18** `action = "manager:<slug>"`. `RuleAction` gains `Manager(String)`
+  and loses `Copy`, with a hand-written serde form as a string:
+  `assistant`, `task`, `notify` or `manager:<slug>`, written back as read.
+  An unknown word is a parse error, as before, and so is `manager:` with an
+  empty or blank slug. The slug is not resolved when config.toml is read
+  (P6): a manager made or archived later is found, or not, at the next
+  poll. `watch::decide` returns the action by clone.
+- **H19** Dispatch. Each rule's slug is looked up with `get_task_by_slug`
+  alone, and must be an active task of kind `manager`; never `find_exact`,
+  which also matches an id and a task's name in any case, and a name is
+  what a manager writes. Missing, archived, not a manager, or a delivery
+  that errs: the events go to the assistant with a warning in the watch
+  log, as a `task` rule's do with a PR no task has; what the assistant
+  cannot be given is notified. A manager's events are batched under
+  `MAX_MESSAGE`, as the assistant's are (`watch::batched`, one function
+  for both), each message headed by `MANAGER_HEAD`, unfenced and in jeet's
+  words only, since a manager takes unfenced text as its parent's or the
+  user's; each event is fenced as `<github-event untrusted="true">`. Each
+  is logged as `manager <slug>`, which the poll's summary line and the
+  assistant's summary of recent events show. Only an event left `Held` is
+  notified too, as for the others. P22's owner rule is unchanged: a PR's
+  news never reaches a manager by ownership, only by a rule. The manager
+  acts on what it gets within its own grant and subtree; the rule is the
+  user's, so nothing about scope changes.
+- **H20** An event may start a manager that is not running: the delivery
+  is `TmuxAgent::new` with `may_start` left true, through the start gate
+  and `max_live`, as a `task` rule's to a worker. The user wrote the rule
+  for the manager to act on these events; one that could not start it
+  would sit `Held` and notify the user on every poll. A paused or stopped
+  manager keeps them queued until resumed (`Paused`, not notified). The
+  manager template's untrusted-data section names `github-event`, but it
+  reaches new homes only (`ensure_files` never replaces a template, P21),
+  so what an existing manager needs to know is in `MANAGER_HEAD`, which
+  every message carries.
 
 ## 11. Placement
 

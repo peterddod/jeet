@@ -431,6 +431,7 @@ mod tests {
         assert!(MANAGER_AGENTS_MD.contains("untrusted"));
         assert!(MANAGER_AGENTS_MD.contains("<jeet-message from="));
         assert!(MANAGER_AGENTS_MD.contains("<jeet-report id="));
+        assert!(MANAGER_AGENTS_MD.contains("<github-event untrusted=\"true\">"));
         assert!(MANAGER_AGENTS_MD.contains("BRIEF.md"));
         assert!(MANAGER_AGENTS_MD.contains("jeet's limits on you are cooperative"));
         // Nothing of the root's watch, notifications or merges.
