@@ -12430,6 +12430,8 @@ fn agents_tab_pauses_and_resumes() {
         lab.run_state_of(&api),
         ("paused".into(), Some("user".into()))
     );
+    // The worker is held by its parent's pause, not paused itself.
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
     let escapes: Vec<_> = calls_of(&tmux, "send-keys")
         .into_iter()
         .filter(|c| c.last().map(String::as_str) == Some("Escape"))
@@ -12441,6 +12443,7 @@ fn agents_tab_pauses_and_resumes() {
     screen.wait_for_text("resumed manager api");
     assert!(screen.shows("api: resumed"), "{}", screen.plain());
     assert_eq!(lab.run_state_of(&api), ("run".into(), None));
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
 
     screen.esc();
     screen.type_keys(b"q");
@@ -12573,6 +12576,65 @@ fn agents_tab_refuses_the_assistant_for_pause() {
     screen.type_keys(b"n");
     screen.wait_for_text("nothing changed");
     assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `n` under a node, left as a task: it is made, not started, under the
+/// node, by the user (its brief says so); more than the node holds to
+/// give is refused.
+#[cfg(unix)]
+#[test]
+fn agents_tab_makes_a_worker_under_a_node() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (api, _w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    // The kind stays a task; a name, and more than api holds to give.
+    screen.type_keys(b"\tleaf\tfix the bug\t\t\ttask.archive\r");
+    screen.wait_for_words("cannot grant `task.archive`: its parent, manager api, does not hold it");
+    let row = || {
+        lab.index()
+            .query_row(
+                "SELECT parent_id, kind, id FROM tasks WHERE slug = 'leaf'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+    };
+    assert_eq!(row(), None);
+    screen.type_keys(b"\x15task.create\r");
+    screen.wait_for_words("made leaf under manager api");
+    let (parent, kind, leaf) = row().unwrap();
+    assert_eq!(parent.as_deref(), Some(api.as_str()));
+    assert_eq!(kind, "work");
+    let (goal, _, by) = lab.brief_of(leaf.as_deref().unwrap()).unwrap();
+    assert_eq!((goal.as_str(), by.as_str()), ("fix the bug", "user"));
+    let started: Vec<_> = calls_of(&tmux, "new-session")
+        .into_iter()
+        .filter(|c| c.iter().any(|a| a == "jeet-leaf"))
+        .collect();
+    assert!(started.is_empty(), "{started:?}");
 
     screen.type_keys(b"q");
     assert!(screen.wait_for_exit().success());

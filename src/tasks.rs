@@ -153,7 +153,10 @@ fn unique_slug(app: &App, base: &str) -> Result<String> {
         let candidate = numbered(base, n);
         // Kept for the assistant, whose tmux session is `jeet-assistant`.
         let reserved = candidate == crate::assistant::SLUG;
+        // A slug that spells another task's id would capture that id in
+        // slug-first lookups (`find_exact`), so ids are kept too.
         if !reserved
+            && app.db.get_task(&candidate)?.is_none()
             && app.db.get_task_by_slug(&candidate)?.is_none()
             && !root.join(&candidate).exists()
         {
@@ -3161,6 +3164,15 @@ mod tests {
         // A worker under the assistant gets none unasked.
         let plan = plan_child(&app, &user, TaskKind::Work, "y", &d, None).unwrap();
         assert_eq!(plan.budget, None);
+    }
+
+    /// A slug never spells another task's id, which slug-first lookups
+    /// would resolve to the wrong task.
+    #[test]
+    fn a_slug_never_spells_a_tasks_id() {
+        let (_dir, app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        assert_eq!(unique_slug(&app, &m.id).unwrap(), format!("{}-2", m.id));
     }
 
     /// The parent defaults to the assistant for the assistant, and to
