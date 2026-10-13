@@ -7342,6 +7342,90 @@ action = "manager:Fe API"
     }
 }
 
+/// A manager that cannot be told — its inbox lock is not a regular file —
+/// hands its events to the assistant, saying so, and they are merged in the
+/// order they came with the events an ordinary rule sends there.
+#[cfg(unix)]
+#[test]
+fn a_manager_that_cannot_be_told_hands_its_events_to_the_assistant() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        r#"scan_roots = []
+
+[assistant]
+notify = false
+
+[[assistant.rules]]
+on = ["ci_failed"]
+action = "manager:api"
+
+[[assistant.rules]]
+on = ["review_requested"]
+action = "assistant"
+"#,
+    )
+    .unwrap();
+    let scratch = TempDir::new().unwrap();
+    let gh = stub_watch_gh(scratch.path());
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let notifier = stub_notifier(scratch.path());
+    let path = path_with(&gh);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+        ("JEET_BACKGROUND", "1"),
+    ];
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let (_api, _mp) = running_manager(&lab, &tmux, &["--goal", "g"]);
+    let api_dir = lab.home().join("tasks/api");
+    let lock = api_dir.join(".jeet/inbox.lock");
+    let _ = std::fs::remove_file(&lock);
+    std::fs::create_dir_all(&lock).unwrap();
+    // No tmux server up, so that the assistant's events wait in its inbox.
+    for entry in std::fs::read_dir(stub.join("alive")).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    let output = poll_five_events(&lab, &gh, &env);
+    succeeded(&output);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("could not tell manager api"), "{stderr}");
+    assert!(
+        stderr.contains("3 to the assistant") && stderr.contains("2 notified"),
+        "{stderr}"
+    );
+    let events = watch_events(&lab.home());
+    let to_assistant: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["to"] == "the assistant")
+        .collect();
+    assert_eq!(to_assistant.len(), 3, "{events:?}");
+    assert!(
+        events.iter().all(|e| e["to"] != "manager api"),
+        "{events:?}"
+    );
+    // Once each, in the order they came.
+    let inbox = read(&lab.home().join("assistant/.jeet/inbox.jsonl"));
+    assert_eq!(inbox.matches("<github-event").count(), 3, "{inbox}");
+    let kinds: Vec<&str> = inbox
+        .match_indices("kind: ")
+        .map(|(i, _)| inbox[i + 6..].split("\\n").next().unwrap())
+        .collect();
+    let logged: Vec<&str> = to_assistant
+        .iter()
+        .map(|e| e["event"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, logged, "{inbox}");
+    assert!(!api_dir.join(".jeet/inbox.jsonl").exists());
+}
+
 /// An event for a manager that is not running starts it, through the
 /// start gate as a message for a worker would: with `max_live` full, its
 /// start waits in the queue with the event, and the user is not notified.
