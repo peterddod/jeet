@@ -227,10 +227,12 @@ fn escalate_with(
     let to = match holder.kind {
         TaskKind::Assistant => None,
         TaskKind::Manager | TaskKind::Work | TaskKind::Review => {
-            let parent = match &holder.parent_id {
-                Some(id) => app.db.get_task(id)?,
-                None => None,
-            };
+            let parent = holder
+                .parent_id
+                .as_deref()
+                .map(|id| app.db.get_task(id))
+                .transpose()?
+                .flatten();
             let Some(parent) = parent else {
                 bail!("{} has no parent to pass #{id} to", manager::label(&holder));
             };

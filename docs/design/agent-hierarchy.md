@@ -2075,8 +2075,9 @@ TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
   command says so and exits 0, and nothing re-sends it.
 - **H11** When `needs_user` becomes 1, one desktop notification: title
   `jeet: task w asks you (#42)`, subtitle the asker's tree path, body the
-  question (the notifier cleans and cuts it), no url. It ignores
-  `[assistant] notify`. A question that reaches only the assistant
+  question as written (not passed through `printable` first: the notifier
+  already drops control characters and cuts it at `BODY_MAX`), no url.
+  It ignores `[assistant] notify`. A question that reaches only the assistant
   notifies nobody. The notifier and the delivery are parameters of
   `reports::escalate`/`answer`'s cores, so no unit test reaches tmux or a
   real notifier; end to end it is tested with `JEET_NOTIFY_CMD` pointed at
@@ -2097,8 +2098,11 @@ TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
   user`. Every parented node's brief says what a `<jeet-answer>` is, and a
   manager's how to answer and escalate: templates reach new homes only
   (`ensure_files` never replaces one), so the brief, read at every
-  SessionStart, carries the meaning. The inbox texts explain a queued
-  answer. The TUI's `i` marks each report `answered by …` or `with the
+  SessionStart, carries the meaning. The brief's body goes through
+  `fence_body`, which would turn a spelled-out tag into `‹…›`, so those
+  lines name the fence in words ("fenced in jeet-answer, to= its id") and
+  not as `<jeet-answer …>`. The inbox texts explain a queued answer, and
+  only when one is queued. The TUI's `i` marks each report `answered by …` or `with the
   user`, with the answer under it. The templates and the `jeet`,
   `jeet-manager` and `jeet-managers` skills say how to answer, escalate
   and act on an answer.
