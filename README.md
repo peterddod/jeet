@@ -862,8 +862,8 @@ an archived parent or past its parent's `max_children`. `--recursive`
 it would lose, ask once (`--force` without a terminal), end every agent in
 it, leaves first, then archive or delete each task, leaves first; delete
 removes their rows together at the end. `unarchive --recursive` brings the
-archived tasks under it back top-down, each under a parent already back;
-only the task named is held to its parent's `max_children`. A failure
+archived tasks under it back top-down, each under a parent already back
+and held to its parent's `max_children`. A failure
 part-way leaves what is done done, and running the command again finishes
 the job. In the tasks list, `a` and `D` on a task with tasks under it are
 recursive, and `a` in the archived view brings its tree back.

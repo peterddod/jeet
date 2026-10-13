@@ -1978,8 +1978,9 @@ fn describe_foreign(dir: &Path, checkout: &ForeignCheckout) -> String {
 /// as many active tasks under it as it may, before anything is done, and
 /// checked again as it is marked active. With `recursive`, every archived
 /// task under it comes back too, top-down, each under a parent already
-/// back (M23): the parent's limit is checked for `task` alone, as the rest
-/// come back to where they were.
+/// back (M23). Each is held to its parent's limit, as a manager may have
+/// made others since, so one that would be over it stops the walk; running
+/// it again after freeing room finishes the job.
 pub fn unarchive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
     if !recursive {
         return unarchive_one(app, task, true);
@@ -1989,7 +1990,7 @@ pub fn unarchive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<St
         if node.state != TaskState::Archived {
             continue;
         }
-        let done = unarchive_one(app, &node, node.id == task.id)
+        let done = unarchive_one(app, &node, true)
             .with_context(|| format!("unarchive task {}", node.slug))?;
         warnings.extend(done.into_iter().map(|w| format!("{}: {w}", node.slug)));
     }
@@ -3352,6 +3353,33 @@ mod tests {
         app.db.insert_task(&own).unwrap();
         kid.parent_id = Some("own-id".into());
         assert_eq!(fan_out_of_parent(&app, &kid).unwrap(), Some(1));
+    }
+
+    /// Every task a recursive unarchive brings back is held to its parent's
+    /// limit, an active target's archived children included.
+    #[test]
+    fn recursive_unarchive_holds_each_task_to_its_parents_limit() {
+        let (_dir, app, _trunk) = manager_lab();
+        let mut lead = app.db.get_task("m-id").unwrap().unwrap();
+        lead.id = "lead-id".into();
+        lead.slug = "lead".into();
+        lead.max_children = Some(1);
+        app.db.insert_task(&lead).unwrap();
+        let mut kid = app.db.get_task("w-id").unwrap().unwrap();
+        kid.id = "kid-id".into();
+        kid.slug = "kid".into();
+        kid.parent_id = Some("lead-id".into());
+        app.db.insert_task(&kid).unwrap();
+        let mut old = kid.clone();
+        old.id = "old-id".into();
+        old.slug = "old".into();
+        old.state = TaskState::Archived;
+        app.db.insert_task(&old).unwrap();
+        let err = unarchive(&app, &lead, true).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("old"), "{err}");
+        let row = app.db.get_task("old-id").unwrap().unwrap();
+        assert_eq!(row.state, TaskState::Archived, "{err}");
     }
 
     #[test]

@@ -1720,7 +1720,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   went; it removes the rows last, in one transaction
   (`delete_rows_leaves_first`), each node's spend folded into its parent
   first. Unarchive runs top-down, each node under a parent already back;
-  `max_children` is checked for the named task alone. A failure part-way
+  each is held to its parent's `max_children`, so a tree that would
+  exceed it stops there. A failure part-way
   leaves what is done done; running the command again finishes the job.
   The TUI's `a` and `D` on a task with tasks under it are recursive, one
   confirm listing each task leaves first, and the confirm records which
