@@ -1558,12 +1558,25 @@ mod tests {
         enqueue(dir.path(), "news").unwrap();
         let said = |q: Vec<Queued>| q.into_iter().map(|q| q.message).collect::<Vec<_>>();
         assert_eq!(said(peek(dir.path())), ["news"]);
-        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+        assert_eq!(said(settled_peek(dir.path())), ["news"]);
         // While a hook holds it, the try gives up; the queue is untouched.
         let held = Inbox::lock(dir.path()).unwrap();
         assert_eq!(try_peek(dir.path()), None);
         drop(held);
-        assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+        assert_eq!(said(settled_peek(dir.path())), ["news"]);
+    }
+
+    /// [`try_peek`] once no one holds the lock. Another test's child process
+    /// holds a copy of every open file from its fork until its exec, the
+    /// lock among them, so a try can find it held for a moment.
+    pub(crate) fn settled_peek(task_dir: &Path) -> Vec<Queued> {
+        for _ in 0..200 {
+            if let Some(queue) = try_peek(task_dir) {
+                return queue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the inbox lock stayed held");
     }
 
     #[test]

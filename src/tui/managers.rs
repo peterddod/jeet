@@ -848,7 +848,17 @@ mod tests {
             .push("hi")
             .unwrap();
 
-        let info = gather(&app, false).unwrap();
+        // A try can find the inbox lock held for a moment by another test's
+        // forked child (`messages::tests::settled_peek`): read again until
+        // both inboxes were read.
+        let mut info = gather(&app, false).unwrap();
+        for _ in 0..200 {
+            if info.nodes.values().all(|node| node.inbox.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            info = gather(&app, false).unwrap();
+        }
         assert!(info.live.is_empty());
         assert_eq!(info.queued, 1);
         assert_eq!(
