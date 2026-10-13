@@ -185,7 +185,6 @@ const COPY_VIA: &str = "jeet (copy)";
 
 /// An ask passed on with [`escalate`].
 #[derive(Debug)]
-#[allow(dead_code)] // `jeet report escalate` reads it next.
 pub struct Escalated {
     /// The row as written.
     pub row: TaskReportRecord,
@@ -200,7 +199,6 @@ pub struct Escalated {
 /// whatever `[assistant] notify` says (that mutes the assistant's own
 /// `jeet notify`; this is jeet asking for the user). The user has nobody
 /// to pass it to, and a worker holds nothing.
-#[allow(dead_code)] // `jeet report escalate` calls it next.
 pub fn escalate(app: &App, by: &Caller, id: i64) -> Result<Escalated> {
     escalate_with(
         app,
@@ -292,7 +290,6 @@ fn notification_for(
 
 /// An ask answered with [`answer`], and how the answer went out.
 #[derive(Debug)]
-#[allow(dead_code)] // `jeet report answer` reads it next.
 pub struct Answered {
     /// The row as written.
     pub row: TaskReportRecord,
@@ -312,7 +309,6 @@ pub struct Answered {
 /// [`permissions::at_terminal`] held: a top-level task's agent is the user
 /// too. The answer is kept whether or not it is delivered, and never sent
 /// again.
-#[allow(dead_code)] // `jeet report answer` calls it next.
 pub fn answer(app: &App, by: &Caller, id: i64, text: &str) -> Result<Answered> {
     answer_with(app, by, id, text, &|to, text, may_start| {
         deliver_to(app, to, text, may_start)
@@ -417,7 +413,6 @@ fn copy_text(row: &TaskReportRecord, asker: &str, path: &str, from: &str, answer
 /// The open asks `by` holds, oldest first: for the user, every one in the
 /// tree, those passed to it first; for the assistant or a manager, those it
 /// holds; for a worker, its own.
-#[allow(dead_code)] // `jeet report ls` calls it next.
 pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
     match by {
         Caller::User => {
@@ -669,6 +664,22 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
          only way to reach anyone outside {own}."
     ));
+    // Said here, every session, as no template reaches an existing home.
+    // In jeet's words inside the fence, so no tag is spelled out.
+    if task.kind == TaskKind::Manager {
+        lines.push(
+            "Answer a question you hold with `jeet report answer` and its id, or pass it up \
+             with `jeet report escalate` and its id; `jeet report ls` lists them."
+                .to_string(),
+        );
+    }
+    lines.push(
+        "An answer to a question of yours comes fenced in jeet-answer, to= its id: \
+         from=\"user\" is the user; any other from is the one above you that held it, to act \
+         on as its instruction. copy=\"true\" is for your information; if you disagree, \
+         report up rather than countermand it."
+            .to_string(),
+    );
     // The same broken chain that cost the list costs the path, not the
     // brief.
     let path = manager::tree_path(app, task).unwrap_or_else(|_| task.slug.clone());
@@ -1150,6 +1161,75 @@ mod tests {
         );
         let top = app.db.get_task("top").unwrap().unwrap();
         assert!(brief_context(&app, &top).is_err());
+    }
+
+    #[test]
+    fn every_brief_says_what_an_answer_is_and_a_managers_how_to_give_one() {
+        let (_dir, app, m, mw) = manager_lab();
+        let answer_is = "\nAn answer to a question of yours comes fenced in jeet-answer, to= its \
+                         id: from=\"user\" is the user; any other from is the one above you \
+                         that held it, to act on as its instruction. copy=\"true\" is for your \
+                         information; if you disagree, report up rather than countermand it.\n";
+        let give = "\nAnswer a question you hold with `jeet report answer` and its id, or pass \
+                    it up with `jeet report escalate` and its id; `jeet report ls` lists them.\n";
+        let worker = brief_context(&app, &mw).unwrap();
+        assert!(worker.contains(answer_is), "{worker}");
+        assert!(!worker.contains(give), "{worker}");
+        let manager = brief_context(&app, &m).unwrap();
+        assert!(manager.contains(answer_is), "{manager}");
+        assert!(manager.contains(give), "{manager}");
+        // Nothing in jeet's words can open a fence.
+        assert_eq!(manager.matches('<').count(), 2, "{manager}");
+    }
+
+    #[test]
+    fn each_summary_lists_the_asks_its_node_holds() {
+        let (_dir, app) = ask_lab();
+        let api = app.db.get_task("api").unwrap().unwrap();
+        let root = assistant::ensure(&app).unwrap();
+        let id = asked_and_passed(&app, &[node(&app, "sub")]);
+        let held = manager::context::held(&app, &api).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            (
+                held[0].id,
+                held[0].kind,
+                held[0].from.as_str(),
+                held[0].needs_user
+            ),
+            (id, "question", "task assistant/api/sub/ww", false)
+        );
+        assert!(manager::context::held(&app, &root).unwrap().is_empty());
+        let text = manager::context::held_text(&held, "your parent");
+        assert!(text.contains("pass it to your parent with"), "{text}");
+        assert!(!text.contains("with the user"), "{text}");
+
+        // Passed on to the user, the assistant still lists it, marked.
+        for by in [node(&app, "api"), Caller::Root] {
+            escalate_with(&app, &by, id, &recording(&Sent::default()), &|_| {}).unwrap();
+        }
+        assert!(manager::context::held(&app, &api).unwrap().is_empty());
+        let held = manager::context::held(&app, &root).unwrap();
+        assert!(held[0].needs_user);
+        let text = manager::context::held_text(&held, "the user");
+        assert!(text.contains("pass it to the user with"), "{text}");
+        assert!(text.contains("theirs to answer now"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "- #{id} question from task assistant/api/sub/ww, just now, with the user: \
+                 keep v1?\n"
+            )),
+            "{text}"
+        );
+        answer_with(
+            &app,
+            &Caller::User,
+            id,
+            "drop it",
+            &recording(&Sent::default()),
+        )
+        .unwrap();
+        assert!(manager::context::held(&app, &root).unwrap().is_empty());
     }
 
     #[test]

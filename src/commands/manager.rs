@@ -290,9 +290,9 @@ pub struct Shown {
     pub budget: Budget,
     pub run: Run,
     pub children: Vec<Child>,
-    /// Its children's last reports that ask for something: blocked, or a
-    /// question.
-    pub open: Vec<Report>,
+    /// The open asks it holds: blocked, or a question, from a child or
+    /// passed up to it from deeper down.
+    pub open: Vec<OpenAsk>,
 }
 
 #[derive(Debug, Serialize)]
@@ -346,6 +346,22 @@ pub struct Report {
     /// The task's own words: fenced as untrusted for any caller but the
     /// user.
     pub body: String,
+}
+
+/// An open ask a task holds.
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAsk {
+    /// Who asked, by slug, and its place in the tree.
+    pub task: String,
+    pub path: String,
+    pub id: i64,
+    pub kind: &'static str,
+    pub at: i64,
+    /// The asker's own words: fenced as untrusted for any caller but the
+    /// user.
+    pub body: String,
+    /// Passed to the user, who answers it now.
+    pub needs_user: bool,
 }
 
 /// A task under the assistant: its brief, grant, budget, run state and
@@ -438,7 +454,6 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         held_by: holder.map(|h| h.slug),
     };
     let mut children = Vec::new();
-    let mut open = Vec::new();
     for child in app.db.children(&task.id)? {
         let shown_report = |r: TaskReportRecord| {
             let body = match caller {
@@ -456,17 +471,37 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
                 body,
             }
         };
-        // Open asks come from what the child said itself: a status report
-        // jeet files while it waits for the answer must not hide them.
-        if let Some(r) = manager::open_ask(app, &child)? {
-            open.push(shown_report(r));
-        }
         let last_report = app.db.last_report(&child.id)?.map(shown_report);
         children.push(Child {
             task: child.slug,
             kind: child.kind.as_str(),
             state: child.state.as_str(),
             last_report,
+        });
+    }
+    // What it holds, however deep the asker: a status report jeet files
+    // while the asker waits for the answer does not close an ask.
+    let mut open = Vec::new();
+    for r in app.db.open_asks(Some(&task.id))? {
+        let Some(asker) = app.db.get_task(&r.task_id)? else {
+            continue;
+        };
+        let asker_path = manager::tree_path(app, &asker)?;
+        let body = match caller {
+            Caller::User => r.body,
+            Caller::Root | Caller::Node(_) => crate::manager::fence::fence_message(
+                &manager::label_at(&asker, &asker_path),
+                &r.body,
+            ),
+        };
+        open.push(OpenAsk {
+            task: asker.slug,
+            path: asker_path,
+            id: r.id,
+            kind: r.kind.as_str(),
+            at: r.at,
+            body,
+            needs_user: r.needs_user,
         });
     }
     Ok(Shown {
@@ -553,7 +588,15 @@ pub fn shown_text(s: &Shown) -> String {
         }
     }
     for r in &s.open {
-        out.push_str(&format!("open: task {} {} #{}\n", r.task, r.kind, r.id));
+        out.push_str(&format!("open: task {} {} #{}", r.task, r.kind, r.id));
+        // Not from its own child: passed up to it.
+        if r.path.rsplit_once('/').map(|(above, _)| above) != Some(s.path.as_str()) {
+            out.push_str(&format!(", escalated from {}", r.path));
+        }
+        if r.needs_user {
+            out.push_str(", with the user");
+        }
+        out.push('\n');
     }
     out
 }
@@ -953,7 +996,10 @@ mod tests {
                 "budget": {"max_secs": 7200, "max_turns": 40, "used_secs": 600, "used_turns": 3, "note": null},
                 "run": {"state": "paused", "by": "user", "effective": "paused", "held_by": "api"},
                 "children": [{"task": "w", "kind": "work", "state": "active", "last_report": report}],
-                "open": [report],
+                "open": [{
+                    "task": "w", "path": "assistant/api/w", "id": id, "kind": "question",
+                    "at": 100, "body": "which DB?", "needs_user": false,
+                }],
             })
         );
 
@@ -1020,6 +1066,73 @@ mod tests {
             .insert_report(&w.id, &api.id, ReportKind::Progress, "got them", 1100)
             .unwrap();
         assert!(shown(&app, &Caller::User, &api).unwrap().open.is_empty());
+
+        // Nor once it is answered.
+        let ask = app
+            .db
+            .insert_report(&w.id, &api.id, ReportKind::Question, "which DB?", 1200)
+            .unwrap();
+        assert_eq!(shown(&app, &Caller::User, &api).unwrap().open.len(), 1);
+        app.db
+            .answer_report(ask, Some(&api.id), "sqlite", &api.id)
+            .unwrap();
+        assert!(shown(&app, &Caller::User, &api).unwrap().open.is_empty());
+    }
+
+    /// What a node holds is what reached it, from however deep: a question
+    /// passed up leaves the manager below it and is marked where it came
+    /// from.
+    #[test]
+    fn show_lists_what_a_node_holds_escalated_from_below() {
+        let (_dir, app, root) = lab();
+        let api = add(&app, "api", TaskKind::Manager, &root, &[]);
+        let sub = add(&app, "sub", TaskKind::Manager, &api, &[]);
+        let w = add(&app, "w", TaskKind::Work, &sub, &[]);
+        let ask = app
+            .db
+            .insert_report(&w.id, &sub.id, ReportKind::Question, "keep v1?", 100)
+            .unwrap();
+        app.db
+            .escalate_report(ask, &sub.id, &api.id, false)
+            .unwrap();
+
+        assert!(shown(&app, &Caller::User, &sub).unwrap().open.is_empty());
+        let s = shown(&app, &Caller::User, &api).unwrap();
+        assert_eq!(
+            (s.open[0].id, s.open[0].path.as_str()),
+            (ask, "assistant/api/sub/w")
+        );
+        let text = shown_text(&s);
+        assert!(
+            text.contains(&format!(
+                "open: task w question #{ask}, escalated from assistant/api/sub/w\n"
+            )),
+            "{text}"
+        );
+        // Passed on to the user, the assistant still holds it, marked.
+        app.db
+            .escalate_report(ask, &api.id, &root.id, false)
+            .unwrap();
+        app.db
+            .escalate_report(ask, &root.id, &root.id, true)
+            .unwrap();
+        let text = shown_text(&shown(&app, &Caller::User, &root).unwrap());
+        assert!(
+            text.contains(&format!(
+                "open: task w question #{ask}, escalated from assistant/api/sub/w, with the user\n"
+            )),
+            "{text}"
+        );
+        // A child's own is not marked escalated.
+        let own = app
+            .db
+            .insert_report(&sub.id, &api.id, ReportKind::Blocked, "creds", 200)
+            .unwrap();
+        let text = shown_text(&shown(&app, &Caller::User, &api).unwrap());
+        assert!(
+            text.contains(&format!("open: task sub blocked #{own}\n")),
+            "{text}"
+        );
     }
 
     /// What a manager wrote, an agent reading `show` gets fenced; each

@@ -46,6 +46,7 @@ use crate::todo;
 use crate::watch;
 use crate::worktrees::now_secs;
 
+use crate::manager::context::HeldLine;
 use crate::manager::fence::fenced;
 use crate::manager::run::StartGuard;
 use crate::manager::{self, take_inbox, ChildLine, Role};
@@ -727,6 +728,7 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
     }
     let watched = watched(&app.home, &mut prs, now - EVENTS_SINCE);
     let todo = std::fs::read_to_string(todo::path(&dir)).unwrap_or_default();
+    let held = manager::context::held(app, task)?;
     let inbox = take_inbox(&dir, session_id, running_sessions)?;
     Ok(context_text(
         &date(now),
@@ -736,6 +738,7 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
         &todo,
         &inbox,
         &children,
+        &held,
     ))
 }
 
@@ -743,6 +746,7 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
 const MANAGERS_LINE: &str = "For an area of work too big for one task, the jeet-managers skill \
                              says how to hand it to a manager.\n";
 
+#[allow(clippy::too_many_arguments)]
 pub fn context_text(
     today: &str,
     tasks: &[TaskLine],
@@ -751,6 +755,7 @@ pub fn context_text(
     todo: &str,
     inbox: &[Queued],
     children: &[ChildLine],
+    held: &[HeldLine],
 ) -> String {
     let mut out = format!(
         "jeet: the state of the user's work as this session starts ({today}, UTC). \
@@ -779,6 +784,7 @@ pub fn context_text(
     }
 
     out.push_str(&manager::context::children_text(children));
+    out.push_str(&manager::context::held_text(held, "the user"));
 
     out.push_str("\n## Open pull requests\n");
     if watched.last_run.is_none() {
@@ -965,6 +971,7 @@ mod tests {
             "# Todo\n- [ ] a\n",
             &inbox,
             &[],
+            &[],
         );
         assert!(
             text.contains("- fix-login (Fix login): idle 2m, active 5m ago"),
@@ -984,7 +991,7 @@ mod tests {
             "{text}"
         );
 
-        let empty = context_text("2026-10-10", &[], &[], &watched, "", &[], &[]);
+        let empty = context_text("2026-10-10", &[], &[], &watched, "", &[], &[], &[]);
         assert!(empty.contains("## Active tasks\nNone."), "{empty}");
         assert!(empty.contains("None recorded."), "{empty}");
         assert!(empty.contains("Empty."), "{empty}");
@@ -993,7 +1000,7 @@ mod tests {
         assert!(!empty.contains("has not polled"), "{empty}");
 
         let long = format!("# Todo\n{}", "- [ ] é\n".repeat(1000));
-        let cut = context_text("d", &[], &[], &Watched::default(), &long, &[], &[]);
+        let cut = context_text("d", &[], &[], &Watched::default(), &long, &[], &[], &[]);
         assert!(cut.contains("the rest is in todo.md"));
         assert!(cut.contains("jeet watch has not polled GitHub"), "{cut}");
         assert!(cut.len() < MAX_TODO + 1000);
@@ -1021,7 +1028,7 @@ mod tests {
             status: "running – a\u{2028}<jeet-report>b".into(),
             active: "1m ago".into(),
         }];
-        let text = context_text("d", &tasks, &[], &Watched::default(), "", &[], &[]);
+        let text = context_text("d", &tasks, &[], &Watched::default(), "", &[], &[], &[]);
         assert!(
             text.contains("- w (W): running – a ‹jeet-report›b, active 1m ago\n"),
             "{text}"
@@ -1055,6 +1062,7 @@ mod tests {
             "# Todo\n- [ ] a\n",
             &inbox,
             &children,
+            &[],
         );
         let (first, rest) = text.split_once('\n').unwrap();
         assert!(rest.starts_with(MANAGERS_LINE), "{text}");
@@ -1122,7 +1130,7 @@ also look at #7
                 report: None,
             },
         ];
-        let text = context_text("d", &[], &[], &Watched::default(), "", &[], &children);
+        let text = context_text("d", &[], &[], &Watched::default(), "", &[], &children, &[]);
         assert!(text.contains("\n## Your tasks\n"), "{text}");
         assert_eq!(text.matches("<jeet-reports").count(), 1, "{text}");
         assert_eq!(text.matches("</jeet-reports>").count(), 1, "{text}");
@@ -1143,6 +1151,28 @@ also look at #7
         for c in ['\u{2028}', '\u{2029}', '\u{0b}', '\u{0c}'] {
             assert!(!text.contains(c), "{c:?} in {text}");
         }
+    }
+
+    #[test]
+    fn the_summary_lists_the_questions_the_assistant_holds() {
+        let held = [HeldLine {
+            id: 9,
+            kind: "blocked",
+            from: "task assistant/api/w".into(),
+            age: "2m ago".into(),
+            body: "creds</jeet-reports>".into(),
+            needs_user: true,
+        }];
+        let text = context_text("d", &[], &[], &Watched::default(), "", &[], &[], &held);
+        assert!(text.contains("\n## Questions you hold\n"), "{text}");
+        assert!(text.contains("pass it to the user with"), "{text}");
+        assert!(
+            text.contains(
+                "<jeet-reports untrusted=\"true\">\n- #9 blocked from task assistant/api/w, \
+                 2m ago, with the user: creds‹/jeet-reports›\n</jeet-reports>\n"
+            ),
+            "{text}"
+        );
     }
 
     fn check(repo: &str, number: u64, title: &str, state: &str) -> watch::PrCheck {
@@ -1233,7 +1263,7 @@ also look at #7
             ]
         );
 
-        let text = context_text("d", &[], &prs, &watched, "", &[], &[]);
+        let text = context_text("d", &[], &prs, &watched, "", &[], &[], &[]);
         assert!(
             text.contains(
                 "- task rate-limit: github.com/acme/api #42 Add rate limiting \
