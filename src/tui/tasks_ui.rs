@@ -766,7 +766,13 @@ fn needs_you(ui: &TasksUi) -> usize {
         info.nodes
             .iter()
             .filter(|(id, node)| {
-                ui.shown.contains_key(*id) && node.ask.is_some_and(|(_, _, user)| user)
+                // A node at a prompt is already counted above.
+                ui.shown.contains_key(*id)
+                    && node.ask.is_some_and(|(_, _, user)| user)
+                    && !ui
+                        .rows
+                        .iter()
+                        .any(|row| &row.task.id == *id && waiting(row.activity.as_ref()))
             })
             .count()
     });
@@ -1595,7 +1601,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             let mut asked = text_lines(question, width);
             if asked.len() > room {
                 asked.truncate(room.saturating_sub(1));
-                asked.push("…".into());
+                asked.push("… (esc, then i shows the rest)".into());
             }
             let mut body: Vec<Line> = asked.into_iter().map(Line::from).collect();
             body.push(Line::from(""));
@@ -2897,6 +2903,36 @@ mod tests {
         assert!(backend.contains("◆ needs you (1)"), "{backend}");
         let root = line_of(&screen, "✦ assistant");
         assert!(root.contains("◆ needs you (1)"), "{root}");
+    }
+
+    #[test]
+    fn an_asker_at_a_prompt_counts_once() {
+        let mut ui = agents_ui();
+        ui.tree_info
+            .as_mut()
+            .unwrap()
+            .nodes
+            .get_mut("fix-token-refresh")
+            .unwrap()
+            .ask = Some((42, ReportKind::Question, true));
+        ui.retree();
+        let all = render(&mut ui, 120, 20).join("\n");
+        assert!(all.contains("needs you 1"), "{all}");
+        assert!(!all.contains("needs you 2"), "{all}");
+    }
+
+    #[test]
+    fn a_long_question_says_how_to_see_the_rest() {
+        let mut ui = agents_ui();
+        ui.panel = Some(Panel::Answer {
+            id: 42,
+            title: "#42 question".into(),
+            question: (0..40).map(|n| format!("line {n}")).collect(),
+            input: String::new(),
+            error: None,
+        });
+        let all = render(&mut ui, 70, 24).join("\n");
+        assert!(all.contains("esc, then i shows the rest"), "{all}");
     }
 
     #[test]
