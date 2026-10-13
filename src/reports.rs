@@ -516,10 +516,17 @@ fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, TaskRecord)> {
     let Some(asker) = app.db.get_task(&row.task_id)? else {
         bail!("the task that asked #{id} is gone");
     };
-    if let Some(last) = app.db.last_own_report(&asker.id)?.filter(|r| r.id != id) {
+    // Only a done, blocked or question report since supersedes it; progress
+    // does not.
+    if let Some(last) = app
+        .db
+        .last_closing_report(&asker.id)?
+        .filter(|r| r.id != id)
+    {
         bail!(
-            "{} has reported since (#{}); #{id} is no longer open",
+            "{} has filed a {} report since (#{}); #{id} is no longer open",
             manager::label(&asker),
+            last.kind.as_str(),
             last.id
         );
     }
@@ -1521,13 +1528,16 @@ mod tests {
     }
 
     /// Deleting manager api with `--reparent` hands the assistant the open
-    /// ask api held, fenced `via="jeet (moved)"`; an ask the user holds is
-    /// not delivered again, and an answer api gave shows as a deleted
-    /// task's (C11).
+    /// ask api held, fenced `via="jeet (moved)"`, though its asker has
+    /// reported progress since; an ask the user holds is not delivered
+    /// again, and an answer api gave shows as a deleted task's (C11).
     #[test]
     fn a_deleted_managers_open_asks_go_to_its_parent() {
         let (_dir, app) = ask_lab();
         let held = asked_and_passed(&app, &[node(&app, "sub")]);
+        // Still waiting on it: progress keeps it open, so it moves.
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
         let sub = app.db.get_task("sub").unwrap().unwrap();
         let (answered, _) = send(&app, &sub, ReportKind::Question, "split?", false).unwrap();
         answer_by(&app, &node(&app, "api"), answered, "yes");
@@ -1625,6 +1635,36 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_is_still_answered_and_passed_on_after_the_asker_reports_progress() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        // Passed on after progress, then the user answers after more.
+        let id = asked_and_passed(&app, &[]);
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let sent = Sent::default();
+        escalate_with(&app, &node(&app, "sub"), id, &recording(&sent), &|_| {}).unwrap();
+        escalate_with(&app, &node(&app, "api"), id, &recording(&sent), &|_| {}).unwrap();
+        escalate_with(&app, &Caller::Root, id, &recording(&sent), &|_| {}).unwrap();
+        let _ = send(&app, &ww, ReportKind::Progress, "more", false).unwrap();
+        let (answered, sent) = answer_by(&app, &Caller::User, id, "drop it");
+        assert_eq!(answered.row.answer.as_deref(), Some("drop it"));
+        assert!(matches!(answered.to_asker, Ok(Delivered::Queued)));
+        assert_eq!(sent[0].0, "ww");
+        assert_eq!(
+            copied_to(&answered),
+            ["manager sub", "manager api", "the assistant"]
+        );
+
+        // A holder answers after progress too.
+        let id = asked_and_passed(&app, &[node(&app, "sub")]);
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let (answered, sent) = answer_by(&app, &node(&app, "api"), id, "keep it");
+        assert_eq!(answered.row.answered_by.as_deref(), Some("api"));
+        assert_eq!(sent[0].0, "ww");
+        assert_eq!(copied_to(&answered), ["manager sub"]);
+    }
+
+    #[test]
     fn copies_stop_at_the_manager_holding_the_ask() {
         let (_dir, app) = ask_lab();
         // The user steps in while api holds it: nobody above api saw it.
@@ -1712,9 +1752,16 @@ mod tests {
         let (done, _) = send(&app, &ww, ReportKind::Done, "shipped", false).unwrap();
         assert_eq!(
             refused(q),
-            format!("task ww has reported since (#{done}); #{q} is no longer open")
+            format!("task ww has filed a done report since (#{done}); #{q} is no longer open")
         );
+        let (q, _) = send(&app, &ww, ReportKind::Question, "v2?", false).unwrap();
         let (b, _) = send(&app, &ww, ReportKind::Blocked, "creds", false).unwrap();
+        assert_eq!(
+            refused(q),
+            format!("task ww has filed a blocked report since (#{b}); #{q} is no longer open")
+        );
+        // Progress since does not close it.
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
         // jeet's own words since do not close it.
         auto_status(&app, &ww, StatusEvent::Waiting, "waiting", 1, 0).unwrap();
         let empty = answer_with(
@@ -1728,9 +1775,17 @@ mod tests {
         let long = "a".repeat(MAX_REPORT + 1);
         let long = answer_with(&app, &Caller::User, b, &long, &recording(&Sent::default()));
         assert!(long.unwrap_err().to_string().contains("2000 bytes"));
+        let held_ids = || {
+            held(&app, &Caller::User)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(held_ids().contains(&b));
         app.db.archive_task("ww").unwrap();
         assert_eq!(refused(b), "task ww is archived; unarchive it first");
-        assert!(held(&app, &Caller::User).unwrap().iter().all(|r| r.id == b));
+        assert!(!held_ids().contains(&b));
     }
 
     #[test]

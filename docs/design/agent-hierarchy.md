@@ -438,9 +438,11 @@ assistant's own pane, or one rolled up from below.
 **Phase 4 (as built, without the TUI).**
 - An ask is a `question` or `blocked` report (`blocked` is answered and
   escalated like a question). It is *open* while it is unanswered and is
-  the asker's last report other than jeet's own `status`: a task that
-  reports again, asks again included, has moved on and the old ask closes.
-  An answer closes it at once (H3), and so does archiving the asker.
+  the asker's last `done`, `blocked` or `question` report: a task that
+  reports done, is blocked or asks again has moved on and the old ask
+  closes. A `progress` report ("still waiting on #42") and jeet's own
+  `status` do not close it. An answer closes it at once (H3), and so does
+  archiving the asker.
 - Only the holder (`to_id`) answers or escalates, and never once it has
   passed the ask to the user. The user may answer any open ask in the tree,
   even one a manager still holds. A worker holds nothing, and a node never
@@ -1910,9 +1912,10 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   stands. The rollup itself (`managers::retree`) is pure and runs on the
   screen's thread, so the draw reads no index and no tmux.
 - **A7** A node's own urgency: a prompt is *needs input*; else an open ask
-  (its last own report blocked or a question, `manager::open_ask`) is
-  *blocked*; else a budget at 80% or a budget's pause is *budget*; else a
-  running agent is *running*; else a last own report of done is *done*;
+  (`manager::open_ask`, H3: its last done, blocked or question report, if
+  blocked or a question and unanswered; progress since does not close it)
+  is *blocked*; else a budget at 80% or a budget's pause is *budget*; else
+  a running agent is *running*; else a last own report of done is *done*;
   else *idle*. A *needs input* lifts to *needs you* above it, with the count
   of descendants at the shown state when it comes from below. Before phase
   4 the only *needs you* is a prompt. The assistant's own state is its
@@ -2029,9 +2032,13 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   kind.
 - **H3** One meaning of open (`OPEN_ASK` in `db/tasks.rs`, behind
   `open_asks` and `manager::open_ask`): a `question` or `blocked`, with no
-  answer, that is the asker's last report other than `status`. So an
-  answer now closes an ask for A7, A13, A14 and `manager show`, and a
-  `progress` report withdraws one, even one with the user.
+  answer, that is the asker's last `done`, `blocked` or `question` report
+  (`CLOSES_ASK`), its asker not archived. So an answer now closes an ask
+  for A7, A13, A14 and `manager show`, and so does a later done, blocked
+  or question report. A `progress` report does not (the user's decision on
+  the plan's Q13, against its default): a task that reports "still waiting
+  on #42" keeps its question open, and one with the user stays the
+  user's to answer. Nor does a `status` report, which is jeet's.
 - **H4** A question reaches the user only by escalation: there is no
   `--to-user`, since each manager above may be able to answer within its
   brief. When the assistant passes one up, `needs_user` becomes 1 and
@@ -2051,7 +2058,8 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   manager answer only what they hold and have not passed to the user. Both
   commands refuse in jeet's words: no such report, not an ask ("#41 is a
   progress report"), answered ("#42 was answered by the user"), superseded
-  ("task w has reported since (#57); #42 is no longer open"), held by
+  by a done, blocked or question report ("task w has filed a done report
+  since (#57); #42 is no longer open"), held by
   another ("#42 is held by manager backend"), with the user, and an
   archived asker ("unarchive it first").
 - **H8** Acting as the user (answering, or listing every open ask) needs

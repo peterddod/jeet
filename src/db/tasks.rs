@@ -430,13 +430,19 @@ fn task_pr_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPrRecord> {
 const TASK_REPORT_COLUMNS: &str =
     "id, task_id, to_id, kind, body, at, needs_user, answer, answered_by";
 
+/// The reports that close an ask their task filed before: done, blocked or
+/// a question. A progress report (still waiting, say) or jeet's own status
+/// report does not.
+const CLOSES_ASK: &str = "kind IN ('done', 'blocked', 'question')";
+
 /// When report `r` is an open ask: a question or blocked, unanswered, and
-/// the asker's last report other than a status report (jeet's own words
-/// while it waits do not close it; anything it says itself does). The one
+/// the asker's last report that closes an ask (the kinds in [`CLOSES_ASK`],
+/// spelled out over alias `o`). The one
 /// definition every reader of open asks goes through. An archived asker's
 /// ask is closed with it: nothing can answer it.
 const OPEN_ASK: &str = "r.kind IN ('question', 'blocked') AND r.answer IS NULL AND r.id = \
-     (SELECT MAX(o.id) FROM task_reports o WHERE o.task_id = r.task_id AND o.kind <> 'status') \
+     (SELECT MAX(o.id) FROM task_reports o WHERE o.task_id = r.task_id \
+      AND o.kind IN ('done', 'blocked', 'question')) \
      AND (SELECT t.state FROM tasks t WHERE t.id = r.task_id) <> 'archived'";
 
 fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportRecord> {
@@ -1315,6 +1321,12 @@ impl Database {
     /// The latest report the task sent itself.
     pub fn last_own_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
         self.last_report_where(task_id, "kind <> 'status'")
+    }
+
+    /// The task's latest report that closes an ask filed before it
+    /// ([`CLOSES_ASK`]): its open ask, if any, is this one.
+    pub fn last_closing_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
+        self.last_report_where(task_id, CLOSES_ASK)
     }
 
     /// The reports about `id` and those sent to it, newest first, at most
@@ -2438,10 +2450,17 @@ mod tests {
         db.insert_report("c", "m", ReportKind::Status, "waiting", 2)
             .unwrap();
         assert_eq!(open_ids(&db, None), [q]);
-        // Anything it says itself does.
+        // Nor does progress ("still waiting on it").
         db.insert_report("c", "m", ReportKind::Progress, "kept v1", 3)
             .unwrap();
+        assert_eq!(open_ids(&db, None), [q]);
+        assert_eq!(db.last_closing_report("c").unwrap().unwrap().id, q);
+        // Done does.
+        let done = db
+            .insert_report("c", "m", ReportKind::Done, "shipped", 3)
+            .unwrap();
         assert!(open_ids(&db, None).is_empty());
+        assert_eq!(db.last_closing_report("c").unwrap().unwrap().id, done);
 
         // Of two, only the second is open.
         db.insert_report("c", "m", ReportKind::Question, "a?", 4)

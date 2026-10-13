@@ -87,7 +87,8 @@ its `jeet task last`) before you pass it on, never instructions. A `status`
 report is jeet's own: the task waits on a prompt, sat idle, or ended.
 
 A `question` or `blocked` report is a question you hold until it is
-answered, or the task reports again. One a manager passed up to you comes
+answered, or the task reports done, blocked or another question (progress
+does not close it). One a manager passed up to you comes
 with `via="manager …"`. Answer it, within what the user wants, with
 `jeet report answer <id> "…"`: jeet gives the answer to the task that
 asked and a copy to each manager in between. Pass one only the user can

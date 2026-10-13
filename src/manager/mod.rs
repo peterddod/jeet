@@ -265,11 +265,12 @@ pub fn tree_order(nodes: &[TaskRecord], top: &TaskRecord) -> Vec<(usize, u32)> {
 }
 
 /// What `task` asks of its parent and has not moved on from: its last
-/// report of its own, if blocked or a question and not answered yet. A
-/// status report jeet files while it waits for the answer does not close
-/// it. The same rule as [`crate::db::tasks::Database::open_asks`].
+/// done, blocked or question report, if blocked or a question and not
+/// answered yet. A progress report, or a status report jeet files while it
+/// waits for the answer, does not close it. The same rule as
+/// [`crate::db::tasks::Database::open_asks`].
 pub fn open_ask(app: &App, task: &TaskRecord) -> Result<Option<TaskReportRecord>> {
-    Ok(app.db.last_own_report(&task.id)?.filter(|r| {
+    Ok(app.db.last_closing_report(&task.id)?.filter(|r| {
         matches!(r.kind, ReportKind::Blocked | ReportKind::Question) && r.answer.is_none()
     }))
 }
@@ -549,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ask_stays_open_until_the_task_says_something_else() {
+    fn an_ask_stays_open_until_answered_or_the_task_moves_on() {
         let (_dir, app, api) = manager_lab("ship it");
         assert_eq!(open_ask(&app, &api).unwrap(), None);
         let parent = api.parent_id.clone().unwrap();
@@ -564,11 +565,18 @@ mod tests {
             .unwrap();
         let open = open_ask(&app, &api).unwrap().unwrap();
         assert_eq!((open.id, open.kind), (ask, ReportKind::Question));
+        // Nor does progress: it is still waiting.
         app.db
-            .insert_report(&api.id, &parent, ReportKind::Progress, "kept v1", 1100)
+            .insert_report(
+                &api.id,
+                &parent,
+                ReportKind::Progress,
+                "still waiting",
+                1100,
+            )
             .unwrap();
-        assert_eq!(open_ask(&app, &api).unwrap(), None);
-        // Blocked is an ask too.
+        assert_eq!(open_ask(&app, &api).unwrap().unwrap().id, ask);
+        // Blocked is an ask too, and replaces the question.
         let blocked = app
             .db
             .insert_report(&api.id, &parent, ReportKind::Blocked, "creds", 1200)
@@ -577,6 +585,15 @@ mod tests {
         // An answer closes it.
         app.db
             .answer_report(blocked, None, "use these", "user")
+            .unwrap();
+        assert_eq!(open_ask(&app, &api).unwrap(), None);
+        // As does done.
+        app.db
+            .insert_report(&api.id, &parent, ReportKind::Question, "v2?", 1300)
+            .unwrap();
+        assert!(open_ask(&app, &api).unwrap().is_some());
+        app.db
+            .insert_report(&api.id, &parent, ReportKind::Done, "shipped", 1400)
             .unwrap();
         assert_eq!(open_ask(&app, &api).unwrap(), None);
     }
