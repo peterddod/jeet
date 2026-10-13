@@ -15677,6 +15677,8 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
 
     // Another agent's leaves it to the watcher, which posts it; nothing
     // is typed.
+    let keys = calls_of(&tmux, "send-keys").len();
+    let pastes = pasted(&tmux).len();
     let output = y_agent.jeet(&["task", "send", "w", "hi"], &lab.home(), &env);
     succeeded(&output);
     assert!(
@@ -15687,7 +15689,8 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
     let post = socket.post();
     let content = post[1]["message"]["content"].as_str().unwrap();
     assert!(content.contains("hi"), "{content}");
-    assert_eq!(pasted(&tmux).len(), 1);
+    assert_eq!(calls_of(&tmux, "send-keys").len(), keys);
+    assert_eq!(pasted(&tmux).len(), pastes);
     let status = status_file(&task, session);
     assert_eq!(status["state"], "running", "{status}");
     assert_eq!(status["event"], "wake", "{status}");

@@ -2562,7 +2562,9 @@ built.
   drop. With the second PR: a launched task's and the assistant's
   settings carry the watcher entry, and `[harness] wake = false` leaves it
   out; at an idle, watched agent the user's own `task send` is typed in
-  while another agent's goes to the watcher.
+  while another agent's goes to the watcher. Known: with unsent text in
+  its input box, the user's message is queued, not typed, so the watcher
+  posts it at once as another session's (`Delivered::Wake`).
 - **K20** Docs: §12 rewritten as built, with the spike's findings and three
   corrections (the watcher stays while paused; `Delivered::Wake`, not
   `Watched`; no worklog note per delivery); §7's optional row; 5.3 (a wake

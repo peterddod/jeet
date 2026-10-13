@@ -701,7 +701,8 @@ into its pane. An idle agent wakes and reads it; a busy one gets it at its
 next tool call (or as its turn ends); one waiting on a prompt gets it once
 the prompt is answered, and a message never answers the prompt. What you
 send yourself, from your own terminal, to an idle agent is still typed in,
-as your turn.
+as your turn; unless you have unsent text in its input box, when it goes
+through the channel as a message from another session, not over your text.
 Everything else (messages from the assistant or a manager, reports,
 answers, watch events, and what you send to an agent that is busy) arrives
 as a message from another session, which Claude Code tells the agent cannot

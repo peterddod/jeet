@@ -563,7 +563,13 @@ pub fn deliver(
     }
     let message = queued.message;
     let route = match route(&activity, agent.has_hooks()) {
-        // Typed in, it would be joined to what the user has not sent.
+        // Typed in, it would be joined to what the user has not sent. Its
+        // wake channel posts it at once (as another session's, as it does
+        // any queued message), so say so rather than that it waits.
+        Route::Type if agent.has_draft() && reported && agent.watched() => {
+            inbox.push_to(&message, me, from)?;
+            return Ok(Delivered::Wake);
+        }
         Route::Type if agent.has_draft() => Route::Queue,
         route => route,
     };
@@ -1200,7 +1206,8 @@ mod tests {
         assert_eq!(agent.typed.borrow().len(), 1);
         assert!(agent.typed.borrow()[0].contains("a report"));
         assert!(left(task.path()).is_empty());
-        // Unsent text in its input box: queued, for its wake channel.
+        // Unsent text in its input box: not typed over; its wake channel
+        // posts it, and the CLI says so.
         let task = task_in(Some(State::Idle));
         let agent = Fake {
             alive: true,
@@ -1212,7 +1219,7 @@ mod tests {
         };
         assert_eq!(
             deliver(task.path(), &agent, "hi", Sender::User).unwrap(),
-            Delivered::Queued
+            Delivered::Wake
         );
         assert!(agent.typed.borrow().is_empty());
         // Busy, it would not be typed: its wake channel takes it.
