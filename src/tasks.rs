@@ -2774,6 +2774,7 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<
 fn delivered_words(delivered: &Result<Delivered>) -> String {
     match delivered {
         Ok(Delivered::Typed) => "typed into its session".to_string(),
+        Ok(Delivered::Wake) => "delivered to its session".to_string(),
         Ok(Delivered::Queued) => "queued; it gets it when it finishes or sits idle".to_string(),
         Ok(Delivered::Started) => "started a session with it".to_string(),
         Ok(Delivered::Held) => "it waits for its next session".to_string(),

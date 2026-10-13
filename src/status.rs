@@ -44,6 +44,7 @@ use crate::manager::run;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
+use crate::waiter;
 use crate::worktrees::now_secs;
 
 /// More than any hook payload jeet cares about; a pasted novel of a prompt
@@ -841,6 +842,10 @@ fn stop(
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
         .ok();
+    // Held or not: this only keeps the queue whole.
+    if let Some(inbox) = &inbox {
+        recover_wake(inbox, task_dir, session_id, event, now);
+    }
     if held_now(ctx) {
         if let Some(status) = status_for(hook, now) {
             write_status(task_dir, &status)?;
@@ -914,6 +919,7 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
     let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
+    recover_wake(&inbox, task_dir, session_id, event, now);
     if held_now(ctx) || inbox.read_for(Some(session_id))?.is_empty() {
         return Ok(());
     }
@@ -921,6 +927,16 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
         return Ok(());
     };
     messages::hand_over_queue(&inbox, &*idle_agent(&ctx.app, task, session_id)).map(|_| ())
+}
+
+/// Put back in `inbox` what session `session_id`'s wake channel posted and
+/// the session never got, once no watcher holds it and it is old enough to
+/// be lost (`waiter::recover`): a watcher killed mid-flight, say. A failure
+/// is warned of: it must not keep the hook from its work.
+fn recover_wake(inbox: &messages::Inbox, task_dir: &Path, session_id: &str, event: &str, now: i64) {
+    if let Err(e) = waiter::recover(inbox, task_dir, session_id, now) {
+        eprintln!("jeet task-hook {event}: {e:#}");
+    }
 }
 
 /// The agent of `task`'s session `session_id`, that sat idle: for the
@@ -1492,6 +1508,70 @@ mod tests {
         idle_prompt(&dir, &idle, &ctx, 500).unwrap();
         let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
         assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn a_stop_hands_over_a_wake_long_lost_and_leaves_a_young_one() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (home, app) = lab();
+        let dir = busy_w(&app);
+        let transcript = home.path().join("s.jsonl");
+        let lost = messages::Queued {
+            at: 50,
+            message: "posted and lost".into(),
+            to: Some("s".into()),
+        };
+        // Posted 10 s before the Stop: the session may hold it yet, and
+        // deliver it when this Stop's turn ends.
+        waiter::left_in_flight_for_test(&dir, "s", &transcript, vec![lost.clone()], 390);
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(
+            stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap(),
+            None
+        );
+        assert!(waiter::in_flight_for_test(&dir, "s"));
+        // Posted long enough ago, by a watcher since gone, and never seen.
+        waiter::left_in_flight_for_test(
+            &dir,
+            "s",
+            &transcript,
+            vec![lost],
+            400 - waiter::CONFIRM_SECS,
+        );
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("posted and lost")));
+        assert!(!waiter::in_flight_for_test(&dir, "s"));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_watched_agent_sitting_idle_is_typed_nothing() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        let w = ctx.app.db.get_task("w").unwrap().unwrap();
+        let agent = messages::TmuxAgent::new(&ctx.app, &w);
+        assert!(!messages::Agent::watched(&agent));
+        let watcher = waiter::held_for_test(&dir, "s");
+        assert!(messages::Agent::watched(&agent));
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        assert!(!typed_path(&dir).exists());
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+        // Unwatched, it would be typed in: here, into a tmux unit tests
+        // never have.
+        drop(watcher);
+        assert!(idle_prompt(&dir, &idle, &ctx, 400).is_err());
     }
 
     #[test]

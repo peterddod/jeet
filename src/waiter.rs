@@ -822,6 +822,44 @@ pub fn run(harness: &dyn Harness, task_id: &str, env: WakeEnv) -> Result<()> {
     watcher.close(why, &*agent)
 }
 
+/// For other modules' tests: `session`'s wait lock, held as a watcher
+/// holds it.
+#[cfg(test)]
+pub(crate) fn held_for_test(task_dir: &Path, session: &str) -> File {
+    std::fs::create_dir_all(wait_dir(task_dir)).unwrap();
+    lock_within(&wait_file(task_dir, session, "lock"), 1, Duration::ZERO)
+        .unwrap()
+        .unwrap()
+}
+
+/// For other modules' tests: `msgs` posted to `session` at `posted_at`, to
+/// be looked for in `transcript` (made empty), and not seen there yet.
+#[cfg(test)]
+pub(crate) fn left_in_flight_for_test(
+    task_dir: &Path,
+    session: &str,
+    transcript: &Path,
+    msgs: Vec<Queued>,
+    posted_at: i64,
+) {
+    std::fs::create_dir_all(wait_dir(task_dir)).unwrap();
+    std::fs::write(transcript, "").unwrap();
+    let inflight = Inflight {
+        nonce: new_nonce(),
+        transcript: transcript.to_path_buf(),
+        offset: 0,
+        posted_at,
+        msgs,
+    };
+    write_inflight(&wait_file(task_dir, session, "inflight"), &inflight).unwrap();
+}
+
+/// For other modules' tests: whether `session` has a batch in flight.
+#[cfg(test)]
+pub(crate) fn in_flight_for_test(task_dir: &Path, session: &str) -> bool {
+    wait_file(task_dir, session, "inflight").exists()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -1520,17 +1558,8 @@ mod tests {
     /// `s`'s batch of `msgs` in flight, posted at `posted_at`, as a watcher
     /// killed after writing it leaves it.
     fn left_in_flight(lab: &Lab, msgs: Vec<Queued>, posted_at: i64) -> Inflight {
-        std::fs::create_dir_all(wait_dir(&lab.dir())).unwrap();
-        std::fs::write(lab.transcript(), "").unwrap();
-        let inflight = Inflight {
-            nonce: new_nonce(),
-            transcript: lab.transcript(),
-            offset: 0,
-            posted_at,
-            msgs,
-        };
-        write_inflight(&wait_file(&lab.dir(), "s", "inflight"), &inflight).unwrap();
-        inflight
+        left_in_flight_for_test(&lab.dir(), "s", &lab.transcript(), msgs, posted_at);
+        lab.inflight().unwrap()
     }
 
     #[test]

@@ -594,6 +594,12 @@ impl Agent for SessionAgent<'_> {
     fn status(&self, task_dir: &Path) -> Option<SessionStatus> {
         status::read_status(task_dir, self.session.as_deref()?)
     }
+
+    fn watched(&self) -> bool {
+        self.session.as_deref().is_some_and(|session| {
+            crate::waiter::watched(&tasks::task_dir(self.app, self.task), session)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

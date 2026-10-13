@@ -2387,11 +2387,30 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   in the transcripts beside the session's modified since the post (the
   last 1 MiB of each: after `/clear` the next conversation gets it).
   Nothing is typed on either. Paused, it stays and takes nothing.
-- **K11** `waiter::recover` (for `stop` and `idle_prompt`, under the lock
-  they hold, from the routing that follows): with the session's lock free,
-  a batch seen is let go; one unseen and posted 20 s ago or more goes back,
-  less what is still queued; a younger one is left, since Claude may still
-  deliver it.
+- **K10** Routing. `Agent::watched` is false by default; `TmuxAgent`
+  asks `waiter::watched` of `current_status`'s session (none: false), and
+  the assistant's `SessionAgent` of its own session. `deliver`, after the
+  held check, queues the message for `me` and returns the new
+  `Delivered::Wake` when the session's status says it is idle, running or
+  waiting on a prompt, `waiter::wakes` says it goes through the channel,
+  and the session is watched. This comes before the draft check, so no
+  pane is captured and a draft is left be. A start never asks (an
+  orphan's lock must not strand one), nor does an agent no hook has
+  reported on yet (at its startup dialogs, with no watcher), which queues
+  as before; admission applies only to a start, so it is unaffected.
+  `deliver` asks under the inbox lock, and a watcher lets go of its lock
+  under it (K9), so a message is either queued while it watches or routed
+  as before after.
+- **K11** Stop and idle typing. `hand_over_queue` returns false while the
+  agent is watched, which covers `idle_prompt` and `resume`; Stop's take
+  is unchanged, as each take is under `Inbox::lock`. `waiter::recover`
+  runs in `stop` (before the held check: it only keeps the queue whole)
+  and `idle_prompt`, under the lock they hold, and in a starting watcher
+  for every `.inflight` in the task: with the session's lock free, a batch
+  seen is let go; one unseen and posted 20 s ago or more goes back, less
+  what is still queued, and so is handed over by that Stop; a younger one
+  is left, since Claude may still deliver it. A failure to recover is
+  warned of, never failing the hook.
 - **K12** At most 6 posts per rolling 60 s per watcher, in memory; past
   it, messages wait.
 - **K13** A pause and the `wake` write: `status::input_unreported` counts
@@ -2402,16 +2421,20 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
 - **K14** The token is in no file (not `.inflight`, not the lock file),
   argv or log line; `WakeEnv`'s `Debug` prints `…` for it, and a failed
   post's error names the socket only. No worklog note per delivery.
+- **K17** No wake indicator. `jeet task send` says "sent to w's agent;
+  it gets it now, through its wake channel" (for the assistant, "sent to
+  the assistant's session <id>, through its wake channel"); a report or
+  answer says "delivered to <to>'s session"; a watch event delivered so is
+  not notified as well.
 - **K19** The library is tested without a real Claude, tmux server or
   `~/.jeet`: a `UnixListener` under `/tmp` for the socket, temp files for
   transcripts, the test process or a killed `sleep` for `CLAUDE_PID`,
   time passed to `Watcher::step`, and a recording `Agent` for the
   fallback's typing, which `run` gets from `status::idle_agent` (shared
   with `idle_prompt`).
-- **K2, K10, K15-K18, K20, K21** The routing (`Delivered::Wake`,
-  `Agent::watched`), the hidden `jeet inbox watch` verb, the hook entry
-  that starts it, the docs of §12 and the live check follow, as the plan
-  has them.
+- **K2, K15, K16, K18, K20, K21** The hidden `jeet inbox watch` verb,
+  the hook entry that starts it, the docs of §12 and the live check
+  follow, as the plan has them.
 
 ## 11. Placement
 
