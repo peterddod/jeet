@@ -2396,7 +2396,9 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   Nothing is typed on either. Paused, it stays and takes nothing.
 - **K10** Routing. `Agent::watched` is false by default; `TmuxAgent`
   asks `waiter::watched` of `current_status`'s session (none: false), and
-  the assistant's `SessionAgent` of its own session. `deliver`, after the
+  the assistant's `SessionAgent` of its own session. It is a plain `bool`,
+  not the plan's `Result<bool>`: a lock that cannot be opened or locked is
+  no watcher, so there is no error to pass on. `deliver`, after the
   held check, queues the message for `me` and returns the new
   `Delivered::Wake` when the session's status says it is idle, running or
   waiting on a prompt, `waiter::wakes` says it goes through the channel,
@@ -2465,7 +2467,9 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   queue: to the session recorded as following on from it, if any.
 - **K15, K20, K21** The hook entry that starts the watcher
   (`Harness::wake_hook`, `HookSetup.wake`), the docs of §12 and the live
-  check follow with the second PR, as the plan has them.
+  check follow with the second PR, as the plan has them. Of K15, what the
+  verb itself needs is built now: Claude Code's variable names and wire
+  format are in `harness/claude.rs` (K4, K7), and `--harness` picks them.
 
 ## 11. Placement
 

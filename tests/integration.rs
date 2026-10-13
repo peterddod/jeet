@@ -14312,6 +14312,60 @@ fn a_hookless_worker_is_typed_what_waited_once_resumed() {
     assert!(lab.start_queue().is_empty());
 }
 
+/// A resume types none of what waited into an agent a wake channel
+/// watches: its watcher hands it over. Unwatched, it is typed in.
+#[cfg(unix)]
+#[test]
+fn a_resume_leaves_a_watched_workers_queue_to_its_watcher() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    let jeet = |args: &[&str]| {
+        let output = lab.jeet_at(args, &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output)
+    };
+    let w = lab.new_task_with("w", &["--parent", "assistant"]);
+    jeet(&["task", "open", "w"]);
+    let task = lab.home().join("tasks/w");
+    let session = "11111111-2222-4333-8444-555555555555";
+    hook_ok(&lab.hook(
+        "Stop",
+        &hook_input("Stop", session, &task),
+        &[("JEET_TASK_ID", &w)],
+    ));
+    assert_eq!(status_file(&task, session)["state"], "idle");
+    jeet(&["manager", "pause", "w"]);
+    let said = jeet(&["task", "send", "w", "carry on"]);
+    assert!(said.contains("paused or stopped"), "{said}");
+
+    // A watcher holds the session's wait lock.
+    let wait = task.join(".jeet/wait");
+    std::fs::create_dir_all(&wait).unwrap();
+    let watcher = std::fs::File::create(wait.join(format!("{session}.lock"))).unwrap();
+    watcher.lock().unwrap();
+    let said = jeet(&["manager", "resume", "w"]);
+    assert!(said.contains("w: resumed"), "{said}");
+    assert!(!said.contains("handed what queued"), "{said}");
+    assert!(pasted(&tmux).is_empty());
+    let inbox = task.join(".jeet/inbox.jsonl");
+    assert!(std::fs::read_to_string(&inbox)
+        .unwrap()
+        .contains("carry on"));
+
+    // Its watcher gone, the next resume types it in.
+    drop(watcher);
+    jeet(&["manager", "pause", "w"]);
+    let said = jeet(&["manager", "resume", "w"]);
+    assert!(said.contains("handed what queued while held"), "{said}");
+    let typed = pasted(&tmux);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(typed[0].1.contains("carry on"), "{typed:?}");
+}
+
 /// A manager made under a paused manager is made, not started: its first
 /// prompt waits in its inbox, and the parent's resume starts it once, on
 /// that prompt.

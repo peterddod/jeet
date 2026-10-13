@@ -1555,6 +1555,54 @@ mod tests {
         assert!(!watched(&lab.dir(), "s"));
     }
 
+    #[test]
+    fn the_assistants_lost_batch_goes_to_the_session_after_a_clear() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        let root = crate::manager::root(&lab.app).unwrap();
+        assert_eq!(root.kind, TaskKind::Assistant);
+        let dir = tasks::task_dir(&lab.app, &root);
+        std::fs::create_dir_all(dir.join(".jeet")).unwrap();
+        status_of(&dir, "s", State::Idle, "SessionStart", 1);
+        std::fs::write(lab.transcript(), b"").unwrap();
+        let mut w = Watcher::open_retrying(
+            &lab.app,
+            root.clone(),
+            lab.env(std::process::id()),
+            lab.start(),
+            0,
+            Duration::ZERO,
+        )
+        .unwrap()
+        .unwrap();
+        Inbox::lock(&dir).unwrap().push_to("hi", Some("s")).unwrap();
+        w.step(10).unwrap();
+        assert!(received(&listener).is_some());
+        // `/clear`: session t follows on from s, and never got the batch.
+        lab.app
+            .db
+            .upsert_task_session(&crate::db::tasks::TaskSessionRecord {
+                session_id: "t".into(),
+                task_id: root.id.clone(),
+                parent_id: Some("s".into()),
+                name: "t".into(),
+                created_at: 11,
+                last_activity: 11,
+            })
+            .unwrap();
+        status_of(&dir, "s", State::Ended, "SessionEnd", 11);
+        assert_eq!(w.step(11).unwrap(), Next::Exit(Why::Ended));
+        let typist = Typist::default();
+        w.close(Why::Ended, &typist).unwrap();
+        assert!(typist.typed.borrow().is_empty());
+        let left = Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            (left[0].message.as_str(), left[0].to.as_deref()),
+            ("hi", Some("t"))
+        );
+    }
+
     /// `s`'s batch of `msgs` in flight, posted at `posted_at`, as a watcher
     /// killed after writing it leaves it.
     fn left_in_flight(lab: &Lab, msgs: Vec<Queued>, posted_at: i64) -> Inflight {
