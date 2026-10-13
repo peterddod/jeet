@@ -232,6 +232,14 @@ fn recover_unwatched(inbox: &Inbox, task_dir: &Path, session: &str, now: i64) ->
         remove(&path)?;
         return Ok(false);
     }
+    // Still all queued: the watcher died before its take, so nothing was
+    // posted. Let it go now, or a Stop that takes them first would leave
+    // it to put them back, delivered twice.
+    let queued = inbox.read()?;
+    if inflight.msgs.iter().all(|m| queued.contains(m)) {
+        remove(&path)?;
+        return Ok(false);
+    }
     if now - inflight.posted_at < CONFIRM_SECS {
         return Ok(false);
     }
@@ -389,6 +397,9 @@ pub struct Watcher<'a> {
     start: Start,
     /// The agent's process's start time when the watcher began.
     s0: i64,
+    /// When the watcher began: an `Ended` older than this is a previous run
+    /// of the same session's, which a resume has yet to overwrite.
+    born: i64,
     lock: File,
     /// When each post in the window was made.
     posts: VecDeque<i64>,
@@ -473,6 +484,7 @@ impl<'a> Watcher<'a> {
             env,
             start,
             s0,
+            born: now,
             lock,
             posts: VecDeque::new(),
             flight,
@@ -489,6 +501,13 @@ impl<'a> Watcher<'a> {
 
     fn status(&self) -> Option<status::SessionStatus> {
         status::read_status(&self.task_dir, &self.start.session)
+    }
+
+    /// Whether `status` is this run's end of the session: a resumed session
+    /// keeps its id, and its old `Ended` stands until its SessionStart hook
+    /// writes over it, which can come after the watcher's first look.
+    fn ended(&self, status: Option<&status::SessionStatus>) -> bool {
+        status.is_some_and(|s| s.state == State::Ended && s.at >= self.born)
     }
 
     /// Whether the inbox file changed since last asked.
@@ -527,11 +546,10 @@ impl<'a> Watcher<'a> {
         if identity::start_of(self.env.claude_pid) != Some(self.s0) {
             return Ok(Next::Exit(Why::Gone));
         }
-        if tick.is_multiple_of(STATUS_EVERY)
-            && self.status().is_some_and(|s| s.state == State::Ended)
-        {
+        if tick.is_multiple_of(STATUS_EVERY) && self.ended(self.status().as_ref()) {
             return Ok(Next::Exit(Why::Ended));
         }
+        let born = self.born;
         if let Some(flight) = &mut self.flight {
             let record = &flight.record;
             let found = seen(&record.transcript, &mut flight.pos, &record.nonce)
@@ -539,7 +557,10 @@ impl<'a> Watcher<'a> {
                 .unwrap_or(false);
             if !found {
                 let status = status::read_status(&self.task_dir, &self.start.session);
-                if status.as_ref().is_some_and(|s| s.state == State::Ended) {
+                if status
+                    .as_ref()
+                    .is_some_and(|s| s.state == State::Ended && s.at >= born)
+                {
                     return Ok(Next::Exit(Why::Ended));
                 }
                 // Only while it sits idle: a post waits behind a prompt, or
@@ -593,7 +614,9 @@ impl<'a> Watcher<'a> {
             return Ok(Next::Wait);
         };
         match status.state {
-            State::Ended => return Ok(Next::Exit(Why::Ended)),
+            State::Ended if self.ended(Some(&status)) => return Ok(Next::Exit(Why::Ended)),
+            // The last run's: the hook that says this one's has yet to run.
+            State::Ended => return Ok(Next::Wait),
             // A post while it waits on a prompt starts a turn once the
             // prompt goes, even when a pause's Esc is what made it go.
             State::Waiting => return Ok(Next::Wait),
@@ -679,6 +702,11 @@ impl<'a> Watcher<'a> {
         } = self;
         let session = start.session.as_str();
         let inbox = Inbox::lock(&task_dir)?;
+        // A take that failed after writing its batch: still queued, and
+        // typed below, so not to be put back later.
+        if flight.is_none() {
+            remove(&wait_file(&task_dir, session, "inflight"))?;
+        }
         if let Some(mut flight) = flight {
             let record = &flight.record;
             let found = seen(&record.transcript, &mut flight.pos, &record.nonce).unwrap_or(false)
@@ -1509,6 +1537,36 @@ mod tests {
     }
 
     #[test]
+    fn the_last_runs_end_of_a_resumed_session_is_not_this_ones() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.send("hi");
+        // Its id kept, and the SessionEnd of the run before still there.
+        lab.status(State::Ended, "SessionEnd", 5);
+        let mut w = Watcher::open_retrying(
+            &lab.app,
+            lab.task(),
+            lab.env(std::process::id()),
+            lab.start(),
+            10,
+            Duration::ZERO,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(w.step(10).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        // Its hook writes over it, and the message goes.
+        lab.status(State::Idle, "SessionStart", 11);
+        w.pending = true;
+        assert_eq!(w.step(11).unwrap(), Next::Wait);
+        assert!(received(&listener).is_some());
+        // An end since is this run's.
+        lab.status(State::Ended, "SessionEnd", 12);
+        w.tick = 0;
+        assert_eq!(w.step(12).unwrap(), Next::Exit(Why::Ended));
+    }
+
+    #[test]
     fn an_end_finds_a_batch_the_next_conversation_got() {
         let lab = Lab::new();
         let listener = lab.listen();
@@ -1620,6 +1678,32 @@ mod tests {
         assert!(!recover(&inbox, &lab.dir(), "s", 40).unwrap());
         drop(inbox);
         assert_eq!(lab.queued(), msgs);
+        assert!(lab.inflight().is_none());
+    }
+
+    #[test]
+    fn a_batch_stop_took_before_its_recovery_is_not_put_back() {
+        let lab = Lab::new();
+        lab.send("hi");
+        left_in_flight(&lab, lab.queued(), 10);
+        let dir = lab.dir();
+        // Stop recovers first, then takes what is queued.
+        let inbox = Inbox::lock(&dir).unwrap();
+        assert!(!recover(&inbox, &dir, "s", 12).unwrap());
+        assert_eq!(inbox.take_for(Some("s")).unwrap().len(), 1);
+        assert!(recover(&inbox, &dir, "s", 40).is_ok());
+        drop(inbox);
+        assert!(lab.queued().is_empty());
+        assert!(lab.inflight().is_none());
+    }
+
+    #[test]
+    fn a_take_that_failed_leaves_nothing_in_flight_to_put_back() {
+        let lab = Lab::new();
+        let w = lab.watcher();
+        lab.send("hi");
+        left_in_flight(&lab, lab.queued(), 10);
+        w.close(Why::Refused, &Typist::default()).unwrap();
         assert!(lab.inflight().is_none());
     }
 

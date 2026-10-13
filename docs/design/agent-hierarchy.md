@@ -2361,12 +2361,16 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
 - **K6** Take and post, under `Inbox::lock`: nothing for a held task;
   nothing while the session's status is `Waiting` (a post would queue
   behind the prompt and start a turn when a pause's Esc clears it), absent
-  or not the task's current session; `Ended` ends the watcher; nothing
+  or not the task's current session; `Ended` ends the watcher, unless it is older than the watcher (a resumed
+  session keeps its id, and its last run's `Ended` stands until the
+  SessionStart hook writes over it); nothing
   while a batch is in flight or over the cap. The batch is as many of the
   oldest as fit `MAX_MESSAGE` with the header and nonce
   (`messages::fitting_within`). `.inflight` is written before the take,
-  so a kill between them leaves the batch queued and in flight, which
-  recovery puts right. Then `mark_typed`, and for an idle session a
+  so a kill between them leaves the batch queued and in flight: recovery
+  lets such a batch go at once (nothing was posted, and a Stop that took
+  it first must not see it put back), and a take that fails drops its
+  `.inflight` at close. Then `mark_typed`, and for an idle session a
   `Running` status with event `wake`, detail "reading messages",
   `busy_since` now (`status::wake_running`). Which messages go through
   the channel at all is one function, `waiter::wakes`, true for every one

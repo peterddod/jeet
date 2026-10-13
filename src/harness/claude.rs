@@ -827,6 +827,19 @@ mod tests {
     }
 
     #[test]
+    fn reading_the_wake_env_removes_it_from_the_process() {
+        std::env::set_var(MESSAGING_SOCKET_ENV, "/tmp/cc-socks/42.sock");
+        std::env::set_var(MESSAGING_TOKEN_ENV, "ab12");
+        std::env::set_var(CLAUDE_PID_ENV, "42");
+        let env = wake_env().unwrap();
+        assert_eq!(env.token, "ab12");
+        for name in [MESSAGING_SOCKET_ENV, MESSAGING_TOKEN_ENV, CLAUDE_PID_ENV] {
+            assert!(std::env::var_os(name).is_none(), "{name}");
+        }
+        assert!(wake_env().is_none());
+    }
+
+    #[test]
     fn the_wake_channel_needs_its_socket_token_and_process() {
         let some = |s: &str| Some(s.to_string());
         let env = wake_env_of(some("/tmp/cc-socks/42.sock"), some("ab12"), some("42")).unwrap();

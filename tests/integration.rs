@@ -15479,6 +15479,18 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
             &stdin,
         ),
         w_agent.jeet_with_input(&watch, &lab.home(), &[("CLAUDE_PID", &w_pid)], &stdin),
+        // The right task's pane, but not under the agent it claims: another
+        // session's, live, and no ancestor of this process.
+        w_agent.jeet_with_input(
+            &watch,
+            &lab.home(),
+            &[
+                ("CLAUDE_PID", &y_pid),
+                ("CLAUDE_CODE_MESSAGING_SOCKET", &socket.env()),
+                ("CLAUDE_CODE_MESSAGING_TOKEN", token),
+            ],
+            &stdin,
+        ),
     ];
     for output in refused {
         succeeded(&output);
