@@ -16,7 +16,7 @@ use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::identity;
 use crate::manager::{self, run};
-use crate::messages::{self, Delivered, Inbox};
+use crate::messages::{self, Delivered, Inbox, Sender};
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::pr_history;
 use crate::projects;
@@ -43,7 +43,7 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     let caller = permissions::caller(app)?;
     let prompt = args
         .prompt
-        .map(|prompt| from_sender(app, &caller, prompt))
+        .map(|prompt| from_sender(app, &caller, prompt).map(|(prompt, _)| prompt))
         .transpose()?;
     let prompt = match prompt.as_deref().map(messages::brief).transpose() {
         Ok(prompt) => prompt,
@@ -173,7 +173,7 @@ pub fn start(app: &App, task: &TaskRecord, prompt: &str) -> Result<Start> {
     // Under a paused or stopped manager: its brief waits in its inbox, and
     // its start for the resume.
     let held = |holder: &TaskRecord| -> Result<Start> {
-        inbox.push_to(prompt, None)?;
+        inbox.push_to(prompt, None, Sender::Agent)?;
         app.db.queue_start(&task.id, now_secs())?;
         Ok(Start {
             outcome: StartOutcome::Held {
@@ -193,7 +193,7 @@ pub fn start(app: &App, task: &TaskRecord, prompt: &str) -> Result<Start> {
                 Started::AlreadyRunning => StartOutcome::AlreadyRunning { session },
                 Started::Queued { live, max, prompt } => {
                     if let Some(prompt) = prompt {
-                        inbox.push_to(&prompt, None)?;
+                        inbox.push_to(&prompt, None, Sender::Agent)?;
                     }
                     drop(inbox);
                     run::report_queued(app, task, live, max, i64::MAX);
@@ -259,9 +259,10 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             task.slug
         );
     }
-    let message = from_sender(app, &permissions::caller(app)?, message)?;
+    let (message, from) = from_sender(app, &permissions::caller(app)?, message)?;
     let dir = tasks::task_dir(app, &task);
-    let delivered = messages::deliver(&dir, &messages::TmuxAgent::new(app, &task), &message)?;
+    let agent = messages::TmuxAgent::new(app, &task);
+    let delivered = messages::deliver(&dir, &agent, &message, from)?;
     let _ = app.db.touch_task(&task.id, now_secs());
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {}'s agent", called),
@@ -305,16 +306,16 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-/// `text` that `caller` sends a task's agent unfenced: as written from the
-/// user's own terminal, and from anyone else unable to carry a tag only
-/// jeet writes, so no agent can pass its words off as the user's answer
-/// (`<jeet-answer from="user">`). A top-level task's agent is
+/// `text` that `caller` sends a task's agent unfenced, and who sent it: as
+/// written from the user's own terminal, and from anyone else unable to
+/// carry a tag only jeet writes, so no agent can pass its words off as the
+/// user's answer (`<jeet-answer from="user">`). A top-level task's agent is
 /// [`Caller::User`] too, so the terminal is checked as answering checks
 /// it.
-fn from_sender(app: &App, caller: &Caller, text: &str) -> Result<String> {
+fn from_sender(app: &App, caller: &Caller, text: &str) -> Result<(String, Sender)> {
     match caller == &Caller::User && permissions::at_terminal(app)? {
-        true => Ok(text.to_string()),
-        false => Ok(crate::manager::fence::defang(text)),
+        true => Ok((text.to_string(), Sender::User)),
+        false => Ok((crate::manager::fence::defang(text), Sender::Agent)),
     }
 }
 

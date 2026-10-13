@@ -1288,7 +1288,13 @@ mod tests {
             // Under its inbox lock, through `TmuxAgent::start`, the start
             // admits it and starts it holding the start lock: so far as
             // tmux, which unit tests never reach.
-            let err = messages::deliver(&task_dir, &TmuxAgent::new(app, &w1), "hi").unwrap_err();
+            let err = messages::deliver(
+                &task_dir,
+                &TmuxAgent::new(app, &w1),
+                "hi",
+                messages::Sender::Agent,
+            )
+            .unwrap_err();
             assert!(err.to_string().contains(tmux::INSTALL_HINT), "{err:#}");
             // Neither lock is left held.
             assert!(matches!(admit_start(app, &w1).unwrap(), StartGate::Go(_)));
@@ -1306,7 +1312,7 @@ mod tests {
         std::fs::create_dir_all(&w2_dir).unwrap();
         Inbox::lock(&w1_dir)
             .unwrap()
-            .push_to("from m", None)
+            .push_to("from m", None, messages::Sender::Agent)
             .unwrap();
         // One with messages to start with, one without; neither starts with
         // no tmux, so both stay queued, and w1's message waits still.
@@ -1408,7 +1414,7 @@ mod tests {
         let m_dir = tasks::task_dir(&app, &get(&app, "m"));
         Inbox::lock(&m_dir)
             .unwrap()
-            .push_to("idle 12m; w1 is waiting", None)
+            .push_to("idle 12m; w1 is waiting", None, messages::Sender::Agent)
             .unwrap();
         // A message held for w1, which queued its start.
         let w1_dir = tasks::task_dir(&app, &get(&app, "w1"));
@@ -1416,7 +1422,7 @@ mod tests {
         std::fs::create_dir_all(&w2_dir).unwrap();
         Inbox::lock(&w1_dir)
             .unwrap()
-            .push_to("your report", None)
+            .push_to("your report", None, messages::Sender::Agent)
             .unwrap();
         app.db.queue_start("w1", 1).unwrap();
         let outcomes = resume(&app, &Caller::User, &get(&app, "m")).unwrap();

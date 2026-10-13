@@ -693,6 +693,26 @@ before its first hook runs, which it would answer. An agent that is not
 running is started with the message as its first prompt. `jeet task new
 --prompt` starts the new task's agent on a brief the same way.
 
+With Claude Code, each agent also has a *wake channel*: a small background
+process (`jeet inbox watch`, started by the agent's own session-start hook)
+that hands it what is queued for it as soon as it is queued, through Claude
+Code's messaging socket, rather than waiting for its turn to end or typing
+into its pane. An idle agent wakes and reads it; a busy one gets it at its
+next tool call (or as its turn ends); one waiting on a prompt gets it once
+the prompt is answered, and a message never answers the prompt. What you
+send yourself, from your own terminal, to an idle agent is still typed in,
+as your turn; unless you have unsent text in its input box, when it goes
+through the channel as a message from another session, not over your text.
+Everything else (messages from the assistant or a manager, reports,
+answers, watch events, and what you send to an agent that is busy) arrives
+as a message from another session, which Claude Code tells the agent cannot
+approve anything, and `jeet task send` says "it gets it now, through its
+wake channel". If Claude Code refuses the message (a repo's
+`crossSessionInbound: "refuse"`, say), jeet notices it never arrived and
+falls back to the queue and typing for that session. `[harness] wake =
+false` turns the channel off ([The coding agent's
+harness](#the-coding-agents-harness)).
+
 A message holds at most 8,000 bytes, which keeps what is typed in under
 tmux's limit on a command; queued messages that do not fit with it wait for
 the next hand-over. Text starting with `!`, `/` or `#`, which Claude would run
@@ -778,9 +798,9 @@ put detail in the pull request or a file and say where. `done`, `blocked` and
 `question` start an assistant session when none is running; `progress`
 waits for the next one. A task under a manager reports to that manager the
 same way, fenced with its path in the tree (`path="assistant/backend/fix-x"`):
-typed into the manager's pane when it sits idle, queued while it is busy, and
-held in its inbox when it is not running, unless the report is one that
-starts it.
+handed to the manager now through its wake channel (or, without one, typed
+into its pane when it sits idle and queued while it is busy), and held in
+its inbox when it is not running, unless the report is one that starts it.
 
 ```bash
 jeet report ls                 # the open questions you hold
@@ -898,7 +918,10 @@ attaches to it while its agent still runs, and otherwise says to resume it.
 Pause interrupts the turn of each of their agents that is working (one
 Escape, never over what you typed), and says, task by task, what it did; an
 agent started with a prompt or typed a message in the last few seconds,
-whose turn has not begun yet, is waited for and then interrupted. Stop ends their
+whose turn has not begun yet, is waited for and then interrupted. One batch
+of messages its wake channel handed a working agent just before, which
+Claude had not yet shown it, may still start one more turn; that turn's end
+hands it nothing. Stop ends their
 tmux sessions, and any review job running for them or in their worktrees
 (a review task's agent is its review command, which pause cannot
 interrupt), and their ending is not reported; `jeet review` does not
@@ -1510,10 +1533,11 @@ jeet runs your coding agent through a *harness*: what it knows about that
 agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
-first prompt, no assistant, no deny rules, no interrupt). Without deny rules,
-tasks with a parent are not stopped from force-pushing, pushing to a default
-branch or merging (see the deny rules under the assistant's permissions below,
-and [docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
+first prompt, no assistant, no deny rules, no interrupt, no wake channel).
+Without deny rules, tasks with a parent are not stopped from force-pushing,
+pushing to a default branch or merging (see the deny rules under the
+assistant's permissions below, and
+[docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
 interrupt` refuses.
 
 ```toml
@@ -1529,6 +1553,7 @@ name = "claude-code"
 command = "/opt/bin/claude --model opus"   # program and arguments (default: claude)
 auto_trust = true                          # default: false
 auto_trust_reviews = false                 # default: false
+wake = true                                # default: true
 ```
 
 The command is taken from `$JEET_AGENT` first, then `[harness] command`, then
@@ -1553,6 +1578,12 @@ branch, so review tasks are left to you unless `auto_trust_reviews` is on as
 well. Some per-folder settings, such as `.claude/settings.local.json` and
 `.mcp.json`, reportedly need the exact folder trusted, not just a parent.
 The assistant's session is never answered for.
+
+**`wake`** gives each agent its wake channel ([Messaging an
+agent](#messaging-an-agent)): a background `jeet inbox watch` started by
+its session-start hook. `wake = false` installs none, from each agent's
+next start (`jeet task restart` one that is running), and messages are
+queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
 
@@ -1737,6 +1768,7 @@ export JEET_HOME=/tmp/jeet-test
     fix-login/                       # a task: the agent's working directory
       .jeet/task-id                  # marks it, so jeet finds the task from below
       .jeet/inbox.jsonl              # messages queued for its busy agent
+      .jeet/wait/                    # its wake channel's lock and the batch in flight
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
     backend/                         # a manager: AGENTS.md, notes/, todo.md,

@@ -46,7 +46,9 @@ use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::harness::Harness;
 use crate::identity;
 use crate::manager::run;
-use crate::messages::{self, open_regular, Agent, Inbox, Queued, MAX_MESSAGE, QUEUE_SEPARATOR};
+use crate::messages::{
+    self, open_regular, Agent, Inbox, Queued, Sender, MAX_MESSAGE, QUEUE_SEPARATOR,
+};
 use crate::status::{self, State};
 use crate::tasks;
 use crate::worktrees::now_secs;
@@ -85,10 +87,14 @@ const HEADER: &str = "jeet: messages and reports were sent to you (with `jeet ta
 /// Before the nonce, on a batch's last line.
 const NONCE_PREFIX: &str = "jeet delivery ";
 
-/// Which messages go through the wake channel rather than waiting for the
-/// agent's Stop or being typed in at its idle prompt: every one, for now.
-pub fn wakes(_queued: &Queued) -> bool {
-    true
+/// Whether `queued` goes through the wake channel rather than waiting for
+/// the agent's Stop or being typed in at its prompt, `idle` saying the
+/// agent sits idle: all but the user's own message for an idle agent, which
+/// is typed in as the user's turn. Through the channel it would arrive as
+/// another session's, which cannot approve anything; for a busy agent it
+/// would not be typed anyway.
+pub fn wakes(queued: &Queued, idle: bool) -> bool {
+    !(idle && queued.from == Sender::User)
 }
 
 /// How to reach the session the watcher runs under, from its hook's
@@ -597,11 +603,11 @@ impl<'a> Watcher<'a> {
     fn take_and_post(&mut self, now: i64) -> Result<Next> {
         let session = self.start.session.clone();
         let inbox = Inbox::lock(&self.task_dir)?;
-        let queue: Vec<Queued> = inbox
-            .read_for(Some(&session))?
-            .into_iter()
-            .filter(wakes)
-            .collect();
+        // All of it, the user's too: what `wakes` would have had typed
+        // was typed when it was sent; theirs queued since (the agent was
+        // busy, had a draft or was paused) is typed by nothing while this
+        // watches.
+        let queue = inbox.read_for(Some(&session))?;
         self.pending = !queue.is_empty();
         if queue.is_empty() {
             return Ok(Next::Wait);
@@ -1105,6 +1111,7 @@ mod tests {
             at,
             message: message.into(),
             to: None,
+            from: Sender::Agent,
         }
     }
 
@@ -1393,7 +1400,7 @@ mod tests {
         let mut w = lab.watcher();
         Inbox::lock(&lab.dir())
             .unwrap()
-            .push_to("for t", Some("t"))
+            .push_to("for t", Some("t"), Sender::Agent)
             .unwrap();
         assert_eq!(w.step(10).unwrap(), Next::Wait);
         assert!(received(&listener).is_none());
@@ -1590,6 +1597,25 @@ mod tests {
     }
 
     #[test]
+    fn a_users_message_queued_while_the_agent_was_busy_is_posted_by_the_watcher() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let mut w = lab.watcher();
+        Inbox::lock(&lab.dir())
+            .unwrap()
+            .push_to("from the user", None, Sender::User)
+            .unwrap();
+        assert_eq!(w.step(10).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        assert!(posted.contains("\n\nfrom the user\n\n"), "{posted}");
+        assert!(lab.queued().is_empty());
+        let inflight = lab.inflight().unwrap();
+        assert_eq!(inflight.msgs.len(), 1);
+        assert_eq!(inflight.msgs[0].from, Sender::User);
+    }
+
+    #[test]
     fn a_gone_agent_ends_the_watcher_with_its_batch_back() {
         let lab = Lab::new();
         let listener = lab.listen();
@@ -1633,7 +1659,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        Inbox::lock(&dir).unwrap().push_to("hi", Some("s")).unwrap();
+        Inbox::lock(&dir)
+            .unwrap()
+            .push_to("hi", Some("s"), Sender::Agent)
+            .unwrap();
         w.step(10).unwrap();
         assert!(received(&listener).is_some());
         // `/clear`: session t follows on from s, and never got the batch.

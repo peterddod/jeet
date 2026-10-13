@@ -2818,6 +2818,30 @@ fn task_hook_finds_its_task_or_quietly_does_nothing() {
     assert!(!task.join(".jeet/status/other-session.json").exists());
 }
 
+/// `[harness] wake = false` starts an agent with no wake channel.
+#[cfg(unix)]
+#[test]
+fn the_wake_channel_can_be_turned_off() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[harness]\nwake = false\n",
+    )
+    .unwrap();
+    lab.new_task("Fix login");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    let settings = session_settings(&lab, &tmux, "jeet-fix-login");
+    let start = settings["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(start.len(), 1, "{settings}");
+    assert!(!settings.to_string().contains("inbox watch"));
+}
+
 #[cfg(unix)]
 #[test]
 fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
@@ -2887,6 +2911,18 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         stop.starts_with('\'') && stop.ends_with(&format!("' task-hook --task {id} Stop")),
         "{stop}"
     );
+    // Its wake channel, started in the background beside SessionStart's
+    // own hook.
+    let start = settings["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(start.len(), 2, "{settings}");
+    let watch = start[1]["command"].as_str().unwrap();
+    assert!(
+        watch.ends_with(&format!("' inbox watch --task {id}")),
+        "{watch}"
+    );
+    assert_eq!(start[1]["async"], true);
     assert_eq!(
         settings["permissions"]["allow"],
         serde_json::json!([
@@ -5971,6 +6007,31 @@ fn value_after<'a>(call: &'a [String], flag: &str) -> &'a str {
     &call[at + 1]
 }
 
+/// `[harness] wake = false` starts the assistant with no wake channel.
+#[cfg(unix)]
+#[test]
+fn the_assistants_wake_channel_can_be_turned_off() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_window_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[harness]\nwake = false\n",
+    )
+    .unwrap();
+    succeeded(&lab.jeet_at(&["chat"], &lab.home(), &env));
+    let started = calls_of(&tmux, "new-session");
+    let agent = agent_argv(&started[0]);
+    let settings = settings_file(&lab, &agent[6]);
+    let start = settings["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(start.len(), 1, "{settings}");
+    assert!(!settings.to_string().contains("inbox watch"));
+}
+
 #[cfg(unix)]
 #[test]
 fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
@@ -6056,6 +6117,15 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         "{deny:?}"
     );
     assert!(settings["hooks"]["SessionStart"].is_array());
+    let watch = &settings["hooks"]["SessionStart"][0]["hooks"][1];
+    assert!(
+        watch["command"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("' inbox watch --task {id}")),
+        "{settings}"
+    );
+    assert_eq!(watch["async"], true);
     // The window is keyed by the session it runs.
     assert!(calls_of(&tmux, "set-option")
         .iter()
@@ -15477,8 +15547,9 @@ fn append(path: &std::path::Path, text: &str) {
 }
 
 /// `jeet inbox watch`, run as the agent's session-start hook runs it, posts
-/// what is queued for the session into its socket, and what `task send`
-/// sends from then on, typing nothing; it is confirmed by the transcript,
+/// what is queued for the session into its socket, and what another agent's
+/// `task send` sends from then on, typing nothing (the user's own, at an
+/// idle prompt, is still typed); it is confirmed by the transcript,
 /// and ends with the agent. Started anywhere else, or for a session already
 /// watched, it does nothing, and it never prints.
 #[cfg(unix)]
@@ -15584,8 +15655,8 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
     append(&transcript, &nonce_of(&post));
     wait_until("the post to be confirmed", || !inflight.exists());
 
-    // Idle: `task send` leaves it to the watcher, which posts it; nothing
-    // is typed.
+    // Idle: the user's own `task send`, from their terminal, is typed in
+    // as their turn, watched or not.
     hook_ok(&w_agent.hook(
         &lab,
         Some(&id),
@@ -15593,7 +15664,22 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
         &hook_input("Stop", session, &task),
         &[],
     ));
-    let output = lab.jeet_at(&["task", "send", "w", "hi"], &lab.home(), &env);
+    let output = lab.jeet_at(&["task", "send", "w", "mine"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("wake channel"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(pasted(&tmux).len(), 1);
+    assert!(!socket.posted());
+    assert!(!queued().contains("mine"));
+
+    // Another agent's leaves it to the watcher, which posts it; nothing
+    // is typed.
+    let keys = calls_of(&tmux, "send-keys").len();
+    let pastes = pasted(&tmux).len();
+    let output = y_agent.jeet(&["task", "send", "w", "hi"], &lab.home(), &env);
     succeeded(&output);
     assert!(
         stderr_of(&output).contains("through its wake channel"),
@@ -15603,8 +15689,8 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
     let post = socket.post();
     let content = post[1]["message"]["content"].as_str().unwrap();
     assert!(content.contains("hi"), "{content}");
-    assert!(calls_of(&tmux, "send-keys").is_empty());
-    assert!(pasted(&tmux).is_empty());
+    assert_eq!(calls_of(&tmux, "send-keys").len(), keys);
+    assert_eq!(pasted(&tmux).len(), pastes);
     let status = status_file(&task, session);
     assert_eq!(status["state"], "running", "{status}");
     assert_eq!(status["event"], "wake", "{status}");
@@ -15650,7 +15736,7 @@ fn a_watcher_hands_an_agent_its_messages_through_its_wake_channel() {
         "{}",
         stderr_of(&output)
     );
-    assert_eq!(pasted(&tmux).len(), 1);
+    assert_eq!(pasted(&tmux).len(), 2);
     assert!(!socket.posted());
     assert_eq!(read(&out), "");
 }

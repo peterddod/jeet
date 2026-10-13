@@ -1522,6 +1522,7 @@ mod tests {
             at: 50,
             message: "posted and lost".into(),
             to: Some("s".into()),
+            from: crate::messages::Sender::Agent,
         };
         // Posted 10 s before the Stop: the session may hold it yet, and
         // deliver it when this Stop's turn ends.

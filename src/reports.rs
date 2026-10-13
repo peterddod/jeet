@@ -11,7 +11,7 @@ use crate::context::App;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::manager;
 use crate::manager::budget::{self, Limits, Threshold};
-use crate::messages::{self, Agent, Delivered, TmuxAgent};
+use crate::messages::{self, Agent, Delivered, Sender, TmuxAgent};
 use crate::notify::{self, Notification};
 use crate::permissions::{self, Caller};
 use crate::runtime;
@@ -176,9 +176,12 @@ fn deliver_to_with<'a>(
         TaskKind::Assistant => assistant::deliver(app, text, may_start).map(|(d, _)| d),
         // Typed into its idle pane, queued while it is busy, and started
         // only with `may_start`; otherwise held in its inbox.
-        TaskKind::Manager | TaskKind::Work | TaskKind::Review => {
-            messages::deliver(&tasks::task_dir(app, to), agent(may_start).as_ref(), text)
-        }
+        TaskKind::Manager | TaskKind::Work | TaskKind::Review => messages::deliver(
+            &tasks::task_dir(app, to),
+            agent(may_start).as_ref(),
+            text,
+            Sender::Agent,
+        ),
     }
 }
 

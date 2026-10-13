@@ -35,7 +35,7 @@ use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord, TaskState};
 use crate::identity;
-use crate::messages::{self, Agent, Delivered, Queued};
+use crate::messages::{self, Agent, Delivered, Queued, Sender};
 use crate::permissions;
 use crate::placement::Placement;
 use crate::runtime::{self, Started};
@@ -382,7 +382,8 @@ fn launch_argv(
     argv.extend(args.unwrap_or_default());
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let branches = permissions::default_branches(app)?;
-    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id);
+    let wake = runtime::wake(app, spec.harness);
+    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id, wake);
     argv.extend(runtime::hook_args(
         &app.home,
         spec.harness,
@@ -512,7 +513,9 @@ pub fn deliver(app: &App, text: &str, may_start: bool) -> Result<(Delivered, Opt
         window: target.and_then(|s| s.window.clone()),
         may_start,
     };
-    let delivered = messages::deliver(&dir, &agent, text)?;
+    // Never the user's, whoever sent it (see `send`): through its wake
+    // channel even at an idle prompt.
+    let delivered = messages::deliver(&dir, &agent, text, Sender::Agent)?;
     Ok((delivered, target.map(|s| s.name.clone())))
 }
 
@@ -989,6 +992,7 @@ mod tests {
             at: 1,
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
+            from: Sender::Agent,
         }];
         let watched = Watched {
             last_run: Some(1),
@@ -1084,6 +1088,7 @@ mod tests {
             at: 1,
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
+            from: Sender::Agent,
         }];
         let text = context_text(
             "2026-10-10",

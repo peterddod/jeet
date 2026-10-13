@@ -74,6 +74,11 @@ pub enum HarnessConfig {
         /// checkouts are other people's PR branches (default: off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_trust_reviews: Option<bool>,
+        /// Give each agent a wake channel (`jeet inbox watch`), where its
+        /// harness has one, so what is sent to it reaches it now rather
+        /// than at the end of its turn (default: on).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake: Option<bool>,
     },
 }
 
@@ -414,6 +419,14 @@ impl Config {
         }
     }
 
+    /// `[harness] wake`, on unless set off.
+    pub fn wake(&self) -> bool {
+        match &self.harness {
+            Some(HarnessConfig::Table { wake, .. }) => wake.unwrap_or(true),
+            _ => true,
+        }
+    }
+
     /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
     /// command`, then `agent`, then the harness's `default`.
     pub fn agent_command(&self, default: Option<&str>) -> Option<String> {
@@ -699,6 +712,7 @@ mod tests {
                 command: Some("/opt/claude --verbose".into()),
                 auto_trust: None,
                 auto_trust_reviews: None,
+                wake: None,
             })
         );
         let out = toml::to_string_pretty(&config).unwrap();
@@ -727,6 +741,16 @@ mod tests {
             read("[harness]\nauto_trust_reviews = true\n"),
             (false, false)
         );
+    }
+
+    #[test]
+    fn the_wake_channel_is_on_unless_set_off() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap().wake();
+        assert!(Config::default().wake());
+        assert!(read("harness = \"claude-code\"\n"));
+        assert!(read("[harness]\nname = \"claude-code\"\n"));
+        assert!(read("[harness]\nwake = true\n"));
+        assert!(!read("[harness]\nwake = false\n"));
     }
 
     #[test]

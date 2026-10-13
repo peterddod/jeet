@@ -29,7 +29,8 @@ jeet does without that feature:
 | `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and `jeet manager pause` says it could not interrupt the task and leaves its turn to end, after which it is handed nothing until resumed (with no hooks, what waited is then typed in, as `task send` would) |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
-| `wake_env` | reads, and removes from the environment, how the session whose hook runs `jeet inbox watch --harness <id>` takes messages from outside it (Claude Code: its messaging socket, token and process id), returning a `waiter::WakeEnv` with the harness's wire format. Nothing starts the watcher yet, so this is unused in practice | `None`: the watcher ends at once |
+| `wake_hook` | whether the harness can have a wake channel: `hook_args`/`hook_file` then add a background session-start hook running `jeet inbox watch` when `HookSetup::wake` asks (see [The wake channel](#the-wake-channel)) | `false`: what is queued waits for `continue_output` at the turn's end, or is typed in once the agent is idle |
+| `wake_env` | reads, and removes from the environment, how the session whose hook runs `jeet inbox watch --harness <id>` takes messages from outside it (Claude Code: its messaging socket, token and process id), returning a `waiter::WakeEnv` with the harness's wire format | `None`: the watcher ends at once |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary, a manager's summary, a task's brief) | the assistant starts without its summary; a manager reads its `BRIEF.md`, as its `AGENTS.md` says |
 | `last_messages(dir, id, n)` | reads a session's last `n` messages and how its last turn ended (finished, interrupted, an API error, still running) from the agent's own record | `jeet task last` says the agent's record cannot be read |
@@ -85,7 +86,7 @@ describes it, and use `None` for events jeet does not use:
 | --- | --- | --- | --- |
 | `SessionStarted(source)` | a session began; `source` is `Startup`, `Resume`, `Clear`, `Compact` or `Other` | `idle` | `SessionStart` |
 | `Working(detail)` | busy; `detail` is the prompt's first line or the tool in use | `running – <detail>` | `UserPromptSubmit`, `PreToolUse`, `SubagentStop` |
-| `Idle` | sitting at its prompt without a turn having just ended | `idle`; the queue is typed in | `Notification` with `idle_prompt` |
+| `Idle` | sitting at its prompt without a turn having just ended | `idle`; the queue is typed in, unless a wake channel watches the session | `Notification` with `idle_prompt` |
 | `NeedsInput(detail)` | stopped mid-turn for a permission or a question | `needs input – <detail>` | `Notification` with `permission_prompt` or `elicitation_dialog` (or no type); others are ignored |
 | `Stopped` | a turn finished | `idle`; the queue is handed over | `Stop` |
 | `Ended { cleared }` | the session is over; `cleared` when a new one replaces it in the same window, as `/clear` does | `ended` | `SessionEnd` (`cleared` when its `reason` is `clear`) |
@@ -148,6 +149,40 @@ the sandbox on: jeet runs unconfined, and Claude Code decides per Bash
 command, so a command that chains other commands with `jeet` may run them
 unconfined too. Only what the harness knows (the `clear` reason, say) belongs in its module:
 the reporting itself is jeet's.
+
+### The wake channel
+
+Optional. A harness whose agent can take a message from outside its
+session while it runs (Claude Code's messaging socket) can have jeet hand
+it what is queued for it as soon as it is queued, rather than at its turn's
+end or by typing. `wake_hook` returns `true`, and when `HookSetup::wake` is
+set (from `wake_hook` and `[harness] wake`, on by default), the hooks install
+a second session-start hook that runs `jeet inbox watch --task <id>` in the
+background for the session's life (Claude Code: `"async": true` with a
+`timeout` of `WAKE_TIMEOUT_SECS`). The watcher must run as a descendant of
+the agent's process, prints nothing and always exits 0. It needs, all from
+the harness's module:
+
+- `wake_env`: the session's socket, token and agent process id, read from
+  the hook's environment and removed from it, so nothing the watcher
+  starts inherits the token, and the wire format (Claude Code:
+  `claude::wake_lines`, an `auth` line with the token, then a `user`
+  message). The token must never reach a file, argv or log line;
+- `parse_hook` filling `HookEvent.transcript` at session start: the watcher
+  confirms each batch by finding its nonce in the transcript, and takes a
+  batch not found as refused, falling back to the queue for good for that
+  session;
+- the events that set the session's status (`Stopped` or `Idle`,
+  `NeedsInput`, `Ended`): the watcher reads the status file, posts nothing
+  while the agent waits on a prompt (a post would wait behind it), and
+  ends with the session.
+
+For any harness except Claude Code, add `--harness <id>` to the command, as
+for `task-hook`. The user's own `jeet task send` to an idle agent is still
+typed in; everything else goes through the channel and arrives as the
+harness frames a message from outside the session (Claude Code: from
+another session, which cannot approve anything). See
+[agent-hierarchy.md §12](design/agent-hierarchy.md#12-message-delivery-through-a-watcher-phase-2a).
 
 ## Deny rules
 
@@ -297,7 +332,8 @@ for Claude Code 2.1.296):
   no prompt) into `tests/fixtures/panes/<id>/`. Test that `accept_trust` never
   returns a confirming key unless the accept option is the one selected.
 - **Launch arguments**: test each `*_args` method, and that the hook arguments
-  install every event with the jeet binary path shell-quoted, render
+  install every event with the jeet binary path shell-quoted (and, with
+  `wake_hook`, the watcher only when `HookSetup::wake` is set), render
   `HookSetup::deny` in the harness's syntax, and leave deny rules out when
   the list is empty. Check by hand that the keys `interrupt_keys` returns
   end a turn in the real agent.

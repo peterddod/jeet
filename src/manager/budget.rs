@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 
 use crate::context::App;
 use crate::db::tasks::{BudgetRow, RunState, TaskRecord};
-use crate::messages::Inbox;
+use crate::messages::{Inbox, Sender};
 use crate::permissions::Caller;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
@@ -312,7 +312,7 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
                  or report to ask for more."
             );
             let told = Inbox::lock(&tasks::task_dir(app, task))
-                .and_then(|inbox| inbox.push_to(&note, None));
+                .and_then(|inbox| inbox.push_to(&note, None, Sender::Agent));
             if let Err(e) = told {
                 eprintln!("jeet: could not tell task {} its budget: {e:#}", task.slug);
             }
