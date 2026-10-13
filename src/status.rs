@@ -604,27 +604,36 @@ fn write_event_status(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64
 
 /// A subagent's tool or end: the turn it is part of is still going, so a
 /// running session's status is brought up to date, its detail and busy
-/// spell kept. Nothing for a session in any other state: a subagent can
+/// spell kept; a waiting one (a prompt the user has answered, the main
+/// session blocked on the subagent) is running again. Nothing for an idle
+/// or ended session: a subagent can
 /// outlive its turn (one in the background), and its end marking an idle
 /// session running would leave it so, every message to it queued as busy,
 /// until its next turn. Nor for the wake channel's running write, which
 /// only a hook of the turn it starts replaces. Read again here, not taken
-/// from [`HookCtx::prev`], so a Stop written since is not undone.
+/// from [`HookCtx::prev`], which narrows, but without a lock does not close,
+/// the window in which a Stop written since is undone.
 fn refresh_running(task_dir: &Path, hook: &HookEvent, now: i64) -> Result<()> {
     let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
-    let Some(running) = read_status(task_dir, session_id)
-        .filter(|s| s.state == State::Running && s.event != WAKE_EVENT)
+    let Some(live) = read_status(task_dir, session_id)
+        .filter(|s| matches!(s.state, State::Running | State::Waiting) && s.event != WAKE_EVENT)
     else {
         return Ok(());
+    };
+    let (detail, state) = match live.state {
+        State::Waiting => (Some("waiting for subagents".to_string()), State::Running),
+        _ => (live.detail.clone(), live.state),
     };
     write_status(
         task_dir,
         &SessionStatus {
+            state,
+            detail,
             event: hook.name.clone(),
             at: now,
-            ..running
+            ..live
         },
     )
 }
@@ -1510,6 +1519,20 @@ mod tests {
         assert_eq!((status.event.as_str(), status.at), ("SubagentStop", 200));
         assert_eq!(status.busy_since, Some(100));
         assert_eq!(used(&ctx.app, "w"), (0, 0));
+
+        // Waiting on a prompt a subagent raised: a subagent's hook means it
+        // was answered, so running again, the busy spell kept.
+        let mut asking = read_status(&dir, "s").unwrap();
+        asking.state = State::Waiting;
+        asking.detail = Some("may I?".into());
+        write_status(&dir, &asking).unwrap();
+        let tool = hook("PreToolUse", EventKind::Subagent);
+        write_event_status(&dir, &tool, &ctx, 250).unwrap();
+        let status = read_status(&dir, "s").unwrap();
+        assert_eq!(status.state, State::Running);
+        assert_eq!(status.detail.as_deref(), Some("waiting for subagents"));
+        assert_eq!((status.event.as_str(), status.at), ("PreToolUse", 250));
+        assert_eq!(status.busy_since, Some(100));
 
         // After the turn's Stop: idle it stays, idle since the Stop, with
         // no busy spell begun and nothing charged.

@@ -86,7 +86,7 @@ describes it, and use `None` for events jeet does not use:
 | --- | --- | --- | --- |
 | `SessionStarted(source)` | a session began; `source` is `Startup`, `Resume`, `Clear`, `Compact` or `Other` | `idle` | `SessionStart` |
 | `Working(detail)` | busy; `detail` is the prompt's first line or the tool in use | `running – <detail>` | `UserPromptSubmit`, `PreToolUse` |
-| `Subagent` | a subagent's work (a tool it uses, or its end), which can outlive the turn that started it | a `running` status is kept, brought up to date; any other is left as it is | `SubagentStop`, `PreToolUse` with an `agent_id` |
+| `Subagent` | a subagent's work (a tool it uses, or its end), which can outlive the turn that started it | a `running` status is kept, brought up to date, and a `waiting` one becomes `running` again; any other is left as it is | `SubagentStop`, `PreToolUse` with an `agent_id` |
 | `Idle` | sitting at its prompt without a turn having just ended | `idle`; the queue is typed in, unless a wake channel watches the session | `Notification` with `idle_prompt` |
 | `NeedsInput(detail)` | stopped mid-turn for a permission or a question | `needs input – <detail>` | `Notification` with `permission_prompt` or `elicitation_dialog` (or no type); others are ignored |
 | `Stopped` | a turn finished | `idle`; the queue is handed over | `Stop` |
