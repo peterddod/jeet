@@ -838,8 +838,9 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
 
 /// Archive a task once the user has seen which ignored files would go with
 /// its worktrees and agreed — or passed --force. Without a terminal there is
-/// no agreeing, only --force.
-pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
+/// no agreeing, only --force. With `recursive`, every active task under it
+/// is archived first, leaves first, after one confirm for them all.
+pub fn archive(app: &App, name: &str, force: bool, recursive: bool) -> Result<()> {
     let task = permissions::scoped_target(
         app,
         Verb::TaskArchive,
@@ -849,19 +850,69 @@ pub fn archive(app: &App, name: &str, force: bool) -> Result<()> {
         },
     )?;
     let called = called(app, &task);
+    if recursive {
+        return archive_subtree(app, &task, force);
+    }
     // Before asking, not after: the answer would count for nothing.
     app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(&task, "archive")?;
     if !force {
         confirm_archive(app, &task)?;
     }
-    let warnings = tasks::archive(app, &task)?;
+    let warnings = tasks::archive(app, &task, false)?;
     warn_all(&warnings);
     eprintln!("jeet: archived task {}", called);
     Ok(())
 }
 
-pub fn unarchive(app: &App, name: &str) -> Result<()> {
+/// [`archive`] `task` and every active task under it (M23).
+fn archive_subtree(app: &App, task: &TaskRecord, force: bool) -> Result<()> {
+    let called = called(app, task);
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant cannot be archived");
+    }
+    let nodes: Vec<TaskRecord> = tasks::subtree_leaves_first(app, task)?
+        .into_iter()
+        .filter(|node| node.state == TaskState::Active)
+        .collect();
+    if nodes.is_empty() {
+        eprintln!("jeet: task {} and the tasks under it are archived", called);
+        return Ok(());
+    }
+    // Before asking, not after: the answer would count for nothing.
+    tasks::refuse_inside_any(app, &nodes, "archive")?;
+    if !force {
+        let mut report = format!(
+            "archiving task {called} archives the {} under it first, leaves first, ending \
+             every agent among them; their uncommitted work is kept, but not the files git \
+             ignores, which are deleted with their worktrees:",
+            tasks::plural(nodes.len() - 1, "active task")
+        );
+        for (node, unkept) in tasks::subtree_unkept(app, task)? {
+            report.push_str(&format!("\n  {}", self::called(app, &node)));
+            match unkept.is_empty() {
+                true => report.push_str(": nothing to lose"),
+                false => report.extend(unkept.iter().map(|line| format!("\n    {line}"))),
+            }
+        }
+        confirm(
+            &report,
+            "archive them all?",
+            &format!("kept task {called} and the tasks under it as they are"),
+        )?;
+    }
+    let warnings = tasks::archive(app, task, true)?;
+    warn_all(&warnings);
+    eprintln!(
+        "jeet: archived task {called} and {} under it",
+        tasks::plural(nodes.len() - 1, "task")
+    );
+    Ok(())
+}
+
+/// Bring an archived task back; with `recursive`, every archived task under
+/// it too, top-down.
+pub fn unarchive(app: &App, name: &str, recursive: bool) -> Result<()> {
     let task = permissions::scoped_target(
         app,
         Verb::TaskUnarchive,
@@ -871,14 +922,31 @@ pub fn unarchive(app: &App, name: &str) -> Result<()> {
         },
     )?;
     let called = called(app, &task);
-    if task.state == TaskState::Active {
+    let archived = match recursive {
+        true => tasks::subtree_leaves_first(app, &task)?
+            .iter()
+            .filter(|node| node.state == TaskState::Archived)
+            .count(),
+        false => usize::from(task.state == TaskState::Archived),
+    };
+    if archived == 0 {
         eprintln!("jeet: task {} is not archived", called);
         return Ok(());
     }
-    let warnings = tasks::unarchive(app, &task)?;
+    let warnings = tasks::unarchive(app, &task, recursive)?;
     warn_all(&warnings);
+    let under = match (task.state, recursive) {
+        (TaskState::Archived, false) => String::new(),
+        (TaskState::Archived, true) => {
+            format!(", with {} under it", tasks::plural(archived - 1, "task"))
+        }
+        (TaskState::Active, _) => format!(
+            "; {} back under it",
+            tasks::plural(archived, "archived task")
+        ),
+    };
     eprintln!(
-        "jeet: task {} is back at {}",
+        "jeet: task {} is back at {}{under}",
         called,
         tasks::task_dir(app, &task).display()
     );
@@ -887,7 +955,9 @@ pub fn unarchive(app: &App, name: &str) -> Result<()> {
 
 /// Delete a task once the user has seen what would be lost and agreed — or
 /// passed --force. Without a terminal there is no agreeing, only --force.
-pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
+/// With `recursive`, every task under it goes first, leaves first, after
+/// one confirm for them all.
+pub fn delete(app: &App, name: &str, force: bool, recursive: bool) -> Result<()> {
     // By exact name only: with --force nothing asks, so a stale name must not
     // land on whichever task it happens to be a prefix of.
     let task = permissions::scoped_target(
@@ -899,22 +969,43 @@ pub fn delete(app: &App, name: &str, force: bool) -> Result<()> {
         },
     )?;
     let called = called(app, &task);
-    let dir = tasks::task_dir(app, &task);
-    if standing_in(&dir) {
-        bail!(
-            "you are inside {}; cd out of it before deleting the task",
-            dir.display()
-        );
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant cannot be deleted");
+    }
+    let nodes = match recursive {
+        true => tasks::subtree_leaves_first(app, &task)?,
+        false => vec![task.clone()],
+    };
+    for node in &nodes {
+        let dir = tasks::task_dir(app, node);
+        if standing_in(&dir) {
+            bail!(
+                "you are inside {}; cd out of it before deleting the task",
+                dir.display()
+            );
+        }
     }
     // Before asking, not after: the answer would count for nothing.
-    tasks::refuse_delete_with_children(app, &task)?;
-    runtime::refuse_inside_session(&task, "delete")?;
-    if !force {
-        confirm_delete(app, &task)?;
+    if !recursive {
+        tasks::refuse_delete_with_children(app, &task)?;
     }
-    let warnings = tasks::delete(app, &task)?;
+    tasks::refuse_inside_any(app, &nodes, "delete")?;
+    if !force {
+        match recursive {
+            true => confirm_delete_subtree(app, &task, nodes.len() - 1)?,
+            false => confirm_delete(app, &task)?,
+        }
+    }
+    let warnings = tasks::delete(app, &task, recursive)?;
     warn_all(&warnings);
-    eprintln!("jeet: deleted task {}", called);
+    match nodes.len() {
+        1 => eprintln!("jeet: deleted task {}", called),
+        n => eprintln!(
+            "jeet: deleted task {} and {} under it",
+            called,
+            tasks::plural(n - 1, "task")
+        ),
+    }
     Ok(())
 }
 
@@ -970,6 +1061,36 @@ fn confirm_delete(app: &App, task: &TaskRecord) -> Result<()> {
         report.push_str(&format!("\n  {loss}"));
     }
     confirm(&report, "delete it?", &format!("kept task {}", called))
+}
+
+/// Ask once before deleting `task` and the `under` tasks below it, naming
+/// what each would lose, leaves first.
+fn confirm_delete_subtree(app: &App, task: &TaskRecord, under: usize) -> Result<()> {
+    let called = called(app, task);
+    let mut report = format!(
+        "deleting task {called} deletes the {} under it first, leaves first, ending every agent among \
+         them; each one's directory and worktrees go:",
+        tasks::plural(under, "task")
+    );
+    for (node, losses) in tasks::subtree_losses(app, task)? {
+        report.push_str(&format!(
+            "\n  {}: removes {}",
+            self::called(app, &node),
+            tasks::task_dir(app, &node).display()
+        ));
+        match losses.is_empty() {
+            true => report.push_str(", losing nothing"),
+            false => {
+                report.push_str(", losing:");
+                report.extend(losses.iter().map(|loss| format!("\n    {loss}")));
+            }
+        }
+    }
+    confirm(
+        &report,
+        "delete them all?",
+        &format!("kept task {called} and the tasks under it"),
+    )
 }
 
 /// Copy the task's project files again: those the task left alone are

@@ -305,12 +305,18 @@ pub enum TaskCommands {
         /// Do not ask, even when files git ignores (which are not kept) would go
         #[arg(short, long)]
         force: bool,
+        /// Archive every active task under it too, leaves first, asking once
+        #[arg(short, long)]
+        recursive: bool,
     },
 
     /// Bring an archived task's worktrees back
     Unarchive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
+        /// Bring every archived task under it back too, top-down
+        #[arg(short, long)]
+        recursive: bool,
     },
 
     /// Delete a task and everything it owns
@@ -320,6 +326,9 @@ pub enum TaskCommands {
         /// Do not ask, even when work would be lost
         #[arg(short, long)]
         force: bool,
+        /// Delete every task under it too, leaves first, asking once
+        #[arg(short, long)]
+        recursive: bool,
     },
 
     /// Print a task's directory

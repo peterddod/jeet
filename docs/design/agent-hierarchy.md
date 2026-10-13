@@ -251,7 +251,7 @@ Archive is refused while a child is active, and unarchive under an archived
 parent or when the parent already has its `max_children` active children
 (the root has no limit). Each of these two checks once before any work and
 again with the state change, in one IMMEDIATE transaction, so a child made
-meanwhile cannot slip past. `--recursive` comes later in phase 2;
+meanwhile cannot slip past. `--recursive` takes the tree instead (P23);
 `--reparent` is phase 4.
 
 ## 3. Delegation
@@ -1668,6 +1668,32 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `jeet watch` sends an event for a pull request to the worker that owns
   it, never to a manager that came to have it recorded (say by checking
   out a worker's head to read it): routing events to managers is phase 4.
+- **P23** `--recursive` (`-r`) on `task archive`, `unarchive` and
+  `delete` (M23) takes the subtree, through `tasks::{archive, unarchive,
+  delete}(…, recursive)`, which the CLI and the TUI share. Archive and
+  delete walk `tasks::subtree_leaves_first` (the walk `manager/run.rs`
+  pauses and stops by); archive skips what is already archived. Before any
+  work, every node is checked (`refuse_inside_any`: not this jeet's own
+  session or review job; for delete, not the shell's cwd and a sane
+  slug), then the CLI shows one listing, `subtree_losses` (delete) or
+  `subtree_unkept` (archive), and asks once, `--force` without a
+  terminal. A recursive archive always asks, as it ends a tree's agents,
+  where a lone one asks only when files git ignores would go. Then every
+  node's agent is ended, leaves first, as a stop ends it
+  (`manager::run::end_agent`: tmux session, review jobs; its pane
+  forgotten, its turn charged) and not through `run::stop`, which would
+  leave an unarchived tree stopped; only then is each node archived or
+  removed from disk, leaves first, with its own warnings prefixed by its
+  slug. Delete removes the rows last, in one transaction
+  (`delete_rows_leaves_first`), each node's spend folded into its parent
+  first. Unarchive runs top-down, each node under a parent already back;
+  `max_children` is checked for the named task alone. A failure part-way
+  leaves what is done done; running the command again finishes the job.
+  The TUI's `a` and `D` on a task with tasks under it are recursive, one
+  confirm listing each task leaves first, and the confirm records which
+  it was, so a child made after a lone task's confirm is refused, not
+  swept up; `a` in the archived view brings the tree back. The log line
+  of a recursive teardown says `and every task under it`.
 
 ## 11. Placement
 

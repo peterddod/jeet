@@ -272,11 +272,19 @@ fn run(command: Option<Commands>) -> Result<()> {
                 TaskCommands::Open { name, session } => {
                     commands::task::open(&app, &name, session.as_deref())?
                 }
-                TaskCommands::Archive { name, force } => {
-                    commands::task::archive(&app, &name, force)?
+                TaskCommands::Archive {
+                    name,
+                    force,
+                    recursive,
+                } => commands::task::archive(&app, &name, force, recursive)?,
+                TaskCommands::Unarchive { name, recursive } => {
+                    commands::task::unarchive(&app, &name, recursive)?
                 }
-                TaskCommands::Unarchive { name } => commands::task::unarchive(&app, &name)?,
-                TaskCommands::Delete { name, force } => commands::task::delete(&app, &name, force)?,
+                TaskCommands::Delete {
+                    name,
+                    force,
+                    recursive,
+                } => commands::task::delete(&app, &name, force, recursive)?,
                 TaskCommands::Path { name } => commands::task::path(&app, &name)?,
                 TaskCommands::Prs { name, offline } => {
                     commands::task::prs(&app, name.as_deref(), offline)?

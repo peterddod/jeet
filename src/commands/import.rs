@@ -1017,7 +1017,7 @@ fn execute(app: &App, plan: &Plan, groups: &[Group]) -> Outcome {
         }
         if added == 0 {
             // Made a moment ago for this, and nothing came of it.
-            if let Err(e) = tasks::delete(app, &task) {
+            if let Err(e) = tasks::delete(app, &task, false) {
                 outcome.lines.push(format!(
                     "the empty task {} could not be removed ({e:#}); `jeet task delete {} \
                      --force` cleans it up",

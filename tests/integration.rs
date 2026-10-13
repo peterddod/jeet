@@ -10364,6 +10364,248 @@ fn a_managers_run_state_holds_its_whole_subtree() {
     assert!(stub.join("alive/jeet-w").exists());
 }
 
+/// A real tree for `--recursive`: the manager `api`, from `jeet manager
+/// new`, and its worker `w`, made by `api`'s own pane with a worktree of
+/// `widget`, both running under `tmux`, a [`multi_session`] stub. Their
+/// ids, and the panes, which must outlive the test's use of them.
+#[cfg(unix)]
+fn running_tree(lab: &StoreLab, tmux: &std::path::Path) -> (String, String, Vec<PaneShell>) {
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+         \"task.send\", \"worktree.add\"]\n",
+    )
+    .unwrap();
+    lab.clone_repo("widget");
+    let stub = tmux.parent().unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    // The user's own session keeps the server up once the tasks' go.
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let (api, mut mp) = running_manager(
+        lab,
+        tmux,
+        &["--goal", "g", "--allow", "task.create,worktree.add"],
+    );
+    let w_agent = PaneShell::spawn(lab, &[("JEET_TMUX", &tmux_env)]);
+    w_agent.as_session_pane(tmux, "jeet-w");
+    let output = mp.jeet(
+        &[
+            "task", "new", "w", "--repo", "widget", "--prompt", "build it",
+        ],
+        &lab.home().join("tasks/api"),
+        &env,
+    );
+    succeeded(&output);
+    let w = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&w), Some(api.clone()));
+    assert!(stub.join("alive/jeet-api").exists());
+    assert!(stub.join("alive/jeet-w").exists());
+    (api, w, vec![mp, w_agent])
+}
+
+/// Without `--recursive`, a manager with a task under it is neither
+/// deleted nor archived; with it, and `--force` (there is no terminal to
+/// ask at), every live session in the tree is ended, leaves first, then
+/// each task is deleted, leaves first, with its rows.
+#[cfg(unix)]
+#[test]
+fn delete_recursive_ends_a_managers_tree_leaves_first() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    let (api, w, _panes) = running_tree(&lab, &tmux);
+    let (api_dir, w_dir) = (lab.home().join("tasks/api"), lab.home().join("tasks/w"));
+    let rows = || -> i64 {
+        lab.index()
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE id IN (?1, ?2)",
+                [&api, &w],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let kills = || calls_of(&tmux, "kill-session").len();
+
+    // The refusals of a task with tasks under it stand.
+    let output = lab.jeet_at(&["task", "delete", "api", "--force"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("1 task under it"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(&["task", "archive", "api", "--force"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("1 active task under it"),
+        "{}",
+        stderr_of(&output)
+    );
+    // Without a terminal, one listing of the whole tree, and --force named.
+    let output = lab.jeet_at(&["task", "delete", "api", "--recursive"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("deleting task api deletes the 1 task under it"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("w: removes"), "{stderr}");
+    assert!(stderr.contains("api: removes"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert_eq!(kills(), 0);
+    assert_eq!(rows(), 2);
+    assert!(w_dir.is_dir() && api_dir.is_dir());
+
+    let output = lab.jeet_at(
+        &["task", "delete", "api", "--recursive", "--force"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("deleted task api and 1 task under it"),
+        "{}",
+        stderr_of(&output)
+    );
+    let killed: Vec<String> = calls_of(&tmux, "kill-session")
+        .iter()
+        .map(|c| value_after(c, "-t").to_string())
+        .collect();
+    let first = |s: &str| killed.iter().position(|k| k == s).unwrap();
+    assert!(first("=jeet-w") < first("=jeet-api"), "{killed:?}");
+    assert!(!stub.join("alive/jeet-api").exists());
+    assert!(!stub.join("alive/jeet-w").exists());
+    assert!(!w_dir.exists() && !api_dir.exists());
+    assert_eq!(rows(), 0);
+}
+
+/// `--recursive` asks once, at a terminal, for the whole tree.
+#[cfg(unix)]
+#[test]
+fn delete_recursive_asks_once_at_a_terminal() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let (api, w, _panes) = running_tree(&lab, &tmux);
+
+    let mut pty = Pty::open(
+        &lab,
+        "task delete --recursive api",
+        &lab.home(),
+        &[("JEET_TMUX", &tmux_env)],
+    );
+    pty.wait_for_text("delete them all?");
+    pty.type_keys(b"y\n");
+    assert!(pty.wait_for_exit().success(), "{}", pty.screen());
+    let screen = pty.screen();
+    assert_eq!(screen.matches("[y/N]").count(), 1, "{screen}");
+    assert!(
+        screen.contains("deleted task api and 1 task under it"),
+        "{screen}"
+    );
+    let rows: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE id IN (?1, ?2)",
+            [&api, &w],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// A recursive archive ends the tree's agents and archives it leaves
+/// first; a task under it stays archived while it is, and a recursive
+/// unarchive brings the tree back top-down, worktrees and all.
+#[cfg(unix)]
+#[test]
+fn archive_and_unarchive_recursive_take_a_managers_tree() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str())];
+    let (api, w, _panes) = running_tree(&lab, &tmux);
+    let wt = lab.home().join("tasks/w/widget");
+    assert!(wt.is_dir());
+    let state = |id: &str| -> String {
+        lab.index()
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+
+    // No terminal, and something to say: --force is needed.
+    let output = lab.jeet_at(&["task", "archive", "api", "-r"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("--force"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(state(&api), "active");
+
+    let output = lab.jeet_at(
+        &["task", "archive", "api", "--recursive", "--force"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("archived task api and 1 task under it"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        (state(&api), state(&w)),
+        ("archived".into(), "archived".into())
+    );
+    assert!(!wt.exists());
+    let killed: Vec<String> = calls_of(&tmux, "kill-session")
+        .iter()
+        .map(|c| value_after(c, "-t").to_string())
+        .collect();
+    let first = |s: &str| killed.iter().position(|k| k == s).unwrap();
+    assert!(first("=jeet-w") < first("=jeet-api"), "{killed:?}");
+    assert!(!stub.join("alive/jeet-api").exists());
+    assert!(!stub.join("alive/jeet-w").exists());
+
+    // The worker alone is not back under an archived manager.
+    let output = lab.jeet_at(&["task", "unarchive", "w"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("which is archived"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    let output = lab.jeet_at(
+        &["task", "unarchive", "api", "--recursive"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("with 1 task under it"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!((state(&api), state(&w)), ("active".into(), "active".into()));
+    assert!(wt.is_dir(), "the worker's worktree is not back");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {

@@ -84,6 +84,7 @@ jeet task last fix-login [-n 3] [--json] # what the task's agent last said, and 
 jeet task archive fix-login              # free the disk, keep the work
 jeet task unarchive fix-login
 jeet task delete fix-login [--force]
+jeet task delete api --recursive         # a task and every task under it (also archive, unarchive)
 jeet task prs fix-login                  # the PRs that came out of the task
 
 # The assistant — one organiser for everything, in tmux
@@ -480,8 +481,8 @@ read from its files on a thread of its own, like the statuses.
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
-| `a` | archive the task (asks first if its agent is running) — or, in the archived view, bring it back |
-| `D` | delete the task, after listing any work that would be lost |
+| `a` | archive the task (asks first if its agent is running) — or, in the archived view, bring it back. A task with tasks under it takes them along, after one confirm |
+| `D` | delete the task, after listing any work that would be lost; a task with tasks under it takes them along, after one listing for them all |
 | `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
 | `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser, `v` in the review viewer |
@@ -823,6 +824,7 @@ brief for then.
 jeet task archive fix-login          # -f: without asking about ignored files
 jeet task unarchive fix-login
 jeet task delete fix-login           # -f: without asking about what is lost
+jeet task delete api -r              # -r: every task under it too (archive, unarchive as well)
 ```
 
 **Archive** frees the disk and keeps the work: each worktree's uncommitted
@@ -848,6 +850,19 @@ lost — uncommitted changes, commits that would be left on no branch or remote,
 and any git checkout on the canvas that is none of the task's worktrees (a
 clone made there, or a worktree of a repository outside the store) — and asks;
 without a terminal it needs `--force`.
+
+**A task with tasks under it**, a manager's say, is not deleted while any
+task sits under it, archived ones included, nor archived while one under it is active, nor unarchived under
+an archived parent or past its parent's `max_children`. `--recursive`
+(`-r`) takes the tree instead: archive and delete list what every task in
+it would lose, ask once (`--force` without a terminal), end every agent in
+it, leaves first, then archive or delete each task, leaves first; delete
+removes their rows together at the end. `unarchive --recursive` brings the
+archived tasks under it back top-down, each under a parent already back;
+only the task named is held to its parent's `max_children`. A failure
+part-way leaves what is done done, and running the command again finishes
+the job. In the tasks list, `a` and `D` on a task with tasks under it are
+recursive, and `a` in the archived view brings its tree back.
 
 ## The assistant
 

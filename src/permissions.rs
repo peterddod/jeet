@@ -704,13 +704,22 @@ fn task_gate(command: &TaskCommands) -> Gate {
         TaskCommands::Restart { name, .. } => needs("task.open", format!("restarted task {name}")),
         // The user's word, at a terminal: never an agent's.
         TaskCommands::Adopt { .. } => Gate::Interactive,
-        TaskCommands::Archive { name, .. } => {
-            needs("task.archive", format!("archived task {name}"))
-        }
-        TaskCommands::Unarchive { name } => {
-            needs("task.unarchive", format!("unarchived task {name}"))
-        }
-        TaskCommands::Delete { name, .. } => needs("task.delete", format!("deleted task {name}")),
+        TaskCommands::Archive {
+            name, recursive, ..
+        } => needs(
+            "task.archive",
+            format!("archived task {name}{}", with_under(*recursive)),
+        ),
+        TaskCommands::Unarchive { name, recursive } => needs(
+            "task.unarchive",
+            format!("unarchived task {name}{}", with_under(*recursive)),
+        ),
+        TaskCommands::Delete {
+            name, recursive, ..
+        } => needs(
+            "task.delete",
+            format!("deleted task {name}{}", with_under(*recursive)),
+        ),
         TaskCommands::Resync { name, .. } => needs(
             "task.resync",
             format!("copied project files into task {name} again"),
@@ -726,6 +735,14 @@ fn pr_label(pr: &str, repo: Option<&str>) -> String {
     };
     let repo = repo.map(|r| format!(" of {r}")).unwrap_or_default();
     format!("{pr}{repo}")
+}
+
+/// What a logged teardown adds when it took the tasks under it too.
+fn with_under(recursive: bool) -> &'static str {
+    match recursive {
+        true => " and every task under it",
+        false => "",
+    }
 }
 
 /// The first non-blank line of `text`, cut to `max` characters.
@@ -1362,7 +1379,7 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             // Only the user vouches for an agent.
             TaskCommands::Adopt { .. } => None,
             TaskCommands::Archive { name, .. } => verb(Verb::TaskArchive, key(name)),
-            TaskCommands::Unarchive { name } => verb(Verb::TaskUnarchive, key(name)),
+            TaskCommands::Unarchive { name, .. } => verb(Verb::TaskUnarchive, key(name)),
             TaskCommands::Delete { name, .. } => verb(
                 Verb::TaskDelete,
                 Target::Key {

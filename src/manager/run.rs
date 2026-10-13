@@ -101,18 +101,6 @@ fn setter_label(app: &App, setter: &Setter) -> Result<String> {
     })
 }
 
-/// `target` and everything below it, leaves first, `target` last.
-fn subtree_leaves_first(app: &App, target: &TaskRecord) -> Result<Vec<TaskRecord>> {
-    let mut nodes: Vec<TaskRecord> = app
-        .db
-        .descendants(&target.id)?
-        .into_iter()
-        .map(|(task, _)| task)
-        .collect();
-    nodes.push(target.clone());
-    Ok(nodes)
-}
-
 /// Pause `target` for `by`: [`pause_with`] the runtime of each node's
 /// placement.
 pub fn pause(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOutcome>> {
@@ -137,7 +125,7 @@ pub fn pause_with(
     let mut outcomes = Vec::new();
     // A start admitted before the row was written is done before the walk.
     drop(start_lock(app)?);
-    for node in subtree_leaves_first(app, target)? {
+    for node in tasks::subtree_leaves_first(app, target)? {
         let line = interrupt_line(app, &node, rt, own);
         outcomes.push(NodeOutcome::new(&node, line));
     }
@@ -282,7 +270,7 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         outcomes.push(NodeOutcome::new(target, "resumed"));
     }
     let live = live_set(app)?;
-    for node in subtree_leaves_first(app, target)?.into_iter().rev() {
+    for node in tasks::subtree_leaves_first(app, target)?.into_iter().rev() {
         if node.kind == TaskKind::Assistant || node.state != TaskState::Active {
             continue;
         }
@@ -375,7 +363,7 @@ pub fn stop_with(
     let live = live_set(app)?;
     let mut outcomes = Vec::new();
     for target in &targets {
-        for node in subtree_leaves_first(app, target)? {
+        for node in tasks::subtree_leaves_first(app, target)? {
             let line = end_line(app, &node, live.contains(&node.id), end, own);
             outcomes.push(NodeOutcome::new(&node, line));
         }
