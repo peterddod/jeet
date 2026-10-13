@@ -708,7 +708,7 @@ is no cost column (#26) and no wake cell (§12).
 | Key | |
 |---|---|
 | `⏎` | attach to the node's coding agent (the assistant picks a session, as `C`) |
-| `→` / `←` | expand / collapse; on a node with nothing to open or close, to its first child / its parent |
+| `→` / `←` | expand / collapse; on a node with nothing to open or close, to its first child / its parent; collapse is ignored while a filter is set |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, read-only, scrollable |
 | `i` | the node's open ask, inbox and reports by and to it, newest first; `⏎` opens the node's PRs (a report carries no link, D18) |
 | `a` | answer the open question nearest this node (§4, "Questions and the user"): phase 4 (#36) |

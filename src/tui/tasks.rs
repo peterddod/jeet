@@ -1418,11 +1418,12 @@ impl TasksUi {
                     None
                 }
             },
-            // Open a collapsed manager, else go to its first child.
+            // Open a collapsed manager, else go to its first child. A filter
+            // ignores collapse, so it leaves it alone.
             KeyCode::Right => {
                 let line = line?;
                 match (line.manager, line.open, id) {
-                    (true, false, Some(id)) => {
+                    (true, false, Some(id)) if self.filter.is_empty() => {
                         self.collapsed.remove(&id);
                         self.refresh_visible(Some(&id));
                     }
@@ -1435,11 +1436,11 @@ impl TasksUi {
                 }
                 None
             }
-            // Close an open manager, else go to its parent.
+            // Close an open manager, else go to its parent (not while filtering).
             KeyCode::Left => {
                 let line = line?;
                 match (line.manager, line.open, id) {
-                    (true, true, Some(id)) => {
+                    (true, true, Some(id)) if self.filter.is_empty() => {
                         self.collapsed.insert(id.clone());
                         self.refresh_visible(Some(&id));
                     }
@@ -2266,6 +2267,16 @@ enum TreeAsk {
     Stop,
 }
 
+/// Whether the tree thread should start (`Some(true)`) or stop
+/// (`Some(false)`) when the view goes from `was` to `now`, or go on as it is.
+fn tree_wanted(was: View, now: View) -> Option<bool> {
+    match (was == View::Agents, now == View::Agents) {
+        (false, true) => Some(true),
+        (true, false) => Some(false),
+        _ => None,
+    }
+}
+
 impl Background {
     fn start(home: &Path, config: &Config) -> Self {
         let (tx, updates) = mpsc::channel();
@@ -2805,12 +2816,12 @@ impl Screen<'_> {
     /// The view was `was`: start the tree thread on entering the agents
     /// view, and stop it on leaving.
     fn viewed(&mut self, was: View) {
-        match (was == View::Agents, self.ui.view == View::Agents) {
-            (false, true) => self.read_tree(),
-            (true, false) => {
+        match tree_wanted(was, self.ui.view) {
+            Some(true) => self.read_tree(),
+            Some(false) => {
                 let _ = self.bg.tree.send(TreeAsk::Stop);
             }
-            _ => {}
+            None => {}
         }
     }
 
@@ -5005,7 +5016,46 @@ mod tests {
         };
         assert_eq!(seq, 7);
         bg.tree.send(TreeAsk::Stop).unwrap();
+        // An answer already on its way may still arrive; then, none.
+        std::thread::sleep(Duration::from_millis(500));
+        while bg.updates.try_recv().is_ok() {}
+        let late = bg
+            .updates
+            .recv_timeout(POLL_EVERY + Duration::from_millis(500));
+        assert!(!matches!(late, Ok(Update::Tree { .. })));
         drop(bg);
+    }
+
+    #[test]
+    fn the_tree_thread_runs_only_in_the_agents_view() {
+        assert_eq!(tree_wanted(View::Active, View::Agents), Some(true));
+        assert_eq!(tree_wanted(View::Archived, View::Agents), Some(true));
+        assert_eq!(tree_wanted(View::Agents, View::Archived), Some(false));
+        assert_eq!(tree_wanted(View::Agents, View::Active), Some(false));
+        assert_eq!(tree_wanted(View::Agents, View::Agents), None);
+        assert_eq!(tree_wanted(View::Active, View::Archived), None);
+    }
+
+    #[test]
+    fn the_tree_thread_returns_the_nodes_of_a_populated_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let config = config::load_or_create(&home).unwrap();
+        let db = Database::open(&config::index_path(&home)).unwrap();
+        let mut root = task("root", "assistant", TaskState::Active, 0).task;
+        root.kind = TaskKind::Assistant;
+        db.insert_task(&root).unwrap();
+        let bg = Background::start(&home, &config);
+        bg.tree.send(TreeAsk::Run(1)).unwrap();
+        loop {
+            if let Update::Tree { info, .. } =
+                bg.updates.recv_timeout(Duration::from_secs(10)).unwrap()
+            {
+                assert!(info.unwrap().nodes.contains_key("root"));
+                break;
+            }
+        }
+        bg.tree.send(TreeAsk::Stop).unwrap();
     }
 
     /// The assistant, with `w` waiting on a prompt under manager `m`.
@@ -5160,6 +5210,30 @@ mod tests {
         assert_eq!(ui.selected_id(), Some("w"));
         press(&mut ui, KeyCode::Left);
         assert_eq!(ui.selected_id(), Some("m"));
+    }
+
+    #[test]
+    fn a_filter_ignores_collapse_and_the_arrows_leave_it_alone() {
+        let mut ui = agents_sample();
+        ui.filter = "w".to_string();
+        ui.refresh_visible(None);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(ui.selected_id(), Some("m"));
+        assert!(ui.tree[ui.selected].open);
+        // ← goes to the parent, and nothing is collapsed behind the filter.
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.selected_id(), Some("root"));
+        assert!(ui.collapsed.is_empty());
+        // A flag set before the filter does not show, and → does not clear it.
+        ui.filter.clear();
+        ui.collapsed.insert("m".to_string());
+        ui.filter = "w".to_string();
+        ui.refresh_visible(None);
+        press(&mut ui, KeyCode::Down);
+        assert!(ui.tree[ui.selected].open);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.selected_id(), Some("w"));
+        assert!(ui.collapsed.contains("m"));
     }
 
     #[test]

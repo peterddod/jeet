@@ -160,12 +160,19 @@ impl Inbox {
         let dir = task_dir.join(tasks::MARKER_DIR);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let path = dir.join("inbox.lock");
+        // The agent writes in this directory: a FIFO there, or a link to one,
+        // must not make the open wait for a reader.
+        use std::os::unix::fs::OpenOptionsExt;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
         Ok((file, path))
     }
 
@@ -1553,5 +1560,29 @@ mod tests {
         assert_eq!(try_peek(dir.path()), None);
         drop(held);
         assert_eq!(said(try_peek(dir.path()).unwrap()), ["news"]);
+    }
+
+    #[test]
+    fn a_fifo_or_link_for_the_lock_is_refused_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(tasks::MARKER_DIR);
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(inbox_path(dir.path()), "").unwrap();
+        let lock = marker.join("inbox.lock");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(Inbox::lock(dir.path()).is_err());
+        assert!(Inbox::try_lock(dir.path()).is_err());
+        assert!(peek(dir.path()).is_empty());
+        assert_eq!(try_peek(dir.path()), None);
+        // A link is not followed, nor created through.
+        std::fs::remove_file(&lock).unwrap();
+        let target = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(Inbox::lock(dir.path()).is_err());
+        assert!(!target.exists());
     }
 }

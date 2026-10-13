@@ -304,7 +304,8 @@ pub struct TreeLine {
 /// The tree under `root`, the assistant, as shown: its active descendants
 /// among `rows`, depth first with siblings by slug (as `manager ls` has
 /// them), less what a collapsed manager hides. A `filter` keeps the nodes
-/// whose slug, which the row shows, it matches and their ancestors, collapsed or not. Archived
+/// whose slug, which the row shows, it matches and their ancestors, collapsed or not
+/// (and every manager then shows open). Archived
 /// and top-level tasks are never in it.
 pub fn lines(
     root: Option<&TaskRow>,
@@ -321,6 +322,7 @@ pub fn lines(
         At::Root => &root.task,
         At::Row(i) => &rows[i].task,
     };
+    let filtering = !filter.is_empty();
     let is_manager = |at: At| at != At::Root && task(at).kind == TaskKind::Manager;
     let keep: Vec<bool> = match filter.is_empty() {
         true => {
@@ -381,7 +383,7 @@ pub fn lines(
             rails: going_on.get(1..d).unwrap_or_default().to_vec(),
             last,
             manager: is_manager(at),
-            open: !collapsed.contains(&task(at).id),
+            open: filtering || !collapsed.contains(&task(at).id),
         });
     }
     lines
@@ -743,7 +745,7 @@ mod tests {
         let (root, rows) = tree();
         let collapsed = HashSet::from(["fe".to_string()]);
         let lines = lines(Some(&root), &rows, &collapsed, "w3");
-        assert_eq!(drawn(&lines, &root, &rows), ["root", "└─ ▸ fe", "   └─ w3"]);
+        assert_eq!(drawn(&lines, &root, &rows), ["root", "└─ ▾ fe", "   └─ w3"]);
         assert!(super::lines(Some(&root), &rows, &collapsed, "zzz").is_empty());
     }
 
@@ -816,6 +818,30 @@ mod tests {
         app.db
             .set_run_state("api", RunState::Paused, Some(&Setter::User))
             .unwrap();
+        app.db
+            .insert_report("w2", "api", ReportKind::Done, "done", 6)
+            .unwrap();
+        assert!(app.db.queue_start("w2", 7).unwrap());
+        for (repo, number, state, at) in [
+            ("github/acme/repo", 3, "OPEN", "2026-01-01T00:00:00Z"),
+            ("github/acme/repo", 4, "MERGED", "2026-02-01T00:00:00Z"),
+            ("github/acme/repo", 2, "OPEN", "2025-12-01T00:00:00Z"),
+        ] {
+            app.db
+                .upsert_task_pr(&crate::db::tasks::TaskPrRecord {
+                    task_id: "w1".to_string(),
+                    repo_id: repo.to_string(),
+                    number,
+                    title: "t".to_string(),
+                    url: "u".to_string(),
+                    state: state.to_string(),
+                    is_draft: false,
+                    additions: 1,
+                    deletions: 1,
+                    updated_at: at.to_string(),
+                })
+                .unwrap();
+        }
         let w2 = app.db.get_task("w2").unwrap().unwrap();
         Inbox::lock(&tasks::task_dir(&app, &w2))
             .unwrap()
@@ -824,7 +850,11 @@ mod tests {
 
         let info = gather(&app, false).unwrap();
         assert!(info.live.is_empty());
-        assert_eq!(info.queued, 0);
+        assert_eq!(info.queued, 1);
+        assert_eq!(
+            info.max_live,
+            Some(app.config.manager_policy().unwrap().max_live)
+        );
         let mut ids: Vec<&str> = info.nodes.keys().map(String::as_str).collect();
         ids.sort();
         assert_eq!(ids, ["api", "root", "w1", "w2"]);
@@ -842,6 +872,11 @@ mod tests {
         assert_eq!((w1.run, w1.held), (RunState::Paused, 0));
         assert_eq!(w1.inbox, Some(0));
         assert_eq!(info.nodes["w2"].inbox, Some(1));
+        // The newest PR that is still open, not the merged one or older.
+        assert_eq!(w1.pr.as_deref(), Some("repo#3"));
+        assert_eq!(info.nodes["w2"].pr, None);
+        assert!(info.nodes["w2"].queued && info.nodes["w2"].done);
+        assert!(!w1.queued && !w1.done);
         assert_eq!(info.nodes["root"].children, 1);
         assert_eq!(info.nodes["root"].run, RunState::Run);
     }
