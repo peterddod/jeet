@@ -2662,7 +2662,7 @@ pub fn delete_reparenting(
             task.slug
         )
     })?;
-    let lines = after_move(app, caller, &plan);
+    let lines = after_move(app, caller, &plan, &reports);
     Ok((
         Moved {
             plan,
@@ -2678,9 +2678,11 @@ pub fn delete_reparenting(
 /// `BRIEF.md` again (its path and who it reports to changed); a running
 /// mover is handed its new brief now, without starting one that is not;
 /// and each mover tells its new parent it moved there, in jeet's words,
-/// naming its open question if it has one. Slugs only: a node may run
-/// this, and a manager writes task names (C19). One line per thing said.
-fn after_move(app: &App, caller: &Caller, plan: &MovePlan) -> Vec<String> {
+/// naming its open question if it has one; then each open ask among the
+/// reports `kept` from a deleted task is delivered to the new parent
+/// that holds it now. Slugs only: a node may run this, and a manager
+/// writes task names (C19). One line per thing said.
+fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<String> {
     let mut lines = Vec::new();
     let to = manager::label(&plan.to);
     let by = match caller {
@@ -2754,6 +2756,15 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan) -> Vec<String> {
             Ok(None) => {}
             Err(e) => lines.push(format!("could not tell {to} of {who}: {e:#}")),
         }
+    }
+    match reports::redeliver_moved(app, &plan.to, kept) {
+        Ok(asks) => lines.extend(asks.into_iter().map(|(id, told)| {
+            format!(
+                "handed {to} #{id}, which it holds now: {}",
+                delivered_words(&told)
+            )
+        })),
+        Err(e) => lines.push(format!("could not hand {to} the asks it holds now: {e:#}")),
     }
     lines
 }
@@ -3828,7 +3839,7 @@ mod tests {
             let w = app.db.get_task(&w.id).unwrap().unwrap();
             let plan = plan_move(&app, &Caller::User, vec![w], to.clone(), None).unwrap();
             app.db.apply_move(&plan.rows).unwrap();
-            let lines = after_move(&app, &Caller::User, &plan);
+            let lines = after_move(&app, &Caller::User, &plan, &[]);
             assert!(
                 lines
                     .iter()

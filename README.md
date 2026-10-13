@@ -974,7 +974,8 @@ keeps only what it could use where it was and its new parent lets
 through, so nothing it may do changes, and a capability its grant drops is
 named. The reports sent to the manager are kept, as sent to its parent;
 what it used still counts toward every budget above it. The new parent is
-told of each task, in jeet's words, with the open question it now holds;
+told of each task, in jeet's words, with the open question it now holds,
+and is handed each question the manager held, as passed on by jeet;
 a running task is handed its new brief, and every manager moved gets its
 `BRIEF.md` again. If the move is refused after the files are gone, the
 row is kept, and running the delete again once the cause is gone finishes

@@ -2267,14 +2267,15 @@ check, depth, budget room above, a node-scoped `--parent`).
   deleted manager, open or not, is re-addressed to its parent before its
   row goes, so the `ON DELETE CASCADE` on `to_id` does not take the
   children's history or their open questions; the output says how many
-  were kept. The manager's own reports go with its row. A moved task's
-  open question is named to its new holder in the status report of H29,
-  but not delivered to it again: re-delivering each open ask, fenced as an
-  escalated question `via="jeet (moved)"`, needs phase 4's definition of
-  an open ask and its escalation fence (PR A1), and is a follow-up once
-  those are in. A report the deleted manager answered keeps its id in
-  `answered_by`, which has no foreign key; showing it as "a deleted task"
-  is A1's, with its display of answers.
+  were kept. The manager's own reports go with its row. After the commit,
+  each of those that is an open ask (A1's `OPEN_ASK`) the new parent now
+  holds is delivered to it again (`reports::redeliver_moved`, last in
+  `after_move`), fenced as an escalated question `via="jeet (moved)"` and
+  allowed to start it only as `escalate` would, so never a held node; an
+  ask the user holds (`needs_user`) stays with the user. Each is a line in
+  the output, a failed delivery too. A report the deleted manager answered
+  keeps its id in `answered_by`, which has no foreign key, and shows it as
+  "a deleted task" (`reports::answerer`, C11).
 - **H29** Telling the tree. After the commit (`tasks::after_move`): every
   active manager in the moved subtrees gets its `BRIEF.md` again, since
   its path changed (`manager::write_briefs`, moved from the CLI module so

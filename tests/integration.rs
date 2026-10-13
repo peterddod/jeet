@@ -10957,7 +10957,8 @@ fn delete_recursive_asks_once_at_a_terminal() {
 /// `--reparent` deletes a manager alone: the tasks under it move to its
 /// parent with what they sent it, what a grant could not use under it is
 /// dropped and named, the new parent is told of each, in jeet's words and
-/// slugs, with the open question it now holds, and a running one is handed
+/// slugs, with the open question it now holds, which it is handed again,
+/// fenced `via="jeet (moved)"`, and a running one is handed
 /// its new brief. It is refused with `--recursive`, for a task with nothing
 /// under it, and while a hold on the manager holds the tasks under it.
 #[cfg(unix)]
@@ -11055,10 +11056,12 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     assert!(calls_of(&tmux, "kill-session").is_empty());
     assert_eq!(lab.parent_of(&w), Some(api.clone()));
 
+    // In the background, as a hook runs it, the assistant's start is a
+    // session of its own.
     let output = lab.jeet_at(
         &["task", "delete", "api", "--reparent", "--force"],
         &lab.home(),
-        &env,
+        &[env[0], env[1], ("JEET_BACKGROUND", "1")],
     );
     succeeded(&output);
     let stderr = stderr_of(&output);
@@ -11161,6 +11164,21 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     assert!(handed, "{w_inbox} {:?}", pasted(&tmux));
     assert!(stderr.contains("task w's new brief:"), "{stderr}");
     assert!(!stderr.contains("second-worker's new brief"), "{stderr}");
+    // The question api held is the assistant's now, and handed to it.
+    assert!(
+        stderr.contains(&format!(
+            "handed the assistant #{ask_id}, which it holds now:"
+        )),
+        "{stderr}"
+    );
+    let to_root = given(&lab.home().join("assistant"), &tmux, "assistant");
+    assert!(
+        to_root.contains(&format!(
+            "<jeet-report id=\"{ask_id}\" from=\"task w\" path=\"assistant/w\" \
+             kind=\"question\" via=\"jeet (moved)\" untrusted=\"true\">\nkeep v1?\n"
+        )),
+        "{stderr} {to_root}"
+    );
 }
 
 /// A manager holding `task.delete` deletes a manager below it with
