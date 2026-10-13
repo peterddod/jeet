@@ -573,6 +573,14 @@ each ancestor whose own subtree is at or over its limit, not the subtree:
 running descendants finish their turn and get nothing new (P16). A review
 job runs no hooks, so nothing is charged against it.
 
+**Phase 2a (as built).** A wake counts as a turn through its own Stop: a
+batch the wake channel (§12) posts to an idle agent runs a turn, which ends
+in a `Stop` charged like any other, and its busy time runs from the
+watcher's `Running` status (event `wake`), written before the post. A batch
+that lands mid-turn adds no turn. There is no new charge path. A refused
+post's `wake` status is put back to idle, and a sweep in between may charge
+it a few seconds (K13).
+
 ### 5.4 Stopping a runaway subtree
 
 ```bash
@@ -590,6 +598,21 @@ ends the turn, while at an idle prompt it would rewind or clear a draft, and
 at the trust dialog it would exit. A node whose pane holds unsent input the
 user is typing is left alone. `resume` hands the queue over. A manager may pause or stop its
 descendants. Only the user may `--all` or act on the root.
+
+**Phase 2a (as built).** A paused node's watcher (§12) stays and takes
+nothing, and `deliver` checks the hold before the wake route, so a message
+for it is queued. `resume`'s hand-over leaves a watched node to its
+watcher, which takes the queue at its next tick. The watcher's `wake`
+status, written before the woken turn begins, counts as input not yet
+reported, so a pause waits for the turn's first hook and presses Esc on a
+turn that began, not at an idle prompt (K13). The watcher never posts while
+its session waits on a prompt, so a pause's Esc at a prompt cannot release
+a post queued behind it. **Accepted residual:** a batch posted while the
+agent was working, which Claude has not yet delivered (no tool-call
+boundary since), may start one more turn on the node once a pause's Esc,
+or a budget pause at Stop, ends the turn. It is at most one batch, as only
+one is ever in flight, and that turn's Stop finds the node held and hands
+it nothing more.
 
 ### 5.5 Prompt injection
 
@@ -617,6 +640,18 @@ power.
   `JEET_TASK_ID`, not `JEET_ASSISTANT`, and no pane of jeet's own tmux
   sessions above it. A top-level task's agent is `Caller::User` too, and
   fails it (H8).
+- **Framing, by direction (phase 2a).** A brief and a first prompt are
+  user turns. The user's own `jeet task send` from their terminal to an
+  idle agent is typed in, a user turn with the user's authority. With a
+  wake channel (§12), everything else arrives as a peer message, which
+  Claude Code introduces as from another session, not typed by the user,
+  and which cannot approve anything (spike E2, E4): an agent's `jeet task
+  send` (the root's or a manager's), reports, answers and their copies,
+  escalations, watch events, the user's message to an agent that is busy,
+  waiting on a prompt or holding a draft, and anything to the assistant.
+  An answer from the user still carries `from="user"` in its fence: the
+  fence, not the framing, says whose answer it is. A Stop hand-over is
+  hook feedback. Typing, where there is no wake channel, is a user turn.
 - `jeet watch` routes to the root, to the task a PR belongs to, and to a
   manager a rule names (`action = "manager:backend"`, phase 4). The slug
   is resolved as each poll sends, by slug alone (a manager writes names);
@@ -711,7 +746,7 @@ boundary against a local agent that sets out to escape:
 | Driving jeet's interactive screens (`jeet tasks`, `projects`, `chat`) through a fake terminal (`script`, a pty) | **open locally**: an interactive command needs only a terminal, kept so a person at a pane's own terminal still gets the screen; the screen then acts ungated |
 | Direct edits to `index.db` or `config.toml`; a forged `JEET_HOME` (acts only on a fake index) | **open locally** / harmless |
 | User windows opened inside a parented task's or the assistant's session | refused for gated commands (inherited hint, no anchor), by design |
-| jeet's own helpers (`watch --once`, `task-startup`) while their parent is alive | may resolve as the task; they are Free and must never ask for identity |
+| jeet's own helpers (`watch --once`, `task-startup`, `inbox watch`) while their parent is alive | may resolve as the task; they are Free and never need an identity to act. `inbox watch` calls `identity::identify` only to refuse a watcher that is not `--task`'s agent, as `task-hook`'s `attributed` does |
 
 The open rows close only when a confined placement exists, which is future
 work (§13); until then they stay open for every node. Agents started before
@@ -794,6 +829,7 @@ checked, as the manager is made and at each start (P12). Workers keep #23's degr
 | **deny rules** | yes (#32): `enforcement() >= Rules`; Claude Code only; a lint, not a gate (nothing confines a node yet, 5.7) | yes for children (5.6) and read-only worktrees (§1) |
 | **interrupt** a running turn | yes (#32): `interrupt_keys`; Claude Code only (Esc) | yes (pause) |
 | **usage** (tokens/cost) | no, **new** (#26), optional | no; cost budgets wait for it |
+| background wake (`wake_hook`) | yes (phase 2a, §12): Claude Code only; installed unless `[harness] wake = false` | no: today's queue, Stop hand-over and idle typing |
 | instructions file | yes (`instructions_file`, #22) | yes (manager role template) |
 
 Goose (per #23's survey; #28) would qualify once it can write hook files (#27). Its lack
@@ -878,8 +914,8 @@ row, so past the last column it would never show).
 - Touch points: `db/tasks.rs`, `reports.rs`, `manager/{mod,fence,context}.rs`,
   `commands/{report,task,manager}.rs`, `permissions.rs`, `config.rs`,
   `watch.rs`, `tasks.rs`, `tui/{managers,tasks,tasks_ui}.rs` and the
-  templates. Answers, copies and watch events use today's delivery (no
-  phase 2a). As built so far: escalation and answers, with the agents
+  templates. Answers, copies and watch events use today's delivery (built
+  before phase 2a, which now gives them the wake channel too). As built so far: escalation and answers, with the agents
   pane's `a` and needs-you rollup; see the phase 4 implementation notes.
 - Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
   `watch.rs` (dispatch) and the manager template (H18-H20).
@@ -888,6 +924,24 @@ row, so past the last column it would never show).
   `delete_reparenting`, `after_move`), `manager/mod.rs` (`write_briefs`,
   moved from `commands/manager.rs`), `reports.rs` (`StatusEvent::Moved`),
   `cli.rs`, `commands/task.rs` and `permissions.rs` (H21-H30).
+
+**Phase 2a: the wake channel.** (#34; built after phase 4, in two PRs)
+- An optional background watcher for local Claude Code nodes that hands an
+  agent what is queued for it as soon as it is queued (§12). The user's
+  own message to an idle agent is still typed in.
+- Touch points: new `src/waiter.rs`; `messages.rs` (`Delivered::Wake`,
+  `Agent::watched`, `Sender` and `Queued.from`, `fitting_within`, the
+  `hand_over_queue` skip); `status.rs` (`waiter::recover` in `stop` and
+  `idle_prompt`, `wake_running`, `revert_wake`, `idle_agent`, a fresh
+  `wake` status in `input_unreported`); `runtime.rs` (`interrupt_tmux`,
+  `wake`, `task_hooks`, `assistant_hooks`); `harness/{mod,claude}.rs`
+  (`wake_hook`, `wake_env`, `wake_lines`, `HookSetup.wake`,
+  `HookEvent.transcript`, the settings entry, `WAKE_TIMEOUT_SECS`);
+  `config.rs` (`[harness] wake`); `cli.rs`, `main.rs` and `permissions.rs`
+  (the hidden `jeet inbox watch`); `assistant/mod.rs`,
+  `commands/{task,report}.rs`, `reports.rs`, `tasks.rs` and `watch.rs`
+  (the sender, and `Wake`'s wording). As built: see the phase 2a
+  implementation notes.
 
 **Later: cost budgets**, once #26 gives a harness `usage()`. They need a
 migration for the cost columns, `$<n>` in `--budget`, and a cost column in the
@@ -916,6 +970,10 @@ the assistant hears when a task finishes or gets stuck, without polling
   job). The hooks plus the TUI's refresh thread are enough.
 - **Copying the parent's allow-list into the child at creation.** It goes
   stale when the user narrows the root. Intersection at check time does not.
+- **A per-agent watcher replacing typing.** Accepted as an optional harness
+  wake capability (§12, phase 2a); the inbox, its lock and the Stop
+  hand-over stay, and the user's own message to an idle agent is still
+  typed.
 
 ## 10. Decisions
 
@@ -2312,11 +2370,11 @@ check, depth, budget room above, a node-scoped `--parent`).
 
 ### Phase 2a implementation notes
 
-Notes K1-K21, numbered as the phase 2a plan maps them (its W1-W21), for
-what its first PR builds: the watcher and its routing, inert. Nothing
-installs the session-start hook that starts the watcher until the second
-PR, so delivery is unchanged until then; a watcher started by hand works.
-§12 is rewritten as built with that PR.
+Notes K1-K21, numbered as the phase 2a plan maps them (its W1-W21). The
+first PR built the watcher and its routing, inert: nothing installed the
+session-start hook that starts it, so delivery was unchanged. The second
+switches it on (K15), routes by sender (K6, K10), and rewrites §12 as
+built.
 
 - **K1** Candidate W1 of §12, as the spike found it. The watcher is one
   module, `src/waiter.rs`, with no new dependency: `std`'s
@@ -2372,9 +2430,9 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   it first must not see it put back), and a take that fails drops its
   `.inflight` at close. Then `mark_typed`, and for an idle session a
   `Running` status with event `wake`, detail "reading messages",
-  `busy_since` now (`status::wake_running`). Which messages go through
-  the channel at all is one function, `waiter::wakes`, true for every one
-  for now.
+  `busy_since` now (`status::wake_running`). The watcher takes all that
+  is queued for its session, the user's messages included: which messages
+  go through the channel is decided where they are sent (K10).
 - **K7** The batch is "jeet: messages and reports were sent to you…",
   the messages joined as the Stop hand-over joins them
   (`messages::QUEUE_SEPARATOR`), and a last line `jeet delivery <nonce>`,
@@ -2414,6 +2472,21 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   `deliver` asks under the inbox lock, and a watcher lets go of its lock
   under it (K9), so a message is either queued while it watches or routed
   as before after.
+  **By sender** (the user's decision, second PR). `Queued.from` records who
+  queued a message: `user` for `jeet task send` by `Caller::User` at a
+  terminal (`permissions::at_terminal`, the same test that leaves its text
+  undefanged), `agent` for everyone else and for jeet itself (reports,
+  answers and copies, escalations, budget notes, watch events, briefs held
+  for a start). `waiter::wakes(queued, idle)` is false only for the user's
+  own message to an idle agent, which `deliver` then types in as before,
+  the user's turn with the user's authority; through the channel it would
+  arrive as a peer's (5.5). For a busy, waiting or drafting agent the
+  user's message goes through the channel, since it would not be typed
+  anyway. Everything sent to the assistant is `agent` (it is fenced as
+  untrusted whoever sent it). The field defaults to `agent` when absent,
+  so an `inbox.jsonl` line from before reads as an agent's, which never
+  passes for the user's; `from` is read only as `deliver` routes, so old
+  lines are taken by a watcher as any other.
 - **K11** Stop and idle typing. `hand_over_queue` returns false while the
   agent is watched, which covers `idle_prompt` and `resume`; Stop's take
   is unchanged, as each take is under `Inbox::lock`. `waiter::recover`
@@ -2425,7 +2498,7 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   is left, since Claude may still deliver it. A failure to recover is
   warned of, never failing the hook.
 - **K12** At most 6 posts per rolling 60 s per watcher, in memory; past
-  it, messages wait.
+  it, messages wait. The user kept this cap, with one batch in flight.
 - **K13** A pause and the `wake` write: `status::input_unreported` counts
   a `wake` status younger than `STARTING_SECS` as unreported input, and
   `interrupt_tmux` answers `NotWorking(Starting)` for it, so a pause waits
@@ -2442,7 +2515,7 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   session-start hook's stdout is the agent's context); an error is one
   line on stderr. It calls `identity::identify` only to refuse a watcher
   that is not the agent of `--task`, as `task-hook`'s `attributed` does;
-  §5.7's row for jeet's helpers is reworded with the second PR.
+  §5.7's row for jeet's helpers says so.
 - **K17** No wake indicator. `jeet task send` says "sent to w's agent;
   it gets it now, through its wake channel" (for the assistant, "sent to
   the assistant's session <id>, through its wake channel"); a report or
@@ -2464,16 +2537,39 @@ PR, so delivery is unchanged until then; a watcher started by hand works.
   loses `CLAUDE_CODE_MESSAGING_SOCKET`, `_TOKEN`, `CLAUDE_PID` and
   `CLAUDE_CODE_SESSION_ID`, so a watcher under test never posts into the
   Claude session the suite runs in; a watcher a test starts is killed on
-  drop.
+  drop. With the second PR: a launched task's and the assistant's
+  settings carry the watcher entry, and `[harness] wake = false` leaves it
+  out; at an idle, watched agent the user's own `task send` is typed in
+  while another agent's goes to the watcher.
 - **K18** The assistant: its `SessionAgent` is watched by its own
   session's lock. A batch its watcher posted just before a `/clear` and
   never seen goes back readdressed as session start readdresses the
   queue: to the session recorded as following on from it, if any.
-- **K15, K20, K21** The hook entry that starts the watcher
-  (`Harness::wake_hook`, `HookSetup.wake`), the docs of §12 and the live
-  check follow with the second PR, as the plan has them. Of K15, what the
-  verb itself needs is built now: Claude Code's variable names and wire
-  format are in `harness/claude.rs` (K4, K7), and `--harness` picks them.
+- **K15** Switching it on. `Harness::wake_hook` (default false; Claude
+  Code true) says a harness can have a wake channel; `HookSetup.wake`
+  (default false) says this launch installs it, set by `runtime::wake`
+  from `wake_hook` and `[harness] wake` (`Config::wake`, on unless set
+  `false`; only the table form of `[harness]` has it) in `task_hooks` and
+  `assistant_hooks`. With it, Claude Code's `settings_json` adds a second
+  hook to `SessionStart`'s one group, after `task-hook`:
+  `{"type":"command","command":"<jeet> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
+  `WAKE_TIMEOUT_SECS` is a day, provisionally, pending the live check
+  (K21 (a)); were it enforced, the watcher's lock frees at the timeout, its
+  batch is recovered (K11) and delivery falls back. The setting is read at
+  launch, so turning it off takes effect at each agent's next start.
+  `wake_hook` is not in `manager_missing`: the channel is optional, and
+  `Generic` and any other harness are unchanged. Claude Code's variable
+  names and wire format stay in `harness/claude.rs` (K4, K7).
+- **K20** Docs: §12 rewritten as built, with the spike's findings and three
+  corrections (the watcher stays while paused; `Delivered::Wake`, not
+  `Watched`; no worklog note per delivery); §7's optional row; 5.3 (a wake
+  is a turn through its Stop), 5.4 (the paused watcher, and the accepted
+  residual of one batch), 5.5 (framing by direction), §5.7's helper row,
+  §8 and §9; `docs/harnesses.md` (`wake_hook`, `wake_env`, the hook); the
+  README (how messages reach an agent, `[harness] wake`).
+- **K21** The live check on real Claude Code sessions (§12) is run before
+  the second PR merges; its results go in `notes/spike-2a.md` and here.
+  Not yet run.
 
 ## 11. Placement
 
@@ -2535,8 +2631,11 @@ phase 2–4 code can degrade per placement rather than per runtime.
 
 ## 12. Message delivery through a watcher (phase 2a)
 
-Today jeet types messages into an agent's pane. A watcher would instead let
-a background process, started by a hook, hand messages to the agent.
+Before phase 2a, jeet typed a message into an idle agent's pane, and queued
+it for a busy one until its Stop hook handed the queue over. Phase 2a adds a
+*wake channel*: a background process, started by a hook, hands the agent
+what is queued for it as soon as it is queued. This section is as built
+(#34); the phase 2a notes in §10 (K1-K21) have the detail.
 
 | Goal | Meaning |
 |---|---|
@@ -2545,105 +2644,208 @@ a background process, started by a hook, hand messages to the agent.
 | G3: no typing | jeet never types into an input box: no draft check, no risk of answering a trust or permission prompt |
 | G4: no pane | the same path could serve nodes without a pane |
 
-**Verdict: adopt partly.** An optional *wake channel* for local Claude Code
-nodes, as PR 2a of phase 2, after a spike. It meets G1 and G3, and G2 at
-tool-call boundaries. It needs no daemon and falls back to today's path
-wherever it is missing. Do not:
+**Verdict: adopted partly.** An optional wake channel for local Claude Code
+nodes. It meets G1 and G3, and G2 at tool-call boundaries. It needs no
+daemon and falls back to today's path wherever it is missing. G4 is not
+pursued: the watcher is the agent's own hook child. Not done:
 
-- make it the transport: `.jeet/inbox.jsonl` stays the queue,
+- making it the transport: `.jeet/inbox.jsonl` stays the queue,
   `Inbox::lock` the one place a message is taken, and `task_reports` the
   record;
-- require it of any harness;
-- adopt a long-lived `asyncRewake` waiter: its timeout is enforced (600 s by
+- requiring it of any harness (§7: an optional row);
+- a long-lived `asyncRewake` waiter: its timeout is enforced (600 s by
   default, 30 s on `UserPromptSubmit`), so an idle manager's waiter would
   expire.
 
-**Candidates, in order of preference** (the spike picks one):
+**Candidates.** The spike picked W1, and W1 was built.
 
-| | W1: hook-started poster | W2: the harness watches the inbox | W3: jeet posts directly |
+| | W1: hook-started poster (built) | W2: the harness watches the inbox | W3: jeet posts directly |
 |---|---|---|---|
 | Started by | a `SessionStart` hook entry with `async: true`, in jeet's `--settings` | `SessionStart` returns `watchPaths: [<task>/.jeet/inbox.jsonl]`; a `FileChanged` hook with `asyncRewake: true` | nothing; `SessionStart` stores the socket path and token |
-| Reaches the model | posts to `CLAUDE_CODE_MESSAGING_SOCKET` as the agent's own child, so no `crossSessionInbound` setting is needed | exit 2 with the messages on stderr, as a system reminder | `deliver` posts to the socket; needs `crossSessionInbound: "accept"` |
-| Mid-turn | documented: the next tool-call boundary | unverified | documented |
-| Main unknown | the message wire format; own-child status of a long-lived hook child | `FileChanged` with `asyncRewake`; the watch surviving `Inbox::replace` | the wire format; a token outside the session; repo `refuse` |
+| Reaches the model | posts to `CLAUDE_CODE_MESSAGING_SOCKET` from the agent's own hook, so no `crossSessionInbound` setting is needed | exit 2 with the messages on stderr, as a system reminder | `deliver` posts to the socket; needs `crossSessionInbound: "accept"` |
+| Mid-turn | the next tool-call boundary (spike E3) | unverified | documented |
 
-W1 is preferred: it wakes an idle session and lands mid-turn by documented
-paths, needs no settings change, and its process dies with the agent. W2 is
-the fallback; W3 is a last resort, as it keeps a session token in jeet (0600,
-out of logs and the worklog, if chosen).
+W1 wakes an idle session and lands mid-turn by documented paths, needs no
+settings change, and its process is the agent's. W2 (untested) would put
+the messages in a system reminder, trusted more than user text, a larger
+injection risk; W3 would keep a session token in jeet.
 
-**The spike** runs on the user's machine with local Claude Code sessions, in
-a scratch directory outside `~/.jeet` and on a test tmux server, and settles:
-the message wire format; whether a long-lived hook child keeps own-child
-status; how a refused post (`crossSessionInbound: "refuse"`, or a `--bare`
-session) is detected; whether an `asyncRewake` lands mid-turn and its watch
-survives a rename and a delete; that a wake never answers an open permission
-prompt or AskUserQuestion; whether `--bg` sessions run hooks and wake; async
-hook lifetime on `/exit`, tmux kill and `-p` teardown; whether a child
-complies with a manager's command sent as a peer message; and throttling
-under a burst.
+**The spike** (`notes/spike-2a.md`: Claude Code 2.1.296, tmux 3.8, macOS,
+a scratch directory outside `~/.jeet` and a test tmux server) found:
 
-**How W1 works.** `jeet inbox watch` takes a non-blocking lock on
-`.jeet/wait/<session>.lock` (held: exit 0, so compaction does not start a
-second). It finds its task from `--task` in argv, as hooks do (#33), and its
-session from the hook's stdin. It writes nothing to stdout. On each inbox
-change it takes this session's messages under `Inbox::lock`, posts them as
-one fenced batch with a nonce, and notes the delivery in the worklog. It
-exits when the harness pid it recorded is gone, when its status says
-`Ended`, or when `run_state` is paused or stopped (paused: it takes
-nothing).
+- **E1, environment.** Hooks get `CLAUDE_CODE_MESSAGING_SOCKET` (under
+  `/tmp/cc-socks/`, 0600, owner only), `CLAUDE_CODE_MESSAGING_TOKEN` and
+  `CLAUDE_PID`. An async `SessionStart` hook is a child of the Claude
+  process for its life. Its stdin names the session and its
+  `transcript_path`.
+- **E2, wire format and framing.** JSON lines on the socket:
+  `{"type":"auth","token":…}`, then `{"type":"user","message":{"role":"user","content":…}}`.
+  The socket writes nothing back. An idle session wakes and runs a turn.
+  The model is told the text came from another Claude session, not from
+  its user, and that a peer cannot approve anything.
+- **E3, mid-turn.** A post during a turn is delivered within it at the next
+  tool-call boundary, as a system reminder. A post while the user has an
+  unsent draft starts a turn and leaves the draft intact.
+- **E4, permission prompts.** A post while a permission prompt is open
+  waits behind it and never answers it. Once the prompt goes (answered or
+  refused), the post starts a turn.
+- **E5, refusal.** With `crossSessionInbound: "refuse"`, a post is dropped
+  silently: nothing in the pane, the transcript or on the socket. `--bare`
+  binds no socket. A dropped post is detectable only by its absence from
+  the transcript, hence a nonce.
+- **E6, auth and bursts.** On macOS a post without the auth line was
+  accepted; jeet sends the token anyway. Eleven posts in 0.1 s were all
+  delivered, folded into a few turns (Claude's receive queue holds 50).
+- **E7, lifetime.** An async hook survives `/exit` and `tmux kill-session`,
+  reparented to pid 1, while the socket goes. So the watcher must end
+  itself when `CLAUDE_PID` (with its start time) is gone.
+
+Not tested by the spike: W2, `--bg` sessions (jeet never starts them),
+compaction and `/clear`, and whether a child acts on a manager's
+instruction delivered as a peer message. The live check below covers the
+last two.
+
+**How it works.**
+
+- **Start.** jeet's `--settings` for a Claude Code agent, task or
+  assistant, add a second `SessionStart` hook beside `task-hook`:
+  `jeet inbox watch --task <id>` with `"async": true` and a `timeout` of
+  `WAKE_TIMEOUT_SECS` (a day, provisionally: whether Claude enforces an
+  async hook's timeout is for the live check; if it does, the watcher ends
+  then, its batch is recovered and delivery falls back to today's path).
+  It is installed when the harness has one (`Harness::wake_hook`) and
+  `[harness] wake` is not `false` (`HookSetup.wake`), at each launch. The
+  verb is hidden, `Free` in the gate, prints nothing on stdout and always
+  exits 0.
+- **Startup.** It reads the socket, token and `CLAUDE_PID` from its
+  environment and removes them, so nothing it starts inherits the token.
+  It runs only under `CLAUDE_PID`, as the agent of `--task`
+  (`identity::identify`), when the session has no `.off`, and when it gets
+  the session's lock in `<task>/.jeet/wait/` within 2 s (a second watcher,
+  after compaction, does not). It then recovers the task's stale inflight
+  batches.
+- **Waiting.** Each 500 ms it checks `CLAUDE_PID`, compares the inbox
+  file's inode, length and mtime, and reads its session's status every
+  2 s. Nothing is locked or opened on an idle tick.
+- **Take and post**, under `Inbox::lock`: nothing for a held node, nor
+  while the session's status is `Waiting` (a post would wait behind the
+  prompt and start a turn when a pause's Esc refuses it, E4), `Ended` or
+  not the task's current session, nor while a batch is in flight, nor past
+  6 posts in 60 s. Otherwise it takes as many of this session's oldest
+  messages as fit `MAX_MESSAGE`, writes `<session>.inflight` (0600; never
+  the token) before it takes them, marks the input typed, writes a
+  `Running` status with event `wake` ("reading messages") for an idle
+  session, and posts one batch: a jeet-worded header, the messages joined
+  as the Stop hand-over joins them, and a last line `jeet delivery
+  <nonce>`.
+- **Confirm, or fall back.** Each tick it looks for the nonce in the
+  transcript. Found, the batch was delivered. Not found after 20 s with the
+  session idle (time spent running or at a prompt does not count, since a
+  post waits there), or a post that fails to connect or write: the post was
+  refused. The batch goes back to the front of the queue, the `wake` status
+  back to idle if no hook has written since, `.off` is written so no
+  watcher posts for that session again, and the queue is typed in only if
+  the node is not held and the session is idle and current. From there the
+  session uses today's path.
+- **End.** It ends when `CLAUDE_PID` is gone or its status says `Ended`
+  (`/exit`, `/clear`). An unseen batch goes back to the queue (after
+  `/clear` it is looked for in the transcripts beside the old one first,
+  since the new conversation gets it). It types nothing then; a dead
+  agent's queue waits for its next start, as before. Paused, it stays and
+  takes nothing.
 
 **How it fits with today's path.**
 
-- `deliver` computes the route as today; under `Inbox::lock`, a live watcher
-  means queue and return `Delivered::Watched`, otherwise `Type`, `Queue` or
-  `Hold` as before. The watcher checks the queue once more under the lock
-  before it releases its own, closing the race with `deliver`.
-- The Stop hand-over stays; Stop and the watcher take under the same lock,
-  so each message is taken once. Idle typing is skipped while a watcher is
-  live.
-- Taken messages go to `.jeet/wait/<session>.inflight` with their nonce,
-  cleared when the nonce appears in the transcript; a new watcher pushes
-  stale ones back to the front of the queue.
-- The watcher writes a `Running` status before it posts, since a wake may
-  start a turn jeet does not otherwise see.
+- `deliver` checks the hold first, as before. Then, for an agent a hook has
+  reported idle, running or waiting on a prompt, when the message goes
+  through the channel (below) and its session is watched (its lock is
+  held), it queues the message for that session and returns
+  `Delivered::Wake`. That comes before the draft check, so no pane is
+  captured and a draft is left be. A start never consults the watcher (an
+  orphan's lock must not strand one), nor does an agent no hook has
+  reported on yet, which has no watcher. `deliver` asks under the inbox
+  lock, and a watcher lets go of its lock under it, so a message is never
+  stranded between them.
+- The Stop hand-over stays. Stop and the watcher take under the same lock,
+  so each message is taken once. Idle typing, and `resume`'s hand-over,
+  leave a watched agent to its watcher (`hand_over_queue`). Stop and the
+  idle notification recover a dead watcher's inflight batch once it is
+  20 s old (a younger one may still be delivered by Claude, and pushing it
+  back would deliver it twice).
 - The pane shows only a preview line, so the full text is read in Ctrl+O,
-  the phase 3 `i` view and `jeet report ls`. Fencing is unchanged.
+  the agents pane's `i` and `jeet report ls`. Fencing is unchanged.
 
-**Framing.** A node with a wake channel receives messages as peer messages
-from another session, which cannot approve anything; typed messages and the
-brief stay user turns. 5.5 must say which framing each direction gets.
+**Which messages go through it: by sender.** Each queued message records
+who sent it (`Queued.from`: `user` or `agent`). The user's own `jeet task
+send` from their terminal (`permissions::at_terminal`) to an idle agent is
+still typed in, a user turn with the user's authority; through the channel
+it would arrive as a peer's, which cannot approve anything. Everything
+else goes through the channel: an agent's `jeet task send` (the root's, a
+manager's), reports, answers and their copies, escalations, budget notes
+and watch events, and the user's own message to an agent that is busy,
+waiting on a prompt or holding a draft (it would be queued, not typed,
+anyway). The watcher takes whatever is queued for its session, the user's
+included. Messages to the assistant always go through it, since what is
+sent to it is fenced as untrusted whoever sent it. `from` is read only where
+`deliver` routes a message; a line queued before it existed reads as an
+agent's, which never passes for the user's (`waiter::wakes`).
 
-**Harnesses without it** degrade: with hooks and continue-turn but no async
-wake, today's queue, Stop hand-over and idle typing; with no hooks, typing.
-§7 gains an optional row, "background wake (`wake_hook`)".
+**Framing** by direction is in 5.5. **Harnesses without it** degrade: with
+hooks and continue-turn output, today's queue, Stop hand-over and idle
+typing; with no hooks, typing (§7's optional row, "background wake").
 
-**Required safeguards.** A cap on wakes per session (for example 6 a
-minute; the rest wait for Stop), designed with Claude Code's cap of 8 Stop
-continuations in a row; a wake counts as a turn against 5.3 budgets; pause
-means the watcher takes nothing; batching and nonces against Claude Code's
-inbound throttling (50 queued, per-sender limits, identical repeats
-dropped).
+**Safeguards.** At most 6 posts a minute per session, and one batch in
+flight, so bursts stay far below Claude's limits; the rest wait for the
+window or for Stop. A wake counts as a turn through its Stop (5.3). A
+paused node's watcher takes nothing (5.4). Batches and nonces meet Claude
+Code's inbound limits (50 queued, identical repeats folded) and its silent
+refusal.
 
-**Risks.** Claude Code only. A peer message "can't approve anything", which
-suits reports going up but may let a child ignore a manager's command; W2's
-system reminder is trusted more than user text, a larger injection risk. A
-repo's `crossSessionInbound: "refuse"` or a `--bare` session turns it off, so
-jeet must detect a failed post and fall back to typing. Async hook lifetime
-on interactive exit or tmux kill is unverified; the pid check bounds an
-orphan to one poll. In the assistant's shared inbox, a message with no
-session wakes whichever watcher wins the lock. `@internal` fields
-(`rewakeSummary`, `rewakeMessage`) are used for appearance only.
+**The off switch.** `[harness] wake = false` in `config.toml` installs no
+watcher, from each agent's next launch (`jeet task restart` for one
+running). The default is on.
+
+**Corrections to the design as first written.**
+
+- The watcher stays while its node is paused, taking nothing; the design
+  and the spike's verdict had it exit. Exiting would leave a resumed node
+  with no watcher until its next session start. A stopped node's session
+  is killed, so its watcher ends with `CLAUDE_PID`.
+- `deliver` returns `Delivered::Wake`, not `Watched`:
+  `runtime::Interrupted::Watched` already means a user is attached.
+- No worklog note per delivery: it would be noise, and the inbox and
+  `task_reports` stay the record. Nor is there a `jeet inbox take` verb.
+
+**Risks, as they stand.** Claude Code only. A peer message cannot approve
+anything, which suits reports going up, but a child may weigh a manager's
+command less than typed text (live check (e)). A refused post falls back
+by itself; a false fallback (the post was in fact queued, behind a modal
+no hook reports) delivers one batch twice, once per session, as `.off`
+stops later posts. Orphans end within a tick (E7). In the assistant's
+shared inbox, a message for no particular session goes to whichever
+watcher takes it first. A pause can let one batch already posted start
+one more turn (5.4). The token is in no file, argv or log line; it stays
+in the watcher's initial environment block, which `ps eww` shows to the
+same user, who can read it from Claude's own process anyway (I22).
+
+**Live check.** Before the phase merges, it is run on real Claude Code
+sessions, on a test tmux server and a scratch `JEET_HOME`: whether an
+async hook's `timeout` is enforced; whether `UserPromptSubmit` fires on a
+wake from idle; that compaction's second watcher exits; a refused post
+falling back, typed once; that a child acts on a manager's instruction
+delivered as a peer message; `/exit`; `/clear` with a batch just posted; a
+pause while a batch is in flight, mid-turn and from idle; where an async
+hook's stderr goes; whether the hook runs through `sh -c`; and `jeet task
+restart`. Its results go in `notes/spike-2a.md` and K21.
 
 | Phase | What lands |
 |---|---|
-| Before 2a | the spike; no code |
-| 2a (#34) | `Harness::wake_hook`, `HookSetup.wake`, the settings entry, `src/waiter.rs`, `Delivered::Watched` routing in `messages.rs`, the idle skip and ack in `status.rs`, hidden `jeet inbox watch --task`/`take`. It does not block phase 2 |
-| 3 (#35) | the `i` view (built) and inbox depth on each row (built); `wake: armed/none` comes with 2a, so the pane as built shows nothing for wake (A19) |
-| 4 (#36) | answers, copies and watch events use today's delivery; with no 2a, the wake-cap condition does not apply (were 2a built, they could arrive mid-turn, and the wake cap and turn accounting would have to exist first) |
+| Before 2a | the spike (done; above) |
+| 2a (#34) | built: `src/waiter.rs` and the hidden `jeet inbox watch --task`; `Delivered::Wake` routing by sender (`Queued.from`) in `messages.rs`; the idle and resume skip and inflight recovery in `status.rs`; `Harness::wake_hook`, `wake_env` and `HookSetup.wake`, the settings entry and `[harness] wake` |
+| 3 (#35) | the `i` view and inbox depth on each row (built); no wake indicator (A19; decided again for 2a, K17) |
+| 4 (#36) | answers, copies and watch events go through the wake channel as any message not the user's own does; the wake cap and turn accounting apply to them |
 
-§9 gains: "a per-agent watcher replacing typing: accepted as an optional
-harness wake capability; the inbox, its lock and the Stop hand-over stay."
+§9 has the line this section asked for.
 
 ## 13. Future work: confined and cloud placements
 
