@@ -6509,6 +6509,13 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // Ctrl-U clears the line, and is not typed.
+        type_text(&mut ui, "junk");
+        ui.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        match &ui.panel {
+            Some(Panel::Answer { input, .. }) => assert_eq!(input.as_str(), ""),
+            other => panic!("{other:?}"),
+        }
         type_text(&mut ui, "drop itx");
         press(&mut ui, KeyCode::Backspace);
         assert_eq!(

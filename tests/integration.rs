@@ -14568,6 +14568,55 @@ fn agents_tab_answers_a_question_that_reached_you() {
     assert!(screen.wait_for_exit().success());
 }
 
+/// An answer sent after the question was answered elsewhere is refused on
+/// the form: it stays up, with the reason, and nothing is overwritten.
+#[cfg(unix)]
+#[test]
+fn agents_tab_refuses_an_answer_to_a_question_answered_meanwhile() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let (_api, _w, mut panes) = asking_tree(&lab, &tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_BACKGROUND", "1"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    let (api_dir, w_dir) = (lab.home().join("tasks/api"), lab.home().join("tasks/w"));
+    succeeded(&panes[1].jeet(&["report", "question", "keep v1?"], &w_dir, &env));
+    let id = lab.last_report_id();
+    succeeded(&panes[0].jeet(&["report", "escalate", &id], &api_dir, &env));
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["report", "escalate", &id], &lab.home(), &env));
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_words("needs you – question");
+    screen.type_keys(b"a");
+    screen.wait_for_words(&format!(
+        "#{id} question from task assistant/api/w · with you"
+    ));
+
+    // The user answers at a terminal of their own, with the form up.
+    succeeded(&lab.jeet_at(&["report", "answer", &id, "first"], &lab.home(), &env));
+    screen.type_keys(b"second\r");
+    screen.wait_for_words(&format!("#{id} was answered by"));
+    assert!(screen.shows("question from task"), "{}", screen.plain());
+    assert_eq!(lab.ask_of(&id).2.as_deref(), Some("first"));
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
 /// A manager answers what it holds: the answer is from it, and nobody
 /// above, who never saw the question, hears of it.
 #[cfg(unix)]
