@@ -529,11 +529,15 @@ impl NewTaskForm {
     }
 
     /// The task the form describes, or why it describes none.
-    pub fn spec(&self) -> std::result::Result<TaskSpec, String> {
-        let name = match self.name.trim() {
+    fn name_or_default(&self) -> String {
+        match self.name.trim() {
             "" => self.default_name.clone(),
             name => name.to_string(),
-        };
+        }
+    }
+
+    pub fn spec(&self) -> std::result::Result<TaskSpec, String> {
+        let name = self.name_or_default();
         let repos = self.repos.chosen();
         let branch = Some(self.branch.trim().to_string()).filter(|b| !b.is_empty());
         if branch.is_some() && repos.len() != 1 {
@@ -555,8 +559,9 @@ impl NewTaskForm {
             return Err("a task under a node needs its parent".into());
         };
         let task = match self.kind {
+            // A manager shows no project, repos or branch, so none can fail it.
             TaskKind::Manager => TaskSpec {
-                name: self.spec()?.name,
+                name: self.name_or_default(),
                 project: None,
                 repos: Vec::new(),
                 branch: None,
@@ -6028,6 +6033,16 @@ mod tests {
         assert_eq!(spec.repos, ["github.com/acme/api"]);
         assert_eq!(spec.kind, TaskKind::Work);
         assert_eq!(spec.delegation().parent.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn a_manager_ignores_the_fields_it_hides() {
+        let mut f = child_form();
+        f.branch = "feat".into();
+        f.toggle_kind();
+        let spec = f.child_spec().unwrap();
+        assert_eq!(spec.kind, TaskKind::Manager);
+        assert!(spec.repos.is_empty());
     }
 
     #[test]

@@ -12518,6 +12518,30 @@ fn agents_tab_stops_after_a_confirm() {
     screen.wait_for_words("task w is stopped under manager api; `jeet manager resume api` first");
     assert!(!stub.join("alive/jeet-w").exists());
 
+    // Pausing a stopped manager keeps it stopped.
+    screen.esc();
+    screen.type_keys(b"k");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"p");
+    screen.wait_for_text("kept manager api stopped");
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+
+    // Stopping everything under the assistant runs on the root.
+    screen.esc();
+    screen.type_keys(b"k");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"x");
+    screen.wait_for_words("stopping every task under the assistant");
+    screen.type_keys(b"y");
+    screen.wait_for_words("stopped every task under the assistant");
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+
     screen.esc();
     screen.type_keys(b"q");
     assert!(screen.wait_for_exit().success());
