@@ -76,7 +76,8 @@ trait, so raise it in the PR.
 
 `parse_hook` returns a `HookEvent`: the harness's own event `name` (kept in
 the status file), the `session_id`, the session's `cwd` (used to find the
-task), and a `kind`. Map each event the agent sends to the `EventKind` that
+task), its `transcript` file when the payload names one (where the wake
+channel looks for what it posted), and a `kind`. Map each event the agent sends to the `EventKind` that
 describes it, and use `None` for events jeet does not use:
 
 | `EventKind` | Meaning | Status shown | Claude Code event |

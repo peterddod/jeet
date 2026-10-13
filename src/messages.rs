@@ -321,9 +321,13 @@ pub fn queued_reason(queued: &[Queued]) -> String {
     format!(
         "Messages and reports were sent to you (with `jeet task send` or `jeet report`) \
          while you were working. Deal with them now:\n\n{}",
-        messages.join("\n\n---\n\n")
+        messages.join(QUEUE_SEPARATOR)
     )
 }
+
+/// What goes between the messages of a queue handed over in one go, by the
+/// Stop hook or the wake channel.
+pub(crate) const QUEUE_SEPARATOR: &str = "\n\n---\n\n";
 
 /// How a message reaches the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,10 +648,16 @@ fn hand_over(
 /// How many of the oldest of `queue` fit in one prompt: at least one, which
 /// a message always does.
 fn fitting(queue: &[Queued]) -> usize {
+    fitting_within(queue, MAX_MESSAGE, "\n\n")
+}
+
+/// How many of the oldest of `queue`, joined by `separator`, fit in `limit`
+/// bytes: at least one, however long.
+pub(crate) fn fitting_within(queue: &[Queued], limit: usize, separator: &str) -> usize {
     let mut len = 0;
     for (i, q) in queue.iter().enumerate() {
-        len += q.message.len() + if i == 0 { 0 } else { 2 };
-        if len > MAX_MESSAGE {
+        len += q.message.len() + if i == 0 { 0 } else { separator.len() };
+        if len > limit {
             return i.max(1);
         }
     }

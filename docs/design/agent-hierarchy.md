@@ -2310,6 +2310,109 @@ check, depth, budget room above, a node-scoped `--parent`).
   exact. The tasks list's and agents pane's `x`/`D` confirms act on the
   ids they recorded, even if a task moved in between.
 
+### Phase 2a implementation notes
+
+Notes K1-K21, numbered as the phase 2a plan maps them (its W1-W21), for
+what its first PR builds: the watcher and its routing, inert. Nothing
+installs the session-start hook that starts the watcher until the second
+PR, so delivery is unchanged until then; a watcher started by hand works.
+§12 is rewritten as built with that PR.
+
+- **K1** Candidate W1 of §12, as the spike found it. The watcher is one
+  module, `src/waiter.rs`, with no new dependency: `std`'s
+  `UnixStream`, polling rather than inotify or kqueue, and `uuid` for
+  nonces. The inbox stays the queue, `Inbox::lock` the only place a
+  message is taken, and the Stop hand-over stays.
+- **K3** Its files are in `<task>/.jeet/wait/`: `<session>.lock`, an
+  flock held for the watcher's life (`waiter::watched` is a non-blocking
+  lock that fails; it opens without creating, so a probe makes nothing);
+  `<session>.inflight`, the batch posted and not yet seen, 0600; and
+  `<session>.off`, written when a post was refused, after which no
+  watcher posts for that session. The session id passes
+  `valid_session_id` first.
+- **K4** Startup. The harness module builds the `WakeEnv`
+  (`harness::claude::wake_env`, which reads and removes
+  `CLAUDE_CODE_MESSAGING_SOCKET`, `_TOKEN` and `CLAUDE_PID`, so no child
+  inherits the token); the library never reads the environment.
+  `waiter::run` parses the hook's stdin with the harness
+  (`HookEvent.transcript` is new, from Claude's `transcript_path`),
+  requires that it runs under `CLAUDE_PID` and that `identity::identify`
+  resolves to `--task`, then `Watcher::open`: not when `.off` exists or
+  `CLAUDE_PID`'s start time cannot be read; the lock is tried 9 times
+  250 ms apart, so a probe or a restart's orphan does not leave the
+  session unwatched, while a live watcher (after compaction) keeps it. The
+  lock file gets `{claude_pid, start, pid}`. Every `.inflight` in the task
+  is then recovered (K11); one of its own session too young to recover is
+  carried on with, not posted over. The plan's comparison of
+  `CLAUDE_CODE_SESSION_ID` with stdin is not made, so `WakeEnv` has no
+  field for it.
+- **K5** Each 500 ms tick: `CLAUDE_PID`'s start time is checked, the
+  status read for its end every 4th tick, the inbox file's inode, length
+  and mtime compared, and the inbox locked only when that changed or
+  something for the session was left untaken. A held task's hold is read
+  again at most every 5 s.
+- **K6** Take and post, under `Inbox::lock`: nothing for a held task;
+  nothing while the session's status is `Waiting` (a post would queue
+  behind the prompt and start a turn when a pause's Esc clears it), absent
+  or not the task's current session; `Ended` ends the watcher; nothing
+  while a batch is in flight or over the cap. The batch is as many of the
+  oldest as fit `MAX_MESSAGE` with the header and nonce
+  (`messages::fitting_within`). `.inflight` is written before the take,
+  so a kill between them leaves the batch queued and in flight, which
+  recovery puts right. Then `mark_typed`, and for an idle session a
+  `Running` status with event `wake`, detail "reading messages",
+  `busy_since` now (`status::wake_running`). Which messages go through
+  the channel at all is one function, `waiter::wakes`, true for every one
+  for now.
+- **K7** The batch is "jeet: messages and reports were sent to you…",
+  the messages joined as the Stop hand-over joins them
+  (`messages::QUEUE_SEPARATOR`), and a last line `jeet delivery <nonce>`,
+  16 hex characters. The wire format is the harness's
+  (`harness::claude::wake_lines`: an `auth` line with the token, then a
+  `user` message), passed to the library in `WakeEnv.lines`.
+- **K8** Confirm, or fall back. Each tick reads the transcript on from
+  where it last stopped, less a nonce's length, so a nonce written across
+  two reads is found. The 20 s deadline counts only while the status is
+  `Idle` or still the watcher's own `wake` write. Past it, or when the
+  connect or write fails, the watcher ends refused: under the inbox lock
+  the batch goes back at its own times (so in front), the `wake` status is
+  put back to idle only if it is still that write
+  (`status::revert_wake`), `.off` is written and the lock let go, and the
+  queue is typed in (through the `Agent` it is given) only when the task
+  is not held, the session is idle and the task's current one. A watcher
+  whose tick fails ends the same way.
+- **K9** It ends when `CLAUDE_PID` is gone or its session's status is
+  `Ended`, and lets go of its lock while still holding the inbox's. An
+  unseen batch goes back to the queue; on `Ended` it is looked for first
+  in the transcripts beside the session's modified since the post (the
+  last 1 MiB of each: after `/clear` the next conversation gets it).
+  Nothing is typed on either. Paused, it stays and takes nothing.
+- **K11** `waiter::recover` (for `stop` and `idle_prompt`, under the lock
+  they hold, from the routing that follows): with the session's lock free,
+  a batch seen is let go; one unseen and posted 20 s ago or more goes back,
+  less what is still queued; a younger one is left, since Claude may still
+  deliver it.
+- **K12** At most 6 posts per rolling 60 s per watcher, in memory; past
+  it, messages wait.
+- **K13** A pause and the `wake` write: `status::input_unreported` counts
+  a `wake` status younger than `STARTING_SECS` as unreported input, and
+  `interrupt_tmux` answers `NotWorking(Starting)` for it, so a pause waits
+  for the woken turn's first hook and presses Esc on a turn that began,
+  not on an idle prompt.
+- **K14** The token is in no file (not `.inflight`, not the lock file),
+  argv or log line; `WakeEnv`'s `Debug` prints `…` for it, and a failed
+  post's error names the socket only. No worklog note per delivery.
+- **K19** The library is tested without a real Claude, tmux server or
+  `~/.jeet`: a `UnixListener` under `/tmp` for the socket, temp files for
+  transcripts, the test process or a killed `sleep` for `CLAUDE_PID`,
+  time passed to `Watcher::step`, and a recording `Agent` for the
+  fallback's typing, which `run` gets from `status::idle_agent` (shared
+  with `idle_prompt`).
+- **K2, K10, K15-K18, K20, K21** The routing (`Delivered::Wake`,
+  `Agent::watched`), the hidden `jeet inbox watch` verb, the hook entry
+  that starts it, the docs of §12 and the live check follow, as the plan
+  has them.
+
 ## 11. Placement
 
 A node's placement says where its agent runs. There is one today:

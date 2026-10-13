@@ -26,6 +26,7 @@ use super::{
 };
 use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
+use crate::waiter::WakeEnv;
 
 /// Every hook event jeet installs.
 pub const HOOK_EVENTS: [&str; 7] = [
@@ -146,6 +147,7 @@ impl Harness for ClaudeCode {
             name,
             session_id: input.session_id,
             cwd: input.cwd,
+            transcript: input.transcript_path.map(PathBuf::from),
         })
     }
 
@@ -370,6 +372,9 @@ struct HookInput {
     /// SessionEnd's: why it ended (`clear`, `logout`, `prompt_input_exit`…).
     #[serde(default)]
     reason: Option<String>,
+    /// The session's transcript file.
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 fn event_kind(event: &str, input: &HookInput) -> Option<EventKind> {
@@ -729,6 +734,63 @@ fn one_line(text: &str) -> String {
     }
 }
 
+/// Where Claude Code's session takes messages from other sessions: a Unix
+/// socket, owner-only, that each hook it runs is told of.
+const MESSAGING_SOCKET_ENV: &str = "CLAUDE_CODE_MESSAGING_SOCKET";
+/// What a sender authenticates with on that socket.
+const MESSAGING_TOKEN_ENV: &str = "CLAUDE_CODE_MESSAGING_TOKEN";
+/// The Claude Code process the hook runs under.
+const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
+
+/// The wake channel of the Claude Code session this runs under, from its
+/// hook's environment, which loses the variables, so nothing this starts
+/// inherits the token. `None` when one is missing, as for `--bare`, which
+/// binds no socket. Called first thing, before anything starts a thread.
+// Called by `jeet inbox watch`, which follows it (#34).
+#[allow(dead_code)]
+pub fn wake_env() -> Option<WakeEnv> {
+    let read = |name: &str| {
+        let value = std::env::var(name).ok();
+        std::env::remove_var(name);
+        value
+    };
+    let (socket, token, pid) = (
+        read(MESSAGING_SOCKET_ENV),
+        read(MESSAGING_TOKEN_ENV),
+        read(CLAUDE_PID_ENV),
+    );
+    wake_env_of(socket, token, pid)
+}
+
+/// [`wake_env`] from the variables' values.
+fn wake_env_of(
+    socket: Option<String>,
+    token: Option<String>,
+    pid: Option<String>,
+) -> Option<WakeEnv> {
+    let socket = socket.filter(|s| !s.trim().is_empty())?;
+    let token = token.filter(|t| !t.trim().is_empty())?;
+    let claude_pid = pid?.trim().parse().ok().filter(|&p: &u32| p > 1)?;
+    Some(WakeEnv {
+        socket: PathBuf::from(socket),
+        token,
+        claude_pid,
+        lines: wake_lines,
+    })
+}
+
+/// What a session posts to another's socket: an `auth` line with the token,
+/// then the message, which it takes as a peer's, as a turn of its own when
+/// idle and at its next tool call when not.
+pub fn wake_lines(token: &str, content: &str) -> Vec<u8> {
+    let auth = serde_json::json!({ "type": "auth", "token": token });
+    let user = serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": content },
+    });
+    format!("{auth}\n{user}\n").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +809,33 @@ mod tests {
 
     fn parsed(event: &str, raw: &str) -> HookEvent {
         ClaudeCode.parse_hook(event, raw).unwrap()
+    }
+
+    #[test]
+    fn a_session_start_says_where_its_transcript_is() {
+        let start = parsed("SessionStart", &raw_fixture("SessionStart"));
+        assert_eq!(
+            start.transcript.as_deref(),
+            Some(Path::new(
+                "/home/me/.claude/projects/-home-me--jeet-tasks-fix-login/\
+                 3f1c2a9e-5b7d-4e61-9a0b-2c4d6e8f0a1b.jsonl"
+            ))
+        );
+        assert!(parsed("Stop", "{}").transcript.is_none());
+    }
+
+    #[test]
+    fn the_wake_channel_needs_its_socket_token_and_process() {
+        let some = |s: &str| Some(s.to_string());
+        let env = wake_env_of(some("/tmp/cc-socks/42.sock"), some("ab12"), some("42")).unwrap();
+        assert_eq!(env.socket, Path::new("/tmp/cc-socks/42.sock"));
+        assert_eq!((env.token.as_str(), env.claude_pid), ("ab12", 42));
+        assert!(!format!("{env:?}").contains("ab12"));
+        assert!(wake_env_of(None, some("ab12"), some("42")).is_none());
+        assert!(wake_env_of(some("/s"), some(" "), some("42")).is_none());
+        assert!(wake_env_of(some("/s"), some("ab12"), None).is_none());
+        assert!(wake_env_of(some("/s"), some("ab12"), some("init")).is_none());
+        assert!(wake_env_of(some("/s"), some("ab12"), some("1")).is_none());
     }
 
     #[test]

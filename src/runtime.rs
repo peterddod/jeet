@@ -710,6 +710,15 @@ fn interrupt_tmux(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     if at_startup(current.as_ref(), status::launched_at(&dir)) {
         return Ok(Interrupted::AtStartup);
     }
+    // Running only by the wake channel's word: the turn it posted for has
+    // not begun, and the keys would land on an idle prompt. A pause waits
+    // for the turn's first hook (`status::input_unreported`).
+    if current
+        .as_ref()
+        .is_some_and(|s| status::fresh_wake(s, now_secs()))
+    {
+        return Ok(Interrupted::NotWorking(Activity::Starting));
+    }
     if spec.harness.has_draft(&tmux::capture_styled(&name)?) {
         return Ok(Interrupted::UserTyping);
     }

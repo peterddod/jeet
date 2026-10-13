@@ -329,6 +329,9 @@ pub struct HookEvent {
     pub cwd: Option<String>,
     /// `None` for an event that says nothing jeet uses.
     pub kind: Option<EventKind>,
+    /// Where the harness records the session's conversation, when it says:
+    /// the wake channel looks there for what it posted.
+    pub transcript: Option<PathBuf>,
 }
 
 /// What a session is doing, as a hook reports it.

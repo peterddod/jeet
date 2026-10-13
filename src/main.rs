@@ -33,6 +33,9 @@ mod tasks;
 mod tmux;
 mod todo;
 mod tui;
+// Used by the routing and the `inbox watch` verb that follow it (#34).
+#[allow(dead_code)]
+mod waiter;
 mod watch;
 mod worktrees;
 

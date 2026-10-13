@@ -860,6 +860,22 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_waits_for_the_turn_a_wake_is_about_to_start() {
+        let (_dir, app) = lab();
+        let w2 = get(&app, "w2");
+        // The wake channel just posted to it, idle: no hook yet.
+        status::wake_running(&tasks::task_dir(&app, &w2), "s", now_secs()).unwrap();
+        let rt = Starting {
+            starting: 2,
+            calls: std::cell::Cell::new(0),
+        };
+        let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
+        let outcomes = pause_with(&app, &Caller::User, &w2, &lookup, &nobody).unwrap();
+        assert_eq!(outcomes, [NodeOutcome::new(&w2, "interrupted")]);
+        assert_eq!(rt.calls.get(), 3);
+    }
+
+    #[test]
     fn a_pause_goes_on_past_what_a_node_refuses_or_fails_at() {
         let (_dir, app) = lab();
         let rt = fake(&app, |slug| match slug {
