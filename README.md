@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.10.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.11.0
 ```
 
 ## Quick start
@@ -1253,6 +1253,59 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.11
+
+The wake channel: phase 2a of [hierarchical
+agents](docs/design/agent-hierarchy.md). Messages reach an agent while it
+works, or wake it when idle, instead of waiting for its turn to end.
+
+- **The wake channel** (Claude Code): each agent session starts a
+  background watcher, `jeet inbox watch`, from its own session-start hook.
+  It hands the agent what is queued for it through Claude Code's messaging
+  socket as soon as it is queued: an idle agent wakes, a busy one gets it
+  at its next tool call, one waiting on a prompt gets it once the prompt
+  is answered. Such messages arrive from another session, which Claude
+  Code tells the agent cannot approve anything ([Messaging an
+  agent](#messaging-an-agent)).
+- **Routing by sender**: only what you send yourself, with `jeet task
+  send` from your own terminal, to an idle agent is still typed in as your
+  turn (unless its input box holds unsent text; then it goes through the
+  channel, and the CLI says so). Messages from the assistant and managers,
+  reports, answers, escalations, watch events and briefs go through the
+  channel. If Claude Code refuses or drops a message, jeet falls back to
+  the queue and typing for that session.
+- **`[harness] wake = false`** turns the channel off, from each agent's
+  next start ([The coding agent's harness](#the-coding-agents-harness)).
+- **A question stays open through progress**: a `question` or `blocked`
+  report stays open until it is answered or the task reports done,
+  blocked or another question; a `progress` report no longer closes it
+  ([Reporting to the parent](#reporting-to-the-parent)).
+
+**Upgrading to v0.11.0:** the index stays at schema v6, so there is no
+migration and v0.10.0 still opens it. The one new config key is
+`[harness] wake` (default true), which v0.10.0 refuses, so leave it out of
+config.toml until every jeet you run is v0.11.
+
+- Running agents keep working, with messages delivered as before. An
+  agent gets its watcher hook at its next start: restart each once it is
+  idle with `jeet task restart <task>` and `jeet task restart assistant`;
+  both keep the conversation. An agent `jeet task ls` marks `(unanchored)`
+  needs `jeet task restart`, or `jeet task adopt` from a terminal outside
+  jeet's tmux sessions, as before.
+- The channel was built and checked on Claude Code 2.1.296, the harness's
+  tested version. It needs the session's messaging socket
+  (`CLAUDE_CODE_MESSAGING_SOCKET`); a session without one, such as
+  `claude --bare`, gets no watcher and messages are queued and typed as
+  before. A repo's `crossSessionInbound: "refuse"` makes jeet fall back the
+  same way, after about 20 seconds.
+- A question a task asked and then followed with only `progress` reports
+  is open again, and its parent holds it: `jeet report ls` lists the ones
+  you hold.
+- The assistant's and managers' `AGENTS.md` and skills, and a task's own
+  skill, changed only in how they word when a question closes; jeet never
+  rewrites them, and nothing needs regenerating for the wake channel. To
+  get the new wording, delete the unedited files as for v0.10.
 
 ## What's new in v0.10
 
