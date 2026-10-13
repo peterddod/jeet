@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.8.1
+cargo install --git https://github.com/peterddod/jeet --tag v0.9.0
 ```
 
 ## Quick start
@@ -1107,7 +1107,7 @@ into tasks.
 
 ## What's new in v0.9
 
-Unreleased. Managers, the second phase of [hierarchical
+Managers, the second phase of [hierarchical
 agents](docs/design/agent-hierarchy.md).
 
 - **`jeet manager new`** makes a manager, an agent that takes an area of
@@ -1148,10 +1148,31 @@ agents](docs/design/agent-hierarchy.md).
   older jeet started, so its jeet commands work without a restart.
 - `jeet task ls` and the tasks list mark agents jeet has no record of as
   unanchored, with the command that fixes it.
+- **Reviews**: opening a review task resumes the review's session instead of
+  starting a blank one, review tasks show as `review <repo>#<n>` in the
+  tasks list and `jeet task ls`, and `v` opens any task's pull request in
+  the review viewer.
 
-**Upgrading:** the index stays at schema v6, so v0.8.1 still opens it.
-`[managers]` is checked when it is used, so a mistake there refuses work
-under the assistant, not jeet.
+**Upgrading to v0.9.0:** the index stays at schema v6, so there is no
+migration and v0.8.1 still opens it. `[managers]` is checked when it is
+used, so a mistake there refuses work under the assistant, not jeet.
+
+- If the assistant should keep cloning repositories it does not have through
+  `jeet worktree add` or `jeet task new --repo`, add `repo.clone` to
+  `[assistant] allow`.
+- If the assistant may run more than 8 tasks at once, raise `[managers]
+  max_live`, or starts past it are queued.
+- jeet never writes over a file in the assistant's home, so the assistant
+  keeps the `jeet-assistant` skill it was first given. If you have not
+  edited it, delete `$JEET_HOME/assistant/.claude/skills/jeet-assistant/`
+  and the next start writes the current one, which knows about reports,
+  reviews and managers. The new `jeet-managers` skill is added on its own.
+- Running agents keep working. To give them v0.9's agent settings and
+  skills, restart each once it is idle with `jeet task restart <task>` and
+  `jeet task restart assistant`; both keep the conversation. An agent `jeet task ls` marks `(unanchored)`, started by a
+  jeet older than v0.8.1, needs `jeet task restart`, or `jeet task adopt`
+  from a terminal outside jeet's tmux sessions, before its `jeet report`
+  and `jeet worktree add` work.
 
 ## What's new in v0.8
 
