@@ -1,25 +1,191 @@
 //! `jeet manager …`: the tree under the assistant, and what each task in it
 //! may do.
 //!
-//! `ls` and `show` are reads, free to every caller, but each checks who
-//! asks itself: a task with a parent sees only itself and the tasks below
-//! it. `grant` and `budget` are gated by `manager.grant`, `pause`, `resume`
-//! and `stop` by `manager.stop`, and each is scoped before it runs
-//! (`permissions`). `drain`, hidden, starts what is queued already.
+//! `new` is gated by `manager.create`. `ls` and `show` are reads, free to
+//! every caller, but each checks who asks itself: a task with a parent
+//! sees only itself and the tasks below it. `grant` and `budget` are gated
+//! by `manager.grant`, `pause`, `resume` and `stop` by `manager.stop`, and
+//! each is scoped before it runs (`permissions`). `drain`, hidden, starts
+//! what is queued already.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::cli::Delegation;
+use crate::commands::task::{start_new, warn_all};
 use crate::context::App;
-use crate::db::tasks::{ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord};
+use crate::db::tasks::{
+    ReportKind, RunState, Setter, TaskKind, TaskRecord, TaskReportRecord, TaskState,
+};
 use crate::manager;
 use crate::manager::budget::{self, Change, Limits};
 use crate::manager::run::{self, NodeOutcome};
+use crate::messages;
 use crate::permissions::{self, Caller, Target, Verb};
 use crate::runtime;
+use crate::tasks::{self, NewTask};
 use crate::tmux;
+
+/// What `jeet manager new` was given.
+pub struct NewManager<'a> {
+    pub name: &'a str,
+    pub delegation: &'a Delegation,
+    pub brief_file: Option<&'a Path>,
+    pub max_children: Option<u32>,
+}
+
+/// Make a manager under its parent (the assistant, unless `--parent` says)
+/// and start its agent (M35): through the start gate, so it may be queued
+/// on `[managers] max_live` or held by a paused parent. Its brief is its
+/// `BRIEF.md` and its session context; its first prompt only points there.
+/// A start that fails leaves it made and is an error.
+pub fn new(app: &App, args: &NewManager) -> Result<()> {
+    let mut d = args.delegation.clone();
+    let caller = permissions::caller(app)?;
+    if let Some(path) = args.brief_file {
+        let text = read_brief_file(app, &caller, path)?;
+        if text.trim().is_empty() {
+            bail!("--brief-file: {} is empty", path.display());
+        }
+        if let Some(goal) = d.goal.as_deref() {
+            if let Err(e) = messages::checked(goal) {
+                bail!("--goal: {e:#}");
+            }
+        }
+        // Stored with the goal, so it is fenced, kept and shown with it,
+        // and held to a message's length with it.
+        let goal = match d.goal.take() {
+            Some(goal) => format!("{}\n\n{}", goal.trim_end(), text.trim()),
+            None => text,
+        };
+        let len = messages::clean(&goal).len();
+        if len > messages::MAX_MESSAGE {
+            bail!(
+                "--brief-file: the brief is too long ({len} bytes, with --goal; at most {})",
+                messages::MAX_MESSAGE
+            );
+        }
+        d.goal = Some(goal);
+    }
+    // A worker has its prompt; a manager has only its brief to work
+    // towards, so it is not made without one —
+    // checked before the parent is resolved, which may make the assistant.
+    if d.goal.is_none() {
+        bail!("a manager needs --goal or --brief-file: it is what it works towards");
+    }
+    let plan = tasks::plan_child(
+        app,
+        &caller,
+        TaskKind::Manager,
+        args.name,
+        &d,
+        args.max_children,
+    )?;
+    let created = tasks::create(
+        app,
+        &NewTask {
+            name: args.name,
+            project: None,
+            repos: &[],
+            branch: None,
+            child: Some((&caller, &plan)),
+        },
+    )?;
+    warn_all(&created.warnings);
+    let task = created.task;
+    let dir = tasks::task_dir(app, &task);
+    eprintln!(
+        "jeet: manager {} ({}) -> {}",
+        task.slug,
+        manager::fence::fenced(&manager::tree_path(app, &task)?),
+        dir.display()
+    );
+    if let Some(parent) = &task.parent_id {
+        if let Some(parent) = app.db.get_task(parent)? {
+            eprintln!(
+                "jeet: manager {} reports to {}",
+                task.slug,
+                manager::label(&parent)
+            );
+        }
+    }
+    println!("{}", dir.display());
+    start_new(app, &task, &manager::first_prompt(app, &task)?)
+}
+
+/// The text of `--brief-file`: a regular file, read no further than a
+/// brief may be long. An agent's command is pre-approved and its brief
+/// shown back to it by `manager show`, so an agent names only a file in its
+/// own home: through `--brief-file` it reads nothing it could not already.
+fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let home = match caller {
+        Caller::User => None,
+        Caller::Root => Some(tasks::task_dir(app, &manager::root(app)?)),
+        Caller::Node(node) => Some(tasks::task_dir(app, node)),
+    };
+    // Where `path` leads now, if inside `home`: asked again once it is
+    // open, since a link in the home can be swapped in between.
+    let inside = |home: &Path| -> Result<PathBuf> {
+        let real = std::fs::canonicalize(path)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        if !std::fs::canonicalize(home).is_ok_and(|home| real.starts_with(home)) {
+            bail!(
+                "--brief-file: {} is outside your home {}; write the brief there",
+                path.display(),
+                home.display()
+            );
+        }
+        Ok(real)
+    };
+    let real = match &home {
+        Some(home) => inside(home)?,
+        None => std::fs::canonicalize(path)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?,
+    };
+    // Asked before opening it too: opening a FIFO would wait for a writer.
+    let regular = |meta: std::io::Result<std::fs::Metadata>| meta.is_ok_and(|m| m.is_file());
+    if !regular(std::fs::metadata(&real)) {
+        bail!("--brief-file: {} is not a regular file", path.display());
+    }
+    let file = std::fs::File::open(&real)
+        .with_context(|| format!("--brief-file: read {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .ok()
+        .filter(|m| m.is_file())
+        .with_context(|| format!("--brief-file: {} is not a regular file", path.display()))?;
+    // The file opened is the one inside the home: where the path leads now
+    // is that very file, its only name (a hard link would be a second).
+    if let Some(home) = &home {
+        use std::os::unix::fs::MetadataExt;
+        let now = std::fs::metadata(inside(home)?)
+            .with_context(|| format!("--brief-file: read {}", path.display()))?;
+        if (now.dev(), now.ino()) != (opened.dev(), opened.ino()) || opened.nlink() != 1 {
+            bail!(
+                "--brief-file: {} changed as it was read, or has another name; write \
+                 the brief to a file of its own in your home",
+                path.display()
+            );
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(messages::MAX_MESSAGE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("--brief-file: read {}", path.display()))?;
+    if bytes.len() > messages::MAX_MESSAGE {
+        bail!(
+            "--brief-file: the brief is too long (over {} bytes)",
+            messages::MAX_MESSAGE
+        );
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("--brief-file: {} is not UTF-8", path.display()))
+}
 
 /// One task in `jeet manager ls`.
 #[derive(Debug, Serialize)]
@@ -453,6 +619,8 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let had = app.db.grants(&task.id)?;
     app.db.set_grants(&task.id, &grant.caps)?;
+    // What each manager below may do is in its brief too.
+    write_briefs(app, &subtree);
 
     let new_held: Vec<&str> = grant
         .held
@@ -501,6 +669,23 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
     Ok(())
 }
 
+/// Write again the `BRIEF.md` of each active manager in `nodes`, after a
+/// change to what it may do or spend. One not written is a warning: its
+/// session context still has the brief as it is now.
+fn write_briefs(app: &App, nodes: &[TaskRecord]) {
+    let managers = nodes
+        .iter()
+        .filter(|t| t.kind == TaskKind::Manager && t.state == TaskState::Active);
+    for node in managers {
+        if let Err(e) = manager::write_brief(app, node) {
+            eprintln!(
+                "jeet: warning: could not write {}'s BRIEF.md: {e:#}",
+                manager::label(node)
+            );
+        }
+    }
+}
+
 /// Change what task `name` may spend (M19): `+` raises a limit it has,
 /// `=` sets one, a unit not given is kept. Within what is left above it
 /// and, for a task with a parent changing it, what it has left itself.
@@ -519,6 +704,7 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
         .with_context(|| format!("{}'s budget", manager::label(&task)))?;
     let want = budget::cap(app, &task, &caller, had, want)?;
     app.db.set_budget_max(&task.id, want.secs, want.turns)?;
+    write_briefs(app, std::slice::from_ref(&task));
     let (secs, turns) = app.db.subtree_used(&task.id)?;
     eprintln!(
         "jeet: {}'s budget is {} ({}m and {turns} turns used, with the tasks below it)",

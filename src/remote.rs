@@ -16,8 +16,10 @@ impl RepoIdentity {
 
 #[derive(Debug, Error)]
 pub enum RemoteParseError {
-    #[error("unsupported or unrecognised remote URL: {0}")]
+    #[error("unsupported or unrecognised remote URL: {}", .0.escape_debug())]
     Unrecognised(String),
+    #[error("refusing repository `{}`: each part of host/owner/repo must be a plain name (no empty, `.` or `..` segment, control or invisible character, `<`, `>` or `\\`)", .0.escape_debug())]
+    Unsafe(String),
 }
 
 pub fn parse_remote_url(url: &str) -> Result<RepoIdentity, RemoteParseError> {
@@ -70,11 +72,34 @@ fn parse_host_owner_repo(host: &str, path: &str) -> Result<RepoIdentity, RemoteP
     }
     let repo = parts[parts.len() - 1].to_string();
     let owner = parts[..parts.len() - 1].join("/");
-    Ok(RepoIdentity {
+    let identity = RepoIdentity {
         host: host.to_string(),
         owner,
         repo,
-    })
+    };
+    check_identity(&identity)?;
+    Ok(identity)
+}
+
+/// Refuse an identity that would not stay a plain path under the store, or
+/// that prints as something else: its parts become `store/<host>/<owner>/<repo>`
+/// and its id is shown to the user and to agents. So no empty, `.` or `..`
+/// segment, and no control, format (invisible or bidi) character, `<` or `>`.
+fn check_identity(identity: &RepoIdentity) -> Result<(), RemoteParseError> {
+    let bad = |part: &str| {
+        part.split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+            || part.chars().any(|c| {
+                c.is_control() || crate::tasks::format_char(c) || matches!(c, '<' | '>' | '\\')
+            })
+    };
+    if [&identity.host, &identity.owner, &identity.repo]
+        .iter()
+        .any(|part| bad(part))
+    {
+        return Err(RemoteParseError::Unsafe(identity.id()));
+    }
+    Ok(())
 }
 
 pub fn parse_remote_url_anyhow(url: &str) -> Result<RepoIdentity> {
@@ -89,7 +114,9 @@ pub fn identity_from_id(id: &str) -> Result<RepoIdentity> {
     let repo = parts[parts.len() - 1].to_string();
     let owner = parts[parts.len() - 2].to_string();
     let host = parts[..parts.len() - 2].join("/");
-    Ok(RepoIdentity { host, owner, repo })
+    let identity = RepoIdentity { host, owner, repo };
+    check_identity(&identity)?;
+    Ok(identity)
 }
 
 #[cfg(test)]
@@ -121,5 +148,33 @@ mod tests {
     fn parses_ssh_url() {
         let id = parse_remote_url("ssh://git@github.com/acme/widget").unwrap();
         assert_eq!(id.id(), "github.com/acme/widget");
+    }
+
+    #[test]
+    fn refuses_identities_that_leave_the_store_or_hide_text() {
+        for url in [
+            "ssh://evil.com/../../out/o/r",
+            "https://evil.example/../../assistant/.claude/skills/pwn.git",
+            "git@evil:../../assistant/.claude/skills/pwn.git",
+            "https://h/a/./r",
+            "https://../a/r",
+            "https://h/a/..",
+            "ssh://evil.com/o/r\u{1b}[31mred",
+            "https://h/o\u{202e}x/r",
+            "https://h/o/r\u{200b}",
+            "https://h/<o>/r",
+            "https://h/o\\..\\x/r",
+        ] {
+            let err = parse_remote_url(url).unwrap_err().to_string();
+            assert!(err.contains("refusing repository"), "{url}: {err}");
+            assert!(!err.contains('\u{1b}'), "{url}: {err}");
+        }
+        for id in ["h.tld/../r", "h.tld/o/..", "../o/r", "h.tld/o\u{1b}/r"] {
+            assert!(identity_from_id(id).is_err(), "{id}");
+        }
+        // Dots inside a name are fine: `.github` is a real repository.
+        let id = parse_remote_url("https://github.com/acme/.github.git").unwrap();
+        assert_eq!(id.id(), "github.com/acme/.github");
+        assert!(identity_from_id("github.com/a.b/c..d").is_ok());
     }
 }

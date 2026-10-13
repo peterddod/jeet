@@ -29,10 +29,16 @@ pub fn run(
     eprintln!("jeet: looking up #{number}");
     let found = github::pr_history(trunk, number)?;
     let pr = found.pr.clone();
-    eprintln!("jeet: #{} {} ({})", pr.number, pr.title, pr.state_label());
+    // The title is whoever opened the PR's: an agent gets it fenced.
+    let caller = permissions::caller(app)?;
+    eprintln!(
+        "jeet: #{} {} ({})",
+        pr.number,
+        super::task::shown_github(&caller, &pr.title),
+        pr.state_label()
+    );
 
     // What the assistant checks out reports to it, like a task it makes.
-    let caller = permissions::caller(app)?;
     let parent = match caller {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User | Caller::Node(_) => None,

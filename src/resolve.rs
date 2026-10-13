@@ -64,7 +64,7 @@ pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoCont
                 "{} is in task {}'s workspace, not in one of its worktrees; \
                  `jeet worktree ls` lists them",
                 dir.display(),
-                task.name
+                crate::commands::task::called(app, &task)
             ),
             None => bail!("not inside a git repository: {}", dir.display()),
         },

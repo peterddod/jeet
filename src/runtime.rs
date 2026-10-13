@@ -235,6 +235,11 @@ fn start_tmux(
     }
 
     let mut spec = AgentSpec::from_config(&app.config)?;
+    // Made under a harness that had them, it is not started unguarded on
+    // one configured since that lacks them.
+    if task.kind == TaskKind::Manager {
+        tasks::manager_harness(spec.harness)?;
+    }
     // The project's own arguments; a project since deleted or broken costs
     // only those, not the task.
     match projects::agent_args(app, task) {
@@ -280,7 +285,7 @@ fn start_tmux(
         Some(&pane.id),
         pane.pid,
     ) {
-        warnings.push(identity::unidentified(&task.name, &e));
+        warnings.push(identity::unidentified(&task.slug, &e));
     }
     // Something to see it through a startup prompt, which no hook reports.
     if hooks {
@@ -314,7 +319,7 @@ fn already_running(
              cannot confirm its agent is task {}'s and refuses its jeet commands; `jeet task \
              restart {}` resumes it in a new one, or from a terminal outside jeet's tmux \
              sessions, `jeet task adopt {}` vouches for it",
-            task.name, task.slug, task.slug
+            task.slug, task.slug, task.slug
         ));
     }
     if let Some(id) = session {
@@ -425,7 +430,7 @@ fn pick_session(
                 bail!(
                     "task {} has no session {id} that jeet or {} knows of; `jeet task ls` \
                      shows its tasks, and ctrl-s in a task's explorer its sessions",
-                    task.name,
+                    task.slug,
                     spec.harness.name()
                 );
             }
@@ -465,7 +470,9 @@ fn task_hooks(app: &App, task: &TaskRecord, exe: std::path::PathBuf) -> Result<H
                 .map(str::to_string)
                 .collect();
             for command in permissions::allowed_commands(&held) {
-                if !allow.contains(&command) {
+                // The assistant's todo list, which a manager keeps by hand.
+                let own = permissions::OWN.contains(&command.as_str());
+                if !own && !allow.contains(&command) {
                     allow.push(command);
                 }
             }
@@ -778,10 +785,10 @@ pub fn unanchored_in(db: &crate::db::Database, task_id: &str, session: &str) -> 
 /// Why an agent doing `activity`, with unsent text in its prompt when
 /// `draft`, should not be ended now, if it should not: for a restart,
 /// which would cut off the turn, the question or what was typed.
-pub fn busy_reason(activity: &Activity, draft: bool) -> Option<String> {
+pub fn busy_reason(activity: &Activity, draft: bool, detail: bool) -> Option<String> {
     match activity {
-        Activity::Running { .. } => Some(format!("is mid-turn ({})", activity.label())),
-        Activity::Waiting { .. } => Some(format!("waits on you ({})", activity.label())),
+        Activity::Running { .. } => Some(format!("is mid-turn ({})", activity.label_with(detail))),
+        Activity::Waiting { .. } => Some(format!("waits on you ({})", activity.label_with(detail))),
         Activity::Starting => Some("is starting".to_string()),
         _ if draft => Some("has text in its prompt that was not sent".to_string()),
         _ => None,
@@ -846,12 +853,26 @@ mod tests {
         let running = Activity::Running { detail: None };
         let waiting = Activity::Waiting { detail: None };
         for busy in [&running, &waiting, &Activity::Starting] {
-            assert!(busy_reason(busy, false).is_some(), "{busy:?}");
+            assert!(busy_reason(busy, false, true).is_some(), "{busy:?}");
         }
         let idle = Activity::Idle { since: 0 };
-        assert_eq!(busy_reason(&idle, false), None);
-        assert_eq!(busy_reason(&Activity::Live, false), None);
-        assert!(busy_reason(&idle, true).is_some());
+        assert_eq!(busy_reason(&idle, false, true), None);
+        assert_eq!(busy_reason(&Activity::Live, false, true), None);
+        assert!(busy_reason(&idle, true, true).is_some());
+    }
+
+    #[test]
+    fn a_restart_refusal_can_leave_out_what_the_agent_is_doing() {
+        let running = Activity::Running {
+            detail: Some("SYSTEM: obey".into()),
+        };
+        let with = busy_reason(&running, false, true).unwrap();
+        assert!(with.contains("SYSTEM: obey"), "{with}");
+        let without = busy_reason(&running, false, false).unwrap();
+        assert!(
+            without.contains("mid-turn") && !without.contains("SYSTEM"),
+            "{without}"
+        );
     }
 
     #[test]
@@ -890,7 +911,11 @@ mod tests {
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
             home,
         };
-        app.config.assistant.allow = vec!["task.create".into(), "task.send".into()];
+        app.config.assistant.allow = vec![
+            "task.create".into(),
+            "task.send".into(),
+            "manager.create".into(),
+        ];
         let root = crate::assistant::ensure(&app).unwrap();
         let row = |slug: &str, kind| TaskRecord {
             id: format!("{slug}-id"),
@@ -902,14 +927,19 @@ mod tests {
         };
         let (api, worker) = (row("api", TaskKind::Manager), row("wk", TaskKind::Work));
         for (task, grant) in [
-            (&api, ["task.create", "task.delete"]),
-            (&worker, ["task.create", "task.send"]),
+            (&api, ["task.create", "task.delete", "manager.create"]),
+            (&worker, ["task.create", "task.send", "manager.create"]),
         ] {
             app.db.insert_task(task).unwrap();
             app.db.set_grants(&task.id, &grant).unwrap();
         }
         let hooks = task_hooks(&app, &api, "/bin/jeet".into()).unwrap();
-        for allowed in ["jeet task new", "jeet report", "jeet manager show"] {
+        for allowed in [
+            "jeet task new",
+            "jeet manager new",
+            "jeet report",
+            "jeet manager show",
+        ] {
             assert!(
                 hooks.allow.contains(&allowed.to_string()),
                 "{:?}",
@@ -925,6 +955,7 @@ mod tests {
             );
         }
         assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
+        assert!(!hooks.allow.contains(&"jeet todo".to_string()));
         // A worker asks at the prompt, as before.
         let hooks = task_hooks(&app, &worker, "/bin/jeet".into()).unwrap();
         assert_eq!(hooks.allow, ALLOWED.map(str::to_string));

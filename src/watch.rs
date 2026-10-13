@@ -38,7 +38,7 @@ use crate::config::{
     self, Config, EventKind, ProjectRef, Rule, RuleAction, WatchConfig, DEFAULT_WATCH_INTERVAL_SECS,
 };
 use crate::context::App;
-use crate::db::tasks::{TaskRecord, TaskState};
+use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::manager::run;
 use crate::messages::{self, Delivered, TmuxAgent};
@@ -775,12 +775,17 @@ fn task_message(event: &Event) -> String {
 
 /// The active task with the pull request `event` is about, by the PRs jeet
 /// has recorded for each; the most recently updated when several have it.
+/// Never a manager: one may have a worker's PR recorded from reading its
+/// head, and is not where that PR's news belongs.
 fn owning_task(app: &App, event: &Event) -> Result<Option<TaskRecord>> {
     let Some(number) = event.number else {
         return Ok(None);
     };
     let mut best: Option<(String, TaskRecord)> = None;
     for task in app.db.list_tasks(Some(TaskState::Active))? {
+        if task.kind == TaskKind::Manager {
+            continue;
+        }
         let found = app
             .db
             .list_task_prs(&task.id)?
@@ -2203,5 +2208,63 @@ mod tests {
         assert!(try_lock(dir.path()).unwrap().is_none());
         drop(held);
         assert!(try_lock(dir.path()).unwrap().is_some());
+    }
+
+    /// A manager that came to have a worker's PR recorded (from checking
+    /// out its head to read it) is never sent that PR's news: its summary
+    /// takes text in no fence as its parent's, and GitHub's is no one's.
+    #[test]
+    fn a_prs_news_never_goes_to_a_manager() {
+        use crate::db::tasks::{RunState, TaskPrRecord};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let task = |slug: &str, kind, last_activity| TaskRecord {
+            id: slug.into(),
+            slug: slug.into(),
+            name: slug.into(),
+            project: None,
+            kind,
+            state: TaskState::Active,
+            created_at: 0,
+            last_activity,
+            parent_id: None,
+            placement: crate::placement::Placement::Local,
+            run_state: RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        // The manager is listed first, and holds the PR as newly as the
+        // worker: before, it won the tie.
+        app.db
+            .insert_task(&task("m", TaskKind::Manager, 2))
+            .unwrap();
+        app.db.insert_task(&task("w", TaskKind::Work, 1)).unwrap();
+        for id in ["m", "w"] {
+            app.db
+                .upsert_task_pr(&TaskPrRecord {
+                    task_id: id.into(),
+                    repo_id: "github.com/acme/api".into(),
+                    number: 1,
+                    title: "t".into(),
+                    url: String::new(),
+                    state: "OPEN".into(),
+                    is_draft: false,
+                    additions: 0,
+                    deletions: 0,
+                    updated_at: "2026-10-10T12:00:00Z".into(),
+                })
+                .unwrap();
+        }
+        let ev = event(EventKind::CiFailed, "acme/api");
+        assert_eq!(owning_task(&app, &ev).unwrap().unwrap().slug, "w");
+
+        // With no worker holding it, the news is notified instead.
+        app.db.set_task_state("w", TaskState::Archived).unwrap();
+        assert!(owning_task(&app, &ev).unwrap().is_none());
     }
 }

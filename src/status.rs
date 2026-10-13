@@ -38,6 +38,7 @@ use crate::context::App;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::identity;
+use crate::manager;
 use crate::manager::budget::{self, Threshold};
 use crate::manager::run;
 use crate::messages;
@@ -328,6 +329,11 @@ fn handle_hook(
             // The harness adds this to the conversation; a summary that
             // cannot be made costs the session its context, not its start.
             if assistant && harness.session_context_output("").is_some() {
+                // The summary points at the root's skills: a home made by
+                // an older jeet gets the ones it lacks before it is read.
+                if let Err(e) = assistant::ensure_files(&task_dir) {
+                    eprintln!("jeet task-hook {event}: {e:#}");
+                }
                 match assistant::session_context(app, task, session_id, now) {
                     Ok(context) => {
                         if let Some(output) = harness.session_context_output(&context) {
@@ -341,8 +347,22 @@ fn handle_hook(
                 && attributed(launched_for, &task.id, app)
             {
                 // What its parent asked of it, each time a session starts,
-                // /clear included.
-                match reports::brief_context(app, task) {
+                // /clear included; for a manager, with the state of its area.
+                let context = match task.kind {
+                    TaskKind::Manager => {
+                        // Written again as each session starts, so what
+                        // changed while it was archived, or in config, is
+                        // in it before it is read.
+                        if let Err(e) = manager::write_brief(app, task) {
+                            eprintln!("jeet task-hook {event}: {e:#}");
+                        }
+                        manager::context::session_context(app, task, session_id, now)
+                    }
+                    TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {
+                        reports::brief_context(app, task)
+                    }
+                };
+                match context {
                     Ok(brief) => {
                         if let Some(output) = harness.session_context_output(&brief) {
                             println!("{output}");
@@ -1122,6 +1142,19 @@ impl Activity {
             Activity::Running { detail } => with("running", detail),
             Activity::Waiting { detail } => with("needs input", detail),
             Activity::Ended => "ended".to_string(),
+        }
+    }
+
+    /// [`Activity::label`], and with a running or waiting agent's detail
+    /// only when `detail`. That detail is the first line of its last
+    /// prompt, which for a task below another manager that manager wrote
+    /// (its brief, its `task send`), so one not shown the task's name, or
+    /// a manager above its parent, gets the status without it (P9).
+    pub fn label_with(&self, detail: bool) -> String {
+        match (self, detail) {
+            (Activity::Running { .. }, false) => Activity::Running { detail: None }.label(),
+            (Activity::Waiting { .. }, false) => Activity::Waiting { detail: None }.label(),
+            _ => self.label(),
         }
     }
 }

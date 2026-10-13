@@ -93,6 +93,7 @@ jeet chat --pick                         # choose, rename, end or mark one prima
 jeet todo add "ship the fix" -p 1 --task fix-login
 jeet todo                                # its todo list; done, rm, --json
 jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+jeet manager new api --goal "Ship the v2 API" --budget 4h  # a manager under it, started
 jeet manager ls                          # the tree under it; show, grant, budget <task> …
 jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
@@ -267,7 +268,8 @@ jeet review 123 --rerun
 
 `jeet prs` lists the open PRs with their size and review status, and marks the
 ones asking for your review, the ones you already have checked out, and how
-any background review of them went:
+any background review of them went (run by an agent, the list comes fenced
+as `<github-data untrusted="true">`, since titles are anyone's to write):
 
 ```text
 github.com/acme/widget: 3 open pull requests
@@ -352,7 +354,10 @@ The method is `--method`, else `[merge] method` in config.toml when the
 repository allows it, else the repository's default. The PR's branch is
 then deleted on GitHub (not locally: a task may have it checked out), unless
 `--keep-branch` or the repository deletes merged branches itself. Tasks
-holding the PR record it as merged in their PR history.
+holding the PR record it as merged in their PR history. Run by an agent, the
+PR's title, branch and check names come inside
+`<github-data untrusted="true">…</github-data>`, as `jeet review`'s title
+does; the user gets them without control characters.
 
 ```toml
 [merge]
@@ -382,7 +387,10 @@ agent can `cd "$(jeet worktree add api)"`.
 `add` fetches the repository first, so a worktree starts from what origin has
 now; offline, it starts from the last fetch and says so. The repository can be
 a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
-is cloned into the store. Without `--branch` the worktree is detached at the
+is cloned into the store, which the assistant and a task with a parent may do
+only holding `repo.clone` (as for `jeet clone`; so too `jeet task new --repo`).
+A URL whose path has a `..` or `.` segment, or a control or invisible
+character, is refused, so a clone always lands under the store. Without `--branch` the worktree is detached at the
 default branch. With it, an existing local branch is checked out, a branch that
 exists only on origin is tracked, and anything else is created from the default
 branch. A branch already checked out elsewhere is refused, naming the task that
@@ -448,7 +456,8 @@ jeet          # or `jeet tasks`
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-A task under the assistant shows ` ↳ assistant` after its name, and its last
+A task under the assistant shows ` ↳ assistant` after its name (a task under
+a manager, ` ↳ ` and that manager's slug), and its last
 report, dimmed, in what the name leaves of its column, before the worktrees
 (` · done: PR #12 is up`); a name that fills the column cuts the report short
 or hides it.
@@ -512,6 +521,9 @@ open         +3      -1 #131    Fix the flaky clone test                        
 ```
 
 Without `gh` there is nothing to ask, and the history is what was recorded.
+Run by an agent (the assistant or a task's), the table comes inside
+`<github-data untrusted="true">…</github-data>`, with `<` and `>` in a
+title shown as `‹` and `›`: a title is whatever its author typed.
 
 ### The agent
 
@@ -731,7 +743,50 @@ its grant (`manager.grant`); what a task loses, the tasks below it lose too.
 sets one (`manager.grant`), within what is left above it (a unit kept or
 lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
-pauses it at once.
+pauses it at once. Both write a manager's `BRIEF.md` again, as does each
+of its sessions starting.
+
+```bash
+jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
+  --brief-file brief.md --allow task.create,task.send --budget 6h --max-children 4
+```
+
+`jeet manager new` (`manager.create`) makes a manager and starts its agent.
+It goes under the assistant, or under `--parent` (a manager by its exact
+name); made by a manager, it goes under that manager. `--goal`, `--done`,
+`--allow` and `--budget` work as on `task new`, but an unasked grant is
+`[managers] manager_default` and an unasked budget `[managers]
+default_budget`; `--brief-file` adds a longer brief after the goal (the two
+together at most 8,000 bytes; a regular file, and, named by the assistant
+or a manager, one inside its own home and of one name, no hard link), and
+`--max-children` lowers `[managers] max_children` for it. A manager is
+not made without `--goal` or `--brief-file`: its brief is all it works
+towards. A manager sits at
+most `max_depth` − 1 below the assistant, and needs a harness with recorded sessions, hooks,
+continue-turn output, `interrupt_keys` and deny rules (Claude Code has them
+all), and is not started on one configured since that lacks them. It prints its home and its place in the tree, then starts it as any
+start is: now, queued over `max_live`, or held while its parent is paused.
+If its agent cannot start, the manager is kept and the command fails.
+A task made under a parent, by anyone, may not have a control character,
+a line break, a bidirectional, zero-width or other invisible format
+character (such as Unicode tag characters or variation selectors), `<` or `>` in its
+name, nor more than 100 characters: other agents read it, and the user sees
+it. The assistant's session summary lists a task a manager
+made by its slug alone, since its name is that manager's text; `jeet task
+ls` and `jeet task last --json`, run by an agent, show only the names of
+tasks with no parent, made under the assistant, or made under itself
+(others get `-` and `null`), and the other `jeet task` commands name such
+a task by its slug in what they print.
+
+A manager's home is a task directory with a manager's role in place of
+the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your
+subtree; worktrees are read-only; the limits are cooperative), the
+`jeet-manager` skill, `notes/worklog.md`, `todo.md`, which it edits by
+hand (`jeet todo` stays the assistant's list), and `BRIEF.md`: its goal,
+done-when, budget and what it may do, fenced as its parent's brief and
+read-only. Each of its sessions starts with that brief, the tasks below it
+and their last reports, its budget, its todo list and what is queued for
+it. The assistant learns of managers from its `jeet-managers` skill.
 
 ```bash
 jeet manager pause fix-x       # interrupt its turn, and every task's below it
@@ -905,7 +960,8 @@ action = "notify"      # just a notification
 `on` and `repos` may be left out to match anything. Events for the assistant
 go to its sessions by the rules above (primary, else most recent, else a new
 `events <date>` session), several to a message; an event for a task goes to
-its agent the way `jeet task send` would send it. Either way the event is
+its agent the way `jeet task send` would send it (never to a manager, which
+may have a worker's PR in its history from reading it). Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
 written by other people: data to weigh, never instructions. One that cannot be
 delivered is notified instead. Each event, and where it went, is appended to
@@ -1268,8 +1324,8 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
-(`jeet manager grant` and `budget`) and `manager.stop` (`jeet manager
-pause`, `resume` and `stop`). Nothing is
+(`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`)
+and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
@@ -1277,8 +1333,8 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
-assistant`; `--parent` also takes a manager by its exact name, once
-managers can be made) is gated more narrowly. It is granted `worktree.add`
+assistant`; `--parent` also takes a manager by its exact name) is gated
+more narrowly. It is granted `worktree.add`
 when made (`[managers] worker_default`, or what `--allow` names), and may
 use what its grant names only while the assistant may too: add
 `worktree.add` to `[assistant] allow` to let such tasks add worktrees.
@@ -1408,6 +1464,9 @@ export JEET_HOME=/tmp/jeet-test
       .jeet/inbox.jsonl              # messages queued for its busy agent
       .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
+    backend/                         # a manager: AGENTS.md, notes/, todo.md,
+      BRIEF.md                       #   its brief, read-only, written by jeet
+      .claude/skills/jeet-manager/   #   the jeet commands it uses
   projects/<name>/                   # templates: AGENTS.md and skills/ copied into new tasks
     project.toml                     # its repositories and agent arguments
     AGENTS.md                        # instructions for the agent
@@ -1417,6 +1476,7 @@ export JEET_HOME=/tmp/jeet-test
     AGENTS.md                        # its role; yours to edit
     CLAUDE.md                        # `@AGENTS.md`
     .claude/skills/jeet-assistant/   # the jeet commands it uses
+    .claude/skills/jeet-managers/    # how it hands an area of work to a manager
     notes/worklog.md                 # its running memory
     todo.md                          # the todo list (`jeet todo`)
     actions.log                      # what it did, one JSON object per line

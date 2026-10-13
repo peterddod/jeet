@@ -34,7 +34,8 @@ says everything else on stderr.
   With `--prompt` its agent starts straight away with the brief as its first
   prompt. A task you make reports back to you (see "Your tasks"); `--goal`
   and `--done` give it a definition of done, shown to its agent each time a
-  session starts.
+  session starts. A `--repo` jeet does
+  not have yet is cloned only if `repo.clone` is in `[assistant] allow`.
 - `jeet task send <task> "<message>"` gets a message to a task's agent:
   typed in when it is idle, queued until it stops when it is busy, its first
   prompt when it is not running.
@@ -45,7 +46,8 @@ says everything else on stderr.
   It needs `task.send`.
 - `jeet task open <task>` starts a task's agent without a brief.
 - `jeet worktree add <repo> [--branch <b>] --task <task>` adds a worktree
-  to a task.
+  to a task. A repository jeet does not have yet is cloned only if
+  `repo.clone` is in `[assistant] allow`.
 - `jeet review <pr> --repo <repo>` checks a pull request out into its review
   task and starts the configured review. Review a pull request this way, not
   with a task of your own (`jeet task new`): the review task is marked as a

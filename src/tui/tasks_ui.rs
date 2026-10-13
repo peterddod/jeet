@@ -362,10 +362,24 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
 
     let inner = area.width.saturating_sub(2) as usize;
     let columns = Columns::for_width(inner);
+    // Every task but the assistant is a row: a parent not among them is it.
+    let slugs: std::collections::HashMap<&str, &str> = ui
+        .rows
+        .iter()
+        .map(|r| (r.task.id.as_str(), r.task.slug.as_str()))
+        .collect();
     let items: Vec<ListItem> = ui
         .visible
         .iter()
-        .map(|&i| ListItem::new(row_line(&ui.rows[i], &columns)))
+        .map(|&i| {
+            let row = &ui.rows[i];
+            let parent = row
+                .task
+                .parent_id
+                .as_deref()
+                .map(|id| slugs.get(id).copied().unwrap_or("assistant"));
+            ListItem::new(row_line(row, parent, &columns))
+        })
         .collect();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
@@ -472,7 +486,12 @@ pub fn unanchored_hint(row: Option<&TaskRow>) -> Option<String> {
     ))
 }
 
-fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
+/// The columns of a name a parent marker leaves it, if the name has them.
+const MIN_NAME: usize = 4;
+
+/// `parent` is the slug of the task's parent, `assistant` for the
+/// assistant: a slug, which jeet made, never a name a manager wrote.
+fn row_line(row: &TaskRow, parent: Option<&str>, columns: &Columns) -> Line<'static> {
     let (glyph, color) = glyph(row);
     let mut spans = vec![
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
@@ -488,15 +507,19 @@ fn row_line(row: &TaskRow, columns: &Columns) -> Line<'static> {
         TaskKind::Manager => format!("{} (manager)", row.task.name),
         TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
-    // The assistant is the only parent there is for now. The name gives way
-    // before the marker does: a cut-off marker would pass for a top-level task.
-    const MARKER: &str = " ↳ assistant";
-    let name = match row.task.parent_id.is_some() {
-        true if columns.name > MARKER.width() => {
-            format!("{}{MARKER}", truncate(&name, columns.name - MARKER.width()))
+    // The name gives way before the marker does: a cut-off marker would pass
+    // for a top-level task. A slug too long to leave the name a few columns
+    // is shortened inside the marker, so `↳` is always there.
+    let marker = parent.map(|p| {
+        let room = columns.name.saturating_sub(MIN_NAME.min(name.width()));
+        format!(" ↳ {}", truncate(p, room.saturating_sub(" ↳ ".width())))
+    });
+    let name = match marker {
+        Some(marker) if columns.name > marker.width() => {
+            format!("{}{marker}", truncate(&name, columns.name - marker.width()))
         }
-        true => truncate(&format!("{name}{MARKER}"), columns.name),
-        false => truncate(&name, columns.name),
+        Some(marker) => truncate(&format!("{name}{marker}"), columns.name),
+        None => truncate(&name, columns.name),
     };
     // The last report, dim, in what the name leaves of its column: the
     // columns after it fill the row.
@@ -1505,6 +1528,39 @@ mod tests {
         let mut ui = TasksUi::new(vec![child]);
         let screen = render(&mut ui, 80, 12).join("\n");
         assert!(screen.contains("fix… ↳ assistant"), "{screen}");
+    }
+
+    /// A task under a manager names that manager, not the assistant.
+    #[test]
+    fn a_task_under_a_manager_names_its_manager() {
+        let mut api = row("api", Some(Activity::Idle { since: 0 }));
+        api.task.kind = TaskKind::Manager;
+        api.task.parent_id = Some("assistant-id".into());
+        let mut child = row("fix-x", Some(Activity::Idle { since: 0 }));
+        child.task.parent_id = Some("api".into());
+        let mut ui = TasksUi::new(vec![api, child]);
+        let screen = render(&mut ui, 120, 12).join("\n");
+        assert!(screen.contains("api (manager) ↳ assistant"), "{screen}");
+        assert!(screen.contains("fix-x ↳ api"), "{screen}");
+        assert!(!screen.contains("fix-x ↳ assistant"), "{screen}");
+    }
+
+    /// A manager's slug may be long; its children still show `↳`.
+    #[test]
+    fn a_long_manager_slug_is_shortened_inside_the_marker() {
+        let mut api = row("api-migration", Some(Activity::Idle { since: 0 }));
+        api.task.kind = TaskKind::Manager;
+        api.task.parent_id = Some("assistant-id".into());
+        let mut child = row("fix-the-login-bug", Some(Activity::Idle { since: 0 }));
+        child.task.parent_id = Some("api-migration".into());
+        let mut ui = TasksUi::new(vec![api, child]);
+        let screen = render(&mut ui, 80, 12).join("\n");
+        assert!(screen.contains("fix… ↳ api-migr…"), "{screen}");
+        let screen = render(&mut ui, 160, 12).join("\n");
+        assert!(
+            screen.contains("fix-the-login-bug ↳ api-migration"),
+            "{screen}"
+        );
     }
 
     fn session(id: &str, primary: bool, running: bool) -> crate::assistant::Session {

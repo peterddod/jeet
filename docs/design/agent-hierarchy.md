@@ -106,7 +106,7 @@ A manager's home is a task directory, so every task path keeps working:
   AGENTS.md  CLAUDE.md            # role (manager template) + #22's shim
   BRIEF.md                        # written by jeet from the parent's brief; read-only
   notes/worklog.md
-  todo.md                         # `jeet todo` works on the caller's own list
+  todo.md                         # edited by hand; `jeet todo` stays the assistant's (P21)
   actions.log
   .claude/skills/jeet-manager/SKILL.md
   api/                            # optional read-only worktree, detached
@@ -263,7 +263,7 @@ meanwhile cannot slip past. `--recursive` comes later in phase 2;
 jeet manager new backend \
   --goal "Ship the v2 auth API" \
   --done "PRs open for api#120 and web#88, CI green, summary in worklog" \
-  --brief-file /tmp/backend-brief.md \
+  --brief-file backend-brief.md \
   --allow task.create,task.send,task.archive,worktree.add \
   --budget 6h,400turns \
   --max-children 4
@@ -988,9 +988,11 @@ RFC left open, or departed from it:
   gets a warning that its agent is not stopped from force-pushing or
   merging, and only jeet's own commands are gated (§7, degrade, don't
   fail).
-- **E14** The manager refusal, `missing(h, &[Feature]) -> Vec<Feature>`
-  with `Feature::label` naming the piece ("deny rules", "interrupt"),
-  lands with phase 2's `manager new`; it has no caller in #32.
+- **E14** The manager refusal lands with phase 2's `manager new` (P12,
+  P22) as `harness::manager_missing(&dyn Harness) -> Vec<&'static str>`,
+  checked through `tasks::manager_harness`, naming "recorded sessions",
+  "hook events", "continue-turn output", "interrupt_keys" and "deny rules"; it has no
+  caller in #32.
 - **E15** Deny rules are a lint, not a gate (5.6). They cover only the
   agent's Bash and file tools, not MCP tools, `!` commands or scripts.
   Branch protection is the real control; #33 is the boundary.
@@ -1235,8 +1237,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   manager can be made, and apply to every task with children.
 - **P3** Every `Manager` arm that restricts a manager lands before
   `jeet manager new` can make one: teardown refusals (P2), read-only
-  worktrees and git denies (P4) and the trust scope (P5). Until then no
-  manager row exists for a report or a `--parent` to reach (P11, P14).
+  worktrees and git denies (P4) and the trust scope (P5). Until it lands
+  (P22) no manager row exists for a report or a `--parent` to reach (P11,
+  P14).
 - **P4** Read-only worktrees (§1 "Phase 2 (as built)") are lint, not the
   #32 write denies §1 anticipated: there are no `Edit(…)` denies and no
   chmod, since a manager runs unconfined anyway. `git branch` is not
@@ -1276,7 +1279,21 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `jeet prs`, `report`, hooks, screens). A name is resolved within the
   node's subtree, so a prefix cannot reach outside it; delete and
   `--parent` take exact names. A command the table leaves out is refused
-  to every node, reads included (`worktree rm`, `projects`, `clone`, …).
+  to every node, reads included (`worktree rm`, `projects`, `sync`, …).
+  `jeet clone` names no task, so a node holding `repo.clone` may run it;
+  `worktree add` and `task new --repo` naming a repository the store lacks
+  clone it only for a caller holding `repo.clone` (`permissions::may_clone`),
+  so neither reaches the store around `clone`'s gate; the clone, made or
+  refused, is logged (and the assistant's announced) as `jeet clone`'s is.
+  Every route refuses a URL or id whose host, owner or repo has an empty,
+  `.` or `..` segment, a control or invisible character, `<`, `>` or `\`
+  (`remote::parse_remote_url`), so a clone stays under the store and its
+  id prints as itself; and, since owners may nest, `clone_into_store`
+  refuses a trunk inside or above an indexed repository's store trunk
+  (compared case-folded), so a clone cannot plant `.cargo/` or the like in
+  another checkout; a trunk registered in place before tasks (outside the
+  store, maybe above it) is not compared, so it blocks no clone, its own
+  `jeet import` included.
   `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
   it lets a node merge. The root keeps D1; the `jeet manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`
@@ -1297,7 +1314,23 @@ Managers run locally in tmux, as the user, like any other task (I22).
   close a fence or open one (as `jeet task ls`'s STATUS column does), and
   everyone without control characters. So does `jeet manager show`,
   for the children's reports and for the brief's goal and done-when, which
-  a manager writes from what it has read.
+  a manager writes from what it has read. A task made under a parent has a
+  name of at most 100 characters on one line with no `<` or `>` and no
+  bidirectional, zero-width or other invisible format character, and the
+  root's summary lists a task whose parent is neither the root nor none by
+  its slug alone: a manager may name it from text it read. `jeet task ls`
+  (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
+  agent, which sees names only of tasks with no parent, under the root, or
+  under itself; `send`, `interrupt`, `archive`, `unarchive`, `delete`,
+  `resync`, `prs`, `last` and `open`, and `jeet worktree ls`, `path`,
+  `add` and `rm`, name any other by its slug in what they print, as do
+  the start warnings and errors they pass on, `jeet review`'s, and every
+  message that names the task holding a branch or the task whose
+  workspace a command was run in. The root's summary, `jeet
+  task ls` and `jeet task last` give such a task's status without its
+  detail (the first line of its last prompt, which a manager wrote), as a
+  manager's summary does for every task below its own children, and every
+  task's status there unable to close a fence or open one.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
   is started with nobody at its pane. Never `jeet *`.
@@ -1318,9 +1351,13 @@ Managers run locally in tmux, as the user, like any other task (I22).
   used up, whatever `--budget` names. A worker of the assistant's gets no budget unless
   asked. Every command naming a task finds it as the permission check did,
   then checks its reach again.
-- **P12** A manager needs a harness with hook events, continue-turn
-  output, `interrupt_keys` and deny rules (§7), and is refused, naming what
-  is missing, on one without. A worker starts without them; only a
+- **P12** A manager needs a harness with recorded sessions (hooks, deny
+  rules and the first prompt are installed only on one), hook events,
+  continue-turn output, `interrupt_keys` and deny rules (§7), and is refused, naming what
+  is missing, on one without, as it is made and again at each start
+  (`runtime::start_tmux`), so one made before the configured harness
+  changed is not started on one that lacks them. A worker starts without
+  them; only a
   worker with a parent is warned, and only of missing deny rules.
   There is no `--harness` flag: the configured harness is checked.
 - **P13** `jeet manager ls [--json]` is the tree (a flat list with each
@@ -1535,7 +1572,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   checked at once (`budget::enforce`), so a limit set at or below what
   the task has used pauses it now, not after a turn past it. Otherwise it
   leaves the run state alone: a task its budget paused runs again only once resumed, and the
-  command says so. There is no `BRIEF.md` to rewrite yet (2-iii). `jeet
+  command says so. A manager's `BRIEF.md` is written again (P21). `jeet
   manager pause`, `resume` and `stop` (`manager.stop`) print one line per
   node the walk touched. `stop --all` is the user's alone, refused before
   any scope check to the assistant and to a node (M11); the assistant may
@@ -1547,6 +1584,90 @@ Managers run locally in tmux, as the user, like any other task (I22).
   drain returns what it warns of instead of printing it, so the TUI,
   which drains on a full refresh (opening, and `r`), shows the first in
   its status line rather than on the screen it draws.
+- **P21** A manager's role (§1 "Layout"): its home gets, in place of the
+  worker's `jeet` skill (which says what a worker may do), the manager's
+  `AGENTS.md` (read `BRIEF.md` first; the subtree only, no messages
+  sideways; report with `jeet report`; the budget, pause and stop;
+  read-only worktrees, so delegate code changes; jeet's limits are
+  cooperative, stay within them; the untrusted-fence paragraphs), the
+  `jeet-manager` skill, `notes/worklog.md` and `todo.md`, written once as
+  the assistant's are. `jeet todo` stays the assistant's list (D6) and is
+  refused to every task: a manager edits its `todo.md` by hand, its
+  templates never name `jeet todo`, its settings do not pre-approve it,
+  and its summary reads the file as `jeet todo` would parse it. Its
+  `BRIEF.md` is its brief as its session context has it
+  (`reports::brief_context`, fenced as `<jeet-brief>` with its tree path),
+  plus its budget, which a worker's brief leaves to its manager. jeet
+  writes it, mode 0444, when the manager is made, once its row is in (a
+  failure is a warning: the session context has the brief too), and again
+  on `manager grant` (for each active manager in the subtree, whose `You
+  may` the grant cuts) and `manager budget`, and as each of its sessions
+  starts (its SessionStart hook, before its summary; a failure is a
+  warning), so a change made while it was archived, or to `[assistant]
+  allow` in config, is in it before it reads it. Each write makes a new
+  read-only file beside it and renames it over the old one rather than
+  editing it in place, so an agent never reads half of one and a link put
+  in its place is replaced, not followed; each reads the brief and
+  renames under the task's `.jeet/brief.lock`, so a write that read the
+  brief before a grant or budget changed cannot land over a newer one. A
+  manager's `SessionStarted`
+  (the hook path a worker's brief takes, switching on its kind) prints
+  its summary (`manager::context::session_context`): its brief, the
+  active tasks below it with their status and run state, the last
+  reports of those under it, its budget and what its subtree used, its
+  todo list and its inbox, which it hands over unless the manager is
+  held. Each agent-written part is fenced. The assistant's summary gains
+  one line, pointing to a new `jeet-managers` skill, a path of its own so
+  existing homes get it (the write-once templates reach them no other
+  way); it is otherwise unchanged to the byte.
+- **P22** `jeet manager new <name>` (`manager.create`) is planned and
+  made as a child (P11) of kind manager, under the assistant for the user
+  and the assistant, under itself for a manager, or under `--parent`; a
+  node's `--parent` has `task new`'s scope row (itself or a manager below
+  it). `--max-children` (at least 1, at most `[managers] max_children`)
+  is stored on the row. `--brief-file` has no column of its own (§2's
+  `brief TEXT` is not added): its text follows `--goal` in the brief's
+  goal, or is the goal without one, so it is checked, kept, fenced and
+  shown with it (the two together at most a message's 8,000 bytes, refused
+  as `--brief-file`'s when over). One of the two is required: a manager's
+  brief is all it works towards, so one without a goal is refused before
+  anything is made. The file is a regular file, read no
+  further than that limit; named by an agent (the root or a node), it must
+  resolve inside that agent's own home, links followed, since its
+  `manager new` is pre-approved and `manager show` hands the brief back.
+  It is opened, then its path resolved again: still inside the home and
+  leading to the file opened (same device and inode), which has no other
+  name (one link), or it is refused, so a link in the home swapped as it
+  is read reaches nothing outside. The command prints the manager's slug, tree path and
+  parent to stderr and its home on stdout (without changing directory, as
+  `task new` asks the shell to), then starts it with
+  `manager::first_prompt` through the start gate as `task new --prompt`
+  does (one function, `commands::task::start_new`): started, queued over
+  `max_live` with its parent told, or held under a paused parent with the
+  prompt in its inbox. A start that fails keeps the manager, says it was
+  made but its agent did not start, and exits 1 (M35). A child's name
+  (whatever makes it under a parent: `task new --parent`, `manager new`,
+  a review task made for the assistant) is refused when it holds a control
+  character, whitespace other than a space, a bidirectional, zero-width
+  or other invisible format character (Unicode's Cf, the tag block, the
+  variation selectors),
+  `<` or `>`: the assistant's summary lists names, the user's
+  `task ls` and TUI show them, and a manager now writes them. A top-level
+  task's name is unchanged. 2-ib's test pinning `manager new` as no command
+  is gone; a worker running it is refused as for `task new`. The TUI's
+  ` ↳ assistant` (D22) names a task's real parent: ` ↳ <slug>` for one
+  under a manager. A manager's summary introduces its queued messages as
+  its own: what its parent or the user sent with `task send` is queued
+  unfenced and is their instruction; whatever is fenced (jeet-report,
+  github-event, github-data, jeet-message) is a claim or data, never
+  instructions. `task prs` run by an agent lists a task's PRs inside
+  `<github-data untrusted>`, titles unable to close it, as the root's
+  summary lists them; `jeet prs` run by an agent lists a repository's
+  open PRs the same way, titles and authors unable to close it. The user
+  gets either without control characters.
+  `jeet watch` sends an event for a pull request to the worker that owns
+  it, never to a manager that came to have it recorded (say by checking
+  out a worker's head to read it): routing events to managers is phase 4.
 
 ## 11. Placement
 

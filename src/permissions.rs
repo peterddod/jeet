@@ -129,8 +129,7 @@ pub const CAPABILITIES: &[Capability] = &[
         "install or remove the background GitHub watcher",
         &["jeet watch install", "jeet watch uninstall"],
     ),
-    // `jeet manager new` is listed here once it lands.
-    cap("manager.create", "make managers", &[]),
+    cap("manager.create", "make managers", &["jeet manager new"]),
     cap(
         "manager.grant",
         "change what tasks under it may do and spend",
@@ -245,8 +244,9 @@ const READ_ONLY: &[&str] = &[
 ];
 
 /// The assistant's own files, which it keeps through jeet: pre-approved
-/// too, and needing no capability.
-const OWN: &[&str] = &["jeet todo"];
+/// too, and needing no capability. Refused to every task, a manager
+/// included (M39).
+pub const OWN: &[&str] = &["jeet todo"];
 
 pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
@@ -597,6 +597,10 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         },
         Commands::Task { command } => task_gate(command),
         Commands::Manager { command } => match command {
+            ManagerCommands::New { name, .. } => needs(
+                "manager.create",
+                format!("created manager {name} and started its agent"),
+            ),
             // Each checks who asks and shows only what it may see.
             ManagerCommands::Ls { .. } | ManagerCommands::Show { .. } => Gate::Free,
             // Starts only what is queued already, each through the same
@@ -759,6 +763,61 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
         ));
     }
     Some(message)
+}
+
+/// Check that the caller may clone `url` into the store, which `jeet
+/// worktree add` and `jeet task new --repo` do for a repository the store
+/// lacks: the same `repo.clone` that `jeet clone` needs, so no command
+/// reaches the store without it. Returns the clone to [`Authorized::record`]
+/// once it has run, logged (and for the assistant, announced) as `jeet
+/// clone` would be.
+pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
+    let action = format!("cloned {url}");
+    let (message, authorized) = match caller(app)? {
+        Caller::User => (None, None),
+        Caller::Root => {
+            let log = actions_log(&app.home);
+            let message = refusal(
+                "repo.clone",
+                &app.config.assistant.allow,
+                &config::config_path(&app.home),
+            );
+            // Logged as a refused `jeet clone` is ([`authorize_as`]).
+            if message.is_some() {
+                if let Err(e) = append(&log, "repo.clone", &action, Outcome::Denied, None) {
+                    eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+                }
+            }
+            let authorized = Authorized {
+                capability: "repo.clone",
+                action,
+                log,
+                notify: app.config.assistant.notify(),
+            };
+            (message, Some(authorized))
+        }
+        Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
+            true => {
+                let authorized = Authorized {
+                    capability: "repo.clone",
+                    action,
+                    log: actions_log_for(app, &node),
+                    notify: false,
+                };
+                (None, Some(authorized))
+            }
+            false => {
+                let about = self::capability("repo.clone").map_or("do that", |c| c.about);
+                let cut = cut_by(app, &node, "repo.clone")?;
+                let message = node_refusal(&node.slug, about, "repo.clone", cut.as_deref());
+                (Some(message), None)
+            }
+        },
+    };
+    match message {
+        None => Ok(authorized),
+        Some(message) => bail!("{} is not in the store: {message}", url.escape_debug()),
+    }
 }
 
 /// The command prefixes the assistant's harness pre-approves: the read-only
@@ -1158,6 +1217,7 @@ pub enum Verb {
     TaskDelete,
     TaskResync,
     TaskNew,
+    ManagerNew,
     ManagerShow,
     ManagerGrant,
     ManagerBudget,
@@ -1199,6 +1259,7 @@ impl Verb {
             Verb::TaskDelete => "task delete",
             Verb::TaskResync => "task resync",
             Verb::TaskNew => "task new",
+            Verb::ManagerNew => "manager new",
             Verb::ManagerShow => "manager show",
             Verb::ManagerGrant => "manager grant",
             Verb::ManagerBudget => "manager budget",
@@ -1219,7 +1280,7 @@ impl Verb {
             | Verb::TaskUnarchive
             | Verb::TaskDelete
             | Verb::TaskResync => Reach::Below,
-            Verb::TaskNew => Reach::Parent,
+            Verb::TaskNew | Verb::ManagerNew => Reach::Parent,
             Verb::ManagerShow
             | Verb::ManagerGrant
             | Verb::ManagerBudget
@@ -1268,6 +1329,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::StoreSync
         | Commands::TaskHook { .. }
         | Commands::TaskStartup { .. }
+        // Into the store, which no task owns: only with `repo.clone`.
+        | Commands::Clone { .. }
         | Commands::Tasks
         | Commands::Explore
         | Commands::Exec { .. }
@@ -1314,6 +1377,10 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             ),
         },
         Commands::Manager { command } => match command {
+            ManagerCommands::New { delegation, .. } => verb(
+                Verb::ManagerNew,
+                Target::Parent(delegation.parent.clone()),
+            ),
             ManagerCommands::Ls { .. } => Some(Scope::Listed),
             ManagerCommands::Show { name, .. } => verb(Verb::ManagerShow, key(name)),
             ManagerCommands::Grant { name, .. } => verb(Verb::ManagerGrant, key(name)),
@@ -1356,14 +1423,16 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
         Reach::OwnOrBelow => own || below,
         Reach::Below | Reach::Tree => below,
         Reach::Parent if own && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet task new`: a task with a parent cannot make tasks \
+            "task {} may not run `jeet {}`: a task with a parent cannot make tasks \
              unless it is a manager; {ASK}",
-            node.slug
+            node.slug,
+            verb.name()
         ),
         Reach::Parent if below && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet task new` under task {}: only a manager has tasks \
+            "task {} may not run `jeet {}` under task {}: only a manager has tasks \
              under it; {ASK}",
             node.slug,
+            verb.name(),
             target.slug
         ),
         Reach::Parent => own || below,
@@ -1433,6 +1502,21 @@ impl Authorized {
             (Ok(()), Some(why)) => (Outcome::Skipped, Some(why)),
             (Err(e), _) => (Outcome::Failed, Some(format!("{e:#}"))),
         };
+        self.write(outcome, error);
+    }
+
+    /// Record a step run inside another command, such as the store clone
+    /// `worktree add <url>` makes: done, or failed with `error`. Unlike
+    /// [`Authorized::finish`] it leaves a [`skipped`] note to the command.
+    pub fn record(self, error: Option<String>) {
+        let outcome = match error {
+            None => Outcome::Done,
+            Some(_) => Outcome::Failed,
+        };
+        self.write(outcome, error);
+    }
+
+    fn write(self, outcome: Outcome, error: Option<String>) {
         if let Err(e) = append(
             &self.log,
             self.capability,
@@ -2146,6 +2230,10 @@ mod tests {
             (Verb::TaskDelete, line(&["task", "delete", "{}"])),
             (Verb::TaskResync, line(&["task", "resync", "{}"])),
             (Verb::TaskNew, line(&["task", "new", "x", "--parent", "{}"])),
+            (
+                Verb::ManagerNew,
+                line(&["manager", "new", "x", "--parent", "{}"]),
+            ),
             (Verb::ManagerShow, line(&["manager", "show", "{}"])),
             (
                 Verb::ManagerGrant,
@@ -2207,7 +2295,9 @@ mod tests {
         let in_reach = |verb: Verb, caller: &str, target: &str| {
             let target = match target {
                 // Delete and `--parent` take a task named exactly.
-                "fix" if matches!(verb, Verb::TaskDelete | Verb::TaskNew) => return false,
+                "fix" if matches!(verb, Verb::TaskDelete | Verb::TaskNew | Verb::ManagerNew) => {
+                    return false
+                }
                 "fix" if caller == "m" => "fix-a",
                 "fix" if caller == "s" => "fix-b",
                 "fix" => return false,
@@ -2232,7 +2322,7 @@ mod tests {
                 | Verb::ManagerPause
                 | Verb::ManagerResume
                 | Verb::ManagerStop => below,
-                Verb::TaskNew => (own || below) && manager(target),
+                Verb::TaskNew | Verb::ManagerNew => (own || below) && manager(target),
             }
         };
         for caller in ["m", "wk", "s"] {
@@ -2279,14 +2369,17 @@ mod tests {
         node_of(&app, &row("m"), &["task", "new", "x"], false).unwrap();
 
         // The user and the assistant reach any task, but the `jeet manager`
-        // verbs only a task under the assistant.
+        // verbs (but `new`) only a task under the assistant.
         for caller in [Caller::User, Caller::Root] {
             for target in targets {
                 for (verb, args) in verbs(target) {
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     let result = run_as(&app, &caller, &args, false);
                     let tree_node = !["assistant", "top", "fix"].contains(&target);
-                    let manager_verb = verb.name().starts_with("manager ");
+                    // `manager new` names a parent, which may be the
+                    // assistant; whether it may have one is for the command.
+                    let manager_verb =
+                        verb.name().starts_with("manager ") && verb != Verb::ManagerNew;
                     match !manager_verb || tree_node {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
@@ -2447,7 +2540,6 @@ mod tests {
             &["worktree", "ls", "--task", "sib"],
             &["worktree", "path", "r", "--task", "sib"],
             &["task", "new", "x"],
-            &["clone", "https://example.com/a/b"],
             &["sync"],
             &["review", "42"],
             &["projects", "new", "p"],
@@ -2490,6 +2582,8 @@ mod tests {
             &["task-hook", "Stop"],
             // Held, so only ever granted by name.
             &["pr", "merge", "42"],
+            // Into the store, as `worktree add` may clone.
+            &["clone", "https://example.com/a/b"],
         ];
         for args in allowed {
             node_of(&app, &w, args, false).unwrap_or_else(|e| panic!("{args:?}: {e}"));
@@ -2525,7 +2619,7 @@ mod tests {
         // One invocation of every command, and whether a task with a
         // parent may run it on something (listed in `node_scope`).
         let samples: &[(&[&str], bool)] = &[
-            (&["clone", "u"], false),
+            (&["clone", "u"], true),
             (&["import"], false),
             (&["ls"], true),
             (&["explore"], true),
@@ -2556,6 +2650,7 @@ mod tests {
             (&["task", "prs"], true),
             (&["task", "last", "x"], true),
             (&["task", "resync", "x"], true),
+            (&["manager", "new", "x"], true),
             (&["manager", "ls"], true),
             (&["manager", "show", "x"], true),
             (&["manager", "grant", "x", "--none"], true),

@@ -63,13 +63,18 @@ pub fn has_hooks(harness: &dyn Harness) -> bool {
             .is_some()
 }
 
-/// What `harness` lacks that a manager needs (design §7), by name: hook
-/// events (its budget and its children's reports), continue-turn output
-/// (handing it what queued mid-turn), `interrupt_keys` (pausing it) and
-/// deny rules (the git denies that keep it from writing code). Nothing
-/// when it has them all. A worker runs without them, with a warning.
+/// What `harness` lacks that a manager needs (design §7), by name:
+/// recorded sessions (without them `runtime::launch_argv` installs no
+/// hooks, deny rules or first prompt), hook events (its budget and its
+/// children's reports), continue-turn output (handing it what queued
+/// mid-turn), `interrupt_keys` (pausing it) and deny rules (the git denies
+/// that keep it from writing code). Nothing when it has them all. A worker
+/// runs without them, with a warning.
 pub fn manager_missing(harness: &dyn Harness) -> Vec<&'static str> {
     let mut missing = Vec::new();
+    if harness.new_session_args("", "").is_none() || harness.resume_args("").is_none() {
+        missing.push("recorded sessions");
+    }
     if !has_hooks(harness) {
         missing.push("hook events");
     }
@@ -555,6 +560,12 @@ mod tests {
         fn default_command(&self) -> Option<&'static str> {
             None
         }
+        fn new_session_args(&self, _id: &str, _name: &str) -> Option<Vec<String>> {
+            (self.0 != "sessions").then(Vec::new)
+        }
+        fn resume_args(&self, _id: &str) -> Option<Vec<String>> {
+            (self.0 != "resume").then(Vec::new)
+        }
         fn hook_args(&self, _hooks: &HookSetup) -> Option<Vec<String>> {
             (self.0 != "hooks").then(Vec::new)
         }
@@ -573,12 +584,13 @@ mod tests {
     }
 
     #[test]
-    fn a_manager_needs_hooks_continue_output_interrupt_and_rules() {
+    fn a_manager_needs_sessions_hooks_continue_output_interrupt_and_rules() {
         assert!(manager_missing(&claude::ClaudeCode).is_empty());
         assert!(manager_missing(&Partial("")).is_empty());
         assert_eq!(
             manager_missing(&Generic),
             [
+                "recorded sessions",
                 "hook events",
                 "continue-turn output",
                 "interrupt_keys",
@@ -586,6 +598,8 @@ mod tests {
             ]
         );
         for (drop, named) in [
+            ("sessions", "recorded sessions"),
+            ("resume", "recorded sessions"),
             ("hooks", "hook events"),
             ("continue", "continue-turn output"),
             ("interrupt", "interrupt_keys"),
