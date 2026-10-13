@@ -2648,7 +2648,14 @@ pub fn delete_reparenting(
         );
     }
     refuse_inside_any(app, std::slice::from_ref(&task), "delete")?;
-    let warnings = remove_from_disk(app, &task)?;
+    // The agent ends first, since it could change the tree as it runs, and
+    // the move is checked again once it has: a plan gone stale during the
+    // confirmation is refused while nothing of the task is removed.
+    let mut warnings = end_agents(app, std::slice::from_ref(&task))?;
+    if let Err(e) = app.db.check_move(&plan.rows) {
+        bail!("{e:#}\nnothing was deleted, so run it again");
+    }
+    warnings.extend(remove_from_disk(app, &task)?);
     let reports = app.db.apply_move(&plan.rows).with_context(|| {
         format!(
             "task {}'s files are removed but its row is kept: run the delete again",
@@ -3736,6 +3743,33 @@ mod tests {
         // The assistant holds `pr.merge`, and still nothing below it does.
         let after: Vec<_> = ["sub-id", "kid-id", "w2-id"].map(effective).to_vec();
         assert_eq!(before, after);
+    }
+
+    /// A plan gone stale between planning and deleting (a child made while
+    /// the confirmation was open) is refused before anything of the manager
+    /// is removed; a fresh plan then goes through.
+    #[test]
+    fn a_stale_reparent_plan_is_refused_with_the_files_untouched() {
+        let (_dir, app, _trunk) = manager_lab();
+        let m = app.db.get_task("m-id").unwrap().unwrap();
+        insert(&app, "w1", TaskKind::Work, "m-id");
+        let plan = plan_reparent(&app, &Caller::User, &m).unwrap();
+        insert(&app, "w2", TaskKind::Work, "m-id");
+        let dir = task_dir(&app, &m);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let e = delete_reparenting(&app, &Caller::User, plan)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("nothing was deleted"), "{e}");
+        assert!(dir.is_dir(), "the task directory went");
+        assert!(app.db.get_task("m-id").unwrap().is_some());
+        assert_eq!(app.db.child_count("m-id", false).unwrap(), 2);
+
+        let plan = plan_reparent(&app, &Caller::User, &m).unwrap();
+        delete_reparenting(&app, &Caller::User, plan).unwrap();
+        assert!(app.db.get_task("m-id").unwrap().is_none());
+        assert!(!dir.exists());
     }
 
     /// `--reparent` needs tasks under it, and a node does not free a task
