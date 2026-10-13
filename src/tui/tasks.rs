@@ -21,16 +21,24 @@
 //! picks one of its sessions, `t` opens its todo list, `i` its inbox and
 //! activity, and `o` sorts the tasks by the todo items that link them.
 //!
+//! `⇥` cycles active → agents → archived. The agents view shows the
+//! assistant at the root of the tree of the active tasks under it, with what
+//! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
+//! `→`/`←` open and close managers, and `l`, `i` and `b` read a node's
+//! worklog, inbox and reports, and brief. Its index facts come from a tree
+//! thread of its own, running only while the view is shown.
+//!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
 //! tested; [`run`] carries the actions out.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -40,13 +48,13 @@ use ratatui::widgets::ListState;
 
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
-use super::managers::{self, TreeInfo, Urgency};
+use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
-use crate::agent::{self, AgentSpec};
+use crate::agent::{self, age_label, AgentSpec};
 use crate::assistant::{self, Open};
-use crate::commands::task::printable;
+use crate::commands::{self, task::printable, task::printable_text};
 use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::tasks::{
@@ -55,7 +63,9 @@ use crate::db::tasks::{
 use crate::db::Database;
 use crate::git;
 use crate::github;
-use crate::manager::run;
+use crate::manager::{self, run};
+use crate::messages;
+use crate::permissions::{self, Caller};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Admission};
@@ -86,6 +96,21 @@ const BACK_LABEL: &str = "tasks";
 
 /// Said when a key needs a task and the list has none under the cursor.
 const NO_TASK: &str = "no task selected — n makes one";
+
+/// Said in the agents view when it has no tree: none without the assistant.
+const NO_NODE: &str = "no assistant yet — c starts it, and the tree grows under it";
+
+/// Said when a key of the agents view that shows an agent's text, or acts,
+/// is pressed by anyone but the user (Q2).
+const NOT_USER: &str =
+    "the agents pane acts as you; open jeet from your own terminal, not from an agent's pane";
+
+/// Said for a key of the active view the agents view does not take (Q22).
+const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
+
+/// Said for `a` in the agents view, until #36 brings answers (Q18).
+const ANSWER_LATER: &str =
+    "answering comes with #36; i shows the open question and ⏎ attaches to the asker";
 
 // ---------------------------------------------------------------------------
 // State
@@ -135,25 +160,39 @@ impl TaskRow {
     }
 }
 
-/// Which tasks the list shows; ⇥ switches.
+/// Which tasks the list shows; ⇥ cycles, ⇧⇥ goes back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Active,
+    /// The tree under the assistant (design §6).
+    Agents,
     Archived,
 }
 
 impl View {
-    pub fn state(self) -> TaskState {
+    /// The state of the tasks it lists; `None` for the tree, which has its
+    /// own rules.
+    pub fn state(self) -> Option<TaskState> {
         match self {
-            View::Active => TaskState::Active,
-            View::Archived => TaskState::Archived,
+            View::Active => Some(TaskState::Active),
+            View::Agents => None,
+            View::Archived => Some(TaskState::Archived),
         }
     }
 
-    fn other(self) -> View {
+    fn next(self) -> View {
+        match self {
+            View::Active => View::Agents,
+            View::Agents => View::Archived,
+            View::Archived => View::Active,
+        }
+    }
+
+    fn prev(self) -> View {
         match self {
             View::Active => View::Archived,
-            View::Archived => View::Active,
+            View::Agents => View::Active,
+            View::Archived => View::Agents,
         }
     }
 }
@@ -572,6 +611,15 @@ pub enum Panel {
     Inbox {
         selected: usize,
     },
+    /// `l`, `i` and `b` in the agents view: text to read, scrolled.
+    Text {
+        title: String,
+        lines: Vec<String>,
+        /// Lines scrolled past, as drawn; the draw keeps it in range.
+        scroll: u16,
+        /// The task whose PRs ⏎ opens, when it has some.
+        prs: Option<String>,
+    },
 }
 
 /// Which of the assistant's sessions to attach to.
@@ -709,6 +757,18 @@ pub enum Action {
     OpenUrl {
         url: String,
     },
+    /// `l` in the agents view: the node's `notes/worklog.md`.
+    Worklog {
+        task_id: String,
+    },
+    /// `i` in the agents view: the node's open ask, inbox and reports.
+    Reports {
+        task_id: String,
+    },
+    /// `b` in the agents view: the node's brief, grant, lists and budget.
+    Brief {
+        task_id: String,
+    },
 }
 
 /// What the remove-worktree prompt needs from the panel line it came from.
@@ -725,9 +785,14 @@ pub struct TasksUi {
     pub filter: String,
     /// `/` was pressed: typed characters go to the filter until ⏎ or esc.
     pub filtering: bool,
-    /// Indices into `rows` on screen, in display order.
+    /// Indices into `rows` on screen, in display order; none in the agents
+    /// view, which shows `tree`.
     pub visible: Vec<usize>,
-    /// Cursor within `visible`.
+    /// The agents view's lines, in display order.
+    pub tree: Vec<TreeLine>,
+    /// The managers whose subtree the agents view hides, by task id.
+    pub collapsed: HashSet<String>,
+    /// Cursor within `visible`, or `tree` in the agents view.
     pub selected: usize,
     pub panel: Option<Panel>,
     pub status_line: String,
@@ -755,6 +820,9 @@ pub struct TasksUi {
     pub tree_failed: bool,
     /// What each tree node shows, by task id ([`managers::rollup`]).
     pub shown: HashMap<String, (Urgency, u32)>,
+    /// jeet runs as the user, not inside an agent's pane: the agents
+    /// view's keys that show an agent's text or act need it (Q2).
+    pub user: bool,
 }
 
 impl Default for TasksUi {
@@ -771,6 +839,8 @@ impl TasksUi {
             filter: String::new(),
             filtering: false,
             visible: Vec::new(),
+            tree: Vec::new(),
+            collapsed: HashSet::new(),
             selected: 0,
             panel: None,
             status_line: String::new(),
@@ -786,6 +856,7 @@ impl TasksUi {
             tree_seq: 0,
             tree_failed: false,
             shown: HashMap::new(),
+            user: false,
         };
         ui.set_rows(rows);
         ui
@@ -852,7 +923,25 @@ impl TasksUi {
     /// Recompute what is on screen from the view and the filter, leaving
     /// the cursor on `keep` if it is still shown.
     fn refresh_visible(&mut self, keep: Option<&str>) {
-        let state = self.view.state();
+        let Some(state) = self.view.state() else {
+            self.visible.clear();
+            self.tree = managers::lines(
+                self.assistant_row.as_ref(),
+                &self.rows,
+                &self.collapsed,
+                &self.filter,
+            );
+            let (root, rows) = (self.assistant_row.as_ref(), &self.rows);
+            self.selected = keep
+                .and_then(|id| {
+                    self.tree
+                        .iter()
+                        .position(|line| managers::id_at(line, root, rows) == Some(id))
+                })
+                .unwrap_or_else(|| self.selected.min(self.tree.len().saturating_sub(1)));
+            return;
+        };
+        self.tree.clear();
         let in_view: Vec<usize> = (0..self.rows.len())
             .filter(|&i| self.rows[i].task.state == state)
             .collect();
@@ -870,8 +959,26 @@ impl TasksUi {
             .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
     }
 
+    /// How many lines the list shows: tasks, or the tree's nodes.
+    pub fn shown_len(&self) -> usize {
+        match self.view {
+            View::Agents => self.tree.len(),
+            View::Active | View::Archived => self.visible.len(),
+        }
+    }
+
+    /// The task under the cursor; in the agents view, the assistant's own
+    /// row at the root.
     pub fn selected_row(&self) -> Option<&TaskRow> {
-        self.visible.get(self.selected).map(|&i| &self.rows[i])
+        match self.view {
+            View::Agents => match self.tree.get(self.selected)?.at {
+                At::Root => self.assistant_row.as_ref(),
+                At::Row(i) => self.rows.get(i),
+            },
+            View::Active | View::Archived => {
+                self.visible.get(self.selected).map(|&i| &self.rows[i])
+            }
+        }
     }
 
     pub fn selected_id(&self) -> Option<&str> {
@@ -880,6 +987,15 @@ impl TasksUi {
 
     pub fn row(&self, id: &str) -> Option<&TaskRow> {
         self.rows.iter().find(|row| row.task.id == id)
+    }
+
+    /// A node of the tree: a task's row, or the assistant's.
+    pub fn node(&self, id: &str) -> Option<&TaskRow> {
+        self.row(id).or_else(|| {
+            self.assistant_row
+                .as_ref()
+                .filter(|root| root.task.id == id)
+        })
     }
 
     /// Put the cursor on task `id`, switching to the view that holds it and
@@ -899,11 +1015,16 @@ impl TasksUi {
         }
     }
 
+    /// How many tasks `view` has; for the agents view, the tree's nodes.
     pub fn count(&self, view: View) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.task.state == view.state())
-            .count()
+        match view.state() {
+            Some(state) => self
+                .rows
+                .iter()
+                .filter(|row| row.task.state == state)
+                .count(),
+            None => self.shown.len(),
+        }
     }
 
     /// Take in what a background thread found out.
@@ -960,7 +1081,17 @@ impl TasksUi {
                 self.retree();
             }
             Update::Tree { seq, .. } if seq < self.tree_seq => {}
-            Update::Tree { info: Ok(info), .. } => {
+            Update::Tree {
+                info: Ok(mut info), ..
+            } => {
+                // An inbox a hook held is counted as it was last.
+                if let Some(old) = &self.tree_info {
+                    for (id, node) in info.nodes.iter_mut() {
+                        if node.inbox.is_none() {
+                            node.inbox = old.nodes.get(id).and_then(|n| n.inbox);
+                        }
+                    }
+                }
                 self.tree_info = Some(*info);
                 self.tree_failed = false;
                 self.retree();
@@ -1051,7 +1182,7 @@ impl TasksUi {
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        self.selected = moved(self.selected, delta, self.visible.len());
+        self.selected = moved(self.selected, delta, self.shown_len());
     }
 
     fn quit(&mut self, exit: Exit) {
@@ -1133,7 +1264,7 @@ impl TasksUi {
             }
             _ => {}
         }
-        if self.visible.is_empty() && !self.filter.is_empty() {
+        if self.shown_len() == 0 && !self.filter.is_empty() {
             self.set_status("nothing matches — ⌫ to widen the filter");
         } else {
             self.set_status("");
@@ -1141,6 +1272,11 @@ impl TasksUi {
     }
 
     fn list_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.view == View::Agents {
+            if let Some(action) = self.agents_key(key) {
+                return action;
+            }
+        }
         let id = self.selected_id().map(str::to_string);
         let needs_task = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match &id {
             Some(id) => Some(make(id.clone())),
@@ -1181,11 +1317,14 @@ impl TasksUi {
                 None
             }
             KeyCode::End | KeyCode::Char('G') => {
-                self.selected = self.visible.len().saturating_sub(1);
+                self.selected = self.shown_len().saturating_sub(1);
                 None
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                self.view = self.view.other();
+                self.view = match key.code {
+                    KeyCode::Tab => self.view.next(),
+                    _ => self.view.prev(),
+                };
                 self.selected = 0;
                 self.refresh_visible(None);
                 self.set_status("");
@@ -1247,6 +1386,8 @@ impl TasksUi {
                     recursive: false,
                 }),
                 View::Archived => needs_task(self, &|task_id| Action::Unarchive { task_id }),
+                // Taken by `agents_key`.
+                View::Agents => None,
             },
             KeyCode::Char('D') => needs_task(self, &|task_id| Action::AskDelete { task_id }),
             KeyCode::Char('S') => needs_task(self, &|task_id| Action::Resync {
@@ -1255,6 +1396,87 @@ impl TasksUi {
             }),
             _ => None,
         }
+    }
+
+    /// The keys the agents view has of its own (Q22), or `None` for one it
+    /// shares with the other views: moving, `/`, `?`, `r`, `q`, `⇥`, `c`,
+    /// `C` and `t`.
+    fn agents_key(&mut self, key: KeyEvent) -> Option<Option<Action>> {
+        let line = self.tree.get(self.selected).cloned();
+        let id = self.selected_id().map(str::to_string);
+        let action = match key.code {
+            // The assistant's sessions, as `C`; a node's agent, as in the
+            // active view.
+            KeyCode::Enter => match (line.map(|l| l.at), id) {
+                (Some(At::Root), _) => Some(Action::AssistantSessions),
+                (Some(At::Row(_)), Some(task_id)) => Some(Action::Open {
+                    task_id,
+                    session: None,
+                }),
+                _ => {
+                    self.set_status(NO_NODE);
+                    None
+                }
+            },
+            // Open a collapsed manager, else go to its first child.
+            KeyCode::Right => {
+                let line = line?;
+                match (line.manager, line.open, id) {
+                    (true, false, Some(id)) => {
+                        self.collapsed.remove(&id);
+                        self.refresh_visible(Some(&id));
+                    }
+                    _ => {
+                        let below = self.tree.get(self.selected + 1);
+                        if below.is_some_and(|next| next.depth > line.depth) {
+                            self.selected += 1;
+                        }
+                    }
+                }
+                None
+            }
+            // Close an open manager, else go to its parent.
+            KeyCode::Left => {
+                let line = line?;
+                match (line.manager, line.open, id) {
+                    (true, true, Some(id)) => {
+                        self.collapsed.insert(id.clone());
+                        self.refresh_visible(Some(&id));
+                    }
+                    _ => {
+                        if let Some(up) = managers::parent(&self.tree, self.selected) {
+                            self.selected = up;
+                        }
+                    }
+                }
+                None
+            }
+            KeyCode::Char(c @ ('l' | 'i' | 'b')) => match (self.user, id) {
+                (false, _) => {
+                    self.set_status(NOT_USER);
+                    None
+                }
+                (true, None) => {
+                    self.set_status(NO_NODE);
+                    None
+                }
+                (true, Some(task_id)) => Some(match c {
+                    'l' => Action::Worklog { task_id },
+                    'i' => Action::Reports { task_id },
+                    _ => Action::Brief { task_id },
+                }),
+            },
+            KeyCode::Char('a') => {
+                self.set_status(ANSWER_LATER);
+                None
+            }
+            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S' | 'p' | 'P' | 'x' | 'n') => {
+                self.set_status(NOT_IN_AGENTS);
+                None
+            }
+            _ => return None,
+        };
+        Some(action)
     }
 
     fn panel_key(&mut self, panel: Panel, key: KeyEvent) -> Option<Action> {
@@ -1270,7 +1492,7 @@ impl TasksUi {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | '?') => return None,
                     KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => {
-                        (scroll + 1).min(tasks_ui::HELP.len() as u16)
+                        (scroll + 1).min(tasks_ui::help(self.view).len() as u16)
                     }
                     KeyCode::PageUp | KeyCode::Home => 0,
                     _ => scroll,
@@ -1737,6 +1959,35 @@ impl TasksUi {
                 self.panel = Some(Panel::Inbox { selected });
                 action
             }
+            Panel::Text {
+                title,
+                lines,
+                scroll,
+                prs,
+            } => {
+                // Past the end is drawn as the end ([`tasks_ui::draw`]).
+                let scroll = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return None,
+                    KeyCode::Enter => match prs {
+                        Some(task_id) => return Some(Action::Prs { task_id }),
+                        None => return None,
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1),
+                    KeyCode::PageUp => scroll.saturating_sub(10),
+                    KeyCode::PageDown => scroll.saturating_add(10),
+                    KeyCode::Home | KeyCode::Char('g') => 0,
+                    KeyCode::End | KeyCode::Char('G') => u16::MAX,
+                    _ => scroll,
+                };
+                self.panel = Some(Panel::Text {
+                    title,
+                    lines,
+                    scroll,
+                    prs,
+                });
+                None
+            }
         }
     }
 
@@ -1756,7 +2007,7 @@ impl TasksUi {
                     && mouse.row < area.y + area.height.saturating_sub(1);
                 if inside {
                     let row = self.list.offset() + (mouse.row - area.y - 1) as usize;
-                    if row < self.visible.len() {
+                    if row < self.shown_len() {
                         self.selected = row;
                     }
                 }
@@ -2003,10 +2254,6 @@ struct Background {
     sizes: Sender<Vec<(String, PathBuf)>>,
     prs: Sender<Vec<pr_history::Job>>,
     assistant: Sender<assistant_info::Probe>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the agents view starts and stops it")
-    )]
     tree: Sender<TreeAsk>,
     updates: Receiver<Update>,
 }
@@ -2014,10 +2261,6 @@ struct Background {
 /// What the tree thread is told: gather now and every [`POLL_EVERY`],
 /// answering as `seq`, or stop until told again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agents view starts and stops it")
-)]
 enum TreeAsk {
     Run(u64),
     Stop,
@@ -2316,11 +2559,17 @@ pub enum Start {
 pub fn run(app: &App, start: Start) -> Result<Exit> {
     // Keep git's own output off the alternate screen.
     git::set_capture_output(true);
+    // Inside an agent's pane jeet is that agent: the agents view will not
+    // act or show agents' text for it, nor when who it is cannot be told.
+    let ui = TasksUi {
+        user: matches!(permissions::caller(app), Ok(Caller::User)),
+        ..TasksUi::default()
+    };
     let mut terminal = term::init_terminal()?;
     let mut screen = Screen {
         app,
         terminal: &mut terminal,
-        ui: TasksUi::default(),
+        ui,
         bg: Background::start(&app.home, &app.config),
     };
     let result = screen.go(start);
@@ -2383,9 +2632,13 @@ impl Screen<'_> {
             }
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Keys and actions change the view with no way to the
+                    // tree thread: tell it here.
+                    let was = self.ui.view;
                     if let Some(action) = self.ui.handle_key(key) {
                         self.perform(action);
                     }
+                    self.viewed(was);
                 }
                 Event::Mouse(mouse) => self.ui.handle_mouse(mouse),
                 _ => {}
@@ -2529,7 +2782,30 @@ impl Screen<'_> {
         let before = tasks(&self.ui.rows);
         self.ui.assistant_row = root;
         self.ui.set_rows(rows);
-        tasks(&self.ui.rows) != before
+        let changed = tasks(&self.ui.rows) != before;
+        if changed && self.ui.view == View::Agents {
+            self.read_tree();
+        }
+        changed
+    }
+
+    /// Have the tree thread gather now, and every two seconds after; an
+    /// answer to an older ask is dropped.
+    fn read_tree(&mut self) {
+        self.ui.tree_seq += 1;
+        let _ = self.bg.tree.send(TreeAsk::Run(self.ui.tree_seq));
+    }
+
+    /// The view was `was`: start the tree thread on entering the agents
+    /// view, and stop it on leaving.
+    fn viewed(&mut self, was: View) {
+        match (was == View::Agents, self.ui.view == View::Agents) {
+            (false, true) => self.read_tree(),
+            (true, false) => {
+                let _ = self.bg.tree.send(TreeAsk::Stop);
+            }
+            _ => {}
+        }
     }
 
     fn task(&self, id: &str) -> Option<TaskRecord> {
@@ -3025,6 +3301,49 @@ impl Screen<'_> {
                     Ok(()) => self.ui.set_status("opened it in the browser"),
                     Err(e) => self.ui.set_status(format!("could not open it: {e:#}")),
                 }
+            }
+            Action::Worklog { task_id } => {
+                let Some(row) = self.ui.node(&task_id).cloned() else {
+                    return Ok(());
+                };
+                let label = manager::label(&row.task);
+                if !matches!(row.task.kind, TaskKind::Assistant | TaskKind::Manager) {
+                    self.ui.set_status(format!("{label} keeps no worklog"));
+                    return Ok(());
+                }
+                let path = row.dir.join(manager::WORKLOG_MD);
+                let read = self
+                    .progress("reading the worklog", || worklog_lines(&path))
+                    .and_then(|inner| inner)?;
+                match read {
+                    Some(lines) => self.ui.panel = Some(text_panel(&label, "worklog", lines, None)),
+                    None => self.ui.set_status(format!("{label} has no worklog yet")),
+                }
+            }
+            Action::Reports { task_id } => {
+                let Some(row) = self.ui.node(&task_id).cloned() else {
+                    return Ok(());
+                };
+                let (lines, prs) = self
+                    .progress("reading its inbox and reports", || {
+                        report_lines(app, &row.task, &row.dir)
+                    })
+                    .and_then(|inner| inner)?;
+                let label = manager::label(&row.task);
+                let prs = prs.then_some(task_id);
+                self.ui.panel = Some(text_panel(&label, "inbox & reports", lines, prs));
+            }
+            // A read for the user, the assistant's too: `manager show`'s
+            // scope, which refuses the assistant, is not asked (C13).
+            Action::Brief { task_id } => {
+                let Some(row) = self.ui.node(&task_id).cloned() else {
+                    return Ok(());
+                };
+                let lines = self
+                    .progress("reading its brief", || brief_lines(app, &row.task))
+                    .and_then(|inner| inner)?;
+                let label = manager::label(&row.task);
+                self.ui.panel = Some(text_panel(&label, "brief", lines, None));
             }
         }
         Ok(())
@@ -3689,6 +4008,131 @@ fn project_lines(app: &App) -> Result<Vec<ProjectLine>> {
     Ok(lines)
 }
 
+/// The most of a worklog `l` reads: its end, where the latest is.
+const WORKLOG_TAIL: u64 = 256 * 1024;
+
+/// How many reports `i` lists.
+const REPORTS_SHOWN: u32 = 50;
+
+/// A [`Panel::Text`] about `who`, at the top.
+fn text_panel(who: &str, what: &str, lines: Vec<String>, prs: Option<String>) -> Panel {
+    Panel::Text {
+        title: format!("{who} · {what}"),
+        lines,
+        scroll: 0,
+        prs,
+    }
+}
+
+/// The last [`WORKLOG_TAIL`] bytes of the worklog at `path`, as lines with
+/// no control characters but tabs; `None` when there is none.
+fn worklog_lines(path: &Path) -> Result<Option<Vec<String>>> {
+    let read = || -> std::io::Result<Option<(Vec<u8>, bool)>> {
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let len = file.metadata()?.len();
+        let cut = len > WORKLOG_TAIL;
+        if cut {
+            file.seek(SeekFrom::Start(len - WORKLOG_TAIL))?;
+        }
+        let mut bytes = Vec::new();
+        file.take(WORKLOG_TAIL).read_to_end(&mut bytes)?;
+        Ok(Some((bytes, cut)))
+    };
+    let Some((bytes, cut)) =
+        read().with_context(|| format!("could not read {}", path.display()))?
+    else {
+        return Ok(None);
+    };
+    // The cut can fall inside a character, and inside a line: start at
+    // the next whole one.
+    let all = String::from_utf8_lossy(&bytes);
+    let text = match cut {
+        true => all.split_once('\n').map_or("", |(_, rest)| rest),
+        false => &all,
+    };
+    Ok(Some(
+        printable_text(text).lines().map(str::to_string).collect(),
+    ))
+}
+
+/// What `i` shows of `task`: the ask it has open, what is queued in its
+/// inbox (in `dir`) and the reports by and to it, newest first; and
+/// whether it has PRs, which ⏎ then opens. Its words are shown as written,
+/// to the user (Q10).
+fn report_lines(app: &App, task: &TaskRecord, dir: &Path) -> Result<(Vec<String>, bool)> {
+    let who = |id: &str| -> Result<String> {
+        Ok(match app.db.get_task(id)? {
+            Some(t) => manager::label(&t),
+            None => format!("task {id}"),
+        })
+    };
+    let body = |text: &str| -> Vec<String> {
+        printable_text(text)
+            .lines()
+            .map(|line| format!("    {line}"))
+            .collect()
+    };
+    let mut lines = vec!["open ask".to_string()];
+    match manager::open_ask(app, task)? {
+        Some(r) => {
+            lines.push(format!(
+                "  #{} {} to {} · {}",
+                r.id,
+                r.kind.as_str(),
+                who(&r.to_id)?,
+                age_label(r.at)
+            ));
+            lines.extend(body(&r.body));
+        }
+        None => lines.push("  none".into()),
+    }
+    lines.push(String::new());
+    let queued = messages::peek(dir);
+    lines.push(format!("inbox · {} queued", queued.len()));
+    for q in &queued {
+        lines.push(format!("  {}", age_label(q.at)));
+        lines.extend(body(&q.message));
+    }
+    lines.push(String::new());
+    lines.push("reports, newest first".into());
+    let reports = app.db.reports_for(&task.id, REPORTS_SHOWN)?;
+    if reports.is_empty() {
+        lines.push("  none yet".into());
+    }
+    for r in &reports {
+        lines.push(format!(
+            "  #{} {} · {} → {} · {}",
+            r.id,
+            r.kind.as_str(),
+            who(&r.task_id)?,
+            who(&r.to_id)?,
+            age_label(r.at)
+        ));
+        lines.extend(body(&r.body));
+    }
+    let prs = !app.db.list_task_prs(&task.id)?.is_empty();
+    Ok((lines, prs))
+}
+
+/// What `b` shows of `task`: `jeet manager show`'s text, to the user, and
+/// the ask it has open itself.
+fn brief_lines(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    let mut text =
+        commands::manager::shown_text(&commands::manager::shown(app, &Caller::User, task)?);
+    if let Some(r) = manager::open_ask(app, task)? {
+        text.push_str(&format!(
+            "its own open ask: #{} {}\n",
+            r.id,
+            r.kind.as_str()
+        ));
+    }
+    Ok(printable_text(&text).lines().map(str::to_string).collect())
+}
+
 fn with_warnings(what: String, warnings: &[String]) -> String {
     match warnings {
         [] => what,
@@ -3851,13 +4295,24 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_to_the_archived_tasks_and_back() {
+    fn tab_cycles_active_agents_archived_and_back_tab_goes_back() {
         let mut ui = sample();
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Agents);
+        // No assistant, so no tree.
+        assert_eq!(ui.shown_len(), 0);
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Archived);
         assert_eq!(shown(&ui), ["old spike"]);
         press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Active);
         assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Archived);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Agents);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Active);
     }
 
     #[test]
@@ -4014,7 +4469,7 @@ mod tests {
     #[test]
     fn in_the_archived_view_a_unarchives_and_enter_explains() {
         let mut ui = sample();
-        press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::BackTab);
         assert_eq!(
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Unarchive {
@@ -4651,6 +5106,345 @@ mod tests {
             ui.status_line,
             "could not read the tree: database is locked"
         );
+    }
+
+    /// [`tree_sample`] in the agents view: the assistant, `m`, `w`.
+    fn agents_sample() -> TasksUi {
+        let mut ui = tree_sample();
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Agents);
+        ui
+    }
+
+    #[test]
+    fn the_agents_view_shows_the_tree_and_counts_its_nodes() {
+        let ui = agents_sample();
+        assert_eq!(ui.count(View::Agents), 3);
+        assert_eq!(ui.shown_len(), 3);
+        assert!(ui.visible.is_empty());
+        assert_eq!(ui.selected_id(), Some("root"));
+        // The other views never list the assistant.
+        assert_eq!(ui.count(View::Active), 5);
+    }
+
+    #[test]
+    fn arrows_open_and_close_managers_and_walk_the_tree() {
+        let mut ui = agents_sample();
+        // On the assistant, → goes to the first node under it.
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.selected_id(), Some("m"));
+        // ← closes an open manager, keeping the cursor on it.
+        press(&mut ui, KeyCode::Left);
+        assert!(ui.collapsed.contains("m"));
+        assert_eq!(ui.shown_len(), 2);
+        assert_eq!(ui.selected_id(), Some("m"));
+        // ← on a closed one goes to its parent.
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.selected_id(), Some("root"));
+        press(&mut ui, KeyCode::Down);
+        // → opens a closed manager, then goes into it.
+        press(&mut ui, KeyCode::Right);
+        assert!(!ui.collapsed.contains("m"));
+        assert_eq!(ui.shown_len(), 3);
+        assert_eq!(ui.selected_id(), Some("m"));
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.selected_id(), Some("w"));
+        // A worker has nothing to open; ← goes up.
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.selected_id(), Some("w"));
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.selected_id(), Some("m"));
+    }
+
+    #[test]
+    fn enter_attaches_to_a_node_and_picks_an_assistant_session_at_the_root() {
+        let mut ui = agents_sample();
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::AssistantSessions)
+        );
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "m".into(),
+                session: None
+            })
+        );
+        // No assistant, no tree: nothing to attach to.
+        let mut bare = sample();
+        press(&mut bare, KeyCode::Tab);
+        assert_eq!(press(&mut bare, KeyCode::Enter), None);
+        assert_eq!(bare.status_line, NO_NODE);
+    }
+
+    #[test]
+    fn the_agents_view_keeps_its_own_keys() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Down);
+        for c in ['e', 'w', 'v', 'o', 'D', 'S', 'p', 'P', 'x', 'n'] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
+            assert_eq!(ui.status_line, NOT_IN_AGENTS, "{c}");
+        }
+        assert!(!ui.by_priority);
+        // Not archive: answering waits for #36.
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
+        assert_eq!(ui.status_line, ANSWER_LATER);
+        // The assistant's keys are not a node's.
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('c')),
+            Some(Action::Chat(ChatSession::Latest))
+        );
+        press(&mut ui, KeyCode::Char('t'));
+        assert!(matches!(ui.panel, Some(Panel::Todo { .. })));
+        press(&mut ui, KeyCode::Esc);
+        press(&mut ui, KeyCode::Char('?'));
+        assert!(matches!(ui.panel, Some(Panel::Help { .. })));
+    }
+
+    #[test]
+    fn reading_a_node_is_for_the_user_alone() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Down);
+        // Inside an agent's pane, or not known to be the user.
+        for c in ['l', 'i', 'b'] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
+            assert_eq!(ui.status_line, NOT_USER, "{c}");
+        }
+        ui.user = true;
+        let m = || "m".to_string();
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('l')),
+            Some(Action::Worklog { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('i')),
+            Some(Action::Reports { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('b')),
+            Some(Action::Brief { task_id: m() })
+        );
+        // The assistant is read like any node.
+        press(&mut ui, KeyCode::Up);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('b')),
+            Some(Action::Brief {
+                task_id: "root".into()
+            })
+        );
+        // `i` is still the assistant's inbox in the active view.
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(press(&mut ui, KeyCode::Char('i')), None);
+        assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_node_as_the_tree_changes() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Char('G'));
+        assert_eq!(ui.selected_id(), Some("w"));
+        // A reread with a new node above it.
+        let mut rows = ui.rows.clone();
+        let mut k = task("k", "k", TaskState::Active, 0);
+        k.task.parent_id = Some("root".into());
+        rows.push(k);
+        ui.set_rows(rows);
+        assert_eq!(ui.shown_len(), 4);
+        assert_eq!(ui.selected_id(), Some("w"));
+        // A click picks the line under it: the border, then the root.
+        ui.list_area = Rect::new(0, 4, 80, 10);
+        let click = |row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        ui.handle_mouse(click(6));
+        assert_eq!(ui.selected_id(), Some("k"));
+        ui.handle_mouse(click(12));
+        assert_eq!(ui.selected_id(), Some("k"), "below the last line");
+        // Status updates resort the rows the tree indexes.
+        ui.apply(Update::Status {
+            id: "w".into(),
+            activity: Some(Activity::Running { detail: None }),
+            last_activity: 999,
+            unanchored: false,
+        });
+        assert_eq!(ui.selected_id(), Some("k"));
+    }
+
+    #[test]
+    fn a_text_panel_scrolls_and_opens_its_prs() {
+        let mut ui = agents_sample();
+        let text = |prs: Option<&str>| Panel::Text {
+            title: "t".into(),
+            lines: vec!["a".into(); 50],
+            scroll: 0,
+            prs: prs.map(str::to_string),
+        };
+        let scroll = |ui: &TasksUi| match &ui.panel {
+            Some(Panel::Text { scroll, .. }) => *scroll,
+            other => panic!("{other:?}"),
+        };
+        ui.panel = Some(text(None));
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::PageDown);
+        assert_eq!(scroll(&ui), 11);
+        press(&mut ui, KeyCode::Char('k'));
+        assert_eq!(scroll(&ui), 10);
+        press(&mut ui, KeyCode::Char('G'));
+        assert_eq!(scroll(&ui), u16::MAX, "the draw brings it back to the end");
+        press(&mut ui, KeyCode::Char('g'));
+        assert_eq!(scroll(&ui), 0);
+        // ⏎ closes it, with no PRs to open.
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert!(ui.panel.is_none());
+        ui.panel = Some(text(Some("m")));
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Prs {
+                task_id: "m".into()
+            })
+        );
+        ui.panel = Some(text(None));
+        press(&mut ui, KeyCode::Esc);
+        assert!(ui.panel.is_none());
+    }
+
+    #[test]
+    fn an_inbox_a_hook_held_keeps_its_last_count() {
+        let mut ui = tree_sample();
+        let with_inbox = |inbox| {
+            let mut info = TreeInfo::default();
+            info.nodes.insert(
+                "m".into(),
+                managers::NodeInfo {
+                    run: crate::db::tasks::RunState::Run,
+                    held: 0,
+                    setter: None,
+                    budget: None,
+                    inbox,
+                    pr: None,
+                    queued: false,
+                    ask: None,
+                    done: false,
+                    children: 1,
+                },
+            );
+            Update::Tree {
+                seq: 0,
+                info: Ok(Box::new(info)),
+            }
+        };
+        ui.apply(with_inbox(Some(3)));
+        ui.apply(with_inbox(None));
+        assert_eq!(ui.tree_info.as_ref().unwrap().nodes["m"].inbox, Some(3));
+        ui.apply(with_inbox(Some(0)));
+        assert_eq!(ui.tree_info.as_ref().unwrap().nodes["m"].inbox, Some(0));
+    }
+
+    fn app_at(home: &Path) -> App {
+        App {
+            config: config::load_or_create(home).unwrap(),
+            db: Database::open(&config::index_path(home)).unwrap(),
+            home: home.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn the_worklog_is_read_from_its_end_from_a_whole_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worklog.md");
+        assert_eq!(worklog_lines(&path).unwrap(), None);
+        std::fs::write(&path, "# log\n\x1b[2Jone\ttwo\x07\n").unwrap();
+        assert_eq!(
+            worklog_lines(&path).unwrap().unwrap(),
+            ["# log", "[2Jone\ttwo"]
+        );
+        // Longer than is read: the cut falls inside "é" and inside a line.
+        let mut long = "é".repeat(WORKLOG_TAIL as usize);
+        long.push_str("\nlast\n");
+        std::fs::write(&path, &long).unwrap();
+        let lines = worklog_lines(&path).unwrap().unwrap();
+        assert_eq!(lines, ["last"]);
+    }
+
+    #[test]
+    fn i_and_b_read_a_node_and_the_assistant_unfenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_at(&dir.path().canonicalize().unwrap());
+        let record = |id: &str, kind, parent: Option<&str>| {
+            let mut row = task(id, id, TaskState::Active, 0);
+            row.task.kind = kind;
+            row.task.parent_id = parent.map(str::to_string);
+            app.db.insert_task(&row.task).unwrap();
+            row.task
+        };
+        let root = record("root", TaskKind::Assistant, None);
+        let api = record("api", TaskKind::Manager, Some("root"));
+        let w = record("w", TaskKind::Work, Some("api"));
+        app.db
+            .insert_report(
+                "w",
+                "api",
+                crate::db::tasks::ReportKind::Progress,
+                "half",
+                1,
+            )
+            .unwrap();
+        let asked = app
+            .db
+            .insert_report(
+                "w",
+                "api",
+                crate::db::tasks::ReportKind::Question,
+                "keep v1?\n\x1b[2Jsay",
+                2,
+            )
+            .unwrap();
+        let w_dir = tasks::task_dir(&app, &w);
+        crate::messages::Inbox::lock(&w_dir)
+            .unwrap()
+            .push("from api")
+            .unwrap();
+
+        let (lines, prs) = report_lines(&app, &w, &w_dir).unwrap();
+        let text = lines.join("\n");
+        assert!(!prs);
+        assert!(
+            text.starts_with(format!("open ask\n  #{asked} question to manager api").as_str()),
+            "{text}"
+        );
+        assert!(text.contains("    keep v1?\n    [2Jsay"), "{text}");
+        assert!(text.contains("inbox · 1 queued"), "{text}");
+        assert!(text.contains("    from api"), "{text}");
+        // Newest first, and no fence: the TUI is the user.
+        let newest = text.find(format!("#{asked} question · task w → manager api").as_str());
+        let older = text.find("progress · task w → manager api");
+        assert!(
+            newest.is_some() && older.is_some() && newest < older,
+            "{text}"
+        );
+        assert!(!text.contains("jeet-report"), "{text}");
+
+        // Its manager hears of them too, and has no ask of its own.
+        let (lines, _) = report_lines(&app, &api, &tasks::task_dir(&app, &api)).unwrap();
+        let text = lines.join("\n");
+        assert!(text.starts_with("open ask\n  none"), "{text}");
+        assert!(text.contains("question · task w → manager api"), "{text}");
+
+        let text = brief_lines(&app, &w).unwrap().join("\n");
+        assert!(text.contains("task root/api/w"), "{text}");
+        assert!(
+            text.contains(format!("its own open ask: #{asked} question").as_str()),
+            "{text}"
+        );
+        // The CLI's `manager show` refuses the assistant; `b` reads it.
+        let text = brief_lines(&app, &root).unwrap().join("\n");
+        assert!(text.contains("- api (manager, active)"), "{text}");
     }
 
     fn pr(number: u64) -> TaskPrRecord {

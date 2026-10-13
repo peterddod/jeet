@@ -447,7 +447,7 @@ jeet          # or `jeet tasks`
 
 ```text
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
-│ active 3   archived 1    / filter  ⇥ switch                               │
+│ active 3   agents 1   archived 1    / filter  ⇥ switch                    │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
 ┌ 3 active tasks ───────────────────────────────────────────────────────────┐
@@ -467,8 +467,9 @@ Every task, most recently active first: what its agent is doing, its name, the
 worktrees it holds (as of the last look at the disk, since the agent adds them
 as it goes), its size and when anything last happened in it. Statuses refresh
 every two seconds and sizes are measured in the background, so the list never
-waits on either. `⇥` switches to the archived tasks and back; `/` filters by
-name the way the explorer does.
+waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
+archived tasks, and back to these (`⇧⇥` the other way); `/` filters by name the
+way the explorer does.
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
 has, what each running one is doing (`*` marks the primary one), how many
@@ -498,6 +499,55 @@ read from its files on a thread of its own, like the statuses.
 
 Launching the list also starts a background fetch of the store, when one is
 due. `jeet projects` on a terminal opens it with the projects panel up.
+
+### The agents tab
+
+The second tab shows the tree under the [assistant](#the-assistant): the
+assistant at the root, then its managers and tasks and theirs, as `jeet manager
+ls` orders them (top-level tasks stay in *active*, archived ones in
+*archived*).
+
+```text
+┌ jeet · agents ──────────────────────────────────────────────────────────────┐
+│ active 6   agents 7   archived 0    live 5/8   needs you 1   / filter       │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌ 6 of 7 agents shown ────────────────────────────────────────────────────────┐
+│✦ assistant          ◆ needs you (1)        3 children   inbox 2  todo 4     │
+│├─ ▾ backend         ◆ needs you (1)        2h10/6h      inbox 1             │
+││  ├─ api-docs       ● running – Edit       0h05/1h                          │
+││  └─ fix-token-ref… ◆ needs input – Bash   0h40/2h      api#131             │
+│├─ fix-login         ✓ done                              web#88              │
+│└─ ▸ frontend        ⏸ paused (1 below)     3h50/4h      budget 96%          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each node shows the most urgent of its own state and its subtree's, in the
+order needs you, needs input, blocked (`!`, an open `blocked` or `question`
+report), budget (`$`, 80% used or paused by it), running, idle, done; with a
+count when it comes from below. A permission prompt is *needs input* on the
+task that shows it and *needs you* above it, since only you can answer it; a
+prompt in the assistant's own pane counts too. A paused or stopped node shows
+how many it holds, and what below it still needs you. Then its budget used
+against its limit (the assistant: how many tasks are under it) and notes: its
+inbox, the assistant's open todo items, its newest open PR, a budget past 80%
+and a start waiting on `max_live`. The header counts the agents live against
+`[managers] max_live`, the prompts waiting on you and the starts queued.
+Statuses come from the same poll as the active tab; the rest is read from the
+index every two seconds while the tab is shown.
+
+| Key | |
+|---|---|
+| `⏎` | attach to the node's agent, as in the active tab; on the assistant, pick one of its sessions |
+| `→` / `←` | open / close a manager (everything starts open); else to the first task under it / to its parent |
+| `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
+| `i` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
+| `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
+| `c` `C` `t` | the assistant, as in the active tab |
+
+`l`, `i` and `b` show what agents wrote, unfenced, so they work only when you
+run jeet from your own terminal, not inside an agent's pane. Answering a
+question (`a`) comes with #36. The worktree, PR, archive and delete keys are
+the active tab's: `⇥` back to it.
 
 ### Pull request history
 

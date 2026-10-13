@@ -306,10 +306,6 @@ pub struct TreeLine {
 /// them), less what a collapsed manager hides. A `filter` keeps the nodes
 /// whose name it matches and their ancestors, collapsed or not. Archived
 /// and top-level tasks are never in it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agents view draws the tree")
-)]
 pub fn lines(
     root: Option<&TaskRow>,
     rows: &[TaskRow],
@@ -388,20 +384,12 @@ pub fn lines(
 }
 
 /// The line of `lines[i]`'s parent, for `←`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agents view draws the tree")
-)]
 pub fn parent(lines: &[TreeLine], i: usize) -> Option<usize> {
     let depth = lines.get(i)?.depth;
     lines[..i].iter().rposition(|line| line.depth < depth)
 }
 
 /// The task id of `line`'s node.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agents view draws the tree")
-)]
 pub fn id_at<'a>(
     line: &TreeLine,
     root: Option<&'a TaskRow>,
