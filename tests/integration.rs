@@ -12696,6 +12696,65 @@ fn interrupt_presses_escape_once_and_only_while_working() {
     assert_eq!(calls_of(&tmux, "send-keys").len(), 2);
 }
 
+/// The wake channel's running write is only its word that a turn is
+/// starting: until a hook reports, Esc would land on an idle prompt.
+#[cfg(unix)]
+#[test]
+fn interrupt_presses_nothing_on_a_fresh_wake_but_does_on_an_old_one() {
+    let lab = StoreLab::new();
+    let task = lab.new_task("fix-x");
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    succeeded(&lab.jeet_at(&["task", "open", "fix-x"], &lab.home(), &env));
+    let session = lab.sessions(&task_id(&task))[0].0.clone();
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    hook_ok(&lab.hook(
+        "UserPromptSubmit",
+        &hook_input("UserPromptSubmit", &session, &task),
+        &[],
+    ));
+    let path = task.join(".jeet/status").join(format!("{session}.json"));
+    let wake_at = |at: i64| {
+        let mut status = status_file(&task, &session);
+        status["event"] = "wake".into();
+        status["state"] = "running".into();
+        status["at"] = at.into();
+        std::fs::write(&path, status.to_string()).unwrap();
+    };
+    let interrupt = || {
+        let output = lab.jeet_at(&["task", "interrupt", "fix-x"], &lab.home(), &env);
+        succeeded(&output);
+        stderr_of(&output).to_string()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    wake_at(now);
+    let said = interrupt();
+    assert!(
+        said.contains("not working (starting); nothing sent"),
+        "{said}"
+    );
+    assert!(calls_of(&tmux, "send-keys").is_empty());
+
+    // A wake no hook has followed for long is a turn that is running or lost.
+    std::fs::File::options()
+        .write(true)
+        .open(task.join(".jeet").join("launched"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+        .unwrap();
+    wake_at(now - 60);
+    let said = interrupt();
+    assert!(said.contains("interrupted task fix-x's turn"), "{said}");
+    assert_eq!(calls_of(&tmux, "send-keys").len(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn an_assistant_interrupt_is_logged_done_and_announced_only_when_it_sends() {
