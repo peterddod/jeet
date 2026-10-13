@@ -25,7 +25,8 @@ use crate::tasks;
 
 /// How much a node needs looking at, least first. A prompt is
 /// `NeedsInput` on the node itself and `NeedsYou` above it: only the user
-/// can answer one (§4).
+/// can answer one (§4). A question passed to the user is `NeedsYou` on its
+/// asker too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Urgency {
     Done,
@@ -57,8 +58,9 @@ pub struct NodeInfo {
     /// Its start waits on `max_live`.
     pub queued: bool,
     /// What it asks of its parent and has not moved on from
-    /// ([`manager::open_ask`]): the report's id and kind.
-    pub ask: Option<(i64, ReportKind)>,
+    /// ([`manager::open_ask`]): the report's id and kind, and whether it
+    /// was passed to the user.
+    pub ask: Option<(i64, ReportKind, bool)>,
     /// Its last report of its own says it is done.
     pub done: bool,
     /// Its active children.
@@ -79,14 +81,19 @@ pub struct TreeInfo {
 }
 
 /// A node's own urgency (Q7), from what its agent is doing and what the
-/// index says of it. `None` is an agent the poller has yet to report on.
+/// index says of it; `ask` with whether it is with the user, which
+/// outranks a prompt (R16). `None` is an agent the poller has yet to
+/// report on.
 pub fn own_urgency(
     activity: Option<&Activity>,
-    ask: Option<ReportKind>,
+    ask: Option<(ReportKind, bool)>,
     done: bool,
     pct: Option<i64>,
     by_budget: bool,
 ) -> Urgency {
+    if ask.is_some_and(|(_, user)| user) {
+        return Urgency::NeedsYou;
+    }
     if matches!(activity, Some(Activity::Waiting { .. })) {
         return Urgency::NeedsInput;
     }
@@ -192,7 +199,7 @@ pub fn retree(
         let node = info.and_then(|info| info.nodes.get(&task.id));
         let own = own_urgency(
             rows[i].activity.as_ref(),
-            node.and_then(|n| n.ask).map(|(_, kind)| kind),
+            node.and_then(|n| n.ask).map(|(_, kind, user)| (kind, user)),
             node.is_some_and(|n| n.done),
             node.and_then(|n| n.budget.as_ref())
                 .and_then(|(row, used)| budget::percent(row, *used)),
@@ -258,7 +265,7 @@ pub fn gather(app: &App, tmux_ok: bool) -> Result<TreeInfo> {
             inbox: messages::try_peek(&tasks::task_dir(app, task)).map(|q| q.len()),
             pr,
             queued: queued_starts.contains(&task.id),
-            ask: manager::open_ask(app, task)?.map(|r| (r.id, r.kind)),
+            ask: manager::open_ask(app, task)?.map(|r| (r.id, r.kind, r.needs_user)),
             done: last.is_some_and(|r| r.kind == ReportKind::Done),
             children: app.db.child_count(&task.id, true)?,
         };
@@ -275,6 +282,49 @@ pub fn gather(app: &App, tmux_ok: bool) -> Result<TreeInfo> {
         }
     }
     Ok(info)
+}
+
+/// The open ask `a` on node `at` answers (R15): among the asks at or below
+/// it, those with the user first (C9), then its own, else the shallowest,
+/// ties in tree order. `nodes` are (id, parent id) in tree order, parents
+/// first; the asker's id and the report's.
+pub fn nearest_ask(
+    at: &str,
+    nodes: &[(String, Option<String>)],
+    info: &TreeInfo,
+) -> Option<(String, i64)> {
+    // The depth below `at` of each node under it, as the order reaches it.
+    let mut depth: HashMap<&str, u32> = HashMap::new();
+    let mut best: Option<((bool, u32), &str, i64)> = None;
+    for (id, parent) in nodes {
+        let d = match parent.as_deref().and_then(|p| depth.get(p)) {
+            _ if id == at => 0,
+            Some(&d) => d + 1,
+            None => continue,
+        };
+        depth.insert(id, d);
+        let Some((report, _, user)) = info.nodes.get(id).and_then(|n| n.ask) else {
+            continue;
+        };
+        // Lower ranks first: with the user, then shallower.
+        let rank = (!user, d);
+        if best.is_none_or(|(b, _, _)| rank < b) {
+            best = Some((rank, id, report));
+        }
+    }
+    best.map(|(_, id, report)| (id.to_string(), report))
+}
+
+/// The tree under `root`, the assistant, as [`nearest_ask`] takes it: the
+/// root, then its active descendants among `rows` in tree order.
+pub fn tree_nodes(root: &TaskRow, rows: &[TaskRow]) -> Vec<(String, Option<String>)> {
+    let mut nodes = vec![(root.task.id.clone(), None)];
+    nodes.extend(
+        order(root, rows)
+            .into_iter()
+            .map(|(i, _)| (rows[i].task.id.clone(), rows[i].task.parent_id.clone())),
+    );
+    nodes
 }
 
 /// Where a tree line's node is: the assistant, or `rows[i]`.
@@ -494,6 +544,12 @@ mod tests {
 
     fn info_with_ask(id: &str) -> TreeInfo {
         let mut info = TreeInfo::default();
+        add_ask(&mut info, id, 7, false);
+        info
+    }
+
+    /// `id`'s node in `info`, asking report `report`, with the user or not.
+    fn add_ask(info: &mut TreeInfo, id: &str, report: i64, user: bool) {
         info.nodes.insert(
             id.into(),
             NodeInfo {
@@ -504,12 +560,11 @@ mod tests {
                 inbox: Some(0),
                 pr: None,
                 queued: false,
-                ask: Some((7, ReportKind::Blocked)),
+                ask: Some((report, ReportKind::Blocked, user)),
                 done: false,
                 children: 0,
             },
         );
-        info
     }
 
     #[test]
@@ -518,7 +573,7 @@ mod tests {
         let idle = Some(Activity::Idle { since: 0 });
         type Case = (
             Option<Activity>,
-            Option<ReportKind>,
+            Option<(ReportKind, bool)>,
             bool,
             Option<i64>,
             bool,
@@ -529,15 +584,32 @@ mod tests {
             // A prompt outranks the ask it may be about.
             (
                 waiting(),
-                Some(ReportKind::Question),
+                Some((ReportKind::Question, false)),
                 true,
                 Some(99),
                 true,
                 NeedsInput,
             ),
+            // A question with the user outranks a prompt.
+            (
+                waiting(),
+                Some((ReportKind::Question, true)),
+                false,
+                None,
+                false,
+                NeedsYou,
+            ),
             (
                 running(),
-                Some(ReportKind::Question),
+                Some((ReportKind::Question, true)),
+                false,
+                None,
+                false,
+                NeedsYou,
+            ),
+            (
+                running(),
+                Some((ReportKind::Question, false)),
                 false,
                 None,
                 false,
@@ -545,7 +617,7 @@ mod tests {
             ),
             (
                 idle.clone(),
-                Some(ReportKind::Blocked),
+                Some((ReportKind::Blocked, false)),
                 true,
                 Some(90),
                 false,
@@ -608,6 +680,63 @@ mod tests {
     }
 
     #[test]
+    fn a_question_with_the_user_rolls_up_as_needs_you() {
+        use Urgency::*;
+        let node =
+            |id: &str, parent: Option<&str>, u| (id.to_string(), parent.map(str::to_string), u);
+        let own = own_urgency(
+            running().as_ref(),
+            Some((ReportKind::Question, true)),
+            false,
+            None,
+            false,
+        );
+        let nodes = vec![
+            node("root", None, Idle),
+            node("api", Some("root"), Running),
+            node("w", Some("api"), own),
+        ];
+        let shown = rollup(&nodes);
+        assert_eq!(shown["w"], (NeedsYou, 0));
+        assert_eq!(shown["api"], (NeedsYou, 1));
+        assert_eq!(shown["root"], (NeedsYou, 1));
+    }
+
+    #[test]
+    fn a_answers_the_nearest_ask_with_the_user_first() {
+        let (root, rows) = tree();
+        let nodes = tree_nodes(&root, &rows);
+        let ids: Vec<&str> = nodes.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["root", "api", "w1", "w2", "fe", "w3"]);
+        let nearest = |at: &str, info: &TreeInfo| nearest_ask(at, &nodes, info);
+
+        // Nothing open.
+        assert_eq!(nearest("root", &TreeInfo::default()), None);
+        let mut info = TreeInfo::default();
+        add_ask(&mut info, "w1", 1, false);
+        add_ask(&mut info, "w2", 2, false);
+        add_ask(&mut info, "w3", 3, false);
+        // Ties in tree order.
+        assert_eq!(nearest("root", &info), Some(("w1".into(), 1)));
+        assert_eq!(nearest("fe", &info), Some(("w3".into(), 3)));
+        assert_eq!(nearest("w2", &info), Some(("w2".into(), 2)));
+        // Never above or beside it.
+        assert_eq!(nearest("w2", &TreeInfo::default()), None);
+        let mut only_w3 = TreeInfo::default();
+        add_ask(&mut only_w3, "w3", 3, false);
+        assert_eq!(nearest("api", &only_w3), None);
+        // The node's own, then the shallowest.
+        add_ask(&mut info, "api", 4, false);
+        assert_eq!(nearest("root", &info), Some(("api".into(), 4)));
+        assert_eq!(nearest("api", &info), Some(("api".into(), 4)));
+        // A deeper ask with the user wins over a shallower one a manager
+        // holds (C9).
+        add_ask(&mut info, "w3", 3, true);
+        assert_eq!(nearest("root", &info), Some(("w3".into(), 3)));
+        assert_eq!(nearest("api", &info), Some(("api".into(), 4)));
+    }
+
+    #[test]
     fn a_cycle_in_the_parents_is_rolled_up_once() {
         let nodes = vec![
             ("a".to_string(), Some("b".to_string()), Urgency::Idle),
@@ -632,6 +761,14 @@ mod tests {
         let shown = retree(&root, &rows, &[], Some(&info_with_ask("w3")));
         assert_eq!(shown["fe"], (Urgency::Blocked, 1));
         assert_eq!(shown["root"], (Urgency::NeedsYou, 1));
+
+        // A question with the user: needs you on the asker and above it.
+        let mut info = TreeInfo::default();
+        add_ask(&mut info, "w2", 9, true);
+        let shown = retree(&root, &rows, &[], Some(&info));
+        assert_eq!(shown["w2"], (Urgency::NeedsYou, 0));
+        assert_eq!(shown["api"], (Urgency::NeedsYou, 2));
+        assert_eq!(shown["root"], (Urgency::NeedsYou, 2));
 
         // A budget's pause is the node's own row.
         let mut paused = rows.clone();
@@ -878,7 +1015,7 @@ mod tests {
         assert_eq!(api.ask, None);
 
         let w1 = &info.nodes["w1"];
-        assert_eq!(w1.ask, Some((asked, ReportKind::Question)));
+        assert_eq!(w1.ask, Some((asked, ReportKind::Question, false)));
         assert_eq!((w1.run, w1.held), (RunState::Paused, 0));
         assert_eq!(w1.inbox, Some(0));
         assert_eq!(info.nodes["w2"].inbox, Some(1));

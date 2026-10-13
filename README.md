@@ -526,12 +526,15 @@ order needs you, needs input, blocked (`!`, an open `blocked` or `question`
 report), budget (`$`, 80% used or paused by it), running, idle, done; with a
 count when it comes from below. A permission prompt is *needs input* on the
 task that shows it and *needs you* above it, since only you can answer it; a
-prompt in the assistant's own pane counts too. A paused or stopped node shows
-how many it holds, and what below it still needs you. Then its budget used
+prompt in the assistant's own pane counts too, and so does a question the
+assistant passed to you (`◆ needs you – question` on the task that asked
+it). A paused or stopped node shows how many it holds, and what below it
+still needs you. Then its budget used
 against its limit (the assistant: how many tasks are under it) and notes: its
 inbox, the assistant's open todo items, its newest open PR, a budget past 80%
 and a start waiting on `max_live`. The header counts the agents live against
-`[managers] max_live`, the prompts waiting on you and the starts queued.
+`[managers] max_live`, the prompts and questions waiting on you and the
+starts queued.
 Statuses come from the same poll as the active tab; the rest is read from the
 index every two seconds while the tab is shown.
 
@@ -545,6 +548,7 @@ index every two seconds while the tab is shown.
 | `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
 | `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
 | `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a task also takes a project, repositories and a branch |
+| `a` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
 | `c` `C` `t` | the assistant, as in the active tab |
 
 What each node made of a pause, resume or stop is shown when it is done. A
@@ -553,10 +557,13 @@ says whether it started, was queued on `max_live` or is held by a paused
 manager above it; a task made with `n` is not started (`⏎` starts it), as
 in the active tab. What jeet refuses (a manager with no goal, a capability
 the parent does not hold) is shown on the form. `l`, `i` and `b` show what
-agents wrote, unfenced, and `p`, `P`, `x` and `n` act as you, so they work
-only when you run jeet from your own terminal, not inside an agent's pane.
-Answering a question (`a`) comes with #36. The worktree, PR, archive and
-delete keys are the active tab's: `⇥` back to it.
+agents wrote, unfenced, and `p`, `P`, `x`, `n` and `a` act as you, so they
+work only when you run jeet from your own terminal: not inside an agent's or
+a top-level task's pane, nor any window of jeet's tmux sessions. An answer
+goes to the task that asked, with a copy to each manager it passed through;
+how each went is shown when it is done, and a refusal (answered meanwhile,
+say) stays on the form. The worktree, PR, archive and delete keys are the
+active tab's: `⇥` back to it.
 
 ### Pull request history
 

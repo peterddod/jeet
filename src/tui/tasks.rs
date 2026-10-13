@@ -73,6 +73,7 @@ use crate::messages;
 use crate::permissions::{self, Caller, Verb};
 use crate::pr_history;
 use crate::projects;
+use crate::reports;
 use crate::runtime::{self, Admission};
 use crate::status::{self, Activity};
 use crate::tasks::{self, NewTask};
@@ -106,16 +107,15 @@ const NO_TASK: &str = "no task selected — n makes one";
 const NO_NODE: &str = "no assistant yet — c starts it, and the tree grows under it";
 
 /// Said when a key of the agents view that shows an agent's text, or acts,
-/// is pressed by anyone but the user (Q2).
-const NOT_USER: &str =
-    "the agents pane acts as you; open jeet from your own terminal, not from an agent's pane";
+/// is pressed by anyone but the user at their own terminal (Q2, R17).
+const NOT_USER: &str = "the agents pane acts as you; open jeet from your own terminal, outside \
+     jeet's tmux sessions and any task's pane";
 
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
-/// Said for `a` in the agents view, until #36 brings answers (Q18).
-const ANSWER_LATER: &str =
-    "answering comes with #36; i shows the open question and ⏎ attaches to the asker";
+/// Said for ⏎ on an empty answer.
+const TYPE_AN_ANSWER: &str = "type an answer";
 
 // ---------------------------------------------------------------------------
 // State
@@ -774,6 +774,17 @@ pub enum Panel {
     Inbox {
         selected: usize,
     },
+    /// `a` in the agents view: the answer to open ask `id`, being typed.
+    Answer {
+        id: i64,
+        /// Which ask, from whom.
+        title: String,
+        /// The question, as the asker wrote it, made printable.
+        question: Vec<String>,
+        input: String,
+        /// Why the last ⏎ was refused.
+        error: Option<String>,
+    },
     /// `l`, `i` and `b` in the agents view: text to read, scrolled.
     Text {
         title: String,
@@ -946,6 +957,16 @@ pub enum Action {
     /// `P` in the agents view: let the node run again.
     Resume {
         task_id: String,
+    },
+    /// `a` in the agents view: read the open ask of task `task_id` and
+    /// open the answer form for it.
+    AskAnswer {
+        task_id: String,
+    },
+    /// ⏎ in the answer form: answer ask `id` as the user (R15).
+    Answer {
+        id: i64,
+        text: String,
     },
     /// `x` in the agents view: ask before stopping the node and its
     /// subtree, or with `None`, on the assistant, every task under it.
@@ -1674,10 +1695,36 @@ impl TasksUi {
                     None
                 }
             },
-            KeyCode::Char('a') => {
-                self.set_status(ANSWER_LATER);
-                None
-            }
+            // The open question at or nearest below the node, one with the
+            // user first, as the tree thread last read them (R15).
+            KeyCode::Char('a') => match (self.user, id, &self.assistant_row) {
+                (false, _, _) => {
+                    self.set_status(NOT_USER);
+                    None
+                }
+                (true, Some(at), Some(root)) => {
+                    let nodes = managers::tree_nodes(root, &self.rows);
+                    let found = self
+                        .tree_info
+                        .as_ref()
+                        .and_then(|info| managers::nearest_ask(&at, &nodes, info));
+                    match found {
+                        Some((task_id, _)) => Some(Action::AskAnswer { task_id }),
+                        None => {
+                            let slug = match self.node(&at) {
+                                Some(row) => printable(&row.task.slug),
+                                None => at,
+                            };
+                            self.set_status(format!("no open question at or below {slug}"));
+                            None
+                        }
+                    }
+                }
+                (true, _, _) => {
+                    self.set_status(NO_NODE);
+                    None
+                }
+            },
             // Refused here on a worker, in `plan_child`'s words, rather than
             // after a whole form.
             KeyCode::Char('n') => {
@@ -2207,6 +2254,47 @@ impl TasksUi {
                     }
                 };
                 self.panel = Some(Panel::Inbox { selected });
+                action
+            }
+            Panel::Answer {
+                id,
+                title,
+                question,
+                mut input,
+                mut error,
+            } => {
+                let mut action = None;
+                match key.code {
+                    KeyCode::Esc => return None,
+                    KeyCode::Enter if input.trim().is_empty() => {
+                        error = Some(TYPE_AN_ANSWER.to_string())
+                    }
+                    // The form stays up until the answer is in: a refusal
+                    // is shown on it.
+                    KeyCode::Enter => {
+                        error = None;
+                        action = Some(Action::Answer {
+                            id,
+                            text: input.clone(),
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char('u') if ctrl => input.clear(),
+                    _ => {
+                        if let Some(c) = typed(&key) {
+                            input.push(c);
+                        }
+                    }
+                }
+                self.panel = Some(Panel::Answer {
+                    id,
+                    title,
+                    question,
+                    input,
+                    error,
+                });
                 action
             }
             Panel::Text {
@@ -2841,10 +2929,11 @@ pub enum Start {
     Projects,
 }
 
-/// Whether the caller is known to be the user: anyone else, and who it is
-/// not being told, fail closed.
-fn is_user(caller: Result<Caller>) -> bool {
-    matches!(caller, Ok(Caller::User))
+/// Whether the caller is known to be the user at their own terminal
+/// (R17): a top-level task's agent is [`Caller::User`] but not at one.
+/// Anyone else, and who it is not being told, fail closed.
+fn is_user(caller: Result<Caller>, at_terminal: Result<bool>) -> bool {
+    matches!(caller, Ok(Caller::User)) && matches!(at_terminal, Ok(true))
 }
 
 /// Run the tasks screen until the user leaves it, returning where the shell
@@ -2855,7 +2944,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
     // Inside an agent's pane jeet is that agent: the agents view will not
     // act or show agents' text for it, nor when who it is cannot be told.
     let ui = TasksUi {
-        user: is_user(permissions::caller(app)),
+        user: is_user(permissions::caller(app), permissions::at_terminal(app)),
         ..TasksUi::default()
     };
     let mut terminal = term::init_terminal()?;
@@ -3658,6 +3747,8 @@ impl Screen<'_> {
             }
             Action::Pause { task_id } => self.run_verb(Verb::ManagerPause, Some(&task_id)),
             Action::Resume { task_id } => self.run_verb(Verb::ManagerResume, Some(&task_id)),
+            Action::AskAnswer { task_id } => self.ask_answer(&task_id)?,
+            Action::Answer { id, text } => self.answer(id, &text),
             Action::AskStop { task_id } => self.ask_stop(task_id)?,
             Action::Stop { task_id } => self.run_verb(Verb::ManagerStop, task_id.as_deref()),
         }
@@ -3766,6 +3857,98 @@ impl Screen<'_> {
             self.ui.message(&made, lines, None);
         }
         self.ui.set_status(made);
+    }
+
+    /// `a` in the agents view: the answer form for the ask task `task_id`
+    /// has open, as the index has it now.
+    fn ask_answer(&mut self, task_id: &str) -> Result<()> {
+        let app = self.app;
+        let read = self
+            .progress("reading the question", || -> Result<_> {
+                let Some(asker) = app.db.get_task(task_id)? else {
+                    return Ok(None);
+                };
+                let Some(row) = manager::open_ask(app, &asker)? else {
+                    return Ok(None);
+                };
+                let path = manager::tree_path(app, &asker)?;
+                Ok(Some((row, manager::label_at(&asker, &path))))
+            })
+            .and_then(|inner| inner)?;
+        let Some((row, asker)) = read else {
+            self.ui
+                .set_status("that question was answered or withdrawn meanwhile");
+            self.read_tree();
+            return Ok(());
+        };
+        let with = match row.needs_user {
+            true => " · with you",
+            false => "",
+        };
+        self.ui.panel = Some(Panel::Answer {
+            id: row.id,
+            title: printable(&format!(
+                "#{} {} from {asker}{with}",
+                row.id,
+                row.kind.as_str()
+            )),
+            question: printable_text(&row.body)
+                .lines()
+                .map(str::to_string)
+                .collect(),
+            input: String::new(),
+            error: None,
+        });
+        Ok(())
+    }
+
+    /// ⏎ in the answer form: answer ask `id` as the user, as `jeet report
+    /// answer` does at the user's terminal, which `ui.user` says this is
+    /// (R17); then how the answer and each copy went. A refusal stays on
+    /// the form.
+    fn answer(&mut self, id: i64, text: &str) {
+        let app = self.app;
+        let answered = self
+            .progress(&format!("answering #{id}"), || {
+                reports::answer(app, &Caller::User, id, text)
+            })
+            .and_then(|inner| inner);
+        // A deep error path may have written to the terminal (Q20).
+        if let Err(e) = term::blank(self.terminal) {
+            self.ui.set_status(format!("could not repaint: {e}"));
+        }
+        let answered = match answered {
+            Ok(answered) => answered,
+            Err(e) => {
+                match &mut self.ui.panel {
+                    Some(Panel::Answer { error, .. }) => {
+                        *error = Some(printable(&format!("{e:#}")))
+                    }
+                    _ => self.ui.set_status(printable(&format!("{e:#}"))),
+                }
+                return;
+            }
+        };
+        let asker = manager::label(&answered.asker);
+        let mut lines = vec![commands::report::delivered(
+            &asker,
+            "the answer",
+            &format!("the answer to #{id} is kept, but not delivered to {asker}"),
+            &answered.to_asker,
+        )];
+        for (to, delivered) in &answered.copies {
+            lines.push(commands::report::delivered(
+                to,
+                "its copy",
+                &format!("the copy for {to} was not delivered"),
+                delivered,
+            ));
+        }
+        let title = printable(&format!("answered #{id} for {asker}"));
+        let lines = lines.iter().map(|l| printable(l)).collect();
+        self.ui.message(&title, lines, None);
+        self.ui.set_status(title);
+        self.read_tree();
     }
 
     /// `x` in the agents view: ask before stopping task `task_id` and its
@@ -5646,7 +5829,7 @@ mod tests {
                 inbox: None,
                 pr: None,
                 queued: false,
-                ask: Some((1, crate::db::tasks::ReportKind::Question)),
+                ask: Some((1, crate::db::tasks::ReportKind::Question, false)),
                 done: false,
                 children: 1,
             },
@@ -5815,9 +5998,9 @@ mod tests {
             assert_eq!(ui.status_line, NOT_IN_AGENTS, "{c}");
         }
         assert!(!ui.by_priority);
-        // Not archive: answering waits for #36.
+        // Not archive: answering, which is the user's.
         assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
-        assert_eq!(ui.status_line, ANSWER_LATER);
+        assert_eq!(ui.status_line, NOT_USER);
         // The assistant's keys are not a node's.
         assert_eq!(
             press(&mut ui, KeyCode::Char('c')),
@@ -6232,10 +6415,125 @@ mod tests {
     }
 
     #[test]
-    fn only_a_known_user_is_the_user() {
-        assert!(is_user(Ok(Caller::User)));
-        assert!(!is_user(Ok(Caller::Root)));
-        assert!(!is_user(Err(anyhow::anyhow!("who?"))));
+    fn only_a_known_user_at_their_own_terminal_is_the_user() {
+        assert!(is_user(Ok(Caller::User), Ok(true)));
+        // A top-level task's agent.
+        assert!(!is_user(Ok(Caller::User), Ok(false)));
+        assert!(!is_user(Ok(Caller::User), Err(anyhow::anyhow!("who?"))));
+        assert!(!is_user(Ok(Caller::Root), Ok(true)));
+        assert!(!is_user(Err(anyhow::anyhow!("who?")), Ok(true)));
+    }
+
+    /// [`agents_sample`] with w asking report 42, with the user or not.
+    fn asking_sample(user: bool) -> TasksUi {
+        let mut ui = agents_sample();
+        let mut info = TreeInfo::default();
+        info.nodes.insert(
+            "w".into(),
+            managers::NodeInfo {
+                run: crate::db::tasks::RunState::Run,
+                held: 0,
+                setter: None,
+                budget: None,
+                inbox: Some(0),
+                pr: None,
+                queued: false,
+                ask: Some((42, crate::db::tasks::ReportKind::Question, user)),
+                done: false,
+                children: 0,
+            },
+        );
+        ui.apply(Update::Tree {
+            seq: 0,
+            info: Ok(Box::new(info)),
+        });
+        ui
+    }
+
+    #[test]
+    fn a_answers_the_open_question_at_or_below_the_node() {
+        let mut ui = asking_sample(true);
+        // Not the user at their own terminal.
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
+        assert_eq!(ui.status_line, NOT_USER);
+        ui.user = true;
+        let ask_w = Some(Action::AskAnswer {
+            task_id: "w".into(),
+        });
+        // On the assistant, on the manager and on the asker.
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(ui.selected_id(), Some("m"));
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+
+        // Nothing open: said, and no action.
+        let mut calm = agents_sample();
+        calm.user = true;
+        press(&mut calm, KeyCode::Down);
+        assert_eq!(press(&mut calm, KeyCode::Char('a')), None);
+        assert_eq!(calm.status_line, "no open question at or below m");
+
+        // `a` is still archive in the active view.
+        press(&mut ui, KeyCode::BackTab);
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Archive {
+                confirmed: false,
+                ..
+            })
+        ));
+    }
+
+    fn answer_panel() -> Panel {
+        Panel::Answer {
+            id: 42,
+            title: "#42 question from task assistant/m/w".into(),
+            question: vec!["keep v1?".into()],
+            input: String::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn the_answer_form_takes_an_answer_and_esc_closes_it() {
+        let mut ui = asking_sample(true);
+        ui.user = true;
+        ui.panel = Some(answer_panel());
+        // An empty answer is not sent.
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        match &ui.panel {
+            Some(Panel::Answer { error, .. }) => {
+                assert_eq!(error.as_deref(), Some(TYPE_AN_ANSWER))
+            }
+            other => panic!("{other:?}"),
+        }
+        // Ctrl-U clears the line, and is not typed.
+        type_text(&mut ui, "junk");
+        ui.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        match &ui.panel {
+            Some(Panel::Answer { input, .. }) => assert_eq!(input.as_str(), ""),
+            other => panic!("{other:?}"),
+        }
+        type_text(&mut ui, "drop itx");
+        press(&mut ui, KeyCode::Backspace);
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Answer {
+                id: 42,
+                text: "drop it".into()
+            })
+        );
+        // Up until the answer is in, the error gone.
+        match &ui.panel {
+            Some(Panel::Answer { input, error, .. }) => {
+                assert_eq!((input.as_str(), error), ("drop it", &None))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
     }
 
     #[test]

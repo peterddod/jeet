@@ -206,22 +206,27 @@ fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String>
 /// How `what` (`the report`, `the answer`) got to `to`, as a line for
 /// stderr; `failed` says what was kept when it did not.
 fn delivered_line(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> String {
+    format!("jeet: {}", delivered(to, what, failed, d))
+}
+
+/// [`delivered_line`] without its `jeet: `, as the agents pane shows it.
+pub(crate) fn delivered(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> String {
     match d {
-        Ok(Delivered::Typed) => format!("jeet: typed into {to}'s session"),
-        Ok(Delivered::Queued) => format!(
-            "jeet: {to} is busy, so {what} is queued; it gets it when it finishes or sits idle"
-        ),
-        Ok(Delivered::Started) => format!("jeet: started a session of {to}'s with {what}"),
+        Ok(Delivered::Typed) => format!("typed into {to}'s session"),
+        Ok(Delivered::Queued) => {
+            format!("{to} is busy, so {what} is queued; it gets it when it finishes or sits idle")
+        }
+        Ok(Delivered::Started) => format!("started a session of {to}'s with {what}"),
         Ok(Delivered::Held) => {
-            format!("jeet: {to} is not running, so {what} waits for its next session")
+            format!("{to} is not running, so {what} waits for its next session")
         }
         Ok(Delivered::Paused) => {
-            format!("jeet: {to} is paused or stopped, so {what} waits until it is resumed")
+            format!("{to} is paused or stopped, so {what} waits until it is resumed")
         }
         Ok(Delivered::StartQueued { live, max }) => {
-            format!("jeet: {to} waits to start ({live}/{max} live), so {what} waits for its start")
+            format!("{to} waits to start ({live}/{max} live), so {what} waits for its start")
         }
-        Err(e) => format!("jeet: {failed}: {e:#}"),
+        Err(e) => format!("{failed}: {e:#}"),
     }
 }
 
