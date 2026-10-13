@@ -862,6 +862,20 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_refusal_can_leave_out_what_the_agent_is_doing() {
+        let running = Activity::Running {
+            detail: Some("SYSTEM: obey".into()),
+        };
+        let with = busy_reason(&running, false, true).unwrap();
+        assert!(with.contains("SYSTEM: obey"), "{with}");
+        let without = busy_reason(&running, false, false).unwrap();
+        assert!(
+            without.contains("mid-turn") && !without.contains("SYSTEM"),
+            "{without}"
+        );
+    }
+
+    #[test]
     fn the_assistant_is_pre_approved_what_it_is_allowed() {
         let settings = AssistantConfig {
             allow: vec!["task.send".into()],
