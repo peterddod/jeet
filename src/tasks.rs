@@ -230,7 +230,7 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
                     "could not add {} to the new task",
                     repo.escape_debug()
                 ));
-                return Err(match delete(app, &task) {
+                return Err(match delete(app, &task, false) {
                     Ok(_) => e,
                     Err(undo) => e.context(format!(
                         "and the half-made task could not be removed ({undo:#}); \
@@ -1055,7 +1055,7 @@ pub fn review_task(
         }
     };
     if task.state == TaskState::Archived {
-        warnings.extend(unarchive(app, &task)?);
+        warnings.extend(unarchive(app, &task, false)?);
         task.state = TaskState::Active;
     }
 
@@ -1073,7 +1073,7 @@ pub fn review_task(
                 warnings,
             })
         }
-        Err(e) if created => Err(match delete(app, &task) {
+        Err(e) if created => Err(match delete(app, &task, false) {
             Ok(_) => e,
             Err(undo) => e.context(format!(
                 "and the half-made task could not be removed ({undo:#}); \
@@ -1552,7 +1552,7 @@ fn removal_blockers(repo: &RepoRecord, path: &Path) -> Vec<String> {
     out
 }
 
-fn plural(n: usize, what: &str) -> String {
+pub(crate) fn plural(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -1703,11 +1703,34 @@ fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
 /// caller has already confirmed what [`unkept`] lists.
 ///
 /// It is refused while a task under it is active, before anything is done,
-/// and checked again as it is marked archived.
-pub fn archive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+/// and checked again as it is marked archived; with `recursive`, every
+/// active task under it is archived first, leaves first (M23), once all of
+/// their agents have ended. The caller has then confirmed what
+/// [`subtree_unkept`] lists.
+pub fn archive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
     if task.kind == TaskKind::Assistant {
         bail!("the assistant cannot be archived");
     }
+    if !recursive {
+        return archive_one(app, task);
+    }
+    let nodes: Vec<TaskRecord> = subtree_leaves_first(app, task)?
+        .into_iter()
+        .filter(|node| node.state == TaskState::Active)
+        .collect();
+    refuse_inside_any(app, &nodes, "archive")?;
+    let mut warnings = end_agents(app, &nodes)?;
+    // A failure part-way leaves those done archived, and their parents
+    // active: running it again finishes the job.
+    for node in &nodes {
+        let done = archive_one(app, node).with_context(|| format!("archive task {}", node.slug))?;
+        warnings.extend(done.into_iter().map(|w| format!("{}: {w}", node.slug)));
+    }
+    Ok(warnings)
+}
+
+/// [`archive`] one task.
+fn archive_one(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(task, "archive")?;
     review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
@@ -1824,6 +1847,16 @@ pub fn unkept(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         }
     }
     Ok(out)
+}
+
+/// What archiving `task` and every active task below it would not keep:
+/// [`unkept`] for each, leaves first, `task` last.
+pub fn subtree_unkept(app: &App, task: &TaskRecord) -> Result<Vec<(TaskRecord, Vec<String>)>> {
+    subtree_leaves_first(app, task)?
+        .into_iter()
+        .filter(|node| node.state == TaskState::Active)
+        .map(|node| Ok((node.clone(), unkept(app, &node)?)))
+        .collect()
 }
 
 /// The first few of `paths`, then how many more.
@@ -1943,9 +1976,33 @@ fn describe_foreign(dir: &Path, checkout: &ForeignCheckout) -> String {
 ///
 /// It is refused under an archived parent, and when the parent already has
 /// as many active tasks under it as it may, before anything is done, and
-/// checked again as it is marked active.
-pub fn unarchive(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
-    let fan_out = fan_out_of_parent(app, task)?;
+/// checked again as it is marked active. With `recursive`, every archived
+/// task under it comes back too, top-down, each under a parent already
+/// back (M23). Each is held to its parent's limit, as a manager may have
+/// made others since, so one that would be over it stops the walk; running
+/// it again after freeing room finishes the job.
+pub fn unarchive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
+    if !recursive {
+        return unarchive_one(app, task, true);
+    }
+    let mut warnings = Vec::new();
+    for node in subtree_leaves_first(app, task)?.into_iter().rev() {
+        if node.state != TaskState::Archived {
+            continue;
+        }
+        let done = unarchive_one(app, &node, true)
+            .with_context(|| format!("unarchive task {}", node.slug))?;
+        warnings.extend(done.into_iter().map(|w| format!("{}: {w}", node.slug)));
+    }
+    Ok(warnings)
+}
+
+/// [`unarchive`] one task, held to its parent's limit when `limit`.
+fn unarchive_one(app: &App, task: &TaskRecord, limit: bool) -> Result<Vec<String>> {
+    let fan_out = match limit {
+        true => fan_out_of_parent(app, task)?,
+        false => None,
+    };
     app.db.check_unarchive(&task.id, fan_out)?;
     let dir = task_dir(app, task);
     if !dir.is_dir() {
@@ -2222,21 +2279,66 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 ///
 /// The rows go last, so a failure part-way leaves a task that can be deleted
 /// again. It is refused, before anything is done, while any task sits under
-/// it (see [`refuse_delete_with_children`]).
-pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+/// it (see [`refuse_delete_with_children`]); with `recursive`, every task
+/// under it goes too (M23): all their agents are ended, leaves first, then
+/// each is removed from disk, leaves first, and their rows go together, in
+/// one transaction. The caller has then confirmed what [`subtree_losses`]
+/// lists.
+pub fn delete(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
     // Its directory is the assistant's home: its notes, its todo list.
     if task.kind == TaskKind::Assistant {
         bail!("the assistant cannot be deleted");
     }
-    if task.slug.is_empty() || task.slug.starts_with('.') || task.slug.contains(['/', '\\']) {
+    let nodes = match recursive {
+        true => subtree_leaves_first(app, task)?,
+        false => {
+            refuse_delete_with_children(app, task)?;
+            vec![task.clone()]
+        }
+    };
+    for node in &nodes {
+        if node.slug.is_empty() || node.slug.starts_with('.') || node.slug.contains(['/', '\\']) {
+            bail!(
+                "refusing to delete a task whose directory name is {:?}",
+                node.slug
+            );
+        }
+    }
+    refuse_inside_any(app, &nodes, "delete")?;
+    if !recursive {
+        let warnings = remove_from_disk(app, task)?;
+        app.db.delete_task(&task.id)?;
+        return Ok(warnings);
+    }
+    let mut warnings = end_agents(app, &nodes)?;
+    // A manager may have made a task just before it was ended: its row
+    // would refuse to go once the disk was gone. With every agent ended,
+    // nothing below makes more, so running it again takes it too.
+    let now = subtree_leaves_first(app, task)?;
+    if let Some(new) = now
+        .iter()
+        .find(|node| !nodes.iter().any(|old| old.id == node.id))
+    {
         bail!(
-            "refusing to delete a task whose directory name is {:?}",
+            "task {} was made under task {} as its tree was being ended; nothing was \
+             deleted, so run it again",
+            new.slug,
             task.slug
         );
     }
-    refuse_delete_with_children(app, task)?;
-    runtime::refuse_inside_session(task, "delete")?;
-    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "delete")?;
+    for node in &nodes {
+        let done =
+            remove_from_disk(app, node).with_context(|| format!("delete task {}", node.slug))?;
+        warnings.extend(done.into_iter().map(|w| format!("{}: {w}", node.slug)));
+    }
+    let ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
+    app.db.delete_rows_leaves_first(&ids)?;
+    Ok(warnings)
+}
+
+/// [`delete`] everything of one task but its row: its agent, its review
+/// jobs, its worktrees, branches and refs, its directory and its settings.
+fn remove_from_disk(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     // Stopped, and gone, before anything is removed: a running agent would
     // carry on working in worktrees that are about to go, and its exit hook
@@ -2306,7 +2408,56 @@ pub fn delete(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
-    app.db.delete_task(&task.id)?;
+    Ok(warnings)
+}
+
+/// What deleting `task` and everything below it would destroy: [`losses`]
+/// for each, leaves first, `task` last.
+pub fn subtree_losses(app: &App, task: &TaskRecord) -> Result<Vec<(TaskRecord, Vec<String>)>> {
+    subtree_leaves_first(app, task)?
+        .into_iter()
+        .map(|node| Ok((node.clone(), losses(app, &node)?)))
+        .collect()
+}
+
+/// `task` and everything below it, leaves first, `task` last.
+pub fn subtree_leaves_first(app: &App, task: &TaskRecord) -> Result<Vec<TaskRecord>> {
+    let mut nodes: Vec<TaskRecord> = app
+        .db
+        .descendants(&task.id)?
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect();
+    nodes.push(task.clone());
+    Ok(nodes)
+}
+
+/// Refuse to `verb` `nodes` when this jeet runs inside the agent's session,
+/// or under the review job, of any of them: ending it would end this jeet
+/// part-way through.
+pub fn refuse_inside_any(app: &App, nodes: &[TaskRecord], verb: &str) -> Result<()> {
+    for node in nodes {
+        runtime::refuse_inside_session(node, verb)?;
+        review::refuse_inside_job(app, &node.id, &task_dir(app, node), verb)?;
+    }
+    Ok(())
+}
+
+/// End the agent of each of `nodes`, in order, as a stop does
+/// ([`manager::run::end_agent`]), and forget its pane, before any of them
+/// is torn down: a manager left running would go on making tasks, and
+/// starting them, under one being removed. What each turn ran is charged
+/// first.
+fn end_agents(app: &App, nodes: &[TaskRecord]) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    for node in nodes {
+        let mut charged = Vec::new();
+        charge_before_end(app, node, &mut charged);
+        warnings.extend(charged.into_iter().map(|w| format!("{}: {w}", node.slug)));
+        manager::run::end_agent(app, node)
+            .with_context(|| format!("end task {}'s agent", node.slug))?;
+        app.db.delete_task_anchors(&node.id, AnchorKind::Pane)?;
+    }
     Ok(warnings)
 }
 
@@ -3160,17 +3311,17 @@ mod tests {
             let row = app.db.get_task("lead-id").unwrap().unwrap();
             assert_eq!(row.state, TaskState::Active, "{what}");
         };
-        let refused = archive(&app, &lead).unwrap_err().to_string();
+        let refused = archive(&app, &lead, false).unwrap_err().to_string();
         assert!(refused.contains("1 active task under it"), "{refused}");
         untouched("archive");
-        let refused = delete(&app, &lead).unwrap_err().to_string();
+        let refused = delete(&app, &lead, false).unwrap_err().to_string();
         assert!(refused.contains("1 task under it"), "{refused}");
         untouched("delete");
 
         app.db
             .set_task_state("kid-id", TaskState::Archived)
             .unwrap();
-        let refused = delete(&app, &lead).unwrap_err().to_string();
+        let refused = delete(&app, &lead, false).unwrap_err().to_string();
         assert!(refused.contains("archived ones included"), "{refused}");
         untouched("delete with the child archived");
     }
@@ -3202,6 +3353,33 @@ mod tests {
         app.db.insert_task(&own).unwrap();
         kid.parent_id = Some("own-id".into());
         assert_eq!(fan_out_of_parent(&app, &kid).unwrap(), Some(1));
+    }
+
+    /// Every task a recursive unarchive brings back is held to its parent's
+    /// limit, an active target's archived children included.
+    #[test]
+    fn recursive_unarchive_holds_each_task_to_its_parents_limit() {
+        let (_dir, app, _trunk) = manager_lab();
+        let mut lead = app.db.get_task("m-id").unwrap().unwrap();
+        lead.id = "lead-id".into();
+        lead.slug = "lead".into();
+        lead.max_children = Some(1);
+        app.db.insert_task(&lead).unwrap();
+        let mut kid = app.db.get_task("w-id").unwrap().unwrap();
+        kid.id = "kid-id".into();
+        kid.slug = "kid".into();
+        kid.parent_id = Some("lead-id".into());
+        app.db.insert_task(&kid).unwrap();
+        let mut old = kid.clone();
+        old.id = "old-id".into();
+        old.slug = "old".into();
+        old.state = TaskState::Archived;
+        app.db.insert_task(&old).unwrap();
+        let err = unarchive(&app, &lead, true).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("old"), "{err}");
+        let row = app.db.get_task("old-id").unwrap().unwrap();
+        assert_eq!(row.state, TaskState::Archived, "{err}");
     }
 
     #[test]

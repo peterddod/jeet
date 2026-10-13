@@ -477,11 +477,26 @@ pub struct ProjectLine {
 /// What a confirm overlay is asking about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
-    Archive { task_id: String },
-    Delete { task_id: String },
-    RemoveWorktree { task_id: String, dir_name: String },
-    DeleteProject { name: String },
-    ForceResync { task_id: String },
+    /// `recursive`: with every active task under it (M23).
+    Archive {
+        task_id: String,
+        recursive: bool,
+    },
+    /// `recursive`: with every task under it (M23).
+    Delete {
+        task_id: String,
+        recursive: bool,
+    },
+    RemoveWorktree {
+        task_id: String,
+        dir_name: String,
+    },
+    DeleteProject {
+        name: String,
+    },
+    ForceResync {
+        task_id: String,
+    },
 }
 
 /// An overlay over the list, which takes the keyboard while it is up.
@@ -619,18 +634,24 @@ pub enum Action {
         project: Option<String>,
     },
     CreateTask(TaskSpec),
+    /// With tasks under it, `a` archives them all, leaves first, once
+    /// confirmed: `recursive` says the confirm was for them all.
     Archive {
         task_id: String,
         confirmed: bool,
+        recursive: bool,
     },
+    /// With every archived task under it, top-down.
     Unarchive {
         task_id: String,
     },
     AskDelete {
         task_id: String,
     },
+    /// `recursive`: with every task under it, as confirmed.
     Delete {
         task_id: String,
+        recursive: bool,
     },
     Projects,
     NewProjectForm,
@@ -1168,6 +1189,7 @@ impl TasksUi {
                 View::Active => needs_task(self, &|task_id| Action::Archive {
                     task_id,
                     confirmed: false,
+                    recursive: false,
                 }),
                 View::Archived => needs_task(self, &|task_id| Action::Unarchive { task_id }),
             },
@@ -1219,12 +1241,16 @@ impl TasksUi {
                 let force = matches!(key.code, KeyCode::Char('f' | 'F'));
                 let no = matches!(key.code, KeyCode::Char('n' | 'N') | KeyCode::Esc);
                 match (&action, yes, force, no) {
-                    (Pending::Archive { task_id }, true, _, _) => Some(Action::Archive {
+                    (Pending::Archive { task_id, recursive }, true, _, _) => {
+                        Some(Action::Archive {
+                            task_id: task_id.clone(),
+                            confirmed: true,
+                            recursive: *recursive,
+                        })
+                    }
+                    (Pending::Delete { task_id, recursive }, true, _, _) => Some(Action::Delete {
                         task_id: task_id.clone(),
-                        confirmed: true,
-                    }),
-                    (Pending::Delete { task_id }, true, _, _) => Some(Action::Delete {
-                        task_id: task_id.clone(),
+                        recursive: *recursive,
                     }),
                     (Pending::RemoveWorktree { task_id, dir_name }, y, f, _) if y || f => {
                         Some(Action::RemoveWorktree {
@@ -1835,6 +1861,57 @@ fn archive_warning(name: &str, running: bool, unkept: &[String]) -> Vec<String> 
         lines.push(String::new());
         lines.push("⚠ files git ignores are not kept — they go with the worktrees:".into());
         lines.extend(unkept.iter().map(|line| format!("  {line}")));
+    }
+    lines
+}
+
+/// What the confirm to archive `name` and the active tasks under it says:
+/// that every agent among them ends, and, for each, leaves first, which
+/// files git ignores go with its worktrees.
+fn subtree_archive_warning(name: &str, unkept: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "archiving {name} archives the {} under it first, leaves first",
+            plural(unkept.len().saturating_sub(1), "active task")
+        ),
+        "every agent among them is ended, then their worktrees' disk freed".into(),
+        "(uncommitted work is kept, and comes back on unarchive)".into(),
+        String::new(),
+    ];
+    for (node, files) in unkept {
+        match files.is_empty() {
+            true => lines.push(format!("  {node}: nothing lost")),
+            false => {
+                lines.push(format!(
+                    "⚠ {node}: files git ignores go with its worktrees:"
+                ));
+                lines.extend(files.iter().map(|line| format!("    {line}")));
+            }
+        }
+    }
+    lines
+}
+
+/// What the confirm to delete `name` and every task under it says: for
+/// each, leaves first, the directory that goes and the work it would lose.
+fn subtree_delete_warning(name: &str, losses: &[(String, PathBuf, Vec<String>)]) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "deleting {name} deletes the {} under it first, leaves first",
+            plural(losses.len().saturating_sub(1), "task")
+        ),
+        "every agent among them is ended, then each one's directory removed".into(),
+        String::new(),
+    ];
+    for (node, dir, lost) in losses {
+        lines.push(format!("  {node}: removes {}", dir.display()));
+        match lost.is_empty() {
+            true => lines.push("    nothing would be lost".into()),
+            false => {
+                lines.push("  ⚠ this work would be lost:".into());
+                lines.extend(lost.iter().map(|loss| format!("    {loss}")));
+            }
+        }
     }
     lines
 }
@@ -2528,10 +2605,23 @@ impl Screen<'_> {
                     }
                 }
             }
-            Action::Archive { task_id, confirmed } => {
+            Action::Archive {
+                task_id,
+                confirmed,
+                recursive,
+            } => {
                 let Some(row) = self.ui.row(&task_id).cloned() else {
                     return Ok(());
                 };
+                // With tasks under it, they all go, after one confirm
+                // (M23); once confirmed, what was confirmed.
+                let recursive = match confirmed {
+                    true => recursive,
+                    false => app.db.child_count(&row.task.id, true)? > 0,
+                };
+                if recursive {
+                    return self.archive_subtree(row.task, confirmed);
+                }
                 // Not polled yet is not "not running": ask tmux.
                 let running = row.agent_running()
                     || (row.activity.is_none()
@@ -2555,13 +2645,16 @@ impl Screen<'_> {
                     self.ui.panel = Some(Panel::Confirm {
                         title: format!("archive task {}", task.name),
                         lines: archive_warning(&task.name, running, &unkept),
-                        action: Pending::Archive { task_id },
+                        action: Pending::Archive {
+                            task_id,
+                            recursive: false,
+                        },
                     });
                     return Ok(());
                 }
                 let archived = self
                     .progress(&format!("archiving {}", task.name), || {
-                        tasks::archive(app, &task)
+                        tasks::archive(app, &task, false)
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
@@ -2585,17 +2678,30 @@ impl Screen<'_> {
                 let Some(task) = self.task(&task_id) else {
                     return Ok(());
                 };
+                // The tasks under it come back with it, as `a` archived
+                // them with it.
+                let under = tasks::subtree_leaves_first(app, &task)?
+                    .iter()
+                    .filter(|node| node.state == TaskState::Archived && node.id != task.id)
+                    .count();
                 let back = self
                     .progress(&format!("bringing {} back", task.name), || {
-                        tasks::unarchive(app, &task)
+                        tasks::unarchive(app, &task, true)
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
                 match back {
                     Ok(warnings) => {
                         self.ui.select(&task_id);
-                        self.ui
-                            .set_status(with_warnings(format!("{} is back", task.name), &warnings));
+                        let said = match under {
+                            0 => format!("{} is back", task.name),
+                            n => format!(
+                                "{} is back, with {} under it",
+                                task.name,
+                                plural(n, "task")
+                            ),
+                        };
+                        self.ui.set_status(with_warnings(said, &warnings));
                     }
                     Err(e) => self
                         .ui
@@ -2603,13 +2709,13 @@ impl Screen<'_> {
                 }
             }
             Action::AskDelete { task_id } => self.ask_delete(&task_id)?,
-            Action::Delete { task_id } => {
+            Action::Delete { task_id, recursive } => {
                 let Some(task) = self.task(&task_id) else {
                     return Ok(());
                 };
                 let deleted = self
                     .progress(&format!("deleting {}", task.name), || {
-                        tasks::delete(app, &task)
+                        tasks::delete(app, &task, recursive)
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
@@ -3100,6 +3206,10 @@ impl Screen<'_> {
             );
             return Ok(());
         }
+        // With tasks under it, they all go, after one confirm (M23).
+        if app.db.child_count(&task.id, false)? > 0 {
+            return self.ask_delete_subtree(task);
+        }
         // Before asking, not after: the answer would count for nothing.
         let refused = tasks::refuse_delete_with_children(app, &task)
             .and_then(|()| runtime::refuse_inside_session(&task, "delete"));
@@ -3130,8 +3240,121 @@ impl Screen<'_> {
             lines,
             action: Pending::Delete {
                 task_id: task_id.to_string(),
+                recursive: false,
             },
         });
+        Ok(())
+    }
+
+    /// Ask once before deleting `task` and every task under it, naming
+    /// what each would lose, leaves first; or say why it cannot be.
+    fn ask_delete_subtree(&mut self, task: TaskRecord) -> Result<()> {
+        let app = self.app;
+        let nodes = tasks::subtree_leaves_first(app, &task)?;
+        // Before asking, not after: the answer would count for nothing.
+        if let Some(dir) = nodes
+            .iter()
+            .map(|node| tasks::task_dir(app, node))
+            .find(|dir| crate::commands::task::standing_in(dir))
+        {
+            self.ui.message(
+                "cannot delete",
+                vec![
+                    format!("the shell jeet runs in is inside {}", dir.display()),
+                    "cd out of it, then delete the task".into(),
+                ],
+                None,
+            );
+            return Ok(());
+        }
+        if let Err(e) = tasks::refuse_inside_any(app, &nodes, "delete") {
+            self.ui
+                .message("cannot delete", vec![format!("{e:#}")], None);
+            return Ok(());
+        }
+        let losses = self
+            .progress("checking what would be lost", || {
+                tasks::subtree_losses(app, &task)
+            })
+            .and_then(|inner| inner)?;
+        let losses: Vec<(String, PathBuf, Vec<String>)> = losses
+            .into_iter()
+            .map(|(node, lost)| {
+                let dir = tasks::task_dir(app, &node);
+                (node.name, dir, lost)
+            })
+            .collect();
+        self.ui.panel = Some(Panel::Confirm {
+            title: format!("delete task {} and the tasks under it", task.name),
+            lines: subtree_delete_warning(&task.name, &losses),
+            action: Pending::Delete {
+                task_id: task.id,
+                recursive: true,
+            },
+        });
+        Ok(())
+    }
+
+    /// Archive `task` and every active task under it, once `confirmed`;
+    /// until then, ask, naming what each would not keep.
+    fn archive_subtree(&mut self, task: TaskRecord, confirmed: bool) -> Result<()> {
+        let app = self.app;
+        let nodes: Vec<TaskRecord> = tasks::subtree_leaves_first(app, &task)?
+            .into_iter()
+            .filter(|node| node.state == TaskState::Active)
+            .collect();
+        // Before asking, not after: the answer would count for nothing.
+        if let Err(e) = tasks::refuse_inside_any(app, &nodes, "archive") {
+            self.ui
+                .message("cannot archive", vec![format!("{e:#}")], None);
+            return Ok(());
+        }
+        if !confirmed {
+            let unkept = self
+                .progress("checking what archiving would not keep", || {
+                    tasks::subtree_unkept(app, &task)
+                })
+                .and_then(|inner| inner)?;
+            let unkept: Vec<(String, Vec<String>)> = unkept
+                .into_iter()
+                .map(|(node, lines)| (node.name, lines))
+                .collect();
+            self.ui.panel = Some(Panel::Confirm {
+                title: format!("archive task {} and the tasks under it", task.name),
+                lines: subtree_archive_warning(&task.name, &unkept),
+                action: Pending::Archive {
+                    task_id: task.id,
+                    recursive: true,
+                },
+            });
+            return Ok(());
+        }
+        let archived = self
+            .progress(
+                &format!("archiving {} and the tasks under it", task.name),
+                || tasks::archive(app, &task, true),
+            )
+            .and_then(|inner| inner);
+        self.refresh(false);
+        match archived {
+            Ok(warnings) => self.ui.set_status(with_warnings(
+                format!(
+                    "archived {} and {} under it — ⇥ shows archived tasks",
+                    task.name,
+                    plural(nodes.len().saturating_sub(1), "task")
+                ),
+                &warnings,
+            )),
+            Err(e) => self.ui.message(
+                "could not finish archiving",
+                vec![
+                    format!("{e:#}"),
+                    String::new(),
+                    "a on it again tries again".into(),
+                ],
+                None,
+            ),
+        }
         Ok(())
     }
 
@@ -3376,6 +3599,49 @@ mod tests {
     use crate::db::tasks::{RunState, TaskKind};
 
     #[test]
+    fn the_subtree_confirms_name_each_task_leaves_first() {
+        let lines = subtree_archive_warning(
+            "lead",
+            &[
+                ("kid".into(), vec!["api: .env".into()]),
+                ("lead".into(), Vec::new()),
+            ],
+        );
+        assert!(lines[0].contains("the 1 active task under it"), "{lines:?}");
+        let kid = lines.iter().position(|l| l.contains("kid:")).unwrap();
+        assert!(lines[kid].starts_with('⚠'), "{lines:?}");
+        assert_eq!(lines[kid + 1], "    api: .env");
+        assert_eq!(lines.last().unwrap(), "  lead: nothing lost");
+
+        let lines = subtree_delete_warning(
+            "lead",
+            &[
+                ("a".into(), PathBuf::from("/t/a"), Vec::new()),
+                (
+                    "b".into(),
+                    PathBuf::from("/t/b"),
+                    vec!["api: 1 commit".into()],
+                ),
+                ("lead".into(), PathBuf::from("/t/lead"), Vec::new()),
+            ],
+        );
+        assert!(lines[0].contains("the 2 tasks under it"), "{lines:?}");
+        let order: Vec<&String> = lines.iter().filter(|l| l.contains("removes")).collect();
+        assert_eq!(
+            order,
+            [
+                "  a: removes /t/a",
+                "  b: removes /t/b",
+                "  lead: removes /t/lead"
+            ]
+        );
+        assert!(
+            lines.contains(&"    api: 1 commit".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn the_archive_confirm_names_what_is_not_kept() {
         let quiet = archive_warning("Fix login", false, &[]);
         assert_eq!(quiet[0], "archiving Fix login frees its worktrees' disk");
@@ -3581,7 +3847,8 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive {
                 task_id: id(),
-                confirmed: false
+                confirmed: false,
+                recursive: false
             })
         );
         assert_eq!(
@@ -3664,18 +3931,45 @@ mod tests {
         };
         ui.panel = Some(confirm(Pending::Delete {
             task_id: "b".into(),
+            recursive: false,
         }));
         assert_eq!(press(&mut ui, KeyCode::Char('x')), None);
         assert!(ui.panel.is_some(), "a stray key leaves the question up");
         assert_eq!(
             press(&mut ui, KeyCode::Char('y')),
             Some(Action::Delete {
-                task_id: "b".into()
+                task_id: "b".into(),
+                recursive: false
+            })
+        );
+        // What was confirmed for the tasks under it is what is done.
+        ui.panel = Some(confirm(Pending::Delete {
+            task_id: "b".into(),
+            recursive: true,
+        }));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Delete {
+                task_id: "b".into(),
+                recursive: true
+            })
+        );
+        ui.panel = Some(confirm(Pending::Archive {
+            task_id: "b".into(),
+            recursive: true,
+        }));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Archive {
+                task_id: "b".into(),
+                confirmed: true,
+                recursive: true
             })
         );
 
         ui.panel = Some(confirm(Pending::Delete {
             task_id: "b".into(),
+            recursive: false,
         }));
         assert_eq!(press(&mut ui, KeyCode::Char('n')), None);
         assert!(ui.panel.is_none());
@@ -3707,6 +4001,7 @@ mod tests {
         // Delete has no force: `f` is just a stray key there.
         ui.panel = Some(confirm(Pending::Delete {
             task_id: "b".into(),
+            recursive: false,
         }));
         assert_eq!(press(&mut ui, KeyCode::Char('f')), None);
         assert!(ui.panel.is_some());

@@ -48,9 +48,12 @@ pub const HELP: [(&str, &str); 28] = [
     ),
     (
         "a",
-        "archive (frees the disk) · unarchive, in the archived view",
+        "archive (frees the disk) · unarchive, in the archived view; the tasks under it too",
     ),
-    ("D", "delete the task, after listing any work that would go"),
+    (
+        "D",
+        "delete the task, and the tasks under it, after listing any work that would go",
+    ),
     ("S", "copy the task's project files in again"),
     ("P", "projects: n new, e edit, D delete, ⏎ start a task"),
     ("", ""),
@@ -672,7 +675,13 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 super::tasks::Pending::ForceResync { .. } => {
                     "f replace the task's copies too · n keep them"
                 }
+                super::tasks::Pending::Archive {
+                    recursive: true, ..
+                } => "y archive them all · n keep them as they are",
                 super::tasks::Pending::Archive { .. } => "y archive · n keep it as it is",
+                super::tasks::Pending::Delete {
+                    recursive: true, ..
+                } => "y delete them all · n keep them",
                 _ => "y delete · n keep it",
             };
             body.push(Line::from(dim(keys)));
