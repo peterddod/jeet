@@ -10092,6 +10092,7 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     // Archived, unarchived and deleted by the root, it is still its slug.
     for args in [
         &["task", "archive", slug, "--force"][..],
+        &["task", "restart", slug],
         &["task", "open", slug],
         &["worktree", "add", "--task", slug, "widget"],
         &["worktree", "rm", "--task", slug, "x"],

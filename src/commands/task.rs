@@ -309,10 +309,11 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             exact: false,
         },
     )?;
+    let called = called(app, &task);
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
-            task.name,
+            called,
             task.slug
         );
     }
@@ -323,7 +324,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             "{} keeps no sessions jeet can resume, so a restart would lose task {}'s \
              conversation; stop it and `jeet task open {}` if you want a fresh one",
             spec.display(),
-            task.name,
+            called,
             task.slug
         );
     }
@@ -331,7 +332,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     if !(tmux::available() && tmux::agent_alive(&tmux_session)) {
         bail!(
             "task {}'s agent is not running; `jeet task open {}` starts it",
-            task.name,
+            called,
             task.slug
         );
     }
@@ -347,11 +348,18 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
         let draft = spec
             .harness
             .has_draft(&tmux::capture_styled(&tmux_session).unwrap_or_default());
-        if let Some(why) = runtime::busy_reason(&activity, draft) {
+        // A task another manager made shows no status detail: it is that
+        // manager's worker's text.
+        let detail = shown_name(
+            names_for(app, &permissions::caller(app)?)?.as_deref(),
+            &task,
+        )
+        .is_some();
+        if let Some(why) = runtime::busy_reason(&activity, draft, detail) {
             bail!(
                 "task {}'s agent {why}, which a restart would cut off; wait for it, or pass \
                  --force",
-                task.name
+                called
             );
         }
     }
@@ -360,7 +368,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     let Some(session) = runtime::latest_session(&dir, &known) else {
         bail!(
             "task {} has no session jeet knows of to resume; stop it and `jeet task open {}`",
-            task.name,
+            called,
             task.slug
         );
     };
@@ -379,23 +387,23 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             format!(
                 "ended task {}'s agent, but could not start it again; `jeet task open {} \
                  --session {session}` resumes it",
-                task.name, task.slug
+                called, task.slug
             )
         })?;
     warn_all(&running.warnings);
     match running.started {
         Started::Now => eprintln!(
             "jeet: restarted task {}'s agent in tmux session {}, resuming session {session}",
-            task.name, running.tmux_session
+            called, running.tmux_session
         ),
         Started::AlreadyRunning => eprintln!(
             "jeet: ended task {}'s agent, but another was started meanwhile in tmux session {}",
-            task.name, running.tmux_session
+            called, running.tmux_session
         ),
         Started::Queued { live, max, .. } => eprintln!(
             "jeet: ended task {}'s agent; it waits on max_live ({live}/{max} live) to start \
              again, resuming its latest session",
-            task.name
+            called
         ),
     }
     Ok(())
@@ -434,7 +442,7 @@ fn restart_assistant(app: &App, force: bool) -> Result<()> {
             let draft = spec
                 .harness
                 .has_draft(&tmux::capture_window_styled(window).unwrap_or_default());
-            if let Some(why) = runtime::busy_reason(&session.activity, draft) {
+            if let Some(why) = runtime::busy_reason(&session.activity, draft, true) {
                 eprintln!(
                     "jeet: left the assistant's session {label} running: it {why}, which a \
                      restart would cut off"

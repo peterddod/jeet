@@ -785,10 +785,10 @@ pub fn unanchored_in(db: &crate::db::Database, task_id: &str, session: &str) -> 
 /// Why an agent doing `activity`, with unsent text in its prompt when
 /// `draft`, should not be ended now, if it should not: for a restart,
 /// which would cut off the turn, the question or what was typed.
-pub fn busy_reason(activity: &Activity, draft: bool) -> Option<String> {
+pub fn busy_reason(activity: &Activity, draft: bool, detail: bool) -> Option<String> {
     match activity {
-        Activity::Running { .. } => Some(format!("is mid-turn ({})", activity.label())),
-        Activity::Waiting { .. } => Some(format!("waits on you ({})", activity.label())),
+        Activity::Running { .. } => Some(format!("is mid-turn ({})", activity.label_with(detail))),
+        Activity::Waiting { .. } => Some(format!("waits on you ({})", activity.label_with(detail))),
         Activity::Starting => Some("is starting".to_string()),
         _ if draft => Some("has text in its prompt that was not sent".to_string()),
         _ => None,
@@ -853,12 +853,12 @@ mod tests {
         let running = Activity::Running { detail: None };
         let waiting = Activity::Waiting { detail: None };
         for busy in [&running, &waiting, &Activity::Starting] {
-            assert!(busy_reason(busy, false).is_some(), "{busy:?}");
+            assert!(busy_reason(busy, false, true).is_some(), "{busy:?}");
         }
         let idle = Activity::Idle { since: 0 };
-        assert_eq!(busy_reason(&idle, false), None);
-        assert_eq!(busy_reason(&Activity::Live, false), None);
-        assert!(busy_reason(&idle, true).is_some());
+        assert_eq!(busy_reason(&idle, false, true), None);
+        assert_eq!(busy_reason(&Activity::Live, false, true), None);
+        assert!(busy_reason(&idle, true, true).is_some());
     }
 
     #[test]
