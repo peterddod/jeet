@@ -329,6 +329,11 @@ fn handle_hook(
             // The harness adds this to the conversation; a summary that
             // cannot be made costs the session its context, not its start.
             if assistant && harness.session_context_output("").is_some() {
+                // The summary points at the root's skills: a home made by
+                // an older jeet gets the ones it lacks before it is read.
+                if let Err(e) = assistant::ensure_files(&task_dir) {
+                    eprintln!("jeet task-hook {event}: {e:#}");
+                }
                 match assistant::session_context(app, task, session_id, now) {
                     Ok(context) => {
                         if let Some(output) = harness.session_context_output(&context) {

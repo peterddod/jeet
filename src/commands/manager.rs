@@ -70,6 +70,12 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         }
         d.goal = Some(goal);
     }
+    // A worker has its prompt; a manager has only its brief to work
+    // towards, so it is not made without one —
+    // checked before the parent is resolved, which may make the assistant.
+    if d.goal.is_none() {
+        bail!("a manager needs --goal or --brief-file: it is what it works towards");
+    }
     let plan = tasks::plan_child(
         app,
         &caller,
@@ -78,11 +84,6 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         &d,
         args.max_children,
     )?;
-    // A worker has its prompt; a manager has only its brief to work
-    // towards, so it is not made without one.
-    if d.goal.is_none() {
-        bail!("a manager needs --goal or --brief-file: it is what it works towards");
-    }
     let created = tasks::create(
         app,
         &NewTask {

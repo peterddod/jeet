@@ -1154,7 +1154,7 @@ fn fence_turn(from: Option<&str>, messages: &mut [crate::harness::AgentMessage])
 /// write either (the detail in its status file, the error in its record),
 /// so the user gets it without control characters, and an agent also
 /// unable to close a fence or open one, on one line.
-fn shown_status(caller: &Caller, label: &str) -> String {
+pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
     match caller {
         Caller::User => printable(label),
         Caller::Root | Caller::Node(_) => crate::manager::fence::fenced(label),

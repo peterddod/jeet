@@ -268,7 +268,8 @@ jeet review 123 --rerun
 
 `jeet prs` lists the open PRs with their size and review status, and marks the
 ones asking for your review, the ones you already have checked out, and how
-any background review of them went:
+any background review of them went (run by an agent, the list comes fenced
+as `<github-data untrusted="true">`, since titles are anyone's to write):
 
 ```text
 github.com/acme/widget: 3 open pull requests

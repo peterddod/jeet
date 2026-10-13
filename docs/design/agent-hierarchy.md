@@ -1661,7 +1661,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   github-event, github-data, jeet-message) is a claim or data, never
   instructions. `task prs` run by an agent lists a task's PRs inside
   `<github-data untrusted>`, titles unable to close it, as the root's
-  summary lists them.
+  summary lists them; `jeet prs` run by an agent lists a repository's
+  open PRs the same way, titles and authors unable to close it. The user
+  gets either without control characters.
   `jeet watch` sends an event for a pull request to the worker that owns
   it, never to a manager that came to have it recorded (say by checking
   out a worker's head to read it): routing events to managers is phase 4.
