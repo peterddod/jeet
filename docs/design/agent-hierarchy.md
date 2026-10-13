@@ -2109,7 +2109,8 @@ TUI; H15-H17 (`a` and the needs-you rollup) come with the TUI's part.
 - **H14** `jeet task send` and `jeet task new --prompt` put a sender's raw
   text before an agent, so for anyone but the user at a terminal (H8) both
   `defang` it: `<jeet-` and `</jeet-`, in any ASCII case, become `‹jeet-`
-  and `‹/jeet-`. The user's own commands and the TUI's `n` form are
+  and `‹/jeet-`. Control characters are dropped first, as delivery drops
+  them, so `<\x01jeet-` cannot hide a tag. The user's own commands and the TUI's `n` form are
   unchanged.
 
 ### Phase 4 implementation notes: watch rules to a manager

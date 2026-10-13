@@ -1296,6 +1296,21 @@ mod tests {
         }
     }
 
+    /// A delivery that fails to every task in `fail`, else records.
+    fn failing<'a>(
+        sent: &'a Sent,
+        fail: &'a [&'a str],
+    ) -> impl Fn(&TaskRecord, &str, bool) -> Result<Delivered> + 'a {
+        move |to, text, may_start| {
+            sent.borrow_mut()
+                .push((to.slug.clone(), text.to_string(), may_start));
+            match fail.contains(&to.slug.as_str()) {
+                true => bail!("{} cannot start", to.slug),
+                false => Ok(Delivered::Queued),
+            }
+        }
+    }
+
     /// `ww`'s question, passed up by each of `by` in turn.
     fn asked_and_passed(app: &App, by: &[Caller]) -> i64 {
         let ww = app.db.get_task("ww").unwrap().unwrap();
@@ -1398,6 +1413,54 @@ mod tests {
         .unwrap_err();
         assert!(refused.to_string().contains("you are the top"), "{refused}");
         assert_eq!(notified.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_delivery_keeps_the_answer_and_still_sends_the_rest() {
+        let (_dir, app) = ask_lab();
+        let id = asked_and_passed(&app, &[node(&app, "sub"), node(&app, "api")]);
+        let sent = Sent::default();
+        let answered =
+            answer_with(&app, &Caller::User, id, "drop it", &failing(&sent, &["ww"])).unwrap();
+        assert!(answered.to_asker.is_err());
+        assert_eq!(answered.row.answer.as_deref(), Some("drop it"));
+        assert_eq!(answered.row.answered_by.as_deref(), Some("user"));
+        assert_eq!(
+            copied_to(&answered),
+            ["manager sub", "manager api", "the assistant"]
+        );
+        assert!(answered.copies.iter().all(|(_, r)| r.is_ok()));
+        assert_eq!(sent.borrow().len(), 4);
+
+        let id = asked_and_passed(&app, &[node(&app, "sub"), node(&app, "api")]);
+        let sent = Sent::default();
+        let answered =
+            answer_with(&app, &Caller::User, id, "no", &failing(&sent, &["sub"])).unwrap();
+        assert!(answered.to_asker.is_ok());
+        assert_eq!(answered.row.answer.as_deref(), Some("no"));
+        let copies: Vec<_> = answered.copies.iter().map(|(_, r)| r.is_ok()).collect();
+        assert_eq!(copies, [false, true, true]);
+        assert_eq!(sent.borrow().len(), 4);
+    }
+
+    #[test]
+    fn a_failed_delivery_keeps_the_escalation_recorded() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let sent = Sent::default();
+        let escalated = escalate_with(
+            &app,
+            &node(&app, "sub"),
+            id,
+            &failing(&sent, &["api"]),
+            &|_| {},
+        )
+        .unwrap();
+        assert!(escalated.delivered.unwrap().is_err());
+        assert_eq!(escalated.row.to_id, escalated.to.unwrap().id);
+        let held = app.db.get_report(id).unwrap().unwrap();
+        assert_eq!(held.to_id, escalated.row.to_id);
     }
 
     #[test]

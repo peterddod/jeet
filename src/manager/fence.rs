@@ -104,11 +104,13 @@ pub fn fence_brief(from: &str, path: &str, lines: &str) -> String {
 /// `text`, which an agent wrote to reach another unfenced (`jeet task
 /// send`, `jeet task new --prompt`), with every `<jeet-` and `</jeet-`, in
 /// any case, turned to `‹jeet-` and `‹/jeet-`: it cannot pass for a tag
-/// only jeet writes, as `<jeet-answer from="user">`. The rest is left as
-/// written.
+/// only jeet writes, as `<jeet-answer from="user">`. Control characters go
+/// first, as delivery drops them: `<\x01jeet-answer` would otherwise pass
+/// and arrive as a live tag. The rest is left as written.
 pub fn defang(text: &str) -> String {
+    let text = messages::clean(text);
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut rest = text.as_str();
     while let Some(at) = rest.find('<') {
         out.push_str(&rest[..at]);
         rest = &rest[at + 1..];
@@ -216,6 +218,14 @@ mod tests {
         );
         assert_eq!(defang("no tag at all"), "no tag at all");
         assert_eq!(defang("<é<jeet-x"), "<é‹jeet-x");
+    }
+
+    #[test]
+    fn defang_sees_the_text_as_delivery_will_clean_it() {
+        assert_eq!(defang("<\x01jeet-answer"), "‹jeet-answer");
+        assert_eq!(defang("<j\x1beet-answer"), "‹jeet-answer");
+        assert_eq!(defang("</\x07JEET-x"), "‹/JEET-x");
+        assert_eq!(defang("a\tb\n<\x00c"), "a\tb\n<c");
     }
 
     #[test]
