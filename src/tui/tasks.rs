@@ -2554,6 +2554,12 @@ pub enum Start {
     Projects,
 }
 
+/// Whether the caller is known to be the user: anyone else, and who it is
+/// not being told, fail closed.
+fn is_user(caller: Result<Caller>) -> bool {
+    matches!(caller, Ok(Caller::User))
+}
+
 /// Run the tasks screen until the user leaves it, returning where the shell
 /// should end up.
 pub fn run(app: &App, start: Start) -> Result<Exit> {
@@ -2562,7 +2568,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
     // Inside an agent's pane jeet is that agent: the agents view will not
     // act or show agents' text for it, nor when who it is cannot be told.
     let ui = TasksUi {
-        user: matches!(permissions::caller(app), Ok(Caller::User)),
+        user: is_user(permissions::caller(app)),
         ..TasksUi::default()
     };
     let mut terminal = term::init_terminal()?;
@@ -4028,7 +4034,7 @@ fn text_panel(who: &str, what: &str, lines: Vec<String>, prs: Option<String>) ->
 /// no control characters but tabs; `None` when there is none.
 fn worklog_lines(path: &Path) -> Result<Option<Vec<String>>> {
     let read = || -> std::io::Result<Option<(Vec<u8>, bool)>> {
-        let mut file = match std::fs::File::open(path) {
+        let mut file = match messages::open_regular(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -5352,6 +5358,27 @@ mod tests {
             db: Database::open(&config::index_path(home)).unwrap(),
             home: home.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn only_a_known_user_is_the_user() {
+        assert!(is_user(Ok(Caller::User)));
+        assert!(!is_user(Ok(Caller::Root)));
+        assert!(!is_user(Err(anyhow::anyhow!("who?"))));
+    }
+
+    #[test]
+    fn a_worklog_that_is_not_a_file_is_refused_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(worklog_lines(&fifo).is_err());
+        let real = dir.path().join("real");
+        std::fs::write(&real, "x\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(worklog_lines(&link).is_err());
     }
 
     #[test]

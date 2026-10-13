@@ -1821,7 +1821,10 @@ the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
 - **A5** `→` opens a closed manager, else goes to the first line under the
   node; `←` closes an open manager, else goes to the parent. A closed node
   still rolls its subtree up. A typed filter keeps the matches and their
-  ancestors, whatever is closed.
+  ancestors, whatever is closed; it matches the slug each row shows
+  ("assistant" for the root). Files the pane reads from an agent's home
+  (worklog, inbox) are opened without waiting or following links, and only
+  if regular.
 - **A6** Rollup reads what agents do from the status poller
   (`TaskRow.activity`) and the assistant's thread, never again per node, so
   the views cannot disagree; the index facts come from a tree thread

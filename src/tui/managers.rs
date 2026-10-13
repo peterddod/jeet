@@ -304,7 +304,7 @@ pub struct TreeLine {
 /// The tree under `root`, the assistant, as shown: its active descendants
 /// among `rows`, depth first with siblings by slug (as `manager ls` has
 /// them), less what a collapsed manager hides. A `filter` keeps the nodes
-/// whose name it matches and their ancestors, collapsed or not. Archived
+/// whose slug, which the row shows, it matches and their ancestors, collapsed or not. Archived
 /// and top-level tasks are never in it.
 pub fn lines(
     root: Option<&TaskRow>,
@@ -338,7 +338,11 @@ pub fn lines(
         }
         false => {
             let mut keep = vec![false; all.len()];
-            let names = all.iter().map(|&(at, _)| task(at).name.as_str());
+            // What each line shows: the slug, and "assistant" for the root.
+            let names = all.iter().map(|&(at, _)| match at {
+                At::Root => "assistant",
+                At::Row(_) => task(at).slug.as_str(),
+            });
             for hit in rank_matches(names, filter) {
                 // It and its ancestors: each the nearest line before it a
                 // level up.
@@ -741,6 +745,19 @@ mod tests {
         let lines = lines(Some(&root), &rows, &collapsed, "w3");
         assert_eq!(drawn(&lines, &root, &rows), ["root", "└─ ▸ fe", "   └─ w3"]);
         assert!(super::lines(Some(&root), &rows, &collapsed, "zzz").is_empty());
+    }
+
+    #[test]
+    fn a_filter_matches_the_slug_the_row_shows_not_the_name() {
+        let (root, mut rows) = tree();
+        let i = rows.iter().position(|r| r.task.id == "w3").unwrap();
+        rows[i].task.name = "Fix the login".to_string();
+        rows[i].task.slug = "fix-the-login".to_string();
+        let none = HashSet::new();
+        assert_eq!(lines(Some(&root), &rows, &none, "the-l").len(), 3);
+        assert!(lines(Some(&root), &rows, &none, "the login").is_empty());
+        // The root reads "assistant".
+        assert_eq!(lines(Some(&root), &rows, &none, "assist").len(), 1);
     }
 
     #[test]

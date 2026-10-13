@@ -38,7 +38,7 @@
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -103,6 +103,21 @@ pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
         return Some(Vec::new());
     }
     Inbox::try_lock(task_dir).ok()??.read().ok()
+}
+
+/// `path` opened for reading, if it is a regular file. The agent writes where
+/// jeet reads, so a FIFO or a device there, or a link to one, must not make
+/// the open wait for a writer: it is refused, and a link is not followed.
+pub fn open_regular(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    match file.metadata()?.is_file() {
+        true => Ok(file),
+        false => Err(std::io::Error::other("not a regular file")),
+    }
 }
 
 /// A task's inbox, locked for as long as this is held. `task send` looks at
@@ -179,7 +194,12 @@ impl Inbox {
     /// The messages waiting, oldest first. Lines that are not one, or hold
     /// more than a message may, are skipped.
     pub fn read(&self) -> Result<Vec<Queued>> {
-        let text = match std::fs::read_to_string(&self.path) {
+        let read = open_regular(&self.path).and_then(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text)?;
+            Ok(text)
+        });
+        let text = match read {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| format!("read {}", self.path.display())),
