@@ -411,9 +411,11 @@ const TASK_REPORT_COLUMNS: &str =
 /// When report `r` is an open ask: a question or blocked, unanswered, and
 /// the asker's last report other than a status report (jeet's own words
 /// while it waits do not close it; anything it says itself does). The one
-/// definition every reader of open asks goes through.
+/// definition every reader of open asks goes through. An archived asker's
+/// ask is closed with it: nothing can answer it.
 const OPEN_ASK: &str = "r.kind IN ('question', 'blocked') AND r.answer IS NULL AND r.id = \
-     (SELECT MAX(o.id) FROM task_reports o WHERE o.task_id = r.task_id AND o.kind <> 'status')";
+     (SELECT MAX(o.id) FROM task_reports o WHERE o.task_id = r.task_id AND o.kind <> 'status') \
+     AND (SELECT t.state FROM tasks t WHERE t.id = r.task_id) <> 'archived'";
 
 fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportRecord> {
     Ok(TaskReportRecord {
@@ -2142,6 +2144,20 @@ mod tests {
             .into_iter()
             .map(|r| r.id)
             .collect()
+    }
+
+    #[test]
+    fn an_archived_askers_ask_is_not_open() {
+        let (_dir, db) = open();
+        ask_tree(&db);
+        let q = db
+            .insert_report("c", "m", ReportKind::Question, "v1?", 1)
+            .unwrap();
+        assert_eq!(open_ids(&db, None), [q]);
+        db.set_task_state("c", TaskState::Archived).unwrap();
+        assert!(open_ids(&db, None).is_empty());
+        db.set_task_state("c", TaskState::Active).unwrap();
+        assert_eq!(open_ids(&db, Some("m")), [q]);
     }
 
     #[test]

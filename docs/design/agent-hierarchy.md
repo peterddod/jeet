@@ -439,7 +439,7 @@ assistant's own pane, or one rolled up from below.
   escalated like a question). It is *open* while it is unanswered and is
   the asker's last report other than jeet's own `status`: a task that
   reports again, asks again included, has moved on and the old ask closes.
-  An answer closes it at once (H3).
+  An answer closes it at once (H3), and so does archiving the asker.
 - Only the holder (`to_id`) answers or escalates, and never once it has
   passed the ask to the user. The user may answer any open ask in the tree,
   even one a manager still holds. A worker holds nothing, and a node never

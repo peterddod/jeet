@@ -37,17 +37,18 @@ pub struct NewTaskArgs<'a> {
 }
 
 pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
-    // Checked before the task is made, so a brief that cannot be given
-    // makes nothing.
-    let prompt = match args.prompt.map(messages::brief).transpose() {
+    // Fenced, then checked, before the task is made: the length check sees
+    // the final text, and a brief that cannot be given makes nothing.
+    let d = args.delegation;
+    let caller = permissions::caller(app)?;
+    let prompt = args
+        .prompt
+        .map(|prompt| from_sender(app, &caller, prompt))
+        .transpose()?;
+    let prompt = match prompt.as_deref().map(messages::brief).transpose() {
         Ok(prompt) => prompt,
         Err(e) => bail!("--prompt: {e:#}"),
     };
-    let d = args.delegation;
-    let caller = permissions::caller(app)?;
-    let prompt = prompt
-        .map(|prompt| from_sender(app, &caller, &prompt))
-        .transpose()?;
     // The user's task is top-level unless given a parent; what the
     // assistant or a manager makes reports to it (M12).
     let plan = match (&caller, &d.parent) {
