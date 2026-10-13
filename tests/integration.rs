@@ -10979,6 +10979,17 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     );
     succeeded(&output);
     let w2 = task_id(&path_from(&output));
+    let output = lab.jeet_at(
+        &["manager", "new", "lead", "--parent", "api", "--goal", "g"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let lead = task_id(&path_from(&output));
+    let lead_brief = lab.home().join("tasks/lead/BRIEF.md");
+    assert!(std::fs::read_to_string(&lead_brief)
+        .unwrap()
+        .contains("Report to manager api"),);
     let output = panes[1].jeet(&["report", "question", "keep v1?"], &lab.home(), &env);
     succeeded(&output);
     // The assistant may send; api may not, so w's grant may not use it.
@@ -11037,7 +11048,7 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("the 2 tasks under it move to the assistant:"),
+        stderr.contains("the 3 tasks under it move to the assistant:"),
         "{stderr}"
     );
     assert!(stderr.contains("--force"), "{stderr}");
@@ -11052,7 +11063,7 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     succeeded(&output);
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("deleted task api; 2 tasks under it now under the assistant"),
+        stderr.contains("deleted task api; 3 tasks under it now under the assistant"),
         "{stderr}"
     );
     assert!(
@@ -11068,6 +11079,11 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     assert!(!stderr.contains("Second Worker"), "{stderr}");
     assert_eq!(lab.parent_of(&w), Some(assistant.clone()));
     assert_eq!(lab.parent_of(&w2), Some(assistant.clone()));
+    assert_eq!(lab.parent_of(&lead), Some(assistant.clone()));
+    // A moved manager's BRIEF.md says where it sits now.
+    let text = std::fs::read_to_string(&lead_brief).unwrap();
+    assert!(text.contains("Report to the assistant"), "{text}");
+    assert!(text.contains("path=\"assistant/lead\""), "{text}");
     let rows: i64 = lab
         .index()
         .query_row("SELECT COUNT(*) FROM tasks WHERE id = ?1", [&api], |r| {

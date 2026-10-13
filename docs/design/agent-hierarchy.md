@@ -2271,7 +2271,9 @@ check, depth, budget room above, a node-scoped `--parent`).
   but not delivered to it again: re-delivering each open ask, fenced as an
   escalated question `via="jeet (moved)"`, needs phase 4's definition of
   an open ask and its escalation fence (PR A1), and is a follow-up once
-  those are in.
+  those are in. A report the deleted manager answered keeps its id in
+  `answered_by`, which has no foreign key; showing it as "a deleted task"
+  is A1's, with its display of answers.
 - **H29** Telling the tree. After the commit (`tasks::after_move`): every
   active manager in the moved subtrees gets its `BRIEF.md` again, since
   its path changed (`manager::write_briefs`, moved from the CLI module so
