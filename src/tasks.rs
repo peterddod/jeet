@@ -2310,6 +2310,21 @@ pub fn delete(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<Strin
         return Ok(warnings);
     }
     let mut warnings = end_agents(app, &nodes)?;
+    // A manager may have made a task just before it was ended: its row
+    // would refuse to go once the disk was gone. With every agent ended,
+    // nothing below makes more, so running it again takes it too.
+    let now = subtree_leaves_first(app, task)?;
+    if let Some(new) = now
+        .iter()
+        .find(|node| !nodes.iter().any(|old| old.id == node.id))
+    {
+        bail!(
+            "task {} was made under task {} as its tree was being ended; nothing was \
+             deleted, so run it again",
+            new.slug,
+            task.slug
+        );
+    }
     for node in &nodes {
         let done =
             remove_from_disk(app, node).with_context(|| format!("delete task {}", node.slug))?;

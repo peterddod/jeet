@@ -1714,7 +1714,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   forgotten, its turn charged) and not through `run::stop`, which would
   leave an unarchived tree stopped; only then is each node archived or
   removed from disk, leaves first, with its own warnings prefixed by its
-  slug. Delete removes the rows last, in one transaction
+  slug. Delete checks the tree again once its agents are ended, and
+  stops with nothing deleted if a task was made under it meanwhile (a
+  manager's last act), so no row is left refusing to go after its disk
+  went; it removes the rows last, in one transaction
   (`delete_rows_leaves_first`), each node's spend folded into its parent
   first. Unarchive runs top-down, each node under a parent already back;
   `max_children` is checked for the named task alone. A failure part-way
