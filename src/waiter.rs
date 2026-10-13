@@ -1597,6 +1597,25 @@ mod tests {
     }
 
     #[test]
+    fn a_users_message_queued_while_the_agent_was_busy_is_posted_by_the_watcher() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let mut w = lab.watcher();
+        Inbox::lock(&lab.dir())
+            .unwrap()
+            .push_to("from the user", None, Sender::User)
+            .unwrap();
+        assert_eq!(w.step(10).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        assert!(posted.contains("\n\nfrom the user\n\n"), "{posted}");
+        assert!(lab.queued().is_empty());
+        let inflight = lab.inflight().unwrap();
+        assert_eq!(inflight.msgs.len(), 1);
+        assert_eq!(inflight.msgs[0].from, Sender::User);
+    }
+
+    #[test]
     fn a_gone_agent_ends_the_watcher_with_its_batch_back() {
         let lab = Lab::new();
         let listener = lab.listen();

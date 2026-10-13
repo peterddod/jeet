@@ -6007,6 +6007,31 @@ fn value_after<'a>(call: &'a [String], flag: &str) -> &'a str {
     &call[at + 1]
 }
 
+/// `[harness] wake = false` starts the assistant with no wake channel.
+#[cfg(unix)]
+#[test]
+fn the_assistants_wake_channel_can_be_turned_off() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_window_tmux(scratch.path());
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[harness]\nwake = false\n",
+    )
+    .unwrap();
+    succeeded(&lab.jeet_at(&["chat"], &lab.home(), &env));
+    let started = calls_of(&tmux, "new-session");
+    let agent = agent_argv(&started[0]);
+    let settings = settings_file(&lab, &agent[6]);
+    let start = settings["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(start.len(), 1, "{settings}");
+    assert!(!settings.to_string().contains("inbox watch"));
+}
+
 #[cfg(unix)]
 #[test]
 fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
