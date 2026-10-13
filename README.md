@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.9.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.10.0
 ```
 
 ## Quick start
@@ -1229,6 +1229,65 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.10
+
+The agents pane, and questions answered up the tree: the third and fourth
+phases of [hierarchical agents](docs/design/agent-hierarchy.md).
+
+- **The agents tab** in the tasks list (`⇥` from *active*) shows the tree
+  under the assistant, each node with the most urgent state in its subtree
+  (needs you, needs input, blocked, budget, running, idle, done), its budget
+  and notes, and a header counting live agents against `max_live` and what
+  waits on you. `l`, `i` and `b` read a node's worklog, inbox and reports,
+  and brief ([The agents tab](#the-agents-tab)).
+- **Steering from the agents tab**: `p` / `P` pause and resume a node and
+  everything below it, `x` stops it after a confirm, and `n` makes a task
+  or manager under the assistant or a manager. These act as you, so they
+  work only from your own terminal, not an agent's pane.
+- **Questions go up the tree and get answered**: a `question` or `blocked`
+  report stays open until it is answered or the task reports again. Its
+  parent holds it and either answers it, `jeet report answer <id> "…"`, or
+  passes it up, `jeet report escalate <id>`; `jeet report ls` lists the
+  ones you hold. One the assistant passes up is yours, with a desktop
+  notification. The task that asked gets the answer as `<jeet-answer>`,
+  and each manager in between a copy ([Reporting to the
+  parent](#reporting-to-the-parent)).
+- **`a` in the agents tab** answers the open question at a node or nearest
+  below it, those passed to you first; the needs-you counts include them.
+- **`jeet watch` rules can hand events to a manager**: `action =
+  "manager:<slug>"` sends a rule's GitHub events to the active manager with
+  that slug, else to the assistant ([Watching GitHub](#watching-github)).
+- **`jeet task delete <manager> --reparent`** deletes a manager alone and
+  moves the tasks under it, with their own, to its parent, keeping what
+  each may do; the parent is told and takes over the questions it held
+  ([Archiving and deleting](#archiving-and-deleting)).
+
+**Upgrading to v0.10.0:** the index stays at schema v6, so there is no
+migration and v0.9.0 still opens it. There are no new config keys; the one
+new config value is a rule's `action = "manager:<slug>"`, which v0.9.0
+refuses, so keep such rules out of config.toml until every jeet you run is
+v0.10.
+
+- A task's last `question` or `blocked` report from before the upgrade, if
+  it has not reported since, is now an open question its parent holds.
+  `jeet report ls` at your terminal lists them; answer each, or leave it
+  until the task reports again.
+- jeet never writes over a file in the assistant's or a manager's home, so
+  they keep the `AGENTS.md` and skills they were first given, which do not
+  know about `jeet report answer`, `escalate` and `ls`, `<jeet-answer>`, or
+  watch events sent to a manager. If you have not edited them, delete
+  `$JEET_HOME/assistant/AGENTS.md`,
+  `$JEET_HOME/assistant/.claude/skills/jeet-assistant/` and
+  `$JEET_HOME/assistant/.claude/skills/jeet-managers/`, and in each
+  manager's home (`$JEET_HOME/tasks/<slug>/`) `AGENTS.md` and
+  `.claude/skills/jeet-manager/`; the next
+  start writes the current ones. A task's own skill is unchanged.
+- Running agents keep working. To give them the new files, restart each
+  once it is idle with `jeet task restart <task>` and `jeet task restart
+  assistant`; both keep the conversation. An agent `jeet task ls` marks
+  `(unanchored)` needs `jeet task restart`, or `jeet task adopt` from a
+  terminal outside jeet's tmux sessions, as in v0.9.
 
 ## What's new in v0.9
 
