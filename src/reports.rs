@@ -1635,6 +1635,36 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_is_still_answered_and_passed_on_after_the_asker_reports_progress() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        // Passed on after progress, then the user answers after more.
+        let id = asked_and_passed(&app, &[]);
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let sent = Sent::default();
+        escalate_with(&app, &node(&app, "sub"), id, &recording(&sent), &|_| {}).unwrap();
+        escalate_with(&app, &node(&app, "api"), id, &recording(&sent), &|_| {}).unwrap();
+        escalate_with(&app, &Caller::Root, id, &recording(&sent), &|_| {}).unwrap();
+        let _ = send(&app, &ww, ReportKind::Progress, "more", false).unwrap();
+        let (answered, sent) = answer_by(&app, &Caller::User, id, "drop it");
+        assert_eq!(answered.row.answer.as_deref(), Some("drop it"));
+        assert!(matches!(answered.to_asker, Ok(Delivered::Queued)));
+        assert_eq!(sent[0].0, "ww");
+        assert_eq!(
+            copied_to(&answered),
+            ["manager sub", "manager api", "the assistant"]
+        );
+
+        // A holder answers after progress too.
+        let id = asked_and_passed(&app, &[node(&app, "sub")]);
+        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let (answered, sent) = answer_by(&app, &node(&app, "api"), id, "keep it");
+        assert_eq!(answered.row.answered_by.as_deref(), Some("api"));
+        assert_eq!(sent[0].0, "ww");
+        assert_eq!(copied_to(&answered), ["manager sub"]);
+    }
+
+    #[test]
     fn copies_stop_at_the_manager_holding_the_ask() {
         let (_dir, app) = ask_lab();
         // The user steps in while api holds it: nobody above api saw it.
