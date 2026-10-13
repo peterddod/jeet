@@ -699,8 +699,9 @@ that hands it what is queued for it as soon as it is queued, through Claude
 Code's messaging socket, rather than waiting for its turn to end or typing
 into its pane. An idle agent wakes and reads it; a busy one gets it at its
 next tool call (or as its turn ends); one waiting on a prompt gets it once
-the prompt is answered, and a message never answers the prompt. What you send yourself,
-from your own terminal, to an idle agent is still typed in, as your turn.
+the prompt is answered, and a message never answers the prompt. What you
+send yourself, from your own terminal, to an idle agent is still typed in,
+as your turn.
 Everything else (messages from the assistant or a manager, reports,
 answers, watch events, and what you send to an agent that is busy) arrives
 as a message from another session, which Claude Code tells the agent cannot
@@ -1532,9 +1533,10 @@ agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
 first prompt, no assistant, no deny rules, no interrupt, no wake channel).
-Without deny rules, tasks with a parent are not stopped from force-pushing, pushing to a default
-branch or merging (see the deny rules under the assistant's permissions below,
-and [docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
+Without deny rules, tasks with a parent are not stopped from force-pushing,
+pushing to a default branch or merging (see the deny rules under the
+assistant's permissions below, and
+[docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
 interrupt` refuses.
 
 ```toml

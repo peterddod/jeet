@@ -915,8 +915,9 @@ row, so past the last column it would never show).
   `commands/{report,task,manager}.rs`, `permissions.rs`, `config.rs`,
   `watch.rs`, `tasks.rs`, `tui/{managers,tasks,tasks_ui}.rs` and the
   templates. Answers, copies and watch events use today's delivery (built
-  before phase 2a, which now gives them the wake channel too). As built so far: escalation and answers, with the agents
-  pane's `a` and needs-you rollup; see the phase 4 implementation notes.
+  before phase 2a, which now gives them the wake channel too). As built so
+  far: escalation and answers, with the agents pane's `a` and needs-you
+  rollup; see the phase 4 implementation notes.
 - Watch rules to a manager, as built: `config.rs` (`RuleAction::Manager`),
   `watch.rs` (dispatch) and the manager template (H18-H20).
 - `--reparent`, as built: `db/tasks.rs` (`MoveRows`, `move_refusal_in`,
@@ -2419,10 +2420,10 @@ built.
 - **K6** Take and post, under `Inbox::lock`: nothing for a held task;
   nothing while the session's status is `Waiting` (a post would queue
   behind the prompt and start a turn when a pause's Esc clears it), absent
-  or not the task's current session; `Ended` ends the watcher, unless it is older than the watcher (a resumed
-  session keeps its id, and its last run's `Ended` stands until the
-  SessionStart hook writes over it); nothing
-  while a batch is in flight or over the cap. The batch is as many of the
+  or not the task's current session; `Ended` ends the watcher, unless it
+  is older than the watcher (a resumed session keeps its id, and its last
+  run's `Ended` stands until the SessionStart hook writes over it);
+  nothing while a batch is in flight or over the cap. The batch is as many of the
   oldest as fit `MAX_MESSAGE` with the header and nonce
   (`messages::fitting_within`). `.inflight` is written before the take,
   so a kill between them leaves the batch queued and in flight: recovery
@@ -2480,7 +2481,9 @@ built.
   for a start). `waiter::wakes(queued, idle)` is false only for the user's
   own message to an idle agent, which `deliver` then types in as before,
   the user's turn with the user's authority; through the channel it would
-  arrive as a peer's (5.5). For a busy, waiting or drafting agent the
+  arrive as a peer's (5.5). It is typed alone: what else is queued for the
+  session stays for the watcher, so no agent's text is typed in with it
+  (without a watcher the queue is typed with it, as before). For a busy, waiting or drafting agent the
   user's message goes through the channel, since it would not be typed
   anyway. Everything sent to the assistant is `agent` (it is fenced as
   untrusted whoever sent it). The field defaults to `agent` when absent,
@@ -2507,6 +2510,21 @@ built.
 - **K14** The token is in no file (not `.inflight`, not the lock file),
   argv or log line; `WakeEnv`'s `Debug` prints `…` for it, and a failed
   post's error names the socket only. No worklog note per delivery.
+- **K15** Switching it on. `Harness::wake_hook` (default false; Claude
+  Code true) says a harness can have a wake channel; `HookSetup.wake`
+  (default false) says this launch installs it, set by `runtime::wake`
+  from `wake_hook` and `[harness] wake` (`Config::wake`, on unless set
+  `false`; only the table form of `[harness]` has it) in `task_hooks` and
+  `assistant_hooks`. With it, Claude Code's `settings_json` adds a second
+  hook to `SessionStart`'s one group, after `task-hook`:
+  `{"type":"command","command":"<jeet> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
+  `WAKE_TIMEOUT_SECS` is a day, provisionally, pending the live check
+  (K21 (a)); were it enforced, the watcher's lock frees at the timeout, its
+  batch is recovered (K11) and delivery falls back. The setting is read at
+  launch, so turning it off takes effect at each agent's next start.
+  `wake_hook` is not in `manager_missing`: the channel is optional, and
+  `Generic` and any other harness are unchanged. Claude Code's variable
+  names and wire format stay in `harness/claude.rs` (K4, K7).
 - **K16** The verb is `jeet inbox watch --task <id> [--harness <id>]`
   (default `claude-code`), hidden from `--help`; §12's `take` is not
   built. It is `Free` in the gate and `NoTarget` in a node's scope, as
@@ -2521,6 +2539,10 @@ built.
   the assistant's session <id>, through its wake channel"); a report or
   answer says "delivered to <to>'s session"; a watch event delivered so is
   not notified as well.
+- **K18** The assistant: its `SessionAgent` is watched by its own
+  session's lock. A batch its watcher posted just before a `/clear` and
+  never seen goes back readdressed as session start readdresses the
+  queue: to the session recorded as following on from it, if any.
 - **K19** The library is tested without a real Claude, tmux server or
   `~/.jeet`: a `UnixListener` under `/tmp` for the socket, temp files for
   transcripts, the test process or a killed `sleep` for `CLAUDE_PID`,
@@ -2541,25 +2563,6 @@ built.
   settings carry the watcher entry, and `[harness] wake = false` leaves it
   out; at an idle, watched agent the user's own `task send` is typed in
   while another agent's goes to the watcher.
-- **K18** The assistant: its `SessionAgent` is watched by its own
-  session's lock. A batch its watcher posted just before a `/clear` and
-  never seen goes back readdressed as session start readdresses the
-  queue: to the session recorded as following on from it, if any.
-- **K15** Switching it on. `Harness::wake_hook` (default false; Claude
-  Code true) says a harness can have a wake channel; `HookSetup.wake`
-  (default false) says this launch installs it, set by `runtime::wake`
-  from `wake_hook` and `[harness] wake` (`Config::wake`, on unless set
-  `false`; only the table form of `[harness]` has it) in `task_hooks` and
-  `assistant_hooks`. With it, Claude Code's `settings_json` adds a second
-  hook to `SessionStart`'s one group, after `task-hook`:
-  `{"type":"command","command":"<jeet> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
-  `WAKE_TIMEOUT_SECS` is a day, provisionally, pending the live check
-  (K21 (a)); were it enforced, the watcher's lock frees at the timeout, its
-  batch is recovered (K11) and delivery falls back. The setting is read at
-  launch, so turning it off takes effect at each agent's next start.
-  `wake_hook` is not in `manager_missing`: the channel is optional, and
-  `Generic` and any other harness are unchanged. Claude Code's variable
-  names and wire format stay in `harness/claude.rs` (K4, K7).
 - **K20** Docs: §12 rewritten as built, with the spike's findings and three
   corrections (the watcher stays while paused; `Delivered::Wake`, not
   `Watched`; no worklog note per delivery); §7's optional row; 5.3 (a wake

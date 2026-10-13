@@ -556,7 +556,8 @@ pub fn deliver(
         to: me.map(str::to_string),
         from,
     };
-    if reported && waiter::wakes(&queued, idle) && agent.watched() {
+    let wakes = waiter::wakes(&queued, idle);
+    if reported && wakes && agent.watched() {
         inbox.push_to(&queued.message, me, from)?;
         return Ok(Delivered::Wake);
     }
@@ -573,6 +574,13 @@ pub fn deliver(
     if route == Route::Start && !agent.can_start() {
         inbox.push_to(&message, me, from)?;
         return Ok(Delivered::Held);
+    }
+    // The user's own, typed in at an idle prompt its wake channel watches:
+    // that alone, so what else is queued (another agent's, a report) still
+    // reaches it through the channel, not passed off as the user's turn.
+    if route == Route::Type && !wakes && agent.watched() {
+        agent.type_in(&marked(&typed(&message)))?;
+        return Ok(Delivered::Typed);
     }
     if route == Route::Start {
         start_refused()?;
@@ -1162,6 +1170,35 @@ mod tests {
             Delivered::Typed
         );
         assert_eq!(*agent.typed.borrow(), ["hi"]);
+        assert!(left(task.path()).is_empty());
+        // Alone: what else is queued stays for its wake channel.
+        let task = task_in(Some(State::Idle));
+        enqueue(task.path(), "a report").unwrap();
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            watched: true,
+            session: Some("s".into()),
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "hi", Sender::User).unwrap(),
+            Delivered::Typed
+        );
+        assert_eq!(*agent.typed.borrow(), ["hi"]);
+        assert_eq!(left(task.path()), ["a report"]);
+        // Unwatched, it is typed with the queue, as before.
+        let task = task_in(Some(State::Idle));
+        enqueue(task.path(), "a report").unwrap();
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            session: Some("s".into()),
+            ..Fake::default()
+        };
+        deliver(task.path(), &agent, "hi", Sender::User).unwrap();
+        assert_eq!(agent.typed.borrow().len(), 1);
+        assert!(agent.typed.borrow()[0].contains("a report"));
         assert!(left(task.path()).is_empty());
         // Unsent text in its input box: queued, for its wake channel.
         let task = task_in(Some(State::Idle));
