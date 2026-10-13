@@ -2518,9 +2518,10 @@ built.
   `assistant_hooks`. With it, Claude Code's `settings_json` adds a second
   hook to `SessionStart`'s one group, after `task-hook`:
   `{"type":"command","command":"<jeet> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
-  `WAKE_TIMEOUT_SECS` is a day, provisionally, pending the live check
-  (K21 (a)); were it enforced, the watcher's lock frees at the timeout, its
-  batch is recovered (K11) and delivery falls back. The setting is read at
+  `WAKE_TIMEOUT_SECS` is a day. The live check (K21 (a)) found Claude does
+  not enforce an async hook's timeout; were a later version to, the
+  watcher's lock frees at the timeout, its batch is recovered (K11) and
+  delivery falls back. The setting is read at
   launch, so turning it off takes effect at each agent's next start.
   `wake_hook` is not in `manager_missing`: the channel is optional, and
   `Generic` and any other harness are unchanged. Claude Code's variable
@@ -2572,9 +2573,24 @@ built.
   residual of one batch), 5.5 (framing by direction), §5.7's helper row,
   §8 and §9; `docs/harnesses.md` (`wake_hook`, `wake_env`, the hook); the
   README (how messages reach an agent, `[harness] wake`).
-- **K21** The live check on real Claude Code sessions (§12) is run before
-  the second PR merges; its results go in `notes/spike-2a.md` and here.
-  Not yet run.
+- **K21** The live check, on real Claude Code 2.1.296 sessions with a jeet
+  built from this PR, a scratch `JEET_HOME` and a separate tmux server:
+  (j) the watcher's parent is the claude process, no shell between;
+  the user's own `task send` to an idle agent was typed, a message while
+  busy was posted and landed at the next tool boundary with its nonce, and
+  an agent's message to an idle agent was posted, peer-framed; (b) a wake
+  from idle fires `UserPromptSubmit`, `PreToolUse` and `Stop`; (g) after
+  `/clear` the old watcher exits and the new session's delivers; (d) with
+  `crossSessionInbound: "refuse"` the post was dropped, and after about
+  20 s idle the watcher wrote `.off`, exited, and the message was typed
+  exactly once; (e) a child carried out a manager's instruction sent as a
+  peer message; (h) a paused child's message stayed queued and was
+  delivered once on resume; (c) compaction left exactly one watcher;
+  (f) after `/exit`, and a tmux kill, every watcher was gone within a
+  second; (k) `jeet task restart` hands the lock to the new watcher;
+  (a) a 30 s async hook timeout is not enforced (alive at 69 s). Not
+  checked: a batch posted just before `/clear`, the mid-turn pause residual
+  (5.4) and where an async hook's stderr goes.
 
 ## 11. Placement
 
@@ -2707,17 +2723,18 @@ a scratch directory outside `~/.jeet` and a test tmux server) found:
 
 Not tested by the spike: W2, `--bg` sessions (jeet never starts them),
 compaction and `/clear`, and whether a child acts on a manager's
-instruction delivered as a peer message. The live check below covers the
-last two.
+instruction delivered as a peer message. The live check (K21) covered the
+last two: one watcher survives compaction, `/clear` hands over to the new
+session's, and a child carried out a manager's instruction sent this way.
 
 **How it works.**
 
 - **Start.** jeet's `--settings` for a Claude Code agent, task or
   assistant, add a second `SessionStart` hook beside `task-hook`:
   `jeet inbox watch --task <id>` with `"async": true` and a `timeout` of
-  `WAKE_TIMEOUT_SECS` (a day, provisionally: whether Claude enforces an
-  async hook's timeout is for the live check; if it does, the watcher ends
-  then, its batch is recovered and delivery falls back to today's path).
+  `WAKE_TIMEOUT_SECS` (a day; Claude does not enforce an async hook's
+  timeout, K21 (a), and if a later version does, the watcher ends then,
+  its batch is recovered and delivery falls back to today's path).
   It is installed when the harness has one (`Harness::wake_hook`) and
   `[harness] wake` is not `false` (`HookSetup.wake`), at each launch. The
   verb is hidden, `Free` in the gate, prints nothing on stdout and always
@@ -2823,7 +2840,8 @@ running). The default is on.
 
 **Risks, as they stand.** Claude Code only. A peer message cannot approve
 anything, which suits reports going up, but a child may weigh a manager's
-command less than typed text (live check (e)). A refused post falls back
+command less than typed text (in the live check (e) a child carried one
+out). A refused post falls back
 by itself; a false fallback (the post was in fact queued, behind a modal
 no hook reports) delivers one batch twice, once per session, as `.off`
 stops later posts. Orphans end within a tick (E7). In the assistant's
