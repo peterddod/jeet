@@ -3668,17 +3668,45 @@ impl Pty {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !self.screen().contains(text) {
             if std::time::Instant::now() > deadline {
-                // What was drawn, without the escape sequences.
-                let mut plain = String::new();
-                let mut escaped = false;
-                for c in self.screen().chars() {
-                    match (escaped, c) {
-                        (false, '\x1b') => escaped = true,
-                        (false, c) => plain.push(c),
-                        (true, c) if c.is_ascii_alphabetic() => escaped = false,
-                        _ => {}
-                    }
-                }
+                let plain = self.plain();
+                let tail: String = plain.chars().rev().take(3000).collect();
+                let tail: String = tail.chars().rev().collect();
+                panic!("timed out waiting for the screen to show {text:?}; it drew:\n{tail}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+
+    /// What was drawn, without the escape sequences.
+    fn plain(&self) -> String {
+        let mut plain = String::new();
+        let mut escaped = false;
+        for c in self.screen().chars() {
+            match (escaped, c) {
+                (false, '\x1b') => escaped = true,
+                (false, c) => plain.push(c),
+                (true, c) if c.is_ascii_alphabetic() => escaped = false,
+                _ => {}
+            }
+        }
+        plain
+    }
+
+    /// Whether the screen has drawn `text`, matched by what is not white
+    /// space: a redraw moves the cursor over blank cells rather than
+    /// writing the spaces between words.
+    fn shows(&self, text: &str) -> bool {
+        let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+        squeeze(&self.plain()).contains(&squeeze(text))
+    }
+
+    /// [`Pty::wait_for_text`], matching as [`Pty::shows`] does.
+    fn wait_for_words(&self, text: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !self.shows(text) {
+            if std::time::Instant::now() > deadline {
+                let plain = self.plain();
                 let tail: String = plain.chars().rev().take(3000).collect();
                 let tail: String = tail.chars().rev().collect();
                 panic!("timed out waiting for the screen to show {text:?}; it drew:\n{tail}");
@@ -12305,6 +12333,496 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     );
     succeeded(&root.jeet(&["manager", "resume", "x"], &lab.home(), &env));
     assert_eq!(lab.run_state_of(&x).0, "run");
+}
+
+/// The tasks screen on [`running_tree`]'s manager api and worker w, at a
+/// terminal of its own, under `tmux`; it opens on the active view.
+#[cfg(unix)]
+fn tasks_screen(lab: &StoreLab, tmux: &std::path::Path) -> Pty {
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let screen = Pty::open(
+        lab,
+        "tasks",
+        &lab.home(),
+        &[("JEET_TMUX", &tmux_env), ("JEET_AGENT", "claude")],
+    );
+    screen.wait_for_text("jeet · tasks");
+    screen
+}
+
+/// `⇥` goes to the agents view, which shows the assistant at the root of
+/// the tree, and `←` closes a manager.
+#[cfg(unix)]
+#[test]
+fn agents_tab_shows_the_tree() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (_api, _w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.wait_for_words("   └─ w");
+    // Both run, as the tree thread reads tmux.
+    screen.wait_for_text("live 2/");
+    assert!(screen.screen().contains("agents"));
+    // Down to api, and closed.
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"\x1b[D");
+    screen.wait_for_text("▸");
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `p` and `P` on a manager pause and resume its subtree as `jeet manager
+/// pause` and `resume` do, as the user.
+#[cfg(unix)]
+#[test]
+fn agents_tab_pauses_and_resumes() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let (api, w, mut panes) = running_tree(&lab, &tmux);
+    // Both in a turn, which a pause interrupts.
+    std::fs::copy(pane_fixture("input-empty"), stub.join("pane")).unwrap();
+    let background = [("JEET_BACKGROUND", "1")];
+    for (pane, (id, session)) in panes.iter_mut().zip([
+        (&api, "11111111-2222-4333-8444-555555555555"),
+        (&w, "22222222-3333-4444-8555-666666666666"),
+    ]) {
+        let dir = lab.home().join("tasks").join(match id == &api {
+            true => "api",
+            false => "w",
+        });
+        hook_ok(&pane.hook(
+            &lab,
+            Some(id),
+            "UserPromptSubmit",
+            &hook_input("UserPromptSubmit", session, &dir),
+            &background,
+        ));
+    }
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"p");
+    screen.wait_for_text("paused manager api");
+    assert!(screen.shows("w: interrupted"), "{}", screen.plain());
+    assert!(screen.shows("api: interrupted"), "{}", screen.plain());
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("paused".into(), Some("user".into()))
+    );
+    // The worker is held by its parent's pause, not paused itself.
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+    let escapes: Vec<_> = calls_of(&tmux, "send-keys")
+        .into_iter()
+        .filter(|c| c.last().map(String::as_str) == Some("Escape"))
+        .collect();
+    assert_eq!(escapes.len(), 2, "{escapes:?}");
+
+    screen.esc();
+    screen.type_keys(b"P");
+    screen.wait_for_text("resumed manager api");
+    assert!(screen.shows("api: resumed"), "{}", screen.plain());
+    assert_eq!(lab.run_state_of(&api), ("run".into(), None));
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `x` on a manager asks first, listing what runs; `n` changes nothing,
+/// and `y` stops the subtree, leaves first, as `jeet manager stop` does,
+/// after which ⏎ on the worker is refused until it is resumed.
+#[cfg(unix)]
+#[test]
+fn agents_tab_stops_after_a_confirm() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    let (api, w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    // The confirm lists what the tree last saw running.
+    screen.wait_for_text("live 2/");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"x");
+    screen.wait_for_text("stop manager api");
+    // Each on a line of its own, between the panel's borders, leaves first.
+    screen.wait_for_words("running now:");
+    assert!(
+        screen.shows("running now: │ │ w │ │ api │"),
+        "{}",
+        screen.plain()
+    );
+    assert!(screen.shows("only you can resume it"), "{}", screen.plain());
+    screen.type_keys(b"n");
+    screen.wait_for_text("nothing changed");
+    assert_eq!(lab.run_state_of(&api), ("run".into(), None));
+    assert!(calls_of(&tmux, "kill-session").is_empty());
+
+    screen.type_keys(b"x");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    screen.type_keys(b"y");
+    screen.wait_for_text("stopped manager api");
+    assert!(screen.shows("w: stopped its agent"), "{}", screen.plain());
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+    let killed: Vec<String> = calls_of(&tmux, "kill-session")
+        .into_iter()
+        .map(|c| c.last().unwrap().clone())
+        .collect();
+    let at = |name: &str| {
+        killed
+            .iter()
+            .position(|k| k.contains(name))
+            .unwrap_or_else(|| panic!("{name} not ended: {killed:?}"))
+    };
+    assert!(at("jeet-w") < at("jeet-api"), "{killed:?}");
+    assert!(!stub.join("alive/jeet-api").exists());
+    assert!(!stub.join("alive/jeet-w").exists());
+
+    // Held: w is not started again.
+    screen.esc();
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"\r");
+    screen.wait_for_words("task w is stopped under manager api; `jeet manager resume api` first");
+    assert!(!stub.join("alive/jeet-w").exists());
+
+    // Pausing a stopped manager keeps it stopped.
+    screen.esc();
+    screen.type_keys(b"k");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"p");
+    screen.wait_for_text("kept manager api stopped");
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+
+    // Stopping everything under the assistant runs on the root.
+    screen.esc();
+    screen.type_keys(b"k");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"x");
+    screen.wait_for_words("stopping every task under the assistant");
+    screen.type_keys(b"y");
+    screen.wait_for_words("stopped every task under the assistant");
+    assert_eq!(
+        lab.run_state_of(&api),
+        ("stopped".into(), Some("user".into()))
+    );
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// On the assistant, `p` gets `in_scope`'s refusal, as `jeet manager pause
+/// assistant` does, and `x` asks to stop every task under it.
+#[cfg(unix)]
+#[test]
+fn agents_tab_refuses_the_assistant_for_pause() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let w = lab.new_task_with("w", &["--parent", "assistant"]);
+
+    let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[]);
+    screen.wait_for_text("jeet · tasks");
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ w");
+    screen.type_keys(b"p");
+    screen.wait_for_words("`jeet manager pause` is for a task under the assistant");
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    screen.esc();
+    screen.type_keys(b"x");
+    screen.wait_for_words("stopping every task under the assistant");
+    screen.type_keys(b"n");
+    screen.wait_for_text("nothing changed");
+    assert_eq!(lab.run_state_of(&w), ("run".into(), None));
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `n` under a node, left as a task: it is made, not started, under the
+/// node, by the user (its brief says so); more than the node holds to
+/// give is refused.
+#[cfg(unix)]
+#[test]
+fn agents_tab_makes_a_worker_under_a_node() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (api, _w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    // The kind stays a task; a name, and more than api holds to give.
+    screen.type_keys(b"\tleaf\tfix the bug\t\t\ttask.archive\r");
+    screen.wait_for_words("cannot grant `task.archive`: its parent, manager api, does not hold it");
+    let row = || {
+        lab.index()
+            .query_row(
+                "SELECT parent_id, kind, id FROM tasks WHERE slug = 'leaf'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+    };
+    assert_eq!(row(), None);
+    screen.type_keys(b"\x15task.create\r");
+    screen.wait_for_words("made leaf under manager api");
+    let (parent, kind, leaf) = row().unwrap();
+    assert_eq!(parent.as_deref(), Some(api.as_str()));
+    assert_eq!(kind, "work");
+    let (goal, _, by) = lab.brief_of(leaf.as_deref().unwrap()).unwrap();
+    assert_eq!((goal.as_str(), by.as_str()), ("fix the bug", "user"));
+    let started: Vec<_> = calls_of(&tmux, "new-session")
+        .into_iter()
+        .filter(|c| c.iter().any(|a| a == "jeet-leaf"))
+        .collect();
+    assert!(started.is_empty(), "{started:?}");
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `n` on a manager makes a manager under it, as `jeet manager new
+/// --parent` does, as the user: `plan_child`'s refusals stay on the form,
+/// and once made it starts at once with its brief.
+#[cfg(unix)]
+#[test]
+fn agents_tab_makes_a_manager_under_a_node() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (api, _w, _panes) = running_tree(&lab, &tmux);
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    // A manager, called sub, with no goal yet.
+    screen.type_keys(b" ");
+    screen.wait_for_text("‹ manager ›");
+    screen.type_keys(b"\tsub\r");
+    screen.wait_for_words("a manager needs --goal or --brief-file");
+    // A goal, and more than api holds to give.
+    screen.type_keys(b"\tship the v2 api\t\t\ttask.archive\r");
+    screen.wait_for_words("cannot grant `task.archive`: its parent, manager api, does not hold it");
+    let made = || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM tasks WHERE slug = 'sub'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(made(), 0);
+    screen.type_keys(b"\x15task.create\r");
+    screen.wait_for_words("made manager sub under manager api");
+    screen.wait_for_words("started the agent with its brief in tmux session jeet-sub");
+
+    let (sub, parent, kind) = lab
+        .index()
+        .query_row(
+            "SELECT id, parent_id, kind FROM tasks WHERE slug = 'sub'",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (parent.as_deref(), kind.as_str()),
+        (Some(api.as_str()), "manager")
+    );
+    let (goal, _, by) = lab.brief_of(&sub).unwrap();
+    assert_eq!((goal.as_str(), by.as_str()), ("ship the v2 api", "user"));
+    let brief = std::fs::read_to_string(lab.home().join("tasks/sub/BRIEF.md")).unwrap();
+    assert!(brief.contains("ship the v2 api"), "{brief}");
+    let started: Vec<_> = calls_of(&tmux, "new-session")
+        .into_iter()
+        .filter(|c| c.iter().any(|a| a == "jeet-sub"))
+        .collect();
+    assert_eq!(started.len(), 1, "{started:?}");
+
+    // What the start warns of (the stub's pane has no process) is in a
+    // message; under it, the cursor is on the new node.
+    screen.wait_for_words("cannot be identified");
+    screen.esc();
+    screen.wait_for_words("├─ ▾ sub");
+    screen.type_keys(b"b");
+    screen.wait_for_words("goal (from user): ship the v2 api");
+    assert!(screen.shows("may: task.create"), "{}", screen.plain());
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// `l` reads a manager's worklog, and `i` a worker's open question, which
+/// rolls up to its manager as blocked.
+#[cfg(unix)]
+#[test]
+fn agents_tab_reads_worklog_and_reports() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (_api, _w, mut panes) = running_tree(&lab, &tmux);
+    let notes = lab.home().join("tasks/api/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(notes.join("worklog.md"), "kept the v1 routes for now\n").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_BACKGROUND", "1"),
+    ];
+    succeeded(&panes[1].jeet(
+        &["report", "question", "keep v1?"],
+        &lab.home().join("tasks/w"),
+        &env,
+    ));
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.wait_for_words("! blocked (1)");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"l");
+    screen.wait_for_words("kept the v1 routes for now");
+    screen.esc();
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"i");
+    let asked: i64 = lab
+        .index()
+        .query_row("SELECT MAX(id) FROM task_reports", [], |r| r.get(0))
+        .unwrap();
+    screen.wait_for_words("open ask");
+    screen.wait_for_words(&format!("#{asked} question to manager api"));
+    assert!(screen.shows("keep v1?"), "{}", screen.plain());
+
+    screen.esc();
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
+}
+
+/// A manager made with `n` over `max_live` is queued, and says so on the
+/// status line rather than on stderr under the screen.
+#[cfg(unix)]
+#[test]
+fn agents_tab_shows_a_queued_start() {
+    if !have_script() {
+        eprintln!("no `script` to run a terminal with; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let (_api, _w, _panes) = running_tree(&lab, &tmux);
+    // api and w run; one is the most that may.
+    let config = lab.home().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[managers]\nmax_live = 1\n");
+    std::fs::write(&config, text).unwrap();
+
+    let mut screen = tasks_screen(&lab, &tmux);
+    screen.type_keys(b"\t");
+    screen.wait_for_text("└─ ▾ api");
+    screen.type_keys(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    screen.type_keys(b"n");
+    screen.wait_for_text("new task under manager api");
+    screen.type_keys(b" \tlater\tdo it later\r");
+    screen.wait_for_words("made manager later under manager api");
+    screen.wait_for_words("queued (tasks in the tree running: 2/1");
+    assert!(!screen.plain().contains("jeet:"), "{}", screen.plain());
+    assert!(calls_of(&tmux, "new-session")
+        .iter()
+        .all(|c| !c.iter().any(|a| a == "jeet-later")));
+    let later = lab
+        .index()
+        .query_row("SELECT id FROM tasks WHERE slug = 'later'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    assert_eq!(lab.start_queue(), [later]);
+
+    screen.type_keys(b"q");
+    assert!(screen.wait_for_exit().success());
 }
 
 /// Archiving a worker mid-turn charges it the turn's time so far before

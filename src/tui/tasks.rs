@@ -24,9 +24,12 @@
 //! `⇥` cycles active → agents → archived. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
-//! `→`/`←` open and close managers, and `l`, `i` and `b` read a node's
-//! worklog, inbox and reports, and brief. Its index facts come from a tree
-//! thread of its own, running only while the view is shown.
+//! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
+//! worklog, inbox and reports, and brief, `p`, `P` and `x` pause, resume
+//! and stop its subtree, and `n` makes a task or manager under it, through
+//! the CLI's own checks, as the user.
+//! Its index facts come from a tree thread of its own, running only while
+//! the view is shown.
 //!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
@@ -38,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -54,18 +57,20 @@ use super::tasks_ui;
 use super::term::{self, Tui};
 use crate::agent::{self, age_label, AgentSpec};
 use crate::assistant::{self, Open};
+use crate::cli::Delegation;
 use crate::commands::{self, task::printable, task::printable_text};
 use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::tasks::{
-    TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
+    RunState, TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
 };
 use crate::db::Database;
 use crate::git;
 use crate::github;
+use crate::manager::budget::{self, BudgetPart};
 use crate::manager::{self, run};
 use crate::messages;
-use crate::permissions::{self, Caller};
+use crate::permissions::{self, Caller, Verb};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Admission};
@@ -348,33 +353,42 @@ impl Picker {
     }
 }
 
-/// The new-task form's fields, in order.
+/// The new-task form's fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    /// Under a node: a task or a manager.
+    Kind,
     Name,
+    Goal,
+    Done,
+    Budget,
+    Allow,
     Project,
     Repos,
     Branch,
 }
 
-impl Field {
-    const ALL: [Field; 4] = [Field::Name, Field::Project, Field::Repos, Field::Branch];
-
-    fn step(self, delta: isize) -> Field {
-        let at = Field::ALL.iter().position(|&f| f == self).unwrap_or(0) as isize;
-        let len = Field::ALL.len() as isize;
-        Field::ALL[(at + delta).rem_euclid(len) as usize]
-    }
-}
-
 /// `n`: a name, and optionally a project, repositories and a branch.
-/// Everything left blank makes an empty canvas under a made-up name.
+/// Everything left blank makes an empty canvas under a made-up name. Under
+/// a node in the agents view, also its kind, goal, done, budget and what it
+/// may do (Q17).
 #[derive(Debug, Clone)]
 pub struct NewTaskForm {
     pub field: Field,
+    /// What `--parent` would name (`assistant`, or the node's id) and how
+    /// the node is shown; `None` for a top-level task.
+    pub parent: Option<(String, String)>,
+    /// Work or Manager, under a node.
+    pub kind: TaskKind,
     pub name: String,
     /// What a blank name becomes.
     pub default_name: String,
+    pub goal: String,
+    pub done: String,
+    /// Comma-separated, as `--budget` takes it.
+    pub budget: String,
+    /// Comma-separated capabilities, as `--allow` takes them.
+    pub allow: String,
     pub projects: Vec<String>,
     /// Index into `projects`; None for no project.
     pub project: Option<usize>,
@@ -393,6 +407,36 @@ pub struct TaskSpec {
     pub branch: Option<String>,
 }
 
+/// A task or manager to make under a node, as the form describes it: what
+/// `jeet task new --parent` or `jeet manager new` would be given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildSpec {
+    /// `assistant`, or the node's id.
+    pub parent: String,
+    pub kind: TaskKind,
+    pub name: String,
+    pub goal: Option<String>,
+    pub done: Option<String>,
+    pub budget: Vec<BudgetPart>,
+    pub allow: Option<Vec<String>>,
+    pub project: Option<String>,
+    pub repos: Vec<String>,
+    pub branch: Option<String>,
+}
+
+impl ChildSpec {
+    /// As `--parent`, `--goal`, `--done`, `--allow` and `--budget` give it.
+    pub fn delegation(&self) -> Delegation {
+        Delegation {
+            parent: Some(self.parent.clone()),
+            goal: self.goal.clone(),
+            done_when: self.done.clone(),
+            allow: self.allow.clone(),
+            budget: self.budget.clone(),
+        }
+    }
+}
+
 impl NewTaskForm {
     pub fn new(
         default_name: String,
@@ -403,14 +447,71 @@ impl NewTaskForm {
         let project = project.and_then(|p| projects.iter().position(|n| n == p));
         NewTaskForm {
             field: Field::Name,
+            parent: None,
+            kind: TaskKind::Work,
             name: String::new(),
             default_name,
+            goal: String::new(),
+            done: String::new(),
+            budget: String::new(),
+            allow: String::new(),
             projects,
             project,
             repos: Picker::new(repos),
             branch: String::new(),
             error: None,
         }
+    }
+
+    /// The form for a task under `parent` (what `--parent` names), shown as
+    /// `label`; it starts on the kind.
+    pub fn under(self, parent: String, label: String) -> Self {
+        NewTaskForm {
+            field: Field::Kind,
+            parent: Some((parent, label)),
+            ..self
+        }
+    }
+
+    /// The fields shown, in order: a manager has no worktrees (`manager
+    /// new` takes none).
+    pub fn fields(&self) -> &'static [Field] {
+        use Field::*;
+        match (&self.parent, self.kind) {
+            (None, _) => &[Name, Project, Repos, Branch],
+            (Some(_), TaskKind::Manager) => &[Kind, Name, Goal, Done, Budget, Allow],
+            (Some(_), _) => &[
+                Kind, Name, Goal, Done, Budget, Allow, Project, Repos, Branch,
+            ],
+        }
+    }
+
+    /// The field `delta` steps from the focused one.
+    fn step(&self, delta: isize) -> Field {
+        let fields = self.fields();
+        let at = fields.iter().position(|&f| f == self.field).unwrap_or(0) as isize;
+        fields[(at + delta).rem_euclid(fields.len() as isize) as usize]
+    }
+
+    /// The text `field` holds, for those typed into.
+    fn text_mut(&mut self, field: Field) -> Option<&mut String> {
+        match field {
+            Field::Name => Some(&mut self.name),
+            Field::Goal => Some(&mut self.goal),
+            Field::Done => Some(&mut self.done),
+            Field::Budget => Some(&mut self.budget),
+            Field::Allow => Some(&mut self.allow),
+            Field::Branch => Some(&mut self.branch),
+            Field::Kind | Field::Project | Field::Repos => None,
+        }
+    }
+
+    /// A task, or a manager, under a node.
+    fn toggle_kind(&mut self) {
+        self.kind = match self.kind {
+            TaskKind::Manager => TaskKind::Work,
+            _ => TaskKind::Manager,
+        };
     }
 
     pub fn project_name(&self) -> Option<&str> {
@@ -428,11 +529,15 @@ impl NewTaskForm {
     }
 
     /// The task the form describes, or why it describes none.
-    pub fn spec(&self) -> std::result::Result<TaskSpec, String> {
-        let name = match self.name.trim() {
+    fn name_or_default(&self) -> String {
+        match self.name.trim() {
             "" => self.default_name.clone(),
             name => name.to_string(),
-        };
+        }
+    }
+
+    pub fn spec(&self) -> std::result::Result<TaskSpec, String> {
+        let name = self.name_or_default();
         let repos = self.repos.chosen();
         let branch = Some(self.branch.trim().to_string()).filter(|b| !b.is_empty());
         if branch.is_some() && repos.len() != 1 {
@@ -443,6 +548,59 @@ impl NewTaskForm {
             project: self.project_name().map(str::to_string),
             repos,
             branch,
+        })
+    }
+
+    /// The task under a node the form describes, or why it describes none:
+    /// what can be told without the index, as clap parses `--budget` and
+    /// `--allow`. The rest is `plan_child`'s.
+    pub fn child_spec(&self) -> std::result::Result<ChildSpec, String> {
+        let Some((parent, _)) = &self.parent else {
+            return Err("a task under a node needs its parent".into());
+        };
+        let task = match self.kind {
+            // A manager shows no project, repos or branch, so none can fail it.
+            TaskKind::Manager => TaskSpec {
+                name: self.name_or_default(),
+                project: None,
+                repos: Vec::new(),
+                branch: None,
+            },
+            _ => self.spec()?,
+        };
+        let text = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        let parts = |s: &str| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let budget = parts(&self.budget)
+            .iter()
+            .map(|p| budget::parse_part(p))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| format!("budget: {e}"))?;
+        let allow = match parts(&self.allow) {
+            caps if caps.is_empty() => None,
+            caps => Some(
+                caps.iter()
+                    .map(|c| permissions::parse_capability(c))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| format!("allow: {e}"))?,
+            ),
+        };
+        Ok(ChildSpec {
+            parent: parent.clone(),
+            kind: self.kind,
+            name: task.name,
+            goal: text(&self.goal),
+            done: text(&self.done),
+            budget,
+            allow,
+            project: task.project,
+            repos: task.repos,
+            branch: task.branch,
         })
     }
 }
@@ -543,6 +701,11 @@ pub enum Pending {
     ForceResync {
         task_id: String,
     },
+    /// `x` in the agents view: a node and its subtree, or with `None` every
+    /// task under the assistant (Q16).
+    Stop {
+        task_id: Option<String>,
+    },
 }
 
 /// An overlay over the list, which takes the keyboard while it is up.
@@ -583,7 +746,7 @@ pub enum Panel {
         branch: String,
         field: AddField,
     },
-    NewTask(NewTaskForm),
+    NewTask(Box<NewTaskForm>),
     Projects {
         lines: Vec<ProjectLine>,
         selected: usize,
@@ -689,6 +852,13 @@ pub enum Action {
         project: Option<String>,
     },
     CreateTask(TaskSpec),
+    /// `n` in the agents view: the form for a task under the node.
+    NewChildForm {
+        parent_id: String,
+    },
+    /// Make, as the user, the task or manager the form describes under its
+    /// node; a manager starts at once (Q17).
+    CreateChild(ChildSpec),
     /// With tasks under it, `a` archives them all, leaves first, once
     /// confirmed: `recursive` says the confirm was for them all.
     Archive {
@@ -768,6 +938,23 @@ pub enum Action {
     /// `b` in the agents view: the node's brief, grant, lists and budget.
     Brief {
         task_id: String,
+    },
+    /// `p` in the agents view: pause the node and its subtree.
+    Pause {
+        task_id: String,
+    },
+    /// `P` in the agents view: let the node run again.
+    Resume {
+        task_id: String,
+    },
+    /// `x` in the agents view: ask before stopping the node and its
+    /// subtree, or with `None`, on the assistant, every task under it.
+    AskStop {
+        task_id: Option<String>,
+    },
+    /// The stop, once confirmed.
+    Stop {
+        task_id: Option<String>,
     },
 }
 
@@ -1467,11 +1654,59 @@ impl TasksUi {
                     _ => Action::Brief { task_id },
                 }),
             },
+            // The assistant is refused a pause by `in_scope`, as the CLI
+            // refuses it; `x` on it is `stop --all`, the user's alone (P8).
+            KeyCode::Char(c @ ('p' | 'P' | 'x')) => match (self.user, line.map(|l| l.at), id) {
+                (false, _, _) => {
+                    self.set_status(NOT_USER);
+                    None
+                }
+                (true, Some(At::Root), _) if c == 'x' => Some(Action::AskStop { task_id: None }),
+                (true, _, Some(task_id)) => Some(match c {
+                    'p' => Action::Pause { task_id },
+                    'P' => Action::Resume { task_id },
+                    _ => Action::AskStop {
+                        task_id: Some(task_id),
+                    },
+                }),
+                (true, _, None) => {
+                    self.set_status(NO_NODE);
+                    None
+                }
+            },
             KeyCode::Char('a') => {
                 self.set_status(ANSWER_LATER);
                 None
             }
-            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S' | 'p' | 'P' | 'x' | 'n') => {
+            // Refused here on a worker, in `plan_child`'s words, rather than
+            // after a whole form.
+            KeyCode::Char('n') => {
+                let node = self.selected_row().map(|row| row.task.clone());
+                match (self.user, node) {
+                    (false, _) => {
+                        self.set_status(NOT_USER);
+                        None
+                    }
+                    (true, None) => {
+                        self.set_status(NO_NODE);
+                        None
+                    }
+                    (true, Some(node))
+                        if matches!(node.kind, TaskKind::Assistant | TaskKind::Manager) =>
+                    {
+                        Some(Action::NewChildForm { parent_id: node.id })
+                    }
+                    (true, Some(node)) => {
+                        self.set_status(format!(
+                            "task {} is not a manager: only the assistant and managers have \
+                             tasks under them",
+                            printable(&node.slug)
+                        ));
+                        None
+                    }
+                }
+            }
+            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S') => {
                 self.set_status(NOT_IN_AGENTS);
                 None
             }
@@ -1549,6 +1784,9 @@ impl TasksUi {
                     (Pending::ForceResync { task_id }, _, true, _) => Some(Action::Resync {
                         task_id: task_id.clone(),
                         force: true,
+                    }),
+                    (Pending::Stop { task_id }, true, _, _) => Some(Action::Stop {
+                        task_id: task_id.clone(),
                     }),
                     (_, _, _, true) => {
                         self.set_status("nothing changed");
@@ -1721,37 +1959,48 @@ impl TasksUi {
             Panel::NewTask(mut form) => {
                 match (key.code, form.field) {
                     (KeyCode::Esc, _) => return None,
-                    (KeyCode::Enter, _) => match form.spec() {
-                        Ok(spec) => {
-                            // Left up while the task is made, to come back to
-                            // if that fails.
-                            self.panel = Some(Panel::NewTask(form));
-                            return Some(Action::CreateTask(spec));
+                    (KeyCode::Enter, _) => {
+                        let action = match form.parent {
+                            Some(_) => form.child_spec().map(Action::CreateChild),
+                            None => form.spec().map(Action::CreateTask),
+                        };
+                        match action {
+                            Ok(action) => {
+                                // Left up while the task is made, to come
+                                // back to if that fails.
+                                self.panel = Some(Panel::NewTask(form));
+                                return Some(action);
+                            }
+                            Err(why) => form.error = Some(why),
                         }
-                        Err(why) => form.error = Some(why),
-                    },
-                    (KeyCode::Tab, _) => form.field = form.field.step(1),
-                    (KeyCode::BackTab, _) => form.field = form.field.step(-1),
+                    }
+                    (KeyCode::Tab, _) => form.field = form.step(1),
+                    (KeyCode::BackTab, _) => form.field = form.step(-1),
                     (_, Field::Repos) => {
                         form.repos.multi_key(&key);
                     }
-                    (KeyCode::Up, _) => form.field = form.field.step(-1),
-                    (KeyCode::Down, _) => form.field = form.field.step(1),
+                    (KeyCode::Up, _) => form.field = form.step(-1),
+                    (KeyCode::Down, _) => form.field = form.step(1),
+                    (KeyCode::Left | KeyCode::Right | KeyCode::Char(' '), Field::Kind) => {
+                        form.toggle_kind()
+                    }
                     (KeyCode::Left, Field::Project) => form.cycle_project(-1),
                     (KeyCode::Right | KeyCode::Char(' '), Field::Project) => form.cycle_project(1),
-                    (KeyCode::Backspace, Field::Name) => {
-                        form.name.pop();
+                    (KeyCode::Backspace, field) => {
+                        if let Some(text) = form.text_mut(field) {
+                            text.pop();
+                        }
                     }
-                    (KeyCode::Backspace, Field::Branch) => {
-                        form.branch.pop();
+                    (KeyCode::Char('u'), field) if ctrl => {
+                        if let Some(text) = form.text_mut(field) {
+                            text.clear();
+                        }
                     }
-                    (KeyCode::Char('u'), Field::Name) if ctrl => form.name.clear(),
-                    (KeyCode::Char('u'), Field::Branch) if ctrl => form.branch.clear(),
-                    (_, field) => match (typed(&key), field) {
-                        (Some(c), Field::Name) => form.name.push(c),
-                        (Some(c), Field::Branch) => form.branch.push(c),
-                        _ => {}
-                    },
+                    (_, field) => {
+                        if let (Some(c), Some(text)) = (typed(&key), form.text_mut(field)) {
+                            text.push(c);
+                        }
+                    }
                 }
                 if key.code != KeyCode::Enter {
                     form.error = None;
@@ -2193,6 +2442,36 @@ fn subtree_archive_warning(name: &str, unkept: &[(String, Vec<String>)]) -> Vec<
             }
         }
     }
+    lines
+}
+
+/// What the confirm to stop `name` and everything below it says, or with
+/// `all` every task under the assistant: which of them run, leaves first,
+/// as the tree last saw them, and that only the user starts them again.
+pub(super) fn stop_warning(name: &str, running: &[String], all: bool) -> Vec<String> {
+    let mut lines = vec![
+        match all {
+            true => "stopping every task under the assistant ends each one's agent, leaves first"
+                .to_string(),
+            false => {
+                format!("stopping {name} ends its agent and every agent below it, leaves first")
+            }
+        },
+        "and starts none of them again until it is resumed".into(),
+        String::new(),
+    ];
+    match running.is_empty() {
+        true => lines.push("none of them is running now".into()),
+        false => {
+            lines.push("running now:".into());
+            lines.extend(running.iter().map(|node| format!("  {node}")));
+        }
+    }
+    lines.push(String::new());
+    lines.push(match all {
+        true => "only you can resume them".into(),
+        false => "only you can resume it".into(),
+    });
     lines
 }
 
@@ -2976,12 +3255,12 @@ impl Screen<'_> {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
                 let default_name = default_task_name(self.ui.rows.iter().map(|r| &r.task));
-                self.ui.panel = Some(Panel::NewTask(NewTaskForm::new(
+                self.ui.panel = Some(Panel::NewTask(Box::new(NewTaskForm::new(
                     default_name,
                     projects,
                     project.as_deref(),
                     repos,
-                )));
+                ))));
             }
             Action::CreateTask(spec) => {
                 let label = match spec.repos.len() + usize::from(spec.project.is_some()) {
@@ -3019,6 +3298,24 @@ impl Screen<'_> {
                     }
                 }
             }
+            Action::NewChildForm { parent_id } => {
+                let Some(parent) = self.ui.node(&parent_id).map(|row| row.task.clone()) else {
+                    return Ok(());
+                };
+                // `find_exact` leaves the assistant out even by id (C7).
+                let named = match parent.kind {
+                    TaskKind::Assistant => assistant::SLUG.to_string(),
+                    _ => parent.id.clone(),
+                };
+                let projects = projects::list(app)?;
+                let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
+                let default_name = default_task_name(self.ui.rows.iter().map(|r| &r.task));
+                let form = NewTaskForm::new(default_name, projects, None, repos);
+                self.ui.panel = Some(Panel::NewTask(Box::new(
+                    form.under(named, printable(&manager::label(&parent))),
+                )));
+            }
+            Action::CreateChild(spec) => self.create_child(spec),
             Action::Archive {
                 task_id,
                 confirmed,
@@ -3359,8 +3656,246 @@ impl Screen<'_> {
                 let label = manager::label(&row.task);
                 self.ui.panel = Some(text_panel(&label, "brief", lines, None));
             }
+            Action::Pause { task_id } => self.run_verb(Verb::ManagerPause, Some(&task_id)),
+            Action::Resume { task_id } => self.run_verb(Verb::ManagerResume, Some(&task_id)),
+            Action::AskStop { task_id } => self.ask_stop(task_id)?,
+            Action::Stop { task_id } => self.run_verb(Verb::ManagerStop, task_id.as_deref()),
         }
         Ok(())
+    }
+
+    /// `n` in the agents view: make the task or manager `spec` describes,
+    /// as `jeet task new --parent` and `jeet manager new` make it, as the
+    /// user: `plan_child`, then `create`, then, for a manager, its start
+    /// (Q17). A worker is not started, as `n` in the active view does not
+    /// start one. What `plan_child` refuses stays on the form.
+    fn create_child(&mut self, spec: ChildSpec) {
+        let app = self.app;
+        let user = Caller::User;
+        let d = spec.delegation();
+        let plan = match tasks::plan_child(app, &user, spec.kind, &spec.name, &d, None) {
+            Ok(plan) => plan,
+            Err(e) => {
+                if let Some(Panel::NewTask(form)) = &mut self.ui.panel {
+                    form.error = Some(printable(&format!("{e:#}")));
+                }
+                return;
+            }
+        };
+        let label = match spec.repos.len() + usize::from(spec.project.is_some()) {
+            0 => format!("creating {}", spec.name),
+            _ => format!("creating {} and its worktrees", spec.name),
+        };
+        let made = self
+            .progress(&label, || {
+                tasks::create(
+                    app,
+                    &NewTask {
+                        name: &spec.name,
+                        project: spec.project.as_deref(),
+                        repos: &spec.repos,
+                        branch: spec.branch.as_deref(),
+                        child: Some((&user, &plan)),
+                    },
+                )
+            })
+            .and_then(|inner| inner);
+        let created = match made {
+            Ok(created) => created,
+            Err(e) => {
+                let back = self.ui.panel.take();
+                self.ui.message(
+                    "could not create the task",
+                    vec![printable(&format!("{e:#}"))],
+                    back,
+                );
+                return;
+            }
+        };
+        self.ui.panel = None;
+        let task = created.task;
+        let under = match self.ui.node(spec.parent.as_str()) {
+            Some(row) => manager::label(&row.task),
+            None => match spec.parent.as_str() {
+                assistant::SLUG => "the assistant".to_string(),
+                id => format!("task {id}"),
+            },
+        };
+        let mut warnings = created.warnings;
+        let made = match task.kind {
+            // A manager has only its brief to work towards: it starts now,
+            // or queued or held, as `jeet manager new` starts it (M35).
+            TaskKind::Manager => {
+                let started = self
+                    .progress(&format!("starting {}", task.slug), || {
+                        commands::task::start(app, &task, &manager::first_prompt(app, &task)?)
+                    })
+                    .and_then(|inner| inner);
+                let how = match started {
+                    // The start's warnings, then how it went.
+                    Ok(start) => {
+                        let mut lines = start.lines(&task);
+                        let how = lines.pop().unwrap_or_default();
+                        warnings.extend(lines);
+                        how
+                    }
+                    Err(e) => format!("{e:#}"),
+                };
+                format!("made manager {} under {under} · {how}", task.slug)
+            }
+            _ => format!("made {} under {under} — ⏎ starts its agent", task.slug),
+        };
+        self.refresh(false);
+        // The new node shows, under its parent opened, with the cursor on it.
+        if self.ui.view == View::Agents {
+            if let Some(parent) = &task.parent_id {
+                self.ui.collapsed.remove(parent);
+            }
+            self.ui.refresh_visible(Some(&task.id));
+        }
+        self.read_tree();
+        // A deep error path may have written to the terminal (Q20).
+        if let Err(e) = term::blank(self.terminal) {
+            self.ui.set_status(format!("could not repaint: {e}"));
+            return;
+        }
+        // How it went fits the status line; what it warns of may not.
+        let made = printable(&made);
+        if !warnings.is_empty() {
+            let lines = warnings.iter().map(|w| printable(w)).collect();
+            self.ui.message(&made, lines, None);
+        }
+        self.ui.set_status(made);
+    }
+
+    /// `x` in the agents view: ask before stopping task `task_id` and its
+    /// subtree, or with `None` every task under the assistant, listing
+    /// which of them run as the tree last saw them; the stop itself asks
+    /// tmux (Q16).
+    fn ask_stop(&mut self, task_id: Option<String>) -> Result<()> {
+        let app = self.app;
+        let (name, targets) = match &task_id {
+            Some(id) => {
+                let Some(task) = app.db.get_task(id)? else {
+                    return Ok(());
+                };
+                (manager::label(&task), vec![task])
+            }
+            None => {
+                let Some(root) = &self.ui.assistant_row else {
+                    self.ui.set_status(NO_NODE);
+                    return Ok(());
+                };
+                let children = app
+                    .db
+                    .children(&root.task.id)?
+                    .into_iter()
+                    .filter(|c| c.state == TaskState::Active)
+                    .collect();
+                ("every task under the assistant".to_string(), children)
+            }
+        };
+        let mut running = Vec::new();
+        for target in &targets {
+            for node in tasks::subtree_leaves_first(app, target)? {
+                // Before the first gather, as the status poller saw it.
+                let live = match &self.ui.tree_info {
+                    Some(info) => info.live.contains(&node.id),
+                    None => self.ui.node(&node.id).is_some_and(TaskRow::agent_running),
+                };
+                if live {
+                    running.push(printable(&node.slug));
+                }
+            }
+        }
+        self.ui.panel = Some(Panel::Confirm {
+            title: format!("stop {name}"),
+            lines: stop_warning(&name, &running, task_id.is_none()),
+            action: Pending::Stop { task_id },
+        });
+        Ok(())
+    }
+
+    /// `p`, `P` and `x` in the agents view: `verb` on task `task_id` and its
+    /// subtree, or with `None` `stop --all`, as `jeet manager pause`,
+    /// `resume` and `stop` do it: `in_scope`, then [`run`], as the user
+    /// (Q15). What came of each node is shown; then the screen is painted
+    /// afresh and the tree gathered anew, so nothing older shows after it.
+    fn run_verb(&mut self, verb: Verb, task_id: Option<&str>) {
+        let app = self.app;
+        let user = Caller::User;
+        let name = match task_id {
+            Some(id) => self
+                .ui
+                .node(id)
+                .map_or_else(|| format!("task {id}"), |row| manager::label(&row.task)),
+            None => "every task under the assistant".to_string(),
+        };
+        let (doing, done) = match verb {
+            Verb::ManagerPause => ("pausing", "paused"),
+            Verb::ManagerResume => ("resuming", "resumed"),
+            _ => ("stopping", "stopped"),
+        };
+        let walked = self
+            .progress(&format!("{doing} {name}"), || -> Result<_> {
+                // As the index has it now, as the CLI reads it: a resume
+                // undoes only what it checked.
+                let task = match task_id {
+                    Some(id) => match app.db.get_task(id)? {
+                        Some(task) => Some(task),
+                        None => bail!("task {id} is gone"),
+                    },
+                    None => None,
+                };
+                if let Some(task) = &task {
+                    permissions::in_scope(app, &user, verb, task)?;
+                }
+                let outcomes = match (verb, &task) {
+                    (Verb::ManagerPause, Some(task)) => run::pause(app, &user, task)?,
+                    (Verb::ManagerResume, Some(task)) => run::resume(app, &user, task)?,
+                    (Verb::ManagerStop, task) => run::stop(app, &user, task.as_ref())?,
+                    _ => bail!("`jeet {}` needs a task", verb.name()),
+                };
+                let after = match &task {
+                    Some(task) => app.db.get_task(&task.id)?.map(|t| t.run_state),
+                    None => None,
+                };
+                Ok((task, outcomes, after))
+            })
+            .and_then(|inner| inner);
+        self.refresh(false);
+        self.read_tree();
+        // A deep error path may have written to the terminal (Q20).
+        if let Err(e) = term::blank(self.terminal) {
+            self.ui.set_status(format!("could not repaint: {e}"));
+        }
+        match walked {
+            Ok((task, outcomes, after)) => {
+                let title = match after {
+                    Some(RunState::Stopped) if verb == Verb::ManagerPause => {
+                        format!("kept {name} stopped")
+                    }
+                    _ => format!("{done} {name}"),
+                };
+                // The CLI's own summary first; `resume` has none.
+                let mut lines = match commands::manager::outcome_summary(verb, task.as_ref(), after)
+                {
+                    Some(summary) => vec![summary, String::new()],
+                    None => Vec::new(),
+                };
+                lines.extend(
+                    outcomes
+                        .iter()
+                        .map(|o| printable(&format!("{}: {}", o.slug, o.line))),
+                );
+                self.ui.message(&printable(&title), lines, None);
+            }
+            Err(e) => self.ui.message(
+                &format!("not {done}"),
+                vec![printable(&format!("{e:#}"))],
+                None,
+            ),
+        }
     }
 
     /// `c`: attach to one of the assistant's sessions, starting it — and
@@ -4189,7 +4724,7 @@ mod tests {
             PrToView::Pick
         );
     }
-    use crate::db::tasks::{RunState, TaskKind};
+    use crate::db::tasks::TaskKind;
 
     #[test]
     fn the_subtree_confirms_name_each_task_leaves_first() {
@@ -4682,7 +5217,7 @@ mod tests {
     #[test]
     fn the_form_is_filled_in_from_the_keyboard() {
         let mut ui = sample();
-        ui.panel = Some(Panel::NewTask(form()));
+        ui.panel = Some(Panel::NewTask(Box::new(form())));
         type_text(&mut ui, "fix it");
         press(&mut ui, KeyCode::Tab); // project
         press(&mut ui, KeyCode::Right); // web
@@ -4711,7 +5246,7 @@ mod tests {
         let mut ui = sample();
         let mut f = form();
         f.field = Field::Branch;
-        ui.panel = Some(Panel::NewTask(f));
+        ui.panel = Some(Panel::NewTask(Box::new(f)));
         type_text(&mut ui, "b");
         assert_eq!(press(&mut ui, KeyCode::Enter), None);
         match &ui.panel {
@@ -5259,7 +5794,7 @@ mod tests {
     fn the_agents_view_keeps_its_own_keys() {
         let mut ui = agents_sample();
         press(&mut ui, KeyCode::Down);
-        for c in ['e', 'w', 'v', 'o', 'D', 'S', 'p', 'P', 'x', 'n'] {
+        for c in ['e', 'w', 'v', 'o', 'D', 'S'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
             assert_eq!(ui.status_line, NOT_IN_AGENTS, "{c}");
@@ -5316,6 +5851,256 @@ mod tests {
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(press(&mut ui, KeyCode::Char('i')), None);
         assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
+    }
+
+    #[test]
+    fn pausing_resuming_and_stopping_are_for_the_user_alone() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Down);
+        for c in ['p', 'P', 'x'] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
+            assert_eq!(ui.status_line, NOT_USER, "{c}");
+        }
+        ui.user = true;
+        let m = || "m".to_string();
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Pause { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('P')),
+            Some(Action::Resume { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('x')),
+            Some(Action::AskStop { task_id: Some(m()) })
+        );
+        // On the assistant, `x` is `stop --all`; a pause goes to `in_scope`,
+        // which refuses it as the CLI does.
+        press(&mut ui, KeyCode::Up);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('x')),
+            Some(Action::AskStop { task_id: None })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Pause {
+                task_id: "root".into()
+            })
+        );
+        // `p` and `P` are still PRs and projects in the active view.
+        press(&mut ui, KeyCode::BackTab);
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Prs { .. })
+        ));
+        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
+        // No tree, no node.
+        let mut bare = sample();
+        bare.user = true;
+        press(&mut bare, KeyCode::Tab);
+        assert_eq!(press(&mut bare, KeyCode::Char('x')), None);
+        assert_eq!(bare.status_line, NO_NODE);
+    }
+
+    #[test]
+    fn n_opens_a_form_under_the_assistant_or_a_manager_only() {
+        let mut ui = agents_sample();
+        assert_eq!(press(&mut ui, KeyCode::Char('n')), None);
+        assert_eq!(ui.status_line, NOT_USER);
+        ui.user = true;
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewChildForm {
+                parent_id: "root".into()
+            })
+        );
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewChildForm {
+                parent_id: "m".into()
+            })
+        );
+        // A worker is refused at the key, in `plan_child`'s words.
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(press(&mut ui, KeyCode::Char('n')), None);
+        assert_eq!(
+            ui.status_line,
+            "task w is not a manager: only the assistant and managers have tasks under them"
+        );
+        // `n` is still a top-level task in the active view.
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewTaskForm { project: None })
+        );
+    }
+
+    fn child_form() -> NewTaskForm {
+        form().under("m".into(), "manager m".into())
+    }
+
+    #[test]
+    fn a_form_under_a_node_shows_its_fields_by_kind() {
+        use Field::*;
+        let mut f = child_form();
+        assert_eq!(f.field, Kind);
+        assert_eq!(
+            f.fields(),
+            [Kind, Name, Goal, Done, Budget, Allow, Project, Repos, Branch]
+        );
+        f.toggle_kind();
+        assert_eq!(f.kind, TaskKind::Manager);
+        // `manager new` takes no worktrees.
+        assert_eq!(f.fields(), [Kind, Name, Goal, Done, Budget, Allow]);
+        f.field = Allow;
+        assert_eq!(f.step(1), Kind);
+        assert_eq!(form().fields(), [Name, Project, Repos, Branch]);
+    }
+
+    #[test]
+    fn the_form_under_a_node_is_filled_in_from_the_keyboard() {
+        let mut ui = agents_sample();
+        ui.panel = Some(Panel::NewTask(Box::new(child_form())));
+        press(&mut ui, KeyCode::Char(' ')); // a manager
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "sub");
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "ship v2");
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "it is out");
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "2h, 40turns");
+        press(&mut ui, KeyCode::Tab);
+        type_text(&mut ui, "task.create,task.open");
+        // A manager's fields wrap round: no project, repos or branch.
+        press(&mut ui, KeyCode::Tab);
+        match &ui.panel {
+            Some(Panel::NewTask(f)) => assert_eq!(f.field, Field::Kind),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::CreateChild(ChildSpec {
+                parent: "m".into(),
+                kind: TaskKind::Manager,
+                name: "sub".into(),
+                goal: Some("ship v2".into()),
+                done: Some("it is out".into()),
+                budget: vec![BudgetPart::Secs(7200), BudgetPart::Turns(40)],
+                allow: Some(vec!["task.create".into(), "task.open".into()]),
+                project: None,
+                repos: Vec::new(),
+                branch: None,
+            }))
+        );
+        // Left up while it is made, so a refusal can come back to it.
+        assert!(matches!(ui.panel, Some(Panel::NewTask(_))));
+    }
+
+    #[test]
+    fn a_bad_budget_or_capability_stays_on_the_form() {
+        for (field, text, why) in [
+            (Field::Budget, "2x", "budget: 2x: not a budget"),
+            (
+                Field::Allow,
+                "task.create,fly",
+                "allow: \"fly\" is not a capability",
+            ),
+        ] {
+            let mut ui = agents_sample();
+            let mut f = child_form();
+            f.field = field;
+            ui.panel = Some(Panel::NewTask(Box::new(f)));
+            type_text(&mut ui, text);
+            assert_eq!(press(&mut ui, KeyCode::Enter), None, "{text}");
+            match &ui.panel {
+                Some(Panel::NewTask(f)) => {
+                    let error = f.error.as_deref().unwrap_or_default();
+                    assert!(error.starts_with(why), "{error}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // Blank ones are the defaults; a worker keeps its worktrees.
+        let mut f = child_form();
+        f.repos.toggle();
+        let spec = f.child_spec().unwrap();
+        assert_eq!((&spec.goal, &spec.allow), (&None, &None));
+        assert!(spec.budget.is_empty());
+        assert_eq!(spec.repos, ["github.com/acme/api"]);
+        assert_eq!(spec.kind, TaskKind::Work);
+        assert_eq!(spec.delegation().parent.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn a_manager_ignores_the_fields_it_hides() {
+        let mut f = child_form();
+        f.branch = "feat".into();
+        f.toggle_kind();
+        let spec = f.child_spec().unwrap();
+        assert_eq!(spec.kind, TaskKind::Manager);
+        assert!(spec.repos.is_empty());
+    }
+
+    #[test]
+    fn a_stop_is_done_only_once_confirmed() {
+        let mut ui = agents_sample();
+        let confirm = |task_id: Option<&str>| {
+            Some(Panel::Confirm {
+                title: "stop".into(),
+                lines: Vec::new(),
+                action: Pending::Stop {
+                    task_id: task_id.map(str::to_string),
+                },
+            })
+        };
+        ui.panel = confirm(Some("m"));
+        assert_eq!(press(&mut ui, KeyCode::Char('f')), None);
+        assert!(ui.panel.is_some(), "no force: a stray key keeps asking");
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Stop {
+                task_id: Some("m".into())
+            })
+        );
+        ui.panel = confirm(None);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Stop { task_id: None })
+        );
+        ui.panel = confirm(Some("m"));
+        assert_eq!(press(&mut ui, KeyCode::Char('n')), None);
+        assert!(ui.panel.is_none());
+        assert_eq!(ui.status_line, "nothing changed");
+    }
+
+    #[test]
+    fn the_stop_warning_lists_what_runs_leaves_first() {
+        let running = ["w".to_string(), "api".to_string()];
+        let lines = stop_warning("manager api", &running, false);
+        assert_eq!(
+            lines,
+            [
+                "stopping manager api ends its agent and every agent below it, leaves first",
+                "and starts none of them again until it is resumed",
+                "",
+                "running now:",
+                "  w",
+                "  api",
+                "",
+                "only you can resume it",
+            ]
+        );
+        let all = stop_warning("every task under the assistant", &[], true);
+        assert_eq!(
+            all[0],
+            "stopping every task under the assistant ends each one's agent, leaves first"
+        );
+        assert!(all.contains(&"none of them is running now".to_string()));
+        assert_eq!(all.last().unwrap(), "only you can resume them");
     }
 
     #[test]
