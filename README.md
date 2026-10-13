@@ -789,9 +789,10 @@ jeet report escalate <id>      # pass one up
 ```
 
 A `question` or `blocked` report stays open until it is answered or the
-task reports again (jeet's own `status` reports do not close it). Its
-parent holds it, and either answers it or passes it to its own parent,
-which gets it fenced with `via="manager …"` and may be started by it. Only
+task reports done, blocked or another question (a `progress` report, or
+jeet's own `status` report, does not close it). Its parent holds it, and
+either answers it or passes it to its own parent, which gets it fenced
+with `via="manager …"` and may be started by it. Only
 the holder answers or passes it on. Once the assistant passes one up it is
 yours: jeet raises one desktop notification (`jeet: task w asks you
 (#42)`), even with `[assistant] notify = false`. You may answer any open
@@ -1246,10 +1247,10 @@ phases of [hierarchical agents](docs/design/agent-hierarchy.md).
   or manager under the assistant or a manager. These act as you, so they
   work only from your own terminal, not an agent's pane.
 - **Questions go up the tree and get answered**: a `question` or `blocked`
-  report stays open until it is answered or the task reports again. Its
-  parent holds it and either answers it, `jeet report answer <id> "…"`, or
-  passes it up, `jeet report escalate <id>`; `jeet report ls` lists the
-  ones you hold. One the assistant passes up is yours, with a desktop
+  report stays open until it is answered or the task reports done, blocked
+  or another question; `progress` does not close it. Its parent holds it
+  and either answers it, `jeet report answer <id> "…"`, or passes it up,
+  `jeet report escalate <id>`; `jeet report ls` lists the ones you hold. One the assistant passes up is yours, with a desktop
   notification. The task that asked gets the answer as `<jeet-answer>`,
   and each manager in between a copy ([Reporting to the
   parent](#reporting-to-the-parent)).
@@ -1270,9 +1271,10 @@ refuses, so keep such rules out of config.toml until every jeet you run is
 v0.10.
 
 - A task's last `question` or `blocked` report from before the upgrade, if
-  it has not reported since, is now an open question its parent holds.
-  `jeet report ls` at your terminal lists them; answer each, or leave it
-  until the task reports again.
+  it has not reported done, blocked or another question since, is now an
+  open question its parent holds. `jeet report ls` at your terminal lists
+  them; answer each, or leave it until the task reports done, blocked or
+  another question.
 - jeet never writes over a file in the assistant's or a manager's home, so
   they keep the `AGENTS.md` and skills they were first given, which do not
   know about `jeet report answer`, `escalate` and `ls`, `<jeet-answer>`, or

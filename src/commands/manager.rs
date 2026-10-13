@@ -479,8 +479,9 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             last_report,
         });
     }
-    // What it holds, however deep the asker: a status report jeet files
-    // while the asker waits for the answer does not close an ask.
+    // What it holds, however deep the asker: a progress report, or a status
+    // report jeet files while the asker waits for the answer, does not
+    // close an ask.
     let mut open = Vec::new();
     for r in app.db.open_asks(Some(&task.id))? {
         let Some(asker) = app.db.get_task(&r.task_id)? else {
@@ -1023,9 +1024,10 @@ mod tests {
     }
 
     /// A child that asked and then sat idle keeps its ask open, though
-    /// the status report jeet filed about it is now its latest.
+    /// the status report jeet filed about it is now its latest, and so does
+    /// one that reports progress since.
     #[test]
-    fn show_keeps_an_ask_open_after_jeet_files_a_status_report() {
+    fn show_keeps_an_ask_open_after_a_status_or_progress_report() {
         let (_dir, app, root) = lab();
         let api = add(&app, "api", TaskKind::Manager, &root, &[]);
         let w = add(&app, "w", TaskKind::Work, &api, &[]);
@@ -1044,9 +1046,15 @@ mod tests {
         assert_eq!(s.open.len(), 1);
         assert_eq!((s.open[0].id, s.open[0].kind), (ask, "blocked"));
 
-        // Once it says something else, the ask is no longer open.
+        // Progress is still waiting on it.
         app.db
-            .insert_report(&w.id, &api.id, ReportKind::Progress, "got them", 1100)
+            .insert_report(&w.id, &api.id, ReportKind::Progress, "still waiting", 1050)
+            .unwrap();
+        assert_eq!(shown(&app, &Caller::User, &api).unwrap().open[0].id, ask);
+
+        // Once it is done, the ask is no longer open.
+        app.db
+            .insert_report(&w.id, &api.id, ReportKind::Done, "got them", 1100)
             .unwrap();
         assert!(shown(&app, &Caller::User, &api).unwrap().open.is_empty());
 

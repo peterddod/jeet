@@ -71,8 +71,9 @@ prompt, sit idle, end, or near your budget.
 ## Questions from below
 
 A `question` or `blocked` report from a task below you is yours to deal
-with until it is answered or the task reports again. `jeet report ls`
-lists the ones you hold; your session summary does too.
+with until it is answered or the task reports done, blocked or another
+question (progress does not close it). `jeet report ls` lists the ones you
+hold; your session summary does too.
 
 - `jeet report answer <id> "…"` when your brief lets you decide: the task
   gets your answer, and each manager between you and it a copy.
