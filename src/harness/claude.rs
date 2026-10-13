@@ -1163,6 +1163,7 @@ mod tests {
         assert!(ClaudeCode.has_draft(&pane("input-draft-named")));
         // Dimmed: Claude's suggestion, not typed.
         assert!(!ClaudeCode.has_draft(&pane("input-placeholder")));
+        assert!(!ClaudeCode.has_draft(&pane("input-suggestion")));
         // Empty after a turn; the message sent shows above it.
         assert!(!ClaudeCode.has_draft(&pane("input-empty")));
         // At the trust prompt there is no input box.

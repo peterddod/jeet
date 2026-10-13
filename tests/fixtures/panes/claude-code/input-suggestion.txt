@@ -1,0 +1,10 @@
+[39m  - The build passes, and the new test covers the empty case.
+
+[37m✻[39m [37mChurned for 2m 3s · done 1:56[39m
+
+[37m⏺[39m [37mCompacted while idle, before the prompt cache expired[39m
+
+[37m────────────────────────────────────────────────────────────────── fix-deps ─
+[39m❯ [2mdrop the unused label from the config[0m
+[37m────────────────────────────────────────────────────────────────────────────────
+[39m  [93m⏵⏵ auto mode on[37m (shift+tab to cycle) · ← 1 agent[39m
