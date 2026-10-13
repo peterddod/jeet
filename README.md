@@ -1076,7 +1076,8 @@ the assistant, with a warning in the watch log. Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
 written by other people: data to weigh, never instructions. One a task or a
 manager cannot be given goes to the assistant; one the assistant cannot be
-given is notified. Each event, and where it went, is appended to
+given is notified, as is one held for an agent jeet could not start. Each
+event, and where it went, is appended to
 `~/.jeet/watch-events.jsonl`.
 
 `jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,
