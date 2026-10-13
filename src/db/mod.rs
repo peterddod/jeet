@@ -114,7 +114,7 @@ const MIGRATIONS: &[&str] = &[
     // (for the manager kind), the rebuild must copy `parent_id` and
     // `placement` (v5) and re-create `tasks_one_assistant` and
     // `tasks_parent`. `needs_user`, `answer` and `answered_by` are for
-    // questions escalated to the user, not read yet.
+    // questions escalated and answered (phase 4, no migration of its own).
     "
     ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT;
     CREATE INDEX tasks_parent ON tasks(parent_id);

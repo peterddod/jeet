@@ -50,7 +50,9 @@ use crate::manager::fence::fenced;
 use crate::manager::run::StartGuard;
 use crate::manager::{self, take_inbox, ChildLine, Role};
 
-pub use crate::manager::fence::{fence_brief, fence_message, fence_report};
+pub use crate::manager::fence::{
+    fence_answer, fence_brief, fence_escalated, fence_message, fence_report,
+};
 pub use crate::manager::{date, TODO};
 
 /// The assistant's task slug, which no other task may take.

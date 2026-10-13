@@ -269,6 +269,13 @@ pub struct TaskReportRecord {
     pub kind: ReportKind,
     pub body: String,
     pub at: i64,
+    /// An ask the assistant passed to the user; `to_id` stays the
+    /// assistant.
+    pub needs_user: bool,
+    /// The answer to an ask, once given.
+    pub answer: Option<String>,
+    /// Who answered: the answerer's task id, or `user`.
+    pub answered_by: Option<String>,
 }
 
 /// What a task's parent asked of it.
@@ -312,7 +319,12 @@ const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, la
 
 /// [`TASK_COLUMNS`], each qualified by `alias`, for a query that joins.
 fn prefixed_columns(alias: &str) -> String {
-    TASK_COLUMNS
+    prefixed(TASK_COLUMNS, alias)
+}
+
+/// `columns`, a list of them, each prefixed with `alias.`.
+fn prefixed(columns: &str, alias: &str) -> String {
+    columns
         .split(", ")
         .map(|c| format!("{alias}.{}", c.trim()))
         .collect::<Vec<_>>()
@@ -393,7 +405,15 @@ fn task_pr_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPrRecord> {
     })
 }
 
-const TASK_REPORT_COLUMNS: &str = "id, task_id, to_id, kind, body, at";
+const TASK_REPORT_COLUMNS: &str =
+    "id, task_id, to_id, kind, body, at, needs_user, answer, answered_by";
+
+/// When report `r` is an open ask: a question or blocked, unanswered, and
+/// the asker's last report other than a status report (jeet's own words
+/// while it waits do not close it; anything it says itself does). The one
+/// definition every reader of open asks goes through.
+const OPEN_ASK: &str = "r.kind IN ('question', 'blocked') AND r.answer IS NULL AND r.id = \
+     (SELECT MAX(o.id) FROM task_reports o WHERE o.task_id = r.task_id AND o.kind <> 'status')";
 
 fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportRecord> {
     Ok(TaskReportRecord {
@@ -403,7 +423,23 @@ fn task_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReportR
         kind: ReportKind::parse(&row.get::<_, String>(3)?)?,
         body: row.get(4)?,
         at: row.get(5)?,
+        needs_user: row.get(6)?,
+        answer: row.get(7)?,
+        answered_by: row.get(8)?,
     })
+}
+
+/// Report `id` once a guarded update `changed` rows: refused when it
+/// changed none, as the ask was no longer what the caller checked.
+fn changed_report_in(conn: &Connection, id: i64, changed: usize) -> Result<TaskReportRecord> {
+    if changed == 0 {
+        bail!("#{id} changed meanwhile; it is no longer yours to act on");
+    }
+    Ok(conn.query_row(
+        &format!("SELECT {TASK_REPORT_COLUMNS} FROM task_reports WHERE id = ?1"),
+        params![id],
+        task_report_from_row,
+    )?)
 }
 
 fn insert_task_in(conn: &Connection, task: &TaskRecord) -> Result<()> {
@@ -1060,6 +1096,83 @@ impl Database {
         ))?;
         let rows = stmt.query_map(params![id, limit], task_report_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn get_report(&self, id: i64) -> Result<Option<TaskReportRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!("SELECT {TASK_REPORT_COLUMNS} FROM task_reports WHERE id = ?1"),
+                params![id],
+                task_report_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The open asks ([`OPEN_ASK`]) held by `holder`, or every one with
+    /// None, oldest first.
+    pub fn open_asks(&self, holder: Option<&str>) -> Result<Vec<TaskReportRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM task_reports r
+             WHERE {OPEN_ASK} AND (?1 IS NULL OR r.to_id = ?1) ORDER BY r.id",
+            prefixed(TASK_REPORT_COLUMNS, "r")
+        ))?;
+        let rows = stmt.query_map(params![holder], task_report_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Pass ask `id`, held by `holder`, to `to`, or keep it at `holder`
+    /// (`to` is `holder`) marked for the user with `needs_user`. Refused
+    /// unless it is open, `holder` holds it and the user does not have it
+    /// already: checked and written in one write transaction, so of two
+    /// escalations, or an escalation and an answer, one wins. Returns the
+    /// row as written.
+    pub fn escalate_report(
+        &self,
+        id: i64,
+        holder: &str,
+        to: &str,
+        needs_user: bool,
+    ) -> Result<TaskReportRecord> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            &format!(
+                "UPDATE task_reports AS r SET to_id = ?2, needs_user = ?3
+                 WHERE r.id = ?1 AND r.to_id = ?4 AND r.needs_user = 0 AND {OPEN_ASK}"
+            ),
+            params![id, to, needs_user, holder],
+        )?;
+        let row = changed_report_in(&tx, id, changed)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Answer ask `id` with `answer`, by `by` (a task id, or `user`).
+    /// Refused unless it is open and, with `holder`, held by it and not
+    /// passed to the user; with None (the user), whoever holds it. Checked
+    /// and written in one write transaction. Returns the row as written.
+    pub fn answer_report(
+        &self,
+        id: i64,
+        holder: Option<&str>,
+        answer: &str,
+        by: &str,
+    ) -> Result<TaskReportRecord> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            &format!(
+                "UPDATE task_reports AS r SET answer = ?2, answered_by = ?3
+                 WHERE r.id = ?1 AND {OPEN_ASK}
+                   AND (?4 IS NULL OR (r.to_id = ?4 AND r.needs_user = 0))"
+            ),
+            params![id, answer, by, holder],
+        )?;
+        let row = changed_report_in(&tx, id, changed)?;
+        tx.commit()?;
+        Ok(row)
     }
 
     pub fn insert_brief(&self, brief: &TaskBriefRecord) -> Result<()> {
@@ -1968,6 +2081,9 @@ mod tests {
                 kind: ReportKind::Status,
                 body: "idle".into(),
                 at: 5,
+                needs_user: false,
+                answer: None,
+                answered_by: None,
             }
         );
         assert_eq!(db.last_status_report("c").unwrap().unwrap().id, third);
@@ -2004,6 +2120,137 @@ mod tests {
         // The parent sees everything sent to it.
         assert_eq!(db.reports_for("a", 50).unwrap().len(), 3);
         assert!(db.reports_for("nobody", 50).unwrap().is_empty());
+    }
+
+    /// The assistant `a`, manager `m` under it, and `c` under `m`.
+    fn ask_tree(db: &Database) {
+        let mut assistant = task("a", "assistant", 1);
+        assistant.kind = TaskKind::Assistant;
+        db.insert_task(&assistant).unwrap();
+        let mut manager = task("m", "m", 1);
+        manager.kind = TaskKind::Manager;
+        manager.parent_id = Some("a".into());
+        db.insert_task(&manager).unwrap();
+        let mut child = task("c", "child", 1);
+        child.parent_id = Some("m".into());
+        db.insert_task(&child).unwrap();
+    }
+
+    fn open_ids(db: &Database, holder: Option<&str>) -> Vec<i64> {
+        db.open_asks(holder)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    #[test]
+    fn an_ask_is_open_until_answered_or_the_asker_moves_on() {
+        let (_dir, db) = open();
+        ask_tree(&db);
+        let q = db
+            .insert_report("c", "m", ReportKind::Question, "v1?", 1)
+            .unwrap();
+        assert_eq!(open_ids(&db, None), [q]);
+        // jeet's own words while it waits do not close it.
+        db.insert_report("c", "m", ReportKind::Status, "waiting", 2)
+            .unwrap();
+        assert_eq!(open_ids(&db, None), [q]);
+        // Anything it says itself does.
+        db.insert_report("c", "m", ReportKind::Progress, "kept v1", 3)
+            .unwrap();
+        assert!(open_ids(&db, None).is_empty());
+
+        // Of two, only the second is open.
+        db.insert_report("c", "m", ReportKind::Question, "a?", 4)
+            .unwrap();
+        let b = db
+            .insert_report("c", "m", ReportKind::Blocked, "creds", 5)
+            .unwrap();
+        assert_eq!(open_ids(&db, None), [b]);
+        let mq = db
+            .insert_report("m", "a", ReportKind::Question, "budget?", 6)
+            .unwrap();
+        assert_eq!(open_ids(&db, None), [b, mq]);
+        // By holder.
+        assert_eq!(open_ids(&db, Some("m")), [b]);
+        assert_eq!(open_ids(&db, Some("a")), [mq]);
+        assert!(open_ids(&db, Some("c")).is_empty());
+
+        // An answer closes it.
+        let answered = db.answer_report(b, Some("m"), "use these", "m").unwrap();
+        assert_eq!(
+            (answered.answer.as_deref(), answered.answered_by.as_deref()),
+            (Some("use these"), Some("m"))
+        );
+        assert_eq!(open_ids(&db, None), [mq]);
+        assert_eq!(db.get_report(b).unwrap().unwrap(), answered);
+        assert_eq!(db.get_report(999).unwrap(), None);
+    }
+
+    #[test]
+    fn an_ask_is_escalated_once_and_only_by_its_holder() {
+        let (_dir, db) = open();
+        ask_tree(&db);
+        let q = db
+            .insert_report("c", "m", ReportKind::Question, "v1?", 1)
+            .unwrap();
+        // Not m's parent's to pass on.
+        assert!(db.escalate_report(q, "a", "a", true).is_err());
+        let row = db.escalate_report(q, "m", "a", false).unwrap();
+        assert_eq!((row.to_id.as_str(), row.needs_user), ("a", false));
+        // m holds it no longer.
+        let refused = db.escalate_report(q, "m", "a", false).unwrap_err();
+        assert!(
+            refused.to_string().contains("changed meanwhile"),
+            "{refused}"
+        );
+        // To the user: held by the assistant still.
+        let row = db.escalate_report(q, "a", "a", true).unwrap();
+        assert_eq!((row.to_id.as_str(), row.needs_user), ("a", true));
+        assert!(db.escalate_report(q, "a", "a", true).is_err());
+        assert_eq!(open_ids(&db, Some("a")), [q]);
+
+        // A superseded ask goes nowhere.
+        let q2 = db
+            .insert_report("c", "m", ReportKind::Question, "v2?", 2)
+            .unwrap();
+        db.insert_report("c", "m", ReportKind::Done, "shipped", 3)
+            .unwrap();
+        assert!(db.escalate_report(q2, "m", "a", false).is_err());
+        assert_eq!(db.get_report(q2).unwrap().unwrap().to_id, "m");
+    }
+
+    #[test]
+    fn an_ask_is_answered_once_by_its_holder_or_the_user() {
+        let (_dir, db) = open();
+        ask_tree(&db);
+        let q = db
+            .insert_report("c", "m", ReportKind::Question, "v1?", 1)
+            .unwrap();
+        // Not the assistant's while m holds it.
+        assert!(db.answer_report(q, Some("a"), "no", "a").is_err());
+        db.escalate_report(q, "m", "a", false).unwrap();
+        db.escalate_report(q, "a", "a", true).unwrap();
+        // With the user now: not the assistant's either.
+        assert!(db.answer_report(q, Some("a"), "no", "a").is_err());
+        // The user answers whoever holds it.
+        let row = db.answer_report(q, None, "drop it", "user").unwrap();
+        assert_eq!(row.answered_by.as_deref(), Some("user"));
+        let refused = db.answer_report(q, None, "again", "user").unwrap_err();
+        assert!(
+            refused.to_string().contains("changed meanwhile"),
+            "{refused}"
+        );
+        assert_eq!(
+            db.get_report(q).unwrap().unwrap().answer.as_deref(),
+            Some("drop it")
+        );
+        // Nor is anything but an ask answered.
+        let p = db
+            .insert_report("c", "m", ReportKind::Progress, "half", 2)
+            .unwrap();
+        assert!(db.answer_report(p, None, "ok", "user").is_err());
     }
 
     #[test]

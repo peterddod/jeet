@@ -309,6 +309,37 @@ pub fn caller(app: &App) -> Result<Caller> {
     Ok(classify(identity::identify(app)?.task.as_ref()))
 }
 
+/// Whether this jeet runs at the user's own terminal, the bar for acting as
+/// the user where a top-level task's agent, also [`Caller::User`], must
+/// not: it runs under no task, says it runs for none, and runs in no pane
+/// of jeet's tmux sessions, so an agent's window with its environment
+/// cleared does not pass. An identity error is an error, so it fails
+/// closed.
+#[allow(dead_code)] // `jeet report answer` and `ls` call it next.
+pub fn at_terminal(app: &App) -> Result<bool> {
+    let task = identity::identify(app)?.task;
+    let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
+    let under_jeet_pane = identity::runs_under_any(&crate::tmux::jeet_pane_pids());
+    Ok(at_terminal_of(
+        task.as_ref(),
+        env_task.as_deref(),
+        assistant_mode(),
+        under_jeet_pane,
+    ))
+}
+
+/// [`at_terminal`], given the task this jeet runs under, `$JEET_TASK_ID`,
+/// whether it says it runs for the assistant, and whether it runs in a pane
+/// of jeet's.
+fn at_terminal_of(
+    task: Option<&TaskRecord>,
+    env_task: Option<&str>,
+    assistant: bool,
+    under_jeet_pane: bool,
+) -> bool {
+    task.is_none() && env_task.is_none_or(|v| v.trim().is_empty()) && !assistant && !under_jeet_pane
+}
+
 /// The capabilities `[assistant] allow` lists that jeet knows: the root's
 /// list, which every list below it is cut by.
 fn root_list(app: &App) -> Vec<&'static str> {
@@ -1920,6 +1951,18 @@ mod tests {
         assert_eq!(classify(Some(&root)), Caller::Root);
         assert_eq!(classify(Some(&task(None))), Caller::User);
         assert_eq!(classify(None), Caller::User);
+    }
+
+    #[test]
+    fn only_a_terminal_under_no_task_and_no_jeet_pane_is_the_users() {
+        assert!(at_terminal_of(None, None, false, false));
+        assert!(at_terminal_of(None, Some(" "), false, false));
+        // A top-level task's agent is the user to the gate, but not here.
+        assert!(!at_terminal_of(Some(&task(None)), None, false, false));
+        assert!(!at_terminal_of(None, Some("t"), false, false));
+        assert!(!at_terminal_of(None, None, true, false));
+        // An agent's own window with its environment cleared.
+        assert!(!at_terminal_of(None, None, false, true));
     }
 
     /// An index in a tempdir with the assistant, `w` and `sib` under it, and
