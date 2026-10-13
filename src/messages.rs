@@ -98,13 +98,6 @@ pub fn peek(task_dir: &Path) -> Vec<Queued> {
 
 /// [`peek`], without waiting on the lock a hook or a delivery holds:
 /// `None` while it is held, or when the inbox cannot be read.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the agents pane's tree thread counts inboxes with it"
-    )
-)]
 pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
     if !inbox_path(task_dir).exists() {
         return Some(Vec::new());

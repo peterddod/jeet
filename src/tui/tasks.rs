@@ -25,7 +25,7 @@
 //! touching the terminal, the index or git, so the whole key map is unit
 //! tested; [`run`] carries the actions out.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -40,13 +40,14 @@ use ratatui::widgets::ListState;
 
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
+use super::managers::{self, TreeInfo, Urgency};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
 use crate::agent::{self, AgentSpec};
 use crate::assistant::{self, Open};
 use crate::commands::task::printable;
-use crate::config;
+use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::tasks::{
     TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
@@ -174,6 +175,12 @@ pub enum Update {
     Prs(pr_history::Found),
     /// The assistant, as its files have it now.
     Assistant(Box<AssistantInfo>),
+    /// The tree, as the index has it now, for the gather asked for as
+    /// `seq`; why it could not be read, if it could not.
+    Tree {
+        seq: u64,
+        info: Result<Box<TreeInfo>, String>,
+    },
 }
 
 /// A list to choose from, narrowed by typing — one repository for a new
@@ -737,6 +744,17 @@ pub struct TasksUi {
     pub assistant: Option<AssistantInfo>,
     /// `o`: tasks the todo list links first, by its priorities.
     pub by_priority: bool,
+    /// The assistant's own row, the tree's root, once it has one.
+    pub assistant_row: Option<TaskRow>,
+    /// The tree thread's latest read of the index.
+    pub tree_info: Option<TreeInfo>,
+    /// The latest gather asked of the tree thread: older answers are
+    /// dropped, so one begun before an action never shows what it undid.
+    pub tree_seq: u64,
+    /// The last gather failed, and the status line said so.
+    pub tree_failed: bool,
+    /// What each tree node shows, by task id ([`managers::rollup`]).
+    pub shown: HashMap<String, (Urgency, u32)>,
 }
 
 impl Default for TasksUi {
@@ -763,6 +781,11 @@ impl TasksUi {
             links: Vec::new(),
             assistant: None,
             by_priority: false,
+            assistant_row: None,
+            tree_info: None,
+            tree_seq: 0,
+            tree_failed: false,
+            shown: HashMap::new(),
         };
         ui.set_rows(rows);
         ui
@@ -792,6 +815,19 @@ impl TasksUi {
             })
             .collect();
         self.resort(keep.as_deref());
+        self.retree();
+    }
+
+    /// Roll the tree's urgencies up again from what the threads last
+    /// found: pure, so the draw reads no index and no tmux.
+    pub fn retree(&mut self) {
+        self.shown = match &self.assistant_row {
+            Some(root) => {
+                let sessions = self.assistant.as_ref().map_or(&[][..], |a| &a.sessions[..]);
+                managers::retree(root, &self.rows, sessions, self.tree_info.as_ref())
+            }
+            None => HashMap::new(),
+        };
     }
 
     fn resort(&mut self, keep: Option<&str>) {
@@ -883,11 +919,15 @@ impl TasksUi {
                 let Some(row) = self.rows.iter_mut().find(|r| r.task.id == id) else {
                     return;
                 };
+                let changed = row.activity != activity;
                 row.activity = activity;
                 row.unanchored = unanchored;
                 if last_activity > row.last_activity {
                     row.last_activity = last_activity;
                     self.resort(keep.as_deref());
+                }
+                if changed {
+                    self.retree();
                 }
             }
             Update::Size { id, bytes } => {
@@ -916,6 +956,21 @@ impl TasksUi {
                 self.assistant = Some(*info);
                 if todo_changed && self.by_priority {
                     self.resort(keep.as_deref());
+                }
+                self.retree();
+            }
+            Update::Tree { seq, .. } if seq < self.tree_seq => {}
+            Update::Tree { info: Ok(info), .. } => {
+                self.tree_info = Some(*info);
+                self.tree_failed = false;
+                self.retree();
+            }
+            // The last read stands; said once, not every two seconds (an
+            // index a hook is writing can fail a read).
+            Update::Tree { info: Err(e), .. } => {
+                if !self.tree_failed {
+                    self.tree_failed = true;
+                    self.set_status(format!("could not read the tree: {e}"));
                 }
             }
         }
@@ -1948,29 +2003,51 @@ struct Background {
     sizes: Sender<Vec<(String, PathBuf)>>,
     prs: Sender<Vec<pr_history::Job>>,
     assistant: Sender<assistant_info::Probe>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the agents view starts and stops it")
+    )]
+    tree: Sender<TreeAsk>,
     updates: Receiver<Update>,
 }
 
+/// What the tree thread is told: gather now and every [`POLL_EVERY`],
+/// answering as `seq`, or stop until told again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agents view starts and stops it")
+)]
+enum TreeAsk {
+    Run(u64),
+    Stop,
+}
+
 impl Background {
-    fn start(home: &Path) -> Self {
+    fn start(home: &Path, config: &Config) -> Self {
         let (tx, updates) = mpsc::channel();
         let (probes, probe_rx) = mpsc::channel();
         let (sizes, size_rx) = mpsc::channel();
         let (prs, pr_rx) = mpsc::channel();
         let (assistant, assistant_rx) = mpsc::channel();
+        let (tree, tree_rx) = mpsc::channel();
         let status_tx = tx.clone();
         let size_tx = tx.clone();
         let assistant_tx = tx.clone();
+        let tree_tx = tx.clone();
         let (status_home, assistant_home) = (home.to_path_buf(), home.to_path_buf());
+        let (tree_home, tree_config) = (home.to_path_buf(), config.clone());
         std::thread::spawn(move || poll_statuses(probe_rx, status_tx, &status_home));
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
         std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx, &assistant_home));
+        std::thread::spawn(move || poll_tree(tree_rx, tree_tx, tree_home, tree_config));
         std::thread::spawn(move || find_prs(pr_rx, tx));
         Background {
             probes,
             sizes,
             prs,
             assistant,
+            tree,
             updates,
         }
     }
@@ -2093,6 +2170,53 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>, h
     }
 }
 
+/// Read the tree from the index on each [`TreeAsk::Run`] and every
+/// [`POLL_EVERY`] after, until told to stop: only while the agents view is
+/// shown. Its own connection, opened as the other threads open theirs; a
+/// home with no index yet is looked at again on the next ask.
+fn poll_tree(asks: Receiver<TreeAsk>, tx: Sender<Update>, home: PathBuf, config: Config) {
+    let tmux_ok = tmux::available();
+    let mut app: Option<App> = None;
+    let mut running: Option<u64> = None;
+    loop {
+        let ask = match running {
+            Some(_) => asks.recv_timeout(POLL_EVERY),
+            None => asks.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match ask {
+            Ok(ask) => {
+                // Only the latest of several asks counts.
+                let ask = asks.try_iter().last().unwrap_or(ask);
+                running = match ask {
+                    TreeAsk::Run(seq) => Some(seq),
+                    TreeAsk::Stop => None,
+                };
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        let Some(seq) = running else {
+            continue;
+        };
+        if app.is_none() {
+            app = open_index(&home).map(|db| App {
+                home: home.clone(),
+                config: config.clone(),
+                db,
+            });
+        }
+        let Some(app) = &app else {
+            continue;
+        };
+        let info = managers::gather(app, tmux_ok)
+            .map(Box::new)
+            .map_err(|e| format!("{e:#}"));
+        if tx.send(Update::Tree { seq, info }).is_err() {
+            return;
+        }
+    }
+}
+
 /// Walk every task's directory for its size, again every [`RESIZE_EVERY`];
 /// a new list of tasks starts the walk over.
 fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Sender<Update>) {
@@ -2197,7 +2321,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         app,
         terminal: &mut terminal,
         ui: TasksUi::default(),
-        bg: Background::start(&app.home),
+        bg: Background::start(&app.home, &app.config),
     };
     let result = screen.go(start);
     let exit = screen.ui.exit.take();
@@ -2339,14 +2463,14 @@ impl Screen<'_> {
                         Err(e) => Some(format!("could not start what waits on max_live: {e:#}")),
                     };
                     warning = warning.or(drained);
-                    load_rows(app).map(|rows| (rows, warning))
+                    load_rows(app).map(|loaded| (loaded, warning))
                 })
                 .and_then(|inner| inner),
-            false => load_rows(app).map(|rows| (rows, None)),
+            false => load_rows(app).map(|loaded| (loaded, None)),
         };
         match loaded {
-            Ok((rows, warning)) => {
-                let changed = self.set_rows(rows);
+            Ok((loaded, warning)) => {
+                let changed = self.set_rows(loaded);
                 // Sizes are walked again only when there are new tasks to
                 // measure: a walk restarted on every action never finishes
                 // a big task.
@@ -2383,8 +2507,7 @@ impl Screen<'_> {
     /// Read the tasks again, quietly: the background threads hear of it
     /// only when tasks came, went or changed state.
     fn reread(&mut self) -> Result<()> {
-        let rows = load_rows(self.app)?;
-        if self.set_rows(rows) {
+        if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows);
         }
         // New sessions are recorded in the index as they start.
@@ -2394,7 +2517,7 @@ impl Screen<'_> {
 
     /// Replace the rows, saying whether the tasks themselves changed rather
     /// than only what is known about them.
-    fn set_rows(&mut self, rows: Vec<TaskRow>) -> bool {
+    fn set_rows(&mut self, (rows, root): (Vec<TaskRow>, Option<TaskRow>)) -> bool {
         let tasks = |rows: &[TaskRow]| {
             let mut ids: Vec<(String, TaskState)> = rows
                 .iter()
@@ -2404,6 +2527,7 @@ impl Screen<'_> {
             ids
         };
         let before = tasks(&self.ui.rows);
+        self.ui.assistant_row = root;
         self.ui.set_rows(rows);
         tasks(&self.ui.rows) != before
     }
@@ -3411,27 +3535,38 @@ impl Screen<'_> {
 }
 
 /// Every task in the index, as rows not yet polled or measured.
-fn load_rows(app: &App) -> Result<Vec<TaskRow>> {
-    app.db
+/// Every task's row, and the assistant's, the tree's root, if it has one
+/// yet: this never makes it.
+fn load_rows(app: &App) -> Result<(Vec<TaskRow>, Option<TaskRow>)> {
+    let rows = app
+        .db
         .list_tasks(None)?
         .into_iter()
-        .map(|task| {
-            Ok(TaskRow {
-                dir: tasks::task_dir(app, &task),
-                worktrees: app.db.list_task_worktrees(&task.id)?,
-                activity: None,
-                last_activity: task.last_activity,
-                size: None,
-                unanchored: false,
-                report: match task.parent_id {
-                    Some(_) => app.db.last_report(&task.id)?,
-                    None => None,
-                },
-                review_jobs: crate::review::state_files_of_task(app, &task),
-                task,
-            })
-        })
-        .collect()
+        .map(|task| task_row(app, task))
+        .collect::<Result<_>>()?;
+    let root = app
+        .db
+        .get_assistant_task()?
+        .map(|task| task_row(app, task))
+        .transpose()?;
+    Ok((rows, root))
+}
+
+fn task_row(app: &App, task: TaskRecord) -> Result<TaskRow> {
+    Ok(TaskRow {
+        dir: tasks::task_dir(app, &task),
+        worktrees: app.db.list_task_worktrees(&task.id)?,
+        activity: None,
+        last_activity: task.last_activity,
+        size: None,
+        unanchored: false,
+        report: match task.parent_id {
+            Some(_) => app.db.last_report(&task.id)?,
+            None => None,
+        },
+        review_jobs: crate::review::state_files_of_task(app, &task),
+        task,
+    })
 }
 
 /// Which of a task's PRs `v` shows.
@@ -4370,7 +4505,7 @@ mod tests {
     fn the_background_threads_answer_and_stop_with_the_screen() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f"), [1u8; 9]).unwrap();
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
         let mut row = task("t", "t", TaskState::Archived, 3);
         row.dir = dir.path().to_path_buf();
         bg.watch(&[row]);
@@ -4386,6 +4521,136 @@ mod tests {
             .iter()
             .any(|u| matches!(u, Update::Status { id, .. } if id == "t")));
         drop(bg);
+    }
+
+    #[test]
+    fn the_tree_thread_gathers_when_told_and_stops_with_the_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let config = config::load_or_create(&home).unwrap();
+        Database::open(&config::index_path(&home)).unwrap();
+        let bg = Background::start(&home, &config);
+        bg.tree.send(TreeAsk::Run(7)).unwrap();
+        let seq = loop {
+            match bg.updates.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Update::Tree { seq, info } => {
+                    let info = info.unwrap();
+                    // No assistant, and none made.
+                    assert!(info.nodes.is_empty());
+                    break seq;
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(seq, 7);
+        bg.tree.send(TreeAsk::Stop).unwrap();
+        drop(bg);
+    }
+
+    /// The assistant, with `w` waiting on a prompt under manager `m`.
+    fn tree_sample() -> TasksUi {
+        let mut ui = sample();
+        let mut root = task("root", "assistant", TaskState::Active, 0);
+        root.task.kind = TaskKind::Assistant;
+        let mut m = task("m", "m", TaskState::Active, 0);
+        m.task.kind = TaskKind::Manager;
+        m.task.parent_id = Some("root".into());
+        let mut w = task("w", "w", TaskState::Active, 0);
+        w.task.parent_id = Some("m".into());
+        let mut rows = ui.rows.clone();
+        rows.extend([m, w]);
+        ui.assistant_row = Some(root);
+        ui.set_rows(rows);
+        ui
+    }
+
+    #[test]
+    fn the_tree_rolls_up_as_statuses_and_tree_reads_arrive() {
+        let mut ui = tree_sample();
+        assert_eq!(ui.shown["m"], (Urgency::Idle, 0));
+        ui.apply(Update::Status {
+            id: "w".into(),
+            activity: Some(Activity::Waiting { detail: None }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        assert_eq!(ui.shown["m"], (Urgency::NeedsYou, 1));
+        assert_eq!(ui.shown["root"], (Urgency::NeedsYou, 1));
+
+        let mut info = TreeInfo::default();
+        info.nodes.insert(
+            "m".into(),
+            managers::NodeInfo {
+                run: crate::db::tasks::RunState::Run,
+                held: 0,
+                setter: None,
+                budget: None,
+                inbox: None,
+                pr: None,
+                queued: false,
+                ask: Some((1, crate::db::tasks::ReportKind::Question)),
+                done: false,
+                children: 1,
+            },
+        );
+        ui.tree_seq = 3;
+        // A gather asked for before the latest is dropped.
+        ui.apply(Update::Tree {
+            seq: 2,
+            info: Ok(Box::new(info.clone())),
+        });
+        assert_eq!(ui.tree_info, None);
+        ui.apply(Update::Tree {
+            seq: 3,
+            info: Ok(Box::new(info.clone())),
+        });
+        assert_eq!(ui.tree_info.as_ref(), Some(&info));
+        // Its own ask, under the prompt below it.
+        assert_eq!(ui.shown["m"], (Urgency::NeedsYou, 1));
+        ui.apply(Update::Status {
+            id: "w".into(),
+            activity: Some(Activity::Idle { since: 0 }),
+            last_activity: 0,
+            unanchored: false,
+        });
+        assert_eq!(ui.shown["m"], (Urgency::Blocked, 0));
+        assert_eq!(ui.shown["root"], (Urgency::Blocked, 1));
+    }
+
+    #[test]
+    fn a_failed_tree_read_keeps_the_last_and_is_said_once() {
+        let mut ui = tree_sample();
+        let info = TreeInfo {
+            queued: 2,
+            ..TreeInfo::default()
+        };
+        ui.apply(Update::Tree {
+            seq: 0,
+            info: Ok(Box::new(info.clone())),
+        });
+        let failed = || Update::Tree {
+            seq: 0,
+            info: Err("database is locked".into()),
+        };
+        ui.apply(failed());
+        assert_eq!(
+            ui.status_line,
+            "could not read the tree: database is locked"
+        );
+        ui.set_status("something else");
+        ui.apply(failed());
+        assert_eq!(ui.status_line, "something else");
+        assert_eq!(ui.tree_info.as_ref(), Some(&info));
+        // Said again after a read that worked.
+        ui.apply(Update::Tree {
+            seq: 0,
+            info: Ok(Box::new(info)),
+        });
+        ui.apply(failed());
+        assert_eq!(
+            ui.status_line,
+            "could not read the tree: database is locked"
+        );
     }
 
     fn pr(number: u64) -> TaskPrRecord {
@@ -4490,7 +4755,7 @@ mod tests {
 
     #[test]
     fn the_pr_thread_answers_for_each_task() {
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
         bg.find_prs(vec![pr_history::Job {
             task_id: "t".into(),
             sources: Vec::new(),
@@ -4771,7 +5036,7 @@ mod tests {
         let dir = home.path().join("assistant");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("todo.md"), "- [ ] !p1 one\n").unwrap();
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"));
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
         bg.look_at_assistant(assistant_info::Probe {
             home: home.path().to_path_buf(),
             dir,
