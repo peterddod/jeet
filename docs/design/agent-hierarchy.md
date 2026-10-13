@@ -1802,13 +1802,14 @@ same *Q* number. It lands in two PRs: the read-only pane (this part), then
 the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
 
 - **A1** Two stacked PRs, for review size alone: neither widens what an
-  agent can do. Until the second lands, `p`, `P`, `x` and `n` in the agents
-  view give A22's status line, as the other keys it does not take do.
+  agent can do. Until the second lands, `n` in the agents view gives A22's
+  status line, as the other keys it does not take do.
 - **A2** The pane acts as the user. `tui::tasks::run` asks
   `permissions::caller` once, and the agents view's keys that show an
   agent's text (`l`, `i`, `b`) work only for `Caller::User`; an identity
-  error counts as not the user. Anything else gets "the agents pane acts as
-  you; open jeet from your own terminal, not from an agent's pane". The
+  error counts as not the user. So do the actions (`p`, `P`, `x`), which
+  pass `Caller::User` to the library. Anything else gets "the agents pane
+  acts as you; open jeet from your own terminal, not from an agent's pane". The
   tree, `⏎` and moving about stay open, as the active view is. Known gap,
   left as it is: the other views' `a` and `D` still run with no caller.
 - **A3** A third view between *active* and *archived*: `⇥` cycles active →
@@ -1885,15 +1886,38 @@ the actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   and `shown_text`) as the user, unfenced, with the node's own open ask
   after it. On the assistant too: it is a read for the user, so
   `manager show`'s scope, which refuses the assistant, is not asked.
+- **A15** `p` and `P` pause and resume the node's subtree as `jeet manager
+  pause` and `resume` do: `permissions::in_scope` as the user (the CLI's
+  `scoped`, since `run::*` checks no scope), then `run::pause` or
+  `run::resume` (which asks `check_resume`), on the node as the index has it
+  then, under the spinner. Neither asks first: both can be undone. Each
+  node's outcome goes to a message titled `paused manager api` (or `kept …
+  stopped`, `resumed …`), after the CLI's own summary
+  (`commands::manager::outcome_summary`). On the assistant, `in_scope`'s
+  refusal is shown.
+- **A16** `x` asks first. The confirm lists the nodes that run, leaves
+  first, from the tree's last live set (before the first gather, the status
+  poller's), and says only the user resumes them; `y` runs `in_scope` and
+  `run::stop`, `n` changes nothing. There is no force. On the assistant,
+  `x` is `stop --all` (`run::stop` with no task, the user's alone, P8),
+  listing every active task under it.
 - **A18** `a` in the agents view says "answering comes with #36; i shows the
   open question and ⏎ attaches to the asker"; it does not archive there.
 - **A19** Nothing about wake: no cell, field or read of watcher state.
+- **A20** No capture of stderr. The actions return what they did as data
+  (`NodeOutcome` lines and `drain`'s warnings), shown in the message; after
+  each the screen is blanked and painted whole (`term::blank`), so a line
+  a deep error path wrote (a budget charge or a report that failed) cannot
+  stay on screen. Its text is lost to the TUI: a known gap, shared with the
+  other views, whose `r` and `⏎` reach the same paths. After each action the
+  rows are read again and the tree thread asked for a new gather, whose
+  sequence number drops any older answer.
 - **A21** `?` and the hints follow the view (`HELP_AGENTS`,
   `HINTS_AGENTS`).
 - **A22** The agents view's keys are its own: moving, `/`, `?`, `r`, `q`,
-  `⇥`, `c`, `C` and `t` as everywhere; `⏎`, `→`, `←`, `l`, `i`, `b` and `a`
-  as above; `e`, `w`, `v`, `o`, `D` and `S` (and, until the actions land,
-  `p`, `P`, `x` and `n`) say "not in the agents view; ⇥ to active".
+  `⇥`, `c`, `C` and `t` as everywhere; `⏎`, `→`, `←`, `l`, `i`, `b`, `p`,
+  `P`, `x` and `a` as above; `e`, `w`, `v`, `o`, `D` and `S` (and, until
+  it lands, `n`) say "not in the agents view; ⇥ to active".
 
 ## 11. Placement
 

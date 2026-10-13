@@ -56,7 +56,7 @@ pub fn init_terminal() -> Result<Tui> {
 /// Not `Terminal::clear`: since ratatui 0.30 that first asks the terminal
 /// where its cursor is and waits for an answer some terminals never give.
 /// The alternate screen has no cursor position worth keeping.
-fn blank(terminal: &mut Tui) -> io::Result<()> {
+pub(crate) fn blank(terminal: &mut Tui) -> io::Result<()> {
     execute!(terminal.backend_mut(), Clear(ClearType::All))?;
     // Each swap resets the buffer it leaves, so two reset both.
     terminal.swap_buffers();

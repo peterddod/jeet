@@ -24,9 +24,11 @@
 //! `⇥` cycles active → agents → archived. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
-//! `→`/`←` open and close managers, and `l`, `i` and `b` read a node's
-//! worklog, inbox and reports, and brief. Its index facts come from a tree
-//! thread of its own, running only while the view is shown.
+//! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
+//! worklog, inbox and reports, and brief, and `p`, `P` and `x` pause,
+//! resume and stop its subtree, through the CLI's own checks, as the user.
+//! Its index facts come from a tree thread of its own, running only while
+//! the view is shown.
 //!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
@@ -38,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -58,14 +60,14 @@ use crate::commands::{self, task::printable, task::printable_text};
 use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::tasks::{
-    TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
+    RunState, TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
 };
 use crate::db::Database;
 use crate::git;
 use crate::github;
 use crate::manager::{self, run};
 use crate::messages;
-use crate::permissions::{self, Caller};
+use crate::permissions::{self, Caller, Verb};
 use crate::pr_history;
 use crate::projects;
 use crate::runtime::{self, Admission};
@@ -543,6 +545,11 @@ pub enum Pending {
     ForceResync {
         task_id: String,
     },
+    /// `x` in the agents view: a node and its subtree, or with `None` every
+    /// task under the assistant (Q16).
+    Stop {
+        task_id: Option<String>,
+    },
 }
 
 /// An overlay over the list, which takes the keyboard while it is up.
@@ -768,6 +775,23 @@ pub enum Action {
     /// `b` in the agents view: the node's brief, grant, lists and budget.
     Brief {
         task_id: String,
+    },
+    /// `p` in the agents view: pause the node and its subtree.
+    Pause {
+        task_id: String,
+    },
+    /// `P` in the agents view: let the node run again.
+    Resume {
+        task_id: String,
+    },
+    /// `x` in the agents view: ask before stopping the node and its
+    /// subtree, or with `None`, on the assistant, every task under it.
+    AskStop {
+        task_id: Option<String>,
+    },
+    /// The stop, once confirmed.
+    Stop {
+        task_id: Option<String>,
     },
 }
 
@@ -1467,11 +1491,31 @@ impl TasksUi {
                     _ => Action::Brief { task_id },
                 }),
             },
+            // The assistant is refused a pause by `in_scope`, as the CLI
+            // refuses it; `x` on it is `stop --all`, the user's alone (P8).
+            KeyCode::Char(c @ ('p' | 'P' | 'x')) => match (self.user, line.map(|l| l.at), id) {
+                (false, _, _) => {
+                    self.set_status(NOT_USER);
+                    None
+                }
+                (true, Some(At::Root), _) if c == 'x' => Some(Action::AskStop { task_id: None }),
+                (true, _, Some(task_id)) => Some(match c {
+                    'p' => Action::Pause { task_id },
+                    'P' => Action::Resume { task_id },
+                    _ => Action::AskStop {
+                        task_id: Some(task_id),
+                    },
+                }),
+                (true, _, None) => {
+                    self.set_status(NO_NODE);
+                    None
+                }
+            },
             KeyCode::Char('a') => {
                 self.set_status(ANSWER_LATER);
                 None
             }
-            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S' | 'p' | 'P' | 'x' | 'n') => {
+            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S' | 'n') => {
                 self.set_status(NOT_IN_AGENTS);
                 None
             }
@@ -1549,6 +1593,9 @@ impl TasksUi {
                     (Pending::ForceResync { task_id }, _, true, _) => Some(Action::Resync {
                         task_id: task_id.clone(),
                         force: true,
+                    }),
+                    (Pending::Stop { task_id }, true, _, _) => Some(Action::Stop {
+                        task_id: task_id.clone(),
                     }),
                     (_, _, _, true) => {
                         self.set_status("nothing changed");
@@ -2193,6 +2240,36 @@ fn subtree_archive_warning(name: &str, unkept: &[(String, Vec<String>)]) -> Vec<
             }
         }
     }
+    lines
+}
+
+/// What the confirm to stop `name` and everything below it says, or with
+/// `all` every task under the assistant: which of them run, leaves first,
+/// as the tree last saw them, and that only the user starts them again.
+pub(super) fn stop_warning(name: &str, running: &[String], all: bool) -> Vec<String> {
+    let mut lines = vec![
+        match all {
+            true => "stopping every task under the assistant ends each one's agent, leaves first"
+                .to_string(),
+            false => {
+                format!("stopping {name} ends its agent and every agent below it, leaves first")
+            }
+        },
+        "and starts none of them again until it is resumed".into(),
+        String::new(),
+    ];
+    match running.is_empty() {
+        true => lines.push("none of them is running now".into()),
+        false => {
+            lines.push("running now:".into());
+            lines.extend(running.iter().map(|node| format!("  {node}")));
+        }
+    }
+    lines.push(String::new());
+    lines.push(match all {
+        true => "only you can resume them".into(),
+        false => "only you can resume it".into(),
+    });
     lines
 }
 
@@ -3359,8 +3436,142 @@ impl Screen<'_> {
                 let label = manager::label(&row.task);
                 self.ui.panel = Some(text_panel(&label, "brief", lines, None));
             }
+            Action::Pause { task_id } => self.run_verb(Verb::ManagerPause, Some(&task_id)),
+            Action::Resume { task_id } => self.run_verb(Verb::ManagerResume, Some(&task_id)),
+            Action::AskStop { task_id } => self.ask_stop(task_id)?,
+            Action::Stop { task_id } => self.run_verb(Verb::ManagerStop, task_id.as_deref()),
         }
         Ok(())
+    }
+
+    /// `x` in the agents view: ask before stopping task `task_id` and its
+    /// subtree, or with `None` every task under the assistant, listing
+    /// which of them run as the tree last saw them; the stop itself asks
+    /// tmux (Q16).
+    fn ask_stop(&mut self, task_id: Option<String>) -> Result<()> {
+        let app = self.app;
+        let (name, targets) = match &task_id {
+            Some(id) => {
+                let Some(task) = app.db.get_task(id)? else {
+                    return Ok(());
+                };
+                (manager::label(&task), vec![task])
+            }
+            None => {
+                let Some(root) = &self.ui.assistant_row else {
+                    self.ui.set_status(NO_NODE);
+                    return Ok(());
+                };
+                let children = app
+                    .db
+                    .children(&root.task.id)?
+                    .into_iter()
+                    .filter(|c| c.state == TaskState::Active)
+                    .collect();
+                ("every task under the assistant".to_string(), children)
+            }
+        };
+        let mut running = Vec::new();
+        for target in &targets {
+            for node in tasks::subtree_leaves_first(app, target)? {
+                // Before the first gather, as the status poller saw it.
+                let live = match &self.ui.tree_info {
+                    Some(info) => info.live.contains(&node.id),
+                    None => self.ui.node(&node.id).is_some_and(TaskRow::agent_running),
+                };
+                if live {
+                    running.push(printable(&node.slug));
+                }
+            }
+        }
+        self.ui.panel = Some(Panel::Confirm {
+            title: format!("stop {name}"),
+            lines: stop_warning(&name, &running, task_id.is_none()),
+            action: Pending::Stop { task_id },
+        });
+        Ok(())
+    }
+
+    /// `p`, `P` and `x` in the agents view: `verb` on task `task_id` and its
+    /// subtree, or with `None` `stop --all`, as `jeet manager pause`,
+    /// `resume` and `stop` do it: `in_scope`, then [`run`], as the user
+    /// (Q15). What came of each node is shown; then the screen is painted
+    /// afresh and the tree gathered anew, so nothing older shows after it.
+    fn run_verb(&mut self, verb: Verb, task_id: Option<&str>) {
+        let app = self.app;
+        let user = Caller::User;
+        let name = match task_id {
+            Some(id) => self
+                .ui
+                .node(id)
+                .map_or_else(|| format!("task {id}"), |row| manager::label(&row.task)),
+            None => "every task under the assistant".to_string(),
+        };
+        let (doing, done) = match verb {
+            Verb::ManagerPause => ("pausing", "paused"),
+            Verb::ManagerResume => ("resuming", "resumed"),
+            _ => ("stopping", "stopped"),
+        };
+        let walked = self
+            .progress(&format!("{doing} {name}"), || -> Result<_> {
+                // As the index has it now, as the CLI reads it: a resume
+                // undoes only what it checked.
+                let task = match task_id {
+                    Some(id) => match app.db.get_task(id)? {
+                        Some(task) => Some(task),
+                        None => bail!("task {id} is gone"),
+                    },
+                    None => None,
+                };
+                if let Some(task) = &task {
+                    permissions::in_scope(app, &user, verb, task)?;
+                }
+                let outcomes = match (verb, &task) {
+                    (Verb::ManagerPause, Some(task)) => run::pause(app, &user, task)?,
+                    (Verb::ManagerResume, Some(task)) => run::resume(app, &user, task)?,
+                    (Verb::ManagerStop, task) => run::stop(app, &user, task.as_ref())?,
+                    _ => bail!("`jeet {}` needs a task", verb.name()),
+                };
+                let after = match &task {
+                    Some(task) => app.db.get_task(&task.id)?.map(|t| t.run_state),
+                    None => None,
+                };
+                Ok((task, outcomes, after))
+            })
+            .and_then(|inner| inner);
+        self.refresh(false);
+        self.read_tree();
+        // A deep error path may have written to the terminal (Q20).
+        if let Err(e) = term::blank(self.terminal) {
+            self.ui.set_status(format!("could not repaint: {e}"));
+        }
+        match walked {
+            Ok((task, outcomes, after)) => {
+                let title = match after {
+                    Some(RunState::Stopped) if verb == Verb::ManagerPause => {
+                        format!("kept {name} stopped")
+                    }
+                    _ => format!("{done} {name}"),
+                };
+                // The CLI's own summary first; `resume` has none.
+                let mut lines = match commands::manager::outcome_summary(verb, task.as_ref(), after)
+                {
+                    Some(summary) => vec![summary, String::new()],
+                    None => Vec::new(),
+                };
+                lines.extend(
+                    outcomes
+                        .iter()
+                        .map(|o| printable(&format!("{}: {}", o.slug, o.line))),
+                );
+                self.ui.message(&printable(&title), lines, None);
+            }
+            Err(e) => self.ui.message(
+                &format!("not {done}"),
+                vec![printable(&format!("{e:#}"))],
+                None,
+            ),
+        }
     }
 
     /// `c`: attach to one of the assistant's sessions, starting it — and
@@ -4189,7 +4400,7 @@ mod tests {
             PrToView::Pick
         );
     }
-    use crate::db::tasks::{RunState, TaskKind};
+    use crate::db::tasks::TaskKind;
 
     #[test]
     fn the_subtree_confirms_name_each_task_leaves_first() {
@@ -5259,7 +5470,7 @@ mod tests {
     fn the_agents_view_keeps_its_own_keys() {
         let mut ui = agents_sample();
         press(&mut ui, KeyCode::Down);
-        for c in ['e', 'w', 'v', 'o', 'D', 'S', 'p', 'P', 'x', 'n'] {
+        for c in ['e', 'w', 'v', 'o', 'D', 'S', 'n'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
             assert_eq!(ui.status_line, NOT_IN_AGENTS, "{c}");
@@ -5316,6 +5527,115 @@ mod tests {
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(press(&mut ui, KeyCode::Char('i')), None);
         assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
+    }
+
+    #[test]
+    fn pausing_resuming_and_stopping_are_for_the_user_alone() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Down);
+        for c in ['p', 'P', 'x'] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
+            assert_eq!(ui.status_line, NOT_USER, "{c}");
+        }
+        ui.user = true;
+        let m = || "m".to_string();
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Pause { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('P')),
+            Some(Action::Resume { task_id: m() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('x')),
+            Some(Action::AskStop { task_id: Some(m()) })
+        );
+        // On the assistant, `x` is `stop --all`; a pause goes to `in_scope`,
+        // which refuses it as the CLI does.
+        press(&mut ui, KeyCode::Up);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('x')),
+            Some(Action::AskStop { task_id: None })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Pause {
+                task_id: "root".into()
+            })
+        );
+        // `p` and `P` are still PRs and projects in the active view.
+        press(&mut ui, KeyCode::BackTab);
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('p')),
+            Some(Action::Prs { .. })
+        ));
+        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
+        // No tree, no node.
+        let mut bare = sample();
+        bare.user = true;
+        press(&mut bare, KeyCode::Tab);
+        assert_eq!(press(&mut bare, KeyCode::Char('x')), None);
+        assert_eq!(bare.status_line, NO_NODE);
+    }
+
+    #[test]
+    fn a_stop_is_done_only_once_confirmed() {
+        let mut ui = agents_sample();
+        let confirm = |task_id: Option<&str>| {
+            Some(Panel::Confirm {
+                title: "stop".into(),
+                lines: Vec::new(),
+                action: Pending::Stop {
+                    task_id: task_id.map(str::to_string),
+                },
+            })
+        };
+        ui.panel = confirm(Some("m"));
+        assert_eq!(press(&mut ui, KeyCode::Char('f')), None);
+        assert!(ui.panel.is_some(), "no force: a stray key keeps asking");
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Stop {
+                task_id: Some("m".into())
+            })
+        );
+        ui.panel = confirm(None);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('y')),
+            Some(Action::Stop { task_id: None })
+        );
+        ui.panel = confirm(Some("m"));
+        assert_eq!(press(&mut ui, KeyCode::Char('n')), None);
+        assert!(ui.panel.is_none());
+        assert_eq!(ui.status_line, "nothing changed");
+    }
+
+    #[test]
+    fn the_stop_warning_lists_what_runs_leaves_first() {
+        let running = ["w".to_string(), "api".to_string()];
+        let lines = stop_warning("manager api", &running, false);
+        assert_eq!(
+            lines,
+            [
+                "stopping manager api ends its agent and every agent below it, leaves first",
+                "and starts none of them again until it is resumed",
+                "",
+                "running now:",
+                "  w",
+                "  api",
+                "",
+                "only you can resume it",
+            ]
+        );
+        let all = stop_warning("every task under the assistant", &[], true);
+        assert_eq!(
+            all[0],
+            "stopping every task under the assistant ends each one's agent, leaves first"
+        );
+        assert!(all.contains(&"none of them is running now".to_string()));
+        assert_eq!(all.last().unwrap(), "only you can resume them");
     }
 
     #[test]

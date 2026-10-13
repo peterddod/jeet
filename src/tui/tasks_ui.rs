@@ -118,10 +118,18 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "b",
         "its brief, grant, what it may do, budget, run state and tasks",
     ),
+    (
+        "p / P",
+        "pause the node and everything below it / let it run again",
+    ),
+    (
+        "x",
+        "stop it and everything below it, after a confirm; on the assistant, all",
+    ),
     ("a", "answering a question comes with #36"),
     (
         "",
-        "l, i and b only from your own terminal, not an agent's pane",
+        "l, i, b, p, P and x only from your own terminal, not an agent's pane",
     ),
     ("", ""),
     (
@@ -201,6 +209,8 @@ const HINTS_AGENTS: &[&str] = &[
     "l worklog",
     "i inbox",
     "b brief",
+    "p/P pause/resume",
+    "x stop",
     "c assistant",
     "t todo",
     "/ filter",
@@ -1245,6 +1255,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                 super::tasks::Pending::Delete {
                     recursive: true, ..
                 } => "y delete them all · n keep them",
+                super::tasks::Pending::Stop { .. } => "y stop · n leave it as it is",
                 _ => "y delete · n keep it",
             };
             body.push(Line::from(dim(keys)));
@@ -2097,6 +2108,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_stop_confirm_is_never_clipped() {
+        let running: Vec<String> = ["fix-token-refresh", "api-docs", "backend"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut ui = agents_ui();
+        ui.view = View::Agents;
+        ui.set_rows(ui.rows.clone());
+        ui.panel = Some(Panel::Confirm {
+            title: "stop manager backend".into(),
+            lines: crate::tui::tasks::stop_warning("manager backend", &running, false),
+            action: crate::tui::tasks::Pending::Stop {
+                task_id: Some("backend".into()),
+            },
+        });
+        let all = render(&mut ui, 70, 24).join("\n");
+        for want in [
+            "stop manager backend",
+            "stopping manager backend ends its agent",
+            "fix-token-refresh",
+            "api-docs",
+            "only you can resume it",
+            "y stop · n leave it as it is",
+        ] {
+            assert!(all.contains(want), "{want}: {all}");
+        }
+    }
+
     /// No panel, and one of each.
     fn all_panels() -> Vec<Option<Panel>> {
         vec![
@@ -2126,6 +2166,15 @@ mod tests {
                 adding: Some("half".into()),
             }),
             Some(Panel::Inbox { selected: 9 }),
+            Some(Panel::Confirm {
+                title: "stop every task under the assistant".into(),
+                lines: crate::tui::tasks::stop_warning(
+                    "every task under the assistant",
+                    &["漢字".repeat(60)],
+                    true,
+                ),
+                action: crate::tui::tasks::Pending::Stop { task_id: None },
+            }),
             Some(Panel::Text {
                 title: "w \u{1b}[2J· worklog".into(),
                 lines: vec![format!("{}\twide\u{7}", "漢字".repeat(200)); 80],

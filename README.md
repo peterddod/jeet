@@ -542,10 +542,14 @@ index every two seconds while the tab is shown.
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
 | `i` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
 | `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
+| `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
+| `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
 | `c` `C` `t` | the assistant, as in the active tab |
 
-`l`, `i` and `b` show what agents wrote, unfenced, so they work only when you
-run jeet from your own terminal, not inside an agent's pane. Answering a
+What each node made of a pause, resume or stop is shown when it is done.
+`l`, `i` and `b` show what agents wrote, unfenced, and `p`, `P` and `x` act
+as you, so they work only when you run jeet from your own terminal, not
+inside an agent's pane. Answering a
 question (`a`) comes with #36. The worktree, PR, archive and delete keys are
 the active tab's: `⇥` back to it.
 
