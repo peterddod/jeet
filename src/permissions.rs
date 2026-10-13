@@ -587,7 +587,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. }
-        | Commands::TaskStartup { .. } => Gate::Free,
+        | Commands::TaskStartup { .. }
+        | Commands::Inbox { .. } => Gate::Free,
         Commands::Tasks | Commands::Explore | Commands::Exec { .. } | Commands::Chat { .. } => {
             Gate::Interactive
         }
@@ -1384,6 +1385,7 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::StoreSync
         | Commands::TaskHook { .. }
         | Commands::TaskStartup { .. }
+        | Commands::Inbox { .. }
         // Into the store, which no task owns: only with `repo.clone`.
         | Commands::Clone { .. }
         | Commands::Tasks
@@ -1897,6 +1899,7 @@ mod tests {
             &["prs"],
             &["notify", "hi"],
             &["task-hook", "Stop"],
+            &["inbox", "watch", "--task", "x"],
             &["manager", "drain"],
             &["store-sync"],
             &["todo"],
@@ -2783,6 +2786,7 @@ mod tests {
             (&["projects", "rm", "p"], false),
             (&["task-hook", "Stop"], true),
             (&["task-startup", "x"], true),
+            (&["inbox", "watch", "--task", "x"], true),
             (&["worktree", "add", "r"], true),
             (&["worktree", "ls"], true),
             (&["worktree", "rm", "r"], false),

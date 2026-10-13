@@ -44,11 +44,12 @@ use crate::manager::run;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
 use crate::tasks;
+use crate::waiter;
 use crate::worktrees::now_secs;
 
 /// More than any hook payload jeet cares about; a pasted novel of a prompt
 /// is cut off rather than held in memory.
-const MAX_INPUT: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
 /// How much of a prompt or message is kept as the status detail.
 pub const DETAIL_MAX: usize = 60;
@@ -186,6 +187,11 @@ pub fn mark_typed(task_dir: &Path) -> Result<()> {
 /// to start, though its status does not say so yet. Not one the startup
 /// watcher found held at a startup prompt.
 pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
+    // The wake channel's own write: the turn its post starts has not
+    // reported yet either.
+    if current_status(task_dir).is_some_and(|s| fresh_wake(&s, now)) {
+        return true;
+    }
     let launched = launched_at(task_dir);
     // Typed into the agent running now, not one launched before it.
     let typed = std::fs::metadata(typed_path(task_dir))
@@ -209,6 +215,57 @@ pub fn input_unreported(task_dir: &Path, now: i64) -> bool {
         s.event != STARTUP_PROMPT_EVENT
             && (s.at <= given || s.detail.as_deref() == Some(STARTED_DETAIL))
     })
+}
+
+/// The event of the status the wake channel writes when it hands an idle
+/// session its queue ([`wake_running`]), and of the idle one it reverts
+/// that to when the session never got it ([`revert_wake`]).
+pub const WAKE_EVENT: &str = "wake";
+
+/// Whether `status` is the wake channel's running write, made in the last
+/// [`STARTING_SECS`]: the turn it starts may not have begun, and no hook
+/// has reported on it since.
+pub fn fresh_wake(status: &SessionStatus, now: i64) -> bool {
+    status.event == WAKE_EVENT && status.state == State::Running && now - status.at < STARTING_SECS
+}
+
+/// Mark idle session `session_id` running from `now`: the wake channel has
+/// just handed it its queue, which starts a turn its hooks report on.
+pub(crate) fn wake_running(task_dir: &Path, session_id: &str, now: i64) -> Result<()> {
+    write_status(
+        task_dir,
+        &SessionStatus {
+            session_id: session_id.to_string(),
+            state: State::Running,
+            detail: Some("reading messages".to_string()),
+            event: WAKE_EVENT.to_string(),
+            at: now,
+            busy_since: Some(now),
+        },
+    )
+}
+
+/// Put session `session_id` back to idle after a wake it never got, only
+/// while its status is still the [`wake_running`] write made at `at`: a
+/// hook's status since is never overwritten. True when it was put back.
+pub(crate) fn revert_wake(task_dir: &Path, session_id: &str, at: i64) -> Result<bool> {
+    let ours = read_status(task_dir, session_id)
+        .is_some_and(|s| s.event == WAKE_EVENT && s.state == State::Running && s.at == at);
+    if !ours {
+        return Ok(false);
+    }
+    write_status(
+        task_dir,
+        &SessionStatus {
+            session_id: session_id.to_string(),
+            state: State::Idle,
+            detail: None,
+            event: WAKE_EVENT.to_string(),
+            at,
+            busy_since: None,
+        },
+    )?;
+    Ok(true)
 }
 
 /// The event of a status [`mark_startup_prompt`] wrote.
@@ -785,6 +842,10 @@ fn stop(
     let inbox = messages::Inbox::lock(task_dir)
         .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
         .ok();
+    // Held or not: this only keeps the queue whole.
+    if let Some(inbox) = &inbox {
+        recover_wake(inbox, task_dir, session_id, event, now);
+    }
     if held_now(ctx) {
         if let Some(status) = status_for(hook, now) {
             write_status(task_dir, &status)?;
@@ -858,24 +919,41 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
     let Some(session_id) = hook.session_id.as_deref() else {
         return Ok(());
     };
+    recover_wake(&inbox, task_dir, session_id, event, now);
     if held_now(ctx) || inbox.read_for(Some(session_id))?.is_empty() {
         return Ok(());
     }
     let Some(task) = &ctx.task else {
         return Ok(());
     };
-    let app = &ctx.app;
+    messages::hand_over_queue(&inbox, &*idle_agent(&ctx.app, task, session_id)).map(|_| ())
+}
+
+/// Put back in `inbox` what session `session_id`'s wake channel posted and
+/// the session never got, once no watcher holds it and it is old enough to
+/// be lost (`waiter::recover`): a watcher killed mid-flight, say. A failure
+/// is warned of: it must not keep the hook from its work.
+fn recover_wake(inbox: &messages::Inbox, task_dir: &Path, session_id: &str, event: &str, now: i64) {
+    if let Err(e) = waiter::recover(inbox, task_dir, session_id, now) {
+        eprintln!("jeet task-hook {event}: {e:#}");
+    }
+}
+
+/// The agent of `task`'s session `session_id`, that sat idle: for the
+/// assistant, the window that session runs in.
+pub(crate) fn idle_agent<'a>(
+    app: &'a App,
+    task: &'a TaskRecord,
+    session_id: &str,
+) -> Box<dyn messages::Agent + 'a> {
     match task.kind {
-        // Typed into the window of the session that sat idle.
-        TaskKind::Assistant => messages::hand_over_queue(
-            &inbox,
-            &assistant::SessionAgent::for_session(app, task, session_id),
-        ),
+        TaskKind::Assistant => {
+            Box::new(assistant::SessionAgent::for_session(app, task, session_id))
+        }
         TaskKind::Work | TaskKind::Review | TaskKind::Manager => {
-            messages::hand_over_queue(&inbox, &messages::TmuxAgent::new(app, task))
+            Box::new(messages::TmuxAgent::new(app, task))
         }
     }
-    .map(|_| ())
 }
 
 /// The task the hook ran for: the one its `--task` names, wherever the
@@ -1001,7 +1079,7 @@ fn parent_of<'a>(
 
 /// Replace a session's status file whole, so a reader never sees half of
 /// one.
-fn write_status(task_dir: &Path, status: &SessionStatus) -> Result<()> {
+pub(crate) fn write_status(task_dir: &Path, status: &SessionStatus) -> Result<()> {
     let dir = status_dir(task_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{}.json", status.session_id));
@@ -1223,6 +1301,7 @@ mod tests {
             session_id: Some("s".into()),
             cwd: None,
             kind: Some(kind),
+            transcript: None,
         }
     }
 
@@ -1432,6 +1511,70 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_hands_over_a_wake_long_lost_and_leaves_a_young_one() {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let (home, app) = lab();
+        let dir = busy_w(&app);
+        let transcript = home.path().join("s.jsonl");
+        let lost = messages::Queued {
+            at: 50,
+            message: "posted and lost".into(),
+            to: Some("s".into()),
+        };
+        // Posted 10 s before the Stop: the session may hold it yet, and
+        // deliver it when this Stop's turn ends.
+        waiter::left_in_flight_for_test(&dir, "s", &transcript, vec![lost.clone()], 390);
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        assert_eq!(
+            stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap(),
+            None
+        );
+        assert!(waiter::in_flight_for_test(&dir, "s"));
+        // Posted long enough ago, by a watcher since gone, and never seen.
+        waiter::left_in_flight_for_test(
+            &dir,
+            "s",
+            &transcript,
+            vec![lost],
+            400 - waiter::CONFIRM_SECS,
+        );
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.is_some_and(|o| o.contains("posted and lost")));
+        assert!(!waiter::in_flight_for_test(&dir, "s"));
+        assert!(messages::Inbox::lock(&dir)
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_watched_agent_sitting_idle_is_typed_nothing() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let idle = hook("Notification", EventKind::Idle);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, &dir, "w", &idle, 400, &|_| true).unwrap();
+        let w = ctx.app.db.get_task("w").unwrap().unwrap();
+        let agent = messages::TmuxAgent::new(&ctx.app, &w);
+        assert!(!messages::Agent::watched(&agent));
+        let watcher = waiter::held_for_test(&dir, "s");
+        assert!(messages::Agent::watched(&agent));
+        idle_prompt(&dir, &idle, &ctx, 400).unwrap();
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        assert!(!typed_path(&dir).exists());
+        let left = messages::Inbox::lock(&dir).unwrap().read().unwrap();
+        assert_eq!(left.len(), 1);
+        // Unwatched, it would be typed in: here, into a tmux unit tests
+        // never have.
+        drop(watcher);
+        assert!(idle_prompt(&dir, &idle, &ctx, 400).is_err());
+    }
+
+    #[test]
     fn a_stopped_tasks_end_is_not_reported() {
         let (_home, app) = lab();
         let dir = busy_w(&app);
@@ -1601,6 +1744,43 @@ mod tests {
         // Held at a startup prompt the watcher found: no turn is coming.
         mark_startup_prompt(dir, "s", "trust", now - 1).unwrap();
         assert!(!input_unreported(dir, now));
+    }
+
+    #[test]
+    fn a_wake_is_unreported_input_until_a_hook_says_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        // Handed nothing else: only the wake's own write says a turn comes.
+        wake_running(dir, "s", 100).unwrap();
+        let woken = read_status(dir, "s").unwrap();
+        assert_eq!(
+            (woken.state, woken.event.as_str(), woken.busy_since),
+            (State::Running, WAKE_EVENT, Some(100))
+        );
+        assert!(fresh_wake(&woken, 100));
+        assert!(input_unreported(dir, 105));
+        assert!(!input_unreported(dir, 100 + STARTING_SECS));
+        // The turn's first hook.
+        let hook = SessionStatus {
+            session_id: "s".into(),
+            state: State::Running,
+            detail: None,
+            event: "UserPromptSubmit".into(),
+            at: 101,
+            busy_since: Some(100),
+        };
+        write_status(dir, &hook).unwrap();
+        assert!(!input_unreported(dir, 105));
+        // The revert leaves a hook's status be, and puts its own back.
+        assert!(!revert_wake(dir, "s", 100).unwrap());
+        assert_eq!(read_status(dir, "s").unwrap(), hook);
+        wake_running(dir, "s", 200).unwrap();
+        assert!(!revert_wake(dir, "s", 199).unwrap());
+        assert!(revert_wake(dir, "s", 200).unwrap());
+        let back = read_status(dir, "s").unwrap();
+        assert_eq!((back.state, back.busy_since), (State::Idle, None));
+        assert!(!fresh_wake(&back, 200));
+        assert!(!input_unreported(dir, 201));
     }
 
     #[test]

@@ -213,6 +213,7 @@ fn delivered_line(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> 
 pub(crate) fn delivered(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> String {
     match d {
         Ok(Delivered::Typed) => format!("typed into {to}'s session"),
+        Ok(Delivered::Wake) => format!("delivered to {to}'s session"),
         Ok(Delivered::Queued) => {
             format!("{to} is busy, so {what} is queued; it gets it when it finishes or sits idle")
         }

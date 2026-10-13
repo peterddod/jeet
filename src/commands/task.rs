@@ -297,6 +297,10 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
              queued; it starts with it when a task in the tree ends",
             called
         ),
+        Delivered::Wake => eprintln!(
+            "jeet: sent to {}'s agent; it gets it now, through its wake channel",
+            called
+        ),
     }
     Ok(())
 }
@@ -672,6 +676,9 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
     let session = session.map(|name| printable(&name)).unwrap_or_default();
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to the assistant's session {session}"),
+        Delivered::Wake => {
+            eprintln!("jeet: sent to the assistant's session {session}, through its wake channel")
+        }
         Delivered::Queued => eprintln!(
             "jeet: the assistant is busy, waiting on you, or has text you have not sent in its \
              prompt, so the message is queued; it gets it when it finishes or sits idle"

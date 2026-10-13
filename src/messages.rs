@@ -22,6 +22,12 @@
 //! - paused or stopped, itself or above it: it waits in the inbox, whatever
 //!   the agent is doing, until it is resumed.
 //!
+//! An agent whose session has a wake channel (a `jeet inbox watch` holding
+//! its wait lock; see [`crate::waiter`]) gets it queued, idle, busy or
+//! waiting on a prompt, and the watcher hands it over: nothing is typed,
+//! and its Stop and idle typing leave the queue to the watcher. Not one to
+//! start, which an orphaned watcher must never strand.
+//!
 //! Anything still queued when a message is typed in or starts the agent goes
 //! with it, so nothing waits for a Stop that may never come. What is typed
 //! or given as a first prompt at once is kept under tmux's limit on a
@@ -53,6 +59,7 @@ use crate::runtime::{self, Admission, Started};
 use crate::status::{self, Activity};
 use crate::tasks;
 use crate::tmux;
+use crate::waiter;
 use crate::worktrees::now_secs;
 
 /// The most one message, or what is typed in or given as a first prompt at
@@ -321,9 +328,13 @@ pub fn queued_reason(queued: &[Queued]) -> String {
     format!(
         "Messages and reports were sent to you (with `jeet task send` or `jeet report`) \
          while you were working. Deal with them now:\n\n{}",
-        messages.join("\n\n---\n\n")
+        messages.join(QUEUE_SEPARATOR)
     )
 }
+
+/// What goes between the messages of a queue handed over in one go, by the
+/// Stop hook or the wake channel.
+pub(crate) const QUEUE_SEPARATOR: &str = "\n\n---\n\n";
 
 /// How a message reaches the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +423,11 @@ pub trait Agent {
     fn session(&self) -> Option<&str> {
         None
     }
+    /// Whether a wake channel watches its session: what is queued for it
+    /// is handed over by the watcher, not typed in.
+    fn watched(&self) -> bool {
+        false
+    }
 }
 
 /// What became of a message.
@@ -432,6 +448,8 @@ pub enum Delivered {
         live: u32,
         max: u32,
     },
+    /// Queued for the agent's wake channel, which hands it over now.
+    Wake,
 }
 
 /// `text` as a message: without control characters, not blank and not too
@@ -496,6 +514,24 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
         return Ok(Delivered::Paused);
     }
     let activity = activity();
+    // Watched: its wake channel takes it now, typing nothing, whatever text
+    // the user has in its input box; waiting on a prompt, once the prompt
+    // goes. Not one no hook has reported on yet, which has no watcher, nor
+    // one to start, which an orphaned watcher's lock must not strand.
+    let reported = matches!(
+        activity,
+        Activity::Idle { .. } | Activity::Running { .. } | Activity::Waiting { .. }
+    );
+    let queued = Queued {
+        at: now_secs(),
+        message,
+        to: me.map(str::to_string),
+    };
+    if reported && waiter::wakes(&queued) && agent.watched() {
+        inbox.push_to(&queued.message, me)?;
+        return Ok(Delivered::Wake);
+    }
+    let message = queued.message;
     let route = match route(&activity, agent.has_hooks()) {
         // Typed in, it would be joined to what the user has not sent.
         Route::Type if agent.has_draft() => Route::Queue,
@@ -557,8 +593,12 @@ pub fn deliver(task_dir: &Path, agent: &dyn Agent, message: &str) -> Result<Deli
 /// Type the task's queue into its idle agent: for an agent that went idle
 /// with no Stop to hand the queue over. True when there was anything. Left
 /// queued while the user has text in the agent's input box: the turn it
-/// starts takes it.
+/// starts takes it; and while a wake channel watches it, which takes it.
 pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
+    // Its wake channel hands the queue over.
+    if agent.watched() {
+        return Ok(false);
+    }
     let queue = inbox.read_for(agent.session())?;
     if queue.is_empty() || agent.has_draft() {
         return Ok(false);
@@ -644,10 +684,16 @@ fn hand_over(
 /// How many of the oldest of `queue` fit in one prompt: at least one, which
 /// a message always does.
 fn fitting(queue: &[Queued]) -> usize {
+    fitting_within(queue, MAX_MESSAGE, "\n\n")
+}
+
+/// How many of the oldest of `queue`, joined by `separator`, fit in `limit`
+/// bytes: at least one, however long.
+pub(crate) fn fitting_within(queue: &[Queued], limit: usize, separator: &str) -> usize {
     let mut len = 0;
     for (i, q) in queue.iter().enumerate() {
-        len += q.message.len() + if i == 0 { 0 } else { 2 };
-        if len > MAX_MESSAGE {
+        len += q.message.len() + if i == 0 { 0 } else { separator.len() };
+        if len > limit {
             return i.max(1);
         }
     }
@@ -801,6 +847,11 @@ impl Agent for TmuxAgent<'_> {
         run::report_queued(self.app, self.task, live, max, i64::MAX);
     }
 
+    fn watched(&self) -> bool {
+        let dir = tasks::task_dir(self.app, self.task);
+        status::current_status(&dir).is_some_and(|s| waiter::watched(&dir, &s.session_id))
+    }
+
     fn queue_held_start(&self) -> Result<()> {
         // The assistant's sessions are opened with `jeet chat`, not started.
         // Nor is a start queued on a harness that takes no first prompt (a
@@ -884,6 +935,12 @@ mod tests {
         held_start: std::cell::Cell<bool>,
         /// The user has text in its input box.
         draft: bool,
+        /// Whether it has text in its input box was asked.
+        draft_asked: std::cell::Cell<bool>,
+        /// A wake channel watches it.
+        watched: bool,
+        /// The session it is, of several.
+        session: Option<String>,
         typed: RefCell<Vec<String>>,
         started: RefCell<Vec<String>>,
     }
@@ -903,10 +960,17 @@ mod tests {
             Ok(())
         }
         fn has_draft(&self) -> bool {
+            self.draft_asked.set(true);
             self.draft
         }
         fn can_start(&self) -> bool {
             !self.held
+        }
+        fn watched(&self) -> bool {
+            self.watched
+        }
+        fn session(&self) -> Option<&str> {
+            self.session.as_deref()
         }
         fn held(&self) -> Result<bool> {
             Ok(self.paused)
@@ -1014,6 +1078,105 @@ mod tests {
         assert_eq!(got, Delivered::Typed);
         assert_eq!(*agent.typed.borrow(), ["also add tests please[A"]);
         assert!(agent.started.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_watched_agent_gets_it_through_its_wake_channel() {
+        for state in [State::Idle, State::Running, State::Waiting] {
+            let task = task_in(Some(state));
+            let agent = Fake {
+                alive: true,
+                hooks: true,
+                watched: true,
+                // With text unsent in its input box, which it leaves be.
+                draft: true,
+                session: Some("s".into()),
+                ..Fake::default()
+            };
+            assert_eq!(
+                deliver(task.path(), &agent, "hi").unwrap(),
+                Delivered::Wake,
+                "{state:?}"
+            );
+            assert!(agent.typed.borrow().is_empty());
+            assert!(agent.started.borrow().is_empty());
+            assert!(!agent.draft_asked.get());
+            let queued = drain(task.path()).unwrap();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(
+                (queued[0].message.as_str(), queued[0].to.as_deref()),
+                ("hi", Some("s"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_watcher_never_strands_a_start_nor_takes_what_no_hook_reported() {
+        // Gone or ended: an orphaned watcher's lock does not keep it from
+        // being started.
+        for (state, alive) in [(State::Idle, false), (State::Ended, true)] {
+            let task = task_in(Some(state));
+            let agent = Fake {
+                alive,
+                hooks: true,
+                watched: true,
+                ..Fake::default()
+            };
+            assert_eq!(
+                deliver(task.path(), &agent, "hi").unwrap(),
+                Delivered::Started,
+                "{state:?}"
+            );
+            assert_eq!(*agent.started.borrow(), ["hi"]);
+        }
+        // Running with no hook having said so: at its startup dialogs,
+        // with no watcher yet.
+        let task = task_in(None);
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            watched: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "hi").unwrap(),
+            Delivered::Queued
+        );
+        assert_eq!(left(task.path()), ["hi"]);
+    }
+
+    #[test]
+    fn a_held_watched_agent_is_held() {
+        let task = task_in(Some(State::Idle));
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            watched: true,
+            paused: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            deliver(task.path(), &agent, "hi").unwrap(),
+            Delivered::Paused
+        );
+        assert_eq!(left(task.path()), ["hi"]);
+    }
+
+    #[test]
+    fn a_watched_agent_is_typed_none_of_its_queue() {
+        let task = task_in(Some(State::Idle));
+        enqueue(task.path(), "waiting").unwrap();
+        let agent = Fake {
+            alive: true,
+            hooks: true,
+            watched: true,
+            ..Fake::default()
+        };
+        let inbox = Inbox::lock(task.path()).unwrap();
+        assert!(!hand_over_queue(&inbox, &agent).unwrap());
+        drop(inbox);
+        assert!(agent.typed.borrow().is_empty());
+        assert_eq!(left(task.path()), ["waiting"]);
     }
 
     #[test]

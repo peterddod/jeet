@@ -594,6 +594,12 @@ impl Agent for SessionAgent<'_> {
     fn status(&self, task_dir: &Path) -> Option<SessionStatus> {
         status::read_status(task_dir, self.session.as_deref()?)
     }
+
+    fn watched(&self) -> bool {
+        self.session.as_deref().is_some_and(|session| {
+            crate::waiter::watched(&tasks::task_dir(self.app, self.task), session)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -888,6 +894,31 @@ mod tests {
     use super::*;
     use crate::manager::context::MAX_TODO;
     use crate::manager::ReportLine;
+
+    #[test]
+    fn a_session_is_watched_when_its_own_watcher_holds_its_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&path).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            home: path,
+        };
+        let task = create_record(&app).unwrap();
+        let dir = tasks::task_dir(&app, &task);
+        let agent = |session: Option<&str>| SessionAgent {
+            app: &app,
+            task: &task,
+            session: session.map(str::to_string),
+            window: None,
+            may_start: true,
+        };
+        assert!(!agent(Some("a")).watched());
+        let _held = crate::waiter::held_for_test(&dir, "a");
+        assert!(agent(Some("a")).watched());
+        assert!(!agent(Some("b")).watched());
+        assert!(!agent(None).watched());
+    }
 
     fn session(id: &str, last: i64, running: bool, primary: bool) -> Session {
         Session {
