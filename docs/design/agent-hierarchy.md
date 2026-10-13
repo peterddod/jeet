@@ -1307,7 +1307,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `budget`, `pause`, `resume`, `stop`), a
   manager at or below it as `--parent`, or no task at all (`jeet ls`,
   `jeet prs`, `report`, hooks, screens). A name is resolved within the
-  node's subtree, so a prefix cannot reach outside it; delete and
+  node's subtree, so a prefix cannot reach outside it; delete, `archive --recursive` and
   `--parent` take exact names. A command the table leaves out is refused
   to every node, reads included (`worktree rm`, `projects`, `sync`, …).
   `jeet clone` names no task, so a node holding `repo.clone` may run it;
