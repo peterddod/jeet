@@ -10023,7 +10023,12 @@ fn manager_new_past_max_live_queues_its_start() {
     let reports = lab.reports_of(&api);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].1, lab.assistant_id());
-    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+    assert!(
+        reports[0]
+            .2
+            .starts_with("queued on [managers] max_live, 1/1 live"),
+        "{reports:?}"
+    );
 
     // Nothing starts it while the slot is taken.
     succeeded(&lab.jeet_at(&["manager", "drain"], &lab.home(), &env));
@@ -14291,7 +14296,12 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let reports = lab.reports_of(&b);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].1, root);
-    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+    assert!(
+        reports[0]
+            .2
+            .starts_with("queued on [managers] max_live, 1/1 live"),
+        "{reports:?}"
+    );
 
     // a's session ends: the drain its hook leaves behind waits for its
     // pane to go, as the hook runs before its agent exits, then starts b,
@@ -14345,14 +14355,19 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let output = lab.jeet_at(&["task", "send", "d", "go"], &lab.home(), &env);
     succeeded(&output);
     assert!(
-        stderr_of(&output).contains("waits on max_live (1/1 live)"),
+        stderr_of(&output).contains("waits on [managers] max_live (1/1 live)"),
         "{}",
         stderr_of(&output)
     );
     assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
     let reports = lab.reports_of(&d);
     assert_eq!(reports.len(), 1, "{reports:?}");
-    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+    assert!(
+        reports[0]
+            .2
+            .starts_with("queued on [managers] max_live, 1/1 live"),
+        "{reports:?}"
+    );
     succeeded(&lab.jeet_at(&["task", "send", "c", "more"], &lab.home(), &env));
     assert_eq!(lab.reports_of(&c).len(), 1, "{:?}", lab.reports_of(&c));
 
@@ -14361,7 +14376,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let output = assistant.jeet(&["task", "open", "c"], &lab.home(), &env);
     succeeded(&output);
     assert!(
-        stderr_of(&output).contains("queued (tasks in the tree running: 1/1"),
+        stderr_of(&output).contains("queued (1/1 live, [managers] max_live)"),
         "{}",
         stderr_of(&output)
     );
@@ -14386,7 +14401,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     );
     succeeded(&output);
     assert!(
-        stderr_of(&output).contains("over max_live (1/1"),
+        stderr_of(&output).contains("over [managers] max_live (1/1"),
         "{}",
         stderr_of(&output)
     );
@@ -14474,7 +14489,7 @@ fn a_managers_open_of_its_child_waits_on_max_live() {
     let output = mp.jeet(&["task", "open", "c"], &m_dir, &env);
     succeeded(&output);
     assert!(
-        stderr_of(&output).contains("queued (tasks in the tree running: 1/1"),
+        stderr_of(&output).contains("queued (1/1 live, [managers] max_live)"),
         "{}",
         stderr_of(&output)
     );
@@ -14523,19 +14538,24 @@ fn a_held_start_that_waits_on_max_live_once_resumed_is_told() {
     let said = jeet(&["manager", "resume", "m"]);
     assert!(said.contains("m: resumed"), "{said}");
     assert!(
-        said.contains("task kid is queued on max_live (1/1 live)"),
+        said.contains("task kid is queued on [managers] max_live (1/1 live)"),
         "{said}"
     );
     let reports = lab.reports_of(&kid);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].1, m);
-    assert!(reports[0].2.starts_with("queued, 1/1 live"), "{reports:?}");
+    assert!(
+        reports[0]
+            .2
+            .starts_with("queued on [managers] max_live, 1/1 live"),
+        "{reports:?}"
+    );
     assert_eq!(lab.start_queue(), [kid.as_str()]);
     assert!(!stub.join("alive/jeet-kid").exists());
 
     // Told once: a drain after says nothing more.
     let said = jeet(&["manager", "drain"]);
-    assert!(!said.contains("queued on max_live"), "{said}");
+    assert!(!said.contains("queued on [managers] max_live"), "{said}");
     assert_eq!(lab.reports_of(&kid).len(), 1);
 }
 

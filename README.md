@@ -337,9 +337,36 @@ server to start it on, waiting until the task is next opened. Once its agent
 has been asked, a review stays with it even if `[review] command` is set
 later.
 The review agent is gated like any task's: under the assistant it reports to
-it, a paused or stopped task (or one under a held manager) keeps the prompt
-until resumed, and `[managers] max_live` queues its start. `--no-agent`
-only checks the PR out.
+it, and a paused or stopped task (or one under a held manager) keeps the
+prompt until resumed. `--no-agent` only checks the PR out.
+
+#### Review limits
+
+Reviews have limits of their own, apart from `[managers]`: review agents
+neither take a `[managers] max_live` slot nor spend any budget above them,
+and tasks and managers take nothing from the review limits.
+
+```toml
+[review]
+max_live = 2    # review agents running at once; a review past it waits for one to end
+time = "1h"     # busy time each review may take (30m, 2h, ...)
+turns = 20      # turns each review may take
+```
+
+`max_live` counts every review agent, yours included: a review past it is
+queued, and starts when a review agent's session ends (`jeet task open`
+from your terminal starts it anyway, with a warning). `time` and `turns`
+apply to reviews in the tree, the ones the assistant starts: each review
+asked of the agent (a first one, a new head commit or `--rerun`) gets them
+afresh, on top of what it has used, and is held to them as a task is to its
+budget (see [Reporting to the parent](#reporting-to-the-parent)): at 80% it
+is told, at 100% it is paused until the next review is asked. Your own
+`jeet review` makes a top-level task, which, as any top-level task, has no
+budget: its agent works for you, and nothing charges it. The defaults keep
+reviews from crowding out other work (2 at once) and stop a stuck one
+(an hour of busy time, or 20 turns, a turn being one prompt answered: a
+review is one or a few). Like `[managers]`, these are checked when used: 0,
+or a `time` that is not a time, refuses starting a review.
 
 #### Legacy `[review] command`
 
@@ -875,7 +902,9 @@ deleting a task mid-turn charges the turn so far first). At 80% the parent is to
 note; at 100% the task is paused and its parent told `blocked: budget`: its
 turn ends with nothing more handed to it, and messages for it wait in its
 inbox until the budget is raised and it is resumed.
-At most `[managers] max_live` tasks under the assistant run at once: a
+At most `[managers] max_live` tasks under the assistant run at once (a
+review agent counts toward `[review] max_live` instead, and spends only its
+own `[review]` budget: [Review limits](#review-limits)): a
 start past it is queued and the task's parent told, and it starts when a
 running one's agent ends (a window you opened in its session does not hold
 the slot) (its session's end hook starts it; on a harness without
@@ -1672,8 +1701,8 @@ queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
 
-A `[review]` section sets the review agent's first prompt — see
-[The review agent](#the-review-agent).
+A `[review]` section sets the review agent's first prompt and its limits —
+see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
 ### Notifications
 
@@ -1805,7 +1834,7 @@ idle_report_mins = 10   # tell the assistant when a task of its sits idle this l
 max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
-max_live = 8            # tasks under the assistant running at once; a start past it waits
+max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
 worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
 manager_default = []    # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete

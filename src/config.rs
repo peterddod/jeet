@@ -112,11 +112,76 @@ pub struct ReviewConfig {
     /// Desktop notification when the command finishes (default: on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
+
+    /// Review agents that may run at once, apart from `[managers]
+    /// max_live` (default: 2). Over it, a review waits for one to end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_live: Option<u32>,
+
+    /// Busy time each review asked of an agent in the tree may take, e.g.
+    /// `"30m"` or `"1h"` (default: `"1h"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+
+    /// Turns each review asked of an agent in the tree may take (default:
+    /// 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+}
+
+pub const DEFAULT_REVIEW_MAX_LIVE: u32 = 2;
+pub const DEFAULT_REVIEW_TIME: &str = "1h";
+pub const DEFAULT_REVIEW_TURNS: u32 = 20;
+
+/// `[review]`'s limits, checked and with their defaults filled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewPolicy {
+    pub max_live: u32,
+    /// What each review may spend: both units always set.
+    pub budget: Limits,
 }
 
 impl ReviewConfig {
     fn is_empty(&self) -> bool {
-        self.prompt.is_none() && self.command.is_none() && self.notify.is_none()
+        self.prompt.is_none()
+            && self.command.is_none()
+            && self.notify.is_none()
+            && self.max_live.is_none()
+            && self.time.is_none()
+            && self.turns.is_none()
+    }
+
+    /// `max_live`, `time` and `turns` with their defaults, checked where
+    /// they are used, as `[managers]` is: 0 and a time that does not parse
+    /// are refused.
+    pub fn policy(&self) -> Result<ReviewPolicy> {
+        let max_live = match self.max_live {
+            Some(0) => bail!("[review] max_live = 0 allows nothing; give at least 1"),
+            Some(n) => n,
+            None => DEFAULT_REVIEW_MAX_LIVE,
+        };
+        let turns = match self.turns {
+            Some(0) => bail!("[review] turns = 0 allows nothing; give at least 1"),
+            Some(n) => n,
+            None => DEFAULT_REVIEW_TURNS,
+        };
+        let time = self.time.as_deref().unwrap_or(DEFAULT_REVIEW_TIME);
+        let secs = match budget::parse_part(time) {
+            Ok(budget::BudgetPart::Secs(secs)) => secs,
+            Ok(budget::BudgetPart::Turns(_)) => {
+                bail!(
+                    "[review] time: {time} is turns; give a time (30m or 1h), and turns as `turns`"
+                )
+            }
+            Err(e) => bail!("[review] time: {e}"),
+        };
+        Ok(ReviewPolicy {
+            max_live,
+            budget: Limits {
+                secs: Some(secs),
+                turns: Some(i64::from(turns)),
+            },
+        })
     }
 
     /// The review agent's first prompt, before substitution.
@@ -795,6 +860,58 @@ mod tests {
         assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
         let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
         assert_eq!(config.review.prompt(), "Review {pr}");
+    }
+
+    fn review_policy_of(text: &str) -> Result<ReviewPolicy> {
+        toml::from_str::<Config>(&format!("[review]\n{text}\n"))
+            .unwrap()
+            .review
+            .policy()
+    }
+
+    #[test]
+    fn review_policy_fills_in_its_defaults() {
+        assert_eq!(
+            Config::default().review.policy().unwrap(),
+            ReviewPolicy {
+                max_live: 2,
+                budget: Limits {
+                    secs: Some(3600),
+                    turns: Some(20)
+                },
+            }
+        );
+        let text = "max_live = 4\ntime = \"30m\"\nturns = 50";
+        assert_eq!(
+            review_policy_of(text).unwrap(),
+            ReviewPolicy {
+                max_live: 4,
+                budget: Limits {
+                    secs: Some(1800),
+                    turns: Some(50)
+                },
+            }
+        );
+        // Round trip: every key written back.
+        let config: Config = toml::from_str(&format!("[review]\n{text}\n")).unwrap();
+        let out = toml::to_string_pretty(&config).unwrap();
+        let back = toml::from_str::<Config>(&out).unwrap().review;
+        assert_eq!(back.policy().unwrap(), config.review.policy().unwrap());
+    }
+
+    #[test]
+    fn review_policy_refuses_what_it_cannot_honour() {
+        let refused = |text: &str, says: &str| {
+            let err = review_policy_of(text).unwrap_err().to_string();
+            assert!(err.contains(says), "{text}: {err}");
+        };
+        refused("max_live = 0", "[review] max_live = 0 allows nothing");
+        refused("turns = 0", "[review] turns = 0 allows nothing");
+        refused("time = \"0m\"", "[review] time: 0m: a budget of 0");
+        refused("time = \"20turns\"", "is turns");
+        refused("time = \"soon\"", "[review] time: soon: not a budget");
+        // A mistake there does not stop config.toml from loading.
+        assert!(toml::from_str::<Config>("[review]\nmax_live = 0\n").is_ok());
     }
 
     #[test]

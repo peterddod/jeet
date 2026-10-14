@@ -138,9 +138,10 @@ pub fn ensure_running(
         None => ensure_running_admitted(app, task, session, prompt, &guard)?,
     };
     if let Some((live, max)) = over {
-        running.warnings.push(format!(
-            "over max_live ({live}/{max} tasks in the tree run already)"
-        ));
+        let (cap, _) = run::max_live_of(task);
+        running
+            .warnings
+            .push(format!("over {cap} ({live}/{max} live already)"));
     }
     Ok(running)
 }

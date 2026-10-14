@@ -549,7 +549,13 @@ whatever `held` names, so holding `worktree.add` needs no second key.
 `max_live` is checked when jeet starts an agent (`task new --prompt`,
 `task open`, a message to a stopped agent). Over the limit, the start is
 queued: the row is made, its first prompt waits in its inbox, and the parent
-is told `status: queued, 8/8 live`. It starts when a slot frees.
+is told `status: queued on [managers] max_live, 8/8 live`. It starts when a
+slot frees.
+
+Reviews are limited apart (`[review] max_live`, default 2, counting every
+review agent, top-level ones too), and spend apart: a review's use counts
+toward no budget above it, only its own, which `[review] time` and `turns`
+(default 1h and 20) give afresh as each review is asked of it.
 
 ### 5.3 Budgets
 
