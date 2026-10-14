@@ -8500,6 +8500,15 @@ fn a_task_with_a_parent_is_refused_jeet_review() {
         );
     }
     assert!(!lab.home().join("tasks/review-widget-7").exists());
+    let reviews: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE kind = 'review'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reviews, 0);
 }
 
 #[cfg(unix)]
