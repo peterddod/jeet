@@ -38,7 +38,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -96,6 +98,12 @@ pub const REREAD_EVERY: Duration = Duration::from_secs(5);
 /// How often the list sees whether a GitHub poll (`jeet watch --once`) is
 /// due, while it is open; `[watch] interval_secs` says how often one is.
 const WATCH_EVERY: Duration = Duration::from_secs(30);
+
+/// How many updates the pollers may have sent that the screen has yet to
+/// take before they stop looking: while the screen is away — attached to an
+/// agent in tmux, in the explorer — nobody takes them, and a poll every two
+/// seconds piled up gigabytes in a day.
+const BACKLOG_MAX: usize = 256;
 
 /// What the screen esc in the explorer comes back to.
 const BACK_LABEL: &str = "tasks";
@@ -2620,7 +2628,51 @@ struct Background {
     prs: Sender<Vec<pr_history::Job>>,
     assistant: Sender<assistant_info::Probe>,
     tree: Sender<TreeAsk>,
-    updates: Receiver<Update>,
+    updates: Updates,
+}
+
+/// The threads' end of the channel they answer on, counting what they sent
+/// that is not yet taken.
+#[derive(Clone)]
+struct Outbox {
+    tx: Sender<Update>,
+    backlog: Arc<AtomicUsize>,
+}
+
+impl Outbox {
+    /// Fails once the screen is gone.
+    fn send(&self, update: Update) -> Result<(), mpsc::SendError<Update>> {
+        self.backlog.fetch_add(1, Ordering::Relaxed);
+        self.tx.send(update)
+    }
+
+    /// Whether the screen has stopped taking updates: a poller skips its
+    /// round, tmux and all, until it takes them again.
+    fn stalled(&self) -> bool {
+        self.backlog.load(Ordering::Relaxed) >= BACKLOG_MAX
+    }
+}
+
+/// The screen's end: taking an update counts it off the backlog.
+struct Updates {
+    rx: Receiver<Update>,
+    backlog: Arc<AtomicUsize>,
+}
+
+impl Updates {
+    fn taken(&self, update: Update) -> Update {
+        self.backlog.fetch_sub(1, Ordering::Relaxed);
+        update
+    }
+
+    fn try_recv(&self) -> Result<Update, TryRecvError> {
+        self.rx.try_recv().map(|u| self.taken(u))
+    }
+
+    #[cfg(test)]
+    fn recv_timeout(&self, timeout: Duration) -> Result<Update, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout).map(|u| self.taken(u))
+    }
 }
 
 /// What the tree thread is told: gather now and every [`POLL_EVERY`],
@@ -2643,7 +2695,13 @@ fn tree_wanted(was: View, now: View) -> Option<bool> {
 
 impl Background {
     fn start(home: &Path, config: &Config) -> Self {
-        let (tx, updates) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let updates = Updates {
+            rx,
+            backlog: backlog.clone(),
+        };
+        let tx = Outbox { tx, backlog };
         let (probes, probe_rx) = mpsc::channel();
         let (sizes, size_rx) = mpsc::channel();
         let (prs, pr_rx) = mpsc::channel();
@@ -2718,13 +2776,13 @@ impl Background {
 
 /// Read every task's agent status now and every [`POLL_EVERY`], and again at
 /// once whenever a new list of tasks arrives.
-fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Sender<Update>, home: &Path) {
+fn poll_statuses(probes: Receiver<Vec<Probe>>, tx: Outbox, home: &Path) {
     let tmux_ok = tmux::available();
     // Its own connection, for the anchors; without one, none is unanchored.
     let db = open_index(home);
     let mut current: Vec<Probe> = Vec::new();
     loop {
-        for probe in &current {
+        for probe in current.iter().filter(|_| !tx.stalled()) {
             if tx.send(probe_status(probe, tmux_ok, db.as_ref())).is_err() {
                 return;
             }
@@ -2762,12 +2820,12 @@ pub fn probe_status(probe: &Probe, tmux_ok: bool, db: Option<&Database>) -> Upda
 
 /// Look at the assistant now and every [`POLL_EVERY`], and again at once
 /// whenever a new probe arrives.
-fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>, home: &Path) {
+fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Outbox, home: &Path) {
     let tmux_ok = tmux::available();
     let db = open_index(home);
     let mut current: Option<assistant_info::Probe> = None;
     loop {
-        if let Some(probe) = &current {
+        if let Some(probe) = current.as_ref().filter(|_| !tx.stalled()) {
             let windows = match tmux_ok {
                 true => tmux::windows(assistant::TMUX_SESSION),
                 false => Vec::new(),
@@ -2792,7 +2850,7 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Sender<Update>, h
 /// [`POLL_EVERY`] after, until told to stop: only while the agents view is
 /// shown. Its own connection, opened as the other threads open theirs; a
 /// home with no index yet is looked at again on the next ask.
-fn poll_tree(asks: Receiver<TreeAsk>, tx: Sender<Update>, home: PathBuf, config: Config) {
+fn poll_tree(asks: Receiver<TreeAsk>, tx: Outbox, home: PathBuf, config: Config) {
     let tmux_ok = tmux::available();
     let mut app: Option<App> = None;
     let mut running: Option<u64> = None;
@@ -2816,6 +2874,9 @@ fn poll_tree(asks: Receiver<TreeAsk>, tx: Sender<Update>, home: PathBuf, config:
         let Some(seq) = running else {
             continue;
         };
+        if tx.stalled() {
+            continue;
+        }
         if app.is_none() {
             app = open_index(&home).map(|db| App {
                 home: home.clone(),
@@ -2837,7 +2898,7 @@ fn poll_tree(asks: Receiver<TreeAsk>, tx: Sender<Update>, home: PathBuf, config:
 
 /// Walk every task's directory for its size, again every [`RESIZE_EVERY`];
 /// a new list of tasks starts the walk over.
-fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Sender<Update>) {
+fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Outbox) {
     let mut current: Vec<(String, PathBuf)> = Vec::new();
     'walk: loop {
         for (id, dir) in &current {
@@ -2848,6 +2909,18 @@ fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Sender<Update>) {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => {}
+            }
+            // The rest of the walk waits for the screen to take updates
+            // again, or for a new list.
+            while tx.stalled() {
+                match jobs.recv_timeout(POLL_EVERY) {
+                    Ok(list) => {
+                        current = list;
+                        continue 'walk;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
             }
             let update = Update::Size {
                 id: id.clone(),
@@ -2866,7 +2939,7 @@ fn walk_sizes(jobs: Receiver<Vec<(String, PathBuf)>>, tx: Sender<Update>) {
 }
 
 /// Look up each task's PRs in turn, as [`enqueue`] orders them.
-fn find_prs(jobs: Receiver<Vec<pr_history::Job>>, tx: Sender<Update>) {
+fn find_prs(jobs: Receiver<Vec<pr_history::Job>>, tx: Outbox) {
     let mut queue: VecDeque<pr_history::Job> = VecDeque::new();
     loop {
         // Everything asked for so far, waiting for something when idle.
@@ -5722,6 +5795,46 @@ mod tests {
         assert!(got
             .iter()
             .any(|u| matches!(u, Update::Status { id, .. } if id == "t")));
+        drop(bg);
+    }
+
+    #[test]
+    fn the_pollers_hold_off_while_the_screen_takes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
+        let rows: Vec<TaskRow> = (0..10)
+            .map(|i| {
+                let mut row = task(&format!("t{i}"), "t", TaskState::Archived, 3);
+                row.dir = dir.path().to_path_buf();
+                row
+            })
+            .collect();
+        // Many refresh cycles, as while the user is attached to an agent:
+        // each new list is a round of the status poller, and nobody takes
+        // what it sends.
+        const CYCLES: usize = 200;
+        for _ in 0..CYCLES {
+            bg.probe(&rows);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // However slow the machine, the first round lands.
+        bg.updates.recv_timeout(Duration::from_secs(10)).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let mut queued = 1;
+        while bg.updates.try_recv().is_ok() {
+            queued += 1;
+        }
+        // Unbounded, it would be a round of rows per cycle.
+        assert!(
+            queued <= BACKLOG_MAX + rows.len() && queued < CYCLES * rows.len() / 4,
+            "{queued} updates piled up over {CYCLES} cycles"
+        );
+        // Taken again, it answers again.
+        bg.probe(&rows);
+        assert!(matches!(
+            bg.updates.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Update::Status { .. }
+        ));
         drop(bg);
     }
 
