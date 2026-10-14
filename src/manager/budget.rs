@@ -6,7 +6,7 @@
 use anyhow::{bail, Result};
 
 use crate::context::App;
-use crate::db::tasks::{BudgetRow, RunState, TaskRecord};
+use crate::db::tasks::{BudgetRow, RunState, TaskKind, TaskRecord};
 use crate::messages::{Inbox, Sender};
 use crate::permissions::Caller;
 use crate::reports::{self, StatusEvent};
@@ -190,7 +190,9 @@ pub fn cap(
     had: Limits,
     want: Limits,
 ) -> Result<Limits> {
+    // A review spends apart from the budgets above it.
     let parent = match &target.parent_id {
+        Some(_) if target.kind == TaskKind::Review => None,
         Some(id) => app.db.get_task(id)?,
         None => None,
     };
@@ -198,7 +200,7 @@ pub fn cap(
         Some(parent) => remaining(app, parent)?,
         None => Limits::default(),
     };
-    if let Caller::Node(me) = by {
+    if let (Caller::Node(me), false) = (by, target.kind == TaskKind::Review) {
         let mine = remaining(app, me)?;
         left.secs = least(left.secs, mine.secs);
         left.turns = least(left.turns, mine.turns);
@@ -273,9 +275,7 @@ pub enum Threshold {
 pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
     let held_before = super::run::hold(app, node)?.is_some();
     let mut crossed = Threshold::None;
-    let mut chain = vec![node.clone()];
-    chain.extend(app.db.ancestors(&node.id)?);
-    for task in &chain {
+    for task in &counted_toward(app, node)? {
         // Read, paused and claimed in one go: a limit changed meanwhile is
         // checked as it now is, and only one of two checks at once tells.
         let check = app
@@ -321,6 +321,17 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
     Ok(crossed)
 }
 
+/// The nodes whose budgets what `node` uses counts toward: it and its
+/// ancestors, or, for a review, only itself, whose caps come from
+/// `[review]` (M21).
+fn counted_toward(app: &App, node: &TaskRecord) -> Result<Vec<TaskRecord>> {
+    let mut chain = vec![node.clone()];
+    if node.kind != TaskKind::Review {
+        chain.extend(app.db.ancestors(&node.id)?);
+    }
+    Ok(chain)
+}
+
 /// Whether `task` is stopped, itself or above.
 fn stopped(app: &App, task: &TaskRecord) -> Result<bool> {
     Ok(app.db.effective_run_state(&task.id)?.0 == RunState::Stopped)
@@ -339,10 +350,8 @@ pub fn report_blocked(app: &App, node: &TaskRecord) {
 
 /// `budget used up (…); blocked: budget, …`.
 fn blocked_body(app: &App, node: &TaskRecord) -> Result<String> {
-    let mut chain = vec![node.clone()];
-    chain.extend(app.db.ancestors(&node.id)?);
     let mut whose = String::new();
-    for task in &chain {
+    for task in &counted_toward(app, node)? {
         let Some(row) = app.db.budget(&task.id)? else {
             continue;
         };
@@ -626,6 +635,64 @@ mod tests {
         app.db.charge("w", 3000, 0).unwrap();
         assert_eq!(enforce(&app, &w).unwrap(), Threshold::Warn80);
         assert_eq!(budget_reports(&app, "m").len(), 2);
+    }
+
+    /// A review under `m`, beside `w`.
+    fn add_review(app: &App) -> TaskRecord {
+        let mut r = get(app, "w");
+        (r.id, r.slug, r.name, r.kind) = ("r".into(), "r".into(), "r".into(), TaskKind::Review);
+        app.db.insert_task(&r).unwrap();
+        r
+    }
+
+    /// A review spends apart from the budgets above it, and they apart
+    /// from it: its use counts toward neither its manager's budget nor
+    /// what is left under it, only its own caps hold it, and a limit set on
+    /// it is not held to what is left above.
+    #[test]
+    fn a_review_spends_apart_from_the_budgets_above_it() {
+        let (_dir, app) = lab();
+        let r = add_review(&app);
+        app.db.set_budget_max("m", None, Some(10)).unwrap();
+        app.db.set_budget_max("r", None, Some(5)).unwrap();
+        app.db.charge("r", 600, 4).unwrap();
+        assert_eq!(app.db.subtree_used("m").unwrap(), (0, 0));
+        assert_eq!(app.db.subtree_used("r").unwrap(), (600, 4));
+        assert_eq!(remaining(&app, &get(&app, "m")).unwrap().turns, Some(10));
+        assert_eq!(enforce(&app, &r).unwrap(), Threshold::Warn80);
+        assert_eq!(app.db.budget("m").unwrap().unwrap().warned, 0);
+
+        // m spent by w: r runs on, and is held only by its own caps.
+        app.db.charge("w", 0, 10).unwrap();
+        assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
+        app.db.set_run_state("m", RunState::Run, None).unwrap();
+        app.db.charge("r", 0, 1).unwrap();
+        assert_eq!(enforce(&app, &r).unwrap(), Threshold::Hit100);
+        let r = get(&app, "r");
+        assert_eq!(
+            (r.run_state, r.run_state_by.clone()),
+            (RunState::Paused, Some(Setter::Budget))
+        );
+        assert!(
+            blocked_body(&app, &r)
+                .unwrap()
+                .starts_with("budget used up (5 of 5turns)"),
+            "{}",
+            blocked_body(&app, &r).unwrap()
+        );
+        // m, with nothing left, does not cap a limit set on r.
+        let want = parse_limits("50turns").unwrap();
+        assert_eq!(
+            cap(
+                &app,
+                &r,
+                &Caller::Node(get(&app, "m")),
+                Limits::default(),
+                want
+            )
+            .unwrap(),
+            want
+        );
     }
 
     #[test]

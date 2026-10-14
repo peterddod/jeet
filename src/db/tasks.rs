@@ -669,14 +669,15 @@ fn budget_in(conn: &Connection, id: &str) -> Result<Option<BudgetRow>> {
         .optional()?)
 }
 
-/// [`Database::subtree_used`] on `conn`.
+/// [`Database::subtree_used`] on `conn`. A review below `id` is left out:
+/// it spends under `[review]`'s caps, not its ancestors' budgets.
 fn subtree_used_in(conn: &Connection, id: &str) -> Result<(i64, i64)> {
     Ok(conn.query_row(
         "WITH RECURSIVE sub(id, depth) AS (
              SELECT ?1, 0
              UNION
              SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
-             WHERE sub.depth < ?2
+             WHERE sub.depth < ?2 AND t.kind != 'review'
          )
          SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
          FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
@@ -1618,7 +1619,8 @@ impl Database {
         Ok(())
     }
 
-    /// What `id` and everything below it have used: (seconds, turns).
+    /// What `id` and everything below it, reviews aside, have used:
+    /// (seconds, turns).
     pub fn subtree_used(&self, id: &str) -> Result<(i64, i64)> {
         subtree_used_in(&self.conn(), id)
     }

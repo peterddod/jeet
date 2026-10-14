@@ -546,7 +546,8 @@ pub(crate) fn format_char(c: char) -> bool {
 /// A new child's budget: what `--budget` asks for, which must fit in what
 /// is left above it, else `[managers] default_budget` for a manager or a
 /// manager's child (M20), cut to what is left. A child of the assistant
-/// gets none unless asked.
+/// gets none unless asked, and a review none here: [`crate::review::start_agent`]
+/// gives it `[review]`'s.
 fn child_budget(
     app: &App,
     parent: &TaskRecord,
@@ -554,6 +555,13 @@ fn child_budget(
     d: &Delegation,
     policy: &crate::config::ManagerPolicy,
 ) -> Result<Option<Limits>> {
+    // Capped by `[review]` as each review is asked, not by what is above.
+    if kind == TaskKind::Review {
+        if !d.budget.is_empty() {
+            bail!("a review's budget is [review] time and turns, given as each review is asked");
+        }
+        return Ok(None);
+    }
     let left = budget::remaining(app, parent)?;
     // Spent in either unit, whatever is asked: nothing more is born there.
     if left.secs == Some(0) || left.turns == Some(0) {
@@ -3292,6 +3300,16 @@ mod tests {
         assert_eq!(plan.budget.unwrap().secs, Some(1800));
         app.db.charge(&w3.id, 1800, 0).unwrap();
         refused(&user, TaskKind::Work, &under("m"), "nothing is left");
+        // A review is born with no budget, however little is left above:
+        // `[review]` caps it as each review is asked.
+        let plan = plan_child(&app, &user, TaskKind::Review, "x", &under("m"), None).unwrap();
+        assert_eq!(plan.budget, None);
+        refused(
+            &user,
+            TaskKind::Review,
+            &budget("30m"),
+            "[review] time and turns",
+        );
 
         assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
     }

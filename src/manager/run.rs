@@ -429,15 +429,26 @@ pub fn end_agent(app: &App, node: &TaskRecord) -> Result<String> {
 }
 
 /// The active tasks in the tree, below the assistant, whose agent's pane
-/// is live: what `max_live` counts, managers included, the assistant and
-/// top-level tasks not. One `tmux list-sessions`, then a look at the agent's
-/// pane of each task's session in it: a session left open after its agent
-/// exited, by `remain-on-exit` or a window the user opened there, does not
-/// count.
+/// is live, managers and reviews included, the assistant and top-level
+/// tasks not: what `[managers] max_live` counts, less the reviews, which
+/// count toward `[review] max_live` ([`counted`]). A session left open
+/// after its agent exited, by `remain-on-exit` or a window the user opened
+/// there, does not count.
 pub fn live_set(app: &App) -> Result<HashSet<String>> {
+    Ok(live_tasks(app)?
+        .into_iter()
+        .filter(|t| t.parent_id.is_some())
+        .map(|t| t.id)
+        .collect())
+}
+
+/// The active tasks, top-level ones included, whose agent's pane is live:
+/// one `tmux list-sessions`, then a look at the agent's pane of each
+/// task's session in it.
+fn live_tasks(app: &App) -> Result<Vec<TaskRecord>> {
     let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
     if sessions.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(Vec::new());
     }
     Ok(app
         .db
@@ -445,10 +456,18 @@ pub fn live_set(app: &App) -> Result<HashSet<String>> {
         .into_iter()
         .filter(|t| {
             let name = runtime::session_name(t);
-            t.parent_id.is_some() && sessions.contains(&name) && tmux::agent_alive(&name)
+            sessions.contains(&name) && tmux::agent_alive(&name)
         })
-        .map(|t| t.id)
         .collect())
+}
+
+/// The `max_live` a start of `task` counts toward, and what frees a slot
+/// under it: review agents are counted apart from the rest of the tree.
+pub fn max_live_of(task: &TaskRecord) -> (&'static str, &'static str) {
+    match task.kind {
+        TaskKind::Review => ("[review] max_live", "a review ends"),
+        _ => ("[managers] max_live", "a task in the tree ends"),
+    }
 }
 
 /// Where the start lock is kept, beside the watch's.
@@ -542,20 +561,41 @@ pub fn held_refusal(task: &TaskRecord, holder: &TaskRecord) -> String {
     )
 }
 
-/// How many tasks in the tree run, and `max_live`, when starting `task`
-/// would take one more than that: never for a task running already, a
-/// top-level task or the assistant.
+/// How many run, and the `max_live` that counts them, when starting
+/// `task` would take one more than that: never for a task running
+/// already, the assistant, or a top-level task other than a review. A
+/// review counts review agents against `[review] max_live`, top-level ones
+/// included; any other task counts the rest of the tree against
+/// `[managers] max_live`.
 fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
-    if task.parent_id.is_none() || task.kind == TaskKind::Assistant {
+    let review = task.kind == TaskKind::Review;
+    if task.kind == TaskKind::Assistant || (task.parent_id.is_none() && !review) {
         return Ok(None);
     }
-    let live = live_set(app)?;
-    if live.contains(&task.id) {
+    let live = live_tasks(app)?;
+    if live.iter().any(|t| t.id == task.id) {
         return Ok(None);
     }
-    let max = app.config.manager_policy()?.max_live;
-    let n = live.len() as u32;
+    let max = match review {
+        true => app.config.review.max_live()?,
+        false => app.config.manager_policy()?.max_live,
+    };
+    let n = counted(&live, task);
     Ok((n >= max).then_some((n, max)))
+}
+
+/// Of the `live` tasks, how many count toward the `max_live` that `task`
+/// does ([`max_live_of`]): review agents, top-level ones included, for a
+/// review; the rest of the tree for anything else.
+fn counted(live: &[TaskRecord], task: &TaskRecord) -> u32 {
+    let n = match task.kind == TaskKind::Review {
+        true => live.iter().filter(|t| t.kind == TaskKind::Review).count(),
+        false => live
+            .iter()
+            .filter(|t| t.parent_id.is_some() && t.kind != TaskKind::Review)
+            .count(),
+    };
+    n as u32
 }
 
 /// Tell `task`'s parent that its start waits on `max_live`, with `live` of
@@ -565,7 +605,8 @@ fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
 /// queued, so one a hold queued, and nobody told, is told once. Returns
 /// whether it was told now.
 pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32, since: i64) -> bool {
-    let body = format!("queued, {live}/{max} live: it starts when a task in the tree ends");
+    let (cap, frees) = max_live_of(task);
+    let body = format!("queued on {cap}, {live}/{max} live: it starts when {frees}");
     match reports::auto_status(app, task, StatusEvent::Queued, &body, since, 0) {
         Ok(told) => told.is_some(),
         Err(e) => {
@@ -593,9 +634,15 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
     if !tmux::may_start_session() {
         return Ok(warnings);
     }
-    // `live` of `max` once the tree is found full.
-    let mut full: Option<(u32, u32)> = None;
+    // `live` of `max` once the tree is found full; reviews, counted apart,
+    // fill up apart.
+    let mut full_tree: Option<(u32, u32)> = None;
+    let mut full_reviews: Option<(u32, u32)> = None;
     for task in app.db.queued_starts()? {
+        let full = match task.kind == TaskKind::Review {
+            true => &mut full_reviews,
+            false => &mut full_tree,
+        };
         if task.state != TaskState::Active {
             app.db.unqueue(&task.id)?;
             continue;
@@ -620,7 +667,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        if let Some((live, max)) = full {
+        if let Some((live, max)) = *full {
             if hold(app, &task)?.is_none() {
                 tell_queued(app, &task, live, max, &mut warnings)?;
             }
@@ -631,7 +678,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             StartGate::Go(guard) => guard,
             StartGate::Held(_) => continue,
             StartGate::Queue { live, max, .. } => {
-                full = Some((live, max));
+                *full = Some((live, max));
                 tell_queued(app, &task, live, max, &mut warnings)?;
                 continue;
             }
@@ -666,9 +713,9 @@ fn tell_queued(
         return Ok(());
     };
     if report_queued(app, task, live, max, since) {
+        let (cap, frees) = max_live_of(task);
         warnings.push(format!(
-            "task {} is queued on max_live ({live}/{max} live): it starts when a task in the \
-             tree ends",
+            "task {} is queued on {cap} ({live}/{max} live): it starts when {frees}",
             task.slug
         ));
     }
@@ -765,6 +812,36 @@ mod tests {
 
     fn nobody(_: &TaskRecord) -> bool {
         false
+    }
+
+    /// Review agents and the rest of the tree fill their `max_live`s
+    /// apart: a review counts reviews, top-level ones too; anything else
+    /// counts the tree's other tasks, never a review or a top-level task.
+    #[test]
+    fn reviews_and_the_tree_are_counted_apart() {
+        let review = |slug: &str, parent: Option<&str>| TaskRecord {
+            kind: TaskKind::Review,
+            parent_id: parent.map(str::to_string),
+            ..task(slug, TaskKind::Work, "a")
+        };
+        let live = [
+            task("w", TaskKind::Work, "a"),
+            task("m", TaskKind::Manager, "a"),
+            TaskRecord {
+                parent_id: None,
+                ..task("top", TaskKind::Work, "a")
+            },
+            review("r1", Some("a")),
+            review("r2", None),
+        ];
+        assert_eq!(counted(&live, &review("r3", Some("m"))), 2);
+        assert_eq!(counted(&live, &review("r3", None)), 2);
+        assert_eq!(counted(&live, &task("w2", TaskKind::Work, "m")), 2);
+        assert_eq!(
+            max_live_of(&review("r3", None)),
+            ("[review] max_live", "a review ends")
+        );
+        assert_eq!(max_live_of(&live[0]).0, "[managers] max_live");
     }
 
     #[test]

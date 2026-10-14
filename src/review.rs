@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ReviewConfig;
 use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
-use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskSessionRecord};
 use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
@@ -427,8 +427,9 @@ fn reason_not_to_ask(
 /// is busy, and otherwise starting it in its tmux pane, resuming its
 /// latest session so a review keeps the one. A paused or stopped task, or
 /// one under a held node, keeps it queued until resumed; one over
-/// `[managers] max_live` starts when a slot frees. Returns what to tell the
-/// user.
+/// `[review] max_live` starts when a review ends. A review in the tree
+/// gets `[review]`'s time and turns afresh ([`give_budget`]). Returns what
+/// to tell the user.
 pub fn start_agent(
     app: &App,
     repo: &RepoRecord,
@@ -455,6 +456,7 @@ pub fn start_agent(
             pr.number
         ));
     }
+    give_budget(app, task)?;
     let agent = crate::messages::TmuxAgent::new(app, task);
     let delivered = crate::messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
     if let Err(e) = record_asked(app, task, pr) {
@@ -488,11 +490,37 @@ pub fn start_agent(
             task.slug, pr.number
         ),
         Delivered::StartQueued { live, max } => format!(
-            "the review of #{} waits on max_live ({live}/{max} live); it starts when a task \
-             in the tree ends",
+            "the review of #{} waits on [review] max_live ({live}/{max} review agents live); \
+             it starts when a review ends",
             pr.number
         ),
     })
+}
+
+/// Give review task `task`, in the tree, `[review]`'s caps afresh for the
+/// review it is about to be asked: what it has used so far, and `time` and
+/// `turns` more, held to as a manager's budget is (warned at 80%, paused at
+/// 100%, M21). A pause its own budget set, the last review's, is lifted
+/// for this one; one anybody else set is left. A top-level review has no
+/// budget: nothing charges a task outside the tree (M19).
+fn give_budget(app: &App, task: &TaskRecord) -> Result<()> {
+    if task.parent_id.is_none() {
+        return Ok(());
+    }
+    let caps = app.config.review.policy()?.budget;
+    let (secs, turns) = app.db.subtree_used(&task.id)?;
+    let more = |used: i64, cap: Option<i64>| cap.map(|cap| used.saturating_add(cap));
+    app.db
+        .set_budget_max(&task.id, more(secs, caps.secs), more(turns, caps.turns))?;
+    let paused_by_budget = app
+        .db
+        .get_task(&task.id)?
+        .is_some_and(|t| t.run_state == RunState::Paused && t.run_state_by == Some(Setter::Budget));
+    if paused_by_budget {
+        app.db
+            .resume_run_state(&task.id, (RunState::Paused, Some(&Setter::Budget)))?;
+    }
+    Ok(())
 }
 
 /// Start the review command for `pr` in `worktree`, detached from this
@@ -1140,6 +1168,49 @@ mod tests {
         let _ = other.kill();
         let _ = other.wait();
     }
+    /// Each review asked of a review in the tree gets `[review]`'s time and
+    /// turns afresh on top of what it has used, a pause its last review's
+    /// budget set lifted, any other kept; a top-level one gets no budget.
+    #[cfg(unix)]
+    #[test]
+    fn each_review_in_the_tree_gets_its_caps_afresh() {
+        let home = tempfile::tempdir().unwrap();
+        let app = test_app(home.path());
+        give_budget(&app, &app.db.get_task("t").unwrap().unwrap()).unwrap();
+        assert_eq!(app.db.budget("t").unwrap(), None);
+
+        let mut t = app.db.get_task("t").unwrap().unwrap();
+        (t.id, t.slug, t.parent_id) = ("r".into(), "r".into(), Some("a".into()));
+        app.db.insert_task(&t).unwrap();
+        give_budget(&app, &t).unwrap();
+        let row = app.db.budget("r").unwrap().unwrap();
+        assert_eq!((row.max_secs, row.max_turns), (Some(3600), Some(20)));
+
+        // The first review spent: paused by its budget, until the next.
+        app.db.charge("r", 3600, 3).unwrap();
+        crate::manager::budget::enforce(&app, &t).unwrap();
+        let paused = app.db.get_task("r").unwrap().unwrap();
+        assert_eq!(paused.run_state_by, Some(Setter::Budget));
+        give_budget(&app, &t).unwrap();
+        let row = app.db.budget("r").unwrap().unwrap();
+        assert_eq!((row.max_secs, row.max_turns), (Some(7200), Some(23)));
+        assert_eq!(row.warned, 0);
+        assert_eq!(
+            app.db.get_task("r").unwrap().unwrap().run_state,
+            RunState::Run
+        );
+
+        // The user's pause stays.
+        app.db
+            .set_run_state("r", RunState::Paused, Some(&Setter::User))
+            .unwrap();
+        give_budget(&app, &t).unwrap();
+        assert_eq!(
+            app.db.get_task("r").unwrap().unwrap().run_state_by,
+            Some(Setter::User)
+        );
+    }
+
     /// A test index holding the assistant and one top-level review task `t`.
     #[cfg(unix)]
     fn test_app(home: &Path) -> App {

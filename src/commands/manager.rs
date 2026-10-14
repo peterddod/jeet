@@ -716,7 +716,8 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
     );
     if task.kind == TaskKind::Review {
         eprintln!(
-            "jeet: it is a review job, which runs no hooks, so nothing is counted against it"
+            "jeet: it is a review: the next review asked of it gets [review] time and turns \
+             afresh in place of this"
         );
     }
     // No hook charges an idle task, so nothing else would check it before

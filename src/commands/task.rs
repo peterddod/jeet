@@ -293,11 +293,13 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
              resumed",
             called
         ),
-        Delivered::StartQueued { live, max } => eprintln!(
-            "jeet: task {}'s start waits on max_live ({live}/{max} live), so the message is \
-             queued; it starts with it when a task in the tree ends",
-            called
-        ),
+        Delivered::StartQueued { live, max } => {
+            let (cap, frees) = run::max_live_of(&task);
+            eprintln!(
+                "jeet: task {called}'s start waits on {cap} ({live}/{max} live), so the message \
+                 is queued; it starts with it when {frees}"
+            )
+        }
         Delivered::Wake => eprintln!(
             "jeet: sent to {}'s agent; it gets it now, through its wake channel",
             called
@@ -474,9 +476,10 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             called, running.tmux_session
         ),
         Started::Queued { live, max, .. } => eprintln!(
-            "jeet: ended task {}'s agent; it waits on max_live ({live}/{max} live) to start \
+            "jeet: ended task {}'s agent; it waits on {} ({live}/{max} live) to start \
              again, resuming its latest session",
-            called
+            called,
+            run::max_live_of(&task).0
         ),
     }
     Ok(())
@@ -885,10 +888,8 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         ),
         Started::AlreadyRunning => {}
         Started::Queued { live, max, .. } => {
-            eprintln!(
-                "jeet: queued (tasks in the tree running: {live}/{max}, [managers] max_live); \
-                 its agent starts when one ends"
-            );
+            let (cap, frees) = run::max_live_of(&task);
+            eprintln!("jeet: queued ({live}/{max} live, {cap}); its agent starts when {frees}");
             return Ok(());
         }
     }
