@@ -803,8 +803,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             Style::default().fg(review_fg),
         ));
     }
-    // Whoever opened the PR wrote the title: only its printable text.
-    spans.push(Span::raw(cell(&printable(&title), columns.title)));
+    spans.push(Span::raw(cell(&title, columns.title)));
     if columns.age > 0 {
         spans.push(Span::styled(
             format!(" {:>width$}", age_label(when), width = columns.age),

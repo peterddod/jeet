@@ -1204,7 +1204,12 @@ impl TasksUi {
     fn refresh_visible(&mut self, keep: Option<&str>) {
         if self.view == View::Reviews {
             self.visible.clear();
-            self.tree.clear();
+            // A job no task holds is kept under the cursor by its PR.
+            let was = self
+                .reviews
+                .get(self.selected)
+                .filter(|line| matches!(line.source, Source::Legacy(_)))
+                .and_then(|line| line.pr.clone());
             let reviewed = &self.reviewed;
             self.reviews = reviews::lines(&self.rows, &self.legacy, &self.filter, |pr| {
                 reviewed.get(pr)?.as_ref().ok().map(|r| r.title.clone())
@@ -1214,6 +1219,12 @@ impl TasksUi {
                     self.reviews.iter().position(
                         |line| matches!(line.source, Source::Task(i) if self.rows[i].task.id == id),
                     )
+                })
+                .or_else(|| {
+                    let was = was?;
+                    self.reviews.iter().position(|line| {
+                        matches!(line.source, Source::Legacy(_)) && line.pr.as_ref() == Some(&was)
+                    })
                 })
                 .unwrap_or_else(|| self.selected.min(self.reviews.len().saturating_sub(1)));
             return;
@@ -1301,12 +1312,12 @@ impl TasksUi {
 
     /// Every PR the reviews view lists, filter or not: what GitHub is asked.
     pub fn reviewed_prs(&self) -> Vec<PrKey> {
-        let mut prs: Vec<PrKey> = reviews::lines(&self.rows, &self.legacy, "", |_| None)
+        let mut seen = HashSet::new();
+        reviews::lines(&self.rows, &self.legacy, "", |_| None)
             .into_iter()
             .filter_map(|line| line.pr)
-            .collect();
-        prs.dedup();
-        prs
+            .filter(|pr| seen.insert(pr.clone()))
+            .collect()
     }
 
     pub fn selected_id(&self) -> Option<&str> {
@@ -3478,7 +3489,10 @@ impl Screen<'_> {
     /// Read the tasks again, quietly: the background threads hear of it
     /// only when tasks came, went or changed state.
     fn reread(&mut self) -> Result<()> {
-        self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
+        // A walk of the review jobs on disk, only while they are shown.
+        if self.ui.view == View::Reviews {
+            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
+        }
         if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows);
             if self.ui.view == View::Reviews {
@@ -3521,8 +3535,9 @@ impl Screen<'_> {
     /// The view was `was`: start the tree thread on entering the agents
     /// view, and stop it on leaving.
     fn viewed(&mut self, was: View) {
+        // GitHub is asked by the loop, when what it said is stale.
         if was != View::Reviews && self.ui.view == View::Reviews {
-            self.look_at_reviews();
+            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
         }
         match tree_wanted(was, self.ui.view) {
             Some(true) => self.read_tree(),
@@ -5502,6 +5517,30 @@ mod tests {
         assert_eq!(reviews_shown(&ui), ["r1"]);
         press(&mut ui, KeyCode::Esc);
         assert_eq!(reviews_shown(&ui).len(), 4);
+    }
+
+    #[test]
+    fn the_cursor_stays_on_a_job_no_task_holds_as_lines_come_above_it() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::End);
+        assert_eq!(
+            ui.selected_review().and_then(|l| l.pr.clone()),
+            Some(pr_key(7))
+        );
+        let job = |number| Legacy {
+            pr: pr_key(number),
+            title: String::new(),
+            running: false,
+            started_at: 0,
+        };
+        ui.set_legacy(vec![job(8), job(2), job(7)]);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "old", "job 8", "job 7"]);
+        assert_eq!(
+            ui.selected_review().and_then(|l| l.pr.clone()),
+            Some(pr_key(7))
+        );
     }
 
     #[test]
