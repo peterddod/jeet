@@ -511,6 +511,7 @@ mod tests {
             report: None,
             review_jobs: Vec::new(),
             unanchored: false,
+            queued: false,
         }
     }
 

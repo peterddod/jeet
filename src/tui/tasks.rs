@@ -180,6 +180,8 @@ pub struct TaskRow {
     /// Its agent runs without jeet knowing its process, as the last poll
     /// found ([`runtime::unanchored`]).
     pub unanchored: bool,
+    /// Its start waits on a `max_live`, as the index last said.
+    pub queued: bool,
 }
 
 impl TaskRow {
@@ -4993,6 +4995,7 @@ fn task_row(app: &App, task: TaskRecord) -> Result<TaskRow> {
             None => None,
         },
         review_jobs: crate::review::state_files_of_task(app, &task),
+        queued: app.db.queued_at(&task.id)?.is_some(),
         task,
     })
 }
@@ -5381,6 +5384,7 @@ mod tests {
             report: None,
             review_jobs: Vec::new(),
             unanchored: false,
+            queued: false,
         }
     }
 

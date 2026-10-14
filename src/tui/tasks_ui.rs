@@ -20,7 +20,7 @@ use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
 use crate::commands::task::printable;
-use crate::db::tasks::{RunState, TaskKind, TaskPrRecord, TaskState};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskPrRecord, TaskState};
 use crate::manager::budget;
 use crate::messages;
 use crate::pr_history;
@@ -722,6 +722,27 @@ fn verdict_color(verdict: Verdict) -> Color {
     }
 }
 
+/// A review task's session: what its agent is doing, after what holds it
+/// back — paused (at its `[review]` caps, or by hand), stopped, or queued
+/// on a `max_live`.
+pub fn review_session(row: &TaskRow) -> String {
+    let held = match (row.task.run_state, &row.task.run_state_by) {
+        _ if row.task.state == TaskState::Archived => None,
+        (RunState::Paused, Some(Setter::Budget)) => Some("paused at its caps"),
+        (RunState::Paused, _) => Some("paused"),
+        (RunState::Stopped, _) => Some("stopped"),
+        (RunState::Run, _) if row.queued => Some("queued on max_live"),
+        (RunState::Run, _) => None,
+    };
+    let status = status_text(row);
+    match held {
+        // Paused, a turn under way still finishes: say so.
+        Some(held) if row.agent_running() => format!("{held} · {status}"),
+        Some(held) => held.to_string(),
+        None => status,
+    }
+}
+
 fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line<'static> {
     let (glyph, color, session, name, when) = match line.source {
         Source::Task(i) => {
@@ -730,7 +751,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             (
                 glyph,
                 color,
-                status_text(row),
+                review_session(row),
                 row.task.name.clone(),
                 row.last_activity,
             )
@@ -2417,6 +2438,7 @@ mod tests {
             report: None,
             review_jobs: Vec::new(),
             unanchored: false,
+            queued: false,
         }
     }
 
@@ -2537,6 +2559,24 @@ mod tests {
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
         ui
+    }
+
+    #[test]
+    fn a_held_review_says_what_holds_it() {
+        let mut review = row("r", None);
+        assert_eq!(review_session(&review), "");
+        review.queued = true;
+        assert_eq!(review_session(&review), "queued on max_live");
+        review.task.run_state = RunState::Paused;
+        review.task.run_state_by = Some(Setter::Budget);
+        assert_eq!(review_session(&review), "paused at its caps");
+        review.activity = Some(Activity::Running { detail: None });
+        assert!(review_session(&review).starts_with("paused at its caps · running"));
+        review.task.run_state_by = Some(Setter::User);
+        review.activity = Some(Activity::NotRunning);
+        assert_eq!(review_session(&review), "paused");
+        review.task.state = TaskState::Archived;
+        assert_eq!(review_session(&review), "archived");
     }
 
     #[test]
