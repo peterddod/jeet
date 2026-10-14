@@ -1255,10 +1255,12 @@ mod tests {
         let home = dir.path().canonicalize().unwrap();
         let app = test_app(&home);
         let done = home.join("done");
+        // Gone in 30s whatever happens, so a failing test leaves nothing.
         let mut job = Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "trap 'sleep 1; touch {}; exit 0' TERM; while :; do sleep 0.1; done",
+                "trap 'sleep 1; touch {}; exit 0' TERM; \
+                 i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done",
                 done.display()
             ))
             .stdin(Stdio::null())

@@ -9,9 +9,10 @@
 //! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
 //! tests, which point it at a stub so they never reach a real server.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -49,6 +50,83 @@ fn binary() -> String {
     "/nonexistent/jeet-unit-test-tmux".to_string()
 }
 
+/// How long one tmux command gets before jeet gives up on it and kills it.
+/// A server that has stopped answering must not hang jeet with it: a review
+/// job's runner, detached and waiting on tmux to tell the assistant the
+/// review ended, would wait forever.
+const CALL_LIMIT: Duration = Duration::from_secs(20);
+
+/// [`Command::output`] and [`Command::status`] for a tmux command, killed
+/// and failed as [`std::io::ErrorKind::TimedOut`] once it has run for
+/// [`CALL_LIMIT`]. Its stdin is nothing, and its output is read either way.
+trait Bounded {
+    fn bounded_output(&mut self) -> std::io::Result<Output>;
+    fn bounded_status(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+impl Bounded for Command {
+    fn bounded_output(&mut self) -> std::io::Result<Output> {
+        let child = self
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        finish(child, CALL_LIMIT)
+    }
+
+    fn bounded_status(&mut self) -> std::io::Result<ExitStatus> {
+        self.bounded_output().map(|o| o.status)
+    }
+}
+
+/// Wait for `child` and read what it writes, as
+/// [`std::process::Child::wait_with_output`] does, for up to `limit`:
+/// past it the child is killed, and its output given up on.
+fn finish(mut child: Child, limit: Duration) -> std::io::Result<Output> {
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let timed_out = || {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("tmux did not finish within {}s", limit.as_secs()),
+        )
+    };
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(timed_out());
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(20));
+    };
+    // Exited, but something it started may still hold its output open.
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let stdout = out.recv_timeout(left()).map_err(|_| timed_out())?;
+    let stderr = err.recv_timeout(left()).map_err(|_| timed_out())?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// A tmux command that cannot read the terminal and says nothing on it.
 fn quiet() -> Command {
     let mut cmd = Command::new(binary());
@@ -68,7 +146,7 @@ fn target(name: &str) -> String {
 pub fn available() -> bool {
     quiet()
         .arg("-V")
-        .status()
+        .bounded_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -90,7 +168,7 @@ fn in_background() -> bool {
 fn server_running() -> bool {
     quiet()
         .arg("list-sessions")
-        .status()
+        .bounded_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -119,7 +197,7 @@ pub fn list_sessions() -> Vec<String> {
         .args(["list-sessions", "-F", "#{session_name}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return Vec::new();
     };
@@ -137,7 +215,7 @@ pub fn list_sessions() -> Vec<String> {
 pub fn has_session(name: &str) -> bool {
     quiet()
         .args(["has-session", "-t", &target(name)])
-        .status()
+        .bounded_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -194,7 +272,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         .env_remove(crate::permissions::ASSISTANT_ENV)
         .env_remove(BACKGROUND_ENV)
         .stdin(Stdio::null());
-    let output = cmd.output().context("run tmux")?;
+    let output = cmd.bounded_output().context("run tmux")?;
     if !output.status.success() {
         bail!(
             "tmux could not start session {name}: {}",
@@ -221,7 +299,7 @@ fn record_agent_pane(name: &str, pane: &str) {
     let _ = quiet()
         .args(["set-option", "-t", &format!("{}:", target(name))])
         .args([AGENT_PANE_OPTION, pane])
-        .status();
+        .bounded_status();
 }
 
 /// The pane of session `name` its agent runs in, by the id
@@ -242,7 +320,7 @@ fn recorded_agent_pane(name: &str) -> String {
         .arg(AGENT_PANE_OPTION)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -300,12 +378,13 @@ fn paste(pane: &str, text: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()
         .context("run tmux")?;
-    let written = load
-        .stdin
-        .take()
-        .context("tmux took no input")?
-        .write_all(text.as_bytes());
-    let output = load.wait_with_output().context("run tmux")?;
+    // Written from a thread of its own: a tmux that stops reading must not
+    // hold this up past the limit.
+    let mut stdin = load.stdin.take().context("tmux took no input")?;
+    let text = text.as_bytes().to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&text));
+    let output = finish(load, CALL_LIMIT).context("run tmux")?;
+    let written = writer.join().unwrap_or(Ok(()));
     written.context("hand tmux the text")?;
     if !output.status.success() {
         bail!(
@@ -317,10 +396,12 @@ fn paste(pane: &str, text: &str) -> Result<()> {
         .args(["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     if !output.status.success() {
-        let _ = quiet().args(["delete-buffer", "-b", &buffer]).status();
+        let _ = quiet()
+            .args(["delete-buffer", "-b", &buffer])
+            .bounded_status();
         bail!(
             "tmux could not type into the agent's pane: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -363,7 +444,7 @@ pub fn windows(name: &str) -> Vec<Window> {
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return Vec::new();
     };
@@ -453,7 +534,7 @@ pub fn new_window(
             .env_remove(crate::permissions::ASSISTANT_ENV)
             .env_remove(BACKGROUND_ENV)
             .stdin(Stdio::null());
-        let output = cmd.output().context("run tmux")?;
+        let output = cmd.bounded_output().context("run tmux")?;
         // Another jeet made the session between the look and the start:
         // a window in it does as well.
         if !output.status.success() && creating && attempts == 1 && has_session(name) {
@@ -504,7 +585,7 @@ pub fn set_window_key(id: &str, key: &str) -> bool {
 fn set_window_option(id: &str, option: &str, value: &str) -> bool {
     quiet()
         .args(["set-option", "-w", "-t", id, option, value])
-        .status()
+        .bounded_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -522,7 +603,7 @@ pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
         ))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .ok()
         .filter(|o| o.status.success())?;
     parse_current_window(&String::from_utf8_lossy(&output.stdout), name)
@@ -551,7 +632,7 @@ pub fn select_window(id: &str) -> Result<()> {
         .args(["select-window", "-t", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -570,7 +651,7 @@ pub fn kill_window(id: &str) -> Result<()> {
         .args(["kill-window", "-t", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     if !output.status.success() && window_exists(id) {
         bail!(
@@ -585,7 +666,7 @@ pub fn kill_window(id: &str) -> Result<()> {
 fn window_exists(id: &str) -> bool {
     quiet()
         .args(["list-panes", "-t", id])
-        .status()
+        .bounded_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -596,7 +677,7 @@ pub fn window_alive(id: &str) -> bool {
         .args(["list-panes", "-t", id, "-F", "#{pane_dead}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return false;
     };
@@ -638,7 +719,7 @@ fn capture_pane(pane: &str, styled: bool) -> Result<String> {
         .args(["-t", pane])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     if !output.status.success() {
         bail!("tmux could not read pane {pane}");
@@ -652,7 +733,7 @@ pub fn attached(name: &str) -> bool {
         .args(["list-clients", "-t", &target(name)])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
@@ -662,7 +743,7 @@ fn send_keys(args: &[&str]) -> Result<()> {
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -690,7 +771,7 @@ fn set_detach_hint(name: &str) {
         .args(["bind-key", "-n", DETACH_KEY, "if-shell", "-F"])
         .arg(format!("#{{m:{SESSION_PREFIX}*,#{{session_name}}}}"))
         .args(["detach-client", &format!("send-keys {DETACH_KEY}")])
-        .status();
+        .bounded_status();
     let _ = quiet()
         .args([
             "set-option",
@@ -700,7 +781,7 @@ fn set_detach_hint(name: &str) {
             "status-right",
             DETACH_HINT,
         ])
-        .status();
+        .bounded_status();
 }
 
 /// The server option that has tmux pass modified keys such as Shift+Enter
@@ -805,7 +886,7 @@ pub fn kill(name: &str) -> Result<()> {
         .args(["kill-session", "-t", &target(name)])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .bounded_output()
         .context("run tmux")?;
     // It may have ended on its own between the check and the kill.
     if !output.status.success() && has_session(name) {
@@ -844,7 +925,7 @@ fn pane_pids(args: &[&str]) -> Vec<u32> {
         .args(["-F", "#{pane_dead} #{pane_pid}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return Vec::new();
     };
@@ -989,7 +1070,7 @@ pub fn current_session() -> Option<String> {
         .arg("#{session_name}")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .ok()
         .filter(|o| o.status.success())?;
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1010,7 +1091,7 @@ pub fn pane_alive(name: &str) -> bool {
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return false;
     };
@@ -1043,7 +1124,7 @@ pub fn agent_alive(name: &str) -> bool {
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return false;
     };
@@ -1076,7 +1157,7 @@ pub fn live_agent_pane(name: &str) -> Option<LivePane> {
         .arg(LIVE_PANE_FORMAT)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .ok()?;
     output.status.success().then_some(())?;
     parse_live_pane(String::from_utf8_lossy(&output.stdout).lines().next()?)
@@ -1089,7 +1170,7 @@ pub fn live_window_pane(id: &str) -> Option<LivePane> {
         .args(["list-panes", "-t", id, "-F", LIVE_PANE_FORMAT])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
         .ok()?;
     output.status.success().then_some(())?;
     parse_live_pane(String::from_utf8_lossy(&output.stdout).lines().next()?)
@@ -1120,7 +1201,7 @@ pub fn jeet_pane_pids() -> Vec<u32> {
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .bounded_output()
     else {
         return Vec::new();
     };
@@ -1143,6 +1224,32 @@ fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tmux that hangs is killed once its time is up, rather than
+    /// holding up whoever called it; one that answers is read in full.
+    #[test]
+    fn a_tmux_call_that_hangs_is_given_up_on() {
+        let child = Command::new("sh")
+            .args(["-c", "echo hello; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let started = Instant::now();
+        let err = finish(child, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(still_running(&[pid]).is_empty(), "the hung call was left");
+
+        let output = Command::new("sh")
+            .args(["-c", "echo out; echo err >&2; exit 3"])
+            .bounded_output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"out\n");
+        assert_eq!(output.stderr, b"err\n");
+    }
 
     #[test]
     fn a_live_pane_is_read_with_its_program() {
