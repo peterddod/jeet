@@ -4267,6 +4267,24 @@ fn a_review_is_its_tasks_agent_in_one_session() {
     );
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
 
+    // Asked again while the prompt still waits for it: one is enough.
+    let output = lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("queued"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("already queued"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    std::fs::remove_file(task.join(".jeet/inbox.jsonl")).unwrap();
+
     // Asked again once its agent has ended: the same session, the same
     // worktree, no second of either.
     std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();

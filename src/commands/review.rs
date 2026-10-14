@@ -65,7 +65,16 @@ pub fn run(
     );
 
     if start_review {
-        if app.config.review.command().is_some() {
+        // Once its agent has been asked, a review stays with it: a job
+        // beside it would leave a second session.
+        let has_agent = review::asked(app, &review.task).is_some();
+        if app.config.review.command().is_some() && has_agent {
+            eprintln!(
+                "jeet: warning: [review] command is deprecated, and not run for a review its \
+                 agent has started; the agent is asked instead"
+            );
+        }
+        if app.config.review.command().is_some() && !has_agent {
             eprintln!(
                 "jeet: warning: [review] command is deprecated: it runs headless, outside the \
                  review task's agent; remove it to have the agent review in its tmux pane, \

@@ -331,7 +331,11 @@ One review is one task, one worktree and one session. Running `jeet review`
 again for the same commit asks nothing; a new head commit, or `--rerun`,
 brings the worktree up to the PR's head (when it is clean) and sends the
 prompt again into the same session: typed in when the agent is idle, queued
-while it works, and resuming its session in a new pane when it has ended.
+while it works (once: a prompt still waiting is not queued twice), and
+resuming its session in a new pane when it has ended — or, run with no tmux
+server to start it on, waiting until the task is next opened. Once its agent
+has been asked, a review stays with it even if `[review] command` is set
+later.
 The review agent is gated like any task's: under the assistant it reports to
 it, a paused or stopped task (or one under a held manager) keeps the prompt
 until resumed, and `[managers] max_live` queues its start. `--no-agent`

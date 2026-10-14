@@ -443,6 +443,18 @@ pub fn start_agent(
     }
     let prompt = expand_prompt(app.config.review.prompt(), pr, worktree);
     let dir = crate::tasks::task_dir(app, task);
+    // Still waiting in its inbox: the worktree it names is at the new head
+    // already, so one is enough, not a second review behind it.
+    let checked = crate::messages::checked(&prompt)?;
+    if crate::messages::peek(&dir)
+        .iter()
+        .any(|q| q.message == checked)
+    {
+        return Ok(format!(
+            "the review of #{} is already queued for the review agent",
+            pr.number
+        ));
+    }
     let agent = crate::messages::TmuxAgent::new(app, task);
     let delivered = crate::messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
     if let Err(e) = record_asked(app, task, pr) {
