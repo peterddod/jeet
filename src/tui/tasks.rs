@@ -3535,9 +3535,18 @@ impl Screen<'_> {
     /// The view was `was`: start the tree thread on entering the agents
     /// view, and stop it on leaving.
     fn viewed(&mut self, was: View) {
-        // GitHub is asked by the loop, when what it said is stale.
+        // GitHub is asked by the loop, when what it said is stale or a
+        // review came along meanwhile that it has not been asked about.
         if was != View::Reviews && self.ui.view == View::Reviews {
             self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
+            let unknown = self
+                .ui
+                .reviewed_prs()
+                .iter()
+                .any(|pr| !self.ui.reviewed.contains_key(pr));
+            if unknown {
+                self.reviews_asked = None;
+            }
         }
         match tree_wanted(was, self.ui.view) {
             Some(true) => self.read_tree(),

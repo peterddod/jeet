@@ -777,6 +777,9 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
         ),
         Some(Err(why)) => ("?", Color::Red, format!("unknown: {why}"), Color::Red, name),
     };
+    // Titles are whoever opened the PR's, and errors are gh's: only their
+    // printable text reaches the terminal.
+    let (pr, review, title) = (printable(&pr), printable(&review), printable(&title));
     let mut spans = vec![Span::styled(
         format!("{glyph} "),
         Style::default().fg(color),
@@ -2530,7 +2533,7 @@ mod tests {
             }),
         );
         ui.reviewed
-            .insert(key(3), Err("gh is not installed".into()));
+            .insert(key(3), Err("\u{1b}[2Jgh is not installed".into()));
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
         ui
@@ -2554,7 +2557,7 @@ mod tests {
         assert!(archived.contains("merged") && archived.contains("approved"));
         let legacy = line_of(&screen, "api#3");
         assert!(legacy.contains("no task"), "{legacy}");
-        assert!(legacy.contains("unknown: gh"), "{legacy}");
+        assert!(legacy.contains("unknown: [2Jgh"), "{legacy}");
         assert!(!all.contains("not a review"), "{all}");
         assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
         // Archived after active, and the job no task holds last.
