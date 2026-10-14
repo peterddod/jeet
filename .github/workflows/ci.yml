@@ -23,6 +23,16 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      # Every process the tests start must be gone once they finish, failed
+      # or not: a detached review runner or a stub tmux left behind spins on.
+      - name: Check no test process is left running
+        if: always()
+        run: |
+          sleep 2
+          if pgrep -fl 'target/debug/jeet|tmux-stub'; then
+            echo "::error::the tests left the processes above running"
+            exit 1
+          fi
       - name: Verify deb includes shell completions
         if: runner.os == 'Linux'
         run: |
