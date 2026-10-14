@@ -234,6 +234,10 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
     (
         "",
+        "paused (at its [review] caps, or by hand), stopped, or queued on max_live",
+    ),
+    (
+        "",
         "a review with no task is an older jeet review's job: no session",
     ),
     ("PR", "open · draft · merged · closed, as GitHub last said"),

@@ -643,7 +643,9 @@ last any review job an older `jeet review` recorded with no task to hold it.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each row shows whether the review's session is running, the PR, its state on
+Each row shows whether the review's session is running (or what holds it back:
+paused at its `[review]` caps or by hand, stopped, or queued on `max_live`), the
+PR, its state on
 GitHub (open, draft, merged, closed) and where its review stands: GitHub's
 review decision (approved, changes requested, review required), else what the
 reviewers' latest reviews say (changes requested, approved, commented), else
