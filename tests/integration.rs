@@ -4,6 +4,9 @@ use tempfile::TempDir;
 
 fn jeet_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_jeet"));
+    // Whatever it leaves running is ended with the test.
+    #[cfg(unix)]
+    reaper::own_session(&mut cmd);
     // jeet shells out to git, so the developer's global config would otherwise
     // reach in — commit.gpgsign alone fails most of this suite.
     hermetic_git(&mut cmd);
@@ -40,6 +43,248 @@ fn jeet_bin() -> Command {
         cmd.env_remove(name);
     }
     cmd
+}
+
+/// What the tests leave running, ended.
+///
+/// jeet starts some processes detached, in a process group of their own
+/// (a review's runner, a store sync): they outlive the jeet a test ran, and
+/// a test that failed part-way leaves them waiting forever, on a review
+/// command or a stub tmux whose directory has gone. A process group is not
+/// enough to find them by; a session is, as nothing jeet starts makes one
+/// of its own. So every process a test starts that may leave others behind
+/// (jeet, and the shells and terminals that run it) leads a new session,
+/// noted with the test's name in this run's registry, and once the test's
+/// thread ends, passed or failed, every process still in its sessions is
+/// killed. Whatever is left when the run ends goes then, and a run killed
+/// outright is cleaned up after by the next.
+#[cfg(unix)]
+mod reaper {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    extern "C" {
+        fn setsid() -> i32;
+        fn getsid(pid: i32) -> i32;
+        fn getpid() -> i32;
+        fn kill(pid: i32, sig: i32) -> i32;
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        fn atexit(f: extern "C" fn()) -> i32;
+    }
+
+    const SIGKILL: i32 = 9;
+
+    /// Each run's registry, named by the test process's pid: a line
+    /// `<session> <test>` for each session one of its tests started.
+    fn registries() -> PathBuf {
+        std::env::temp_dir().join("jeet-test-sessions")
+    }
+
+    /// This run's registry, open for appending.
+    fn registry() -> &'static (PathBuf, std::fs::File) {
+        static REGISTRY: OnceLock<(PathBuf, std::fs::File)> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            let dir = registries();
+            std::fs::create_dir_all(&dir).unwrap();
+            sweep_dead_runs(&dir);
+            let path = dir.join(std::process::id().to_string());
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: registers a plain function, once.
+            unsafe { atexit(at_exit) };
+            (path, file)
+        })
+    }
+
+    /// The test this thread runs, by the name libtest gives its thread.
+    fn test_name() -> Option<String> {
+        std::thread::current()
+            .name()
+            .filter(|n| *n != "main" && n.len() < 400 && !n.contains(char::is_whitespace))
+            .map(str::to_string)
+    }
+
+    thread_local! {
+        /// The test whose sessions this thread ends as it exits.
+        static TEST: Test = const { Test(RefCell::new(None)) };
+    }
+
+    struct Test(RefCell<Option<String>>);
+
+    impl Drop for Test {
+        fn drop(&mut self) {
+            if let Some(name) = self.0.borrow().as_deref() {
+                end_sessions(&sessions(&registry().0, Some(name)), false);
+            }
+        }
+    }
+
+    /// Have `cmd` lead a session of its own, noted as this thread's test's
+    /// (or, on another thread, as the run's).
+    pub fn own_session(cmd: &mut Command) {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let fd = registry().1.as_raw_fd();
+        let name = test_name();
+        if let Some(name) = &name {
+            TEST.with(|t| *t.0.borrow_mut() = Some(name.clone()));
+        }
+        let suffix = format!(" {}\n", name.as_deref().unwrap_or("-")).into_bytes();
+        // SAFETY: between fork and exec only async-signal-safe calls, and
+        // no allocation: the line is built on the stack.
+        unsafe {
+            cmd.pre_exec(move || {
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut line = [0u8; 512];
+                let mut n = 0;
+                let mut pid = getpid() as u32;
+                let mut digits = [0u8; 10];
+                let mut d = 0;
+                loop {
+                    digits[d] = b'0' + (pid % 10) as u8;
+                    d += 1;
+                    pid /= 10;
+                    if pid == 0 {
+                        break;
+                    }
+                }
+                while d > 0 {
+                    d -= 1;
+                    line[n] = digits[d];
+                    n += 1;
+                }
+                line[n..n + suffix.len()].copy_from_slice(&suffix);
+                n += suffix.len();
+                write(fd, line.as_ptr(), n);
+                Ok(())
+            });
+        }
+    }
+
+    /// A shell command that notes the shell running it, a session's leader
+    /// (as `script` starts it), as this thread's test's, for a terminal's
+    /// shell [`own_session`] cannot reach.
+    pub fn note_shell() -> String {
+        let path = registry().0.to_string_lossy().replace('\'', r"'\''");
+        let name = test_name();
+        if let Some(name) = &name {
+            TEST.with(|t| *t.0.borrow_mut() = Some(name.clone()));
+        }
+        format!(
+            "echo \"$$ {}\" >> '{path}'; ",
+            name.as_deref().unwrap_or("-")
+        )
+    }
+
+    /// The sessions noted in `registry`: `test`'s, or all of them.
+    fn sessions(registry: &Path, test: Option<&str>) -> Vec<i32> {
+        let text = std::fs::read_to_string(registry).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| {
+                let (sid, name) = line.split_once(' ')?;
+                test.is_none_or(|t| t == name).then(|| sid.parse().ok())?
+            })
+            .filter(|&sid| sid > 1)
+            .collect()
+    }
+
+    /// The live processes in `sessions`, as `(pid, session)`.
+    fn members(sessions: &[i32]) -> Vec<(i32, i32)> {
+        let Ok(output) = Command::new("ps")
+            .args(["-A", "-o", "pid=", "-o", "stat="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        let me = std::process::id() as i32;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: i32 = fields.next()?.parse().ok()?;
+                let zombie = fields.next().is_some_and(|s| s.starts_with('Z'));
+                // SAFETY: getsid only reads.
+                let sid = unsafe { getsid(pid) };
+                (pid != me && !zombie && sessions.contains(&sid)).then_some((pid, sid))
+            })
+            .collect()
+    }
+
+    /// Kill every process in `sessions`, again until none is left (one may
+    /// start another meanwhile). `leaderless`: only sessions whose leader
+    /// has exited, for another run's, whose session ids may since have been
+    /// reused by a new leader.
+    pub(super) fn end_sessions(sessions: &[i32], leaderless: bool) {
+        if sessions.is_empty() {
+            return;
+        }
+        for _ in 0..10 {
+            let mut found = members(sessions);
+            if leaderless {
+                let led: Vec<i32> = found
+                    .iter()
+                    .filter(|(pid, sid)| pid == sid)
+                    .map(|&(_, sid)| sid)
+                    .collect();
+                found.retain(|(_, sid)| !led.contains(sid));
+            }
+            if found.is_empty() {
+                return;
+            }
+            for (pid, _) in found {
+                // SAFETY: a signal to a process of this run's.
+                unsafe { kill(pid, SIGKILL) };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The sessions of runs whose test process has gone, ended.
+    fn sweep_dead_runs(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            // SAFETY: signal 0 only asks whether the process is there.
+            if pid == std::process::id() as i32 || unsafe { kill(pid, 0) } == 0 {
+                continue;
+            }
+            end_sessions(&sessions(&entry.path(), None), true);
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+
+    extern "C" fn at_exit() {
+        let (path, _) = registry();
+        end_sessions(&sessions(path, None), false);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Whether process `pid` is running, and not a zombie.
+    pub(super) fn running(pid: i32) -> bool {
+        let Ok(output) = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        let stat = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
 }
 
 /// Detach a command from the ambient git configuration.
@@ -879,10 +1124,12 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
     );
     // A terminal of a known size, then the viewer in it.
     let inner = format!(
-        "stty rows 40 cols 120 && exec '{}' review 7",
+        "{}stty rows 40 cols 120 && exec '{}' review 7",
+        reaper::note_shell(),
         env!("CARGO_BIN_EXE_jeet")
     );
     let mut cmd = Command::new("script");
+    reaper::own_session(&mut cmd);
     if cfg!(target_os = "linux") {
         cmd.args(["-q", "-e", "-c", &inner, "/dev/null"]);
     } else {
@@ -1995,6 +2242,7 @@ pwd"#,
     );
     let mut cmd = Command::new("bash");
     hermetic_git(&mut cmd);
+    reaper::own_session(&mut cmd);
     let output = cmd
         .args(["--noprofile", "--norc", "-c", &program])
         .env("JEET_HOME", lab.home())
@@ -2404,7 +2652,14 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
 here=$(dirname "$0")
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
-until mkdir "$here/lock" 2>/dev/null; do :; done
+# Never spin: a lock left by a call killed part-way, or a test that has
+# ended and taken this directory with it, is given up on after a while.
+tries=0
+until mkdir "$here/lock" 2>/dev/null; do
+  [ -d "$here" ] && [ "$tries" -lt 500 ] || exit 1
+  tries=$((tries + 1))
+  sleep 0.01
+done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
@@ -2416,7 +2671,7 @@ if [ "$1" = load-buffer ]; then cat >> "$record"; printf '\0' >> "$record"; fi
 # One call may run more than one command, `;` between: act on the last.
 for arg in "$@"; do [ "$arg" = ";" ] && chained=1; done
 if [ -n "$chained" ]; then
-  while [ "$1" != ";" ]; do shift; done
+  while [ $# -gt 0 ] && [ "$1" != ";" ]; do shift; done
   shift
 fi
 # The session the call names after `$1`, the flag: `=jeet-x:` is jeet-x.
@@ -3285,7 +3540,9 @@ fn archive_keeps_what_the_agent_writes_as_it_exits() {
     let ready = scratch.path().join("ready");
 
     // An agent that takes a moment, once hung up on, to write its last file.
-    let mut agent = Command::new("sh")
+    let mut agent = Command::new("sh");
+    reaper::own_session(&mut agent);
+    let mut agent = agent
         .arg("-c")
         .arg(
             r#"trap 'sleep 1; echo late > "$WT/late.txt"; exit 0' HUP
@@ -3655,10 +3912,12 @@ impl Pty {
             std::env::var("PATH").unwrap_or_default()
         );
         let inner = format!(
-            "stty rows 40 cols 140 && exec '{}' {args}",
+            "{}stty rows 40 cols 140 && exec '{}' {args}",
+            reaper::note_shell(),
             env!("CARGO_BIN_EXE_jeet")
         );
         let mut cmd = Command::new("script");
+        reaper::own_session(&mut cmd);
         if cfg!(target_os = "linux") {
             cmd.args(["-q", "-f", "-e", "-c", &inner]).arg(&log);
         } else {
@@ -4213,6 +4472,69 @@ fn opening_a_review_task_resumes_its_review_session() {
     assert_eq!(opened[dash + 1..dash + 4], ["claude", "--resume", session]);
     assert!(!opened.contains(&"--session-id".to_string()), "{opened:?}");
     assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+}
+
+/// A test that fails with a review still running leaves nothing behind:
+/// the review's runner, detached in a process group of its own, and the
+/// command it runs are ended with the test, though its directory has gone.
+#[cfg(unix)]
+#[test]
+fn a_test_leaves_no_process_behind() {
+    // A test of its own, as libtest runs each: on a thread named for it.
+    let test = std::thread::Builder::new()
+        .name("leaves_a_review_running".into())
+        .spawn(|| {
+            let lab = StoreLab::new();
+            let trunk = lab.clone_repo("widget");
+            let bin = stub_history_gh(&lab.home());
+            let path = path_with(&bin);
+            let scratch = TempDir::new().unwrap();
+            let tmux = stub_tmux(scratch.path());
+            let pid_file = scratch.path().join("command.pid");
+            std::fs::write(
+                lab.home().join("config.toml"),
+                format!(
+                    "scan_roots = []\n[review]\nnotify = false\ncommand = '''\
+                     echo $$ > {}; while :; do sleep 0.1; done'''\n",
+                    sh_quote(&pid_file.to_string_lossy()),
+                ),
+            )
+            .unwrap();
+            let tmux_env = tmux.to_string_lossy().to_string();
+            let env = [("PATH", path.as_str()), ("JEET_TMUX", tmux_env.as_str())];
+            succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+            let state = lab.home().join("reviews/github.com/acme/widget/7.json");
+            let runner = || {
+                let job = std::fs::read_to_string(&state).ok()?;
+                let job: serde_json::Value = serde_json::from_str(&job).ok()?;
+                job["pid"].as_i64()
+            };
+            wait_until("the review to start", || {
+                pid_file.exists() && runner().is_some()
+            });
+            let runner = runner().unwrap() as i32;
+            let command: i32 = read(&pid_file).trim().parse().unwrap();
+            assert!(reaper::running(runner) && reaper::running(command));
+            (runner, command)
+        })
+        .unwrap();
+    let (runner, command) = test.join().unwrap();
+    assert!(!reaper::running(runner), "the review's runner was left");
+    assert!(!reaper::running(command), "the review's command was left");
+}
+
+/// A stub tmux never spins: a lock left behind by a call killed part-way,
+/// or a directory gone with the test that made it, is given up on.
+#[cfg(unix)]
+#[test]
+fn a_stub_tmux_gives_up_on_a_stale_lock() {
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    std::fs::create_dir(tmux.parent().unwrap().join("lock")).unwrap();
+    let started = std::time::Instant::now();
+    let output = Command::new(&tmux).arg("-V").output().unwrap();
+    assert!(!output.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
 }
 
 #[cfg(unix)]
@@ -5953,7 +6275,14 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
 here=$(dirname "$0")
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
-until mkdir "$here/lock" 2>/dev/null; do :; done
+# Never spin: a lock left by a call killed part-way, or a test that has
+# ended and taken this directory with it, is given up on after a while.
+tries=0
+until mkdir "$here/lock" 2>/dev/null; do
+  [ -d "$here" ] && [ "$tries" -lt 500 ] || exit 1
+  tries=$((tries + 1))
+  sleep 0.01
+done
 n=$(cat "$here/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$here/count"
@@ -5964,7 +6293,7 @@ rmdir "$here/lock"
 if [ "$1" = load-buffer ]; then cat >> "$record"; printf '\0' >> "$record"; fi
 for arg in "$@"; do [ "$arg" = ";" ] && chained=1; done
 if [ -n "$chained" ]; then
-  while [ "$1" != ";" ]; do shift; done
+  while [ $# -gt 0 ] && [ "$1" != ";" ]; do shift; done
   shift
 fi
 target=""
@@ -7733,6 +8062,7 @@ impl PaneShell {
         lab.wire(&mut base);
         let mut cmd = Command::new("sh");
         cmd.args(["-c", r#"while IFS= read -r l; do eval "$l"; done"#]);
+        reaper::own_session(&mut cmd);
         for (key, value) in base.get_envs() {
             match value {
                 Some(value) => cmd.env(key, value),
