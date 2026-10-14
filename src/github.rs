@@ -213,6 +213,35 @@ pub fn pr_view(repo_dir: &Path, number: u64) -> Result<PullRequest> {
     serde_json::from_str(&text).context("parse gh pr view output")
 }
 
+/// One review's verdict, as `latestReviews` lists it: each reviewer's last.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct LatestReview {
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`.
+    pub state: String,
+}
+
+/// A PR with where its review stands: GitHub's decision and each
+/// reviewer's latest review, which says "commented" when the decision has
+/// nothing to say.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedPr {
+    #[serde(flatten)]
+    pub pr: PullRequest,
+    #[serde(default)]
+    pub latest_reviews: Vec<LatestReview>,
+}
+
+/// A PR by number, with its latest reviews.
+pub fn pr_review(repo_dir: &Path, number: u64) -> Result<ReviewedPr> {
+    let fields = format!("{PR_FIELDS},latestReviews");
+    let text = gh_ok(
+        repo_dir,
+        &["pr", "view", &number.to_string(), "--json", &fields],
+    )?;
+    serde_json::from_str(&text).context("parse gh pr view output")
+}
+
 /// The PR for a local branch, if there is one.
 ///
 /// `pr/<n>` is how [`PullRequest::local_branch`] names a fork's PR, so that

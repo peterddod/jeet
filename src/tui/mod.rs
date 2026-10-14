@@ -16,6 +16,7 @@ pub mod chat;
 pub mod command;
 mod managers;
 pub mod review;
+mod reviews;
 pub mod state;
 pub mod tasks;
 mod tasks_ui;

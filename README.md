@@ -509,7 +509,7 @@ jeet          # or `jeet tasks`
 
 ```text
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
-│ active 3   agents 1   archived 1    / filter  ⇥ switch                    │
+│ active 3   agents 1   reviews 2   archived 1    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
 ┌ 3 active tasks ───────────────────────────────────────────────────────────┐
@@ -530,8 +530,8 @@ worktrees it holds (as of the last look at the disk, since the agent adds them
 as it goes), its size and when anything last happened in it. Statuses refresh
 every two seconds and sizes are measured in the background, so the list never
 waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
-archived tasks, and back to these (`⇧⇥` the other way); `/` filters by name the
-way the explorer does.
+[reviews tab](#the-reviews-tab), then the archived tasks, and back to these
+(`⇧⇥` the other way); `/` filters by name the way the explorer does.
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
 has, what each running one is doing (`*` marks the primary one), how many
@@ -626,6 +626,42 @@ goes to the task that asked, with a copy to each manager it passed through;
 how each went is shown when it is done, and a refusal (answered meanwhile,
 say) stays on the form. The worktree, PR, archive and delete keys are the
 active tab's: `⇥` back to it.
+
+### The reviews tab
+
+The third tab lists every review jeet knows of: each review task (what `jeet
+review` makes), active ones first and then archived ones (`▪ archived`), and
+last any review job an older `jeet review` recorded with no task to hold it.
+
+```text
+┌ jeet · reviews ─────────────────────────────────────────────────────────────┐
+│ active 6   agents 7   reviews 3   archived 2    / filter  ⇥ switch          │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌ 3 reviews ──────────────────────────────────────────────────────────────────┐
+│● running – Read  api#131  open    changes requested  Refresh tokens just now│
+│○ idle 2h         web#88   draft   review required    New login page   2h ago│
+│▪ archived        api#120  merged  approved           Drop v1 routes   3d ago│
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each row shows whether the review's session is running (or what holds it back:
+paused at its `[review]` caps or by hand, stopped, or queued on `max_live`), the
+PR, its state on
+GitHub (open, draft, merged, closed) and where its review stands: GitHub's
+review decision (approved, changes requested, review required), else what the
+reviewers' latest reviews say (changes requested, approved, commented), else
+awaiting review. GitHub is asked through `gh` on a thread of its own when the
+tab is shown, on `r`, and every two minutes while it stays shown, so the list
+never waits on it; until it answers a row shows `…`, and a lookup that fails
+keeps what it said before. PR titles are shown as text, never run.
+
+| Key | |
+|---|---|
+| `⏎` | the review's menu: `v` view the diff, `s` open the review's session |
+| `v` | the review's PR in the review viewer, read from the task's checkout when it has one, else the repository's trunk |
+| `s` (in the menu) | open the review's session: attach to the review task's agent, or resume or start it, as `⏎` does in the active tab. A job with no task has none |
+| `e` `w` `p` `a` `D` | the review task's, as in the active tab; `a` brings an archived one back |
+| `/` | filter by PR (`api#131`), task name or title |
 
 ### Pull request history
 

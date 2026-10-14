@@ -21,7 +21,7 @@
 //! picks one of its sessions, `t` opens its todo list, `i` its inbox and
 //! activity, and `o` sorts the tasks by the todo items that link them.
 //!
-//! `⇥` cycles active → agents → archived. The agents view shows the
+//! `⇥` cycles active → agents → reviews → archived. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
 //! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
@@ -30,6 +30,10 @@
 //! the CLI's own checks, as the user.
 //! Its index facts come from a tree thread of its own, running only while
 //! the view is shown.
+//! The reviews view lists every review, with where its PR and its review
+//! stand on GitHub, asked on a thread of its own ([`reviews`]); `⏎` offers
+//! its diff in the review viewer or its session, through the task's own
+//! open.
 //!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
@@ -54,6 +58,7 @@ use ratatui::widgets::ListState;
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
+use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, Source};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
@@ -122,6 +127,31 @@ const NOT_USER: &str = "the agents pane acts as you; open jeet from your own ter
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
+/// Said when a key of the reviews view has no review under the cursor.
+const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
+
+/// Said for opening the session of a review job no task holds.
+const NO_SESSION: &str = "this review has no task, so no session — jeet review <pr> makes one";
+
+/// The review menu's lines, in order: what each opens.
+pub const REVIEW_MENU: &[(&str, &str)] = &[
+    ("v", "view the diff: the PR in the review viewer"),
+    (
+        "s",
+        "open the review's session: attach to its agent, or resume it",
+    ),
+];
+const REVIEW_DIFF: usize = 0;
+const REVIEW_SESSION: usize = 1;
+
+/// `review jeet#55`, for a review with no task to name it.
+pub fn review_name(pr: Option<&PrKey>) -> String {
+    match pr {
+        Some(pr) => format!("review {}", pr.label()),
+        None => "review".to_string(),
+    }
+}
+
 /// Said for ⏎ on an empty answer.
 const TYPE_AN_ANSWER: &str = "type an answer";
 
@@ -150,6 +180,8 @@ pub struct TaskRow {
     /// Its agent runs without jeet knowing its process, as the last poll
     /// found ([`runtime::unanchored`]).
     pub unanchored: bool,
+    /// Its start waits on a `max_live`, as the index last said.
+    pub queued: bool,
 }
 
 impl TaskRow {
@@ -179,6 +211,8 @@ pub enum View {
     Active,
     /// The tree under the assistant (design §6).
     Agents,
+    /// Every review, active or archived, and review jobs with no task.
+    Reviews,
     Archived,
 }
 
@@ -188,7 +222,7 @@ impl View {
     pub fn state(self) -> Option<TaskState> {
         match self {
             View::Active => Some(TaskState::Active),
-            View::Agents => None,
+            View::Agents | View::Reviews => None,
             View::Archived => Some(TaskState::Archived),
         }
     }
@@ -196,7 +230,8 @@ impl View {
     fn next(self) -> View {
         match self {
             View::Active => View::Agents,
-            View::Agents => View::Archived,
+            View::Agents => View::Reviews,
+            View::Reviews => View::Archived,
             View::Archived => View::Active,
         }
     }
@@ -205,7 +240,8 @@ impl View {
         match self {
             View::Active => View::Archived,
             View::Agents => View::Active,
-            View::Archived => View::Agents,
+            View::Reviews => View::Agents,
+            View::Archived => View::Reviews,
         }
     }
 }
@@ -232,6 +268,11 @@ pub enum Update {
     Tree {
         seq: u64,
         info: Result<Box<TreeInfo>, String>,
+    },
+    /// A reviewed PR, as GitHub has it now, or why it could not be asked.
+    Review {
+        pr: PrKey,
+        found: Result<PrReview, String>,
     },
 }
 
@@ -793,6 +834,15 @@ pub enum Panel {
         /// Why the last ⏎ was refused.
         error: Option<String>,
     },
+    /// ⏎ in the reviews view: what to open of a review.
+    ReviewMenu {
+        /// None for a review job with no task.
+        task_id: Option<String>,
+        pr: Option<PrKey>,
+        /// `review jeet#55`, or the task's name.
+        label: String,
+        selected: usize,
+    },
     /// `l`, `i` and `b` in the agents view: text to read, scrolled.
     Text {
         title: String,
@@ -860,6 +910,12 @@ pub enum Action {
     /// `v`: the task's PR in the review viewer.
     ReviewViewer {
         task_id: String,
+    },
+    /// `v` in the reviews view, or its menu: the review's PR in the review
+    /// viewer, from the task's checkout when it has one.
+    ReviewDiff {
+        task_id: Option<String>,
+        pr: PrKey,
     },
     /// `v` in the PRs panel: that PR in the review viewer.
     ViewPr {
@@ -1039,6 +1095,12 @@ pub struct TasksUi {
     /// jeet runs as the user, not inside an agent's pane: the agents
     /// view's keys that show an agent's text or act need it (Q2).
     pub user: bool,
+    /// Review jobs on disk, as last read; the view lists those no task holds.
+    pub legacy: Vec<Legacy>,
+    /// The reviews view's lines, in display order.
+    pub reviews: Vec<ReviewLine>,
+    /// What GitHub last said of each reviewed PR, or why it could not say.
+    pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
 }
 
 impl Default for TasksUi {
@@ -1073,6 +1135,9 @@ impl TasksUi {
             tree_failed: false,
             shown: HashMap::new(),
             user: false,
+            legacy: Vec::new(),
+            reviews: Vec::new(),
+            reviewed: HashMap::new(),
         };
         ui.set_rows(rows);
         ui
@@ -1139,6 +1204,34 @@ impl TasksUi {
     /// Recompute what is on screen from the view and the filter, leaving
     /// the cursor on `keep` if it is still shown.
     fn refresh_visible(&mut self, keep: Option<&str>) {
+        if self.view == View::Reviews {
+            self.visible.clear();
+            // A job no task holds is kept under the cursor by its PR.
+            let was = self
+                .reviews
+                .get(self.selected)
+                .filter(|line| matches!(line.source, Source::Legacy(_)))
+                .and_then(|line| line.pr.clone());
+            let reviewed = &self.reviewed;
+            self.reviews = reviews::lines(&self.rows, &self.legacy, &self.filter, |pr| {
+                reviewed.get(pr)?.as_ref().ok().map(|r| r.title.clone())
+            });
+            self.selected = keep
+                .and_then(|id| {
+                    self.reviews.iter().position(
+                        |line| matches!(line.source, Source::Task(i) if self.rows[i].task.id == id),
+                    )
+                })
+                .or_else(|| {
+                    let was = was?;
+                    self.reviews.iter().position(|line| {
+                        matches!(line.source, Source::Legacy(_)) && line.pr.as_ref() == Some(&was)
+                    })
+                })
+                .unwrap_or_else(|| self.selected.min(self.reviews.len().saturating_sub(1)));
+            return;
+        }
+        self.reviews.clear();
         let Some(state) = self.view.state() else {
             self.visible.clear();
             self.tree = managers::lines(
@@ -1179,6 +1272,7 @@ impl TasksUi {
     pub fn shown_len(&self) -> usize {
         match self.view {
             View::Agents => self.tree.len(),
+            View::Reviews => self.reviews.len(),
             View::Active | View::Archived => self.visible.len(),
         }
     }
@@ -1191,10 +1285,41 @@ impl TasksUi {
                 At::Root => self.assistant_row.as_ref(),
                 At::Row(i) => self.rows.get(i),
             },
+            View::Reviews => match self.reviews.get(self.selected)?.source {
+                Source::Task(i) => self.rows.get(i),
+                Source::Legacy(_) => None,
+            },
             View::Active | View::Archived => {
                 self.visible.get(self.selected).map(|&i| &self.rows[i])
             }
         }
+    }
+
+    /// The review under the cursor, in the reviews view.
+    pub fn selected_review(&self) -> Option<&ReviewLine> {
+        match self.view {
+            View::Reviews => self.reviews.get(self.selected),
+            _ => None,
+        }
+    }
+
+    /// Replace the review jobs on disk with a fresh read.
+    pub fn set_legacy(&mut self, legacy: Vec<Legacy>) {
+        if legacy != self.legacy {
+            self.legacy = legacy;
+            let keep = self.selected_id().map(str::to_string);
+            self.refresh_visible(keep.as_deref());
+        }
+    }
+
+    /// Every PR the reviews view lists, filter or not: what GitHub is asked.
+    pub fn reviewed_prs(&self) -> Vec<PrKey> {
+        let mut seen = HashSet::new();
+        reviews::lines(&self.rows, &self.legacy, "", |_| None)
+            .into_iter()
+            .filter_map(|line| line.pr)
+            .filter(|pr| seen.insert(pr.clone()))
+            .collect()
     }
 
     pub fn selected_id(&self) -> Option<&str> {
@@ -1239,6 +1364,9 @@ impl TasksUi {
                 .iter()
                 .filter(|row| row.task.state == state)
                 .count(),
+            None if view == View::Reviews => {
+                reviews::lines(&self.rows, &self.legacy, "", |_| None).len()
+            }
             None => self.shown.len(),
         }
     }
@@ -1295,6 +1423,16 @@ impl TasksUi {
                     self.resort(keep.as_deref());
                 }
                 self.retree();
+            }
+            Update::Review { pr, found } => {
+                // A lookup that failed keeps what was found before.
+                let known = matches!(self.reviewed.get(&pr), Some(Ok(_)));
+                if found.is_ok() || !known {
+                    self.reviewed.insert(pr, found);
+                }
+                if self.view == View::Reviews && !self.filter.is_empty() {
+                    self.refresh_visible(keep.as_deref());
+                }
             }
             Update::Tree { seq, .. } if seq < self.tree_seq => {}
             Update::Tree {
@@ -1580,6 +1718,11 @@ impl TasksUi {
             }
             KeyCode::Char('n') => Some(Action::NewTaskForm { project: None }),
             KeyCode::Char('P') => Some(Action::Projects),
+            KeyCode::Enter if self.view == View::Reviews => {
+                self.review_menu();
+                None
+            }
+            KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
             KeyCode::Enter => match self.selected_row() {
                 Some(row) if row.task.state == TaskState::Archived => {
                     let name = row.task.name.clone();
@@ -1602,6 +1745,16 @@ impl TasksUi {
                     recursive: false,
                 }),
                 View::Archived => needs_task(self, &|task_id| Action::Unarchive { task_id }),
+                View::Reviews => match self.selected_row().map(|row| row.task.state) {
+                    Some(TaskState::Archived) => {
+                        needs_task(self, &|task_id| Action::Unarchive { task_id })
+                    }
+                    _ => needs_task(self, &|task_id| Action::Archive {
+                        task_id,
+                        confirmed: false,
+                        recursive: false,
+                    }),
+                },
                 // Taken by `agents_key`.
                 View::Agents => None,
             },
@@ -1611,6 +1764,47 @@ impl TasksUi {
                 force: false,
             }),
             _ => None,
+        }
+    }
+
+    /// ⏎ in the reviews view: the menu of what to open of the review.
+    fn review_menu(&mut self) {
+        let Some(line) = self.selected_review().cloned() else {
+            self.set_status(NO_REVIEW);
+            return;
+        };
+        let (task_id, label) = match line.source {
+            Source::Task(i) => {
+                let row = &self.rows[i];
+                let label = tasks::review_label(&row.task, &row.worktrees)
+                    .unwrap_or_else(|| row.task.name.clone());
+                (Some(row.task.id.clone()), label)
+            }
+            Source::Legacy(_) => (None, review_name(line.pr.as_ref())),
+        };
+        self.panel = Some(Panel::ReviewMenu {
+            task_id,
+            pr: line.pr,
+            label,
+            selected: 0,
+        });
+    }
+
+    /// `v` in the reviews view: the review's PR in the review viewer.
+    fn review_diff(&mut self) -> Option<Action> {
+        let Some(line) = self.selected_review().cloned() else {
+            self.set_status(NO_REVIEW);
+            return None;
+        };
+        let task_id = match line.source {
+            Source::Task(i) => Some(self.rows[i].task.id.clone()),
+            Source::Legacy(_) => None,
+        };
+        match (line.pr, task_id) {
+            (Some(pr), task_id) => Some(Action::ReviewDiff { task_id, pr }),
+            // Its checkout records no PR: the viewer finds one if it can.
+            (None, Some(task_id)) => Some(Action::ReviewViewer { task_id }),
+            (None, None) => None,
         }
     }
 
@@ -1877,6 +2071,45 @@ impl TasksUi {
                     None
                 }
             },
+            Panel::ReviewMenu {
+                task_id,
+                pr,
+                label,
+                mut selected,
+            } => {
+                let choice = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return None,
+                    KeyCode::Char('v' | 'd') => Some(REVIEW_DIFF),
+                    KeyCode::Char('s') => Some(REVIEW_SESSION),
+                    KeyCode::Enter => Some(selected),
+                    code => {
+                        selected = list_move(code, selected, REVIEW_MENU.len());
+                        None
+                    }
+                };
+                let Some(choice) = choice else {
+                    self.panel = Some(Panel::ReviewMenu {
+                        task_id,
+                        pr,
+                        label,
+                        selected,
+                    });
+                    return None;
+                };
+                match (choice, task_id, pr) {
+                    (REVIEW_DIFF, task_id, Some(pr)) => Some(Action::ReviewDiff { task_id, pr }),
+                    (REVIEW_DIFF, Some(task_id), None) => Some(Action::ReviewViewer { task_id }),
+                    (REVIEW_SESSION, Some(task_id), _) => Some(Action::Open {
+                        task_id,
+                        session: None,
+                    }),
+                    (REVIEW_SESSION, None, _) => {
+                        self.set_status(NO_SESSION);
+                        None
+                    }
+                    _ => None,
+                }
+            }
             Panel::Places {
                 task_id,
                 places,
@@ -2628,20 +2861,21 @@ struct Background {
     prs: Sender<Vec<pr_history::Job>>,
     assistant: Sender<assistant_info::Probe>,
     tree: Sender<TreeAsk>,
+    reviews: Sender<Vec<reviews::Ask>>,
     updates: Updates,
 }
 
 /// The threads' end of the channel they answer on, counting what they sent
 /// that is not yet taken.
 #[derive(Clone)]
-struct Outbox {
+pub(super) struct Outbox {
     tx: Sender<Update>,
     backlog: Arc<AtomicUsize>,
 }
 
 impl Outbox {
     /// Fails once the screen is gone.
-    fn send(&self, update: Update) -> Result<(), mpsc::SendError<Update>> {
+    pub(super) fn send(&self, update: Update) -> Result<(), mpsc::SendError<Update>> {
         self.backlog.fetch_add(1, Ordering::Relaxed);
         self.tx.send(update)
     }
@@ -2707,7 +2941,9 @@ impl Background {
         let (prs, pr_rx) = mpsc::channel();
         let (assistant, assistant_rx) = mpsc::channel();
         let (tree, tree_rx) = mpsc::channel();
+        let (reviews, reviews_rx) = mpsc::channel();
         let status_tx = tx.clone();
+        let reviews_tx = tx.clone();
         let size_tx = tx.clone();
         let assistant_tx = tx.clone();
         let tree_tx = tx.clone();
@@ -2717,6 +2953,7 @@ impl Background {
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
         std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx, &assistant_home));
         std::thread::spawn(move || poll_tree(tree_rx, tree_tx, tree_home, tree_config));
+        std::thread::spawn(move || reviews::look(reviews_rx, reviews_tx));
         std::thread::spawn(move || find_prs(pr_rx, tx));
         Background {
             probes,
@@ -2724,6 +2961,7 @@ impl Background {
             prs,
             assistant,
             tree,
+            reviews,
             updates,
         }
     }
@@ -3026,6 +3264,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         terminal: &mut terminal,
         ui,
         bg: Background::start(&app.home, &app.config),
+        reviews_asked: None,
     };
     let result = screen.go(start);
     let exit = screen.ui.exit.take();
@@ -3041,6 +3280,8 @@ struct Screen<'a> {
     terminal: &'a mut Tui,
     ui: TasksUi,
     bg: Background,
+    /// When GitHub was last asked about the reviews, if it has been.
+    reviews_asked: Option<Instant>,
 }
 
 impl Screen<'_> {
@@ -3073,6 +3314,13 @@ impl Screen<'_> {
                 if let Err(e) = self.reread() {
                     self.ui.set_status(format!("could not read tasks: {e:#}"));
                 }
+            }
+            // GitHub is asked about the reviews again while they are shown.
+            let stale = self
+                .reviews_asked
+                .is_none_or(|at| at.elapsed() >= reviews::LOOK_EVERY);
+            if self.ui.view == View::Reviews && stale {
+                self.look_at_reviews();
             }
             let frame = self
                 .terminal
@@ -3124,6 +3372,30 @@ impl Screen<'_> {
                 .ui
                 .set_status(format!("could not read pull requests: {e:#}")),
         }
+    }
+
+    /// Have GitHub asked, in the background, about every PR the reviews
+    /// view lists. A PR whose repository has left the store says so.
+    fn look_at_reviews(&mut self) {
+        self.reviews_asked = Some(Instant::now());
+        let mut asks = Vec::new();
+        for pr in self.ui.reviewed_prs() {
+            match self.app.db.get_repo(&pr.repo_id) {
+                Ok(Some(repo)) => asks.push(reviews::Ask {
+                    pr,
+                    trunk: PathBuf::from(&repo.trunk_path),
+                }),
+                Ok(None) => self.ui.apply(Update::Review {
+                    pr,
+                    found: Err("its repository is no longer in the store".into()),
+                }),
+                Err(e) => self.ui.apply(Update::Review {
+                    pr,
+                    found: Err(format!("{e:#}")),
+                }),
+            }
+        }
+        let _ = self.bg.reviews.send(asks);
     }
 
     /// Have every active task's PRs looked up in the background.
@@ -3178,6 +3450,7 @@ impl Screen<'_> {
         };
         match loaded {
             Ok((loaded, warning)) => {
+                self.ui.set_legacy(reviews::legacy_jobs(&app.home));
                 let changed = self.set_rows(loaded);
                 // Sizes are walked again only when there are new tasks to
                 // measure: a walk restarted on every action never finishes
@@ -3191,6 +3464,9 @@ impl Screen<'_> {
                 // `gh` call per worktree.
                 if reconcile {
                     self.discover_prs();
+                    if self.ui.view == View::Reviews {
+                        self.look_at_reviews();
+                    }
                 }
                 if let Some(warning) = warning {
                     self.ui.set_status(warning);
@@ -3215,8 +3491,15 @@ impl Screen<'_> {
     /// Read the tasks again, quietly: the background threads hear of it
     /// only when tasks came, went or changed state.
     fn reread(&mut self) -> Result<()> {
+        // A walk of the review jobs on disk, only while they are shown.
+        if self.ui.view == View::Reviews {
+            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
+        }
         if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows);
+            if self.ui.view == View::Reviews {
+                self.look_at_reviews();
+            }
         }
         // New sessions are recorded in the index as they start.
         self.bg.look_at_assistant(assistant_info::probe(self.app)?);
@@ -3254,6 +3537,19 @@ impl Screen<'_> {
     /// The view was `was`: start the tree thread on entering the agents
     /// view, and stop it on leaving.
     fn viewed(&mut self, was: View) {
+        // GitHub is asked by the loop, when what it said is stale or a
+        // review came along meanwhile that it has not been asked about.
+        if was != View::Reviews && self.ui.view == View::Reviews {
+            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
+            let unknown = self
+                .ui
+                .reviewed_prs()
+                .iter()
+                .any(|pr| !self.ui.reviewed.contains_key(pr));
+            if unknown {
+                self.reviews_asked = None;
+            }
+        }
         match tree_wanted(was, self.ui.view) {
             Some(true) => self.read_tree(),
             Some(false) => {
@@ -3413,6 +3709,16 @@ impl Screen<'_> {
                 repo_id,
                 number,
             } => self.view_pr(&task_id, &repo_id, number)?,
+            Action::ReviewDiff {
+                task_id: Some(task_id),
+                pr,
+            } => self.view_pr(&task_id, &pr.repo_id, pr.number)?,
+            Action::ReviewDiff { task_id: None, pr } => match app.db.get_repo(&pr.repo_id)? {
+                Some(repo) => self.view_pr_at(Path::new(&repo.trunk_path), pr.number)?,
+                None => self
+                    .ui
+                    .set_status(format!("{} is no longer in the store", pr.repo_id)),
+            },
             Action::NewTaskForm { project } => {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
@@ -4689,6 +4995,7 @@ fn task_row(app: &App, task: TaskRecord) -> Result<TaskRow> {
             None => None,
         },
         review_jobs: crate::review::state_files_of_task(app, &task),
+        queued: app.db.queued_at(&task.id)?.is_some(),
         task,
     })
 }
@@ -5077,6 +5384,7 @@ mod tests {
             report: None,
             review_jobs: Vec::new(),
             unanchored: false,
+            queued: false,
         }
     }
 
@@ -5115,11 +5423,15 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_active_agents_archived_and_back_tab_goes_back() {
+    fn tab_cycles_active_agents_reviews_archived_and_back_tab_goes_back() {
         let mut ui = sample();
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Agents);
         // No assistant, so no tree.
+        assert_eq!(ui.shown_len(), 0);
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Reviews);
+        // No review tasks.
         assert_eq!(ui.shown_len(), 0);
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Archived);
@@ -5130,9 +5442,213 @@ mod tests {
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(ui.view, View::Archived);
         press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Reviews);
+        press(&mut ui, KeyCode::BackTab);
         assert_eq!(ui.view, View::Agents);
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(ui.view, View::Active);
+    }
+
+    fn pr_key(number: u64) -> PrKey {
+        PrKey {
+            repo_id: "github.com/acme/api".into(),
+            number,
+        }
+    }
+
+    fn review_row(id: &str, state: TaskState, last: i64, pr: u64) -> TaskRow {
+        let mut row = task(id, &format!("review-api-{pr}"), state, last);
+        row.task.kind = TaskKind::Review;
+        row.worktrees = vec![TaskWorktreeRecord {
+            id: 1,
+            task_id: id.into(),
+            repo_id: "github.com/acme/api".into(),
+            dir_name: "api".into(),
+            branch: None,
+            created_branch: false,
+            head_oid: None,
+            stash_ref: None,
+            pr_number: Some(pr),
+            created_at: 0,
+            read_only: false,
+        }];
+        row
+    }
+
+    fn reviews_sample() -> TasksUi {
+        let mut ui = TasksUi::new(vec![
+            task("w", "some work", TaskState::Active, 90),
+            review_row("old", TaskState::Archived, 80, 4),
+            review_row("r1", TaskState::Active, 10, 1),
+            review_row("r2", TaskState::Active, 20, 2),
+        ]);
+        let legacy = |number, title: &str| Legacy {
+            pr: pr_key(number),
+            title: title.into(),
+            running: false,
+            started_at: 0,
+        };
+        // #2 has a task; #7 is an older jeet's job alone.
+        ui.set_legacy(vec![legacy(2, "held"), legacy(7, "headless job")]);
+        ui
+    }
+
+    fn reviews_shown(ui: &TasksUi) -> Vec<String> {
+        ui.reviews
+            .iter()
+            .map(|line| match line.source {
+                Source::Task(i) => ui.rows[i].task.id.clone(),
+                Source::Legacy(i) => format!("job {}", ui.legacy[i].pr.number),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_reviews_view_lists_every_review_and_jobs_no_task_holds() {
+        let mut ui = reviews_sample();
+        assert_eq!(ui.count(View::Reviews), 4);
+        press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Reviews);
+        // Active newest first, then archived, then the lone job.
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "old", "job 7"]);
+        assert_eq!(
+            ui.reviewed_prs(),
+            [pr_key(2), pr_key(1), pr_key(4), pr_key(7)]
+        );
+        // The filter also matches the title GitHub gave.
+        ui.apply(Update::Review {
+            pr: pr_key(1),
+            found: Ok(PrReview {
+                title: "Speed up login".into(),
+                state: "open",
+                verdict: reviews::Verdict::Awaiting,
+            }),
+        });
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "login");
+        assert_eq!(reviews_shown(&ui), ["r1"]);
+        press(&mut ui, KeyCode::Esc);
+        assert_eq!(reviews_shown(&ui).len(), 4);
+    }
+
+    #[test]
+    fn the_cursor_stays_on_a_job_no_task_holds_as_lines_come_above_it() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::End);
+        assert_eq!(
+            ui.selected_review().and_then(|l| l.pr.clone()),
+            Some(pr_key(7))
+        );
+        let job = |number| Legacy {
+            pr: pr_key(number),
+            title: String::new(),
+            running: false,
+            started_at: 0,
+        };
+        ui.set_legacy(vec![job(8), job(2), job(7)]);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "old", "job 8", "job 7"]);
+        assert_eq!(
+            ui.selected_review().and_then(|l| l.pr.clone()),
+            Some(pr_key(7))
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_what_github_said_before() {
+        let mut ui = reviews_sample();
+        let found = PrReview {
+            title: "t".into(),
+            state: "open",
+            verdict: reviews::Verdict::Approved,
+        };
+        ui.apply(Update::Review {
+            pr: pr_key(1),
+            found: Ok(found.clone()),
+        });
+        ui.apply(Update::Review {
+            pr: pr_key(1),
+            found: Err("offline".into()),
+        });
+        assert_eq!(ui.reviewed[&pr_key(1)], Ok(found));
+        ui.apply(Update::Review {
+            pr: pr_key(2),
+            found: Err("offline".into()),
+        });
+        assert_eq!(ui.reviewed[&pr_key(2)], Err("offline".into()));
+    }
+
+    #[test]
+    fn the_review_menu_opens_the_diff_or_the_session() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('v')),
+            Some(Action::ReviewDiff {
+                task_id: Some("r2".into()),
+                pr: pr_key(2),
+            })
+        );
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert!(matches!(ui.panel, Some(Panel::ReviewMenu { .. })));
+        // ⏎ on the first line: the diff.
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::ReviewDiff {
+                task_id: Some("r2".into()),
+                pr: pr_key(2),
+            })
+        );
+        assert!(ui.panel.is_none());
+        // ↓ ⏎, or s: the session, through the task's own open.
+        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Down);
+        let open = Some(Action::Open {
+            task_id: "r2".into(),
+            session: None,
+        });
+        assert_eq!(press(&mut ui, KeyCode::Enter), open);
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(press(&mut ui, KeyCode::Char('s')), open);
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
+        // The task's own keys act on the review's task.
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('e')),
+            Some(Action::Explore {
+                task_id: "r2".into()
+            })
+        );
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Archive { task_id, .. }) if task_id == "r2"
+        ));
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Unarchive {
+                task_id: "old".into()
+            })
+        );
+        // A job no task holds: its diff, but no session to open.
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('v')),
+            Some(Action::ReviewDiff {
+                task_id: None,
+                pr: pr_key(7),
+            })
+        );
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(press(&mut ui, KeyCode::Char('s')), None);
+        assert_eq!(ui.status_line, NO_SESSION);
+        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+        assert_eq!(ui.status_line, NO_TASK);
     }
 
     #[test]

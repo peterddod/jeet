@@ -10,16 +10,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{At, NodeInfo, TreeLine, Urgency};
+use super::reviews::{PrReview, ReviewLine, Source, Verdict};
 use super::state::human_size;
 use super::tasks::{
-    AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
-    View,
+    review_name, AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField,
+    TaskRow, TasksUi, View, REVIEW_MENU,
 };
 use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
 use crate::commands::task::printable;
-use crate::db::tasks::{RunState, TaskKind, TaskPrRecord, TaskState};
+use crate::db::tasks::{RunState, Setter, TaskKind, TaskPrRecord, TaskState};
 use crate::manager::budget;
 use crate::messages;
 use crate::pr_history;
@@ -79,7 +80,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("", ""),
     (
         "⇥ / ⇧⇥",
-        "next / previous view: active, agents (the tree under the assistant), archived",
+        "next / previous view: active, agents (the tree under the assistant), reviews, archived",
     ),
     ("/", "filter by name; ⏎ keeps the filter, esc drops it"),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
@@ -149,7 +150,10 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
     ),
     ("t", "its todo list: space done, ⏎ go to the task, a add"),
     ("", ""),
-    ("⇥ / ⇧⇥", "next / previous view: active, agents, archived"),
+    (
+        "⇥ / ⇧⇥",
+        "next / previous view: active, agents, reviews, archived",
+    ),
     (
         "/",
         "filter by name, keeping the managers above a match; esc drops it",
@@ -180,10 +184,78 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The reviews view's key list.
+pub const HELP_REVIEWS: &[(&str, &str)] = &[
+    (
+        "⏎",
+        "the review's menu: v view the diff, s open its session",
+    ),
+    (
+        "v",
+        "the review's PR in the review viewer, showing its diff",
+    ),
+    (
+        "",
+        "the session is the review task's agent: attached, resumed or started",
+    ),
+    (
+        "e / w / p",
+        "explore the review's task / its worktrees / its pull requests",
+    ),
+    (
+        "a",
+        "archive the review's task · unarchive, on an archived one",
+    ),
+    (
+        "D",
+        "delete the review's task, after listing any work that would go",
+    ),
+    ("", ""),
+    (
+        "⇥ / ⇧⇥",
+        "next / previous view: active, agents, reviews, archived",
+    ),
+    ("/", "filter by PR, task name or title; esc drops it"),
+    ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
+    (
+        "r",
+        "refresh: re-read tasks and ask GitHub again (it is asked every 2 minutes)",
+    ),
+    ("?", "this list"),
+    ("q / esc", "quit, leaving the shell where it is"),
+    (
+        "ctrl-q",
+        "quit, leaving the shell in the selected review's task",
+    ),
+    ("", ""),
+    (
+        "session",
+        "● running  ◆ needs input  ○ idle  ✕ not running  · ended  ▪ archived",
+    ),
+    (
+        "",
+        "paused (at its [review] caps, or by hand), stopped, or queued on max_live",
+    ),
+    (
+        "",
+        "a review with no task is an older jeet review's job: no session",
+    ),
+    ("PR", "open · draft · merged · closed, as GitHub last said"),
+    (
+        "review",
+        "approved · changes requested · commented · review required · awaiting review",
+    ),
+    (
+        "columns",
+        "session · PR · PR state · review state · title · last activity",
+    ),
+];
+
 /// The key list of `view`.
 pub fn help(view: View) -> &'static [(&'static str, &'static str)] {
     match view {
         View::Agents => HELP_AGENTS,
+        View::Reviews => HELP_REVIEWS,
         View::Active | View::Archived => HELP,
     }
 }
@@ -227,10 +299,24 @@ const HINTS_AGENTS: &[&str] = &[
     "q quit",
 ];
 
+const HINTS_REVIEWS: &[&str] = &[
+    "⏎ menu",
+    "v diff",
+    "e explore",
+    "p PRs",
+    "a archive",
+    "r refresh",
+    "/ filter",
+    "⇥ switch",
+    "? help",
+    "q quit",
+];
+
 /// As many of `view`'s hints as fit, always ending with help and quit.
 fn hints(width: u16, view: View) -> String {
     let hints = match view {
         View::Agents => HINTS_AGENTS,
+        View::Reviews => HINTS_REVIEWS,
         View::Active | View::Archived => HINTS,
     };
     let width = width as usize;
@@ -253,7 +339,7 @@ fn hints(width: u16, view: View) -> String {
 pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     // In the agents view the assistant is the tree's root, not pinned.
     let pinned = match ui.view {
-        View::Agents => 0,
+        View::Agents | View::Reviews => 0,
         View::Active | View::Archived => 1,
     };
     let chunks = Layout::default()
@@ -277,6 +363,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     ui.list_area = chunks[2];
     match ui.view {
         View::Agents => draw_tree(frame, chunks[2], ui),
+        View::Reviews => draw_reviews(frame, chunks[2], ui),
         View::Active | View::Archived => draw_list(frame, chunks[2], ui),
     }
 
@@ -336,6 +423,8 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
         Span::raw(" "),
         tab(View::Agents, "agents"),
         Span::raw(" "),
+        tab(View::Reviews, "reviews"),
+        Span::raw(" "),
         tab(View::Archived, "archived"),
         Span::raw("   "),
     ];
@@ -377,6 +466,7 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     }
     let title = match ui.view {
         View::Agents => " jeet · agents ",
+        View::Reviews => " jeet · reviews ",
         View::Active | View::Archived => " jeet · tasks ",
     };
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
@@ -464,7 +554,7 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
 fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     // The agents view draws its tree instead ([`draw_tree`]).
     let which = match ui.view {
-        View::Active | View::Agents => "active",
+        View::Active | View::Agents | View::Reviews => "active",
         View::Archived => "archived",
     };
     let total = ui.count(ui.view);
@@ -538,6 +628,217 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     state.select(Some(ui.selected.min(ui.visible.len() - 1)));
     frame.render_stateful_widget(list, area, &mut state);
     ui.list = state;
+}
+
+/// The reviews view: one line per review, with its session and where its
+/// PR and its review stand.
+fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
+    let total = ui.count(View::Reviews);
+    let title = match (ui.filter.is_empty(), ui.reviews.len()) {
+        (true, 0) => " no reviews ".to_string(),
+        (true, n) => format!(" {n} review{} ", if n == 1 { "" } else { "s" }),
+        (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
+        (false, n) => format!(" {n} of {total} match \"{}\" ", ui.filter),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(Style::default().fg(Color::Green));
+    if ui.reviews.is_empty() {
+        let hint = match total {
+            0 => "no reviews yet. jeet review <pr> checks one out in a task of its own.",
+            _ => "⌫ or esc widens the filter",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(hint)))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let columns = ReviewColumns::for_width(area.width.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = ui
+        .reviews
+        .iter()
+        .map(|line| ListItem::new(review_line(ui, line, &columns)))
+        .collect();
+    let list = List::new(items).block(block).highlight_style(highlighted());
+    let mut state = std::mem::take(&mut ui.list);
+    state.select(Some(ui.selected.min(ui.reviews.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
+    ui.list = state;
+}
+
+/// How wide each column of the reviews view is; zero drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewColumns {
+    pub session: usize,
+    pub pr: usize,
+    pub state: usize,
+    pub review: usize,
+    pub title: usize,
+    pub age: usize,
+}
+
+impl ReviewColumns {
+    pub fn for_width(width: usize) -> ReviewColumns {
+        const GLYPH: usize = 2;
+        let (session, pr, state, review, age) = match width {
+            w if w >= 100 => (18, 18, 7, 17, 9),
+            w if w >= 80 => (12, 16, 7, 17, 9),
+            w if w >= 60 => (0, 14, 7, 17, 0),
+            _ => (0, 12, 7, 0, 0),
+        };
+        let gaps = [session, pr, state, review, age]
+            .iter()
+            .filter(|&&w| w > 0)
+            .count();
+        let fixed = GLYPH + session + pr + state + review + age + gaps;
+        ReviewColumns {
+            session,
+            pr,
+            state,
+            review,
+            title: width.saturating_sub(fixed),
+            age,
+        }
+    }
+}
+
+/// The colour of a PR state's label: open green, draft grey, merged
+/// purple, closed red, as GitHub has them.
+fn state_color(label: &str) -> Color {
+    match label {
+        "open" => Color::Green,
+        "draft" => Color::DarkGray,
+        "merged" => Color::Magenta,
+        _ => Color::Red,
+    }
+}
+
+fn verdict_color(verdict: Verdict) -> Color {
+    match verdict {
+        Verdict::Approved => Color::Green,
+        Verdict::ChangesRequested => Color::Red,
+        Verdict::Commented => Color::Cyan,
+        Verdict::ReviewRequired | Verdict::Awaiting => Color::Yellow,
+    }
+}
+
+/// A review task's session: what its agent is doing, after what holds it
+/// back — paused (at its `[review]` caps, or by hand), stopped, or queued
+/// on a `max_live`.
+pub fn review_session(row: &TaskRow) -> String {
+    let held = match (row.task.run_state, &row.task.run_state_by) {
+        _ if row.task.state == TaskState::Archived => None,
+        (RunState::Paused, Some(Setter::Budget)) => Some("paused at its caps"),
+        (RunState::Paused, _) => Some("paused"),
+        (RunState::Stopped, _) => Some("stopped"),
+        (RunState::Run, _) if row.queued => Some("queued on max_live"),
+        (RunState::Run, _) => None,
+    };
+    let status = status_text(row);
+    match held {
+        // Paused, a turn under way still finishes: say so.
+        Some(held) if row.agent_running() => format!("{held} · {status}"),
+        Some(held) => held.to_string(),
+        None => status,
+    }
+}
+
+fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line<'static> {
+    let (glyph, color, session, name, when) = match line.source {
+        Source::Task(i) => {
+            let row = &ui.rows[i];
+            let (glyph, color) = glyph(row);
+            (
+                glyph,
+                color,
+                review_session(row),
+                row.task.name.clone(),
+                row.last_activity,
+            )
+        }
+        Source::Legacy(i) => {
+            let job = &ui.legacy[i];
+            let (glyph, color, session) = match job.running {
+                true => ("●", Color::Green, "job running"),
+                false => ("·", Color::DarkGray, "no task"),
+            };
+            (
+                glyph,
+                color,
+                session.to_string(),
+                job.title.clone(),
+                job.started_at,
+            )
+        }
+    };
+    let found = line.pr.as_ref().and_then(|pr| ui.reviewed.get(pr));
+    let pr = match &line.pr {
+        Some(pr) => pr.label(),
+        None => name.clone(),
+    };
+    let (state, state_fg, review, review_fg, title) = match found {
+        None if line.pr.is_none() => (
+            "",
+            Color::DarkGray,
+            "no PR recorded".into(),
+            Color::DarkGray,
+            name,
+        ),
+        None => ("…", Color::DarkGray, String::new(), Color::DarkGray, name),
+        Some(Ok(PrReview {
+            title,
+            state,
+            verdict,
+        })) => (
+            *state,
+            state_color(state),
+            verdict.label().to_string(),
+            verdict_color(*verdict),
+            title.clone(),
+        ),
+        Some(Err(why)) => ("?", Color::Red, format!("unknown: {why}"), Color::Red, name),
+    };
+    // Titles are whoever opened the PR's, and errors are gh's: only their
+    // printable text reaches the terminal.
+    let (pr, review, title) = (printable(&pr), printable(&review), printable(&title));
+    let mut spans = vec![Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(color),
+    )];
+    if columns.session > 0 {
+        spans.push(Span::styled(
+            format!("{} ", cell(&session, columns.session)),
+            Style::default().fg(color),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("{} ", cell(&pr, columns.pr)),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!("{} ", cell(state, columns.state)),
+        Style::default().fg(state_fg),
+    ));
+    if columns.review > 0 {
+        spans.push(Span::styled(
+            format!("{} ", cell(&review, columns.review)),
+            Style::default().fg(review_fg),
+        ));
+    }
+    spans.push(Span::raw(cell(&title, columns.title)));
+    if columns.age > 0 {
+        spans.push(Span::styled(
+            format!(" {:>width$}", age_label(when), width = columns.age),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// How wide each column is at a given width; zero drops it.
@@ -1318,6 +1619,45 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             );
             render_list(frame, area, title, items, *selected);
         }
+        Panel::ReviewMenu {
+            task_id,
+            pr,
+            label,
+            selected,
+        } => {
+            let items = REVIEW_MENU
+                .iter()
+                .enumerate()
+                .map(|(i, (key, what))| {
+                    // A review job with no task has no session to open.
+                    let off = i == 1 && task_id.is_none();
+                    let what = match off {
+                        true => format!("{what} (it has no task)"),
+                        false => what.to_string(),
+                    };
+                    let style = match off {
+                        true => Style::default().fg(Color::DarkGray),
+                        false => Style::default(),
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{key}  "),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(what, style),
+                    ]))
+                })
+                .collect();
+            let label = match task_id {
+                Some(_) => printable(label),
+                None => review_name(pr.as_ref()),
+            };
+            let area = content_rect(70, REVIEW_MENU.len() + 2, full);
+            let title = format!(" {label} · ⏎ choose  esc cancel ");
+            render_list(frame, area, title, items, *selected);
+        }
         Panel::Places {
             task_id,
             places,
@@ -1788,12 +2128,7 @@ fn draw_prs(
 
 /// Open green, draft grey, merged purple, closed red, as GitHub has them.
 pub fn pr_state_color(pr: &TaskPrRecord) -> Color {
-    match pr_history::state_label(pr) {
-        "open" => Color::Green,
-        "draft" => Color::DarkGray,
-        "merged" => Color::Magenta,
-        _ => Color::Red,
-    }
+    state_color(pr_history::state_label(pr))
 }
 
 /// Uncommitted changes, commits ahead of and behind the default branch, and
@@ -2107,6 +2442,7 @@ mod tests {
             report: None,
             review_jobs: Vec::new(),
             unanchored: false,
+            queued: false,
         }
     }
 
@@ -2184,6 +2520,99 @@ mod tests {
         let screen = render(&mut ui, 120, 12).join("\n");
         assert!(screen.contains("review api#55"), "{screen}");
         assert!(!screen.contains("review-api-55"), "{screen}");
+    }
+
+    fn reviews_ui() -> TasksUi {
+        use crate::tui::reviews::{Legacy, PrKey, PrReview, Verdict};
+        let key = |number| PrKey {
+            repo_id: "github.com/acme/api".into(),
+            number,
+        };
+        let mut running = row("review-api-55", Some(Activity::Running { detail: None }));
+        running.task.kind = TaskKind::Review;
+        running.worktrees[0].pr_number = Some(55);
+        let mut archived = row("review-api-9", None);
+        archived.task.kind = TaskKind::Review;
+        archived.task.state = TaskState::Archived;
+        archived.worktrees[0].pr_number = Some(9);
+        let mut ui = TasksUi::new(vec![running, archived, row("not a review", None)]);
+        ui.legacy = vec![Legacy {
+            pr: key(3),
+            title: "old \u{1b}[2Jjob".into(),
+            running: false,
+            started_at: 0,
+        }];
+        ui.reviewed.insert(
+            key(55),
+            Ok(PrReview {
+                title: "Add \u{1b}]8;;x\u{7}reviews".into(),
+                state: "draft",
+                verdict: Verdict::ChangesRequested,
+            }),
+        );
+        ui.reviewed.insert(
+            key(9),
+            Ok(PrReview {
+                title: "Old fix".into(),
+                state: "merged",
+                verdict: Verdict::Approved,
+            }),
+        );
+        ui.reviewed
+            .insert(key(3), Err("\u{1b}[2Jgh is not installed".into()));
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        ui
+    }
+
+    #[test]
+    fn a_held_review_says_what_holds_it() {
+        let mut review = row("r", None);
+        assert_eq!(review_session(&review), "");
+        review.queued = true;
+        assert_eq!(review_session(&review), "queued on max_live");
+        review.task.run_state = RunState::Paused;
+        review.task.run_state_by = Some(Setter::Budget);
+        assert_eq!(review_session(&review), "paused at its caps");
+        review.activity = Some(Activity::Running { detail: None });
+        assert!(review_session(&review).starts_with("paused at its caps · running"));
+        review.task.run_state_by = Some(Setter::User);
+        review.activity = Some(Activity::NotRunning);
+        assert_eq!(review_session(&review), "paused");
+        review.task.state = TaskState::Archived;
+        assert_eq!(review_session(&review), "archived");
+    }
+
+    #[test]
+    fn the_reviews_view_shows_each_review_with_its_pr_and_review_state() {
+        let mut ui = reviews_ui();
+        let screen = render(&mut ui, 140, 14);
+        let all = screen.join("\n");
+        assert!(all.contains(" reviews 3 "), "{all}");
+        assert!(all.contains("3 reviews"), "{all}");
+        let running = line_of(&screen, "api#55");
+        assert!(running.contains("● running"), "{running}");
+        assert!(running.contains("draft"), "{running}");
+        assert!(running.contains("changes requested"), "{running}");
+        // A title is shown, never run: its escapes go.
+        assert!(running.contains("Add ]8;;xreviews"), "{running}");
+        let archived = line_of(&screen, "api#9");
+        assert!(archived.contains("▪ archived"), "{archived}");
+        assert!(archived.contains("merged") && archived.contains("approved"));
+        let legacy = line_of(&screen, "api#3");
+        assert!(legacy.contains("no task"), "{legacy}");
+        assert!(legacy.contains("unknown: [2Jgh"), "{legacy}");
+        assert!(!all.contains("not a review"), "{all}");
+        assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
+        // Archived after active, and the job no task holds last.
+        let at = |what: &str| screen.iter().position(|l| l.contains(what)).unwrap();
+        assert!(at("api#55") < at("api#9") && at("api#9") < at("api#3"));
+        for (w, h) in [(160, 40), (90, 24), (70, 20), (40, 12), (1, 1)] {
+            for panel in all_panels() {
+                ui.panel = panel;
+                render(&mut ui, w, h);
+            }
+        }
     }
 
     #[test]
@@ -2363,6 +2792,21 @@ mod tests {
                 lines: Vec::new(),
                 scroll: 3,
                 prs: None,
+            }),
+            Some(Panel::ReviewMenu {
+                task_id: Some("a".into()),
+                pr: None,
+                label: "review \u{1b}[2Japi#7".into(),
+                selected: 1,
+            }),
+            Some(Panel::ReviewMenu {
+                task_id: None,
+                pr: Some(crate::tui::reviews::PrKey {
+                    repo_id: "github.com/acme/api".into(),
+                    number: 7,
+                }),
+                label: String::new(),
+                selected: 0,
             }),
             Some(Panel::Answer {
                 id: 42,
@@ -3116,6 +3560,8 @@ mod tests {
         assert!(hints(20, View::Active).contains("q quit"));
         assert!(hints(200, View::Active).contains("⏎ open"));
         assert!(hints(200, View::Agents).contains("l worklog"));
+        assert!(hints(200, View::Reviews).contains("⏎ menu"));
+        assert!(help(View::Reviews).iter().any(|(k, _)| *k == "v"));
         assert!(!hints(200, View::Agents).contains("archive"));
     }
 }
