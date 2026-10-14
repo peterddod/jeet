@@ -4139,9 +4139,9 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
     wait_until("the archive", || listed(true).contains("widget-work"));
     assert!(!task.join("widget").exists());
 
-    // Over in the archived view (past the agents view), delete it,
-    // confirming.
-    screen.type_keys(b"\t\tD");
+    // Over in the archived view (past the agents and reviews views),
+    // delete it, confirming.
+    screen.type_keys(b"\t\t\tD");
     screen.wait_for_text("delete task Widget work");
     screen.type_keys(b"y");
     wait_until("the delete", || !listed(true).contains("widget-work"));
