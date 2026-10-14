@@ -62,10 +62,10 @@ pub enum Commands {
         /// Repository the PR belongs to; defaults to the one containing the current directory
         #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
         repo: Option<String>,
-        /// Do not start the `[review] command` from config.toml
-        #[arg(long)]
+        /// Only check the PR out: do not ask the review task's agent to review it
+        #[arg(long, visible_alias = "no-agent")]
         no_command: bool,
-        /// Start the review command even if it already reviewed this commit
+        /// Ask for the review again even if this commit was reviewed already
         #[arg(long, conflicts_with = "no_command")]
         rerun: bool,
     },

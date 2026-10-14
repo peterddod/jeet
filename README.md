@@ -251,7 +251,7 @@ and all, rather than posting a second one.
 `jeet prs` — and `⏎` switches the explorer to it in a task: the task whose
 worktree has the PR's branch already, or else the PR's review task, which it
 makes just as `jeet review` would. It is a way in, not `jeet review`: no
-review command is started.
+review agent is asked to review it.
 
 PR support goes through the [GitHub CLI](https://cli.github.com): install
 `gh` and `gh auth login`, and the lookups happen in the background so the
@@ -264,7 +264,7 @@ jeet prs                    # open PRs in the repo you are in
 jeet prs acme/widget        # or in any indexed repo
 jeet review 123             # or #123, or https://github.com/acme/widget/pull/123
 jeet review 123 --repo acme/widget
-jeet review 123 --no-command
+jeet review 123 --no-agent  # only check it out (or --no-command)
 jeet review 123 --rerun
 ```
 
@@ -283,15 +283,11 @@ github.com/acme/widget: 3 open pull requests
 From anywhere inside a repository, `jeet review` finds or makes the PR's
 **review task**, `review-<repo>-<number>`, checks the PR out in it (or, when
 the task already has it, brings that checkout up to date if it is clean, and
-brings an archived task back), opens it in the review viewer, and `cd`s you
-into the worktree when you leave. The review task is a task like any other: it
-shows in the tasks list as `review <repo>#<number>` (in `jeet task ls` too),
-reading `running – review of #<number>` while its review command runs, and
-there `v` opens the viewer again. Archiving or deleting it frees the disk (and
-stops its review if that is still running). Once the review command has
-finished, `⏎` on the task (or `jeet task open`) resumes the session it left —
-Claude Code files it under the PR's worktree, and jeet picks it up from there;
-while it still runs, headless, there is nothing to attach to, and jeet says so. A PR from a fork is checked out as `pr/<number>`,
+brings an archived task back), has the task's agent review it, opens it in
+the review viewer, and `cd`s you into the worktree when you leave. The review
+task is a task like any other: it shows in the tasks list as `review
+<repo>#<number>` (in `jeet task ls` too), and there `v` opens the viewer
+again. Archiving or deleting it frees the disk and ends its agent. A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -313,8 +309,39 @@ replies to its thread, `+` picks a reaction, and — on your own comments only �
 `⟳ updates – r`, and `r` fetches it all again with the cursor kept on the line
 it was on.
 
-Give it a command in `config.toml` and it also starts that in the background
-from the new worktree — say, Claude Code with your own review command:
+### The review agent
+
+The review is done by the review task's own agent — your harness (Claude
+Code), started in the task's tmux pane like any task's agent — so `⏎` on the
+task (or `jeet task open review-<repo>-<number>`) shows it at work, and you can
+talk to it there. It starts with this prompt:
+
+```toml
+[review]
+# The default; {pr}, {url} and {worktree} are filled in.
+prompt = "Review pull request #{pr} ({url}). It is checked out at the PR's head in {worktree}. Read the change (`gh pr view {pr}`, `gh pr diff {pr}`) and the code around it, then list what is wrong or risky, most serious first, with file and line. Do not push, merge, approve or comment on the PR unless asked."
+```
+
+The PR's branch and title are never filled in — whoever opened the PR wrote
+them — so the agent reads them with `gh`. The prompt is sent as a message is:
+one starting with `/`, `!` or `#` is marked so Claude does not run it as a
+command.
+
+One review is one task, one worktree and one session. Running `jeet review`
+again for the same commit asks nothing; a new head commit, or `--rerun`,
+brings the worktree up to the PR's head (when it is clean) and sends the
+prompt again into the same session: typed in when the agent is idle, queued
+while it works, and resuming its session in a new pane when it has ended.
+The review agent is gated like any task's: under the assistant it reports to
+it, a paused or stopped task (or one under a held manager) keeps the prompt
+until resumed, and `[managers] max_live` queues its start. `--no-agent`
+only checks the PR out.
+
+#### Legacy `[review] command`
+
+Before the review agent, `jeet review` could start a command of your own in
+the background instead. It still works, but is **deprecated**: set, it runs
+in place of the review agent, and `jeet review` warns.
 
 ```toml
 [review]
@@ -325,10 +352,12 @@ notify = true   # desktop notification when it finishes (the default)
 The command runs detached from your terminal, so quitting the explorer or
 closing the window does not stop it. When it finishes you get a notification,
 the header's `review running` turns to `review ready`, and `v` in the PR panel
-opens its output. A Claude Code review also leaves a session behind, which
-`claude --resume` in the review task's worktree picks up. Running `jeet review` again for
-the same commit does not start a second review; new commits do (and
-`--rerun` forces one).
+opens its output. While it runs the task reads `running – review of #<number>`,
+and opening it is refused — headless, there is nothing to attach to; once it
+has finished, opening the task resumes the session it left (jeet picks it up
+from the PR's worktree), and so does the review agent if you later remove the
+command. Running `jeet review` again for the same commit does not start a
+second review; new commits do (and `--rerun` forces one).
 
 `{pr}` and `{url}` are substituted into the command. The PR's branch, base and
 title are not — whoever opened the PR chose those, and pasted into a shell they
@@ -922,11 +951,10 @@ whose turn has not begun yet, is waited for and then interrupted. One batch
 of messages its wake channel handed a working agent just before, which
 Claude had not yet shown it, may still start one more turn; that turn's end
 hands it nothing. Stop ends their
-tmux sessions, and any review job running for them or in their worktrees
-(a review task's agent is its review command, which pause cannot
-interrupt), and their ending is not reported; `jeet review` does not
-start a held review task's job again (it says so, and still opens the
-review and its worktree). Resume is refused while a
+tmux sessions, and any legacy review job running for them or in their
+worktrees (which pause cannot interrupt), and their ending is not reported;
+`jeet review` of a held review task keeps the prompt for its agent until it
+is resumed (it says so, and still opens the review and its worktree). Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once
@@ -1640,8 +1668,8 @@ queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
 
-A `[review]` section sets what `jeet review` runs in the background — see
-[Reviewing](#reviewing).
+A `[review]` section sets the review agent's first prompt — see
+[The review agent](#the-review-agent).
 
 ### Notifications
 
@@ -1711,9 +1739,10 @@ said with `jeet task last`, it gets it fenced as untrusted, as it gets
 reports, and the status beside it (which the task's agent can write) unable
 to close or open a fence. The assistant's own
 reach is unchanged: all tasks, yours included. Review tasks it starts with
-`jeet review` report to it too: their `[review] command` runs as the review
-task, gated like any task under it, and jeet tells the assistant when it
-exits without reporting done. No harness launches that command, so it gets none of
+`jeet review` report to it too: their review agent is the review task's,
+gated like any task under it. A legacy `[review] command` runs as the review
+task too, and jeet tells the assistant when it exits without reporting done.
+No harness launches that command, so it gets none of
 the settings jeet gives Claude Code: if it runs Claude Code with its sandbox
 on, exclude `jeet` from the sandbox yourself (`--settings
 '{"sandbox":{"excludedCommands":["jeet"]}}'`), or its `jeet report` and
@@ -1763,7 +1792,7 @@ commit through the API (the contents endpoint, `createCommitOnBranch`) or a
 merge mutation read from a file gets past them too: they catch
 mistakes, and branch protection on GitHub is the real control. A task with
 a parent on a harness without deny rules starts with a warning, as does the
-`[review] command` of a review task the assistant starts: no harness
+legacy `[review] command` of a review task the assistant starts: no harness
 launches it, so it gets no deny rules.
 
 ```toml

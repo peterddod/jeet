@@ -199,8 +199,9 @@ another session, which cannot approve anything). See
 `HookSetup::deny` lists commands the agent must not run. jeet fills it for
 the assistant and for every task with a parent; top-level tasks the user
 made get none, so a user's own `git push --force-with-lease` keeps working.
-The `[review] command` of a review task the assistant starts is the
-exception: it is the user's own command, run by `jeet review-job` rather
+The legacy, deprecated `[review] command` of a review task the assistant
+starts is the exception (the review agent that replaces it is launched like
+any task's, deny rules and all): it is the user's own command, run by `jeet review-job` rather
 than launched through a harness, so it gets no deny rules, and `jeet
 review` warns when it starts one.
 The list is:
