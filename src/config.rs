@@ -151,15 +151,21 @@ impl ReviewConfig {
             && self.turns.is_none()
     }
 
+    /// `max_live`, or its default, checked alone: a mistake in `time` or
+    /// `turns` does not hold back starts that wait on it.
+    pub fn max_live(&self) -> Result<u32> {
+        match self.max_live {
+            Some(0) => bail!("[review] max_live = 0 allows nothing; give at least 1"),
+            Some(n) => Ok(n),
+            None => Ok(DEFAULT_REVIEW_MAX_LIVE),
+        }
+    }
+
     /// `max_live`, `time` and `turns` with their defaults, checked where
     /// they are used, as `[managers]` is: 0 and a time that does not parse
     /// are refused.
     pub fn policy(&self) -> Result<ReviewPolicy> {
-        let max_live = match self.max_live {
-            Some(0) => bail!("[review] max_live = 0 allows nothing; give at least 1"),
-            Some(n) => n,
-            None => DEFAULT_REVIEW_MAX_LIVE,
-        };
+        let max_live = self.max_live()?;
         let turns = match self.turns {
             Some(0) => bail!("[review] turns = 0 allows nothing; give at least 1"),
             Some(n) => n,
@@ -910,8 +916,11 @@ mod tests {
         refused("time = \"0m\"", "[review] time: 0m: a budget of 0");
         refused("time = \"20turns\"", "is turns");
         refused("time = \"soon\"", "[review] time: soon: not a budget");
-        // A mistake there does not stop config.toml from loading.
+        // A mistake there does not stop config.toml from loading, and one
+        // in `time` or `turns` does not hold back what waits on `max_live`.
         assert!(toml::from_str::<Config>("[review]\nmax_live = 0\n").is_ok());
+        let config: Config = toml::from_str("[review]\ntime = \"soon\"\nturns = 0\n").unwrap();
+        assert_eq!(config.review.max_live().unwrap(), 2);
     }
 
     #[test]

@@ -429,8 +429,9 @@ pub fn end_agent(app: &App, node: &TaskRecord) -> Result<String> {
 }
 
 /// The active tasks in the tree, below the assistant, whose agent's pane
-/// is live: what `[managers] max_live` counts, managers included (reviews
-/// apart), the assistant and top-level tasks not. A session left open
+/// is live, managers and reviews included, the assistant and top-level
+/// tasks not: what `[managers] max_live` counts, less the reviews, which
+/// count toward `[review] max_live` ([`counted`]). A session left open
 /// after its agent exited, by `remain-on-exit` or a window the user opened
 /// there, does not count.
 pub fn live_set(app: &App) -> Result<HashSet<String>> {
@@ -576,7 +577,7 @@ fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
         return Ok(None);
     }
     let max = match review {
-        true => app.config.review.policy()?.max_live,
+        true => app.config.review.max_live()?,
         false => app.config.manager_policy()?.max_live,
     };
     let n = counted(&live, task);

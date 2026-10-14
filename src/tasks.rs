@@ -557,6 +557,9 @@ fn child_budget(
 ) -> Result<Option<Limits>> {
     // Capped by `[review]` as each review is asked, not by what is above.
     if kind == TaskKind::Review {
+        if !d.budget.is_empty() {
+            bail!("a review's budget is [review] time and turns, given as each review is asked");
+        }
         return Ok(None);
     }
     let left = budget::remaining(app, parent)?;
@@ -3301,6 +3304,12 @@ mod tests {
         // `[review]` caps it as each review is asked.
         let plan = plan_child(&app, &user, TaskKind::Review, "x", &under("m"), None).unwrap();
         assert_eq!(plan.budget, None);
+        refused(
+            &user,
+            TaskKind::Review,
+            &budget("30m"),
+            "[review] time and turns",
+        );
 
         assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
     }

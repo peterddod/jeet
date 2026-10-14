@@ -504,10 +504,10 @@ pub fn start_agent(
 /// for this one; one anybody else set is left. A top-level review has no
 /// budget: nothing charges a task outside the tree (M19).
 fn give_budget(app: &App, task: &TaskRecord) -> Result<()> {
-    let caps = app.config.review.policy()?.budget;
     if task.parent_id.is_none() {
         return Ok(());
     }
+    let caps = app.config.review.policy()?.budget;
     let (secs, turns) = app.db.subtree_used(&task.id)?;
     let more = |used: i64, cap: Option<i64>| cap.map(|cap| used.saturating_add(cap));
     app.db
