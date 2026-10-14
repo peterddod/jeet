@@ -995,7 +995,7 @@ fn review_without_a_terminal_prints_only_the_worktree_path() {
         std::env::var("PATH").unwrap_or_default()
     );
     let output = jeet_bin()
-        .args(["review", "#7"])
+        .args(["review", "#7", "--no-command"])
         .current_dir(&lab.repo)
         .env("JEET_HOME", &lab.home)
         .env("PATH", &path)
@@ -4490,6 +4490,96 @@ fn opening_a_review_task_resumes_its_review_session() {
     assert_eq!(opened[dash + 1..dash + 4], ["claude", "--resume", session]);
     assert!(!opened.contains(&"--session-id".to_string()), "{opened:?}");
     assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+}
+
+/// With no `[review] command`, the review is the review task's own agent,
+/// started in its tmux pane with the review prompt; reviewing again keeps
+/// that one session and worktree, and asks nothing twice of one commit.
+#[cfg(unix)]
+#[test]
+fn a_review_is_its_tasks_agent_in_one_session() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    let worktree = path_from(&output);
+    let task = lab.home().join("tasks/review-widget-7");
+    let id = task_id(&task);
+    assert!(stderr_of(&output).contains("reviewing #7 in tmux session"));
+
+    // Started in the task directory, with the prompt and nothing of the
+    // PR's title or branch, which whoever opened it wrote.
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 1);
+    let argv = &started[0];
+    let prompt = argv.last().unwrap();
+    assert!(prompt.starts_with("Review pull request #7"), "{prompt}");
+    assert!(prompt.contains(&*worktree.to_string_lossy()), "{prompt}");
+    assert!(!prompt.contains("Widen the store"), "{prompt}");
+    let sessions = lab.sessions(&id);
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0].0;
+    assert!(argv.contains(session), "{argv:?}");
+
+    // The same commit again: nothing asked, nothing started.
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("already asked"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+
+    // Asked again while the prompt still waits for it: one is enough.
+    let output = lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("queued"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("already queued"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    std::fs::remove_file(task.join(".jeet/inbox.jsonl")).unwrap();
+
+    // Asked again once its agent has ended: the same session, the same
+    // worktree, no second of either.
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    let output = lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    let started = calls_of(&tmux, "new-session");
+    assert_eq!(started.len(), 2);
+    assert!(started[1].contains(session), "{:?}", started[1]);
+    assert_eq!(lab.sessions(&id), sessions);
+    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
+    assert_eq!(
+        listed
+            .lines()
+            .filter(|l| l.contains("review-widget"))
+            .count(),
+        1
+    );
 }
 
 /// A test that fails with a review still running leaves nothing behind:

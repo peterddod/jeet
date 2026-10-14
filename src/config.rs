@@ -84,10 +84,25 @@ pub enum HarnessConfig {
 
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
 
+/// What the review task's agent is asked, unless `[review] prompt` says.
+pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{pr} ({url}). It is checked out \
+at the PR's head in {worktree}. Read the change (`gh pr view {pr}`, `gh pr diff {pr}`) and the \
+code around it, then list what is wrong or risky, most serious first, with file and line. Do \
+not push, merge, approve or comment on the PR unless asked.";
+
 /// `[review]` in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewConfig {
-    /// Shell command run in the background from the new worktree, e.g.
+    /// The first prompt the review task's agent is given, in its tmux pane:
+    /// `{pr}`, `{url}` and `{worktree}` are substituted. Unset, a prompt
+    /// asking it to review the PR in its worktree ([`DEFAULT_REVIEW_PROMPT`]).
+    /// The PR's branch and title are never pasted in: whoever opened the
+    /// PR wrote those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Deprecated: shell command run headless in the background from the
+    /// new worktree instead of the review agent, e.g.
     /// `claude -p "/review-pr {pr}"`. `{pr}` and `{url}` are substituted; the
     /// PR's branch, base and title arrive as environment variables instead,
     /// because a branch name from a fork is not safe to paste into a shell.
@@ -101,7 +116,15 @@ pub struct ReviewConfig {
 
 impl ReviewConfig {
     fn is_empty(&self) -> bool {
-        self.command.is_none() && self.notify.is_none()
+        self.prompt.is_none() && self.command.is_none() && self.notify.is_none()
+    }
+
+    /// The review agent's first prompt, before substitution.
+    pub fn prompt(&self) -> &str {
+        self.prompt
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or(DEFAULT_REVIEW_PROMPT)
     }
 
     /// The configured command, if it says anything.
@@ -769,6 +792,9 @@ mod tests {
         assert!(!config.review.notify());
         assert!(Config::default().review.command().is_none());
         assert!(Config::default().review.notify());
+        assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
+        let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
+        assert_eq!(config.review.prompt(), "Review {pr}");
     }
 
     #[test]

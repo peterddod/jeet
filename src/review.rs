@@ -1,5 +1,12 @@
-//! Background review jobs: the command `jeet review` starts in a PR's worktree.
+//! Reviews: what `jeet review` starts once the PR is checked out.
 //!
+//! The review is the review task's own agent, started in the task's tmux
+//! pane like any task's, with `[review] prompt` as its first prompt
+//! ([`start_agent`]). Each review task has one PR, one worktree and one
+//! session: a review asked for again types the prompt into that session,
+//! resuming it if it is not running, never a second.
+//!
+//! The rest is the legacy, deprecated `[review] command`: a background job.
 //! A job is a JSON state file plus a log under `$JEET_HOME/reviews`, keyed by
 //! repository and PR number. `jeet review` writes the state file and launches
 //! the hidden `jeet review-job` runner detached from the terminal; the runner
@@ -23,6 +30,7 @@ use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
 use crate::db::{Database, RepoRecord};
 use crate::github::PullRequest;
 use crate::identity;
+use crate::messages::{Delivered, Sender};
 use crate::remote;
 use crate::status::Activity;
 use crate::tmux;
@@ -332,6 +340,159 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
         ("JEET_PR_BASE".into(), pr.base_ref_name.clone()),
         ("JEET_REVIEW_LOG".into(), log.to_string_lossy().to_string()),
     ]
+}
+
+/// Where the review agent's last prompt is recorded: the PR head it was
+/// asked to review, in the task's marker directory.
+fn asked_file(app: &App, task: &TaskRecord) -> PathBuf {
+    crate::tasks::task_dir(app, task)
+        .join(crate::tasks::MARKER_DIR)
+        .join("review.json")
+}
+
+/// The PR head review task `task`'s agent was last asked to review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asked {
+    pub pr: u64,
+    pub head: String,
+    pub at: i64,
+}
+
+/// What review task `task`'s agent was last asked to review, if anything.
+pub fn asked(app: &App, task: &TaskRecord) -> Option<Asked> {
+    let text = std::fs::read_to_string(asked_file(app, task)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn record_asked(app: &App, task: &TaskRecord, pr: &PullRequest) -> Result<()> {
+    let path = asked_file(app, task);
+    let asked = Asked {
+        pr: pr.number,
+        head: pr.head_ref_oid.clone(),
+        at: now_secs(),
+    };
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&asked)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
+}
+
+/// `[review] prompt` with `{pr}`, `{url}` and `{worktree}` filled in: all
+/// GitHub's or jeet's own. The PR's branch and title are whoever opened
+/// it's, so never pasted into the agent's prompt; it reads them with `gh`.
+pub fn expand_prompt(template: &str, pr: &PullRequest, worktree: &Path) -> String {
+    expand(template, pr).replace("{worktree}", &worktree.to_string_lossy())
+}
+
+/// Why the review agent is not asked again, given what it was last asked
+/// and the legacy job recorded for the PR — or nothing, when it should be.
+fn reason_not_to_ask(
+    asked: Option<&Asked>,
+    job: Option<&Job>,
+    pr: &PullRequest,
+    rerun: bool,
+) -> Option<String> {
+    // A legacy review still running headless: its session is not the
+    // agent's to resume until it has finished.
+    if let Some(job) = job.filter(|job| job.state() == JobState::Running) {
+        return Some(format!(
+            "a background review of #{} is still running ({}); the review agent starts \
+             once it has finished",
+            job.pr,
+            job.describe()
+        ));
+    }
+    if rerun {
+        return None;
+    }
+    if asked.is_some_and(|a| a.pr == pr.number && a.head == pr.head_ref_oid) {
+        return Some(format!(
+            "the review agent was already asked to review #{} at this commit; pass --rerun \
+             to ask it again",
+            pr.number
+        ));
+    }
+    match job {
+        Some(job) if asked.is_none() => reason_to_skip(Some(job), &pr.head_ref_oid),
+        _ => None,
+    }
+}
+
+/// Have review task `task`'s agent review `pr`, checked out at `worktree`:
+/// the one place a review agent is started or asked again, and so where
+/// any limit on reviews belongs.
+///
+/// The prompt goes to the task's agent as any message to it does
+/// ([`messages::deliver`]): typed into it when it is idle, queued while it
+/// is busy, and otherwise starting it in its tmux pane, resuming its
+/// latest session so a review keeps the one. A paused or stopped task, or
+/// one under a held node, keeps it queued until resumed; one over
+/// `[managers] max_live` starts when a slot frees. Returns what to tell the
+/// user.
+pub fn start_agent(
+    app: &App,
+    repo: &RepoRecord,
+    task: &TaskRecord,
+    pr: &PullRequest,
+    worktree: &Path,
+    rerun: bool,
+) -> Result<String> {
+    let job = load(app, repo, pr.number);
+    if let Some(why) = reason_not_to_ask(asked(app, task).as_ref(), job.as_ref(), pr, rerun) {
+        return Ok(why);
+    }
+    let prompt = expand_prompt(app.config.review.prompt(), pr, worktree);
+    let dir = crate::tasks::task_dir(app, task);
+    // Still waiting in its inbox: the worktree it names is at the new head
+    // already, so one is enough, not a second review behind it.
+    let checked = crate::messages::checked(&prompt)?;
+    if crate::messages::peek(&dir)
+        .iter()
+        .any(|q| q.message == checked)
+    {
+        return Ok(format!(
+            "the review of #{} is already queued for the review agent",
+            pr.number
+        ));
+    }
+    let agent = crate::messages::TmuxAgent::new(app, task);
+    let delivered = crate::messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
+    if let Err(e) = record_asked(app, task, pr) {
+        eprintln!("jeet: warning: could not record the review asked for: {e:#}");
+    }
+    let session = crate::runtime::session_name(task);
+    let watch = format!("`jeet task open {}` to watch it", task.slug);
+    Ok(match delivered {
+        Delivered::Started => {
+            format!(
+                "reviewing #{} in tmux session {session}; {watch}",
+                pr.number
+            )
+        }
+        Delivered::Typed => format!(
+            "asked the review agent in tmux session {session} to review #{}; {watch}",
+            pr.number
+        ),
+        Delivered::Queued | Delivered::Wake => format!(
+            "the review agent is busy, so the review of #{} is queued for it; {watch}",
+            pr.number
+        ),
+        Delivered::Held => format!(
+            "the review of #{} is queued; the agent starts with it when the task is next \
+             opened",
+            pr.number
+        ),
+        Delivered::Paused => format!(
+            "task {} is paused or stopped, so the review of #{} is queued; it starts once \
+             resumed",
+            task.slug, pr.number
+        ),
+        Delivered::StartQueued { live, max } => format!(
+            "the review of #{} waits on max_live ({live}/{max} live); it starts when a task \
+             in the tree ends",
+            pr.number
+        ),
+    })
 }
 
 /// Start the review command for `pr` in `worktree`, detached from this
@@ -735,6 +896,45 @@ mod tests {
         );
         let env = job_env(&pr(), Path::new("/l"));
         assert!(env.contains(&("JEET_PR_BRANCH".into(), "x;touch pwned".into())));
+    }
+
+    #[test]
+    fn the_review_prompt_takes_only_github_and_jeet_values() {
+        let prompt = expand_prompt(
+            "Review #{pr} ({url}) in {worktree}: {branch} {title}",
+            &pr(),
+            Path::new("/t/w"),
+        );
+        assert_eq!(
+            prompt,
+            "Review #7 (https://github.com/acme/widget/pull/7) in /t/w: {branch} {title}"
+        );
+        let default = expand_prompt(crate::config::DEFAULT_REVIEW_PROMPT, &pr(), Path::new("/w"));
+        assert!(!default.contains('{'), "{default}");
+        assert!(!default.contains("rm -rf") && !default.contains("pwned"));
+    }
+
+    #[test]
+    fn the_review_agent_is_asked_once_per_commit() {
+        let asked = |head: &str| Asked {
+            pr: 7,
+            head: head.into(),
+            at: 0,
+        };
+        assert!(reason_not_to_ask(None, None, &pr(), false).is_none());
+        assert!(reason_not_to_ask(Some(&asked("abc")), None, &pr(), false).is_some());
+        assert!(reason_not_to_ask(Some(&asked("abc")), None, &pr(), true).is_none());
+        // A new head commit is asked about again, in the same session.
+        assert!(reason_not_to_ask(Some(&asked("old")), None, &pr(), false).is_none());
+        // A legacy job that reviewed this commit counts, until the agent
+        // has been asked itself.
+        let done = job(Some(0), "abc");
+        assert!(reason_not_to_ask(None, Some(&done), &pr(), false).is_some());
+        assert!(reason_not_to_ask(None, Some(&done), &pr(), true).is_none());
+        assert!(reason_not_to_ask(Some(&asked("old")), Some(&done), &pr(), false).is_none());
+        // One still running is never doubled, --rerun or not.
+        let running = job(None, "old");
+        assert!(reason_not_to_ask(None, Some(&running), &pr(), true).is_some());
     }
 
     #[test]
