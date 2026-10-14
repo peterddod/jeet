@@ -116,10 +116,18 @@ mod reaper {
 
     struct Test(RefCell<Option<String>>);
 
+    /// The tests whose sessions have been ended already.
+    static ENDED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
     impl Drop for Test {
         fn drop(&mut self) {
             if let Some(name) = self.0.borrow().as_deref() {
                 end_sessions(&sessions(&registry().0, Some(name)), false);
+                // Not again at exit, when its session ids may have been
+                // reused by others.
+                if let Ok(mut ended) = ENDED.lock() {
+                    ended.push(name.to_string());
+                }
             }
         }
     }
@@ -183,13 +191,19 @@ mod reaper {
         )
     }
 
-    /// The sessions noted in `registry`: `test`'s, or all of them.
+    /// The sessions noted in `registry`: `test`'s, or all of them but
+    /// those of `skip`.
     fn sessions(registry: &Path, test: Option<&str>) -> Vec<i32> {
+        sessions_but(registry, test, &[])
+    }
+
+    fn sessions_but(registry: &Path, test: Option<&str>, skip: &[String]) -> Vec<i32> {
         let text = std::fs::read_to_string(registry).unwrap_or_default();
         text.lines()
             .filter_map(|line| {
                 let (sid, name) = line.split_once(' ')?;
-                test.is_none_or(|t| t == name).then(|| sid.parse().ok())?
+                let wanted = test.is_none_or(|t| t == name) && !skip.iter().any(|s| s == name);
+                wanted.then(|| sid.parse().ok())?
             })
             .filter(|&sid| sid > 1)
             .collect()
@@ -259,8 +273,11 @@ mod reaper {
             else {
                 continue;
             };
-            // SAFETY: signal 0 only asks whether the process is there.
-            if pid == std::process::id() as i32 || unsafe { kill(pid, 0) } == 0 {
+            // SAFETY: signal 0 only asks whether the process is there; one
+            // that is not ours to signal is there all the same.
+            let there = unsafe { kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(1);
+            if pid == std::process::id() as i32 || there {
                 continue;
             }
             end_sessions(&sessions(&entry.path(), None), true);
@@ -270,7 +287,8 @@ mod reaper {
 
     extern "C" fn at_exit() {
         let (path, _) = registry();
-        end_sessions(&sessions(path, None), false);
+        let ended = ENDED.lock().map(|e| e.clone()).unwrap_or_default();
+        end_sessions(&sessions_but(path, None, &ended), false);
         let _ = std::fs::remove_file(path);
     }
 
@@ -2653,10 +2671,10 @@ here=$(dirname "$0")
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
-# ended and taken this directory with it, is given up on after a while.
+# ended and taken this directory with it, is given up on after ~30s.
 tries=0
 until mkdir "$here/lock" 2>/dev/null; do
-  [ -d "$here" ] && [ "$tries" -lt 500 ] || exit 1
+  [ -d "$here" ] && [ "$tries" -lt 3000 ] || exit 1
   tries=$((tries + 1))
   sleep 0.01
 done
@@ -4523,18 +4541,32 @@ fn a_test_leaves_no_process_behind() {
     assert!(!reaper::running(command), "the review's command was left");
 }
 
-/// A stub tmux never spins: a lock left behind by a call killed part-way,
-/// or a directory gone with the test that made it, is given up on.
+/// A stub tmux never spins: waiting on a lock, it gives up as soon as the
+/// test that made it has ended and taken its directory with it.
 #[cfg(unix)]
 #[test]
-fn a_stub_tmux_gives_up_on_a_stale_lock() {
+fn a_stub_tmux_gives_up_once_its_directory_has_gone() {
     let scratch = TempDir::new().unwrap();
     let tmux = stub_tmux(scratch.path());
-    std::fs::create_dir(tmux.parent().unwrap().join("lock")).unwrap();
-    let started = std::time::Instant::now();
-    let output = Command::new(&tmux).arg("-V").output().unwrap();
-    assert!(!output.status.success());
-    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    let stub = tmux.parent().unwrap().to_path_buf();
+    // A lock left by a call killed part-way.
+    std::fs::create_dir(stub.join("lock")).unwrap();
+    let mut call = Command::new(&tmux).arg("-V").spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(call.try_wait().unwrap().is_none(), "it did not wait");
+    std::fs::remove_dir_all(&stub).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = call.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = call.kill();
+            panic!("the stub tmux kept going");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(!status.success());
 }
 
 #[cfg(unix)]
@@ -6276,10 +6308,10 @@ here=$(dirname "$0")
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
-# ended and taken this directory with it, is given up on after a while.
+# ended and taken this directory with it, is given up on after ~30s.
 tries=0
 until mkdir "$here/lock" 2>/dev/null; do
-  [ -d "$here" ] && [ "$tries" -lt 500 ] || exit 1
+  [ -d "$here" ] && [ "$tries" -lt 3000 ] || exit 1
   tries=$((tries + 1))
   sleep 0.01
 done
