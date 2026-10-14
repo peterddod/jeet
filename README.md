@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.11.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.12.0
 ```
 
 ## Quick start
@@ -1351,6 +1351,95 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.12
+
+Reviews become agents: `jeet review` hands the PR to the review task's own
+agent, working in its tmux pane, with limits of its own and a tab of its own
+in the tasks list.
+
+- **The review agent**: `jeet review <pr>` starts the review task's agent
+  (your harness, Claude Code) in the task's tmux pane with a first prompt,
+  `[review] prompt`, instead of a headless background job. `⏎` on the task,
+  or `jeet task open review-<repo>-<number>`, shows it at work, and you can
+  talk to it there. One review is one task, one worktree and one session:
+  a new head commit or `--rerun` sends the prompt again into that session,
+  and the same commit is not asked twice ([The review
+  agent](#the-review-agent)).
+- **Review limits**: `[review] max_live`, `time` and `turns`, apart from
+  `[managers]`. Review agents no longer take `[managers] max_live` slots or
+  spend a manager's budget ([Review limits](#review-limits)).
+- **The reviews tab**: a new tab in the tasks list, after agents, shows every review
+  with its session's status, the PR's state on GitHub and where its review
+  stands; `⏎` opens a menu to view the diff (`v`) or open the review's
+  session (`s`) ([The reviews tab](#the-reviews-tab)).
+- **A subagent finishing late no longer leaves an agent busy**: a subagent
+  or background agent ending after its session's turn used to mark the
+  idle session running again, so messages to it waited, queued as busy,
+  until its next turn.
+- **The tasks screen no longer grows while you are away**: its pollers
+  kept queueing updates while you were attached to an agent or in the
+  explorer, about 3 GB over a day; they now hold off once 256 are waiting.
+- **No tmux call waits forever**: every tmux call but `attach` is given up
+  on after 20 seconds.
+
+**Upgrading to v0.12.0:** the index stays at schema v6, so there is no
+migration and v0.11.0 still opens it. The one new piece of state is a small
+file per review task, `<task>/.jeet/review.json`, recording the last head
+its agent was asked to review. Review jobs recorded under `~/.jeet/reviews`
+by an older `jeet review` still load, show in the tasks list and the new
+reviews tab, and their sessions are picked up as before.
+
+- **`jeet review` now starts an agent even with no `[review]` config.**
+  Before, with no `[review] command`, it only checked the PR out and opened
+  the viewer; pass `--no-agent` (or `--no-command`) for that.
+- **`[review] command` is deprecated.** It still works: set, it runs
+  headless in place of the review agent, as before, and `jeet review` warns.
+  Once a review's agent has been asked, the command is no longer run for
+  that review (`jeet review` says so) and the agent is asked instead.
+  Remove the command to switch to the agent.
+- **New keys in `[review]`**, all optional:
+
+  ```toml
+  [review]
+  prompt = "…"    # placeholders {pr}, {url}, {worktree}; the default asks the
+                  # agent to review PR {pr} in its worktree, and not to push,
+                  # merge, approve or comment unless asked
+  max_live = 2    # review agents running at once, yours included
+  time = "1h"     # busy time each review in the tree may take
+  turns = 20      # turns each review in the tree may take
+  ```
+
+  These are checked when used, with a `[review] <key>` message, and the
+  rest of config.toml still loads: `max_live = 0` refuses starting any
+  review; `turns = 0`, `time = "0m"` or a `time` that is not a time refuses
+  asking a review in the tree. v0.11.0 ignores these keys.
+- **Reviews have their own limits now.** They no longer use `[managers]
+  max_live` slots or manager budgets: a review below a manager spends
+  nothing of its budget. At most 2 review agents run at once, **including
+  your own `jeet review`**; a third waits until one ends. To keep the old
+  behaviour of no review cap, raise `[review] max_live`. `jeet task open`
+  from your terminal still starts one past the cap, with a warning.
+- **Time and turn caps apply to reviews in the tree** (the ones the
+  assistant starts; a review task already made at the top level stays
+  there, uncapped): each review asked gets `[review] time` and `turns`
+  afresh, is warned at 80% and paused at 100%. A review task's budget is
+  `[review]`'s: `--budget` on one is refused, and one set with `jeet
+  manager budget` is replaced at its next review. **Your own top-level
+  `jeet review` is held by `[review] max_live` only**: like any top-level
+  task it has no budget, so `time` and `turns` never pause it. A task with
+  a parent may not run `jeet review`.
+- **Queue messages name the cap that held a start**, e.g. `waits on
+  [review] max_live (2/2 review agents live)` or `queued on [managers]
+  max_live, 1/1 live` (a `status: queued` report body). Scripts matching
+  the old `queued, n/m live` need updating. The tasks list's header still
+  counts review agents in its `live n/max`, against `[managers] max_live`.
+- **In the tasks list, `⇥` now cycles active → agents → reviews →
+  archived** (`⇧⇥` back): reaching archived from active takes three presses.
+- A session left marked running by a late subagent before this release
+  clears at its next turn's end; nothing repairs its status file sooner.
+- The assistant's and managers' `AGENTS.md` and skills are unchanged by
+  this release; nothing needs regenerating.
 
 ## What's new in v0.11
 
