@@ -1,5 +1,5 @@
 //! `jeet review <pr>`: find or make the PR's review task, check the PR out
-//! in it, and open the review viewer.
+//! in it, have its agent review it, and open the review viewer.
 
 use std::io::{self, IsTerminal};
 
@@ -19,7 +19,7 @@ pub fn run(
     app: &App,
     pr: &str,
     repo_filter: Option<&str>,
-    start_command: bool,
+    start_review: bool,
     rerun: bool,
 ) -> Result<()> {
     let number = github::parse_pr_number(pr)?;
@@ -64,24 +64,29 @@ pub fn run(
         review.path.display()
     );
 
-    if start_command {
-        // Under a parent, the review command is the task's agent and reports.
-        let as_task = review
-            .task
-            .parent_id
-            .as_ref()
-            .map(|_| review.task.id.as_str());
-        // The runner is always recorded as the task it runs for: the review
-        // task under a parent, the assistant that started it for a review
-        // task found at the top level (never moved under it), and otherwise
-        // the top-level review task itself, which runs as the user. Recorded,
-        // archiving or deleting the task finds the job and ends it;
-        // unrecorded, a runner that inherits the assistant's environment is
-        // refused once this jeet has exited.
-        let runner_for = as_task
-            .or(parent.as_deref())
-            .unwrap_or(review.task.id.as_str());
-        start_review(app, &repo, &pr, &review.path, rerun, as_task, runner_for)?;
+    if start_review {
+        // Once its agent has been asked, a review stays with it: a job
+        // beside it would leave a second session.
+        let has_agent = review::asked(app, &review.task).is_some();
+        if app.config.review.command().is_some() && has_agent {
+            eprintln!(
+                "jeet: warning: [review] command is deprecated, and not run for a review its \
+                 agent has started; the agent is asked instead"
+            );
+        }
+        if app.config.review.command().is_some() && !has_agent {
+            eprintln!(
+                "jeet: warning: [review] command is deprecated: it runs headless, outside the \
+                 review task's agent; remove it to have the agent review in its tmux pane, \
+                 asked with [review] prompt"
+            );
+            legacy_review(app, &repo, &pr, &review, parent.as_deref(), rerun)?;
+        } else {
+            match review::start_agent(app, &repo, &review.task, &pr, &review.path, rerun) {
+                Ok(line) => eprintln!("jeet: {line}"),
+                Err(e) => eprintln!("jeet: warning: the review agent did not start: {e:#}"),
+            }
+        }
     }
 
     if io::stdout().is_terminal() {
@@ -94,15 +99,30 @@ pub fn run(
     cd::request(&review.path)
 }
 
-fn start_review(
+/// The deprecated `[review] command`, run as a headless background job.
+fn legacy_review(
     app: &App,
     repo: &crate::db::RepoRecord,
     pr: &github::PullRequest,
-    worktree: &std::path::Path,
+    review: &tasks::ReviewCheckout,
+    parent: Option<&str>,
     rerun: bool,
-    as_task: Option<&str>,
-    runner_for: &str,
 ) -> Result<()> {
+    // Under a parent, the review command is the task's agent and reports.
+    let as_task = review
+        .task
+        .parent_id
+        .as_ref()
+        .map(|_| review.task.id.as_str());
+    // The runner is always recorded as the task it runs for: the review
+    // task under a parent, the assistant that started it for a review
+    // task found at the top level (never moved under it), and otherwise
+    // the top-level review task itself, which runs as the user. Recorded,
+    // archiving or deleting the task finds the job and ends it;
+    // unrecorded, a runner that inherits the assistant's environment is
+    // refused once this jeet has exited.
+    let runner_for = as_task.or(parent).unwrap_or(review.task.id.as_str());
+    let worktree = review.path.as_path();
     let config = &app.config.review;
     let Some(template) = config.command() else {
         return Ok(());
