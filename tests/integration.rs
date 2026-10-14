@@ -8458,6 +8458,50 @@ fn the_assistant_stripping_its_environment_is_still_the_assistant() {
     assert_eq!(log[actions_before]["outcome"], "denied");
 }
 
+/// A task with a parent may not run `jeet review`, a manager or a worker,
+/// even holding `review.start`: a review it made would be top-level, where
+/// nothing charges it against `[review]` time and turns. Nothing is
+/// checked out, and no review task is made.
+#[cfg(unix)]
+#[test]
+fn a_task_with_a_parent_is_refused_jeet_review() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let env = [("PATH", path.as_str())];
+    let m = lab.new_task_with("m", &["--parent", "assistant"]);
+    let index = lab.index();
+    index
+        .execute("UPDATE tasks SET kind = 'manager' WHERE id = ?1", [&m])
+        .unwrap();
+    let w = lab.new_task_with("w", &["--parent", "m"]);
+    for id in [&m, &w] {
+        index
+            .execute(
+                "INSERT OR IGNORE INTO task_grants (task_id, capability) \
+                 VALUES (?1, 'review.start')",
+                [id],
+            )
+            .unwrap();
+    }
+    for slug in ["m", "w"] {
+        let output = lab.task_pane(slug).jeet(&["review", "7"], &trunk, &env);
+        assert!(!output.status.success(), "task {slug} ran jeet review");
+        assert!(
+            stderr_of(&output).contains(&format!("task {slug} may not run that")),
+            "{}",
+            stderr_of(&output)
+        );
+    }
+    assert!(!lab.home().join("tasks/review-widget-7").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_review_the_assistant_checks_out_reports_to_it() {

@@ -3,7 +3,7 @@
 
 use std::io::{self, IsTerminal};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::cd;
 use crate::context::App;
@@ -39,9 +39,13 @@ pub fn run(
     );
 
     // What the assistant checks out reports to it, like a task it makes.
+    // A task with a parent never gets here: `jeet review` is refused to it
+    // (`permissions::node_scope` has no rule for it), so no review of its
+    // escapes `[review]` time and turns as a top-level task.
     let parent = match caller {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
-        Caller::User | Caller::Node(_) => None,
+        Caller::User => None,
+        Caller::Node(node) => bail!("task {} may not run `jeet review`", node.slug),
     };
     let by = parent.as_ref().map(|_| &caller);
     let review = tasks::review_task(app, &repo, &pr, by)?;

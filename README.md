@@ -362,7 +362,8 @@ afresh, on top of what it has used, and is held to them as a task is to its
 budget (see [Reporting to the parent](#reporting-to-the-parent)): at 80% it
 is told, at 100% it is paused until the next review is asked. Your own
 `jeet review` makes a top-level task, which, as any top-level task, has no
-budget: its agent works for you, and nothing charges it. The defaults keep
+budget: its agent works for you, and nothing charges it. A task with a parent may not run
+`jeet review` at all, so no agent's review escapes these caps that way. The defaults keep
 reviews from crowding out other work (2 at once) and stop a stuck one
 (an hour of busy time, or 20 turns, a turn being one prompt answered: a
 review is one or a few). Like `[managers]`, these are checked when used: 0,
