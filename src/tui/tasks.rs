@@ -6489,7 +6489,7 @@ mod tests {
             .collect();
         ui.set_rows(rows);
         assert_eq!(ui.breadcrumb(), ["projects", "api"]);
-        assert_eq!(shown(&ui), ["fix"]);
+        assert_eq!(shown(&ui), ["fix", "ship"]);
     }
 
     #[test]
