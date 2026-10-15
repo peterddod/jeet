@@ -347,6 +347,11 @@ has been asked, a review stays with it even if `[review] command` is set
 later. A review paused at its [limits](#review-limits) keeps the prompt until
 the review is asked for again. `--no-agent` only checks the PR out.
 
+A review remembers who asked for it: the assistant's id when the assistant
+ran `jeet review`, and that holds until the review is deleted. You running
+it again, even for the same commit, never clears it; only a later request by
+the assistant sets it (to the assistant, still).
+
 Every review agent has the same fixed gate, whoever asked for the review. It
 reads: `jeet ls`, `jeet path` and `jeet prs`, and nothing else in jeet. It has
 the worker deny rules: no push, force-push, merge, `gh pr review` or
@@ -407,7 +412,9 @@ and opening it is refused — headless, there is nothing to attach to; once it
 has finished, opening the review resumes the session it left (jeet picks it up
 from the PR's worktree), and so does the review agent if you later remove the
 command. Running `jeet review` again for the same commit does not start a
-second review; new commits do (and `--rerun` forces one).
+second review; new commits do (and `--rerun` forces one). Run for your own
+review, the command runs as you, ungated, as it always has; only the assistant's
+reviews are held to the review agent's gate.
 
 `{pr}` and `{url}` are substituted into the command. The PR's branch, base and
 title are not — whoever opened the PR chose those, and pasted into a shell they
@@ -1510,9 +1517,10 @@ back.
   its session, its limits and use, its place in a `max_live` queue, and its
   archived or active state. A review under the assistant becomes one the
   assistant asked for.
-- **Reports between review tasks and the assistant are not carried over**: a
-  review's `done`, `blocked` and other reports from before the upgrade are
-  gone from `jeet report ls`, as are any the assistant had sent a review.
+- **Reports of a kept review are kept**: its `done`, `blocked` and other
+  reports to the assistant stay in `jeet report ls`. Only those of review
+  tasks that were superseded or dropped go, and any that were sent to a
+  review task.
 - **Only one review per pull request survives.** Where several review tasks
   were for one PR, the newest is kept. The others' worktrees are archived the
   way `jeet task archive` does it, into `refs/jeet/head/<old-task-id>/…` and
@@ -1534,7 +1542,9 @@ back.
   review and no longer read.
 - In the reviews tab, `w` and `p` have nothing to show (a review has one
   worktree and one PR), and a review is no longer "paused by hand" or
-  "stopped": it is paused only at its caps.
+  "stopped" from a tree: it is paused only at its caps. `jeet manager stop
+  --all` still ends the agents (and legacy jobs) of the reviews the
+  assistant asked for, and drops them from the `max_live` queue.
 
 ## What's new in v0.12
 

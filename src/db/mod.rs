@@ -237,7 +237,10 @@ const MIGRATIONS: &[&str] = &[
     // newest review task is kept; the others' worktrees go to
     // `review_leftovers` for `review::migrate_leftovers` to archive, and a
     // review task with no PR is dropped the same way. Every row of a review
-    // task goes explicitly: foreign keys are off while migrations run. Then
+    // task goes explicitly: foreign keys are off while migrations run, so
+    // the step ends with a `foreign_key_check` (see `apply_migrations`). A
+    // kept review's reports stay; those of a superseded or dropped task,
+    // and any sent to a review task, go. Then
     // `tasks` is rebuilt without the kind (v6's pattern), and `task_anchors`
     // and `task_reports` without the foreign key on `task_id`, which may be
     // a review's id now.
@@ -286,6 +289,7 @@ const MIGRATIONS: &[&str] = &[
         was_archived INTEGER NOT NULL,
         done INTEGER NOT NULL DEFAULT 0,
         note TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (task_id, dir_name)
     );
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -312,14 +316,17 @@ const MIGRATIONS: &[&str] = &[
             SELECT 1 FROM rv_pr q JOIN tasks u ON u.id = q.task_id
             WHERE q.repo_id = p.repo_id AND q.pr_number = p.pr_number
               AND q.task_id <> p.task_id
-              AND (u.last_activity, u.created_at, u.id)
-                  > (t.last_activity, t.created_at, t.id));
+              AND (u.state = 'active', u.last_activity, u.created_at, u.id)
+                  > (t.state = 'active', t.last_activity, t.created_at, t.id));
     CREATE TEMP TABLE rv_chosen AS
-        SELECT k.task_id AS task_id, MIN(w.id) AS wt_id
-        FROM rv_kept k
-        JOIN task_worktrees w ON w.task_id = k.task_id
-                             AND w.repo_id = k.repo_id AND w.pr_number = k.pr_number
-        GROUP BY k.task_id;
+        SELECT k.task_id AS task_id,
+               COALESCE(
+                   (SELECT MIN(w.id) FROM task_worktrees w
+                    WHERE w.task_id = k.task_id AND w.repo_id = k.repo_id
+                      AND w.pr_number = k.pr_number),
+                   (SELECT MIN(w.id) FROM task_worktrees w
+                    WHERE w.task_id = k.task_id AND w.repo_id = k.repo_id)) AS wt_id
+        FROM rv_kept k;
 
     INSERT INTO reviews (id, slug, repo_id, pr_number, title, pr_state, pr_url, state,
                          requested_by, created_at, last_activity,
@@ -382,11 +389,14 @@ const MIGRATIONS: &[&str] = &[
     DELETE FROM task_budgets WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'review');
     DELETE FROM task_start_queue WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'review');
     DELETE FROM task_reports
-        WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'review')
-           OR to_id IN (SELECT id FROM tasks WHERE kind = 'review');
+        WHERE to_id IN (SELECT id FROM tasks WHERE kind = 'review')
+           OR (task_id IN (SELECT id FROM tasks WHERE kind = 'review')
+               AND task_id NOT IN (SELECT id FROM reviews));
     DELETE FROM task_anchors
         WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'review')
           AND task_id NOT IN (SELECT id FROM reviews);
+    UPDATE tasks SET parent_id = NULL
+        WHERE parent_id IN (SELECT id FROM tasks WHERE kind = 'review');
     DELETE FROM tasks WHERE kind = 'review';
     DROP TABLE rv_chosen;
     DROP TABLE rv_kept;
@@ -627,7 +637,14 @@ fn migrate_from(conn: &mut Connection, current: i64, latest: i64) -> Result<()> 
         [],
         |row| row.get(0),
     )?;
-    if current > 0 || has_tasks {
+    // A pre-versioning index with no tasks table has only `repos` to lose.
+    let has_repos: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repos')
+         AND EXISTS (SELECT 1 FROM repos)",
+        [],
+        |row| row.get(0),
+    )?;
+    if current > 0 || has_tasks || has_repos {
         let backup = back_up(conn, &path, current)?;
         eprintln!(
             "jeet: backed up the index to {} before migrating it to schema v{latest}",
@@ -638,8 +655,8 @@ fn migrate_from(conn: &mut Connection, current: i64, latest: i64) -> Result<()> 
 }
 
 /// Copy the index to `backups/index-v<version>-<unix time>.db` beside it,
-/// returning the copy's path. One made already this second is that
-/// migration's own, and is kept.
+/// returning the copy's path. A copy is never reused: one already there
+/// gets a `-2` (`-3`, ...) suffix on the new one.
 fn back_up(conn: &Connection, index: &Path, version: i64) -> Result<std::path::PathBuf> {
     let dir = index.parent().unwrap_or(Path::new(".")).join("backups");
     std::fs::create_dir_all(&dir).with_context(|| {
@@ -651,9 +668,11 @@ fn back_up(conn: &Connection, index: &Path, version: i64) -> Result<std::path::P
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let backup = dir.join(format!("index-v{version}-{at}.db"));
-    if backup.exists() {
-        return Ok(backup);
+    let mut backup = dir.join(format!("index-v{version}-{at}.db"));
+    let mut n = 2;
+    while backup.exists() {
+        backup = dir.join(format!("index-v{version}-{at}-{n}.db"));
+        n += 1;
     }
     conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
         .with_context(|| {
@@ -684,6 +703,17 @@ fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
         }
         tx.execute_batch(sql)
             .with_context(|| format!("migrate index to v{version}"))?;
+        // v8 deletes rows by hand with foreign keys off: a row left pointing
+        // at one of them fails the step, and the index is as it was.
+        if version == 8 {
+            let broken: i64 =
+                tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })?;
+            if broken > 0 {
+                bail!("migrate index to v{version}: {broken} rows would point at a deleted row");
+            }
+        }
         // PRAGMA takes no bound parameters; `version` is our own integer.
         tx.execute_batch(&format!("PRAGMA user_version = {version};"))?;
         tx.commit()?;
@@ -1138,10 +1168,12 @@ mod tests {
     ///
     /// - `ra`: PR 7, under the assistant, two sessions, a budget spent to
     ///   the pause, queued, a report and an anchor;
-    /// - `rb0` (archived, oldest), `rb1` and `rb2` (newest): three review
-    ///   tasks of PR 8;
+    /// - `rb0` (archived, the most recent), `rb1` and `rb2`: three review
+    ///   tasks of PR 8, of which an active one is kept over the archived;
     /// - `rc`: PR 9, archived, its worktree kept at archive;
     /// - `rd` and `re`: PRs 10 and 11, top-level and under the manager;
+    ///   `re` has a worktree that names no PR, which becomes its own, and
+    ///   `rd` has a worker `wk` under it;
     /// - `rx`: a worktree and no PR at all.
     fn v7_index(path: &Path) {
         let conn = Connection::open(path).unwrap();
@@ -1160,13 +1192,15 @@ mod tests {
                         ('w', 'work', 'work', 'work', 'm', 1, 1);
              INSERT INTO tasks (id, slug, name, kind, parent_id, state, created_at, last_activity)
                  VALUES ('ra', 'review-api-7', 'review-api-7', 'review', 'a', 'active', 5, 50),
-                        ('rb0', 'review-api-8-3', 'review-api-8', 'review', NULL, 'archived', 1, 5),
+                        ('rb0', 'review-api-8-3', 'review-api-8', 'review', NULL, 'archived', 1, 99),
                         ('rb1', 'review-api-8', 'review-api-8', 'review', NULL, 'active', 2, 10),
                         ('rb2', 'review-api-8-2', 'review-api-8', 'review', NULL, 'active', 3, 20),
                         ('rc', 'review-api-9', 'review-api-9', 'review', NULL, 'archived', 4, 30),
                         ('rd', 'review-api-10', 'review-api-10', 'review', NULL, 'active', 6, 60),
                         ('re', 'review-api-11', 'review-api-11', 'review', 'm', 'active', 7, 70),
                         ('rx', 'review-nothing', 'review-nothing', 'review', NULL, 'active', 8, 80);
+             INSERT INTO tasks (id, slug, name, kind, parent_id, created_at, last_activity)
+                 VALUES ('wk', 'under-review', 'under-review', 'work', 'rd', 1, 1);
              UPDATE tasks SET run_state = 'paused', run_state_by = 'budget' WHERE id = 'ra';
              INSERT INTO task_worktrees
                  (task_id, repo_id, dir_name, branch, created_branch, head_oid, stash_ref,
@@ -1177,6 +1211,7 @@ mod tests {
                         ('rb1', 'github.com/acme/api', 'api', 'pr/8', 0, NULL, NULL, 8, 2),
                         ('rc', 'github.com/acme/api', 'api', 'pr/9', 1, 'h9', 's9', 9, 4),
                         ('rd', 'github.com/acme/api', 'api', 'pr/10', 0, NULL, NULL, 10, 6),
+                        ('re', 'github.com/acme/api', 'e', NULL, 0, NULL, NULL, NULL, 7),
                         ('rx', 'github.com/acme/api', 'x', NULL, 0, NULL, NULL, NULL, 8);
              INSERT INTO task_prs (task_id, repo_id, number, title, url, state, updated_at)
                  VALUES ('w', 'github.com/acme/api', 3, 'mine', 'u3', 'OPEN', 'z'),
@@ -1198,7 +1233,8 @@ mod tests {
              INSERT INTO task_briefs (task_id, goal, created_by)
                  VALUES ('w', 'do it', 'm'), ('ra', 'review it', 'a');
              INSERT INTO task_reports (task_id, to_id, kind, body, at)
-                 VALUES ('w', 'm', 'done', 'shipped', 1), ('ra', 'a', 'done', 'reviewed', 2);
+                 VALUES ('w', 'm', 'done', 'shipped', 1), ('ra', 'a', 'done', 'reviewed', 2),
+                        ('rb1', 'a', 'done', 'superseded', 3), ('w', 'rd', 'question', 'to a review', 4);
              INSERT INTO task_anchors (pid, start, task_id, kind, pane_id, created_at)
                  VALUES (10, 20, 'w', 'pane', '%1', 1),
                         (11, 20, 'ra', 'pane', '%2', 1),
@@ -1249,8 +1285,8 @@ mod tests {
             .into_iter()
             .map(|t| t.id)
             .collect();
-        assert_eq!(ids.len(), 2, "{ids:?}");
-        for id in ["m", "w"] {
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        for id in ["m", "w", "wk"] {
             assert!(ids.contains(&id.to_string()), "{ids:?}");
         }
         assert!(db.get_assistant_task().unwrap().is_some());
@@ -1258,6 +1294,7 @@ mod tests {
             db.get_task("w").unwrap().unwrap().parent_id.as_deref(),
             Some("m")
         );
+        assert_eq!(db.get_task("wk").unwrap().unwrap().parent_id, None);
         assert_eq!(db.list_task_worktrees("w").unwrap().len(), 1);
         assert_eq!(db.list_task_prs("w").unwrap().len(), 1);
         assert_eq!(db.list_task_sessions("w").unwrap().len(), 1);
@@ -1273,7 +1310,6 @@ mod tests {
             "task_grants",
             "task_briefs",
             "task_start_queue",
-            "task_reports",
         ] {
             let foreign = scalar(
                 &db,
@@ -1360,7 +1396,10 @@ mod tests {
         );
         // Only the assistant's reviews are asked for; a manager's are not.
         assert_eq!(db.get_review("rd").unwrap().unwrap().requested_by, None);
-        assert_eq!(db.get_review("re").unwrap().unwrap().requested_by, None);
+        let re = db.get_review("re").unwrap().unwrap();
+        assert_eq!(re.requested_by, None);
+        // A worktree that names no PR is its review's own, not a leftover.
+        assert_eq!(re.dir_name.as_deref(), Some("e"));
 
         // The duplicates' worktrees, and the PR-less task's, wait to be
         // archived; an archived one's work is in refs already.
@@ -1408,8 +1447,17 @@ mod tests {
             .collect();
         assert_eq!(anchors.len(), 2, "{anchors:?}");
         assert!(anchors.contains(&"w".to_string()) && anchors.contains(&"ra".to_string()));
-        // The review's reports went with its task; the worker's stay.
-        assert_eq!(scalar(&db, "SELECT COUNT(*) FROM task_reports"), 1);
+        // A kept review's unanswered report stays; a superseded task's and
+        // one sent to a review task went; the worker's stay.
+        assert_eq!(scalar(&db, "SELECT COUNT(*) FROM task_reports"), 2);
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM task_reports
+                 WHERE task_id = 'ra' AND to_id = 'a' AND answer IS NULL"
+            ),
+            1
+        );
 
         // Foreign keys are on, whole, and no task takes a review's name.
         assert_eq!(
@@ -1460,6 +1508,65 @@ mod tests {
         assert!(!dir.path().join("backups").exists());
         assert_eq!(db.meta("reviews_v8_pending").unwrap(), None);
         assert!(db.pending_leftovers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pre_versioning_index_with_repos_is_backed_up_and_a_backup_is_never_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(LEGACY_V0)
+            .unwrap();
+        let backups = dir.path().join("backups");
+        // One by the name this migration would pick, from the same second.
+        std::fs::create_dir_all(&backups).unwrap();
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let taken: Vec<_> = (0..3)
+            .map(|d| backups.join(format!("index-v0-{}.db", at + d)))
+            .collect();
+        for t in &taken {
+            std::fs::write(t, "someone else's").unwrap();
+        }
+        Database::open(&path).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names.len(), 4, "{names:?}");
+        for t in &taken {
+            assert_eq!(std::fs::read_to_string(t).unwrap(), "someone else's");
+        }
+    }
+
+    #[test]
+    fn a_v8_step_that_leaves_a_dangling_row_fails_and_leaves_the_index_at_v7() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        v7_index(&path);
+        // A session of a task that is not there: no step may leave it so.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO task_sessions
+                     (session_id, task_id, name, created_at, last_activity, is_primary)
+                     VALUES ('ghost', 'nobody', 'x', 1, 1, 0);",
+            )
+            .unwrap();
+        let err = Database::open(&path).err().expect("refused");
+        assert!(
+            format!("{err:#}").contains("migrate index to v8"),
+            "{err:#}"
+        );
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
     }
 
     #[test]
