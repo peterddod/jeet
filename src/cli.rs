@@ -286,7 +286,8 @@ pub enum TaskCommands {
     New {
         name: String,
         /// Project to start from: copies its AGENTS.md and skills, and adds a
-        /// worktree of each of its repositories
+        /// worktree of each of its repositories; under a manager with a
+        /// project, that one when this is not given
         #[arg(long, add = ArgValueCandidates::new(project_candidates))]
         project: Option<String>,
         /// Repository to add a worktree of straight away (repeatable)
@@ -476,6 +477,11 @@ pub enum ManagerCommands {
         /// `[managers] max_children`, its default
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         max_children: Option<u32>,
+        /// Project to start from: its skills and AGENTS.md (as PROJECT.md,
+        /// beside the manager's own instructions) are copied in, and tasks
+        /// made under the manager default to it. No worktrees are added
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
+        project: Option<String>,
     },
 
     /// The tree under the assistant

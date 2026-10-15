@@ -32,6 +32,7 @@ use crate::db::tasks::{
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
+use crate::instructions;
 use crate::manager;
 use crate::manager::budget::{self, Limits};
 use crate::messages::{self, Delivered, Sender};
@@ -217,8 +218,17 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     if spec.branch.is_some() && spec.repos.len() != 1 {
         bail!("--branch needs exactly one --repo: it names that repository's branch");
     }
-    // Read up front, so a missing or broken project makes nothing at all.
-    let project = match spec.project {
+    // A task under a node that has a project starts from it, unless it was
+    // given one of its own. Read up front, so a missing or broken project
+    // makes nothing at all.
+    let inherited = match (spec.project, spec.child) {
+        (None, Some((_, plan))) => match plan.record.parent_id.as_deref() {
+            Some(id) => app.db.get_task(id)?.and_then(|parent| parent.project),
+            None => None,
+        },
+        _ => None,
+    };
+    let project = match spec.project.or(inherited.as_deref()) {
         Some(name) => Some(projects::load(app, name)?),
         None => None,
     };
@@ -660,8 +670,9 @@ fn record_child_held(
 /// project files that were not copied.
 fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
     write_marker(dir, &task.id)?;
+    let is_manager = task.kind == TaskKind::Manager;
     let notes = match project {
-        Some(project) => projects::copy_files(project, dir, false)?
+        Some(project) => projects::copy_files_for(project, dir, false, is_manager)?
             .notes()
             .into_iter()
             .map(|note| format!("project {}: {note}", project.name))
@@ -672,10 +683,46 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
     match task.kind {
         TaskKind::Manager => {
             manager::ensure_files(dir, manager::Role::Manager)?;
+            if let Some(project) = project {
+                link_project_instructions(dir, &project.name)?;
+            }
         }
         TaskKind::Work | TaskKind::Review | TaskKind::Assistant => install_skill(dir)?,
     }
     Ok(notes)
+}
+
+/// Have a manager's AGENTS.md import the project's instructions
+/// ([`projects::MANAGER_INSTRUCTIONS`]), if it has them: a section at the
+/// end, so the manager's own text stands first and is kept. Done once; an
+/// AGENTS.md that already names the file is left alone.
+pub fn link_project_instructions(dir: &Path, project: &str) -> Result<()> {
+    use std::io::Write;
+    let file = projects::MANAGER_INSTRUCTIONS;
+    if !dir.join(file).is_file() {
+        return Ok(());
+    }
+    let path = dir.join(instructions::AGENTS_MD);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    if text.contains(&format!("@{file}")) {
+        return Ok(());
+    }
+    let section = format!(
+        "\n## Project: {project}\n\nYou were made from the `{project}` project. Its instructions \
+         follow; they add to the above and do not replace it. Tasks you make \
+         start from the project too.\n\n@{file}\n"
+    );
+    let mut out = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    out.write_all(section.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Mark `dir` as task `id`'s directory.

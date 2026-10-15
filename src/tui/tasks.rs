@@ -530,13 +530,13 @@ impl NewTaskForm {
         }
     }
 
-    /// The fields shown, in order: a manager has no worktrees (`manager
-    /// new` takes none).
+    /// The fields shown, in order: a manager has a project but no worktrees
+    /// (`manager new` takes none).
     pub fn fields(&self) -> &'static [Field] {
         use Field::*;
         match (&self.parent, self.kind) {
             (None, _) => &[Name, Project, Repos, Branch],
-            (Some(_), TaskKind::Manager) => &[Kind, Name, Goal, Done, Budget, Allow],
+            (Some(_), TaskKind::Manager) => &[Kind, Name, Goal, Done, Budget, Allow, Project],
             (Some(_), _) => &[
                 Kind, Name, Goal, Done, Budget, Allow, Project, Repos, Branch,
             ],
@@ -616,10 +616,11 @@ impl NewTaskForm {
             return Err("a task under a node needs its parent".into());
         };
         let task = match self.kind {
-            // A manager shows no project, repos or branch, so none can fail it.
+            // A manager shows a project but no repos or branch, so only
+            // the project can say what it takes.
             TaskKind::Manager => TaskSpec {
                 name: self.name_or_default(),
-                project: None,
+                project: self.project_name().map(str::to_string),
                 repos: Vec::new(),
                 branch: None,
             },
@@ -7998,9 +7999,9 @@ mod tests {
         );
         f.toggle_kind();
         assert_eq!(f.kind, TaskKind::Manager);
-        // `manager new` takes no worktrees.
-        assert_eq!(f.fields(), [Kind, Name, Goal, Done, Budget, Allow]);
-        f.field = Allow;
+        // `manager new` takes a project but no worktrees.
+        assert_eq!(f.fields(), [Kind, Name, Goal, Done, Budget, Allow, Project]);
+        f.field = Project;
         assert_eq!(f.step(1), Kind);
         assert_eq!(form().fields(), [Name, Project, Repos, Branch]);
     }
@@ -8020,7 +8021,8 @@ mod tests {
         type_text(&mut ui, "2h, 40turns");
         press(&mut ui, KeyCode::Tab);
         type_text(&mut ui, "task.create,task.open");
-        // A manager's fields wrap round: no project, repos or branch.
+        // A manager's fields wrap round after the project: no repos or branch.
+        press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Tab);
         match &ui.panel {
             Some(Panel::NewTask(f)) => assert_eq!(f.field, Field::Kind),
