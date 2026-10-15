@@ -1084,8 +1084,8 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     }
     let app = App::open().context("check what this caller may do")?;
     let me = identity::identify(&app)?;
-    if let Some(Commands::ReviewJob { state }) = command {
-        check_review_job(&app.home, state)?;
+    if let Some(Commands::ReviewJob { review }) = command {
+        check_review_job(&app.db, review, std::process::id())?;
         // The runner `jeet review` started, as the task it runs for.
         if me.self_job {
             return Ok(None);
@@ -1693,20 +1693,22 @@ impl Authorized {
     }
 }
 
-/// A review job runs the command its state file names, so only the ones
-/// `jeet review` wrote, under `$JEET_HOME/reviews`, are run — not one an
-/// agent wrote itself.
-pub fn check_review_job(home: &Path, state: &Path) -> Result<()> {
-    let reviews = home.join("reviews");
-    let reviews = reviews.canonicalize().unwrap_or(reviews);
-    let state = state
-        .canonicalize()
-        .with_context(|| format!("find {}", state.display()))?;
-    if !state.starts_with(&reviews) {
-        bail!(
-            "review jobs run only from jeet's reviews dir, {}",
-            reviews.display()
-        );
+/// A review job runs the command its review's row records, so only a job
+/// `jeet review` recorded runs, once, and as the runner it launched
+/// (`runner`, the pid `jeet review` recorded, or none yet): not a command an
+/// agent has named itself.
+pub fn check_review_job(db: &crate::db::Database, review_id: &str, runner: u32) -> Result<()> {
+    let Some(review) = db.get_review(review_id)? else {
+        bail!("review jobs run only for a review jeet knows; {review_id} is none");
+    };
+    let Some(job) = review.job else {
+        bail!("review {} has no job to run", review.slug);
+    };
+    if job.exit_code.is_some() {
+        bail!("review {}'s job has ended already", review.slug);
+    }
+    if job.pid.is_some_and(|pid| pid != runner) {
+        bail!("review {}'s job is another runner's", review.slug);
     }
     Ok(())
 }
@@ -3428,5 +3430,46 @@ mod tests {
             assert!(deny.contains(&pattern.to_string()), "{pattern}: {deny:?}");
         }
         assert!(deny.iter().any(|d| d == "git push * main"), "{deny:?}");
+    }
+
+    /// A review job runs only a command `jeet review` recorded on a review,
+    /// once, as the runner it launched.
+    #[test]
+    fn a_review_job_runs_only_what_jeet_recorded_for_its_runner() {
+        use crate::db::reviews::{Job, ReviewRecord};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("index.db")).unwrap();
+        let review = ReviewRecord::new("r".into(), "r".into(), "github.com/acme/api", 7, 0);
+        db.insert_review(&review).unwrap();
+        // No review, and a review with no job: nothing to run.
+        assert!(check_review_job(&db, "nobody", 10).is_err());
+        let err = check_review_job(&db, "r", 10).unwrap_err();
+        assert!(err.to_string().contains("no job"), "{err}");
+
+        let job = Job {
+            pr: 7,
+            title: String::new(),
+            head: "abc".into(),
+            worktree: "/w".into(),
+            command: "true".into(),
+            env: Vec::new(),
+            notify: false,
+            log: "/l".into(),
+            started_at: 1,
+            pid: None,
+            runner_start: None,
+            finished_at: None,
+            exit_code: None,
+            lost: false,
+        };
+        // Pending, or this runner's.
+        db.set_review_job("r", &job).unwrap();
+        check_review_job(&db, "r", 10).unwrap();
+        db.set_review_job_runner("r", 10, None).unwrap();
+        check_review_job(&db, "r", 10).unwrap();
+        // Another runner's, or one that has ended.
+        assert!(check_review_job(&db, "r", 11).is_err());
+        db.finish_review_job("r", 2, 0, None).unwrap();
+        assert!(check_review_job(&db, "r", 10).is_err());
     }
 }

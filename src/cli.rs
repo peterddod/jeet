@@ -79,9 +79,9 @@ pub enum Commands {
         command: PrCommands,
     },
 
-    /// Run a background review job (started by `jeet review`)
+    /// Run the background job recorded on a review (started by `jeet review`)
     #[command(hide = true)]
-    ReviewJob { state: std::path::PathBuf },
+    ReviewJob { review: String },
 
     /// Fetch every repository in the store, fast-forwarding clean trunks
     Sync {

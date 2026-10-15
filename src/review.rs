@@ -13,13 +13,15 @@
 //! that asked for it, if any ([`crate::permissions::Caller::Review`]).
 //!
 //! The rest is the legacy, deprecated `[review] command`: a background job.
-//! A job is a JSON state file plus a log under `$JEET_HOME/reviews`, keyed by
-//! repository and PR number. `jeet review` writes the state file and launches
-//! the hidden `jeet review-job` runner detached from the terminal; the runner
-//! runs the configured command with its output going to the log, records how
-//! it ended, and raises a desktop notification. Anything that wants to know
-//! how a review is going — the explorer, a second `jeet review` — reads the
-//! state file back.
+//! A job is the `job_*` columns of the review's row, plus a log under
+//! `$JEET_HOME/reviews`, keyed by repository and PR number. `jeet review`
+//! records the job and launches the hidden `jeet review-job <review id>`
+//! runner detached from the terminal; the runner runs the configured
+//! command with its output going to the log, records how it ended, and
+//! raises a desktop notification. Anything that wants to know how a review
+//! is going — the explorer, a second `jeet review` — reads the row back.
+//! Older jeets kept a job as a JSON file there instead; [`adopt_jobs`]
+//! makes reviews of the files they left.
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -51,36 +53,7 @@ use crate::tasks;
 use crate::tmux;
 use crate::worktrees::{self, now_secs};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    pub pr: u64,
-    pub title: String,
-    /// The PR head commit the review was started against, so a second
-    /// `jeet review` can tell a finished review from a stale one.
-    pub head: String,
-    pub worktree: PathBuf,
-    /// The command as run, placeholders already substituted.
-    pub command: String,
-    pub env: Vec<(String, String)>,
-    pub notify: bool,
-    pub log: PathBuf,
-    pub started_at: i64,
-    #[serde(default)]
-    pub pid: Option<u32>,
-    /// When the runner started, as [`identity`] reads it: with `pid`, the
-    /// one process that runs the job, which a reused pid is not.
-    #[serde(default)]
-    pub runner_start: Option<i64>,
-    #[serde(default)]
-    pub finished_at: Option<i64>,
-    #[serde(default)]
-    pub exit_code: Option<i32>,
-    /// Unfinished, and its process is gone. Worked out once when the job is
-    /// loaded — the explorer asks for the state every frame, and a process
-    /// spawned per frame to check is not a price worth paying.
-    #[serde(skip)]
-    lost: bool,
-}
+pub use crate::db::reviews::Job;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
@@ -105,6 +78,11 @@ impl Job {
         let ago = |at: i64| crate::agent::age_label(at);
         match self.state() {
             JobState::Running => format!("running (started {})", ago(self.started_at)),
+            // Adopted from a job file whose process was gone: no end was
+            // ever recorded.
+            JobState::Finished(_) if self.finished_at.is_none() => {
+                "stopped without finishing".to_string()
+            }
             JobState::Finished(0) => {
                 format!(
                     "finished {}",
@@ -136,7 +114,8 @@ pub fn process_alive(_pid: u32) -> bool {
     true
 }
 
-fn jobs_dir(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
+/// Where the logs of `repo`'s review jobs go.
+fn log_dir(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
     let id = remote::identity_from_id(&repo.id)?;
     Ok(app
         .home
@@ -146,48 +125,32 @@ fn jobs_dir(app: &App, repo: &RepoRecord) -> Result<PathBuf> {
         .join(id.repo))
 }
 
-fn state_file(app: &App, repo: &RepoRecord, pr: u64) -> Result<PathBuf> {
-    Ok(jobs_dir(app, repo)?.join(format!("{pr}.json")))
-}
-
 /// The job recorded for `pr`, if one was ever started.
 pub fn load(app: &App, repo: &RepoRecord, pr: u64) -> Option<Job> {
-    load_at(&state_file(app, repo, pr).ok()?)
+    job_of(app, &app.db.find_review(&repo.id, pr).ok()??)
 }
 
-/// The job whose state file is `path`, if there is one.
-pub fn load_at(path: &Path) -> Option<Job> {
-    let mut job = read(path).ok()?;
+/// The job recorded for `review`, as its row says now.
+pub fn job_of(app: &App, review: &ReviewRecord) -> Option<Job> {
+    let mut job = app.db.get_review(&review.id).ok()??.job?;
     job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
     Some(job)
 }
 
-/// The state file of `review`'s PR's legacy job, started or not.
-pub fn state_file_of(app: &App, review: &ReviewRecord) -> Option<PathBuf> {
-    let repo = app.db.get_repo(&review.repo_id).ok()??;
-    state_file(app, &repo, review.pr_number).ok()
-}
-
-/// The legacy job recorded for `review`'s PR.
-pub fn job_of(app: &App, review: &ReviewRecord) -> Option<Job> {
-    load_at(&state_file_of(app, review)?)
-}
-
-/// `activity`, the review's agent's, with a review job still running in
-/// `jobs` (state files) taking the place of an agent that is not: the job
-/// is headless, with no pane or hooks to say it runs.
-pub fn with_job(activity: Activity, jobs: &[PathBuf]) -> Activity {
+/// `activity`, the review's agent's, with a review job still running for
+/// review `id` taking the place of an agent that is not: the job is
+/// headless, with no pane or hooks to say it runs.
+pub fn with_job(activity: Activity, db: Option<&Database>, id: &str) -> Activity {
     if !matches!(
         activity,
         Activity::NotStarted | Activity::NotRunning | Activity::Ended
     ) {
         return activity;
     }
-    match jobs
-        .iter()
-        .filter_map(|path| load_at(path))
-        .find(|job| job.state() == JobState::Running)
-    {
+    let running = db
+        .and_then(|db| db.get_review(id).ok().flatten())
+        .and_then(|review| running_in(&review));
+    match running {
         Some(job) => Activity::Running {
             detail: Some(format!("review of #{}", job.pr)),
         },
@@ -195,9 +158,16 @@ pub fn with_job(activity: Activity, jobs: &[PathBuf]) -> Activity {
     }
 }
 
+/// `review`'s job, if it is still running.
+fn running_in(review: &ReviewRecord) -> Option<Job> {
+    let mut job = review.job.clone()?;
+    job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
+    (job.state() == JobState::Running).then_some(job)
+}
+
 /// The review job still running for `review`, if one is.
 pub fn running_job(app: &App, review: &ReviewRecord) -> Option<Job> {
-    job_of(app, review).filter(|job| job.state() == JobState::Running)
+    running_in(&app.db.get_review(&review.id).ok()??)
 }
 
 /// Why `review`'s agent is not opened while its review command runs: the
@@ -264,31 +234,21 @@ pub fn adopt_sessions(app: &App, review: &ReviewRecord) -> Vec<String> {
 
 /// The worktree of every review job ever recorded, under any repository.
 pub fn recorded_worktrees(app: &App) -> Vec<PathBuf> {
-    recorded_jobs(app).map(|job| job.worktree).collect()
-}
-
-/// Every review job ever recorded, under any repository.
-fn recorded_jobs(app: &App) -> impl Iterator<Item = Job> {
-    walkdir::WalkDir::new(app.home.join("reviews"))
-        .follow_links(false)
+    recorded_jobs(app)
         .into_iter()
-        .flatten()
-        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| read(e.path()).ok())
+        .map(|(_, job)| job.worktree)
+        .collect()
 }
 
-fn read(path: &Path) -> Result<Job> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read review state {}", path.display()))?;
-    serde_json::from_str(&text).context("parse review state")
-}
-
-fn write(path: &Path, job: &Job) -> Result<()> {
-    let text = serde_json::to_string_pretty(job)?;
-    // Through a temporary file so a reader never sees half a job.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))
+/// Every review job ever recorded, under any repository, with its
+/// review's id.
+fn recorded_jobs(app: &App) -> Vec<(String, Job)> {
+    app.db
+        .list_reviews(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|review| Some((review.id, review.job?)))
+        .collect()
 }
 
 /// Why a new job should not start, given the one already recorded — or
@@ -687,6 +647,13 @@ fn end_agent(
         + stop_jobs_in(app, &dir).context("end the review's job")?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Job)?;
+    // An adopted job, started by an older jeet, has no runner jeet knows.
+    if let Some(job) = running_job(app, review) {
+        warnings.push(format!(
+            "its review job (pid {}) keeps running; jeet did not start it, so it is not stopped",
+            job.pid.unwrap_or(0)
+        ));
+    }
     if let Err(e) = runtime::remove_settings(&app.home, &review.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
@@ -1185,10 +1152,7 @@ pub fn activity(app: &App, review: &ReviewRecord, tmux_ok: bool) -> Activity {
 /// counts as its agent running. Only for display: what routes a delivery or
 /// charges a limit asks of the agent alone.
 pub fn shown_activity(app: &App, review: &ReviewRecord, tmux_ok: bool) -> Activity {
-    with_job(
-        activity(app, review, tmux_ok),
-        &state_file_of(app, review).into_iter().collect::<Vec<_>>(),
-    )
+    with_job(activity(app, review, tmux_ok), Some(&app.db), &review.id)
 }
 
 /// When anything last happened in the review: jeet touching it, a hook
@@ -1281,7 +1245,6 @@ pub fn asked(review: &ReviewRecord) -> Option<Asked> {
 /// to tell the user.
 pub fn start_agent(
     app: &App,
-    repo: &RepoRecord,
     review: &ReviewRecord,
     pr: &PullRequest,
     worktree: &Path,
@@ -1292,7 +1255,7 @@ pub fn start_agent(
     // this holds when nothing is asked again.
     remember_requester(app, &review.id, requested_by)?;
     let review = &folded(app, review);
-    let job = load(app, repo, pr.number);
+    let job = job_of(app, review);
     if let Some(why) = reason_not_to_ask(asked(review).as_ref(), job.as_ref(), pr, rerun) {
         return Ok(why);
     }
@@ -1403,9 +1366,8 @@ pub fn start(
     as_task: Option<&str>,
     runner_for: &str,
 ) -> Result<Job> {
-    let dir = jobs_dir(app, repo)?;
+    let dir = log_dir(app, repo)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join(format!("{}.json", pr.number));
     let log = dir.join(format!("{}.log", pr.number));
 
     let mut env = job_env(pr, &log);
@@ -1428,27 +1390,27 @@ pub fn start(
         exit_code: None,
         lost: false,
     };
-    write(&path, &job)?;
+    app.db.set_review_job(runner_for, &job)?;
 
-    // Once the runner has the go-ahead it is the only writer of the state
-    // file: two writers is how a quick-failing command's exit status got
+    // Once the runner has the go-ahead it is the only writer of the job:
+    // two writers is how a quick-failing command's exit status got
     // papered over with a stale copy. So launching records only the runner,
     // before the go-ahead — and that launching failed, which would otherwise
     // leave a job that reads as running forever, refusing every later
     // `jeet review`, `--rerun` included.
-    if let Err(e) = launch(app, &path, &log, worktree, runner_for) {
+    if let Err(e) = launch(app, &log, worktree, runner_for) {
         job.finished_at = Some(now_secs());
         job.exit_code = Some(127);
-        let _ = write(&path, &job);
+        let _ = app.db.set_review_job(runner_for, &job);
         return Err(e);
     }
     Ok(job)
 }
 
-/// Launch the runner for the job in `state`, recorded as review
-/// `runner_for`'s, so what its command runs is known for the review's, and
+/// Launch the runner for review `runner_for`'s job, recorded as the
+/// review's, so what its command runs is known for the review's, and
 /// archiving or deleting the review finds it to end.
-fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str) -> Result<()> {
+fn launch(app: &App, log: &Path, worktree: &Path, runner_for: &str) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     // `nohup` so closing the terminal does not take the review with it — the
@@ -1457,7 +1419,7 @@ fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str
     let mut cmd = Command::new("nohup");
     cmd.arg(exe)
         .arg("review-job")
-        .arg(state)
+        .arg(runner_for)
         .current_dir(worktree)
         // For the go-ahead: see [`await_go`].
         .stdin(Stdio::piped())
@@ -1480,23 +1442,22 @@ fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str
             .env_remove(crate::permissions::ASSISTANT_ENV);
     }
     let mut child = cmd.spawn().context("start the review command")?;
-    hand_over(app, state, runner_for, users, &mut child)
+    hand_over(app, runner_for, users, &mut child)
 }
 
-/// Record `child`, the runner [`launch`] just started for the job in
-/// `state`, as review `runner_for`'s, name it in the job's file, then give it
-/// the go-ahead. When it cannot be recorded it is killed, unless it is the
-/// user's (`users`): the user needs no anchor to be let through, so its
-/// job runs on, with a warning that archive and delete cannot find it.
+/// Record `child`, the runner [`launch`] just started, as review
+/// `runner_for`'s, name it in the review's job, then give it the go-ahead.
+/// When it cannot be recorded it is killed, unless it is the user's
+/// (`users`): the user needs no anchor to be let through, so its job runs
+/// on, with a warning that archive and delete cannot find it.
 fn hand_over(
     app: &App,
-    state: &Path,
     runner_for: &str,
     users: bool,
     child: &mut std::process::Child,
 ) -> Result<()> {
     // `nohup` execs the runner, so this is its pid. Its pid and start go in
-    // the job's file before it has the go-ahead, so a job is matched to its
+    // the job before it has the go-ahead, so a job is matched to its
     // runner from the first: archiving the task in the moments before the
     // runner gets going ends it all the same.
     let pid = child.id();
@@ -1512,10 +1473,13 @@ fn hand_over(
         recorded => recorded,
     };
     let recorded = recorded.and_then(|()| {
-        let mut job = read(state)?;
-        job.pid = Some(pid);
-        job.runner_start = identity::start_of(pid);
-        write(state, &job)
+        match app
+            .db
+            .set_review_job_runner(runner_for, pid, identity::start_of(pid))?
+        {
+            true => Ok(()),
+            false => bail!("the review's job is gone"),
+        }
     });
     if let Err(e) = recorded {
         let _ = child.kill();
@@ -1534,12 +1498,14 @@ fn task_jobs(db: &Database, review_id: &str) -> Result<Vec<Anchor>> {
 }
 
 /// The runners of the review jobs still running in a worktree under `dir`,
-/// whoever they are recorded as: one a job file names but a review's
+/// whoever they are recorded as: one a review's job names but its own
 /// anchors do not, so [`task_jobs`] does not find it. Only the runner the
 /// job recorded as its own, by pid and start (a pid reused by another job's
 /// runner is not it), while it is still that process.
 fn jobs_in(app: &App, dir: &Path) -> Result<Vec<Anchor>> {
     let jobs: Vec<Job> = recorded_jobs(app)
+        .into_iter()
+        .map(|(_, job)| job)
         .filter(|job| job.exit_code.is_none() && job.worktree.starts_with(dir))
         .collect();
     let pids: Vec<u32> = jobs.iter().filter_map(|job| job.pid).collect();
@@ -1632,48 +1598,59 @@ pub fn await_go() -> Result<()> {
     }
 }
 
-/// The runner for the job in `state`, refused before it ran the command,
+/// The runner for review `id`'s job, refused before it ran the command,
 /// or never given the go-ahead (its `jeet review` died first): record that
 /// it ended, or the job reads as running forever, refusing
-/// every later `jeet review`. Only a state file jeet wrote, for a job not
-/// yet ended and no other runner's.
-pub fn refused(state: &Path) {
-    let Ok(app) = App::open() else {
-        return;
-    };
-    if crate::permissions::check_review_job(&app.home, state).is_err() {
+/// every later `jeet review`. Only a job jeet recorded, not yet ended and
+/// no other runner's.
+pub fn refused(id: &str) {
+    if let Ok(app) = App::open() {
+        refuse(&app, id, std::process::id());
+    }
+}
+
+/// [`refused`] for the runner with pid `me`.
+fn refuse(app: &App, id: &str, me: u32) {
+    if crate::permissions::check_review_job(&app.db, id, me).is_err() {
         return;
     }
-    let Ok(mut job) = read(state) else {
-        return;
-    };
-    // `jeet review` names the runner in the file before the go-ahead.
-    if job.exit_code.is_some() || job.pid.is_some_and(|pid| pid != std::process::id()) {
-        return;
-    }
-    job.finished_at = Some(now_secs());
-    job.exit_code = Some(REFUSED);
-    let _ = write(state, &job);
+    let _ = app.db.finish_review_job(id, now_secs(), REFUSED, Some(me));
 }
 
 /// The status a refused runner records: its command never ran.
 const REFUSED: i32 = 126;
 
-/// `jeet review-job <state>`: run a job's command and record how it ended.
+/// The status a job lost before it was adopted is stored with, and no end
+/// time: it stopped without finishing.
+const LOST: i32 = 127;
+
+/// `jeet review-job <review id>`: run a review's job's command and record
+/// how it ended.
 ///
 /// Its stdout and stderr are already the job's log.
-pub fn run_job(path: &Path) -> Result<()> {
-    let mut job = read(path)?;
+pub fn run_job(id: &str) -> Result<()> {
+    run(&App::open()?, id, std::process::id())
+}
+
+/// [`run_job`] as the runner with pid `me`.
+fn run(app: &App, id: &str, me: u32) -> Result<()> {
+    crate::permissions::check_review_job(&app.db, id, me)?;
+    let Some(job) = app.db.get_review(id)?.and_then(|r| r.job) else {
+        bail!("review {id} has no job");
+    };
     // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
-    job.pid = Some(std::process::id());
-    job.runner_start = identity::start_of(std::process::id());
-    write(path, &job)?;
+    if !app
+        .db
+        .set_review_job_runner(id, me, identity::start_of(me))?
+    {
+        bail!("review {id}'s job is another runner's, or has ended");
+    }
     println!("$ {}", job.command);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&job.command).current_dir(&job.worktree);
     // Run as a task, the command is that task's agent, never the assistant
     // that started it: the runner itself stays the assistant's, so the
-    // check on its state file still applies.
+    // check on its job still applies.
     if job.env.iter().any(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
         cmd.env_remove(crate::permissions::ASSISTANT_ENV);
     }
@@ -1689,14 +1666,12 @@ pub fn run_job(path: &Path) -> Result<()> {
         }
     };
 
-    job.finished_at = Some(now_secs());
-    job.exit_code = Some(code);
-    write(path, &job)?;
+    app.db.finish_review_job(id, now_secs(), code, Some(me))?;
 
     // Run headless, the command gets no hooks to say it ended: as its
     // task's Node, the runner says so for it, unless it reported done.
-    if let Some((_, id)) = job.env.iter().find(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
-        if let Err(e) = App::open().and_then(|app| report_end(&app, id, code, job.started_at)) {
+    if let Some((_, task)) = job.env.iter().find(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
+        if let Err(e) = report_end(app, task, code, job.started_at) {
             eprintln!("jeet: could not report the review's end: {e:#}");
         }
     }
@@ -2142,6 +2117,344 @@ fn give_up_after_three(
     Ok(Some(note))
 }
 
+// ---------------------------------------------------------------------------
+// Adopting the job files older jeets left (schema v9)
+// ---------------------------------------------------------------------------
+
+/// The `meta` marker that [`adopt_jobs`] has been through
+/// `$JEET_HOME/reviews`: it reads the directory once.
+const JOBS_ADOPTED: &str = "legacy_jobs_adopted";
+
+/// Under `$JEET_HOME/logs`: what [`adopt_jobs`] did, one line per file.
+const ADOPT_LOG: &str = "migrate-v9.log";
+
+/// How [`adopt_file`] dealt with one job file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// A review made for it, archived: it had finished or was lost.
+    Archived,
+    /// A review made for it, active: its process still runs.
+    Running,
+    /// Its job put on the review its PR already had, which had none.
+    Folded,
+    /// Its PR's review has a job already; the file is not needed.
+    Held,
+    /// Not a job jeet can read: left alone.
+    Left,
+}
+
+/// Older jeets kept each `[review] command` job as a JSON file under
+/// `$JEET_HOME/reviews/<host>/<owner>/<repo>/<n>.json`, and the Reviews tab
+/// listed them read-only. At the first commands after the upgrade to schema
+/// v9, each file whose PR has no review becomes one: archived when the job
+/// finished or was lost (its process is gone), active while it still runs,
+/// so the sweep of done PRs archives it once its PR is merged or closed. It
+/// has a directory of its own like any review and no worktree: the job's is
+/// never touched. A PR that has a review without a job gets the file's as
+/// its job. A file that cannot be read is left. A job that is not running
+/// is stored ended, so no runner can take it up.
+///
+/// Files are never deleted or moved. Each one gone through is recorded in
+/// `review_job_files`, and one with a final outcome is never looked at
+/// again, so a review deleted since is not made anew. A file whose review
+/// could not be made is tried [`ATTEMPTS`] times, then left. [`JOBS_ADOPTED`]
+/// is set once none is pending, and stops the next command looking. Under a
+/// lock, so two commands at once do not both adopt. Each file's outcome is a
+/// line of the log, and a pass that adopted or gave up on something says so
+/// on stderr.
+pub fn adopt_jobs(app: &App) {
+    if let Err(e) = adopt(app) {
+        eprintln!("jeet: warning: could not adopt the review jobs older jeets left: {e:#}");
+    }
+}
+
+/// The start of the outcome of a job file that is to be tried again (up to
+/// [`ATTEMPTS`] times).
+const RETRY: &str = "pending: ";
+
+fn adopt(app: &App) -> Result<()> {
+    if app.db.meta(JOBS_ADOPTED)?.is_some() {
+        return Ok(());
+    }
+    let locks = app.home.join("locks");
+    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
+    let path = locks.join("adopt-jobs.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        // Another command is at it.
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+    // Done by whoever held the lock before.
+    if app.db.meta(JOBS_ADOPTED)?.is_some() {
+        return Ok(());
+    }
+    let root = app.home.join("reviews");
+    // Each file not yet through, with what was recorded of it.
+    let mut todo = Vec::new();
+    for file in job_files(&root) {
+        let prior = app.db.job_file(&file.to_string_lossy())?;
+        if prior
+            .as_ref()
+            .is_some_and(|(outcome, _)| !outcome.starts_with(RETRY))
+        {
+            continue;
+        }
+        todo.push((file, prior));
+    }
+    if todo.is_empty() {
+        return app.db.set_meta(JOBS_ADOPTED, "1");
+    }
+    let logs = app.home.join("logs");
+    std::fs::create_dir_all(&logs).with_context(|| format!("create {}", logs.display()))?;
+    let log_path = logs.join(ADOPT_LOG);
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let mut say = |line: String| {
+        let _ = writeln!(log, "{} {line}", now_secs());
+    };
+
+    let mut counts = [0usize; 5];
+    let mut gave_up = 0;
+    let mut retry = 0;
+    for (file, prior) in &todo {
+        let key = file.to_string_lossy();
+        let attempts = prior.as_ref().map_or(0, |(_, n)| *n);
+        match adopt_file(app, &root, file) {
+            Ok(done) => {
+                app.db.record_job_file(
+                    &key,
+                    &done.outcome,
+                    done.review_id.as_deref(),
+                    attempts + 1,
+                    now_secs(),
+                )?;
+                say(done.line);
+                counts[done.how as usize] += 1;
+                gave_up += usize::from(done.how == Adoption::Left);
+            }
+            Err(e) => {
+                let attempts = attempts + 1;
+                let line = format!("{}: not adopted yet: {e:#}", file.display());
+                let outcome = if attempts >= ATTEMPTS {
+                    gave_up += 1;
+                    let outcome = format!("left: could not adopt ({e:#})");
+                    say(format!("{}: {outcome}", file.display()));
+                    outcome
+                } else {
+                    retry += 1;
+                    let outcome = format!("{RETRY}{e:#}");
+                    // Only a change is news.
+                    if prior.as_ref().map(|(o, _)| o) != Some(&outcome) {
+                        say(line);
+                    }
+                    outcome
+                };
+                app.db
+                    .record_job_file(&key, &outcome, None, attempts, now_secs())?;
+            }
+        }
+    }
+    if retry == 0 {
+        app.db.set_meta(JOBS_ADOPTED, "1")?;
+    }
+    let [archived, running, folded, held, left] = counts;
+    if archived + running + folded + gave_up > 0 {
+        eprintln!(
+            "jeet: review jobs older jeets left in {} are now reviews: {} adopted ({archived} \
+             archived, {running} still running), {folded} put on a review that had none, \
+             {held} already held, {left} left unread, {gave_up} given up on, {retry} to retry; \
+             nothing was deleted; see {}",
+            root.display(),
+            archived + running,
+            log_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Every `<host>/<owner>/<repo>/<n>.json` under `root` that [`job_key`]
+/// accepts, in path order: the owner may be a group with subgroups.
+fn job_files(root: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .min_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| job_key(root, path).is_some())
+        .collect();
+    files.sort();
+    files
+}
+
+/// The repository and PR a job file at `path` under `root` is for.
+fn job_key(root: &Path, path: &Path) -> Option<(String, u64)> {
+    let number = path.file_stem()?.to_str()?.parse().ok()?;
+    let repo_id = path
+        .parent()?
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    remote::identity_from_id(&repo_id).ok()?;
+    Some((repo_id, number))
+}
+
+/// What [`adopt_file`] did with a file.
+struct Adopted {
+    how: Adoption,
+    /// For the log.
+    line: String,
+    /// For `review_job_files`.
+    outcome: String,
+    /// The review the file's job is on.
+    review_id: Option<String>,
+}
+
+/// Adopt the job file at `path`. An error is a review that could not be
+/// made now: the file is tried again.
+fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
+    let left = |why: String| {
+        let outcome = format!("left: {why}");
+        Ok(Adopted {
+            how: Adoption::Left,
+            line: format!("{}: {outcome}", path.display()),
+            outcome,
+            review_id: None,
+        })
+    };
+    let Some((repo_id, number)) = job_key(root, path) else {
+        return left("not named <repo>/<number>.json".into());
+    };
+    let label = format!("{repo_id}#{number}");
+    let mut job: Job = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(job) => job,
+            Err(e) => return left(format!("not a review job ({e})")),
+        },
+        Err(e) => return left(format!("unreadable ({e})")),
+    };
+    // The path is the key, whatever the file says.
+    job.pr = number;
+    // Recorded before any runner was: it never ran, as a refused one.
+    let mut how = String::new();
+    if job.exit_code.is_none() && job.pid.is_none() {
+        job.finished_at = Some(now_secs());
+        job.exit_code = Some(REFUSED);
+        how = "; it never launched, so recorded as ended (status 126)".to_string();
+    }
+    job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
+    let state = job.state();
+    let state_word = match state {
+        JobState::Running => format!("still running as pid {}", job.pid.unwrap_or(0)),
+        JobState::Finished(code) => format!("finished with status {code}"),
+        JobState::Lost => "lost: its process is gone".to_string(),
+    };
+    // A job not running is stored ended, whatever the file says: nothing
+    // may run it. A lost one has no end to record.
+    if state == JobState::Lost {
+        job.exit_code = Some(LOST);
+        job.lost = false;
+    }
+
+    if let Some(review) = app.db.find_review(&repo_id, number)? {
+        if review.job.is_some() {
+            let line = format!(
+                "{label}: skipped {}: review {} has a job already",
+                path.display(),
+                review.slug
+            );
+            return Ok(Adopted {
+                how: Adoption::Held,
+                line,
+                outcome: format!("held: review {} has a job already", review.slug),
+                review_id: Some(review.id),
+            });
+        }
+        app.db.set_review_job(&review.id, &job)?;
+        let line = format!(
+            "{label}: put {} ({state_word}{how}) on review {}, which had no job",
+            path.display(),
+            review.slug
+        );
+        return Ok(Adopted {
+            how: Adoption::Folded,
+            line,
+            outcome: format!("put on review {}", review.slug),
+            review_id: Some(review.id),
+        });
+    }
+
+    let repo = repo_id.rsplit('/').next().unwrap_or(&repo_id);
+    let slug = tasks::unique_slug(app, &tasks::slugify(&format!("review-{repo}-{number}")))?;
+    let mut review = ReviewRecord::new(
+        Uuid::new_v4().to_string(),
+        slug,
+        &repo_id,
+        number,
+        job.started_at,
+    );
+    review.title = job.title.clone();
+    review.last_activity = job.finished_at.unwrap_or(job.started_at);
+    review.state = match state {
+        JobState::Running => TaskState::Active,
+        JobState::Finished(_) | JobState::Lost => TaskState::Archived,
+    };
+    review.job = Some(job);
+    // The row first: a crash between the two leaves a review without its
+    // directory, not a directory that forces the next slug to `-2`.
+    app.db.insert_review(&review)?;
+    let dir = dir(app, &review);
+    let created = std::fs::create_dir_all(app.tasks_root())
+        .context("create the tasks directory")
+        .and_then(|()| {
+            std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))
+        });
+    // Only a directory made here is removed: one that was there already is
+    // someone else's.
+    let made = created.and_then(|()| {
+        tasks::write_marker(&dir, &review.id)
+            .and_then(|()| install_skill(&dir))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&dir);
+            })
+    });
+    if let Err(e) = made {
+        app.db.delete_review(&review.id)?;
+        return Err(e);
+    }
+    let (how_adopted, kind) = match review.state {
+        TaskState::Active => ("active", Adoption::Running),
+        TaskState::Archived => ("archived", Adoption::Archived),
+    };
+    let line = format!(
+        "{label}: adopted {} as review {} ({how_adopted}: {state_word}{how})",
+        path.display(),
+        review.slug
+    );
+    Ok(Adopted {
+        how: kind,
+        line,
+        outcome: format!("adopted as review {} ({how_adopted})", review.slug),
+        review_id: Some(review.id),
+    })
+}
+
 /// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
 /// (what its agent was asked) and `brought-back` — on its row, where they
 /// are not yet.
@@ -2354,60 +2667,86 @@ mod tests {
     }
 
     #[test]
-    fn a_running_job_shows_as_its_review_tasks_agent() {
+    fn a_running_job_shows_as_its_reviews_agent() {
         let dir = tempfile::tempdir().unwrap();
-        let finished = dir.path().join("1.json");
-        write(&finished, &job(Some(0), "abc")).unwrap();
-        let running = dir.path().join("7.json");
+        let db = Database::open(&dir.path().join("index.db")).unwrap();
+        let add = |id: &str, pr: u64, job: Option<Job>| {
+            let mut review = ReviewRecord::new(
+                id.into(),
+                format!("review-api-{pr}"),
+                "github.com/acme/api",
+                pr,
+                0,
+            );
+            review.job = job;
+            db.insert_review(&review).unwrap();
+        };
+        add("done", 1, Some(job(Some(0), "abc")));
         let mut j = job(None, "abc");
         j.pid = Some(std::process::id());
-        write(&running, &j).unwrap();
-        let missing = dir.path().join("9.json");
+        add("live", 7, Some(j.clone()));
+        add("none", 9, None);
+        // A runner that is gone is not running.
+        j.pid = Some(u32::MAX - 1);
+        add("gone", 10, Some(j));
 
         let reviewing = Activity::Running {
             detail: Some("review of #7".into()),
         };
         let idle = Activity::Idle { since: 5 };
         for none in [Activity::NotStarted, Activity::NotRunning, Activity::Ended] {
-            assert_eq!(
-                with_job(none.clone(), &[missing.clone(), finished.clone()]),
-                none
-            );
-            assert_eq!(
-                with_job(none, &[finished.clone(), running.clone()]),
-                reviewing
-            );
+            for quiet in ["done", "none", "gone", "missing"] {
+                assert_eq!(with_job(none.clone(), Some(&db), quiet), none, "{quiet}");
+            }
+            assert_eq!(with_job(none.clone(), Some(&db), "live"), reviewing);
+            assert_eq!(with_job(none.clone(), None, "live"), none);
         }
         // An agent of its own says what it does itself.
-        assert_eq!(with_job(idle.clone(), std::slice::from_ref(&running)), idle);
-        // A runner that is gone is not running.
-        j.pid = Some(u32::MAX - 1);
-        write(&running, &j).unwrap();
-        assert_eq!(
-            with_job(Activity::NotStarted, &[running]),
-            Activity::NotStarted
-        );
+        assert_eq!(with_job(idle.clone(), Some(&db), "live"), idle);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_runner_records_how_the_command_ended() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("7.json");
+        let home = tempfile::tempdir().unwrap();
+        let app = test_app(home.path());
         let mut j = job(None, "abc");
-        j.worktree = dir.path().to_path_buf();
+        j.worktree = home.path().to_path_buf();
         j.command = "test \"$JEET_PR\" = 7 && exit 3".into();
         j.env = vec![("JEET_PR".into(), "7".into())];
-        write(&path, &j).unwrap();
-        run_job(&path).unwrap();
-        let done = read(&path).unwrap();
+        app.db.set_review_job("t", &j).unwrap();
+        let me = std::process::id();
+        run(&app, "t", me).unwrap();
+        let done = job_of(&app, &app.db.get_review("t").unwrap().unwrap()).unwrap();
         assert_eq!(done.state(), JobState::Finished(3));
-        assert_eq!(
-            done.pid,
-            Some(std::process::id()),
-            "the runner records itself"
-        );
-        assert_eq!(done.runner_start, identity::start_of(std::process::id()));
+        assert_eq!(done.pid, Some(me), "the runner records itself");
+        assert_eq!(done.runner_start, identity::start_of(me));
         assert!(done.finished_at.is_some());
+        // Run once: the job has ended.
+        assert!(run(&app, "t", me).is_err());
+    }
+
+    /// A runner refused before it ran, or never given the go-ahead, ends
+    /// its job as refused, once, and only as the runner the job names.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_runner_ends_its_job_without_running_it() {
+        let home = tempfile::tempdir().unwrap();
+        let app = test_app(home.path());
+        let get = || app.db.get_review("t").unwrap().unwrap().job.unwrap();
+        let mut j = job(None, "abc");
+        j.pid = Some(4242);
+        app.db.set_review_job("t", &j).unwrap();
+        // Another process's job is left as it is.
+        refuse(&app, "t", 1);
+        assert_eq!(get().exit_code, None);
+        refuse(&app, "t", 4242);
+        assert_eq!(get().exit_code, Some(REFUSED));
+        // And an ended one keeps how it ended.
+        app.db.finish_review_job("t", 9, 0, None).unwrap();
+        assert_eq!(get().exit_code, Some(REFUSED));
+        // No review, no job: nothing to do.
+        refuse(&app, "nobody", 4242);
     }
 
     /// A job row whose pid is now another process's: its group is spared;
@@ -2456,7 +2795,7 @@ mod tests {
 
     /// Archiving or deleting one task's dir ends the job running there and
     /// only it: not another task's, and not a runner whose pid a stale job
-    /// file in the dir still names.
+    /// in the dir still names.
     #[cfg(unix)]
     #[test]
     fn stop_jobs_in_ends_only_the_dirs_own_runner() {
@@ -2496,27 +2835,33 @@ mod tests {
                 .spawn()
                 .unwrap()
         };
-        let reviews = home.join("reviews/widget");
-        std::fs::create_dir_all(&reviews).unwrap();
         let x = home.join("tasks/x");
         let y = home.join("tasks/y");
         // The assistant's runner for a job in `x`, and one for a job in `y`.
         let mut mine = group();
         let mut other = group();
-        let state = |name: &str, worktree: &Path, pid: u32, start: Option<i64>| {
+        let state = |n: u64, worktree: &Path, pid: u32, start: Option<i64>| {
             let mut j = job(None, "abc");
             j.worktree = worktree.join("widget");
             j.pid = Some(pid);
             j.runner_start = start;
-            write(&reviews.join(name), &j).unwrap();
+            let mut review = ReviewRecord::new(
+                format!("j{n}"),
+                format!("j{n}"),
+                "github.com/acme/widget",
+                n,
+                0,
+            );
+            review.job = Some(j);
+            app.db.insert_review(&review).unwrap();
         };
         let start = |child: &std::process::Child| identity::start_of(child.id()).unwrap();
-        state("1.json", &x, mine.id(), Some(start(&mine)));
-        state("2.json", &y, other.id(), Some(start(&other)));
+        state(1, &x, mine.id(), Some(start(&mine)));
+        state(2, &y, other.id(), Some(start(&other)));
         // A job in `x` its runner never finished, whose pid is now `other`'s,
         // and one from before runners recorded their start.
-        state("3.json", &x, other.id(), Some(start(&other) + 1));
-        state("4.json", &x, other.id(), None);
+        state(3, &x, other.id(), Some(start(&other) + 1));
+        state(4, &x, other.id(), None);
         for child in [&mine, &other] {
             identity::record(&app.db, "a", AnchorKind::Job, None, child.id()).unwrap();
         }
@@ -2663,13 +3008,11 @@ mod tests {
         app.db.delete_anchor(me.pid, me.start).unwrap();
 
         // The assistant's runner for a job in the task's worktree.
-        let reviews = home.join("reviews/widget");
-        std::fs::create_dir_all(&reviews).unwrap();
         let mut j = job(None, "abc");
         j.worktree = task_dir.join("widget");
         j.pid = Some(me.pid);
         j.runner_start = Some(me.start);
-        write(&reviews.join("1.json"), &j).unwrap();
+        app.db.set_review_job("t", &j).unwrap();
         app.db
             .insert_anchor(
                 &Anchor {
@@ -2686,7 +3029,7 @@ mod tests {
         let _ = other.wait();
     }
 
-    /// The runner is named in the job's file, and recorded, before it has
+    /// The runner is named in the review's job, and recorded, before it has
     /// the go-ahead: archiving or deleting the task in the moments before
     /// the runner writes itself ends the job all the same.
     #[cfg(unix)]
@@ -2697,20 +3040,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
         let app = test_app(&home);
-        let reviews = home.join("reviews/widget");
-        std::fs::create_dir_all(&reviews).unwrap();
-        let state = reviews.join("7.json");
         let mut j = job(None, "abc");
         j.worktree = home.join("tasks/t/widget");
-        write(&state, &j).unwrap();
-        // A runner that, given the go-ahead, copies the job's file as it
-        // then reads, and keeps running as a job would.
-        let seen = home.join("seen.json");
+        app.db.set_review_job("t", &j).unwrap();
+        // A runner that, given the go-ahead, says so, and keeps running as a
+        // job would.
+        let seen = home.join("seen");
         let mut runner = Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "head -c1 >/dev/null; cp {} {}; exec sleep 30",
-                state.display(),
+                "head -c1 >/dev/null; touch {}; exec sleep 30",
                 seen.display()
             ))
             .stdin(Stdio::piped())
@@ -2718,19 +3057,19 @@ mod tests {
             .spawn()
             .unwrap();
 
-        hand_over(&app, &state, "a", false, &mut runner).unwrap();
+        hand_over(&app, "t", false, &mut runner).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !seen.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let at_go = read(&seen).unwrap();
-        assert_eq!(at_go.pid, Some(runner.id()));
-        assert!(at_go.runner_start.is_some());
-        assert_eq!(at_go.runner_start, identity::start_of(runner.id()));
+        let named = app.db.get_review("t").unwrap().unwrap().job.unwrap();
+        assert_eq!(named.pid, Some(runner.id()));
+        assert!(named.runner_start.is_some());
+        assert_eq!(named.runner_start, identity::start_of(runner.id()));
         let found = jobs_in(&app, &home.join("tasks/t")).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].pid, runner.id());
-        assert_eq!(found[0].task_id, "a");
+        assert_eq!(found[0].task_id, "t");
 
         stop_jobs_in(&app, &home.join("tasks/t")).unwrap();
         assert!(!runner.wait().unwrap().success());
@@ -2745,7 +3084,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
         let app = test_app(&home);
-        let state = home.join("7.json");
         // A runner gone before it is recorded: its process cannot be read.
         let gone = || {
             let mut runner = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
@@ -2754,21 +3092,312 @@ mod tests {
             runner
         };
 
-        write(&state, &job(None, "abc")).unwrap();
+        let pid = || app.db.get_review("t").unwrap().unwrap().job.unwrap().pid;
+        app.db.set_review_job("t", &job(None, "abc")).unwrap();
         let mut runner = gone();
-        let err = hand_over(&app, &state, "a", false, &mut runner).unwrap_err();
+        let err = hand_over(&app, "t", false, &mut runner).unwrap_err();
         assert!(format!("{err:#}").contains("cannot be read"), "{err:#}");
-        assert_eq!(read(&state).unwrap().pid, None);
+        assert_eq!(pid(), None);
 
         let mut runner = gone();
-        hand_over(&app, &state, "t", true, &mut runner).unwrap();
-        assert_eq!(read(&state).unwrap().pid, Some(runner.id()));
+        hand_over(&app, "t", true, &mut runner).unwrap();
+        assert_eq!(pid(), Some(runner.id()));
         assert!(app
             .db
             .task_anchors("t", AnchorKind::Job)
             .unwrap()
             .is_empty());
     }
+    /// The job files older jeets left become reviews, once, and nothing is
+    /// deleted: archived when finished or lost, active while running; a PR
+    /// that has a review gets no second.
+    #[cfg(unix)]
+    #[test]
+    fn job_files_older_jeets_left_become_reviews_once() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        app.db
+            .upsert_repo(&RepoRecord {
+                id: "github.com/acme/api".into(),
+                trunk_path: "/nowhere/api".into(),
+                remote_url: "https://github.com/acme/api.git".into(),
+                default_branch: "main".into(),
+            })
+            .unwrap();
+        // PR 8 has a review that has a job already; PR 7's, `t`, has none.
+        let mut held = ReviewRecord::new("h".into(), "h".into(), "github.com/acme/api", 8, 0);
+        held.job = Some(job(Some(0), "kept"));
+        app.db.insert_review(&held).unwrap();
+
+        // The worktree a job ran in is never touched.
+        let worktree = home.join("jobs-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("work.txt"), "mine").unwrap();
+        let put = |repo: &str, n: &str, job: Option<Job>, raw: &str| {
+            let dir = home.join("reviews").join(repo);
+            std::fs::create_dir_all(&dir).unwrap();
+            let text = match job {
+                Some(job) => serde_json::to_string_pretty(&job).unwrap(),
+                None => raw.to_string(),
+            };
+            std::fs::write(dir.join(format!("{n}.json")), text).unwrap();
+        };
+        let mk = |pr: u64, title: &str, pid: Option<u32>, exit: Option<i32>| {
+            let mut j = job(exit, "abc");
+            j.pr = pr;
+            j.title = title.into();
+            j.worktree = worktree.clone();
+            j.started_at = 100;
+            j.finished_at = exit.map(|_| 110);
+            j.pid = pid;
+            j
+        };
+        let api = "github.com/acme/api";
+        put(api, "1", Some(mk(1, "finished", Some(5), Some(0))), "");
+        put(api, "2", Some(mk(2, "failed", Some(5), Some(1))), "");
+        put(api, "3", Some(mk(3, "lost", Some(u32::MAX - 1), None)), "");
+        put(
+            api,
+            "4",
+            Some(mk(4, "running", Some(std::process::id()), None)),
+            "",
+        );
+        put(
+            api,
+            "7",
+            Some(mk(7, "for the review t", Some(5), Some(0))),
+            "",
+        );
+        put(
+            api,
+            "8",
+            Some(mk(8, "for the held review", Some(5), Some(0))),
+            "",
+        );
+        put(api, "9", Some(mk(9, "never launched", None, None)), "");
+        put(api, "6", None, "{not json");
+        put(
+            "github.com/gone/old",
+            "5",
+            Some(mk(5, "unindexed", Some(5), Some(0))),
+            "",
+        );
+        std::fs::write(home.join("reviews").join(api).join("1.log"), "output").unwrap();
+        let files = || -> Vec<(PathBuf, String)> {
+            let mut all: Vec<_> = walkdir::WalkDir::new(home.join("reviews"))
+                .into_iter()
+                .flatten()
+                .filter(|e| e.file_type().is_file())
+                .map(|e| {
+                    let text = std::fs::read_to_string(e.path()).unwrap();
+                    (e.into_path(), text)
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        let before = files();
+        assert_eq!(before.len(), 10);
+
+        adopt(&app).unwrap();
+
+        let get = |repo: &str, n: u64| app.db.find_review(repo, n).unwrap();
+        let gone = "github.com/gone/old";
+        for (repo, n, title, state) in [
+            (api, 1, "finished", TaskState::Archived),
+            (api, 2, "failed", TaskState::Archived),
+            (api, 3, "lost", TaskState::Archived),
+            (api, 4, "running", TaskState::Active),
+            (gone, 5, "unindexed", TaskState::Archived),
+            (api, 9, "never launched", TaskState::Archived),
+        ] {
+            let r = get(repo, n).unwrap_or_else(|| panic!("{repo}#{n} was not adopted"));
+            assert_eq!((r.title.as_str(), r.state), (title, state), "{repo}#{n}");
+            let repo_name = repo.rsplit('/').next().unwrap();
+            assert_eq!(r.slug, format!("review-{repo_name}-{n}"));
+            assert_eq!(r.dir_name, None, "no worktree");
+            // From when the job started, to when it finished if it did.
+            assert_eq!(r.created_at, 100);
+            match n {
+                1 | 2 | 5 => assert_eq!(r.last_activity, 110),
+                3 | 4 => assert_eq!(r.last_activity, 100),
+                _ => assert!(r.last_activity > 110),
+            }
+            assert!(dir(&app, &r).join(tasks::MARKER_DIR).is_dir());
+            assert_eq!(r.job.as_ref().unwrap().worktree, worktree);
+        }
+        let state = |n: u64| job_of(&app, &get(api, n).unwrap()).unwrap().state();
+        assert_eq!(state(1), JobState::Finished(0));
+        assert_eq!(state(2), JobState::Finished(1));
+        // Lost is stored ended, with no end time, so no runner takes it up.
+        assert_eq!(state(3), JobState::Finished(LOST));
+        let lost = job_of(&app, &get(api, 3).unwrap()).unwrap();
+        assert_eq!(lost.finished_at, None);
+        assert_eq!(lost.describe(), "stopped without finishing");
+        for n in [1, 2, 3, 9] {
+            let id = get(api, n).unwrap().id;
+            assert!(crate::permissions::check_review_job(&app.db, &id, 5).is_err());
+            assert!(!app.db.set_review_job_runner(&id, 5, None).unwrap());
+        }
+        assert_eq!(state(4), JobState::Running);
+        // Never launched is recorded as a refused runner is.
+        assert_eq!(state(9), JobState::Finished(REFUSED));
+        // Unreadable, and no second review for a PR that has one.
+        assert!(get(api, 6).is_none());
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 2 + 6);
+        let t = app.db.get_review("t").unwrap().unwrap();
+        let folded = t.job.unwrap();
+        assert_eq!((folded.started_at, folded.exit_code), (100, Some(0)));
+        assert_eq!(
+            app.db.get_review("h").unwrap().unwrap().job.unwrap().head,
+            "kept"
+        );
+
+        // Nothing was deleted, moved or changed, the job's worktree included.
+        assert_eq!(files(), before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
+            "mine"
+        );
+
+        // One line per file.
+        let log = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(log.lines().count(), 9, "{log}");
+        for (n, what) in [
+            ("1.json", "adopted"),
+            ("3.json", "lost"),
+            ("4.json", "still running"),
+            ("5.json", "adopted"),
+            ("6.json", "left"),
+            ("7.json", "which had no job"),
+            ("8.json", "has a job already"),
+            ("9.json", "never launched"),
+        ] {
+            let line = log.lines().find(|l| l.contains(&format!("/{n}"))).unwrap();
+            assert!(line.contains(what), "{n}: {line}");
+        }
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+
+        // Each file is recorded; a review deleted since is not made anew.
+        let recorded = app
+            .db
+            .job_file(
+                &home
+                    .join("reviews")
+                    .join(api)
+                    .join("1.json")
+                    .to_string_lossy(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(recorded.0.starts_with("adopted"), "{recorded:?}");
+        let one = get(api, 1).unwrap();
+        app.db.delete_review(&one.id).unwrap();
+        app.db.delete_meta(JOBS_ADOPTED).unwrap();
+        adopt(&app).unwrap();
+        assert!(get(api, 1).is_none());
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(again, log);
+
+        // Looked through once: a file that turns up later is not adopted,
+        // and nothing is logged twice.
+        put(api, "10", Some(mk(10, "later", Some(5), Some(0))), "");
+        adopt(&app).unwrap();
+        assert!(get(api, 10).is_none());
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 7);
+        let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(again, log);
+    }
+
+    /// A file whose review cannot be made is tried three times, logged when
+    /// its outcome changes, then left; the marker is set once none is pending.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_file_that_cannot_be_adopted_is_tried_three_times() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let dir = home.join("reviews/github.com/acme/api");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = job(Some(0), "abc");
+        j.pr = 3;
+        let file = dir.join("3.json");
+        std::fs::write(&file, serde_json::to_string(&j).unwrap()).unwrap();
+        // A file where the tasks directory goes: no review directory can be made.
+        let _ = std::fs::remove_dir_all(app.tasks_root());
+        std::fs::write(app.tasks_root(), "in the way").unwrap();
+        let log = || std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap_or_default();
+
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
+        assert_eq!(log().lines().count(), 1);
+        adopt(&app).unwrap();
+        // The same failure is not logged again.
+        assert_eq!(log().lines().count(), 1);
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        let log = log();
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(log.contains("left: could not adopt"), "{log}");
+        let (outcome, attempts) = app.db.job_file(&file.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(attempts, ATTEMPTS);
+        assert!(outcome.starts_with("left: could not adopt"), "{outcome}");
+        // No row was left behind by the failures, and the file is kept.
+        assert!(app
+            .db
+            .find_review("github.com/acme/api", 3)
+            .unwrap()
+            .is_none());
+        assert!(file.is_file());
+    }
+
+    /// An owner may be a group with subgroups, so a job file lies deeper.
+    #[test]
+    fn job_files_include_nested_owners_only_when_named_for_a_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for rel in [
+            "gitlab.com/group/sub/repo/5.json",
+            "github.com/acme/api/1.json",
+            "github.com/acme/api/1.log",
+            "github.com/acme/api/x.json",
+            "github.com/acme/2.json",
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        let found: Vec<_> = job_files(root)
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "github.com/acme/api/1.json",
+                "gitlab.com/group/sub/repo/5.json"
+            ]
+        );
+        assert_eq!(
+            job_key(root, &root.join("gitlab.com/group/sub/repo/5.json")),
+            Some(("gitlab.com/group/sub/repo".to_string(), 5))
+        );
+    }
+
+    /// No job files, nothing to log: the marker is set all the same.
+    #[cfg(unix)]
+    #[test]
+    fn no_job_files_leave_no_log_and_are_looked_for_once() {
+        let home = tempfile::tempdir().unwrap();
+        let app = test_app(home.path());
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        assert!(!home.path().join("logs").join(ADOPT_LOG).exists());
+    }
+
     // -----------------------------------------------------------------------
     // The review's life, against real git
     // -----------------------------------------------------------------------

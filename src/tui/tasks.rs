@@ -65,7 +65,7 @@ use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
 use super::projects_tab::{Groups, ProjectGroup};
-use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, ReviewRow, Source};
+use super::reviews::{self, PrKey, PrReview, ReviewLine, ReviewRow};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
@@ -141,9 +141,6 @@ const ONE_WORKTREE: &str =
 /// Said when a key of the reviews view has no review under the cursor.
 const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
 
-/// Said for opening the session of a review job no review holds.
-const NO_SESSION: &str = "this job has no review, so no session — jeet review <pr> makes one";
-
 /// The review menu's lines, in order: what each opens.
 pub const REVIEW_MENU: &[(&str, &str)] = &[
     ("v", "view the diff: the PR in the review viewer"),
@@ -154,11 +151,6 @@ pub const REVIEW_MENU: &[(&str, &str)] = &[
 ];
 const REVIEW_DIFF: usize = 0;
 const REVIEW_SESSION: usize = 1;
-
-/// `review jeet#55`, for a review job with no review to name it.
-pub fn review_name(pr: &PrKey) -> String {
-    format!("review {}", pr.label())
-}
 
 /// Said for ⏎ on an empty answer.
 const TYPE_AN_ANSWER: &str = "type an answer";
@@ -219,8 +211,8 @@ pub enum View {
     Active,
     /// The tree under the assistant (design §6).
     Agents,
-    /// The active reviews and review jobs with no review, or, toggled with
-    /// `A`, the archived reviews: reviews are shown here alone.
+    /// The active reviews, or, toggled with `A`, the archived reviews:
+    /// reviews are shown here alone.
     Reviews,
     /// The active tasks and managers by the project they were
     /// started from, or, toggled with `A`, the projects with no active work.
@@ -847,8 +839,7 @@ pub enum Panel {
     },
     /// ⏎ in the reviews view: what to open of a review.
     ReviewMenu {
-        /// None for a review job with no review.
-        task_id: Option<String>,
+        task_id: String,
         pr: PrKey,
         /// `review jeet#55`.
         label: String,
@@ -925,7 +916,7 @@ pub enum Action {
     /// `v` in the reviews view, or its menu: the review's PR in the review
     /// viewer, from the task's checkout when it has one.
     ReviewDiff {
-        task_id: Option<String>,
+        task_id: String,
         pr: PrKey,
     },
     /// `v` in the PRs panel: that PR in the review viewer.
@@ -1115,9 +1106,6 @@ pub struct TasksUi {
     pub user: bool,
     /// The reviews, newest activity first: not tasks, so not in `rows`.
     pub review_rows: Vec<ReviewRow>,
-    /// Review jobs on disk, as last read; the view lists those no review
-    /// holds.
-    pub legacy: Vec<Legacy>,
     /// The reviews view's lines, in display order.
     pub reviews: Vec<ReviewLine>,
     /// `A` in the reviews view: it lists the archived reviews instead.
@@ -1177,7 +1165,6 @@ impl TasksUi {
             shown: HashMap::new(),
             user: false,
             review_rows: Vec::new(),
-            legacy: Vec::new(),
             reviews: Vec::new(),
             archived_reviews: false,
             archived_tasks: false,
@@ -1298,31 +1285,18 @@ impl TasksUi {
     fn refresh_visible(&mut self, keep: Option<&str>) {
         if self.view == View::Reviews {
             self.visible.clear();
-            // A job no review holds is kept under the cursor by its PR.
-            let was = self
-                .reviews
-                .get(self.selected)
-                .filter(|line| matches!(line.source, Source::Legacy(_)))
-                .map(|line| line.pr.clone());
             let reviewed = &self.reviewed;
             self.reviews = reviews::lines(
                 &self.review_rows,
-                &self.legacy,
                 self.archived_reviews,
                 &self.filter,
                 |pr| reviewed.get(pr)?.as_ref().ok().map(|r| r.title.clone()),
             );
             self.selected = keep
                 .and_then(|id| {
-                    self.reviews.iter().position(
-                        |line| matches!(line.source, Source::Review(i) if self.review_rows[i].id() == id),
-                    )
-                })
-                .or_else(|| {
-                    let was = was?;
-                    self.reviews.iter().position(|line| {
-                        matches!(line.source, Source::Legacy(_)) && line.pr == was
-                    })
+                    self.reviews
+                        .iter()
+                        .position(|line| self.review_rows[line.row].id() == id)
                 })
                 .unwrap_or_else(|| self.selected.min(self.reviews.len().saturating_sub(1)));
             return;
@@ -1492,12 +1466,9 @@ impl TasksUi {
         }
     }
 
-    /// The review under the cursor, in the reviews view; not a legacy job.
+    /// The review under the cursor, in the reviews view.
     pub fn selected_review_row(&self) -> Option<&ReviewRow> {
-        match self.selected_review()?.source {
-            Source::Review(i) => self.review_rows.get(i),
-            Source::Legacy(_) => None,
-        }
+        self.review_rows.get(self.selected_review()?.row)
     }
 
     /// The active review of `pr`, when its agent is idle as last polled:
@@ -1510,21 +1481,11 @@ impl TasksUi {
         })
     }
 
-    /// Replace the review jobs on disk with a fresh read.
-    pub fn set_legacy(&mut self, legacy: Vec<Legacy>) {
-        if legacy != self.legacy {
-            self.legacy = legacy;
-            let keep = self.selected_id().map(str::to_string);
-            self.refresh_visible(keep.as_deref());
-        }
-    }
-
     /// Every PR the reviews view lists, active or archived, filter or not:
     /// what GitHub is asked.
     pub fn reviewed_prs(&self) -> Vec<PrKey> {
         let mut seen = HashSet::new();
-        let lines =
-            |archived| reviews::lines(&self.review_rows, &self.legacy, archived, "", |_| None);
+        let lines = |archived| reviews::lines(&self.review_rows, archived, "", |_| None);
         lines(false)
             .into_iter()
             .chain(lines(true))
@@ -1796,7 +1757,7 @@ impl TasksUi {
     /// How many lines the reviews view has, unfiltered: active, or
     /// `archived`.
     pub fn review_count(&self, archived: bool) -> usize {
-        reviews::lines(&self.review_rows, &self.legacy, archived, "", |_| None).len()
+        reviews::lines(&self.review_rows, archived, "", |_| None).len()
     }
 
     /// Take in what a background thread found out.
@@ -2303,20 +2264,11 @@ impl TasksUi {
             self.set_status(NO_REVIEW);
             return;
         };
-        let (task_id, label) = match line.source {
-            Source::Review(i) => {
-                let review = &self.review_rows[i].review;
-                (
-                    Some(review.id.clone()),
-                    format!("review {}", review.label()),
-                )
-            }
-            Source::Legacy(_) => (None, review_name(&line.pr)),
-        };
+        let review = &self.review_rows[line.row].review;
         self.panel = Some(Panel::ReviewMenu {
-            task_id,
+            task_id: review.id.clone(),
+            label: format!("review {}", review.label()),
             pr: line.pr,
-            label,
             selected: 0,
         });
     }
@@ -2327,12 +2279,8 @@ impl TasksUi {
             self.set_status(NO_REVIEW);
             return None;
         };
-        let task_id = match line.source {
-            Source::Review(i) => Some(self.review_rows[i].id().to_string()),
-            Source::Legacy(_) => None,
-        };
         Some(Action::ReviewDiff {
-            task_id,
+            task_id: self.review_rows[line.row].id().to_string(),
             pr: line.pr,
         })
     }
@@ -2625,16 +2573,12 @@ impl TasksUi {
                     });
                     return None;
                 };
-                match (choice, task_id) {
-                    (REVIEW_DIFF, task_id) => Some(Action::ReviewDiff { task_id, pr }),
-                    (REVIEW_SESSION, Some(task_id)) => Some(Action::Open {
+                match choice {
+                    REVIEW_DIFF => Some(Action::ReviewDiff { task_id, pr }),
+                    REVIEW_SESSION => Some(Action::Open {
                         task_id,
                         session: None,
                     }),
-                    (REVIEW_SESSION, None) => {
-                        self.set_status(NO_SESSION);
-                        None
-                    }
                     _ => None,
                 }
             }
@@ -3383,7 +3327,8 @@ pub struct Probe {
     pub session: String,
     pub touched: i64,
     pub active: bool,
-    pub review_jobs: Vec<PathBuf>,
+    /// A review's: a job of its own may stand in for its agent.
+    pub review: bool,
 }
 
 /// The background threads: their inboxes, and the one channel they all
@@ -3536,7 +3481,7 @@ impl Background {
             session: runtime::session_name(&row.task),
             touched: row.task.last_activity,
             active: row.task.state == TaskState::Active,
-            review_jobs: Vec::new(),
+            review: false,
         });
         let reviews = reviews.iter().map(|row| Probe {
             id: row.id().to_string(),
@@ -3544,7 +3489,7 @@ impl Background {
             session: crate::review::session_name(&row.review),
             touched: row.review.last_activity,
             active: !row.archived(),
-            review_jobs: row.jobs.clone(),
+            review: true,
         });
         let _ = self.probes.send(tasks.chain(reviews).collect());
     }
@@ -3592,10 +3537,11 @@ pub fn probe_status(probe: &Probe, tmux_ok: bool, db: Option<&Database>) -> Upda
     Update::Status {
         id: probe.id.clone(),
         activity: probe.active.then(|| {
-            crate::review::with_job(
-                runtime::activity_at(&probe.dir, &probe.session, tmux_ok),
-                &probe.review_jobs,
-            )
+            let activity = runtime::activity_at(&probe.dir, &probe.session, tmux_ok);
+            match probe.review {
+                true => crate::review::with_job(activity, db, &probe.id),
+                false => activity,
+            }
         }),
         last_activity: runtime::last_activity_at(&probe.dir, probe.touched),
         unanchored: probe.active
@@ -4069,7 +4015,6 @@ impl Screen<'_> {
         };
         match loaded {
             Ok((loaded, warning)) => {
-                self.ui.set_legacy(reviews::legacy_jobs(&app.home));
                 self.read_projects(false);
                 let changed = self.set_rows(loaded);
                 // Sizes are walked again only when there are new tasks to
@@ -4111,10 +4056,6 @@ impl Screen<'_> {
     /// Read the tasks again, quietly: the background threads hear of it
     /// only when tasks came, went or changed state.
     fn reread(&mut self) -> Result<()> {
-        // A walk of the review jobs on disk, only while they are shown.
-        if self.ui.view == View::Reviews {
-            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
-        }
         self.read_projects(false);
         if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows, &self.ui.review_rows);
@@ -4176,7 +4117,6 @@ impl Screen<'_> {
         // GitHub is asked by the loop, when what it said is stale or a
         // review came along meanwhile that it has not been asked about.
         if was != View::Reviews && self.ui.view == View::Reviews {
-            self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
             let unknown = self
                 .ui
                 .reviewed_prs()
@@ -4545,16 +4485,7 @@ impl Screen<'_> {
                 repo_id,
                 number,
             } => self.view_pr(&task_id, &repo_id, number)?,
-            Action::ReviewDiff {
-                task_id: Some(task_id),
-                pr,
-            } => self.view_pr(&task_id, &pr.repo_id, pr.number)?,
-            Action::ReviewDiff { task_id: None, pr } => match app.db.get_repo(&pr.repo_id)? {
-                Some(repo) => self.view_pr_at(Path::new(&repo.trunk_path), pr.number)?,
-                None => self
-                    .ui
-                    .set_status(format!("{} is no longer in the store", pr.repo_id)),
-            },
+            Action::ReviewDiff { task_id, pr } => self.view_pr(&task_id, &pr.repo_id, pr.number)?,
             Action::NewTaskForm { project } => {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
@@ -5837,10 +5768,7 @@ fn load_rows(app: &App) -> Result<Loaded> {
         .into_iter()
         .map(|review| {
             let dir = crate::review::dir(app, &review);
-            let jobs = crate::review::state_file_of(app, &review)
-                .into_iter()
-                .collect();
-            ReviewRow::new(review, dir, jobs)
+            ReviewRow::new(review, dir)
         })
         .collect();
     let root = app
@@ -6985,7 +6913,7 @@ mod tests {
         );
         review.state = state;
         review.dir_name = Some("api".into());
-        ReviewRow::new(review, PathBuf::from("/nowhere").join(id), Vec::new())
+        ReviewRow::new(review, PathBuf::from("/nowhere").join(id))
     }
 
     fn reviews_sample() -> TasksUi {
@@ -6995,42 +6923,27 @@ mod tests {
             review_row("r1", TaskState::Active, 10, 1),
             review_row("r2", TaskState::Active, 20, 2),
         ]);
-        let legacy = |number, title: &str| Legacy {
-            pr: pr_key(number),
-            title: title.into(),
-            running: false,
-            started_at: 0,
-        };
-        // #2 has a review; #7 is an older jeet's job alone.
-        ui.set_legacy(vec![legacy(2, "held"), legacy(7, "headless job")]);
         ui
     }
 
     fn reviews_shown(ui: &TasksUi) -> Vec<String> {
         ui.reviews
             .iter()
-            .map(|line| match line.source {
-                Source::Review(i) => ui.review_rows[i].id().to_string(),
-                Source::Legacy(i) => format!("job {}", ui.legacy[i].pr.number),
-            })
+            .map(|line| ui.review_rows[line.row].id().to_string())
             .collect()
     }
 
     #[test]
-    fn the_reviews_view_lists_every_review_and_jobs_no_review_holds() {
+    fn the_reviews_view_lists_every_review() {
         let mut ui = reviews_sample();
-        assert_eq!(ui.count(View::Reviews), 3);
+        assert_eq!(ui.count(View::Reviews), 2);
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Reviews);
-        // Active newest first, then the lone job; the archived one is not
-        // among them.
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        // Active newest first; the archived one is not among them.
+        assert_eq!(reviews_shown(&ui), ["r2", "r1"]);
         // GitHub is asked about the archived ones too.
-        assert_eq!(
-            ui.reviewed_prs(),
-            [pr_key(2), pr_key(1), pr_key(7), pr_key(4)]
-        );
+        assert_eq!(ui.reviewed_prs(), [pr_key(2), pr_key(1), pr_key(4)]);
         // The filter also matches the title GitHub gave.
         ui.apply(Update::Review {
             pr: pr_key(1),
@@ -7045,7 +6958,7 @@ mod tests {
         type_text(&mut ui, "login");
         assert_eq!(reviews_shown(&ui), ["r1"]);
         press(&mut ui, KeyCode::Esc);
-        assert_eq!(reviews_shown(&ui).len(), 3);
+        assert_eq!(reviews_shown(&ui).len(), 2);
     }
 
     #[test]
@@ -7058,7 +6971,7 @@ mod tests {
         assert_eq!(reviews_shown(&ui), ["old"]);
         assert_eq!(ui.review_count(true), 1);
         // The tab still counts the active ones.
-        assert_eq!(ui.count(View::Reviews), 3);
+        assert_eq!(ui.count(View::Reviews), 2);
         assert_eq!(
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Unarchive {
@@ -7067,7 +6980,7 @@ mod tests {
         );
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_reviews);
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1"]);
         // Selecting a review goes to the reviews view's list that has it.
         ui.view = View::Active;
         ui.select("old");
@@ -7105,7 +7018,7 @@ mod tests {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1"]);
         ui.apply(Update::Status {
             id: "r1".into(),
             activity: Some(Activity::Running { detail: None }),
@@ -7117,7 +7030,7 @@ mod tests {
             bytes: 42,
         });
         // Newer activity moves it up, and the cursor goes with its review.
-        assert_eq!(reviews_shown(&ui), ["r1", "r2", "job 7"]);
+        assert_eq!(reviews_shown(&ui), ["r1", "r2"]);
         assert_eq!(ui.selected_id(), Some("r2"));
         ui.set_reviews(vec![
             review_row("r1", TaskState::Active, 10, 1),
@@ -7168,13 +7081,6 @@ mod tests {
                 task_id: "old".into()
             })
         );
-        // A job with no review has nothing to act on.
-        press(&mut ui, KeyCode::Char('A'));
-        press(&mut ui, KeyCode::End);
-        for key in ['a', 'D'] {
-            assert_eq!(press(&mut ui, KeyCode::Char(key)), None);
-            assert_eq!(ui.status_line, NO_TASK);
-        }
     }
 
     #[test]
@@ -7205,27 +7111,8 @@ mod tests {
         assert!(ui.idle_review_of(&pr_key(1)).is_none(), "asking");
         ui.apply(status(Activity::Idle { since: 0 }));
         assert_eq!(ui.idle_review_of(&pr_key(1)).unwrap().id(), "r1");
-        // An archived review, or a job no review holds, is never archived.
+        // An archived review is never archived again.
         assert!(ui.idle_review_of(&pr_key(4)).is_none());
-        assert!(ui.idle_review_of(&pr_key(7)).is_none());
-    }
-
-    #[test]
-    fn the_cursor_stays_on_a_job_no_review_holds_as_lines_come_above_it() {
-        let mut ui = reviews_sample();
-        ui.view = View::Reviews;
-        ui.set_rows(ui.rows.clone());
-        press(&mut ui, KeyCode::End);
-        assert_eq!(ui.selected_review().map(|l| l.pr.clone()), Some(pr_key(7)));
-        let job = |number| Legacy {
-            pr: pr_key(number),
-            title: String::new(),
-            running: false,
-            started_at: 0,
-        };
-        ui.set_legacy(vec![job(8), job(2), job(7)]);
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 8", "job 7"]);
-        assert_eq!(ui.selected_review().map(|l| l.pr.clone()), Some(pr_key(7)));
     }
 
     #[test]
@@ -7261,7 +7148,7 @@ mod tests {
         assert_eq!(
             press(&mut ui, KeyCode::Char('v')),
             Some(Action::ReviewDiff {
-                task_id: Some("r2".into()),
+                task_id: "r2".into(),
                 pr: pr_key(2),
             })
         );
@@ -7271,7 +7158,7 @@ mod tests {
         assert_eq!(
             press(&mut ui, KeyCode::Enter),
             Some(Action::ReviewDiff {
-                task_id: Some("r2".into()),
+                task_id: "r2".into(),
                 pr: pr_key(2),
             })
         );
@@ -7300,21 +7187,6 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive { task_id, .. }) if task_id == "r2"
         ));
-        // A job no review holds: its diff, but no session to open.
-        press(&mut ui, KeyCode::Down);
-        press(&mut ui, KeyCode::Down);
-        assert_eq!(
-            press(&mut ui, KeyCode::Char('v')),
-            Some(Action::ReviewDiff {
-                task_id: None,
-                pr: pr_key(7),
-            })
-        );
-        press(&mut ui, KeyCode::Enter);
-        assert_eq!(press(&mut ui, KeyCode::Char('s')), None);
-        assert_eq!(ui.status_line, NO_SESSION);
-        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
-        assert_eq!(ui.status_line, NO_TASK);
     }
 
     #[test]
@@ -7937,7 +7809,7 @@ mod tests {
             session: "jeet-x".into(),
             touched: 77,
             active: false,
-            review_jobs: Vec::new(),
+            review: false,
         };
         assert_eq!(
             probe_status(&probe, false, None),

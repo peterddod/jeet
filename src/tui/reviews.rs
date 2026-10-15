@@ -1,15 +1,13 @@
 //! The reviews view of the tasks list: every review jeet knows of — each
-//! active review, and any review job an older `jeet review` recorded with
-//! no review to hold it, or, toggled, the archived reviews — with where its
-//! PR and its review stand on GitHub. Reviews are rows of their own
+//! active review, or, toggled, the archived reviews — with where its PR and
+//! its review stand on GitHub. Reviews are rows of their own
 //! ([`ReviewRow`]), never among the tasks.
 //!
 //! What GitHub says is asked on a thread of its own ([`look`]) and kept by
 //! the list until asked again, so no draw waits on `gh`. PR titles are
 //! whoever opened the PR's: they are shown made printable, never run.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -18,7 +16,6 @@ use super::tasks::{self, Outbox, Update};
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::TaskState;
 use crate::github::{self, LatestReview, ReviewedPr};
-use crate::review::{self, JobState};
 use crate::status::{first_line, Activity};
 
 /// How often GitHub is asked again while the view is shown.
@@ -58,13 +55,10 @@ pub struct ReviewRow {
     /// Its agent runs without jeet knowing its process, as the last poll
     /// found.
     pub unanchored: bool,
-    /// Its legacy job's state file: a job still running is shown as its
-    /// agent running.
-    pub jobs: Vec<PathBuf>,
 }
 
 impl ReviewRow {
-    pub fn new(review: ReviewRecord, dir: PathBuf, jobs: Vec<PathBuf>) -> Self {
+    pub fn new(review: ReviewRecord, dir: PathBuf) -> Self {
         ReviewRow {
             last_activity: review.last_activity,
             review,
@@ -72,7 +66,6 @@ impl ReviewRow {
             activity: None,
             size: None,
             unanchored: false,
-            jobs,
         }
     }
 
@@ -108,116 +101,36 @@ pub fn sort_rows(rows: &mut [ReviewRow]) {
     });
 }
 
-/// A review job with no review: one an older `jeet review` ran headless.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Legacy {
-    pub pr: PrKey,
-    /// The PR's title when the job started; untrusted.
-    pub title: String,
-    pub running: bool,
-    pub started_at: i64,
-}
-
-/// Every review job recorded under `home`'s `reviews/<host>/<owner>/<repo>/
-/// <n>.json`, as [`review`] files them.
-pub fn legacy_jobs(home: &Path) -> Vec<Legacy> {
-    let root = home.join("reviews");
-    let mut jobs: Vec<Legacy> = walkdir::WalkDir::new(&root)
-        .min_depth(4)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| legacy_at(&root, entry.path()))
-        .collect();
-    jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at));
-    jobs
-}
-
-fn legacy_at(root: &Path, path: &Path) -> Option<Legacy> {
-    if path.extension()? != "json" {
-        return None;
-    }
-    let number = path.file_stem()?.to_str()?.parse().ok()?;
-    let repo_id = path
-        .parent()?
-        .strip_prefix(root)
-        .ok()?
-        .components()
-        .map(|c| c.as_os_str().to_str())
-        .collect::<Option<Vec<_>>>()?
-        .join("/");
-    let job = review::load_at(path)?;
-    Some(Legacy {
-        pr: PrKey { repo_id, number },
-        running: job.state() == JobState::Running,
-        title: job.title,
-        started_at: job.started_at,
-    })
-}
-
-/// Where a line of the view comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// Index into the list's review rows.
-    Review(usize),
-    /// Index into the legacy jobs.
-    Legacy(usize),
-}
-
 /// One line of the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewLine {
-    pub source: Source,
+    /// Index into the list's review rows.
+    pub row: usize,
     pub pr: PrKey,
 }
 
 /// The view's lines: the active reviews, newest activity first as `rows`
-/// are, then legacy jobs no review holds; or, `archived`, the archived
-/// reviews alone. Narrowed by `filter` on the PR, the review's name and the
-/// title GitHub last gave.
+/// are, or, `archived`, the archived reviews. Narrowed by `filter` on the
+/// PR, the review's name and the title GitHub last gave.
 pub fn lines(
     rows: &[ReviewRow],
-    legacy: &[Legacy],
     archived: bool,
     filter: &str,
     title: impl Fn(&PrKey) -> Option<String>,
 ) -> Vec<ReviewLine> {
-    let mut all: Vec<ReviewLine> = rows
+    let all: Vec<ReviewLine> = rows
         .iter()
         .enumerate()
         .filter(|(_, row)| row.archived() == archived)
-        .map(|(i, row)| ReviewLine {
-            source: Source::Review(i),
-            pr: row.pr(),
-        })
+        .map(|(row, r)| ReviewLine { row, pr: r.pr() })
         .collect();
-    if !archived {
-        // A job whose PR has a review, archived or not, is that review's.
-        let held: HashSet<PrKey> = rows.iter().map(ReviewRow::pr).collect();
-        let mut seen = HashSet::new();
-        all.extend(
-            legacy
-                .iter()
-                .enumerate()
-                .filter(|(_, job)| !held.contains(&job.pr) && seen.insert(job.pr.clone()))
-                .map(|(i, job)| ReviewLine {
-                    source: Source::Legacy(i),
-                    pr: job.pr.clone(),
-                }),
-        );
-    }
     if filter.is_empty() {
         return all;
     }
     let text: Vec<String> = all
         .iter()
         .map(|line| {
-            let name = match line.source {
-                Source::Review(i) => rows[i].review.slug.as_str(),
-                Source::Legacy(i) => legacy[i].title.as_str(),
-            };
+            let name = rows[line.row].review.slug.as_str();
             let title = title(&line.pr).unwrap_or_default();
             format!("{} {name} {title}", line.pr.label())
         })
@@ -380,58 +293,31 @@ mod tests {
             last,
         );
         review.state = state;
-        ReviewRow::new(review, PathBuf::from("/nowhere"), Vec::new())
-    }
-
-    fn key(number: u64) -> PrKey {
-        PrKey {
-            repo_id: "github.com/acme/api".into(),
-            number,
-        }
-    }
-
-    fn job(number: u64) -> Legacy {
-        Legacy {
-            pr: key(number),
-            title: format!("job {number}"),
-            running: false,
-            started_at: 0,
-        }
+        ReviewRow::new(review, PathBuf::from("/nowhere"))
     }
 
     #[test]
-    fn lines_are_the_reviews_of_a_state_then_the_jobs_no_review_holds() {
+    fn lines_are_the_reviews_of_a_state() {
         let rows = [
             review_row("a", 1, TaskState::Active, 5),
             review_row("b", 2, TaskState::Archived, 4),
             review_row("c", 3, TaskState::Active, 3),
         ];
-        // Job 2 belongs to the archived review of #2; job 9 is nobody's.
-        let legacy = [job(2), job(9), job(9)];
-        let shown = |archived, filter| -> Vec<(Source, u64)> {
-            lines(&rows, &legacy, archived, filter, |_| None)
+        let shown = |archived, filter| -> Vec<(usize, u64)> {
+            lines(&rows, archived, filter, |_| None)
                 .into_iter()
-                .map(|line| (line.source, line.pr.number))
+                .map(|line| (line.row, line.pr.number))
                 .collect()
         };
-        assert_eq!(
-            shown(false, ""),
-            [
-                (Source::Review(0), 1),
-                (Source::Review(2), 3),
-                (Source::Legacy(1), 9)
-            ]
-        );
-        // Archived: the archived reviews alone, never the jobs.
-        assert_eq!(shown(true, ""), [(Source::Review(1), 2)]);
+        assert_eq!(shown(false, ""), [(0, 1), (2, 3)]);
+        assert_eq!(shown(true, ""), [(1, 2)]);
         // The filter matches the PR, the review's name and the title.
-        assert_eq!(shown(false, "api-3"), [(Source::Review(2), 3)]);
-        assert_eq!(shown(false, "job 9"), [(Source::Legacy(1), 9)]);
-        let titled = lines(&rows, &[], false, "login", |pr| {
+        assert_eq!(shown(false, "api-3"), [(2, 3)]);
+        let titled = lines(&rows, false, "login", |pr| {
             (pr.number == 1).then(|| "Speed up login".to_string())
         });
         assert_eq!(titled.len(), 1);
-        assert_eq!(titled[0].source, Source::Review(0));
+        assert_eq!(titled[0].row, 0);
     }
 
     #[test]
@@ -442,33 +328,5 @@ mod tests {
         ];
         sort_rows(&mut rows);
         assert_eq!(rows[0].id(), "b");
-    }
-
-    #[test]
-    fn legacy_jobs_are_read_from_where_review_files_them() {
-        let home = tempfile::tempdir().unwrap();
-        let dir = home.path().join("reviews/github.com/acme/api");
-        std::fs::create_dir_all(&dir).unwrap();
-        let job = serde_json::json!({
-            "pr": 7, "title": "Fix \u{1b}[31mit", "head": "abc", "worktree": "/nowhere",
-            "command": "true", "env": [], "notify": false, "log": "/nowhere/log",
-            "started_at": 100, "finished_at": 110, "exit_code": 0,
-        });
-        std::fs::write(dir.join("7.json"), job.to_string()).unwrap();
-        std::fs::write(dir.join("notes.txt"), "not a job").unwrap();
-        let jobs = legacy_jobs(home.path());
-        assert_eq!(
-            jobs,
-            vec![Legacy {
-                pr: PrKey {
-                    repo_id: "github.com/acme/api".into(),
-                    number: 7,
-                },
-                title: "Fix \u{1b}[31mit".into(),
-                running: false,
-                started_at: 100,
-            }]
-        );
-        assert!(legacy_jobs(&home.path().join("missing")).is_empty());
     }
 }

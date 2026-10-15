@@ -11,7 +11,7 @@ use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{self, At, NodeInfo, TreeLine, Urgency};
 use super::projects_tab::ProjectGroup;
-use super::reviews::{PrReview, ReviewLine, ReviewRow, Source, Verdict};
+use super::reviews::{PrReview, ReviewLine, ReviewRow, Verdict};
 use super::state::human_size;
 use super::tasks::{
     AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
@@ -248,10 +248,6 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
         "● running  ◆ needs input  ○ idle  ✕ not running  · ended  ▪ archived",
     ),
     ("", "paused at its [review] caps, or queued on max_live"),
-    (
-        "",
-        "a job with no review is an older jeet review's: no session",
-    ),
     ("PR", "open · draft · merged · closed, as GitHub last said"),
     (
         "review",
@@ -965,40 +961,14 @@ pub fn review_session(row: &ReviewRow) -> String {
 }
 
 fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line<'static> {
-    let (glyph, color, session, name, when, size) = match line.source {
-        Source::Review(i) => {
-            let row = &ui.review_rows[i];
-            let (glyph, color) = state_glyph(row.archived(), row.activity.as_ref());
-            let name = match row.review.title.is_empty() {
-                true => row.review.slug.clone(),
-                false => row.review.title.clone(),
-            };
-            (
-                glyph,
-                color,
-                review_session(row),
-                name,
-                row.last_activity,
-                row.size.map(human_size).unwrap_or_else(|| "…".into()),
-            )
-        }
-        Source::Legacy(i) => {
-            let job = &ui.legacy[i];
-            let (glyph, color, session) = match job.running {
-                true => ("●", Color::Green, "job running"),
-                false => ("·", Color::DarkGray, "no review"),
-            };
-            // A job with no review has no directory of its own to measure.
-            (
-                glyph,
-                color,
-                session.to_string(),
-                job.title.clone(),
-                job.started_at,
-                String::new(),
-            )
-        }
+    let row = &ui.review_rows[line.row];
+    let (glyph, color) = state_glyph(row.archived(), row.activity.as_ref());
+    let name = match row.review.title.is_empty() {
+        true => row.review.slug.clone(),
+        false => row.review.title.clone(),
     };
+    let (session, when) = (review_session(row), row.last_activity);
+    let size = row.size.map(human_size).unwrap_or_else(|| "…".into());
     let found = ui.reviewed.get(&line.pr);
     let (repo, pr) = (line.pr.repo().to_string(), format!("#{}", line.pr.number));
     let (state, state_fg, review, review_fg, title) = match found {
@@ -1958,25 +1928,11 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             render_list(frame, area, title, items, *selected);
         }
         Panel::ReviewMenu {
-            task_id,
-            label,
-            selected,
-            ..
+            label, selected, ..
         } => {
             let items = REVIEW_MENU
                 .iter()
-                .enumerate()
-                .map(|(i, (key, what))| {
-                    // A job with no review has no session to open.
-                    let off = i == 1 && task_id.is_none();
-                    let what = match off {
-                        true => format!("{what} (it has no review)"),
-                        false => what.to_string(),
-                    };
-                    let style = match off {
-                        true => Style::default().fg(Color::DarkGray),
-                        false => Style::default(),
-                    };
+                .map(|(key, what)| {
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("{key}  "),
@@ -1984,7 +1940,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(what, style),
+                        Span::raw(what.to_string()),
                     ]))
                 })
                 .collect();
@@ -3046,7 +3002,7 @@ mod tests {
             pr,
             0,
         );
-        let mut row = ReviewRow::new(review, std::path::PathBuf::from("/nowhere"), Vec::new());
+        let mut row = ReviewRow::new(review, std::path::PathBuf::from("/nowhere"));
         row.activity = activity;
         row
     }
@@ -3149,7 +3105,7 @@ mod tests {
     }
 
     fn reviews_ui() -> TasksUi {
-        use crate::tui::reviews::{Legacy, PrKey, PrReview, Verdict};
+        use crate::tui::reviews::{PrKey, PrReview, Verdict};
         let key = |number| PrKey {
             repo_id: "github.com/acme/api".into(),
             number,
@@ -3163,13 +3119,10 @@ mod tests {
         let mut archived = review_row("review-api-9", 9, None);
         archived.review.state = TaskState::Archived;
         let mut ui = TasksUi::new(vec![row("not a review", None)]);
-        ui.set_reviews(vec![running, archived]);
-        ui.legacy = vec![Legacy {
-            pr: key(3),
-            title: "old \u{1b}[2Jjob".into(),
-            running: false,
-            started_at: 0,
-        }];
+        // Older than the running one, and GitHub could not say about it.
+        let mut quiet = review_row("review-api-3", 3, None);
+        quiet.last_activity = -1;
+        ui.set_reviews(vec![running, archived, quiet]);
         ui.reviewed.insert(
             key(55),
             Ok(PrReview {
@@ -3226,23 +3179,22 @@ mod tests {
         assert!(running.contains("2.0K"), "{running}");
         // A title is shown, never run: its escapes go.
         assert!(running.contains("Add ]8;;xreviews"), "{running}");
-        let legacy = line_of(&screen, "#3 ");
-        assert!(legacy.contains("no review"), "{legacy}");
-        assert!(legacy.contains("unknown: [2Jgh"), "{legacy}");
+        let quiet = line_of(&screen, "#3 ");
+        assert!(quiet.contains("unknown: [2Jgh"), "{quiet}");
         assert!(!all.contains("not a review"), "{all}");
         // Archived reviews are not among the active ones.
         assert!(!all.contains("#9"), "{all}");
         assert!(all.contains(" A archived reviews "), "{all}");
         assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
         // The repository and the PR are columns of their own, aligned.
-        for line in [running, legacy] {
+        for line in [running, quiet] {
             assert!(!line.contains("api#"), "{line}");
         }
         let col = |line: &str, what: &str| line[..line.find(what).unwrap()].width();
-        assert_eq!(col(running, " api "), col(legacy, " api "));
-        assert_eq!(col(running, "#55"), col(legacy, "#3 "));
+        assert_eq!(col(running, " api "), col(quiet, " api "));
+        assert_eq!(col(running, "#55"), col(quiet, "#3 "));
         assert!(col(running, " api ") < col(running, "#55"));
-        // The active one first, and the job no review holds last.
+        // The newer one first.
         let at = |what: &str| screen.iter().position(|l| l.contains(what)).unwrap();
         assert!(at("#55") < at("#3 "));
         // A: the archived reviews alone.
@@ -3462,22 +3414,13 @@ mod tests {
                 prs: None,
             }),
             Some(Panel::ReviewMenu {
-                task_id: Some("a".into()),
+                task_id: "a".into(),
                 pr: crate::tui::reviews::PrKey {
                     repo_id: "github.com/acme/api".into(),
                     number: 7,
                 },
                 label: "review \u{1b}[2Japi#7".into(),
                 selected: 1,
-            }),
-            Some(Panel::ReviewMenu {
-                task_id: None,
-                pr: crate::tui::reviews::PrKey {
-                    repo_id: "github.com/acme/api".into(),
-                    number: 7,
-                },
-                label: "review api#7".into(),
-                selected: 0,
             }),
             Some(Panel::Answer {
                 id: 42,

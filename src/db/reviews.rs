@@ -7,8 +7,11 @@
 //! `requested_by` is the task, if any, that asked for it, which the review
 //! agent's reports go to.
 
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 
 use super::tasks::{BudgetCheck, BudgetRow, TaskState, TaskWorktreeRecord};
 use super::Database;
@@ -64,6 +67,45 @@ pub struct ReviewRecord {
     pub paused: bool,
     /// When its start began waiting on `[review] max_live`.
     pub queued_at: Option<i64>,
+    /// The deprecated `[review] command`'s job, if one was ever started.
+    pub job: Option<Job>,
+}
+
+/// A review's deprecated `[review] command` job, kept in the `job_*`
+/// columns of its row (schema v9). Before that it was a JSON file of this
+/// shape under `$JEET_HOME/reviews`, which [`crate::review::adopt_jobs`]
+/// reads once to make a record of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Job {
+    /// The review's PR and title, not columns of the job's own.
+    pub pr: u64,
+    pub title: String,
+    /// The PR head commit the review was started against, so a second
+    /// `jeet review` can tell a finished review from a stale one.
+    pub head: String,
+    pub worktree: PathBuf,
+    /// The command as run, placeholders already substituted.
+    pub command: String,
+    pub env: Vec<(String, String)>,
+    pub notify: bool,
+    pub log: PathBuf,
+    pub started_at: i64,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// When the runner started, as [`crate::identity`] reads it: with `pid`,
+    /// the one process that runs the job, which a reused pid is not.
+    #[serde(default)]
+    pub runner_start: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Unfinished, and its process is gone. Worked out when the job is
+    /// loaded by [`crate::review::job_of`] — the explorer asks for the state
+    /// every frame, and a process spawned per frame to check is not a price
+    /// worth paying.
+    #[serde(skip)]
+    pub lost: bool,
 }
 
 impl ReviewRecord {
@@ -98,6 +140,7 @@ impl ReviewRecord {
             warned: 0,
             paused: false,
             queued_at: None,
+            job: None,
         }
     }
 
@@ -155,10 +198,18 @@ pub struct Leftover {
     pub was_archived: bool,
 }
 
-const REVIEW_COLUMNS: &str = "id, slug, repo_id, pr_number, title, pr_state, pr_url, state, \
+/// What `reviews` has had since v8.
+const BASE_COLUMNS: &str = "id, slug, repo_id, pr_number, title, pr_state, pr_url, state, \
      requested_by, created_at, last_activity, dir_name, branch, created_branch, head_oid, \
      stash_ref, worktree_created_at, session_id, asked_head, asked_at, brought_back_at, \
      max_secs, max_turns, used_secs, used_turns, warned, paused, queued_at";
+
+const REVIEW_COLUMNS: &str = "id, slug, repo_id, pr_number, title, pr_state, pr_url, state, \
+     requested_by, created_at, last_activity, dir_name, branch, created_branch, head_oid, \
+     stash_ref, worktree_created_at, session_id, asked_head, asked_at, brought_back_at, \
+     max_secs, max_turns, used_secs, used_turns, warned, paused, queued_at, \
+     job_head, job_command, job_worktree, job_log, job_notify, job_env, job_started_at, \
+     job_finished_at, job_exit_code, job_pid, job_runner_start";
 
 fn review_from_row(row: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
     let state: String = row.get(7)?;
@@ -173,12 +224,36 @@ fn review_from_row(row: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
             ))
         }
     };
+    let pr_number = row.get::<_, i64>(3)? as u64;
+    let title: String = row.get(4)?;
+    let job = match row.get::<_, Option<i64>>(34)? {
+        Some(started_at) => Some(Job {
+            pr: pr_number,
+            title: title.clone(),
+            head: row.get::<_, Option<String>>(28)?.unwrap_or_default(),
+            command: row.get::<_, Option<String>>(29)?.unwrap_or_default(),
+            worktree: PathBuf::from(row.get::<_, Option<String>>(30)?.unwrap_or_default()),
+            log: PathBuf::from(row.get::<_, Option<String>>(31)?.unwrap_or_default()),
+            notify: row.get::<_, Option<i64>>(32)?.unwrap_or(0) != 0,
+            env: row
+                .get::<_, Option<String>>(33)?
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default(),
+            started_at,
+            finished_at: row.get(35)?,
+            exit_code: row.get(36)?,
+            pid: row.get::<_, Option<i64>>(37)?.map(|pid| pid as u32),
+            runner_start: row.get(38)?,
+            lost: false,
+        }),
+        None => None,
+    };
     Ok(ReviewRecord {
         id: row.get(0)?,
         slug: row.get(1)?,
         repo_id: row.get(2)?,
-        pr_number: row.get::<_, i64>(3)? as u64,
-        title: row.get(4)?,
+        pr_number,
+        title,
         pr_state: row.get(5)?,
         pr_url: row.get(6)?,
         state,
@@ -202,7 +277,34 @@ fn review_from_row(row: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
         warned: row.get(25)?,
         paused: row.get::<_, i64>(26)? != 0,
         queued_at: row.get(27)?,
+        job,
     })
+}
+
+/// Write `job` as review `id`'s, in place of any job it had.
+fn set_job_in(conn: &Connection, id: &str, job: &Job) -> Result<()> {
+    conn.execute(
+        "UPDATE reviews
+         SET job_head = ?2, job_command = ?3, job_worktree = ?4, job_log = ?5, job_notify = ?6,
+             job_env = ?7, job_started_at = ?8, job_finished_at = ?9, job_exit_code = ?10,
+             job_pid = ?11, job_runner_start = ?12
+         WHERE id = ?1",
+        params![
+            id,
+            job.head,
+            job.command,
+            job.worktree.to_string_lossy(),
+            job.log.to_string_lossy(),
+            i32::from(job.notify),
+            serde_json::to_string(&job.env)?,
+            job.started_at,
+            job.finished_at,
+            job.exit_code,
+            job.pid.map(i64::from),
+            job.runner_start,
+        ],
+    )?;
+    Ok(())
 }
 
 fn get_review_in(conn: &Connection, id: &str) -> Result<Option<ReviewRecord>> {
@@ -219,7 +321,9 @@ impl Database {
     /// Record a new review. Refused for a PR that has one already, or a
     /// slug a task or review has.
     pub fn insert_review(&self, r: &ReviewRecord) -> Result<()> {
-        let conn = self.conn();
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let conn = &tx;
         let taken: bool = conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM tasks WHERE slug = ?1 OR id = ?2)",
             params![r.slug, r.id],
@@ -230,7 +334,7 @@ impl Database {
         }
         conn.execute(
             &format!(
-                "INSERT INTO reviews ({REVIEW_COLUMNS})
+                "INSERT INTO reviews ({BASE_COLUMNS})
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
             ),
@@ -265,7 +369,49 @@ impl Database {
                 r.queued_at,
             ],
         )?;
+        if let Some(job) = &r.job {
+            set_job_in(conn, &r.id, job)?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Record `job` as review `id`'s, in place of any it had.
+    pub fn set_review_job(&self, id: &str, job: &Job) -> Result<()> {
+        set_job_in(&self.conn(), id, job)
+    }
+
+    /// Record the runner of review `id`'s job: its pid and its start as
+    /// [`crate::identity`] reads it. Only for a job not yet ended, and not
+    /// another runner's (none recorded yet, or this pid): so two runners
+    /// cannot both run one job. Whether it was recorded.
+    pub fn set_review_job_runner(&self, id: &str, pid: u32, start: Option<i64>) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE reviews SET job_pid = ?2, job_runner_start = ?3
+             WHERE id = ?1 AND job_started_at IS NOT NULL AND job_finished_at IS NULL
+               AND job_exit_code IS NULL AND (job_pid IS NULL OR job_pid = ?2)",
+            params![id, i64::from(pid), start],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Record that review `id`'s job ended with `code` at `at`. Only a job
+    /// not yet ended, and with `runner`, one whose runner is that pid or not
+    /// recorded yet: whether it was recorded.
+    pub fn finish_review_job(
+        &self,
+        id: &str,
+        at: i64,
+        code: i32,
+        runner: Option<u32>,
+    ) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE reviews SET job_finished_at = ?2, job_exit_code = ?3
+             WHERE id = ?1 AND job_started_at IS NOT NULL AND job_exit_code IS NULL
+               AND (?4 IS NULL OR job_pid IS NULL OR job_pid = ?4)",
+            params![id, at, code, runner.map(i64::from)],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn get_review(&self, id: &str) -> Result<Option<ReviewRecord>> {
@@ -535,6 +681,40 @@ impl Database {
         Ok(())
     }
 
+    /// What was recorded of job file `path`: its outcome and the attempts
+    /// made at it.
+    pub fn job_file(&self, path: &str) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT outcome, attempts FROM review_job_files WHERE path = ?1",
+                params![path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Record job file `path`'s `outcome` (and the review it went to) after
+    /// `attempts` attempts.
+    pub fn record_job_file(
+        &self,
+        path: &str,
+        outcome: &str,
+        review_id: Option<&str>,
+        attempts: i64,
+        at: i64,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO review_job_files (path, outcome, review_id, attempts, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET outcome = excluded.outcome,
+                 review_id = excluded.review_id, attempts = excluded.attempts,
+                 at = excluded.at",
+            params![path, outcome, review_id, attempts, at],
+        )?;
+        Ok(())
+    }
+
     /// The migration's `meta` value for `key`, if it is there.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -554,6 +734,16 @@ impl Database {
             "INSERT INTO meta (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = '1'",
             params![key],
+        )?;
+        Ok(())
+    }
+
+    /// Set `key` to `value`.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )?;
         Ok(())
     }
@@ -767,6 +957,59 @@ mod tests {
         assert_eq!(queued, ["b", "a"]);
         db.unqueue_review("b").unwrap();
         assert_eq!(db.queued_reviews().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_review_keeps_its_job_on_its_row_and_it_ends_once() {
+        let (_dir, db) = open();
+        let mut r = review("r", 7);
+        r.title = "Add x".into();
+        db.insert_review(&r).unwrap();
+        assert_eq!(db.get_review("r").unwrap().unwrap().job, None);
+        let job = Job {
+            pr: 7,
+            title: "Add x".into(),
+            head: "abc".into(),
+            worktree: "/w/api".into(),
+            command: "true".into(),
+            env: vec![("JEET_PR".into(), "7".into())],
+            notify: true,
+            log: "/l/7.log".into(),
+            started_at: 5,
+            pid: None,
+            runner_start: None,
+            finished_at: None,
+            exit_code: None,
+            lost: false,
+        };
+        db.set_review_job("r", &job).unwrap();
+        assert_eq!(db.get_review("r").unwrap().unwrap().job, Some(job.clone()));
+        assert!(db.set_review_job_runner("r", 42, Some(9)).unwrap());
+        // One runner has the job: not another, and not one that is lost.
+        assert!(!db.set_review_job_runner("r", 43, Some(10)).unwrap());
+        assert!(db.set_review_job_runner("r", 42, Some(9)).unwrap());
+        // Another runner's end is not recorded; its own is, once.
+        assert!(!db.finish_review_job("r", 8, 1, Some(43)).unwrap());
+        assert!(db.finish_review_job("r", 8, 3, Some(42)).unwrap());
+        assert!(!db.finish_review_job("r", 9, 0, None).unwrap());
+        assert!(!db.set_review_job_runner("r", 44, None).unwrap());
+        let got = db.get_review("r").unwrap().unwrap().job.unwrap();
+        assert_eq!(
+            (got.pid, got.runner_start, got.finished_at, got.exit_code),
+            (Some(42), Some(9), Some(8), Some(3))
+        );
+        // A review made with a job has it.
+        let mut with = review("w", 8);
+        with.job = Some(job.clone());
+        db.insert_review(&with).unwrap();
+        assert_eq!(
+            db.get_review("w").unwrap().unwrap().job,
+            Some(Job {
+                pr: 8,
+                title: String::new(),
+                ..job
+            })
+        );
     }
 
     #[test]
