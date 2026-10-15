@@ -524,11 +524,8 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
-/// The most running sessions the assistant's row names.
-const SESSIONS_SHOWN: usize = 4;
-
-/// The assistant, pinned above the list: its sessions and what each running
-/// one is doing, what is queued for it, and its open todo items.
+/// The assistant, pinned above the list: how many sessions it has, and the
+/// one `c` opens — the most recently active.
 pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " ✦ assistant  ",
@@ -540,60 +537,21 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
         spans.push(dim("…"));
         return Line::from(spans);
     };
-    match info.sessions.len() {
-        0 => spans.push(dim("no sessions yet — c starts one")),
-        n => {
-            spans.push(Span::styled(
-                format!("{n} session{}", if n == 1 { "" } else { "s" }),
-                Style::default().fg(Color::Blue),
-            ));
-            let running: Vec<_> = info.sessions.iter().filter(|s| s.running()).collect();
-            if running.is_empty() {
-                spans.push(dim(" · none running"));
-            }
-            for session in running.iter().take(SESSIONS_SHOWN) {
-                let (glyph, color) = activity_glyph(Some(&session.activity));
-                let star = if session.primary { "*" } else { "" };
-                spans.push(Span::styled(
-                    format!(
-                        "  {glyph} {star}{}",
-                        truncate(&printable(&session.name), 18)
-                    ),
-                    Style::default().fg(color),
-                ));
-            }
-            if running.len() > SESSIONS_SHOWN {
-                spans.push(dim(format!("  +{}", running.len() - SESSIONS_SHOWN)));
-            }
-        }
-    }
-    if info.unanchored > 0 {
-        spans.push(Span::styled(
-            format!(
-                " · {} unanchored: jeet task restart assistant",
-                info.unanchored
-            ),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    let inbox = format!(" · inbox {}", info.inbox);
-    spans.push(match info.inbox {
-        0 => dim(inbox),
-        _ => Span::styled(
-            inbox,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-    });
-    match &info.todo_error {
-        Some(_) => spans.push(Span::styled(
-            " · todo.md unreadable",
-            Style::default().fg(Color::Red),
-        )),
-        None => spans.push(dim(format!(" · todo {} open", info.open_todo()))),
-    }
-    spans.push(dim("   c chat  C sessions  t todo  i inbox"));
+    let Some(active) = info.sessions.first() else {
+        spans.push(dim("no sessions yet — c starts one"));
+        return Line::from(spans);
+    };
+    let n = info.sessions.len();
+    spans.push(Span::styled(
+        format!("{n} session{}", if n == 1 { "" } else { "s" }),
+        Style::default().fg(Color::Blue),
+    ));
+    let (glyph, color) = activity_glyph(Some(&active.activity));
+    spans.push(dim(" · active "));
+    spans.push(Span::styled(
+        format!("{glyph} {}", truncate(&printable(&active.name), 32)),
+        Style::default().fg(color),
+    ));
     Line::from(spans)
 }
 
@@ -2624,7 +2582,7 @@ mod tests {
     }
 
     #[test]
-    fn the_assistant_line_counts_its_unanchored_windows() {
+    fn the_assistant_line_shows_only_the_count_and_the_session_c_opens() {
         let text = |info: &AssistantInfo| {
             assistant_line(Some(info))
                 .spans
@@ -2633,13 +2591,13 @@ mod tests {
                 .collect::<String>()
         };
         let mut i = info();
-        assert!(!text(&i).contains("unanchored"));
         i.unanchored = 2;
-        assert!(
-            text(&i).contains("2 unanchored: jeet task restart assistant"),
-            "{}",
-            text(&i)
-        );
+        // Most recently active first, which is the one `c` opens, whether or
+        // not it is running.
+        i.sessions.reverse();
+        assert_eq!(text(&i), " ✦ assistant  2 sessions · active ✕ triage name");
+        i.sessions.truncate(1);
+        assert_eq!(text(&i), " ✦ assistant  1 session · active ✕ triage name");
     }
 
     fn render(ui: &mut TasksUi, width: u16, height: u16) -> Vec<String> {
@@ -3203,9 +3161,8 @@ mod tests {
         ui.assistant = Some(info());
         let screen = render(&mut ui, 140, 12);
         let line = &screen[3];
-        assert!(line.contains("2 sessions  ● *plan name"), "{line}");
-        assert!(!line.contains("triage"), "only running sessions: {line}");
-        assert!(line.contains("inbox 2 · todo 2 open"), "{line}");
+        assert!(line.contains("2 sessions · active ● plan name"), "{line}");
+        assert!(!line.contains("inbox") && !line.contains("todo"), "{line}");
         // The breadcrumb, then the tasks.
         assert_eq!(screen[4].trim(), "assistant");
         assert!(screen[6].contains("fix-login"), "{}", screen[6]);

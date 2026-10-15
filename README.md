@@ -548,8 +548,7 @@ waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
 back to these (`⇧⇥` the other way).
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
-has, what each running one is doing (`*` marks the primary one), how many
-messages and events are queued for it, and how many todo items are open. It is
+has, and the active one, the session `c` opens, with what it is doing. It is
 read from its files on a thread of its own, like the statuses.
 
 | Key | |
