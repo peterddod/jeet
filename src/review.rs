@@ -910,6 +910,7 @@ pub fn mark_brought_back(app: &App, task: &TaskRecord) {
         return;
     }
     let dir = crate::tasks::task_dir(app, task).join(crate::tasks::MARKER_DIR);
+    let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join(BROUGHT_BACK_FILE), now_secs().to_string());
 }
 
