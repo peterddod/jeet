@@ -548,7 +548,9 @@ waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
 back to these (`⇧⇥` the other way).
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
-has, and the active one, the session `c` opens, with what it is doing. It is
+has, and the active one, the session `c` opens, with what it is doing. While
+any of its tmux windows were not started by jeet, a red `N unanchored` follows
+(`jeet task restart assistant` resumes them in windows jeet started). It is
 read from its files on a thread of its own, like the statuses.
 
 | Key | |
