@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{self, At, NodeInfo, TreeLine, Urgency};
-use super::repos::RepoLine;
+use super::repos::{Key, RepoLine};
 use super::reviews::{PrReview, ReviewLine, Source, Verdict};
 use super::state::human_size;
 use super::tasks::{
@@ -1101,6 +1101,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
 pub struct Columns {
     pub name: usize,
     pub status: usize,
+    pub project: usize,
     pub worktrees: usize,
     pub size: usize,
     pub age: usize,
@@ -1108,26 +1109,57 @@ pub struct Columns {
 
 impl Columns {
     pub fn for_width(width: usize) -> Columns {
-        let (status, worktrees, size, age) = match width {
-            w if w >= 110 => (24, 26, 7, 9),
-            w if w >= 90 => (22, 22, 7, 9),
-            w if w >= 72 => (18, 18, 7, 9),
-            w if w >= 56 => (18, 0, 7, 9),
-            w if w >= 40 => (14, 0, 0, 9),
-            _ => (10, 0, 0, 0),
+        // The project goes first as the width shrinks, before the worktrees
+        // (which say more) and the size, and only shows while the name
+        // keeps the 30 it has at 110 without it.
+        let (status, project, worktrees, size, age) = match width {
+            w if w >= 120 => (24, 12, 20, 7, 9),
+            w if w >= 110 => (24, 0, 26, 7, 9),
+            w if w >= 90 => (22, 0, 22, 7, 9),
+            w if w >= 72 => (18, 0, 18, 7, 9),
+            w if w >= 56 => (18, 0, 0, 7, 9),
+            w if w >= 40 => (14, 0, 0, 0, 9),
+            _ => (10, 0, 0, 0, 0),
         };
         // A space before each column after the tag's.
-        let gaps = 1 + [status, worktrees, size, age]
+        let gaps = 1 + [status, project, worktrees, size, age]
             .iter()
             .filter(|&&w| w > 0)
             .count();
-        let fixed = TAG + status + worktrees + size + age + gaps;
+        let fixed = TAG + status + project + worktrees + size + age + gaps;
         Columns {
             name: width.saturating_sub(fixed).max(6),
             status,
+            project,
             worktrees,
             size,
             age,
+        }
+    }
+}
+
+/// A task's project for its row: the short name of the repository of its
+/// first worktree, `+N` for the other repositories it has worktrees in, or
+/// `(no repo)`; the name is cut to leave room for the `+N`, within `width`.
+/// A manager shows its own worktrees' repositories, not those below it.
+fn project_text(row: &TaskRow, width: usize) -> String {
+    let mut repos: Vec<&str> = Vec::new();
+    for wt in &row.worktrees {
+        if !repos.contains(&wt.repo_id.as_str()) {
+            repos.push(&wt.repo_id);
+        }
+    }
+    let Some(first) = repos.first() else {
+        return truncate(Key::NoRepo.name(), width);
+    };
+    let name = Key::Repo(first.to_string());
+    let name = name.name();
+    match repos.len() - 1 {
+        0 => truncate(name, width),
+        more => {
+            let more = format!(" +{more}");
+            let room = width.saturating_sub(more.width());
+            format!("{}{more}", truncate(name, room))
         }
     }
 }
@@ -1259,7 +1291,7 @@ pub fn unanchored_hint(row: Option<&TaskRow>) -> Option<String> {
 }
 
 /// An active or archived task's two lines. The first: its tag, its name,
-/// then its status, worktrees, size and last activity. The second, under
+/// then its status, project, worktrees, size and last activity. The second, under
 /// the name: `path`, the breadcrumb of a filter's match, then its
 /// [`snippet`]. A terminal row is a whole cell high, so what flanks the
 /// name sits on its line rather than between the two.
@@ -1290,6 +1322,15 @@ fn row_lines(
             Style::default().fg(color),
         ),
     ];
+    if columns.project > 0 {
+        first.push(Span::styled(
+            format!(
+                " {}",
+                cell(&project_text(row, columns.project), columns.project)
+            ),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
     if columns.worktrees > 0 {
         first.push(Span::styled(
             format!(" {}", cell(&row.summary(), columns.worktrees)),
@@ -2857,14 +2898,15 @@ mod tests {
                 detail: Some("Edit the token refresh".into()),
             }),
         )]);
-        let screen = render(&mut ui, 120, 14);
+        let screen = render(&mut ui, 130, 14);
         let at = screen.iter().position(|l| l.contains("fix-login")).unwrap();
         let (first, second) = (&screen[at], &screen[at + 1]);
-        // The first line: tag, name, then status, worktrees, size and age.
+        // The first line: tag, name, then status, project, worktrees, size and age.
         for (before, after) in [
             ("task", "fix-login"),
             ("fix-login", "● running"),
-            ("● running", "1 wt: api"),
+            ("● running", "api"),
+            ("api", "1 wt: api"),
             ("1 wt: api", "3.0M"),
             ("3.0M", "2m ago"),
         ] {
@@ -3584,14 +3626,83 @@ mod tests {
 
     #[test]
     fn narrow_terminals_drop_columns_rather_than_the_name() {
-        for width in [20, 40, 56, 72, 90, 110, 200] {
+        for width in [20, 40, 56, 72, 90, 110, 119, 120, 130, 200] {
             let c = Columns::for_width(width);
             assert!(c.name >= 6, "{width}: {c:?}");
-            let used = TAG + c.status + c.worktrees + c.size + c.age + c.name;
+            let used = TAG + c.status + c.project + c.worktrees + c.size + c.age + c.name;
             assert!(used <= width + 6, "{width}: {c:?}");
         }
         assert_eq!(Columns::for_width(60).worktrees, 0);
         assert!(Columns::for_width(100).worktrees > 0);
+    }
+
+    #[test]
+    fn the_project_column_goes_before_the_name_status_worktrees_or_size() {
+        for width in [120, 160] {
+            assert!(Columns::for_width(width).project > 0, "{width}");
+        }
+        for width in [20, 40, 56, 72, 90, 100, 110, 119] {
+            assert_eq!(Columns::for_width(width).project, 0, "{width}");
+        }
+        // Where it is dropped the worktrees and size are still there.
+        let c = Columns::for_width(110);
+        assert!(c.worktrees > 0 && c.size > 0);
+        // Showing it never leaves the name less than it has at 110 without.
+        let at_110 = Columns::for_width(110).name;
+        for width in 110..=200 {
+            let c = Columns::for_width(width);
+            assert!(c.project == 0 || c.name >= at_110, "{width}: {c:?}");
+        }
+    }
+
+    fn in_repos(repos: &[&str]) -> TaskRow {
+        let mut r = row("x", None);
+        let wt = r.worktrees[0].clone();
+        r.worktrees = repos
+            .iter()
+            .map(|id| TaskWorktreeRecord {
+                repo_id: (*id).into(),
+                ..wt.clone()
+            })
+            .collect();
+        r
+    }
+
+    #[test]
+    fn the_project_is_the_first_repo_plus_the_others_or_no_repo() {
+        let a = "github.com/acme/jeet";
+        let b = "github.com/acme/territile";
+        assert_eq!(project_text(&in_repos(&[a]), 14), "jeet");
+        assert_eq!(project_text(&in_repos(&[a, a]), 14), "jeet");
+        assert_eq!(project_text(&in_repos(&[a, b, a]), 14), "jeet +1");
+        assert_eq!(project_text(&in_repos(&[b, a]), 14), "territile +1");
+        assert_eq!(project_text(&in_repos(&[]), 14), "(no repo)");
+        // Cut with the ellipsis, keeping the +N.
+        let long = "github.com/acme/a-very-long-repository";
+        assert_eq!(project_text(&in_repos(&[long]), 12), "a-very-long…");
+        assert_eq!(project_text(&in_repos(&[long, a, b]), 12), "a-very-l… +2");
+        assert_eq!(project_text(&in_repos(&[long, a, b]), 12).width(), 12);
+        // Wide characters and a two-digit count stay within the width.
+        let wide = "github.com/acme/日本語のリポジトリ";
+        assert!(project_text(&in_repos(&[wide, a]), 12).width() <= 12);
+        let many: Vec<String> = (0..13).map(|i| format!("github.com/acme/r{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let text = project_text(&in_repos(&many), 12);
+        assert!(text.ends_with(" +12") && text.width() <= 12, "{text}");
+    }
+
+    #[test]
+    fn a_row_shows_its_project_and_the_narrow_list_does_not() {
+        let mut ui = TasksUi::new(vec![in_repos(&[
+            "github.com/acme/jeet",
+            "github.com/acme/territile",
+        ])]);
+        let wide = render(&mut ui, 130, 14).join("\n");
+        assert!(wide.contains("jeet +1"), "{wide}");
+        let narrow = render(&mut ui, 80, 14).join("\n");
+        assert!(!narrow.contains("jeet +1"), "{narrow}");
+        let mut none = TasksUi::new(vec![in_repos(&[])]);
+        assert!(render(&mut none, 130, 14).join("\n").contains("(no repo)"));
     }
 
     #[test]
