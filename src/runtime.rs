@@ -39,7 +39,12 @@ const ALLOWED: [&str; 3] = ["jeet worktree", "jeet ls", "jeet report"];
 
 /// The task's tmux session.
 pub fn session_name(task: &TaskRecord) -> String {
-    format!("{}{}", crate::tmux::SESSION_PREFIX, task.slug)
+    session_name_for(&task.slug)
+}
+
+/// The tmux session of whatever has `slug`.
+pub fn session_name_for(slug: &str) -> String {
+    format!("{}{}", crate::tmux::SESSION_PREFIX, slug)
 }
 
 /// The outcome of [`ensure_running`].
@@ -225,16 +230,11 @@ fn start_tmux(
 ) -> Result<Running> {
     tmux::require()?;
     let name = session_name(task);
-    let mut warnings = Vec::new();
-    // With `remain-on-exit` set, a session outlives its agent; one with
-    // nothing left running in it is replaced rather than attached to.
-    if tmux::has_session(&name) && !tmux::pane_alive(&name) {
-        tmux::kill(&name)?;
-    }
-    if tmux::has_session(&name) {
+    if live_session(&name)? {
         return already_running(app, task, &name, session);
     }
 
+    let mut warnings = Vec::new();
     let mut spec = AgentSpec::from_config(&app.config)?;
     // Made under a harness that had them, it is not started unguarded on
     // one configured since that lacks them.
@@ -254,23 +254,122 @@ fn start_tmux(
     // A review's session is filed under its worktree: picked up first, so
     // it is the one resumed, not a blank one started beside it.
     warnings.extend(crate::review::adopt_sessions(app, task));
-    let (argv, session_id) = launch_argv(app, task, &spec, session, prompt)?;
+    // Only a harness with sessions has hooks to install.
+    let hooks = match spec.supports_sessions() {
+        true => {
+            let exe = std::env::current_exe().context("locate the jeet binary")?;
+            Some(task_hooks(app, task, spec.harness, exe)?)
+        }
+        false => None,
+    };
+    let launch = Launch {
+        id: task.id.clone(),
+        slug: task.slug.clone(),
+        name: task.name.clone(),
+        dir,
+        known_sessions: app.db.list_task_sessions(&task.id)?,
+        ungated_warning: task.parent_id.is_some(),
+        spec,
+        hooks,
+        warnings,
+    };
+    let running = launch_tmux(
+        app,
+        &launch,
+        session,
+        prompt,
+        |pane| {
+            identity::record(
+                &app.db,
+                &task.id,
+                AnchorKind::Pane,
+                Some(&pane.id),
+                pane.pid,
+            )
+        },
+        |id| {
+            let now = now_secs();
+            app.db.upsert_task_session(&TaskSessionRecord {
+                session_id: id.to_string(),
+                task_id: task.id.clone(),
+                parent_id: None,
+                name: task.name.clone(),
+                created_at: now,
+                last_activity: now,
+            })
+        },
+    )?;
+    let _ = app.db.touch_task(&task.id, now_secs());
+    Ok(running)
+}
+
+/// What an agent launch needs of what asks for it, so a task and a review
+/// start theirs the same way ([`launch_tmux`]).
+pub struct Launch {
+    /// The id its hooks and the agent's environment name.
+    pub id: String,
+    /// Names its tmux session ([`session_name_for`]).
+    pub slug: String,
+    /// The name its sessions start under.
+    pub name: String,
+    /// Where the agent runs, and keeps its status.
+    pub dir: PathBuf,
+    /// The agent's command and harness, with any arguments of its own.
+    pub spec: AgentSpec,
+    /// The sessions the index has recorded for it.
+    pub known_sessions: Vec<TaskSessionRecord>,
+    /// jeet's hooks for it; none for a harness that keeps no sessions.
+    pub hooks: Option<HookSetup>,
+    /// Whether it has a parent: with a harness that has no deny rules, it
+    /// is warned of.
+    pub ungated_warning: bool,
+    /// What there is to warn of already.
+    pub warnings: Vec<String>,
+}
+
+/// Whether tmux session `name` has an agent running. With `remain-on-exit`
+/// set, a session outlives its agent; one with nothing left running in it
+/// is replaced rather than attached to.
+pub fn live_session(name: &str) -> Result<bool> {
+    if tmux::has_session(name) && !tmux::pane_alive(name) {
+        tmux::kill(name)?;
+    }
+    Ok(tmux::has_session(name))
+}
+
+/// Start `launch`'s agent in its tmux session, which is not running,
+/// resuming `session` when given, else its latest, else a new one, with
+/// `prompt` as its first prompt. The caller records what the agent is
+/// known by: `record_anchor` its pane, `record_session` the session it
+/// runs, before the launch.
+pub fn launch_tmux(
+    app: &App,
+    launch: &Launch,
+    session: Option<&str>,
+    prompt: Option<&str>,
+    record_anchor: impl FnOnce(&tmux::Pane) -> Result<()>,
+    record_session: impl FnOnce(&str) -> Result<()>,
+) -> Result<Running> {
+    let name = session_name_for(&launch.slug);
+    let spec = &launch.spec;
+    let mut warnings = launch.warnings.clone();
+    let (argv, session_id) = launch_argv(app, launch, session, prompt, record_session)?;
     warnings.extend(spec.version_warning());
-    if task.parent_id.is_some() && spec.harness.enforcement() == harness::Enforcement::None {
+    if launch.ungated_warning && spec.harness.enforcement() == harness::Enforcement::None {
         warnings.push(format!(
             "{} has no deny rules, so task {}'s agent is not stopped from force-pushing or \
              merging; only jeet's own commands are gated",
             spec.harness.name(),
-            task.slug
+            launch.slug
         ));
     }
     let hooks = spec.has_hooks();
-    if let Err(e) = status::mark_launched(&dir, hooks, prompt.is_some()) {
+    if let Err(e) = status::mark_launched(&launch.dir, hooks, prompt.is_some()) {
         warnings.push(format!("could not note the agent's launch: {e:#}"));
     }
     let home = app.home.to_string_lossy();
     let env = [
-        (tasks::TASK_ID_ENV, task.id.as_str()),
+        (tasks::TASK_ID_ENV, launch.id.as_str()),
         // The agent's own `jeet` calls and hooks must find this index, not
         // whatever the tmux server's environment says.
         ("JEET_HOME", home.as_ref()),
@@ -278,23 +377,16 @@ fn start_tmux(
         // `jeet worktree add` must not move the user's shell.
         (cd::CD_FILE_ENV, ""),
     ];
-    let pane = tmux::new_session(&name, &dir, &env, &argv)?;
-    if let Err(e) = identity::record(
-        &app.db,
-        &task.id,
-        AnchorKind::Pane,
-        Some(&pane.id),
-        pane.pid,
-    ) {
-        warnings.push(identity::unidentified(&task.slug, &e));
+    let pane = tmux::new_session(&name, &launch.dir, &env, &argv)?;
+    if let Err(e) = record_anchor(&pane) {
+        warnings.push(identity::unidentified(&launch.slug, &e));
     }
     // Something to see it through a startup prompt, which no hook reports.
     if hooks {
-        if let Err(e) = startup::launch(app, task, session_id.as_deref()) {
+        if let Err(e) = startup::launch(app, &launch.id, &launch.dir, session_id.as_deref()) {
             warnings.push(format!("could not watch the agent start: {e:#}"));
         }
     }
-    let _ = app.db.touch_task(&task.id, now_secs());
     Ok(Running {
         tmux_session: name,
         started: Started::Now,
@@ -337,12 +429,12 @@ fn already_running(
 }
 
 /// Why `task`'s agent cannot be started with a first prompt on `spec`.
-fn no_first_prompt(spec: &AgentSpec, task: &TaskRecord) -> String {
+fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
     format!(
         "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
          the message once it is running",
         spec.display(),
-        task.slug
+        slug
     )
 }
 
@@ -354,23 +446,24 @@ pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
     let spec = AgentSpec::from_config(&app.config).ok()?;
     match spec.harness.prompt_args("") {
         Some(_) => None,
-        None => Some(no_first_prompt(&spec, task)),
+        None => Some(no_first_prompt(&spec, &task.slug)),
     }
 }
 
 /// The agent's command line. When its harness supports it, it resumes or
-/// starts a recorded session, carries jeet's hooks and, given one, its
-/// first prompt.
+/// starts a recorded session (`record_session` told which, before launch),
+/// carries jeet's hooks and, given one, its first prompt.
 fn launch_argv(
     app: &App,
-    task: &TaskRecord,
-    spec: &AgentSpec,
+    launch: &Launch,
     session: Option<&str>,
     prompt: Option<&str>,
+    record_session: impl FnOnce(&str) -> Result<()>,
 ) -> Result<(Vec<String>, Option<String>)> {
+    let spec = &launch.spec;
     let mut argv = spec.argv.clone();
     if prompt.is_some() && spec.harness.prompt_args("").is_none() {
-        bail!(no_first_prompt(spec, task));
+        bail!(no_first_prompt(spec, &launch.slug));
     }
     if !spec.supports_sessions() {
         if let Some(id) = session {
@@ -382,28 +475,21 @@ fn launch_argv(
         return Ok((argv, None));
     }
 
-    let dir = tasks::task_dir(app, task);
-    let (id, resume) = pick_session(app, task, spec, &dir, session)?;
-    let now = now_secs();
+    let (id, resume) = pick_session(launch, session)?;
     // Recorded before launch, so the session is known even if the agent
     // never gets as far as its first hook.
-    app.db.upsert_task_session(&TaskSessionRecord {
-        session_id: id.clone(),
-        task_id: task.id.clone(),
-        parent_id: None,
-        name: task.name.clone(),
-        created_at: now,
-        last_activity: now,
-    })?;
+    record_session(&id)?;
     let args = match resume {
         true => spec.harness.resume_args(&id),
-        false => spec.harness.new_session_args(&id, &task.name),
+        false => spec.harness.new_session_args(&id, &launch.name),
     };
     argv.extend(args.unwrap_or_default());
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
-    let hooks = task_hooks(app, task, spec.harness, exe)?;
-    // The task's agent is not running, so no other session's file is in use.
-    argv.extend(hook_args(&app.home, spec.harness, &hooks, &id, &[])?);
+    let hooks = launch
+        .hooks
+        .as_ref()
+        .context("a harness with sessions needs hooks")?;
+    // The agent is not running, so no other session's file is in use.
+    argv.extend(hook_args(&app.home, spec.harness, hooks, &id, &[])?);
     if let Some(prompt) = prompt {
         argv.extend(spec.harness.prompt_args(prompt).unwrap_or_default());
     }
@@ -413,14 +499,8 @@ fn launch_argv(
 /// Which session to run, and whether it is resumed. A recorded session that
 /// never got a transcript (the agent died before writing one) cannot be
 /// resumed, so it is started afresh under the same id.
-fn pick_session(
-    app: &App,
-    task: &TaskRecord,
-    spec: &AgentSpec,
-    dir: &Path,
-    session: Option<&str>,
-) -> Result<(String, bool)> {
-    let known = app.db.list_task_sessions(&task.id)?;
+fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)> {
+    let (spec, dir, known) = (&launch.spec, &launch.dir, &launch.known_sessions);
     let id = match session {
         Some(id) => {
             let id = id.trim();
@@ -431,13 +511,13 @@ fn pick_session(
                 bail!(
                     "task {} has no session {id} that jeet or {} knows of; `jeet task ls` \
                      shows its tasks, and ctrl-s in a task's explorer its sessions",
-                    task.slug,
+                    launch.slug,
                     spec.harness.name()
                 );
             }
             id.to_string()
         }
-        None => match latest_session(dir, &known) {
+        None => match latest_session(dir, known) {
             Some(id) => id,
             None => return Ok((Uuid::new_v4().to_string(), false)),
         },
