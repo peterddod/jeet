@@ -3577,16 +3577,20 @@ impl Screen<'_> {
             Update::Review {
                 pr,
                 found: Ok(found),
-            } if crate::review::pr_done(found.state) => self
-                .ui
-                .idle_review_of(pr)
-                .map(|row| (row.task.id.clone(), pr.clone(), found.state)),
+            } if crate::review::pr_done(found.state) => self.ui.idle_review_of(pr).map(|row| {
+                (
+                    row.task.id.clone(),
+                    pr.clone(),
+                    found.state,
+                    found.closed_at,
+                )
+            }),
             _ => None,
         };
         let Update::Prs(found) = update else {
             self.ui.apply(update);
-            if let Some((id, pr, state)) = done {
-                self.retire_review(&id, &pr, state);
+            if let Some((id, pr, state, closed_at)) = done {
+                self.retire_review(&id, &pr, state, closed_at);
             }
             return;
         };
@@ -3610,7 +3614,7 @@ impl Screen<'_> {
     /// PR is `state`: not while its agent is mid-turn (a later look tries
     /// again), and not when archiving would delete ignored files a build
     /// does not make again.
-    fn retire_review(&mut self, id: &str, pr: &PrKey, state: &str) {
+    fn retire_review(&mut self, id: &str, pr: &PrKey, state: &str, closed_at: Option<i64>) {
         if self.kept_reviews.contains(id) {
             return;
         }
@@ -3620,7 +3624,7 @@ impl Screen<'_> {
         let app = self.app;
         let label = format!("archiving the review of {}: it is {state}", pr.label());
         let outcome = self
-            .progress(&label, || crate::review::retire(app, &task))
+            .progress(&label, || crate::review::retire(app, &task, closed_at))
             .and_then(|inner| inner);
         match outcome {
             Ok(crate::review::Retired::Archived(warnings)) => {
@@ -3635,6 +3639,9 @@ impl Screen<'_> {
                 self.ui.set_status(line);
             }
             Ok(crate::review::Retired::Busy(_)) => {}
+            Ok(crate::review::Retired::BroughtBack) => {
+                self.kept_reviews.insert(id.to_string());
+            }
             Ok(crate::review::Retired::Kept(why)) => {
                 self.kept_reviews.insert(id.to_string());
                 self.ui.set_status(format!(
@@ -6061,6 +6068,7 @@ mod tests {
                 title: "Speed up login".into(),
                 state: "open",
                 verdict: reviews::Verdict::Awaiting,
+                closed_at: None,
             }),
         });
         press(&mut ui, KeyCode::Char('/'));
@@ -6188,6 +6196,7 @@ mod tests {
             title: "t".into(),
             state: "open",
             verdict: reviews::Verdict::Approved,
+            closed_at: None,
         };
         ui.apply(Update::Review {
             pr: pr_key(1),

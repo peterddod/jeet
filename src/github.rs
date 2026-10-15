@@ -230,11 +230,14 @@ pub struct ReviewedPr {
     pub pr: PullRequest,
     #[serde(default)]
     pub latest_reviews: Vec<LatestReview>,
+    /// When it was merged or closed, as GitHub writes it; None while open.
+    #[serde(default)]
+    pub closed_at: Option<String>,
 }
 
 /// A PR by number, with its latest reviews.
 pub fn pr_review(repo_dir: &Path, number: u64) -> Result<ReviewedPr> {
-    let fields = format!("{PR_FIELDS},latestReviews");
+    let fields = format!("{PR_FIELDS},latestReviews,closedAt");
     let text = gh_ok(
         repo_dir,
         &["pr", "view", &number.to_string(), "--json", &fields],

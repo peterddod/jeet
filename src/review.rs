@@ -895,6 +895,32 @@ pub enum Retired {
     Busy(String),
     /// Left until the user archives it by hand, and why.
     Kept(String),
+    /// Brought back by the user after its PR was done: theirs to archive.
+    BroughtBack,
+}
+
+/// Under the task directory's `.jeet`: when a review task was last
+/// unarchived, so one brought back after its PR was done is not archived
+/// again behind the user's back.
+const BROUGHT_BACK_FILE: &str = "brought-back";
+
+/// Note that review task `task` was unarchived just now. Best effort.
+pub fn mark_brought_back(app: &App, task: &TaskRecord) {
+    if task.kind != TaskKind::Review {
+        return;
+    }
+    let dir = crate::tasks::task_dir(app, task).join(crate::tasks::MARKER_DIR);
+    let _ = std::fs::write(dir.join(BROUGHT_BACK_FILE), now_secs().to_string());
+}
+
+/// When review task `task` was last unarchived, if it ever was.
+fn brought_back_at(app: &App, task: &TaskRecord) -> Option<i64> {
+    let dir = crate::tasks::task_dir(app, task).join(crate::tasks::MARKER_DIR);
+    std::fs::read_to_string(dir.join(BROUGHT_BACK_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Whether `activity` leaves a review free to archive: its agent idle,
@@ -943,10 +969,15 @@ pub fn rebuildable(path: &str) -> bool {
 /// work kept in the trunk to come back on unarchive. Not while its agent
 /// is mid-turn ([`idle`]), and not when a worktree has ignored files that
 /// are not [`rebuildable`], which archiving would delete with no one there
-/// to say yes.
-pub fn retire(app: &App, task: &TaskRecord) -> Result<Retired> {
+/// to say yes. Nor when the user brought it back after the PR was done
+/// at `closed_at` (unknown: any time it was brought back counts).
+pub fn retire(app: &App, task: &TaskRecord, closed_at: Option<i64>) -> Result<Retired> {
     if task.kind != TaskKind::Review || task.state != crate::db::tasks::TaskState::Active {
         return Ok(Retired::Kept("not an active review".into()));
+    }
+    if brought_back_at(app, task).is_some_and(|back| closed_at.is_none_or(|closed| back >= closed))
+    {
+        return Ok(Retired::BroughtBack);
     }
     let activity = crate::runtime::shown_activity(app, task, tmux::available());
     if !idle(&activity) {
@@ -1000,8 +1031,15 @@ pub fn sweep(app: &App) -> Result<Vec<String>> {
         let Some(repo) = app.db.get_repo(&repo_id)? else {
             continue;
         };
-        let state = match crate::github::pr_view(Path::new(&repo.trunk_path), number) {
-            Ok(pr) => pr.state_label(),
+        let (state, closed_at) = match crate::github::pr_review(Path::new(&repo.trunk_path), number)
+        {
+            Ok(found) => (
+                found.pr.state_label(),
+                found
+                    .closed_at
+                    .as_deref()
+                    .and_then(crate::github::parse_timestamp),
+            ),
             Err(e) => {
                 lines.push(format!("could not ask GitHub about #{number}: {e:#}"));
                 continue;
@@ -1010,7 +1048,7 @@ pub fn sweep(app: &App) -> Result<Vec<String>> {
         if !pr_done(state) {
             continue;
         }
-        match retire(app, &task) {
+        match retire(app, &task, closed_at) {
             Ok(Retired::Archived(warnings)) => {
                 lines.push(format!(
                     "archived review {}: #{number} is {state}",
@@ -1018,8 +1056,9 @@ pub fn sweep(app: &App) -> Result<Vec<String>> {
                 ));
                 lines.extend(warnings.iter().map(|w| format!("{}: {w}", task.slug)));
             }
-            // Tried again on the next poll, once the agent is idle.
-            Ok(Retired::Busy(_)) => {}
+            // Tried again on the next poll, once the agent is idle; one
+            // the user brought back is theirs.
+            Ok(Retired::Busy(_) | Retired::BroughtBack) => {}
             Ok(Retired::Kept(why)) => lines.push(format!(
                 "review {} not archived though #{number} is {state}: {why}",
                 task.slug

@@ -862,6 +862,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             title,
             state,
             verdict,
+            ..
         })) => (
             *state,
             state_color(state),
@@ -2845,6 +2846,7 @@ mod tests {
                 title: "Add \u{1b}]8;;x\u{7}reviews".into(),
                 state: "draft",
                 verdict: Verdict::ChangesRequested,
+                closed_at: None,
             }),
         );
         ui.reviewed.insert(
@@ -2853,6 +2855,7 @@ mod tests {
                 title: "Old fix".into(),
                 state: "merged",
                 verdict: Verdict::Approved,
+                closed_at: None,
             }),
         );
         ui.reviewed

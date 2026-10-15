@@ -4281,8 +4281,8 @@ mv "$here/calls/.call.$$" "$here/calls/call.$$"
 [ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
 pr() {
   # number title state draft branch cross additions deletions
-  printf '{"number":%s,"title":"%s","url":"https://github.com/acme/widget/pull/%s","state":"%s","isDraft":%s,"reviewDecision":"","headRefName":"%s","headRefOid":"abc123","baseRefName":"main","isCrossRepository":%s,"additions":%s,"deletions":%s,"updatedAt":"2026-10-0%sT00:00:00Z"}' \
-    "$1" "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$(( $1 % 9 + 1 ))"
+  printf '{"number":%s,"title":"%s","url":"https://github.com/acme/widget/pull/%s","state":"%s","isDraft":%s,"reviewDecision":"","headRefName":"%s","headRefOid":"abc123","baseRefName":"main","isCrossRepository":%s,"additions":%s,"deletions":%s,"updatedAt":"2026-10-0%sT00:00:00Z","closedAt":%s}' \
+    "$1" "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$(( $1 % 9 + 1 ))" "${STUB_CLOSED_AT:-null}"
 }
 case "$1 $2" in
   "pr view")
@@ -4497,6 +4497,30 @@ fn watch_archives_a_review_once_its_pr_is_merged() {
         "half a review\n"
     );
     assert_eq!(state(), "active");
+
+    // Brought back after the PR was done, it is the user's to archive.
+    let closed_before = [
+        ("PATH", path.as_str()),
+        ("STUB_PR7_STATE", "MERGED"),
+        ("STUB_CLOSED_AT", "\"2020-01-01T00:00:00Z\""),
+    ];
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &closed_before);
+    assert!(
+        !stderr_of(&output).contains("review-widget-7"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(state(), "active");
+    // Done again after it was brought back: archived again.
+    let closed_after = [
+        ("PATH", path.as_str()),
+        ("STUB_PR7_STATE", "CLOSED"),
+        ("STUB_CLOSED_AT", "\"2099-01-01T00:00:00Z\""),
+    ];
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &closed_after);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("#7 is closed"), "{stderr}");
+    assert_eq!(state(), "archived");
 }
 
 /// The review command runs in the PR's worktree, so Claude files its

@@ -689,7 +689,10 @@ A review whose PR is merged or closed is archived for you, the way `a` (or
 and its uncommitted work kept to come back if the PR is reviewed again. It is
 done by each `jeet watch --once` poll and when the reviews tab hears from
 GitHub, and never while the review's agent is mid-turn — running, asking you
-something, or with no hooks to say — so it waits for the agent to go idle.
+something, or with no hooks to say — so it waits for the agent to go idle. A
+review you bring back (`a`, or `jeet review`) after its PR was done stays
+until you archive it; one that is merged or closed again later is archived
+again.
 Archiving deletes the files git ignores; unattended, that is allowed only for
 build caches a build makes again (`target/`, `node_modules/`, `.venv/`,
 `__pycache__/`, `dist/`, `build/` and the like). A review with any other

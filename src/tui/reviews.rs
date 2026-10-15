@@ -234,12 +234,15 @@ pub struct PrReview {
     /// `open`, `draft`, `merged` or `closed`.
     pub state: &'static str,
     pub verdict: Verdict,
+    /// When it was merged or closed, in seconds since the epoch.
+    pub closed_at: Option<i64>,
 }
 
 impl From<ReviewedPr> for PrReview {
     fn from(found: ReviewedPr) -> Self {
         PrReview {
             state: found.pr.state_label(),
+            closed_at: found.closed_at.as_deref().and_then(github::parse_timestamp),
             verdict: verdict(&found.pr.review_decision, &found.latest_reviews),
             title: found.pr.title,
         }
