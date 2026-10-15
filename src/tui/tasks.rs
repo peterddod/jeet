@@ -211,7 +211,8 @@ pub enum View {
     Active,
     /// The tree under the assistant (design §6).
     Agents,
-    /// Every review, active or archived, and review jobs with no task.
+    /// The active reviews and review jobs with no task, or, toggled with
+    /// `A`, the archived reviews: reviews are shown here alone.
     Reviews,
     Archived,
 }
@@ -1106,6 +1107,8 @@ pub struct TasksUi {
     pub legacy: Vec<Legacy>,
     /// The reviews view's lines, in display order.
     pub reviews: Vec<ReviewLine>,
+    /// `A` in the reviews view: it lists the archived reviews instead.
+    pub archived_reviews: bool,
     /// What GitHub last said of each reviewed PR, or why it could not say.
     pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
 }
@@ -1146,6 +1149,7 @@ impl TasksUi {
             user: false,
             legacy: Vec::new(),
             reviews: Vec::new(),
+            archived_reviews: false,
             reviewed: HashMap::new(),
         };
         ui.set_rows(rows);
@@ -1223,9 +1227,13 @@ impl TasksUi {
                 .filter(|line| matches!(line.source, Source::Legacy(_)))
                 .and_then(|line| line.pr.clone());
             let reviewed = &self.reviewed;
-            self.reviews = reviews::lines(&self.rows, &self.legacy, &self.filter, |pr| {
-                reviewed.get(pr)?.as_ref().ok().map(|r| r.title.clone())
-            });
+            self.reviews = reviews::lines(
+                &self.rows,
+                &self.legacy,
+                self.archived_reviews,
+                &self.filter,
+                |pr| reviewed.get(pr)?.as_ref().ok().map(|r| r.title.clone()),
+            );
             self.selected = keep
                 .and_then(|id| {
                     self.reviews.iter().position(
@@ -1272,8 +1280,10 @@ impl TasksUi {
         // The active view lists one level; a filter searches them all.
         let here = self.path.last().map(String::as_str);
         let level = self.view == View::Active && self.filter.is_empty();
+        // Reviews are the reviews view's alone.
         let in_view: Vec<usize> = (0..self.rows.len())
             .filter(|&i| self.rows[i].task.state == state)
+            .filter(|&i| self.rows[i].task.kind != TaskKind::Review)
             .filter(|&i| !level || self.tree_parent(&self.rows[i]) == here)
             .collect();
         let names = in_view.iter().map(|&i| self.rows[i].task.name.as_str());
@@ -1325,6 +1335,17 @@ impl TasksUi {
         }
     }
 
+    /// The active review task of `pr`, when its agent is idle as last
+    /// polled: what to archive now that GitHub says the PR is done.
+    pub fn idle_review_of(&self, pr: &PrKey) -> Option<&TaskRow> {
+        self.rows.iter().find(|row| {
+            row.task.kind == TaskKind::Review
+                && row.task.state == TaskState::Active
+                && reviews::task_pr(row).as_ref() == Some(pr)
+                && row.activity.as_ref().is_some_and(crate::review::idle)
+        })
+    }
+
     /// Replace the review jobs on disk with a fresh read.
     pub fn set_legacy(&mut self, legacy: Vec<Legacy>) {
         if legacy != self.legacy {
@@ -1334,11 +1355,14 @@ impl TasksUi {
         }
     }
 
-    /// Every PR the reviews view lists, filter or not: what GitHub is asked.
+    /// Every PR the reviews view lists, active or archived, filter or not:
+    /// what GitHub is asked.
     pub fn reviewed_prs(&self) -> Vec<PrKey> {
         let mut seen = HashSet::new();
-        reviews::lines(&self.rows, &self.legacy, "", |_| None)
+        let lines = |archived| reviews::lines(&self.rows, &self.legacy, archived, "", |_| None);
+        lines(false)
             .into_iter()
+            .chain(lines(true))
             .filter_map(|line| line.pr)
             .filter(|pr| seen.insert(pr.clone()))
             .collect()
@@ -1385,6 +1409,7 @@ impl TasksUi {
         row.task.kind == TaskKind::Manager
             || self.rows.iter().any(|r| {
                 r.task.state == TaskState::Active
+                    && r.task.kind != TaskKind::Review
                     && r.task.parent_id.as_deref() == Some(&row.task.id)
             })
     }
@@ -1477,9 +1502,14 @@ impl TasksUi {
         let Some(row) = self.row(id) else {
             return;
         };
-        self.view = match row.task.state {
-            TaskState::Active => View::Active,
-            TaskState::Archived => View::Archived,
+        let archived = row.task.state == TaskState::Archived;
+        self.view = match (row.task.kind, archived) {
+            (TaskKind::Review, _) => {
+                self.archived_reviews = archived;
+                View::Reviews
+            }
+            (_, false) => View::Active,
+            (_, true) => View::Archived,
         };
         if self.view == View::Active {
             self.path = self.ancestors(id);
@@ -1491,19 +1521,24 @@ impl TasksUi {
         }
     }
 
-    /// How many tasks `view` has; for the agents view, the tree's nodes.
+    /// How many tasks `view` has; for the agents view, the tree's nodes,
+    /// and for the reviews view, its active lines.
     pub fn count(&self, view: View) -> usize {
         match view.state() {
             Some(state) => self
                 .rows
                 .iter()
-                .filter(|row| row.task.state == state)
+                .filter(|row| row.task.state == state && row.task.kind != TaskKind::Review)
                 .count(),
-            None if view == View::Reviews => {
-                reviews::lines(&self.rows, &self.legacy, "", |_| None).len()
-            }
+            None if view == View::Reviews => self.review_count(false),
             None => self.shown.len(),
         }
+    }
+
+    /// How many lines the reviews view has, unfiltered: active, or
+    /// `archived`.
+    pub fn review_count(&self, archived: bool) -> usize {
+        reviews::lines(&self.rows, &self.legacy, archived, "", |_| None).len()
     }
 
     /// Take in what a background thread found out.
@@ -1858,6 +1893,16 @@ impl TasksUi {
                 None
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
+            KeyCode::Char('A') if self.view == View::Reviews => {
+                self.archived_reviews = !self.archived_reviews;
+                self.selected = 0;
+                self.refresh_visible(None);
+                self.set_status(match self.archived_reviews {
+                    true => "archived reviews · A back to the active ones",
+                    false => "active reviews · A shows the archived ones",
+                });
+                None
+            }
             // The active view is a tree, walked like the explorer's folders.
             KeyCode::Enter | KeyCode::Right if self.view == View::Active => {
                 match self.selected_row() {
@@ -3434,6 +3479,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         ui,
         bg: Background::start(&app.home, &app.config),
         reviews_asked: None,
+        kept_reviews: HashSet::new(),
     };
     let result = screen.go(start);
     let exit = screen.ui.exit.take();
@@ -3451,6 +3497,9 @@ struct Screen<'a> {
     bg: Background,
     /// When GitHub was last asked about the reviews, if it has been.
     reviews_asked: Option<Instant>,
+    /// Reviews whose PR is done that archiving refused or kept back: not
+    /// tried again while the screen is open.
+    kept_reviews: HashSet<String>,
 }
 
 impl Screen<'_> {
@@ -3523,8 +3572,22 @@ impl Screen<'_> {
     /// index here, on the screen's thread: that is quick, and the threads
     /// that ask GitHub have no index of their own.
     fn take(&mut self, update: Update) {
+        // A reviewed PR merged or closed archives its review, once idle.
+        let done = match &update {
+            Update::Review {
+                pr,
+                found: Ok(found),
+            } if crate::review::pr_done(found.state) => self
+                .ui
+                .idle_review_of(pr)
+                .map(|row| (row.task.id.clone(), pr.clone(), found.state)),
+            _ => None,
+        };
         let Update::Prs(found) = update else {
             self.ui.apply(update);
+            if let Some((id, pr, state)) = done {
+                self.retire_review(&id, &pr, state);
+            }
             return;
         };
         if let Err(e) = pr_history::record(self.app, &found) {
@@ -3540,6 +3603,52 @@ impl Screen<'_> {
             Err(e) => self
                 .ui
                 .set_status(format!("could not read pull requests: {e:#}")),
+        }
+    }
+
+    /// Archive review task `id`, as `jeet watch` does, now GitHub says its
+    /// PR is `state`: not while its agent is mid-turn (a later look tries
+    /// again), and not when archiving would delete ignored files a build
+    /// does not make again.
+    fn retire_review(&mut self, id: &str, pr: &PrKey, state: &str) {
+        if self.kept_reviews.contains(id) {
+            return;
+        }
+        let Ok(Some(task)) = self.app.db.get_task(id) else {
+            return;
+        };
+        let app = self.app;
+        let label = format!("archiving the review of {}: it is {state}", pr.label());
+        let outcome = self
+            .progress(&label, || crate::review::retire(app, &task))
+            .and_then(|inner| inner);
+        match outcome {
+            Ok(crate::review::Retired::Archived(warnings)) => {
+                let mut line = format!(
+                    "archived the review of {}: it is {state} · A shows archived reviews",
+                    pr.label()
+                );
+                if let Some(warning) = warnings.first() {
+                    line.push_str(&format!(" · {warning}"));
+                }
+                self.refresh(false);
+                self.ui.set_status(line);
+            }
+            Ok(crate::review::Retired::Busy(_)) => {}
+            Ok(crate::review::Retired::Kept(why)) => {
+                self.kept_reviews.insert(id.to_string());
+                self.ui.set_status(format!(
+                    "kept the review of {} though it is {state}: {why} · a archives it",
+                    pr.label()
+                ));
+            }
+            Err(e) => {
+                self.kept_reviews.insert(id.to_string());
+                self.ui.set_status(format!(
+                    "could not archive the review of {}: {e:#}",
+                    pr.label()
+                ));
+            }
         }
     }
 
@@ -5933,15 +6042,17 @@ mod tests {
     #[test]
     fn the_reviews_view_lists_every_review_and_jobs_no_task_holds() {
         let mut ui = reviews_sample();
-        assert_eq!(ui.count(View::Reviews), 4);
+        assert_eq!(ui.count(View::Reviews), 3);
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Reviews);
-        // Active newest first, then archived, then the lone job.
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "old", "job 7"]);
+        // Active newest first, then the lone job; the archived one is not
+        // among them.
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        // GitHub is asked about the archived ones too.
         assert_eq!(
             ui.reviewed_prs(),
-            [pr_key(2), pr_key(1), pr_key(4), pr_key(7)]
+            [pr_key(2), pr_key(1), pr_key(7), pr_key(4)]
         );
         // The filter also matches the title GitHub gave.
         ui.apply(Update::Review {
@@ -5956,7 +6067,94 @@ mod tests {
         type_text(&mut ui, "login");
         assert_eq!(reviews_shown(&ui), ["r1"]);
         press(&mut ui, KeyCode::Esc);
-        assert_eq!(reviews_shown(&ui).len(), 4);
+        assert_eq!(reviews_shown(&ui).len(), 3);
+    }
+
+    #[test]
+    fn a_toggles_the_reviews_view_to_the_archived_reviews_and_back() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(ui.archived_reviews);
+        assert_eq!(reviews_shown(&ui), ["old"]);
+        assert_eq!(ui.review_count(true), 1);
+        // The tab still counts the active ones.
+        assert_eq!(ui.count(View::Reviews), 3);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Unarchive {
+                task_id: "old".into()
+            })
+        );
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(!ui.archived_reviews);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        // Selecting a review goes to the reviews view's list that has it.
+        ui.view = View::Active;
+        ui.select("old");
+        assert_eq!((ui.view, ui.archived_reviews), (View::Reviews, true));
+        assert_eq!(ui.selected_id(), Some("old"));
+        ui.select("r1");
+        assert_eq!((ui.view, ui.archived_reviews), (View::Reviews, false));
+        assert_eq!(ui.selected_id(), Some("r1"));
+    }
+
+    #[test]
+    fn reviews_are_in_no_task_list() {
+        let mut parent = task("m", "boss", TaskState::Active, 50);
+        parent.task.kind = TaskKind::Manager;
+        let mut child = review_row("r3", TaskState::Active, 60, 3);
+        child.task.parent_id = Some("m".into());
+        let mut rows = reviews_sample().rows;
+        rows.extend([parent, child]);
+        let mut ui = TasksUi::new(rows);
+        // Active: the work and the manager, not the reviews.
+        assert_eq!(shown(&ui), ["some work", "boss"]);
+        assert_eq!(ui.count(View::Active), 2);
+        // A manager with only a review under it has nothing to go into.
+        let boss = ui.row("m").unwrap().clone();
+        assert!(ui.enterable(&boss));
+        // Nor does a task enter for a review under it.
+        let mut over = ui.row("w").unwrap().clone();
+        over.task.id = "m".into();
+        over.task.kind = TaskKind::Work;
+        assert!(!ui.enterable(&over));
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.visible.len(), 0);
+        press(&mut ui, KeyCode::Left);
+        // Filtering searches every level, still without reviews.
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "review");
+        assert!(ui.visible.is_empty());
+        press(&mut ui, KeyCode::Esc);
+        // Archived: none of the archived reviews.
+        ui.view = View::Archived;
+        ui.set_rows(ui.rows.clone());
+        assert!(ui.visible.is_empty());
+        assert_eq!(ui.count(View::Archived), 0);
+    }
+
+    #[test]
+    fn a_done_pr_finds_its_review_only_once_its_agent_is_idle() {
+        let mut ui = reviews_sample();
+        assert!(ui.idle_review_of(&pr_key(1)).is_none(), "not polled yet");
+        let status = |activity| Update::Status {
+            id: "r1".into(),
+            activity: Some(activity),
+            last_activity: 0,
+            unanchored: false,
+        };
+        ui.apply(status(Activity::Running { detail: None }));
+        assert!(ui.idle_review_of(&pr_key(1)).is_none(), "mid-turn");
+        ui.apply(status(Activity::Waiting { detail: None }));
+        assert!(ui.idle_review_of(&pr_key(1)).is_none(), "asking");
+        ui.apply(status(Activity::Idle { since: 0 }));
+        assert_eq!(ui.idle_review_of(&pr_key(1)).unwrap().task.id, "r1");
+        // An archived review, or a job no task holds, is never archived.
+        assert!(ui.idle_review_of(&pr_key(4)).is_none());
+        assert!(ui.idle_review_of(&pr_key(7)).is_none());
     }
 
     #[test]
@@ -5976,7 +6174,7 @@ mod tests {
             started_at: 0,
         };
         ui.set_legacy(vec![job(8), job(2), job(7)]);
-        assert_eq!(reviews_shown(&ui), ["r2", "r1", "old", "job 8", "job 7"]);
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 8", "job 7"]);
         assert_eq!(
             ui.selected_review().and_then(|l| l.pr.clone()),
             Some(pr_key(7))
@@ -6054,15 +6252,8 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive { task_id, .. }) if task_id == "r2"
         ));
-        press(&mut ui, KeyCode::Down);
-        press(&mut ui, KeyCode::Down);
-        assert_eq!(
-            press(&mut ui, KeyCode::Char('a')),
-            Some(Action::Unarchive {
-                task_id: "old".into()
-            })
-        );
         // A job no task holds: its diff, but no session to open.
+        press(&mut ui, KeyCode::Down);
         press(&mut ui, KeyCode::Down);
         assert_eq!(
             press(&mut ui, KeyCode::Char('v')),

@@ -752,8 +752,9 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     // A task with a parent sees itself and the tasks below it.
     let caller = permissions::caller(app)?;
     let mut list: Vec<(i64, TaskRecord)> = Vec::new();
+    // Reviews are listed in the tasks list's reviews view alone.
     for task in app.db.list_tasks(Some(state))? {
-        if permissions::lists(app, &caller, &task)? {
+        if task.kind != TaskKind::Review && permissions::lists(app, &caller, &task)? {
             list.push((runtime::last_activity(app, &task), task));
         }
     }
@@ -791,9 +792,7 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             TaskKind::Manager => " (manager)",
             _ => "",
         };
-        // A review says so, and which PR it is of.
-        let name =
-            tasks::review_label(&task, &rows).unwrap_or_else(|| name.unwrap_or("-").to_string());
+        let name = name.unwrap_or("-");
         println!(
             "{:<28} {:<28} {:<10} {:<24} {name}{kind}",
             task.slug,

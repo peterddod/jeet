@@ -874,9 +874,216 @@ fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Retiring reviews whose PR is done
+// ---------------------------------------------------------------------------
+
+/// Whether a PR in GitHub's `state` (as [`PullRequest::state_label`] has
+/// it) has no more review to do: merged, or closed unmerged. A closed PR
+/// may be reopened; `jeet review` then brings its archived task back.
+pub fn pr_done(state: &str) -> bool {
+    matches!(state, "merged" | "closed")
+}
+
+/// What [`retire`] did with a review whose PR is done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retired {
+    /// Archived, with what archiving warned of.
+    Archived(Vec<String>),
+    /// Left for now: its agent is mid-turn, or jeet cannot tell it is not.
+    /// A later look tries again.
+    Busy(String),
+    /// Left until the user archives it by hand, and why.
+    Kept(String),
+}
+
+/// Whether `activity` leaves a review free to archive: its agent idle,
+/// gone or never started. One running, starting, asking the user, or with
+/// no hooks to say (`Live`) is mid-turn as far as jeet can tell.
+pub fn idle(activity: &Activity) -> bool {
+    matches!(
+        activity,
+        Activity::Idle { .. } | Activity::NotRunning | Activity::NotStarted | Activity::Ended
+    )
+}
+
+/// Whether an ignored `path` (as `git status --ignored` lists it, a
+/// directory with a trailing `/`) is a build cache or tool clutter that a
+/// build makes again: what an unattended archive may let go with its
+/// worktree, as `jeet task archive --force` would. Anything else — a
+/// `.env`, local config — keeps the review for the user to archive.
+pub fn rebuildable(path: &str) -> bool {
+    const CACHES: &[&str] = &[
+        "target",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".gradle",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".parcel-cache",
+        ".cache",
+        ".build",
+        "build",
+        "dist",
+        ".DS_Store",
+    ];
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    CACHES.contains(&name) || name.ends_with(".pyc")
+}
+
+/// Archive review task `task`, whose PR is done, the way `jeet task
+/// archive` does: its agent ended, its worktrees removed, their uncommitted
+/// work kept in the trunk to come back on unarchive. Not while its agent
+/// is mid-turn ([`idle`]), and not when a worktree has ignored files that
+/// are not [`rebuildable`], which archiving would delete with no one there
+/// to say yes.
+pub fn retire(app: &App, task: &TaskRecord) -> Result<Retired> {
+    if task.kind != TaskKind::Review || task.state != crate::db::tasks::TaskState::Active {
+        return Ok(Retired::Kept("not an active review".into()));
+    }
+    let activity = crate::runtime::shown_activity(app, task, tmux::available());
+    if !idle(&activity) {
+        return Ok(Retired::Busy(format!(
+            "its agent is {}",
+            activity.label_with(false)
+        )));
+    }
+    for row in app.db.list_task_worktrees(&task.id)? {
+        let path = crate::tasks::worktree_dir(app, task, &row.dir_name);
+        if !path.exists() {
+            continue;
+        }
+        let kept: Vec<String> = match crate::git::ignored_paths(&path) {
+            Ok(paths) => paths.into_iter().filter(|p| !rebuildable(p)).collect(),
+            Err(e) => {
+                return Ok(Retired::Kept(format!(
+                    "{}: could not list the files git ignores ({e:#})",
+                    row.dir_name
+                )))
+            }
+        };
+        if let Some(first) = kept.first() {
+            return Ok(Retired::Kept(format!(
+                "{}: archiving would delete ignored files such as {first}",
+                row.dir_name
+            )));
+        }
+    }
+    crate::tasks::archive(app, task, false).map(Retired::Archived)
+}
+
+/// Retire every active review whose PR GitHub says is done: one line for
+/// each review archived or kept back, and for each PR that could not be
+/// asked about. For `jeet watch`, which runs unattended.
+pub fn sweep(app: &App) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    let reviews = app
+        .db
+        .list_tasks(Some(crate::db::tasks::TaskState::Active))?
+        .into_iter()
+        .filter(|task| task.kind == TaskKind::Review);
+    for task in reviews {
+        let rows = app.db.list_task_worktrees(&task.id)?;
+        let Some((repo_id, number)) = rows
+            .iter()
+            .find_map(|row| Some((row.repo_id.clone(), row.pr_number?)))
+        else {
+            continue;
+        };
+        let Some(repo) = app.db.get_repo(&repo_id)? else {
+            continue;
+        };
+        let state = match crate::github::pr_view(Path::new(&repo.trunk_path), number) {
+            Ok(pr) => pr.state_label(),
+            Err(e) => {
+                lines.push(format!("could not ask GitHub about #{number}: {e:#}"));
+                continue;
+            }
+        };
+        if !pr_done(state) {
+            continue;
+        }
+        match retire(app, &task) {
+            Ok(Retired::Archived(warnings)) => {
+                lines.push(format!(
+                    "archived review {}: #{number} is {state}",
+                    task.slug
+                ));
+                lines.extend(warnings.iter().map(|w| format!("{}: {w}", task.slug)));
+            }
+            // Tried again on the next poll, once the agent is idle.
+            Ok(Retired::Busy(_)) => {}
+            Ok(Retired::Kept(why)) => lines.push(format!(
+                "review {} not archived though #{number} is {state}: {why}",
+                task.slug
+            )),
+            Err(e) => lines.push(format!("could not archive review {}: {e:#}", task.slug)),
+        }
+    }
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_is_done_with_its_pr_merged_or_closed() {
+        assert!(pr_done("merged") && pr_done("closed"));
+        assert!(!pr_done("open") && !pr_done("draft"));
+    }
+
+    #[test]
+    fn only_an_idle_or_gone_agent_lets_its_review_be_archived() {
+        for free in [
+            Activity::Idle { since: 0 },
+            Activity::NotRunning,
+            Activity::NotStarted,
+            Activity::Ended,
+        ] {
+            assert!(idle(&free), "{free:?}");
+        }
+        // Mid-turn, asking the user, or with no hooks to say: left alone.
+        for busy in [
+            Activity::Running { detail: None },
+            Activity::Waiting { detail: None },
+            Activity::Starting,
+            Activity::Live,
+        ] {
+            assert!(!idle(&busy), "{busy:?}");
+        }
+    }
+
+    #[test]
+    fn build_caches_may_go_unattended_but_nothing_else() {
+        for cache in [
+            "target/",
+            "web/node_modules/",
+            ".venv/",
+            "pkg/__pycache__/",
+            "a/b.pyc",
+            ".DS_Store",
+            "dist/",
+        ] {
+            assert!(rebuildable(cache), "{cache}");
+        }
+        for kept in [
+            ".env",
+            "config.local.toml",
+            "secrets/",
+            "targets/",
+            "my-target/",
+        ] {
+            assert!(!rebuildable(kept), "{kept}");
+        }
+    }
 
     fn pr() -> PullRequest {
         PullRequest {
