@@ -1888,6 +1888,27 @@ const PENDING: &str = "reviews_v8_pending";
 /// Under `$JEET_HOME/logs`: what [`migrate_leftovers`] did, one line each.
 const MIGRATE_LOG: &str = "migrate-v8.log";
 
+/// The lock `name` under `$JEET_HOME/locks`, or None while another command
+/// holds it: what it guards is being done already, and is left to it.
+fn lock_or_skip(app: &App, name: &str) -> Result<Option<std::fs::File>> {
+    let locks = app.home.join("locks");
+    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
+    let path = locks.join(name);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+}
+
 /// What the move of reviews out of `tasks` (schema v8) left for jeet to do
 /// on disk, once, at the first command after the upgrade. Best effort, and
 /// idempotent: what it cannot do now it does at the next command.
@@ -1913,23 +1934,15 @@ fn migrate(app: &App) -> Result<()> {
     if app.db.meta(PENDING)?.is_none() {
         return Ok(());
     }
-    let locks = app.home.join("locks");
-    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
-    let path = locks.join("reviews-migrate.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        // Another command is at it.
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("lock {}", path.display()))
-        }
-    }
+    // Held to the end of the step.
+    let Some(_lock) = lock_or_skip(app, "reviews-migrate.lock")? else {
+        return Ok(());
+    };
+    migrate_held(app)
+}
+
+/// [`migrate`] under its lock.
+fn migrate_held(app: &App) -> Result<()> {
     // Done by whoever held the lock before.
     if app.db.meta(PENDING)?.is_none() {
         return Ok(());
@@ -2176,23 +2189,15 @@ fn adopt(app: &App) -> Result<()> {
     if app.db.meta(JOBS_ADOPTED)?.is_some() {
         return Ok(());
     }
-    let locks = app.home.join("locks");
-    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
-    let path = locks.join("adopt-jobs.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        // Another command is at it.
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("lock {}", path.display()))
-        }
-    }
+    // Held to the end of the step.
+    let Some(_lock) = lock_or_skip(app, "adopt-jobs.lock")? else {
+        return Ok(());
+    };
+    adopt_held(app)
+}
+
+/// [`adopt`] under its lock.
+fn adopt_held(app: &App) -> Result<()> {
     // Done by whoever held the lock before.
     if app.db.meta(JOBS_ADOPTED)?.is_some() {
         return Ok(());
@@ -3200,7 +3205,7 @@ mod tests {
         let before = files();
         assert_eq!(before.len(), 10);
 
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
 
         let get = |repo: &str, n: u64| app.db.find_review(repo, n).unwrap();
         let gone = "github.com/gone/old";
@@ -3295,7 +3300,7 @@ mod tests {
         let one = get(api, 1).unwrap();
         app.db.delete_review(&one.id).unwrap();
         app.db.delete_meta(JOBS_ADOPTED).unwrap();
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         assert!(get(api, 1).is_none());
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
         let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
@@ -3304,7 +3309,7 @@ mod tests {
         // Looked through once: a file that turns up later is not adopted,
         // and nothing is logged twice.
         put(api, "10", Some(mk(10, "later", Some(5), Some(0))), "");
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         assert!(get(api, 10).is_none());
         assert_eq!(app.db.list_reviews(None).unwrap().len(), 7);
         let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
@@ -3330,14 +3335,14 @@ mod tests {
         std::fs::write(app.tasks_root(), "in the way").unwrap();
         let log = || std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap_or_default();
 
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
         assert_eq!(log().lines().count(), 1);
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         // The same failure is not logged again.
         assert_eq!(log().lines().count(), 1);
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
         let log = log();
         assert_eq!(log.lines().count(), 2, "{log}");
@@ -3393,7 +3398,7 @@ mod tests {
     fn no_job_files_leave_no_log_and_are_looked_for_once() {
         let home = tempfile::tempdir().unwrap();
         let app = test_app(home.path());
-        adopt(&app).unwrap();
+        adopt_held(&app).unwrap();
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
         assert!(!home.path().join("logs").join(ADOPT_LOG).exists());
     }
@@ -3631,7 +3636,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         // The dirty one: its work kept in the trunk, the worktree gone.
         assert!(!dirty.exists());
         let head = tasks::jeet_ref("head", "dup-dirty", "api");
@@ -3665,7 +3670,7 @@ mod tests {
 
         // Again: nothing is pending, so nothing changes or is logged.
         let before = std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap();
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         assert_eq!(
             std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap(),
             before
@@ -3686,7 +3691,7 @@ mod tests {
         .unwrap();
         std::fs::write(marker.join("brought-back"), "456").unwrap();
         app.db.set_meta_for_test(PENDING).unwrap();
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         let got = app.db.get_review(&review.id).unwrap().unwrap();
         assert_eq!(
             (got.asked_head.as_deref(), got.asked_at, got.brought_back_at),
@@ -3697,7 +3702,7 @@ mod tests {
         std::fs::write(marker.join("review.json"), marker_pr).unwrap();
         app.db.set_review_asked(&review.id, "newer", 999).unwrap();
         app.db.set_meta_for_test(PENDING).unwrap();
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         let got = app.db.get_review(&review.id).unwrap().unwrap();
         assert_eq!(got.asked_head.as_deref(), Some("newer"));
     }
@@ -3723,7 +3728,7 @@ mod tests {
         let worktree = worktree_path(&app, &review).unwrap();
         insert_leftover(&app, &repo, &review.id, "some-old-slug");
         insert_leftover(&app, &repo, "old-task", &review.slug);
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         assert!(worktree.is_dir());
         assert!(git::branch_exists(Path::new(&repo.trunk_path), "pr/7").unwrap());
         let rows = leftover_rows(&app);
@@ -3747,11 +3752,11 @@ mod tests {
         std::fs::create_dir_all(app.tasks_root().join("zz-dup-broken/api")).unwrap();
         insert_leftover(&app, &repo, "dup-broken", "zz-dup-broken");
         for _ in 0..2 {
-            migrate(&app).unwrap();
+            migrate_held(&app).unwrap();
             assert_eq!(leftover_rows(&app)[0].1, 0);
             assert!(app.db.meta(PENDING).unwrap().is_some());
         }
-        migrate(&app).unwrap();
+        migrate_held(&app).unwrap();
         let rows = leftover_rows(&app);
         assert_eq!(rows[0].1, 1);
         assert!(
