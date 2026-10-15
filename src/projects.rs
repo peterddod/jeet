@@ -24,7 +24,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::context::App;
-use crate::db::tasks::TaskRecord;
+use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::instructions::{self, AGENTS_MD, CLAUDE_MD};
 use crate::tasks;
 
@@ -37,6 +37,10 @@ const TASK_SKILLS: &str = ".claude/skills";
 const MANIFEST: &str = ".jeet/project-files";
 /// The built-in skill every task gets; a project cannot replace it.
 const RESERVED_SKILL: &str = "jeet";
+
+/// Where a manager keeps the project's AGENTS.md: its own AGENTS.md is the
+/// manager role's, so the project's sits beside it, imported from there.
+pub const MANAGER_INSTRUCTIONS: &str = "PROJECT.md";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,8 +301,14 @@ pub fn tasks_using(app: &App, name: &str) -> Result<Vec<TaskRecord>> {
 }
 
 /// Extra agent arguments for `task`, from the project it was made from — as
-/// the project is now, unlike its files. None without a project.
+/// the project is now, unlike its files. None without a project, and none
+/// for a manager.
 pub fn agent_args(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    // A manager's launch is jeet's: a project's arguments are for the
+    // coding agents of tasks, and could undo what a manager is run with.
+    if task.kind == TaskKind::Manager {
+        return Ok(Vec::new());
+    }
     match &task.project {
         Some(name) => Ok(load(app, name)?.config.agent.args),
         None => Ok(Vec::new()),
@@ -341,7 +351,20 @@ impl FileSync {
 /// has it, unless `force`. Likewise a file the project no longer has is
 /// deleted from the task only if the task never changed it. A file with no
 /// record — the task made it, or predates the record — counts as changed.
+#[cfg(test)]
 pub fn copy_files(project: &Project, task_dir: &Path, force: bool) -> Result<FileSync> {
+    copy_files_for(project, task_dir, force, false)
+}
+
+/// [`copy_files`] for a task's directory, or with `manager` a manager's: the
+/// project's skills as they are, but its AGENTS.md as `PROJECT.md`, and not
+/// its other instruction files, so the manager's own are never taken over.
+pub fn copy_files_for(
+    project: &Project,
+    task_dir: &Path,
+    force: bool,
+    manager: bool,
+) -> Result<FileSync> {
     let mut sync = FileSync::default();
     match instructions::migrate(&project.dir) {
         Ok(true) => sync.migrated.push(format!(
@@ -352,7 +375,7 @@ pub fn copy_files(project: &Project, task_dir: &Path, force: bool) -> Result<Fil
             "could not move the project's {CLAUDE_MD} to {AGENTS_MD} ({e:#}); copied it as it is"
         )),
     }
-    let wanted = project_files(&project.dir, &mut sync.skipped)?;
+    let wanted = project_files(&project.dir, manager, &mut sync.skipped)?;
     let before = read_manifest(task_dir);
     let mut after: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -444,21 +467,39 @@ pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
     }
-    let sync = copy_files(&project, &dir, force)?;
-    tasks::install_skill(&dir)?;
+    let manager = task.kind == TaskKind::Manager;
+    let sync = copy_files_for(&project, &dir, force, manager)?;
+    if manager {
+        tasks::link_project_instructions(&dir, &project.name)?;
+    } else {
+        tasks::install_skill(&dir)?;
+    }
     Ok(sync)
 }
 
 /// The files a task gets from a project, keyed by where they go in the task.
 /// Symlinks are skipped rather than followed out of the project, as is a
-/// skill named like the built-in one.
-fn project_files(project: &Path, skipped: &mut Vec<String>) -> Result<BTreeMap<String, PathBuf>> {
+/// skill named like the built-in one. A manager gets the project's AGENTS.md
+/// as [`MANAGER_INSTRUCTIONS`] and no other instruction file.
+fn project_files(
+    project: &Path,
+    manager: bool,
+    skipped: &mut Vec<String>,
+) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    for name in instructions::files() {
+    let names = match manager {
+        true => vec![AGENTS_MD],
+        false => instructions::files(),
+    };
+    for name in names {
         let path = project.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => {
-                out.insert(name.to_string(), path);
+                let rel = match manager {
+                    true => MANAGER_INSTRUCTIONS,
+                    false => name,
+                };
+                out.insert(rel.to_string(), path);
             }
             Ok(_) => skipped.push(format!("{name}: not a plain file; not copied")),
             Err(_) => {}
@@ -527,6 +568,7 @@ fn is_project_path(rel: &str) -> bool {
     let plain = manifest_path(Path::new(rel)).as_deref() == Some(rel);
     plain
         && (instructions::files().contains(&rel)
+            || rel == MANAGER_INSTRUCTIONS
             || rel
                 .strip_prefix(TASK_SKILLS)
                 .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/')))
@@ -689,11 +731,80 @@ mod tests {
     }
 
     #[test]
+    fn a_projects_agent_args_are_for_tasks_not_managers() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home: home.clone(),
+        };
+        let project = home.join("projects/web");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("project.toml"),
+            "[agent]\nargs = [\"--model\", \"opus\"]\n",
+        )
+        .unwrap();
+        let task = |kind| TaskRecord {
+            id: "t".into(),
+            slug: "t".into(),
+            name: "t".into(),
+            project: Some("web".into()),
+            kind,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: None,
+            placement: crate::placement::for_new(),
+            run_state: crate::db::tasks::RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        assert_eq!(
+            agent_args(&app, &task(TaskKind::Work)).unwrap(),
+            ["--model", "opus"]
+        );
+        assert!(agent_args(&app, &task(TaskKind::Manager))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn fnv_is_the_published_function() {
         // Test vectors from the FNV reference.
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn a_manager_gets_the_projects_agents_md_as_project_md_and_nothing_over_its_own() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(&project.path().join("AGENTS.md"), "rules\n");
+        write(&project.path().join("CLAUDE.md"), CLAUDE_SHIM);
+        write(&project.path().join("skills/deploy/SKILL.md"), "deploy\n");
+        write(&home.path().join("AGENTS.md"), "the manager's own\n");
+
+        let sync = copy_files_for(&project_at(project.path()), home.path(), false, true).unwrap();
+        assert_eq!(
+            sync.written,
+            [".claude/skills/deploy/SKILL.md", "PROJECT.md"]
+        );
+        assert_eq!(read(&home.path().join("PROJECT.md")), "rules\n");
+        assert_eq!(read(&home.path().join("AGENTS.md")), "the manager's own\n");
+        assert!(!home.path().join("CLAUDE.md").exists());
+        let manifest = read_manifest(home.path());
+        assert!(manifest.contains_key("PROJECT.md"));
+        assert!(!manifest.contains_key("AGENTS.md"));
+
+        // Linked once, after what the manager has.
+        tasks::link_project_instructions(home.path(), "web").unwrap();
+        tasks::link_project_instructions(home.path(), "web").unwrap();
+        let agents = read(&home.path().join("AGENTS.md"));
+        assert!(agents.starts_with("the manager's own\n"));
+        assert_eq!(agents.matches("@PROJECT.md").count(), 1, "{agents}");
     }
 
     #[test]

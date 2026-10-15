@@ -235,6 +235,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                     delegation,
                     brief_file,
                     max_children,
+                    project,
                 } => commands::manager::new(
                     &app,
                     &commands::manager::NewManager {
@@ -242,6 +243,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                         delegation: &delegation,
                         brief_file: brief_file.as_deref(),
                         max_children,
+                        project: project.as_deref(),
                     },
                 )?,
                 ManagerCommands::Ls { json } => commands::manager::ls(&app, json)?,

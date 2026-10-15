@@ -481,12 +481,16 @@ A project is a template for tasks, in `~/.jeet/projects/<name>`: a
 `AGENTS.md` with instructions for the agent, and `skills/`. `jeet task new
 --project <name>` copies the instructions and skills into the new task — a
 snapshot — and `jeet task resync` brings them up to date later, keeping any file
-the task changed.
+the task changed. `jeet manager new --project <name>` starts a manager from one
+too, with the project's skills and its `AGENTS.md` as `PROJECT.md`, imported
+from the end of the manager's own `AGENTS.md`, never replacing it; it adds no
+worktrees, and tasks made under it default to the same project.
 
 ```bash
 jeet projects new web --repo api --repo web   # prints ~/.jeet/projects/web
 jeet task new "Launch" --project web
 jeet task resync launch                       # --force replaces the task's edits too
+jeet manager new web --goal "Own the web app" --project web   # its tasks start from web too
 ```
 
 `AGENTS.md` is the file Codex, Cursor, Amp, Gemini CLI and most other coding
@@ -631,7 +635,7 @@ index every two seconds while the tab is shown.
 | `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
 | `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
 | `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
-| `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a task also takes a project, repositories and a branch |
+| `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
 | `a` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
 | `c` `C` `t` | the assistant, as in the active tab |
 
@@ -1053,7 +1057,21 @@ name); made by a manager, it goes under that manager. `--goal`, `--done`,
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
-`--max-children` lowers `[managers] max_children` for it. A manager is
+`--max-children` lowers `[managers] max_children` for it. `--project <name>`
+starts it from a [project](#projects): its skills are copied in and its
+`AGENTS.md` becomes `PROJECT.md`, imported from the end of the manager's own
+`AGENTS.md` (which stays as it is); no worktrees are added, as a manager holds
+them read-only and asks for them when it wants one. The project is stored with
+the manager, and a task or manager made under it (`jeet task new` from its
+agent, `--parent`, or `n` on its node in the agents tab) starts from the same
+project unless given `--project` of its own (and so with that project's
+repositories as worktrees, a `--repo` for one of them with no `--branch` adding
+nothing twice); the command line has no way to ask for none, but the `n` form
+starts on the parent's project and takes "no project" at its word. A project
+that can no longer be read costs the new task its project, with a warning. The
+project's `[agent] args` are not applied to the manager itself, and relative
+`@` imports inside the project's `AGENTS.md` do not resolve for a manager, whose
+copy is `PROJECT.md`. A manager is
 not made without `--goal` or `--brief-file`: its brief is all it works
 towards. A manager sits at
 most `max_depth` − 1 below the assistant, and needs a harness with recorded sessions, hooks,

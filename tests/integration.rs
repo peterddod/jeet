@@ -16519,3 +16519,193 @@ fn the_wake_channels_verb_is_hidden() {
     succeeded(&output);
     assert!(!stdout_of(&output).contains("inbox"));
 }
+
+/// A project at `home/projects/<name>` with an AGENTS.md and one skill.
+fn manager_project(home: &std::path::Path, name: &str, rules: &str) {
+    let project = home.join("projects").join(name);
+    std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
+    std::fs::write(project.join("AGENTS.md"), rules).unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy it\n").unwrap();
+}
+
+/// The project stored for task `slug`.
+fn project_of(lab: &StoreLab, slug: &str) -> Option<String> {
+    lab.index()
+        .query_row("SELECT project FROM tasks WHERE slug = ?1", [slug], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// `manager new --project` stores the project, copies its skills, and keeps
+/// the manager's own instructions, importing the project's after them.
+#[test]
+fn a_manager_from_a_project_keeps_its_role_and_gets_the_projects_files() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    manager_project(&home, "web", "be careful\n");
+    // No tmux: the manager is made, its agent is not started.
+    let output = lab.jeet_at(
+        &["manager", "new", "api", "--goal", "g", "--project", "web"],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+    assert!(
+        stderr_of(&output).contains("was made, but its agent did not start"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(project_of(&lab, "api").as_deref(), Some("web"));
+    let dir = home.join("tasks/api");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("PROJECT.md")).unwrap(),
+        "be careful\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "deploy it\n"
+    );
+    // The role's own files, not the project's AGENTS.md or the worker skill.
+    let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("manager"), "{agents}");
+    assert!(!agents.contains("be careful"), "{agents}");
+    assert!(agents.contains("@PROJECT.md"), "{agents}");
+    assert!(dir.join(".claude/skills/jeet-manager/SKILL.md").is_file());
+    assert!(!dir.join(".claude/skills/jeet/SKILL.md").exists());
+    // No worktrees of the project's repositories for a manager.
+    assert_eq!(
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().join(".git").exists())
+            .count(),
+        0
+    );
+
+    // Resync keeps the manager's own files and brings the project's up to date.
+    std::fs::write(home.join("projects/web/AGENTS.md"), "changed\n").unwrap();
+    succeeded(&lab.jeet_at(&["task", "resync", "api"], &home, &[]));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("PROJECT.md")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+        agents
+    );
+}
+
+/// A task or manager made under a manager starts from its project unless
+/// given one; an unknown project makes nothing.
+#[test]
+fn work_under_a_manager_defaults_to_its_project() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    manager_project(&home, "web", "be careful\n");
+    manager_project(&home, "docs", "write well\n");
+    lab.jeet_at(
+        &["manager", "new", "api", "--goal", "g", "--project", "web"],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+
+    let output = lab.jeet_at(&["task", "new", "child", "--parent", "api"], &home, &[]);
+    succeeded(&output);
+    assert_eq!(project_of(&lab, "child").as_deref(), Some("web"));
+    assert_eq!(
+        std::fs::read_to_string(path_from(&output).join("AGENTS.md")).unwrap(),
+        "be careful\n"
+    );
+
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "other",
+            "--parent",
+            "api",
+            "--project",
+            "docs",
+        ],
+        &home,
+        &[],
+    );
+    succeeded(&output);
+    assert_eq!(project_of(&lab, "other").as_deref(), Some("docs"));
+
+    // A sub-manager inherits too, and passes it on.
+    lab.jeet_at(
+        &["manager", "new", "sub", "--goal", "g", "--parent", "api"],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+    assert_eq!(project_of(&lab, "sub").as_deref(), Some("web"));
+
+    // Unknown: nothing is made.
+    let output = lab.jeet_at(
+        &["manager", "new", "bad", "--goal", "g", "--project", "nope"],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+    assert!(!output.status.success());
+    assert!(!home.join("tasks/bad").exists());
+    assert_eq!(project_of_opt(&lab, "bad"), None);
+    let output = lab.jeet_at(
+        &[
+            "task",
+            "new",
+            "bad2",
+            "--parent",
+            "api",
+            "--project",
+            "nope",
+        ],
+        &home,
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(!home.join("tasks/bad2").exists());
+
+    // Without a parent with a project, none.
+    succeeded(&lab.jeet_at(&["task", "new", "plain"], &home, &[]));
+    assert_eq!(project_of(&lab, "plain"), None);
+}
+
+/// Whether a task row exists is not at issue here: `None` if it has none.
+fn project_of_opt(lab: &StoreLab, slug: &str) -> Option<String> {
+    lab.index()
+        .query_row("SELECT project FROM tasks WHERE slug = ?1", [slug], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .ok()
+        .flatten()
+}
+
+/// A project with skills and no AGENTS.md gives a manager its skills and no
+/// link to a file that is not there.
+#[test]
+fn a_manager_from_a_skills_only_project_has_no_project_link() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let project = home.join("projects/skills");
+    std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy it\n").unwrap();
+    lab.jeet_at(
+        &[
+            "manager",
+            "new",
+            "api",
+            "--goal",
+            "g",
+            "--project",
+            "skills",
+        ],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+    assert_eq!(project_of(&lab, "api").as_deref(), Some("skills"));
+    let dir = home.join("tasks/api");
+    assert!(dir.join(".claude/skills/deploy/SKILL.md").is_file());
+    assert!(!dir.join("PROJECT.md").exists());
+    let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+    assert!(!agents.contains("PROJECT.md"), "{agents}");
+}

@@ -14,7 +14,7 @@ time; a single change is a plain `jeet task new`.
 ## Making one
 
 - `jeet manager new <name> --goal "<goal>" [--done "<when>"] [--allow
-  <caps>] [--budget <parts>] [--max-children <n>]` makes a manager under
+  <caps>] [--budget <parts>] [--max-children <n>] [--project <name>]` makes a manager under
   you and starts its agent on its brief. It needs `manager.create`.
   - `--allow` (comma-separated capabilities) is what it may do, within
     what you may; it hands at most that on. Without it, it gets
@@ -23,6 +23,16 @@ time; a single change is a plain `jeet task new`.
     time and turns of it and everything below it. Without it, it gets
     `[managers] default_budget`.
   - `--max-children` caps how many tasks it keeps under it at once.
+  - `--project <name>` (see `jeet projects ls`) starts it from a project:
+    the project's skills and AGENTS.md (as `PROJECT.md`, imported beside
+    the manager's own instructions) are copied in, and every task it
+    makes defaults to the same project unless given another `--project`.
+    No worktrees are added; the manager asks for those as it needs them.
+    A task under it also gets a worktree of each of the project's
+    repositories (as `jeet task new --project` does); `--repo` for one
+    of those with no `--branch` adds nothing twice. A project that can
+    no longer be read costs the task its project, with a warning. The
+    project's `[agent] args` are not applied to the manager itself.
   - `--brief-file <file>` adds a longer brief after the goal; the two
     together are at most 8,000 bytes. The file must be in your own
     directory: write the brief there first.

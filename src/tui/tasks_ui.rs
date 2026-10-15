@@ -3405,13 +3405,14 @@ mod tests {
             "done",
             "budget",
             "allow",
+            "project ",
             "a manager needs --goal",
             "esc cancel",
         ] {
             assert!(manager.contains(want), "{want}: {manager}");
         }
         // The tab bar has "projects", so the field is told by what follows it.
-        for unwanted in ["repos", "branch", "project "] {
+        for unwanted in ["repos", "branch"] {
             assert!(!manager.contains(unwanted), "{unwanted}: {manager}");
         }
     }

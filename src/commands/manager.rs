@@ -33,6 +33,8 @@ pub struct NewManager<'a> {
     pub delegation: &'a Delegation,
     pub brief_file: Option<&'a Path>,
     pub max_children: Option<u32>,
+    /// Project to start from: its skills and instructions are copied in.
+    pub project: Option<&'a str>,
 }
 
 /// Make a manager under its parent (the assistant, unless `--parent` says)
@@ -82,10 +84,11 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
         app,
         &NewTask {
             name: args.name,
-            project: None,
+            project: args.project,
             repos: &[],
             branch: None,
             child: Some((&caller, &plan)),
+            inherit_project: true,
         },
     )?;
     warn_all(&created.warnings);

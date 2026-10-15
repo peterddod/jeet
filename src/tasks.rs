@@ -32,6 +32,7 @@ use crate::db::tasks::{
 use crate::db::RepoRecord;
 use crate::git;
 use crate::identity;
+use crate::instructions;
 use crate::manager;
 use crate::manager::budget::{self, Limits};
 use crate::messages::{self, Delivered, Sender};
@@ -196,6 +197,10 @@ pub struct NewTask<'a> {
     /// Its place under a parent, planned by [`plan_child`] for the caller
     /// making it; `None` for a top-level task.
     pub child: Option<(&'a Caller, &'a NewNode)>,
+    /// With no `project`, start from the parent's, if it has one. The CLI
+    /// does; a form that showed the choice (the TUI) does not, so its
+    /// "no project" is taken at its word.
+    pub inherit_project: bool,
 }
 
 /// A task that was just made, plus anything worth telling the user.
@@ -217,22 +222,64 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
     if spec.branch.is_some() && spec.repos.len() != 1 {
         bail!("--branch needs exactly one --repo: it names that repository's branch");
     }
-    // Read up front, so a missing or broken project makes nothing at all.
-    let project = match spec.project {
-        Some(name) => Some(projects::load(app, name)?),
-        None => None,
+    // A task under a node that has a project starts from it, unless it was
+    // given one of its own. Read up front, so a missing or broken project
+    // makes nothing at all.
+    let mut warnings = Vec::new();
+    let project = match (spec.project, spec.child) {
+        (Some(name), _) => Some(projects::load(app, name)?),
+        (None, Some((_, plan))) if spec.inherit_project => {
+            let parent = match plan.record.parent_id.as_deref() {
+                Some(id) => app.db.get_task(id)?,
+                None => None,
+            };
+            // The parent's project may have been deleted or broken since:
+            // that costs the child its project, not its existence.
+            match parent
+                .as_ref()
+                .and_then(|p| p.project.as_deref().map(|n| (p, n)))
+            {
+                Some((parent, name)) => match projects::load(app, name) {
+                    Ok(project) => Some(project),
+                    Err(e) => {
+                        warnings.push(format!(
+                            "made without a project: {}'s project {name} could not be read ({e:#})",
+                            parent.slug
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            }
+        }
+        _ => None,
     };
 
-    let (task, mut warnings) = match spec.child {
+    let (task, notes) = match spec.child {
         Some((_, plan)) => commit_child(app, plan, project.as_ref())?,
         None => make_task(app, name, project.as_ref(), TaskKind::Work)?,
     };
+    warnings.extend(notes);
 
     let preset = project
         .iter()
         .flat_map(|p| &p.config.repos)
         .map(|r| (r, None));
-    let given = spec.repos.iter().map(|r| (r, spec.branch));
+    // A repository the project already gave, asked for again with no branch,
+    // would be a second detached worktree of the same thing: skipped.
+    let preset_ids: Vec<String> = project
+        .iter()
+        .flat_map(|p| &p.config.repos)
+        .filter_map(|r| known_repo_id(app, r))
+        .collect();
+    let given = spec
+        .repos
+        .iter()
+        .filter(|r| {
+            spec.branch.is_some()
+                || !known_repo_id(app, r).is_some_and(|id| preset_ids.contains(&id))
+        })
+        .map(|r| (r, spec.branch));
     for (repo, branch) in preset.chain(given) {
         match add_worktree(app, &task, repo, branch, None) {
             Ok(added) => warnings.extend(added.warnings),
@@ -660,8 +707,9 @@ fn record_child_held(
 /// project files that were not copied.
 fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
     write_marker(dir, &task.id)?;
+    let is_manager = task.kind == TaskKind::Manager;
     let notes = match project {
-        Some(project) => projects::copy_files(project, dir, false)?
+        Some(project) => projects::copy_files_for(project, dir, false, is_manager)?
             .notes()
             .into_iter()
             .map(|note| format!("project {}: {note}", project.name))
@@ -672,10 +720,51 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
     match task.kind {
         TaskKind::Manager => {
             manager::ensure_files(dir, manager::Role::Manager)?;
+            if let Some(project) = project {
+                link_project_instructions(dir, &project.name)?;
+            }
         }
         TaskKind::Work | TaskKind::Review | TaskKind::Assistant => install_skill(dir)?,
     }
     Ok(notes)
+}
+
+/// Have a manager's AGENTS.md import the project's instructions
+/// ([`projects::MANAGER_INSTRUCTIONS`]), if it has them: a section at the
+/// end, so the manager's own text stands first and is kept. Done once; an
+/// AGENTS.md that already names the file is left alone.
+pub fn link_project_instructions(dir: &Path, project: &str) -> Result<()> {
+    use std::io::Write;
+    let file = projects::MANAGER_INSTRUCTIONS;
+    if !dir.join(file).is_file() {
+        return Ok(());
+    }
+    let path = dir.join(instructions::AGENTS_MD);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    // The heading and the import together mark it as ours; a manager's own
+    // mention of `@PROJECT.md` elsewhere does not. Known limit: should the
+    // project later drop its AGENTS.md, the section stays and imports a
+    // file that is gone (resync removes PROJECT.md, not the section).
+    if text.contains(&format!("## Project: {project}\n")) && text.contains(&format!("\n@{file}\n"))
+    {
+        return Ok(());
+    }
+    let section = format!(
+        "\n## Project: {project}\n\nYou were made from the `{project}` project. Its instructions \
+         follow; they add to the above and do not replace it. Tasks you make \
+         start from the project too.\n\n@{file}\n"
+    );
+    let mut out = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    out.write_all(section.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Mark `dir` as task `id`'s directory.
@@ -1315,6 +1404,25 @@ fn resolve_repo(app: &App, spec: &str) -> Result<RepoRecord> {
         },
         _ => resolve::resolve_repo_filter(&app.db, spec),
     }
+}
+
+/// The id of the store repository `spec` names, if it is there: as
+/// [`resolve_repo`], but never cloning, so safe to ask of what may yet be
+/// refused.
+fn known_repo_id(app: &App, spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    let id = match spec.contains("://") || spec.starts_with("git@") {
+        true => remote::parse_remote_url_anyhow(spec).ok()?.id(),
+        false => match remote::identity_from_id(spec) {
+            Ok(id) if id.host.contains('.') => spec.to_string(),
+            _ => {
+                return resolve::resolve_repo_filter(&app.db, spec)
+                    .ok()
+                    .map(|r| r.id)
+            }
+        },
+    };
+    app.db.get_repo(&id).ok().flatten().map(|r| r.id)
 }
 
 /// Clone `url` into the store for a caller [`permissions::may_clone`]
@@ -3153,6 +3261,73 @@ mod tests {
         );
     }
 
+    /// A child of a manager with a project starts from it (and its repo,
+    /// once even if asked for again) unless the caller took the choice
+    /// itself; one whose project is gone is still made.
+    #[test]
+    fn a_child_inherits_its_managers_project_when_asked_to() {
+        let (_dir, app, _trunk) = manager_lab();
+        let project = app.home.join("projects/web");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("project.toml"),
+            "repos = [\"example.com/o/api\"]\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("AGENTS.md"), "rules\n").unwrap();
+        let m = TaskRecord {
+            project: Some("web".into()),
+            ..app.db.get_task("m-id").unwrap().unwrap()
+        };
+        app.db.delete_task("m-id").unwrap();
+        app.db.insert_task(&m).unwrap();
+        let d = Delegation {
+            parent: Some("m".into()),
+            ..Default::default()
+        };
+        let make = |name: &str, project: Option<&str>, inherit: bool, repos: &[String]| {
+            let plan = plan_child(&app, &Caller::User, TaskKind::Work, name, &d, None).unwrap();
+            create(
+                &app,
+                &NewTask {
+                    name,
+                    project,
+                    repos,
+                    branch: None,
+                    child: Some((&Caller::User, &plan)),
+                    inherit_project: inherit,
+                },
+            )
+        };
+        let worktrees = |t: &TaskRecord| app.db.list_task_worktrees(&t.id).unwrap().len();
+
+        let again = ["example.com/o/api".to_string()];
+        let c = make("c1", None, true, &again).unwrap().task;
+        assert_eq!(c.project.as_deref(), Some("web"));
+        assert_eq!(worktrees(&c), 1);
+        assert!(task_dir(&app, &c).join("AGENTS.md").is_file());
+
+        // The form's "no project" is no project.
+        let c = make("c2", None, false, &[]).unwrap().task;
+        assert_eq!(c.project, None);
+        assert_eq!(worktrees(&c), 0);
+
+        // Gone since: made without, and told.
+        std::fs::remove_dir_all(&project).unwrap();
+        let made = make("c3", None, true, &[]).unwrap();
+        assert_eq!(made.task.project, None);
+        assert!(
+            made.warnings
+                .iter()
+                .any(|w| w.contains("made without a project")),
+            "{:?}",
+            made.warnings
+        );
+        // But asked for by name, it is an error and nothing is made.
+        assert!(make("c4", Some("web"), true, &[]).is_err());
+        assert!(app.db.get_task_by_slug("c4").unwrap().is_none());
+    }
+
     /// A child gets `[managers] worker_default`, the `worktree.add` row
     /// that v6 gave the children before it, and its brief names who made
     /// it; a top-level task gets neither.
@@ -3168,6 +3343,7 @@ mod tests {
                     repos: &[],
                     branch: None,
                     child,
+                    inherit_project: true,
                 },
             )
             .unwrap()
