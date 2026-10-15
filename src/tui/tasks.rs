@@ -35,10 +35,11 @@
 //! stand on GitHub, asked on a thread of its own ([`reviews`]); `⏎` offers
 //! its diff in the review viewer or its session, through the task's own
 //! open.
-//! The projects view groups the active tasks and managers by repository
-//! ([`repos`]): `→` or `⏎` goes into one, where the active view's walk
-//! applies and the task keys act on the task under the cursor; `A` lists the
-//! repositories with only archived tasks instead.
+//! The projects view groups the active tasks and managers by the project
+//! they were started from ([`projects_tab`](super::projects_tab)): `→` or
+//! `⏎` goes into one, where the active view's walk applies and the task keys
+//! act on the task under the cursor; `A` lists the projects with no active
+//! work instead.
 //!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
@@ -63,7 +64,7 @@ use ratatui::widgets::ListState;
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
-use super::repos::{self, Groups, RepoLine};
+use super::projects_tab::{Groups, ProjectGroup};
 use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, Source};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
@@ -220,8 +221,8 @@ pub enum View {
     /// The active reviews and review jobs with no task, or, toggled with
     /// `A`, the archived reviews: reviews are shown here alone.
     Reviews,
-    /// The active tasks and managers by repository, or, toggled with `A`,
-    /// the repositories with only archived tasks.
+    /// The active tasks and managers by the project they were
+    /// started from, or, toggled with `A`, the projects with no active work.
     Projects,
 }
 
@@ -1120,14 +1121,16 @@ pub struct TasksUi {
     pub archived_tasks: bool,
     /// What GitHub last said of each reviewed PR, or why it could not say.
     pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
+    /// Every project's name (`projects::list`), as last read.
+    pub known_projects: Vec<String>,
     /// The projects of the rows, grouped when they are read.
-    pub repos: Groups,
+    pub groups: Groups,
     /// The projects view's top level, in display order.
-    pub projects: Vec<RepoLine>,
+    pub projects: Vec<ProjectGroup>,
     /// `A` in the projects view: it lists the archived projects instead.
     pub archived_projects: bool,
     /// The project the projects view has gone into, or the top level.
-    pub project: Option<repos::Key>,
+    pub project: Option<String>,
     /// The managers gone into within the project, outermost first.
     pub project_path: Vec<String>,
     /// The ids of everyone in `project`.
@@ -1173,7 +1176,8 @@ impl TasksUi {
             archived_reviews: false,
             archived_tasks: false,
             reviewed: HashMap::new(),
-            repos: Groups::default(),
+            known_projects: Vec::new(),
+            groups: Groups::default(),
             projects: Vec::new(),
             archived_projects: false,
             project: None,
@@ -1231,8 +1235,19 @@ impl TasksUi {
             sort_by_todo(&mut self.rows, items);
         }
         // After the last sort: its members are indices into the rows.
-        self.repos = Groups::new(&self.rows);
+        self.groups = Groups::new(&self.rows, &self.known_projects);
         self.refresh_visible(keep);
+    }
+
+    /// Replace the names of the projects that exist, regrouping.
+    pub fn set_known_projects(&mut self, names: Vec<String>) {
+        if names == self.known_projects {
+            return;
+        }
+        self.known_projects = names;
+        let keep = self.selected_id().map(str::to_string);
+        self.groups = Groups::new(&self.rows, &self.known_projects);
+        self.refresh_visible(keep.as_deref());
     }
 
     /// The assistant's todo list, as last read.
@@ -1361,8 +1376,8 @@ impl TasksUi {
         let members = self
             .project
             .as_ref()
-            .map(|key| self.repos.members(archived, key).to_vec())
-            .filter(|members| !members.is_empty());
+            .and_then(|name| self.groups.members(archived, name))
+            .map(<[usize]>::to_vec);
         let Some(members) = members else {
             // A project nobody is left in takes the levels in it.
             self.project = None;
@@ -1374,10 +1389,10 @@ impl TasksUi {
             let was = self
                 .projects
                 .get(self.selected)
-                .map(|line| line.key.clone());
-            self.projects = self.repos.lines(archived, &self.filter);
+                .map(|line| line.name.clone());
+            self.projects = self.groups.lines(archived, &self.filter);
             self.selected = was
-                .and_then(|key| self.projects.iter().position(|line| line.key == key))
+                .and_then(|name| self.projects.iter().position(|line| line.name == name))
                 .unwrap_or_else(|| self.selected.min(self.projects.len().saturating_sub(1)));
             return;
         };
@@ -1574,7 +1589,7 @@ impl TasksUi {
     /// project gone into.
     pub fn crumb_root(&self) -> Vec<String> {
         match (&self.project, self.view) {
-            (Some(key), View::Projects) => vec!["projects".to_string(), key.name().to_string()],
+            (Some(name), View::Projects) => vec!["projects".to_string(), name.clone()],
             _ => vec!["assistant".to_string()],
         }
     }
@@ -1634,7 +1649,8 @@ impl TasksUi {
             None if self.view == View::Projects && self.project.is_some() => {
                 let left = self.project.take();
                 self.refresh_visible(None);
-                if let Some(at) = left.and_then(|k| self.projects.iter().position(|l| l.key == k)) {
+                if let Some(at) = left.and_then(|k| self.projects.iter().position(|l| l.name == k))
+                {
                     self.selected = at;
                 }
                 self.set_status("");
@@ -1648,7 +1664,7 @@ impl TasksUi {
         let Some(line) = self.projects.get(self.selected) else {
             return;
         };
-        self.project = Some(line.key.clone());
+        self.project = Some(line.name.clone());
         self.project_path.clear();
         self.filter.clear();
         self.selected = 0;
@@ -1697,7 +1713,7 @@ impl TasksUi {
         match view.state() {
             Some(_) => self.task_count(false),
             None if view == View::Reviews => self.review_count(false),
-            None if view == View::Projects => self.repos.count(false),
+            None if view == View::Projects => self.groups.count(false),
             None => self.shown.len(),
         }
     }
@@ -2097,7 +2113,7 @@ impl TasksUi {
                 });
                 None
             }
-            // The projects view lists repositories; → or ⏎ goes into one,
+            // The projects view lists projects; → or ⏎ goes into one,
             // and then the active view's walk applies.
             KeyCode::Enter | KeyCode::Right
                 if self.view == View::Projects && self.project.is_none() =>
@@ -3962,6 +3978,7 @@ impl Screen<'_> {
         match loaded {
             Ok((loaded, warning)) => {
                 self.ui.set_legacy(reviews::legacy_jobs(&app.home));
+                self.read_projects();
                 let changed = self.set_rows(loaded);
                 // Sizes are walked again only when there are new tasks to
                 // measure: a walk restarted on every action never finishes
@@ -4006,6 +4023,7 @@ impl Screen<'_> {
         if self.ui.view == View::Reviews {
             self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
         }
+        self.read_projects();
         if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows);
             if self.ui.view == View::Reviews {
@@ -4015,6 +4033,14 @@ impl Screen<'_> {
         // New sessions are recorded in the index as they start.
         self.bg.look_at_assistant(assistant_info::probe(self.app)?);
         Ok(())
+    }
+
+    /// Read the names of the projects again, for the projects tab's other
+    /// projects: a directory listing, on each read of the rows, never per draw.
+    fn read_projects(&mut self) {
+        if let Ok(names) = projects::list(self.app) {
+            self.ui.set_known_projects(names);
+        }
     }
 
     /// Replace the rows, saying whether the tasks themselves changed rather
@@ -5426,6 +5452,7 @@ impl Screen<'_> {
 
     fn show_projects(&mut self, select: Option<&str>) -> Result<()> {
         let lines = project_lines(self.app)?;
+        self.read_projects();
         let selected = select
             .and_then(|name| lines.iter().position(|l| l.name == name))
             .unwrap_or(0);
@@ -6252,38 +6279,23 @@ mod tests {
         assert!(!ui.archived_tasks);
     }
 
-    /// `nested()` with worktrees: `ops` holds none, `deploy` and `fix` are
-    /// of `api`, `ship` of `api` and `web`, `docs` of `web`, `loose` of
-    /// none, and an archived `old` of `gone`.
-    fn by_repo() -> TasksUi {
+    /// `nested()` with projects: `fix` is of `api`, `ship` and `docs` of
+    /// `web`, `ops`, `deploy` and `loose` of none, and an archived `old` of
+    /// `gone`; `idle` is a project with no tasks at all.
+    fn by_project() -> TasksUi {
         let ui = nested();
         let mut rows = ui.rows.clone();
-        let of = |rows: &mut Vec<TaskRow>, id: &str, repos: &[&str]| {
+        let of = |rows: &mut Vec<TaskRow>, id: &str, project: &str| {
             let row = rows.iter_mut().find(|r| r.task.id == id).unwrap();
-            row.worktrees = repos
-                .iter()
-                .map(|repo| TaskWorktreeRecord {
-                    id: 0,
-                    task_id: id.into(),
-                    repo_id: format!("github.com/acme/{repo}"),
-                    dir_name: repo.to_string(),
-                    branch: None,
-                    created_branch: false,
-                    head_oid: None,
-                    stash_ref: None,
-                    pr_number: None,
-                    created_at: 0,
-                    read_only: false,
-                })
-                .collect();
+            row.task.project = Some(project.to_string());
         };
-        of(&mut rows, "deploy", &["api"]);
-        of(&mut rows, "fix", &["api"]);
-        of(&mut rows, "ship", &["api", "web"]);
-        of(&mut rows, "docs", &["web"]);
+        of(&mut rows, "fix", "api");
+        of(&mut rows, "ship", "web");
+        of(&mut rows, "docs", "web");
         rows.push(task("old", "old", TaskState::Archived, 1));
-        of(&mut rows, "old", &["gone"]);
+        of(&mut rows, "old", "gone");
         let mut ui = TasksUi::new(rows);
+        ui.set_known_projects(["api", "gone", "idle", "web"].map(String::from).to_vec());
         ui.view = View::Projects;
         ui.refresh_visible(None);
         ui
@@ -6292,7 +6304,7 @@ mod tests {
     fn projects(ui: &TasksUi) -> Vec<(&str, usize, usize)> {
         ui.projects
             .iter()
-            .map(|p| (p.key.name(), p.managers, p.tasks))
+            .map(|p| (p.name.as_str(), p.managers, p.tasks))
             .collect()
     }
 
@@ -6336,32 +6348,29 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_view_groups_by_repo() {
-        let ui = by_repo();
-        assert_eq!(
-            projects(&ui),
-            [("api", 2, 2), ("web", 2, 2), ("(no repo)", 0, 1)]
-        );
-        assert_eq!(ui.count(View::Projects), 3);
+    fn the_projects_view_groups_by_project() {
+        let ui = by_project();
+        assert_eq!(projects(&ui), [("api", 1, 1), ("web", 2, 2)]);
+        assert_eq!(ui.count(View::Projects), 2);
         // The top level has no task under the cursor.
         assert_eq!(ui.selected_row().map(|r| r.task.id.as_str()), None);
     }
 
     #[test]
     fn a_project_is_walked_like_the_active_tree() {
-        let mut ui = by_repo();
-        // → goes into api: ops, which has none of its own, tops it.
+        let mut ui = by_project();
+        // → goes into api: ops, which is in it for fix, tops it.
         assert_eq!(press(&mut ui, KeyCode::Right), None);
         assert_eq!(ui.breadcrumb(), ["projects", "api"]);
         assert_eq!(shown(&ui), ["ops"]);
         assert_eq!(press(&mut ui, KeyCode::Right), None);
         assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
-        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        assert_eq!(shown(&ui), ["fix"]);
         // ⏎ opens, as in the active list.
         assert_eq!(
             press(&mut ui, KeyCode::Enter),
             Some(Action::Open {
-                task_id: "deploy".into(),
+                task_id: "fix".into(),
                 session: None
             })
         );
@@ -6383,7 +6392,7 @@ mod tests {
 
     #[test]
     fn task_keys_work_on_a_task_inside_a_project() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Down);
         press(&mut ui, KeyCode::Right);
         press(&mut ui, KeyCode::Down);
@@ -6410,10 +6419,10 @@ mod tests {
 
     #[test]
     fn a_toggles_the_archived_projects_and_back() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Char('A'));
         assert!(ui.archived_projects);
-        assert_eq!(projects(&ui), [("gone", 0, 1)]);
+        assert_eq!(projects(&ui), [("gone", 0, 1), ("idle", 0, 0)]);
         assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
         // Inside, the archived tasks, flat; ⏎ explains, a brings back.
         press(&mut ui, KeyCode::Enter);
@@ -6431,12 +6440,28 @@ mod tests {
         assert!(ui.project.is_none());
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_projects);
-        assert_eq!(ui.projects.len(), 3);
+        assert_eq!(ui.projects.len(), 2);
+    }
+
+    #[test]
+    fn an_archived_project_with_no_tasks_is_entered_empty_and_new_projects_appear() {
+        let mut ui = by_project();
+        press(&mut ui, KeyCode::Char('A'));
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(ui.breadcrumb(), ["projects", "idle"]);
+        assert!(shown(&ui).is_empty());
+        press(&mut ui, KeyCode::Left);
+        assert!(ui.project.is_none());
+        assert_eq!(projects(&ui)[ui.selected].0, "idle");
+        // A project made meanwhile is listed; one deleted goes.
+        ui.set_known_projects(["api", "fresh", "gone", "web"].map(String::from).to_vec());
+        assert_eq!(projects(&ui), [("gone", 0, 1), ("fresh", 0, 0)]);
     }
 
     #[test]
     fn the_filter_narrows_projects_and_a_project_s_tasks() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "we");
         assert_eq!(projects(&ui), [("web", 2, 2)]);
@@ -6450,7 +6475,7 @@ mod tests {
 
     #[test]
     fn the_cursor_follows_its_project_when_they_reorder() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         assert_eq!(projects(&ui)[0].0, "api");
         // Newer activity in web alone puts it first; the cursor stays on api.
         ui.apply(Update::Status {
@@ -6467,7 +6492,7 @@ mod tests {
 
     #[test]
     fn a_manager_archived_while_inside_takes_its_levels_with_it() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Right);
         press(&mut ui, KeyCode::Right);
         assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
@@ -6479,7 +6504,7 @@ mod tests {
             .state = TaskState::Archived;
         ui.set_rows(rows);
         assert_eq!(ui.breadcrumb(), ["projects", "api"]);
-        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        assert_eq!(shown(&ui), ["fix"]);
         // Gone altogether, it is the same.
         press(&mut ui, KeyCode::Right);
         let rows = ui
@@ -6490,12 +6515,12 @@ mod tests {
             .collect();
         ui.set_rows(rows);
         assert_eq!(ui.breadcrumb(), ["projects", "api"]);
-        assert_eq!(shown(&ui), ["fix", "ship"]);
+        assert_eq!(shown(&ui), ["fix"]);
     }
 
     #[test]
     fn tab_away_and_back_keeps_the_project_gone_into() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Right);
         press(&mut ui, KeyCode::Right);
         for _ in 0..4 {
@@ -6503,12 +6528,12 @@ mod tests {
         }
         assert_eq!(ui.view, View::Projects);
         assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
-        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        assert_eq!(shown(&ui), ["fix"]);
     }
 
     #[test]
     fn a_click_picks_a_project_two_lines_high() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         ui.list_area = Rect::new(0, 4, 80, 10);
         // The border, then two lines for each project.
         ui.handle_mouse(MouseEvent {
@@ -6522,7 +6547,7 @@ mod tests {
 
     #[test]
     fn a_project_lists_the_right_rows_when_sorted_by_todo_priority() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         ui.assistant = Some(AssistantInfo {
             todo: vec![ItemView {
                 id: 1,
@@ -6544,7 +6569,7 @@ mod tests {
 
     #[test]
     fn a_project_nobody_is_left_in_closes() {
-        let mut ui = by_repo();
+        let mut ui = by_project();
         press(&mut ui, KeyCode::Right);
         let rows = ui
             .rows
@@ -6554,7 +6579,7 @@ mod tests {
             .collect();
         ui.set_rows(rows);
         assert!(ui.project.is_none());
-        assert_eq!(projects(&ui), [("(no repo)", 0, 1)]);
+        assert!(projects(&ui).is_empty());
     }
 
     #[test]
@@ -6570,8 +6595,8 @@ mod tests {
         assert_eq!(ui.shown_len(), 0);
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Projects);
-        // The three active tasks have no repo.
-        assert_eq!(projects(&ui), [("(no repo)", 0, 3)]);
+        // The three active tasks have no project.
+        assert!(projects(&ui).is_empty());
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Active);
         assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
