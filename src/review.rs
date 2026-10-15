@@ -558,6 +558,11 @@ fn check_out(
     }
     // `gh pr checkout` fetches into the trunk: keep a store sync out of its way.
     let _fetch = store::lock_repo(&app.home, &repo.id)?;
+    // Another `jeet review` of this PR may have made the worktree while this
+    // one waited for the lock: it is the review's one, so use it.
+    if let Some(fresh) = app.db.get_review(&review.id)? {
+        *review = fresh;
+    }
 
     let existing = review.worktree();
     if let Some(row) = &existing {
@@ -616,15 +621,39 @@ fn check_out(
         created_at: now_secs(),
         read_only: false,
     };
-    if let Err(e) = app.db.set_review_worktree(&review.id, Some(&record)) {
+    let recorded = app.db.set_review_worktree(&review.id, Some(&record));
+    if !matches!(recorded, Ok(true)) {
         let _ = git::worktree_remove(&trunk, &dest, true);
         if created_branch {
             let _ = git::delete_local_branch(&trunk, &branch);
         }
-        return Err(e.context("record the worktree"));
+        if let Err(e) = recorded {
+            return Err(e.context("record the worktree"));
+        }
+        // The row has another worktree by now: that is the review's.
+        let Some(fresh) = app.db.get_review(&review.id)? else {
+            bail!("{} is not in the index", subject(review));
+        };
+        let Some(row) = fresh.worktree() else {
+            bail!(
+                "could not record the worktree: {} has another",
+                subject(review)
+            );
+        };
+        let path = dir.join(&row.dir_name);
+        *review = fresh;
+        return Ok((path, warnings));
     }
     review.dir_name = Some(record.dir_name);
     Ok((dest, warnings))
+}
+
+/// Keep `row` as review `id`'s worktree, the one it already has.
+fn save_worktree(app: &App, id: &str, row: &TaskWorktreeRecord) -> Result<()> {
+    if !app.db.set_review_worktree(id, Some(row))? {
+        bail!("the review has another worktree than {}", row.dir_name);
+    }
+    Ok(())
 }
 
 /// Charge `review` the time its agent's turn in progress has run, before
@@ -677,7 +706,7 @@ pub fn archive(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
     app.db.unqueue_review(&review.id)?;
     let root = dir(app, review);
     if let Some(mut row) = review.worktree() {
-        let save = |row: &TaskWorktreeRecord| app.db.set_review_worktree(&review.id, Some(row));
+        let save = |row: &TaskWorktreeRecord| save_worktree(app, &review.id, row);
         warnings.extend(tasks::archive_worktree(
             app, &review.id, &root, &mut row, &save,
         )?);
@@ -696,9 +725,11 @@ pub fn unarchive(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
     }
     let mut warnings = Vec::new();
     if let Some(mut row) = review.worktree() {
-        let save = |row: &TaskWorktreeRecord| app.db.set_review_worktree(&review.id, Some(row));
+        let save = |row: &TaskWorktreeRecord| save_worktree(app, &review.id, row);
         match tasks::restore_worktree(app, &review.id, &root, &mut row, &save, &mut warnings)? {
-            tasks::Restored::Forgotten => app.db.set_review_worktree(&review.id, None)?,
+            tasks::Restored::Forgotten => {
+                app.db.set_review_worktree(&review.id, None)?;
+            }
             tasks::Restored::Kept => {}
         }
     }
@@ -1235,6 +1266,10 @@ pub fn start_agent(
     rerun: bool,
     requested_by: Option<&str>,
 ) -> Result<String> {
+    // Who asked sticks: a run by the user never clears the assistant's, and
+    // this holds when nothing is asked again.
+    remember_requester(app, &review.id, requested_by)?;
+    let review = &folded(app, review);
     let job = load(app, repo, pr.number);
     if let Some(why) = reason_not_to_ask(asked(review).as_ref(), job.as_ref(), pr, rerun) {
         return Ok(why);
@@ -1250,7 +1285,6 @@ pub fn start_agent(
             pr.number
         ));
     }
-    app.db.set_review_requested_by(&review.id, requested_by)?;
     give_budget(app, review)?;
     let review = &app
         .db
@@ -1297,6 +1331,15 @@ pub fn start_agent(
             pr.number
         ),
     })
+}
+
+/// Record `requested_by`, the task that asks for review `id` now, if there
+/// is one. The user asking leaves who asked before as it was.
+pub fn remember_requester(app: &App, id: &str, requested_by: Option<&str>) -> Result<()> {
+    match requested_by {
+        Some(by) => app.db.set_review_requested_by(id, Some(by)),
+        None => Ok(()),
+    }
 }
 
 /// Give `review` `[review]`'s caps afresh for the review it is about to be
@@ -1696,12 +1739,6 @@ pub enum Retired {
     BroughtBack,
 }
 
-/// When review `review` was last unarchived, if it ever was, so one brought
-/// back after its PR was done is not archived again behind the user's back.
-fn brought_back_at(review: &ReviewRecord) -> Option<i64> {
-    review.brought_back_at
-}
-
 /// Whether `activity` leaves a review free to archive: its agent idle,
 /// gone or never started. One running, starting, asking the user, or with
 /// no hooks to say (`Live`) is mid-turn as far as jeet can tell.
@@ -1751,10 +1788,14 @@ pub fn rebuildable(path: &str) -> bool {
 /// yes. Nor when the user brought it back after the PR was done at
 /// `closed_at` (unknown: any time it was brought back counts).
 pub fn retire(app: &App, review: &ReviewRecord, closed_at: Option<i64>) -> Result<Retired> {
+    let review = &folded(app, review);
     if review.state != TaskState::Active {
         return Ok(Retired::Kept("not an active review".into()));
     }
-    if brought_back_at(review).is_some_and(|back| closed_at.is_none_or(|closed| back >= closed)) {
+    if review
+        .brought_back_at
+        .is_some_and(|back| closed_at.is_none_or(|closed| back >= closed))
+    {
         return Ok(Retired::BroughtBack);
     }
     let activity = shown_activity(app, review, tmux::available());
@@ -1925,8 +1966,9 @@ fn migrate(app: &App) -> Result<()> {
         }
     }
 
-    for review in app.db.list_reviews(None)? {
-        fold_markers(app, &review, &mut say);
+    let reviews = app.db.list_reviews(None)?;
+    for review in &reviews {
+        fold_markers(app, review, &mut say);
     }
 
     let root = app.tasks_root();
@@ -1935,6 +1977,18 @@ fn migrate(app: &App) -> Result<()> {
         let dir = root.join(&old.slug);
         let path = dir.join(&old.dir_name);
         let what = format!("{}/{}", old.slug, old.dir_name);
+        // A kept review's own, whatever else was recorded of it: never
+        // archived, and its session never ended.
+        if let Some(own) = reviews
+            .iter()
+            .find(|r| r.slug == old.slug || r.id == old.task_id)
+        {
+            let note = format!("left in place: belongs to review {}", own.slug);
+            app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+            say(format!("{what}: {note}"));
+            left += 1;
+            continue;
+        }
         // Ending its session would end this jeet.
         if tmux::current_session().is_some_and(|s| s == session) {
             say(format!(
@@ -1962,10 +2016,22 @@ fn migrate(app: &App) -> Result<()> {
         let ignored = match git::ignored_paths(&path) {
             Ok(paths) => paths.into_iter().find(|p| !rebuildable(p)),
             Err(e) => {
-                say(format!(
-                    "waiting: {what}: could not list its ignored files ({e:#})"
-                ));
-                waiting += 1;
+                match give_up_after_three(
+                    app,
+                    &old,
+                    &format!("could not list its ignored files: {e:#}"),
+                )? {
+                    Some(note) => {
+                        say(format!("{what}: {note}"));
+                        left += 1;
+                    }
+                    None => {
+                        say(format!(
+                            "waiting: {what}: could not list its ignored files ({e:#})"
+                        ));
+                        waiting += 1;
+                    }
+                }
                 continue;
             }
         };
@@ -2009,17 +2075,24 @@ fn migrate(app: &App) -> Result<()> {
                 }
                 archived += 1;
             }
-            Err(e) => {
-                say(format!("waiting: {what}: could not archive it ({e:#})"));
-                waiting += 1;
-            }
+            Err(e) => match give_up_after_three(app, &old, &format!("{e:#}"))? {
+                Some(note) => {
+                    say(format!("{what}: {note}"));
+                    left += 1;
+                }
+                None => {
+                    say(format!("waiting: {what}: could not archive it ({e:#})"));
+                    waiting += 1;
+                }
+            },
         }
     }
 
     if waiting == 0 {
         app.db.delete_meta(PENDING)?;
     }
-    if archived + left + gone + waiting > 0 {
+    // Once per change: a leftover that waits to be tried again is not news.
+    if archived + left + gone > 0 {
         eprintln!(
             "jeet: reviews moved out of the tasks: {archived} duplicate worktrees archived, \
              {left} left in place, {waiting} to retry; see {}",
@@ -2029,10 +2102,31 @@ fn migrate(app: &App) -> Result<()> {
     Ok(())
 }
 
+/// Attempts at a leftover before it is left where it is.
+const ATTEMPTS: i64 = 3;
+
+/// Count a failed attempt at `old`; at [`ATTEMPTS`] it is done, left in
+/// place, and the note says why.
+fn give_up_after_three(
+    app: &App,
+    old: &crate::db::reviews::Leftover,
+    error: &str,
+) -> Result<Option<String>> {
+    if app.db.count_leftover_attempt(&old.task_id, &old.dir_name)? < ATTEMPTS {
+        return Ok(None);
+    }
+    let note = format!("left in place: could not archive ({error})");
+    app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+    Ok(Some(note))
+}
+
 /// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
 /// (what its agent was asked) and `brought-back` — on its row, where they
 /// are not yet.
-fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) {
+///
+/// True when a column was set.
+fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) -> bool {
+    let mut changed = false;
     let marker = dir(app, review).join(tasks::MARKER_DIR);
     if review.asked_at.is_none() {
         let asked = std::fs::read_to_string(marker.join("review.json"))
@@ -2041,7 +2135,10 @@ fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) {
             .filter(|asked| asked.pr == review.pr_number);
         if let Some(asked) = asked {
             match app.db.set_review_asked(&review.id, &asked.head, asked.at) {
-                Ok(()) => say(format!("{}: took what its agent was asked", review.slug)),
+                Ok(()) => {
+                    changed = true;
+                    say(format!("{}: took what its agent was asked", review.slug));
+                }
                 Err(e) => say(format!("{}: could not record it ({e:#})", review.slug)),
             }
         }
@@ -2052,11 +2149,33 @@ fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) {
             .and_then(|text| text.trim().parse::<i64>().ok());
         if let Some(at) = at {
             match app.db.set_review_brought_back(&review.id, at) {
-                Ok(()) => say(format!("{}: took when it was brought back", review.slug)),
+                Ok(()) => {
+                    changed = true;
+                    say(format!("{}: took when it was brought back", review.slug));
+                }
                 Err(e) => say(format!("{}: could not record it ({e:#})", review.slug)),
             }
         }
     }
+    changed
+}
+
+/// `review` with what its task kept in files folded into its row first, for
+/// whatever reads whether its agent was asked or when it was brought back:
+/// the post-step of the upgrade ([`migrate_leftovers`]) may not have run, or
+/// not got to it. Cheap: a file or two, and only where a column is empty.
+pub fn folded(app: &App, review: &ReviewRecord) -> ReviewRecord {
+    if review.asked_at.is_some() && review.brought_back_at.is_some() {
+        return review.clone();
+    }
+    if !fold_markers(app, review, &mut |_| {}) {
+        return review.clone();
+    }
+    app.db
+        .get_review(&review.id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| review.clone())
 }
 
 #[cfg(test)]
@@ -2930,5 +3049,133 @@ mod tests {
         migrate(&app).unwrap();
         let got = app.db.get_review(&review.id).unwrap().unwrap();
         assert_eq!(got.asked_head.as_deref(), Some("newer"));
+    }
+
+    fn insert_leftover(app: &App, repo: &RepoRecord, task: &str, slug: &str) {
+        let conn = rusqlite::Connection::open(crate::config::index_path(&app.home)).unwrap();
+        conn.execute(
+            "INSERT INTO review_leftovers (task_id, slug, repo_id, pr_number, dir_name,
+                 branch, created_branch, was_archived, done)
+             VALUES (?1, ?2, ?3, 7, 'api', ?2, 1, 0, 0)",
+            rusqlite::params![task, slug, repo.id],
+        )
+        .unwrap();
+        app.db.set_meta_for_test(PENDING).unwrap();
+    }
+
+    /// A leftover recorded under a review's id or slug is the review's own
+    /// worktree: never archived.
+    #[test]
+    fn a_leftover_that_belongs_to_a_review_is_left_in_place() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let worktree = worktree_path(&app, &review).unwrap();
+        insert_leftover(&app, &repo, &review.id, "some-old-slug");
+        insert_leftover(&app, &repo, "old-task", &review.slug);
+        migrate(&app).unwrap();
+        assert!(worktree.is_dir());
+        assert!(git::branch_exists(Path::new(&repo.trunk_path), "pr/7").unwrap());
+        let rows = leftover_rows(&app);
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.1, 1);
+            assert_eq!(
+                row.2.as_deref(),
+                Some(format!("left in place: belongs to review {}", review.slug).as_str())
+            );
+        }
+        let log = std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap();
+        assert!(log.contains("belongs to review"), "{log}");
+    }
+
+    /// One that cannot be archived is tried three times, then left.
+    #[test]
+    fn a_leftover_that_cannot_be_archived_is_given_up_after_three_tries() {
+        let (_dir, app, repo) = git_lab();
+        // Not a worktree at all, so listing what git ignores fails.
+        std::fs::create_dir_all(app.tasks_root().join("zz-dup-broken/api")).unwrap();
+        insert_leftover(&app, &repo, "dup-broken", "zz-dup-broken");
+        for _ in 0..2 {
+            migrate(&app).unwrap();
+            assert_eq!(leftover_rows(&app)[0].1, 0);
+            assert!(app.db.meta(PENDING).unwrap().is_some());
+        }
+        migrate(&app).unwrap();
+        let rows = leftover_rows(&app);
+        assert_eq!(rows[0].1, 1);
+        assert!(
+            rows[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .starts_with("left in place: could not archive ("),
+            "{rows:?}"
+        );
+        assert_eq!(app.db.meta(PENDING).unwrap(), None);
+    }
+
+    /// The markers are read from the review's directory when its columns are
+    /// empty, whether or not the post-step has run.
+    #[test]
+    fn markers_are_folded_for_a_reader_before_the_post_step() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        assert!(asked(&review).is_none());
+        let marker = dir(&app, &review).join(tasks::MARKER_DIR);
+        std::fs::write(
+            marker.join("review.json"),
+            r#"{"pr": 7, "head": "abc", "at": 123}"#,
+        )
+        .unwrap();
+        std::fs::write(marker.join("brought-back"), "456").unwrap();
+        let got = folded(&app, &review);
+        assert_eq!(
+            asked(&got).map(|a| (a.head, a.at)),
+            Some(("abc".into(), 123))
+        );
+        assert_eq!(got.brought_back_at, Some(456));
+        // And on the row, so it is read once.
+        let row = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(row.brought_back_at, Some(456));
+        // A PR that was done before it was brought back is not retired.
+        assert!(matches!(
+            retire(&app, &review, Some(100)).unwrap(),
+            Retired::BroughtBack
+        ));
+    }
+
+    /// The second of two `jeet review`s that raced for the lock finds the
+    /// first's worktree recorded and uses it, making no second.
+    #[test]
+    fn a_second_check_out_reuses_the_first_ones_worktree() {
+        let (_dir, app, repo) = git_lab();
+        let recorded = reviewed(&app, &repo);
+        let pr = PullRequest { number: 7, ..pr() };
+        let worktree = worktree_path(&app, &recorded).unwrap();
+        // Uncommitted: the refresh from the PR is not attempted.
+        std::fs::write(worktree.join("notes.md"), "x\n").unwrap();
+        // What the slower one read before the faster one recorded its own.
+        let mut stale = recorded.clone();
+        stale.dir_name = None;
+        stale.branch = None;
+        let (path, _) = check_out(&app, &mut stale, &repo, &pr).unwrap();
+        assert_eq!(path, worktree);
+        assert_eq!(stale.dir_name.as_deref(), Some("api"));
+        let dirs = std::fs::read_dir(dir(&app, &recorded))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().join(".git").exists())
+            .count();
+        assert_eq!(dirs, 1);
+    }
+
+    #[test]
+    fn who_asked_sticks_when_the_user_asks_again() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let assistant = crate::assistant::ensure(&app).unwrap();
+        remember_requester(&app, &review.id, Some(&assistant.id)).unwrap();
+        remember_requester(&app, &review.id, None).unwrap();
+        let got = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(got.requested_by.as_deref(), Some(assistant.id.as_str()));
     }
 }

@@ -336,13 +336,15 @@ impl Database {
         Ok(())
     }
 
-    /// Set (or, with `None`, clear) a review's one worktree.
-    pub fn set_review_worktree(&self, id: &str, wt: Option<&TaskWorktreeRecord>) -> Result<()> {
-        self.conn().execute(
+    /// Set (or, with `None`, clear) a review's one worktree. A compare and
+    /// swap: false, and nothing changed, when the review has a worktree
+    /// already that is not `wt`'s (another `jeet review` made it first).
+    pub fn set_review_worktree(&self, id: &str, wt: Option<&TaskWorktreeRecord>) -> Result<bool> {
+        let changed = self.conn().execute(
             "UPDATE reviews
              SET dir_name = ?2, branch = ?3, created_branch = ?4, head_oid = ?5, stash_ref = ?6,
                  worktree_created_at = ?7
-             WHERE id = ?1",
+             WHERE id = ?1 AND (dir_name IS NULL OR ?2 IS NULL OR dir_name = ?2)",
             params![
                 id,
                 wt.map(|w| w.dir_name.as_str()),
@@ -353,7 +355,7 @@ impl Database {
                 wt.map(|w| w.created_at),
             ],
         )?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Record the review's one session.
@@ -587,6 +589,17 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Count one more failed attempt at a leftover, and return how many
+    /// there have been.
+    pub fn count_leftover_attempt(&self, task_id: &str, dir_name: &str) -> Result<i64> {
+        Ok(self.conn().query_row(
+            "UPDATE review_leftovers SET attempts = attempts + 1
+             WHERE task_id = ?1 AND dir_name = ?2 RETURNING attempts",
+            params![task_id, dir_name],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Note how a leftover ended: done, with `note`.
     pub fn finish_leftover(&self, task_id: &str, dir_name: &str, note: &str) -> Result<()> {
         self.conn().execute(
@@ -688,13 +701,23 @@ mod tests {
             created_at: 11,
             read_only: false,
         };
-        db.set_review_worktree("r", Some(&wt)).unwrap();
+        assert!(db.set_review_worktree("r", Some(&wt)).unwrap());
         db.set_review_session("r", "s1").unwrap();
         let got = db.get_review("r").unwrap().unwrap();
-        assert_eq!(got.worktree(), Some(wt));
+        assert_eq!(got.worktree(), Some(wt.clone()));
         assert_eq!(got.session_id.as_deref(), Some("s1"));
-        db.set_review_worktree("r", None).unwrap();
+        // Saving what it has again is fine; another worktree is refused.
+        assert!(db.set_review_worktree("r", Some(&wt)).unwrap());
+        let other = TaskWorktreeRecord {
+            dir_name: "api-2".into(),
+            ..wt.clone()
+        };
+        assert!(!db.set_review_worktree("r", Some(&other)).unwrap());
+        assert_eq!(db.get_review("r").unwrap().unwrap().worktree(), Some(wt));
+        assert!(db.set_review_worktree("r", None).unwrap());
         assert_eq!(db.get_review("r").unwrap().unwrap().worktree(), None);
+        // With none, any is taken.
+        assert!(db.set_review_worktree("r", Some(&other)).unwrap());
     }
 
     #[test]

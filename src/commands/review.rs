@@ -82,7 +82,7 @@ pub fn run(
     if start_review {
         // Once its agent has been asked, a review stays with it: a job
         // beside it would leave a second session.
-        let has_agent = review::asked(review).is_some();
+        let has_agent = review::asked(&review::folded(app, review)).is_some();
         if app.config.review.command().is_some() && has_agent {
             eprintln!(
                 "jeet: warning: [review] command is deprecated, and not run for a review its \
@@ -95,8 +95,7 @@ pub fn run(
                  review's agent; remove it to have the agent review in its tmux pane, \
                  asked with [review] prompt"
             );
-            app.db
-                .set_review_requested_by(&review.id, requested_by.as_deref())?;
+            review::remember_requester(app, &review.id, requested_by.as_deref())?;
             legacy_review(app, &repo, &pr, &checkout, requested_by.as_deref(), rerun)?;
         } else {
             let asked = review::start_agent(
