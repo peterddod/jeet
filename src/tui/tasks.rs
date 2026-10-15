@@ -2126,7 +2126,7 @@ impl TasksUi {
                 self.refresh_visible(None);
                 self.set_status(match self.archived_projects {
                     true => "other projects · A back to the active ones",
-                    false => "active projects · A shows the archived ones",
+                    false => "active projects · A shows the other ones",
                 });
                 None
             }
