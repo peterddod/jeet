@@ -2420,15 +2420,21 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
     // directory, not a directory that forces the next slug to `-2`.
     app.db.insert_review(&review)?;
     let dir = dir(app, &review);
-    let made = std::fs::create_dir_all(app.tasks_root())
+    let created = std::fs::create_dir_all(app.tasks_root())
         .context("create the tasks directory")
         .and_then(|()| {
             std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))
-        })
-        .and_then(|()| tasks::write_marker(&dir, &review.id))
-        .and_then(|()| install_skill(&dir));
+        });
+    // Only a directory made here is removed: one that was there already is
+    // someone else's.
+    let made = created.and_then(|()| {
+        tasks::write_marker(&dir, &review.id)
+            .and_then(|()| install_skill(&dir))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&dir);
+            })
+    });
     if let Err(e) = made {
-        let _ = std::fs::remove_dir_all(&dir);
         app.db.delete_review(&review.id)?;
         return Err(e);
     }
