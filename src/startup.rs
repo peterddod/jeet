@@ -375,22 +375,22 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Start `jeet task-startup` for the task's agent, just launched, in the
-/// background: detached the way `store::launch` is, its output in the
-/// task's `.jeet/startup.log`.
-pub fn launch(app: &App, task: &TaskRecord, session: Option<&str>) -> Result<()> {
+/// Start `jeet task-startup` for agent `id`, just launched in `dir`, in the
+/// background: detached the way `store::launch` is, its output in
+/// `dir`'s `.jeet/startup.log`.
+pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<()> {
     if std::env::var(WATCH_ENV).is_ok_and(|v| v.trim() == "0") {
         return Ok(());
     }
-    let dir = tasks::task_dir(app, task).join(tasks::MARKER_DIR);
+    let dir = dir.join(tasks::MARKER_DIR);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let log = dir.join(LOG_FILE);
     let out = std::fs::File::create(&log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let mut cmd = Command::new("nohup");
-    cmd.arg(exe).args(["task-startup", &task.id]);
-    if let Some(id) = session {
-        cmd.args(["--session", id]);
+    cmd.arg(exe).args(["task-startup", id]);
+    if let Some(session) = session {
+        cmd.args(["--session", session]);
     }
     cmd.env("JEET_HOME", &app.home)
         .current_dir(&app.home)
