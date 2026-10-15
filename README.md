@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.12.5
+cargo install --git https://github.com/peterddod/jeet --tag v0.13.0
 ```
 
 ## Quick start
@@ -1514,12 +1514,16 @@ the index.
 - **`jeet task send` and `jeet task restart` reach a review's agent**, for you
   and for the task that asked for the review; nobody else may.
 
+v0.13.0: reviews leave the tasks table (#99, #102, #103).
+
 **Upgrading to v0.13.0:** the index moves to **schema v9** the first time any
 v0.13 command opens it (from v7, two steps run one after the other: v8 moves
 reviews out of the tasks, v9 puts a review's `[review] command` job on its
 row), and v0.12 and older refuse the index after that, so upgrade every jeet
-you run at once. Before anything changes, the index is copied to `$JEET_HOME/backups/index-v7-<unix time>.db` (`~/.jeet/backups/` by
-default), and the migration is refused if the copy cannot be made. The copy
+you run at once, the one `jeet watch` runs included. Before anything changes,
+the index is copied to `$JEET_HOME/backups/index-v7-<unix time>.db`
+(`~/.jeet/backups/` by default; a second copy the same second gets `-2`), and
+the migration is refused if the copy cannot be made. The copy
 is a whole index of the old schema: it is what an older jeet opens, if you go
 back.
 
@@ -1533,19 +1537,19 @@ back.
   tasks that were superseded or dropped go, and any that were sent to a
   review task.
 - **Only one review per pull request survives.** Where several review tasks
-  were for one PR, the newest is kept. The others' worktrees are archived the
+  were for one PR, the newest active one is kept (the newest, when all are
+  archived). The others' worktrees are archived the
   way `jeet task archive` does it, into `refs/jeet/head/<old-task-id>/…` and
   `refs/jeet/stash/<old-task-id>/…` in the repository's trunk (the old task id
   is in the log), or, when one holds ignored files that are not build caches (a
   `.env`, local config), left in place on disk untouched. Their task
   directories stay on disk; jeet deletes nothing. A review task with no PR
   recorded gets no review, and its worktrees are handled the same way.
-- This happens at the first command a person runs after the upgrade, not in
-  a hook, and says so on stderr in one line. What it did, a line each, is in
-  `$JEET_HOME/logs/migrate-v8.log` (the job files' log is
-  `migrate-v9.log`, above); a worktree it could not archive then (its
-  agent's tmux session is this very shell, say) is tried again at the next
-  command.
+- Archiving those worktrees happens at the first command you run from your
+  own terminal after the upgrade (not from a hook or an agent's shell), and
+  says so on stderr in one line. What it did, a line each, is in
+  `$JEET_HOME/logs/migrate-v8.log`; a worktree it could not archive then is
+  tried again at the next command, up to three times, then left in place.
 - **Review jobs an older `jeet review` left under `~/.jeet/reviews`
   (`<host>/<owner>/<repo>/<number>.json`, the state of a `[review] command`
   run) become reviews**, at the first commands you run after the upgrade
@@ -1577,6 +1581,19 @@ back.
   "stopped" from a tree: it is paused only at its caps. `jeet manager stop
   --all` still ends the agents (and legacy jobs) of the reviews the
   assistant asked for, and drops them from the `max_live` queue.
+
+After upgrading:
+
+1. **Upgrade every jeet at once**, including the one `jeet watch` runs (on
+   macOS, `brew upgrade jeet` updates the `/opt/homebrew/bin/jeet` launchd
+   runs): an older one refuses the index once it is at v9.
+2. **Run any jeet command from your own terminal**, `jeet ls` say, so the
+   migration and both post-steps run there and print their one-line
+   summaries.
+3. **Read `$JEET_HOME/logs/migrate-v8.log` and `migrate-v9.log`** for what
+   moved, what was archived and what was left in place; the index as it was
+   is in `$JEET_HOME/backups/`.
+4. No config change and nothing to regenerate.
 
 ## What's new in v0.12
 
