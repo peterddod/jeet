@@ -100,7 +100,6 @@ pub fn run(
         } else {
             let asked = review::start_agent(
                 app,
-                &repo,
                 review,
                 &pr,
                 &checkout.path,

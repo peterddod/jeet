@@ -2976,6 +2976,21 @@ impl StoreLab {
             .unwrap()
     }
 
+    /// The `job_exit_code` and `job_pid` of the job on the review with this
+    /// slug; `None` with no review, or none started.
+    fn review_job(&self, slug: &str) -> Option<(Option<i64>, Option<i64>)> {
+        use rusqlite::OptionalExtension;
+        self.index()
+            .query_row(
+                "SELECT job_exit_code, job_pid FROM reviews
+                 WHERE slug = ?1 AND job_started_at IS NOT NULL",
+                [slug],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
     /// A review's state, by slug.
     fn review_state(&self, slug: &str) -> String {
         self.review_row(slug).unwrap().1
@@ -4666,9 +4681,9 @@ fn opening_a_review_task_resumes_its_review_session() {
 
     // Finished, its session is the task's, and opening resumes it.
     std::fs::write(&go, "").unwrap();
-    let state = lab.home().join("reviews/github.com/acme/widget/7.json");
     wait_until("the review to finish", || {
-        std::fs::read_to_string(&state).is_ok_and(|s| s.contains("\"exit_code\": 0"))
+        lab.review_job("review-widget-7")
+            .is_some_and(|(code, _)| code == Some(0))
     });
     let output = lab.jeet_at(&["task", "open", "review-widget-7"], &lab.home(), &env);
     succeeded(&output);
@@ -5161,12 +5176,7 @@ fn a_test_leaves_no_process_behind() {
             let tmux_env = tmux.to_string_lossy().to_string();
             let env = [("PATH", path.as_str()), ("JEET_TMUX", tmux_env.as_str())];
             succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
-            let state = lab.home().join("reviews/github.com/acme/widget/7.json");
-            let runner = || {
-                let job = std::fs::read_to_string(&state).ok()?;
-                let job: serde_json::Value = serde_json::from_str(&job).ok()?;
-                job["pid"].as_i64()
-            };
+            let runner = || lab.review_job("review-widget-7")?.1;
             wait_until("the review to start", || {
                 pid_file.exists() && runner().is_some()
             });
@@ -6295,19 +6305,16 @@ fn the_assistant_does_only_what_it_is_allowed_and_says_so() {
     assert_eq!(actions(&lab.home()).len(), 5);
     assert_eq!(notes(&notifier).len(), 1);
 
-    // A review job runs whatever its state file says: only one jeet wrote.
-    let state = scratch.path().join("job.json");
-    std::fs::write(&state, "{}").unwrap();
-    let state = sh_quote(&state.to_string_lossy());
-    let output = root.run(&format!(r#"echo g | "$JEET" review-job {state}"#));
+    // A review job runs only a command jeet recorded for a review it knows.
+    let output = root.run(r#"echo g | "$JEET" review-job nobody"#);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("review jobs run only from jeet's reviews dir"),
+        stderr.contains("review jobs run only for a review jeet knows"),
         "{stderr}"
     );
     // Nor does one start without the go-ahead `jeet review` gives it.
-    let output = root.run(&format!(r#""$JEET" review-job {state}"#));
+    let output = root.run(r#""$JEET" review-job nobody"#);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(stderr.contains("started only by `jeet review`"), "{stderr}");
@@ -12885,23 +12892,43 @@ fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
     assert!(reports[1].2.starts_with("ended"), "{reports:?}");
 
     // Started by hand in a task's pane, it is refused as what only the
-    // root may do, even with the go-ahead and a state file jeet's own. The
-    // job it was given ends there, never to read as running.
+    // root may do, even with the go-ahead and a job jeet recorded. The job
+    // it was given ends there, never to read as running.
     lab.new_task_with("x", &["--parent", "assistant"]);
     let mut x_agent = lab.task_pane("x");
-    let state = lab.home().join("reviews/forged.json");
     let ran = lab.home().join("ran");
-    let job = serde_json::json!({
-        "pr": 9, "title": "t", "head": "abc", "worktree": lab.home(),
-        "command": format!("touch {}", sh_quote(&ran.to_string_lossy())),
-        "env": [], "notify": false, "log": lab.home().join("reviews/forged.log"),
-        "started_at": 0,
-    });
-    std::fs::write(&state, job.to_string()).unwrap();
-    let output = x_agent.run(&format!(
-        r#"echo g | "$JEET" review-job {}"#,
-        sh_quote(&state.to_string_lossy())
-    ));
+    let add_job = |id: &str, pr: i64, pid: Option<i64>| {
+        lab.index()
+            .execute(
+                "INSERT INTO reviews (id, slug, repo_id, pr_number, created_at, last_activity,
+                     job_head, job_command, job_worktree, job_log, job_notify, job_env,
+                     job_started_at, job_pid)
+                 VALUES (?1, ?1, 'github.com/acme/widget', ?2, 0, 0, 'abc', ?3, ?4, '/nowhere/log',
+                     0, '[]', 0, ?5)",
+                rusqlite::params![
+                    id,
+                    pr,
+                    format!("touch {}", sh_quote(&ran.to_string_lossy())),
+                    lab.home().to_string_lossy(),
+                    pid
+                ],
+            )
+            .unwrap();
+    };
+    let exit_code = |id: &str| -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        lab.index()
+            .query_row(
+                "SELECT job_exit_code FROM reviews WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten()
+    };
+    add_job("forged", 9, None);
+    let output = x_agent.run(r#"echo g | "$JEET" review-job forged"#);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(
@@ -12909,69 +12936,38 @@ fn a_review_job_runs_as_its_task_after_jeet_review_exits() {
         "{stderr}"
     );
     assert!(!ran.exists());
-    let ended: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
-    assert_eq!(ended["exit_code"], 126, "{ended}");
-    assert!(ended["finished_at"].is_i64(), "{ended}");
+    assert_eq!(exit_code("forged"), Some(126));
 
-    // Refused the same, it leaves alone a job a runner has taken up, and
-    // a job's file anywhere but the reviews dir.
-    let taken = lab.home().join("reviews/taken.json");
-    let outside = lab.home().join("outside.json");
-    let mut running = job.clone();
-    running["pid"] = serde_json::json!(std::process::id());
-    std::fs::write(&taken, running.to_string()).unwrap();
-    std::fs::write(&outside, job.to_string()).unwrap();
-    for state in [&taken, &outside] {
-        let before = std::fs::read_to_string(state).unwrap();
-        let state_arg = sh_quote(&state.to_string_lossy());
+    // Refused the same, it leaves alone a job another runner has taken up,
+    // and invents none for a review jeet does not know.
+    add_job("taken", 10, Some(i64::from(std::process::id())));
+    for id in ["taken", "nobody"] {
         for line in [
-            format!(r#"echo g | "$JEET" review-job {state_arg}"#),
-            format!(r#""$JEET" review-job {state_arg} </dev/null"#),
+            format!(r#"echo g | "$JEET" review-job {id}"#),
+            format!(r#""$JEET" review-job {id} </dev/null"#),
         ] {
             assert!(!x_agent.run(&line).status.success(), "{line}");
-            assert_eq!(std::fs::read_to_string(state).unwrap(), before, "{line}");
+            assert_eq!(exit_code(id), None, "{line}");
         }
     }
-
-    // A runner `jeet review` named in the file before the go-ahead still
-    // ends its own job when refused: the shell writes its pid, then execs
-    // the runner as that pid.
-    let named = lab.home().join("reviews/named.json");
-    let head = lab.home().join("named-head");
-    let text = job.to_string();
-    std::fs::write(&head, &text[..text.len() - 1]).unwrap();
-    let inner = format!(
-        r#"{{ cat {head}; printf ',"pid":%s}}' $$; }} > {named} && exec "$JEET" review-job {named} </dev/null"#,
-        head = sh_quote(&head.to_string_lossy()),
-        named = sh_quote(&named.to_string_lossy()),
-    );
-    assert!(!x_agent
-        .run(&format!("sh -c {}", sh_quote(&inner)))
-        .status
-        .success());
-    assert!(!ran.exists());
-    let ended: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&named).unwrap()).unwrap();
-    assert!(ended["pid"].is_u64(), "{ended}");
-    assert_eq!(ended["exit_code"], 126, "{ended}");
-    assert!(ended["finished_at"].is_i64(), "{ended}");
+    let known: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM reviews WHERE id = 'nobody'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(known, 0);
 
     // A runner whose `jeet review` died before the go-ahead ends its job
     // too, wherever it runs.
-    let orphaned = lab.home().join("reviews/orphaned.json");
-    std::fs::write(&orphaned, job.to_string()).unwrap();
-    let output = lab.jeet_at(
-        &["review-job", &orphaned.to_string_lossy()],
-        &lab.home(),
-        &[],
-    );
+    add_job("orphaned", 11, None);
+    let output = lab.jeet_at(&["review-job", "orphaned"], &lab.home(), &[]);
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("started only by `jeet review`"));
     assert!(!ran.exists());
-    let ended: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&orphaned).unwrap()).unwrap();
-    assert_eq!(ended["exit_code"], 126, "{ended}");
+    assert_eq!(exit_code("orphaned"), Some(126));
 }
 
 /// Deleting a review task ends its job, and a command that names the
@@ -13100,20 +13096,9 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
         lab.review_row("review-widget-7").unwrap().2,
         Some(lab.assistant_id())
     );
-    let states = lab.home().join("reviews");
-    let state = states.join(
-        walk_files(&states)
-            .into_iter()
-            .find(|p| p.file_name().is_some_and(|n| n == "7.json"))
-            .unwrap(),
-    );
-    let exit_code = || -> serde_json::Value {
-        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&state).unwrap())
-            .unwrap()["exit_code"]
-            .clone()
-    };
-    wait_until("the job to end", || !exit_code().is_null());
-    assert_eq!(exit_code(), 0);
+    let exit_code = || lab.review_job("review-widget-7").and_then(|job| job.0);
+    wait_until("the job to end", || exit_code().is_some());
+    assert_eq!(exit_code(), Some(0));
     // Run as the review's agent, not as the assistant that asked for it.
     assert_eq!(
         std::fs::read_to_string(&seen).unwrap().trim(),

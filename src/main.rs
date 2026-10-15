@@ -63,9 +63,9 @@ fn main() -> Result<()> {
     // Only once `jeet review` has recorded the runner as its task's does the
     // runner go on to find out who it is. One that never gets it, its
     // launcher gone first, ends its job too.
-    if let Some(Commands::ReviewJob { state }) = &cli.command {
+    if let Some(Commands::ReviewJob { review }) = &cli.command {
         if let Err(e) = review::await_go() {
-            review::refused(state);
+            review::refused(review);
             return Err(e);
         }
     }
@@ -74,8 +74,8 @@ fn main() -> Result<()> {
     let authorized = match permissions::authorize(cli.command.as_ref()) {
         Ok(authorized) => authorized,
         Err(e) => {
-            if let Some(Commands::ReviewJob { state }) = &cli.command {
-                review::refused(state);
+            if let Some(Commands::ReviewJob { review }) = &cli.command {
+                review::refused(review);
             }
             return Err(e);
         }
@@ -221,7 +221,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                 } => commands::pr::merge(&app, &pr, repo.as_deref(), method, keep_branch)?,
             }
         }
-        Commands::ReviewJob { state } => review::run_job(&state)?,
+        Commands::ReviewJob { review } => review::run_job(&review)?,
         Commands::Sync { repo } => {
             let app = context::App::open()?;
             commands::sync::run(&app, repo.as_deref())?;

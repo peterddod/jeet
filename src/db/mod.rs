@@ -465,6 +465,23 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX task_reports_to ON task_reports(to_id, answer);
     CREATE INDEX task_reports_task ON task_reports(task_id, id);
     ",
+    // v9: the deprecated `[review] command`'s job moves onto its review's row
+    // (it was a JSON state file under `$JEET_HOME/reviews`). A job exists
+    // while `job_started_at` is set. `review::adopt_jobs` makes reviews of
+    // the files older jeets left.
+    "
+    ALTER TABLE reviews ADD COLUMN job_head TEXT;
+    ALTER TABLE reviews ADD COLUMN job_command TEXT;
+    ALTER TABLE reviews ADD COLUMN job_worktree TEXT;
+    ALTER TABLE reviews ADD COLUMN job_log TEXT;
+    ALTER TABLE reviews ADD COLUMN job_notify INTEGER;
+    ALTER TABLE reviews ADD COLUMN job_env TEXT;
+    ALTER TABLE reviews ADD COLUMN job_started_at INTEGER;
+    ALTER TABLE reviews ADD COLUMN job_finished_at INTEGER;
+    ALTER TABLE reviews ADD COLUMN job_exit_code INTEGER;
+    ALTER TABLE reviews ADD COLUMN job_pid INTEGER;
+    ALTER TABLE reviews ADD COLUMN job_runner_start INTEGER;
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
