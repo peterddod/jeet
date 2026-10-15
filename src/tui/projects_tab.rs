@@ -23,6 +23,8 @@ pub struct ProjectGroup {
     /// The newest activity of any member; 0 with none.
     pub last_activity: i64,
     pub members: Vec<usize>,
+    /// Who is in it, for the second line: their slugs, or `no tasks`.
+    pub who: String,
 }
 
 /// Both lists of projects, grouped once per read of the rows rather than
@@ -51,6 +53,7 @@ impl Groups {
                     tasks: 0,
                     last_activity: 0,
                     members: Vec::new(),
+                    who: "no tasks".to_string(),
                 });
             }
         }
@@ -155,6 +158,7 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<ProjectGroup> {
                         tasks: 0,
                         last_activity: 0,
                         members: Vec::new(),
+                        who: String::new(),
                     });
                     out.len() - 1
                 }
@@ -167,6 +171,14 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<ProjectGroup> {
             line.last_activity = line.last_activity.max(row.last_activity);
             line.members.push(i);
         }
+    }
+    for line in &mut out {
+        let slugs: Vec<&str> = line
+            .members
+            .iter()
+            .map(|&i| rows[i].task.slug.as_str())
+            .collect();
+        line.who = slugs.join(", ");
     }
     sort(&mut out);
     out
@@ -334,6 +346,43 @@ mod tests {
         assert_eq!(groups.members(false, "empty"), None);
         // Reviews are the reviews view's, in neither.
         assert_eq!(lines(&rows, &[], false, "").len(), 1);
+    }
+
+    #[test]
+    fn an_archived_manager_is_in_the_project_of_its_archived_descendant() {
+        let gone = TaskState::Archived;
+        let rows = vec![
+            row("ops", TaskKind::Manager, gone, None, None, 5),
+            row("old", TaskKind::Work, gone, Some("ops"), Some("web"), 6),
+        ];
+        let got = summary(&lines(&rows, &[], true, ""), &rows);
+        assert_eq!(got, [("web".into(), vec!["ops".into(), "old".into()])]);
+    }
+
+    #[test]
+    fn a_known_project_is_listed_once_and_only_where_it_belongs() {
+        let rows = vec![
+            work("live", Some("api"), 10),
+            row(
+                "gone",
+                TaskKind::Work,
+                TaskState::Archived,
+                None,
+                Some("web"),
+                5,
+            ),
+        ];
+        let known = ["api", "web"];
+        let active: Vec<_> = lines(&rows, &known, false, "")
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        let other: Vec<_> = lines(&rows, &known, true, "")
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(active, ["api"]);
+        assert_eq!(other, ["web"]);
     }
 
     #[test]

@@ -668,7 +668,7 @@ tab has them).
 │ ops, deploy, fix-login                                                    │
 │ web                      ● running      1 task                     5m ago │
 │ ship-web                                                                  │
-└ A archived projects ──────────────────────────────────────────────────────┘
+└ A other projects ─────────────────────────────────────────────────────────┘
 ```
 
 Each project takes two lines: its name, the most urgent status among the tasks

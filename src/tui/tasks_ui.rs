@@ -297,7 +297,7 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
     ("v", "the task's pull request in the review viewer"),
     (
         "a",
-        "archive the task (the tasks under it too) · unarchive, in an archived project",
+        "archive the task (the tasks under it too) · unarchive, in the other projects",
     ),
     ("D", "delete the task, after listing any work that would go"),
     ("S", "copy the task's project files in again"),
@@ -683,7 +683,7 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
         .title(title)
         .title_bottom(dim(match (archived, in_project) {
             (true, _) => " A back to active ",
-            (false, true) => " A archived projects ",
+            (false, true) => " A other projects ",
             (false, false) => " A archived tasks ",
         }))
         .title_style(Style::default().fg(Color::Green));
@@ -758,7 +758,7 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
 /// has and when anything last happened.
 fn draw_projects(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let archived = ui.archived_projects;
-    let which = if archived { "archived " } else { "" };
+    let which = if archived { "other " } else { "" };
     let title = match (ui.filter.is_empty(), ui.projects.len()) {
         (true, 0) => format!(" no {which}projects "),
         (true, n) => format!(" {n} {which}project{} ", if n == 1 { "" } else { "s" }),
@@ -771,7 +771,7 @@ fn draw_projects(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
         .title_bottom(dim(if archived {
             " A back to active "
         } else {
-            " A archived projects "
+            " A other projects "
         }))
         .title_style(Style::default().fg(Color::Green));
     if ui.projects.is_empty() {
@@ -824,15 +824,6 @@ fn project_lines(ui: &TasksUi, line: &ProjectGroup) -> Vec<Line<'static>> {
         .map(|(n, word)| plural(n, word))
         .collect::<Vec<_>>()
         .join(", ");
-    let who = match line.members.is_empty() {
-        true => "no tasks".to_string(),
-        false => line
-            .members
-            .iter()
-            .map(|&i| ui.rows[i].task.slug.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
     vec![
         Line::from(vec![
             Span::styled(
@@ -851,7 +842,7 @@ fn project_lines(ui: &TasksUi, line: &ProjectGroup) -> Vec<Line<'static>> {
             ),
             dim(format!(" {:>9}", age_label(line.last_activity))),
         ]),
-        Line::from(dim(format!(" {}", printable(&who)))),
+        Line::from(dim(format!(" {}", printable(&line.who)))),
     ]
 }
 
@@ -3114,7 +3105,7 @@ mod tests {
         let all = screen.join("\n");
         assert!(all.contains(" projects 2 "), "{all}");
         assert!(all.contains("2 projects"), "{all}");
-        assert!(all.contains(" A archived projects "), "{all}");
+        assert!(all.contains(" A other projects "), "{all}");
         let api = line_of(&screen, "api");
         assert!(api.contains("● running") && api.contains("1 task"), "{api}");
         let web = line_of(&screen, "web");
@@ -3134,13 +3125,13 @@ mod tests {
             all.contains("fix login") && !all.contains("old spike"),
             "{all}"
         );
-        assert!(all.contains(" A archived projects "), "{all}");
+        assert!(all.contains(" A other projects "), "{all}");
         // The archived ones, and back.
         ui.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
         let all = render(&mut ui, 100, 14).join("\n");
         assert!(all.contains(" A back to active "), "{all}");
-        assert!(!all.contains("A archived projects"), "{all}");
-        assert!(all.contains("2 archived projects"), "{all}");
+        assert!(!all.contains("A other projects"), "{all}");
+        assert!(all.contains("2 other projects"), "{all}");
         assert!(all.contains("gone") && all.contains("idle"), "{all}");
         assert!(all.contains("no tasks"), "{all}");
         ui.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));

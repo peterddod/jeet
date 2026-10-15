@@ -1127,7 +1127,7 @@ pub struct TasksUi {
     pub groups: Groups,
     /// The projects view's top level, in display order.
     pub projects: Vec<ProjectGroup>,
-    /// `A` in the projects view: it lists the archived projects instead.
+    /// `A` in the projects view: it lists the other projects instead.
     pub archived_projects: bool,
     /// The project the projects view has gone into, or the top level.
     pub project: Option<String>,
@@ -1535,19 +1535,36 @@ impl TasksUi {
     /// [`Self::tree_parent`], within the project when inside one: a parent
     /// that is not in it leaves the task on top.
     fn level_parent(&self, row: &TaskRow) -> Option<&str> {
-        self.tree_parent(row)
-            .filter(|parent| self.view != View::Projects || self.proj_members.contains(*parent))
+        let mut up = self.tree_parent(row);
+        if self.view != View::Projects {
+            return up;
+        }
+        // Inside a project, the nearest ancestor that is in it.
+        for _ in 0..=self.rows.len() {
+            let id = up?;
+            if self.proj_members.contains(id) {
+                return Some(id);
+            }
+            up = self.active_row(id).and_then(|r| self.tree_parent(r));
+        }
+        None
     }
 
     /// Whether the active view goes into `row`: a manager, or a task with
     /// active tasks under it all the same.
     pub fn enterable(&self, row: &TaskRow) -> bool {
+        if self.view == View::Projects {
+            // Only what has a member of the project below it.
+            return self.rows.iter().any(|r| {
+                self.proj_members.contains(&r.task.id)
+                    && self.level_parent(r) == Some(row.task.id.as_str())
+            });
+        }
         row.task.kind == TaskKind::Manager
             || self.rows.iter().any(|r| {
                 r.task.state == TaskState::Active
                     && r.task.kind != TaskKind::Review
                     && r.task.parent_id.as_deref() == Some(&row.task.id)
-                    && (self.view != View::Projects || self.proj_members.contains(&r.task.id))
             })
     }
 
@@ -2108,7 +2125,7 @@ impl TasksUi {
                 self.selected = 0;
                 self.refresh_visible(None);
                 self.set_status(match self.archived_projects {
-                    true => "archived projects · A back to the active ones",
+                    true => "other projects · A back to the active ones",
                     false => "active projects · A shows the archived ones",
                 });
                 None
@@ -3978,7 +3995,7 @@ impl Screen<'_> {
         match loaded {
             Ok((loaded, warning)) => {
                 self.ui.set_legacy(reviews::legacy_jobs(&app.home));
-                self.read_projects();
+                self.read_projects(false);
                 let changed = self.set_rows(loaded);
                 // Sizes are walked again only when there are new tasks to
                 // measure: a walk restarted on every action never finishes
@@ -4023,7 +4040,7 @@ impl Screen<'_> {
         if self.ui.view == View::Reviews {
             self.ui.set_legacy(reviews::legacy_jobs(&self.app.home));
         }
-        self.read_projects();
+        self.read_projects(false);
         if self.set_rows(load_rows(self.app)?) {
             self.bg.watch(&self.ui.rows);
             if self.ui.view == View::Reviews {
@@ -4037,9 +4054,14 @@ impl Screen<'_> {
 
     /// Read the names of the projects again, for the projects tab's other
     /// projects: a directory listing, on each read of the rows, never per draw.
-    fn read_projects(&mut self) {
-        if let Ok(names) = projects::list(self.app) {
-            self.ui.set_known_projects(names);
+    /// `regroup`: nothing else is about to (`set_rows` does).
+    fn read_projects(&mut self, regroup: bool) {
+        match projects::list(self.app) {
+            Ok(names) if regroup => self.ui.set_known_projects(names),
+            Ok(names) => self.ui.known_projects = names,
+            Err(e) => self
+                .ui
+                .set_status(format!("could not list the projects: {e:#}")),
         }
     }
 
@@ -5452,7 +5474,7 @@ impl Screen<'_> {
 
     fn show_projects(&mut self, select: Option<&str>) -> Result<()> {
         let lines = project_lines(self.app)?;
-        self.read_projects();
+        self.read_projects(true);
         let selected = select
             .and_then(|name| lines.iter().position(|l| l.name == name))
             .unwrap_or(0);
@@ -6423,7 +6445,7 @@ mod tests {
         press(&mut ui, KeyCode::Char('A'));
         assert!(ui.archived_projects);
         assert_eq!(projects(&ui), [("gone", 0, 1), ("idle", 0, 0)]);
-        assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
+        assert!(ui.status_line.contains("other"), "{}", ui.status_line);
         // Inside, the archived tasks, flat; ⏎ explains, a brings back.
         press(&mut ui, KeyCode::Enter);
         assert_eq!(shown(&ui), ["old"]);
@@ -6441,6 +6463,36 @@ mod tests {
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_projects);
         assert_eq!(ui.projects.len(), 2);
+    }
+
+    #[test]
+    fn a_manager_reaching_a_project_through_other_projects_tasks_is_walked_to_its_member() {
+        let mut ui = by_project();
+        let mut rows = ui.rows.clone();
+        let mut sub = task("sub", "sub", TaskState::Active, 1);
+        sub.task.parent_id = Some("ship".into());
+        sub.task.project = Some("docs".into());
+        rows.push(sub);
+        ui.set_rows(rows);
+        // docs: ops and deploy (managers above sub) and sub; ship is web's.
+        assert_eq!(
+            projects(&ui),
+            [("api", 1, 1), ("docs", 2, 1), ("web", 2, 2)]
+        );
+        ui.selected = 1;
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.breadcrumb(), ["projects", "docs"]);
+        assert_eq!(shown(&ui), ["ops"]);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(shown(&ui), ["deploy"]);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.breadcrumb(), ["projects", "docs", "ops", "deploy"]);
+        assert_eq!(shown(&ui), ["sub"]);
+        // sub has nothing of docs below it.
+        let sub = ui.row("sub").unwrap().clone();
+        assert!(!ui.enterable(&sub));
+        let ship = ui.row("ship").unwrap().clone();
+        assert!(!ui.enterable(&ship));
     }
 
     #[test]
