@@ -117,6 +117,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
     if moves_reviews(command.as_ref()) {
         if let Ok(app) = context::App::open() {
             review::migrate_leftovers(&app);
+            review::adopt_jobs(&app);
         }
     }
     let Some(command) = command else {

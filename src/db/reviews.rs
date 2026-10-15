@@ -702,6 +702,16 @@ impl Database {
         Ok(())
     }
 
+    /// Set `key` to `value`.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_meta(&self, key: &str) -> Result<()> {
         self.conn()
             .execute("DELETE FROM meta WHERE key = ?1", params![key])?;

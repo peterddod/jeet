@@ -6149,6 +6149,11 @@ fn import_leaves_pull_request_checkouts_alone() {
         "exit_code": 0,
     });
     write(&jobs.join("42.json"), &job.to_string());
+    // Adopted as a review at the first command, which was cloning: as if
+    // the file had been there before the upgrade.
+    lab.index()
+        .execute("DELETE FROM meta WHERE key = 'legacy_jobs_adopted'", [])
+        .unwrap();
     // The explorer checked out pr-7, and marked it so.
     let admin = git_stdout(&["rev-parse", "--absolute-git-dir"], &explored);
     write(&std::path::Path::new(&admin).join("jeet-pr"), "7\n");
@@ -6160,9 +6165,57 @@ fn import_leaves_pull_request_checkouts_alone() {
     // Said how to remove one, as jeet itself no longer does.
     assert!(stderr.contains("`git worktree remove`"), "{stderr}");
     assert!(stderr.contains("nothing to import"), "{stderr}");
-    assert!(lab.task_slugs().is_empty());
+    // No task: the only directory is the adopted review's, which has the
+    // job but not its worktree.
+    assert_eq!(lab.task_slugs(), ["review-web-42"]);
     assert!(review.is_dir());
     assert!(explored.is_dir());
+}
+
+/// The job files older jeets left are adopted as reviews at the first
+/// command after the upgrade, and every one of them can be brought back,
+/// archived and deleted like any review. The files stay where they are.
+#[test]
+fn legacy_review_job_files_become_reviews_that_can_be_managed() {
+    let lab = StoreLab::new();
+    let jobs = lab.home().join("reviews/github.com/acme/web");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let job = serde_json::json!({
+        "pr": 42, "title": "Add a thing", "head": "abc", "worktree": "/nowhere/web",
+        "command": "true", "env": [], "notify": false, "log": jobs.join("42.log"),
+        "started_at": 100, "finished_at": 110, "exit_code": 0,
+    });
+    write(&jobs.join("42.json"), &job.to_string());
+    write(&jobs.join("7.json"), "not json");
+
+    let output = lab.jeet_at(&["ls"], &lab.home(), &[("JEET_TASK_ID", "")]);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("1 adopted (1 archived, 0 still running)"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(lab.review_state("review-web-42"), "archived");
+    let log = read(&lab.home().join("logs/migrate-v9.log"));
+    assert!(log.contains("7.json: left: not a review job"), "{log}");
+    assert!(jobs.join("42.json").is_file() && jobs.join("7.json").is_file());
+
+    // Looked at once.
+    let output = lab.jeet_at(&["ls"], &lab.home(), &[("JEET_TASK_ID", "")]);
+    assert!(!stderr_of(&output).contains("adopted"));
+
+    let at = |verb: &str, flag: &[&str]| {
+        let mut args = vec!["task", verb, "review-web-42"];
+        args.extend_from_slice(flag);
+        succeeded(&lab.jeet_at(&args, &lab.home(), &[("JEET_TASK_ID", "")]));
+    };
+    at("unarchive", &[]);
+    assert_eq!(lab.review_state("review-web-42"), "active");
+    at("archive", &["--force"]);
+    assert_eq!(lab.review_state("review-web-42"), "archived");
+    at("delete", &["-f"]);
+    assert!(lab.review_row("review-web-42").is_none());
+    assert!(jobs.join("42.json").is_file(), "the file is the user's");
 }
 
 // ---------------------------------------------------------------------------

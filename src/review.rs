@@ -2097,6 +2097,243 @@ fn give_up_after_three(
     Ok(Some(note))
 }
 
+// ---------------------------------------------------------------------------
+// Adopting the job files older jeets left (schema v9)
+// ---------------------------------------------------------------------------
+
+/// The `meta` marker that [`adopt_jobs`] has been through
+/// `$JEET_HOME/reviews`: it reads the directory once.
+const JOBS_ADOPTED: &str = "legacy_jobs_adopted";
+
+/// Under `$JEET_HOME/logs`: what [`adopt_jobs`] did, one line per file.
+const ADOPT_LOG: &str = "migrate-v9.log";
+
+/// How [`adopt_file`] dealt with one job file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// A review made for it, archived: it had finished or was lost.
+    Archived,
+    /// A review made for it, active: its process still runs.
+    Running,
+    /// Its job put on the review its PR already had, which had none.
+    Folded,
+    /// Its PR's review has a job already; the file is not needed.
+    Held,
+    /// Not a job jeet can read: left alone.
+    Left,
+}
+
+/// Older jeets kept each `[review] command` job as a JSON file under
+/// `$JEET_HOME/reviews/<host>/<owner>/<repo>/<n>.json`, and the Reviews tab
+/// listed them read-only. Once, at the first user command after the upgrade
+/// to schema v9, each file whose PR has no review becomes one: archived
+/// when the job finished or was lost (its process is gone), active while it
+/// still runs, so the sweep of done PRs archives it once its PR is merged or
+/// closed. It has a directory of its own like any review and no worktree:
+/// the job's is never touched. A PR that has a review without a job gets
+/// the file's as its job. A file that cannot be read is left.
+///
+/// Files are never deleted or moved, and read once: [`JOBS_ADOPTED`] stops
+/// the next command looking. A file whose review could not be made is
+/// tried again at the next command. Under a lock, so two commands at once
+/// do not both adopt. Each file is a line of the log, and a summary goes to
+/// stderr once.
+pub fn adopt_jobs(app: &App) {
+    if let Err(e) = adopt(app) {
+        eprintln!("jeet: warning: could not adopt the review jobs older jeets left: {e:#}");
+    }
+}
+
+fn adopt(app: &App) -> Result<()> {
+    if app.db.meta(JOBS_ADOPTED)?.is_some() {
+        return Ok(());
+    }
+    let locks = app.home.join("locks");
+    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
+    let path = locks.join("adopt-jobs.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        // Another command is at it.
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+    // Done by whoever held the lock before.
+    if app.db.meta(JOBS_ADOPTED)?.is_some() {
+        return Ok(());
+    }
+    let root = app.home.join("reviews");
+    let files = job_files(&root);
+    if files.is_empty() {
+        return app.db.set_meta(JOBS_ADOPTED, "1");
+    }
+    let logs = app.home.join("logs");
+    std::fs::create_dir_all(&logs).with_context(|| format!("create {}", logs.display()))?;
+    let log_path = logs.join(ADOPT_LOG);
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let mut say = |line: String| {
+        let _ = writeln!(log, "{} {line}", now_secs());
+    };
+
+    let mut counts = [0usize; 5];
+    let mut retry = 0;
+    for file in &files {
+        match adopt_file(app, &root, file) {
+            Ok((how, line)) => {
+                say(line);
+                counts[how as usize] += 1;
+            }
+            Err(e) => {
+                say(format!("{}: not adopted yet: {e:#}", file.display()));
+                retry += 1;
+            }
+        }
+    }
+    if retry == 0 {
+        app.db.set_meta(JOBS_ADOPTED, "1")?;
+    }
+    let [archived, running, folded, held, left] = counts;
+    eprintln!(
+        "jeet: review jobs older jeets left in {} are now reviews: {} adopted ({archived} \
+         archived, {running} still running), {folded} put on a review that had none, \
+         {held} already held, {left} left unread, {retry} to retry; nothing was deleted; \
+         see {}",
+        root.display(),
+        archived + running,
+        log_path.display()
+    );
+    Ok(())
+}
+
+/// Every `<host>/<owner>/<repo>/<n>.json` under `root`, in path order.
+fn job_files(root: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .min_depth(4)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
+        .map(walkdir::DirEntry::into_path)
+        .collect();
+    files.sort();
+    files
+}
+
+/// The repository and PR a job file at `path` under `root` is for.
+fn job_key(root: &Path, path: &Path) -> Option<(String, u64)> {
+    let number = path.file_stem()?.to_str()?.parse().ok()?;
+    let repo_id = path
+        .parent()?
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    remote::identity_from_id(&repo_id).ok()?;
+    Some((repo_id, number))
+}
+
+/// Adopt the job file at `path`, with the line for the log. An error is a
+/// review that could not be made now: the file is tried again.
+fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)> {
+    let left = |why: String| Ok((Adoption::Left, format!("{}: left: {why}", path.display())));
+    let Some((repo_id, number)) = job_key(root, path) else {
+        return left("not named <repo>/<number>.json".into());
+    };
+    let label = format!("{repo_id}#{number}");
+    let mut job: Job = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(job) => job,
+            Err(e) => return left(format!("not a review job ({e})")),
+        },
+        Err(e) => return left(format!("unreadable ({e})")),
+    };
+    // The path is the key, whatever the file says.
+    job.pr = number;
+    // Recorded before any runner was: it never ran, as a refused one.
+    let mut how = String::new();
+    if job.exit_code.is_none() && job.pid.is_none() {
+        job.finished_at = Some(now_secs());
+        job.exit_code = Some(REFUSED);
+        how = "; it never launched, so recorded as ended (status 126)".to_string();
+    }
+    job.lost = job.exit_code.is_none() && job.pid.is_some_and(|pid| !process_alive(pid));
+    let state = job.state();
+    let state_word = match state {
+        JobState::Running => format!("still running as pid {}", job.pid.unwrap_or(0)),
+        JobState::Finished(code) => format!("finished with status {code}"),
+        JobState::Lost => "lost: its process is gone".to_string(),
+    };
+
+    if let Some(review) = app.db.find_review(&repo_id, number)? {
+        if review.job.is_some() {
+            let line = format!(
+                "{label}: skipped {}: review {} has a job already",
+                path.display(),
+                review.slug
+            );
+            return Ok((Adoption::Held, line));
+        }
+        app.db.set_review_job(&review.id, &job)?;
+        let line = format!(
+            "{label}: put {} ({state_word}{how}) on review {}, which had no job",
+            path.display(),
+            review.slug
+        );
+        return Ok((Adoption::Folded, line));
+    }
+
+    let repo = repo_id.rsplit('/').next().unwrap_or(&repo_id);
+    let slug = tasks::unique_slug(app, &tasks::slugify(&format!("review-{repo}-{number}")))?;
+    let mut review = ReviewRecord::new(
+        Uuid::new_v4().to_string(),
+        slug,
+        &repo_id,
+        number,
+        job.started_at,
+    );
+    review.title = job.title.clone();
+    review.last_activity = job.finished_at.unwrap_or(job.started_at);
+    review.state = match state {
+        JobState::Running => TaskState::Active,
+        JobState::Finished(_) | JobState::Lost => TaskState::Archived,
+    };
+    review.job = Some(job);
+    let dir = dir(app, &review);
+    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
+    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let made = tasks::write_marker(&dir, &review.id)
+        .and_then(|()| install_skill(&dir))
+        .and_then(|()| app.db.insert_review(&review));
+    if let Err(e) = made {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    let (how_adopted, kind) = match review.state {
+        TaskState::Active => ("active", Adoption::Running),
+        TaskState::Archived => ("archived", Adoption::Archived),
+    };
+    let line = format!(
+        "{label}: adopted {} as review {} ({how_adopted}: {state_word}{how})",
+        path.display(),
+        review.slug
+    );
+    Ok((kind, line))
+}
+
 /// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
 /// (what its agent was asked) and `brought-back` — on its row, where they
 /// are not yet.
@@ -2750,6 +2987,189 @@ mod tests {
             .unwrap()
             .is_empty());
     }
+    /// The job files older jeets left become reviews, once, and nothing is
+    /// deleted: archived when finished or lost, active while running; a PR
+    /// that has a review gets no second.
+    #[cfg(unix)]
+    #[test]
+    fn job_files_older_jeets_left_become_reviews_once() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        app.db
+            .upsert_repo(&RepoRecord {
+                id: "github.com/acme/api".into(),
+                trunk_path: "/nowhere/api".into(),
+                remote_url: "https://github.com/acme/api.git".into(),
+                default_branch: "main".into(),
+            })
+            .unwrap();
+        // PR 8 has a review that has a job already; PR 7's, `t`, has none.
+        let mut held = ReviewRecord::new("h".into(), "h".into(), "github.com/acme/api", 8, 0);
+        held.job = Some(job(Some(0), "kept"));
+        app.db.insert_review(&held).unwrap();
+
+        // The worktree a job ran in is never touched.
+        let worktree = home.join("jobs-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("work.txt"), "mine").unwrap();
+        let put = |repo: &str, n: &str, job: Option<Job>, raw: &str| {
+            let dir = home.join("reviews").join(repo);
+            std::fs::create_dir_all(&dir).unwrap();
+            let text = match job {
+                Some(job) => serde_json::to_string_pretty(&job).unwrap(),
+                None => raw.to_string(),
+            };
+            std::fs::write(dir.join(format!("{n}.json")), text).unwrap();
+        };
+        let mk = |pr: u64, title: &str, pid: Option<u32>, exit: Option<i32>| {
+            let mut j = job(exit, "abc");
+            j.pr = pr;
+            j.title = title.into();
+            j.worktree = worktree.clone();
+            j.started_at = 100;
+            j.finished_at = exit.map(|_| 110);
+            j.pid = pid;
+            j
+        };
+        let api = "github.com/acme/api";
+        put(api, "1", Some(mk(1, "finished", Some(5), Some(0))), "");
+        put(api, "2", Some(mk(2, "failed", Some(5), Some(1))), "");
+        put(api, "3", Some(mk(3, "lost", Some(u32::MAX - 1), None)), "");
+        put(
+            api,
+            "4",
+            Some(mk(4, "running", Some(std::process::id()), None)),
+            "",
+        );
+        put(
+            api,
+            "7",
+            Some(mk(7, "for the review t", Some(5), Some(0))),
+            "",
+        );
+        put(
+            api,
+            "8",
+            Some(mk(8, "for the held review", Some(5), Some(0))),
+            "",
+        );
+        put(api, "9", Some(mk(9, "never launched", None, None)), "");
+        put(api, "6", None, "{not json");
+        put(
+            "github.com/gone/old",
+            "5",
+            Some(mk(5, "unindexed", Some(5), Some(0))),
+            "",
+        );
+        std::fs::write(home.join("reviews").join(api).join("1.log"), "output").unwrap();
+        let files = || -> Vec<(PathBuf, String)> {
+            let mut all: Vec<_> = walkdir::WalkDir::new(home.join("reviews"))
+                .into_iter()
+                .flatten()
+                .filter(|e| e.file_type().is_file())
+                .map(|e| {
+                    let text = std::fs::read_to_string(e.path()).unwrap();
+                    (e.into_path(), text)
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        let before = files();
+        assert_eq!(before.len(), 10);
+
+        adopt(&app).unwrap();
+
+        let get = |repo: &str, n: u64| app.db.find_review(repo, n).unwrap();
+        let gone = "github.com/gone/old";
+        for (repo, n, title, state) in [
+            (api, 1, "finished", TaskState::Archived),
+            (api, 2, "failed", TaskState::Archived),
+            (api, 3, "lost", TaskState::Archived),
+            (api, 4, "running", TaskState::Active),
+            (gone, 5, "unindexed", TaskState::Archived),
+            (api, 9, "never launched", TaskState::Archived),
+        ] {
+            let r = get(repo, n).unwrap_or_else(|| panic!("{repo}#{n} was not adopted"));
+            assert_eq!((r.title.as_str(), r.state), (title, state), "{repo}#{n}");
+            let repo_name = repo.rsplit('/').next().unwrap();
+            assert_eq!(r.slug, format!("review-{repo_name}-{n}"));
+            assert_eq!(r.dir_name, None, "no worktree");
+            // From when the job started, to when it finished if it did.
+            assert_eq!(r.created_at, 100);
+            match n {
+                1 | 2 | 5 => assert_eq!(r.last_activity, 110),
+                3 | 4 => assert_eq!(r.last_activity, 100),
+                _ => assert!(r.last_activity > 110),
+            }
+            assert!(dir(&app, &r).join(tasks::MARKER_DIR).is_dir());
+            assert_eq!(r.job.as_ref().unwrap().worktree, worktree);
+        }
+        let state = |n: u64| job_of(&app, &get(api, n).unwrap()).unwrap().state();
+        assert_eq!(state(1), JobState::Finished(0));
+        assert_eq!(state(2), JobState::Finished(1));
+        assert_eq!(state(3), JobState::Lost);
+        assert_eq!(state(4), JobState::Running);
+        // Never launched is recorded as a refused runner is.
+        assert_eq!(state(9), JobState::Finished(REFUSED));
+        // Unreadable, and no second review for a PR that has one.
+        assert!(get(api, 6).is_none());
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 2 + 6);
+        let t = app.db.get_review("t").unwrap().unwrap();
+        let folded = t.job.unwrap();
+        assert_eq!((folded.started_at, folded.exit_code), (100, Some(0)));
+        assert_eq!(
+            app.db.get_review("h").unwrap().unwrap().job.unwrap().head,
+            "kept"
+        );
+
+        // Nothing was deleted, moved or changed, the job's worktree included.
+        assert_eq!(files(), before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
+            "mine"
+        );
+
+        // One line per file.
+        let log = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(log.lines().count(), 9, "{log}");
+        for (n, what) in [
+            ("1.json", "adopted"),
+            ("3.json", "lost"),
+            ("4.json", "still running"),
+            ("5.json", "adopted"),
+            ("6.json", "left"),
+            ("7.json", "which had no job"),
+            ("8.json", "has a job already"),
+            ("9.json", "never launched"),
+        ] {
+            let line = log.lines().find(|l| l.contains(&format!("/{n}"))).unwrap();
+            assert!(line.contains(what), "{n}: {line}");
+        }
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+
+        // Looked through once: a file that turns up later is not adopted,
+        // and nothing is logged twice.
+        put(api, "10", Some(mk(10, "later", Some(5), Some(0))), "");
+        adopt(&app).unwrap();
+        assert!(get(api, 10).is_none());
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 8);
+        let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(again, log);
+    }
+
+    /// No job files, nothing to log: the marker is set all the same.
+    #[cfg(unix)]
+    #[test]
+    fn no_job_files_leave_no_log_and_are_looked_for_once() {
+        let home = tempfile::tempdir().unwrap();
+        let app = test_app(home.path());
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        assert!(!home.path().join("logs").join(ADOPT_LOG).exists());
+    }
+
     // -----------------------------------------------------------------------
     // The review's life, against real git
     // -----------------------------------------------------------------------
