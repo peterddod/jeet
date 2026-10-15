@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{At, NodeInfo, TreeLine, Urgency};
+use super::repos::RepoLine;
 use super::reviews::{PrReview, ReviewLine, Source, Verdict};
 use super::state::human_size;
 use super::tasks::{
@@ -274,9 +275,65 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The projects view's key list.
+pub const HELP_PROJECTS: &[(&str, &str)] = &[
+    (
+        "→ ⏎",
+        "on a project, go into it: its managers and tasks; then → goes into a manager",
+    ),
+    ("← ⌫", "back up a level; at the top of a project, out of it"),
+    (
+        "⏎",
+        "inside a project, open the agent of the task or manager under the cursor",
+    ),
+    (
+        "e / w / p",
+        "explore the task / its worktrees / its pull requests",
+    ),
+    (
+        "a",
+        "archive the task (the tasks under it too) · unarchive, in an archived project",
+    ),
+    ("D", "delete the task, after listing any work that would go"),
+    ("n", "new task"),
+    (
+        "A",
+        "show the archived projects (repos with only archived tasks) instead, and back",
+    ),
+    ("", ""),
+    (
+        "⇥ / ⇧⇥",
+        "next / previous view: active, agents, reviews, projects",
+    ),
+    (
+        "/",
+        "filter projects by repo; inside one, its tasks by name; esc drops it",
+    ),
+    ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
+    ("r", "refresh: re-read tasks and the worktrees on disk"),
+    ("?", "this list"),
+    ("q / esc", "quit, leaving the shell where it is"),
+    ("ctrl-q", "quit, leaving the shell in the selected task"),
+    ("", ""),
+    (
+        "project",
+        "a repository: its tasks and managers hold a worktree of it",
+    ),
+    (
+        "",
+        "a task of several repos is in each; (no repo) holds those with none",
+    ),
+    ("", "a manager is also in the repos of the tasks below it"),
+    (
+        "columns",
+        "repo · most urgent status in it · managers, tasks · last activity",
+    ),
+];
+
 /// The key list of `view`.
 pub fn help(view: View) -> &'static [(&'static str, &'static str)] {
     match view {
+        View::Projects => HELP_PROJECTS,
         View::Agents => HELP_AGENTS,
         View::Reviews => HELP_REVIEWS,
         View::Active => HELP,
@@ -338,6 +395,20 @@ const HINTS_REVIEWS: &[&str] = &[
     "q quit",
 ];
 
+const HINTS_PROJECTS: &[&str] = &[
+    "⏎ open",
+    "←→ up/into",
+    "e explore",
+    "w worktrees",
+    "p PRs",
+    "a archive",
+    "A archived",
+    "/ filter",
+    "⇥ switch",
+    "? help",
+    "q quit",
+];
+
 /// As many of `view`'s hints as fit, always ending with help and quit.
 /// `archived`: the list shows the archived ones, so `a` brings back and
 /// `A` goes back.
@@ -345,15 +416,18 @@ fn hints(width: u16, view: View, archived: bool) -> String {
     let hints = match view {
         View::Agents => HINTS_AGENTS,
         View::Reviews => HINTS_REVIEWS,
+        View::Projects => HINTS_PROJECTS,
         View::Active => HINTS,
     };
     let width = width as usize;
     let tail = &hints[hints.len() - 2..];
-    // Only the active view is a tree.
+    // Only the active and projects views are trees.
     let head: Vec<&str> = hints[..hints.len() - 2]
         .iter()
         .copied()
-        .filter(|&hint| (view == View::Active && !archived) || hint != "←→ up/into")
+        .filter(|&hint| {
+            (view == View::Active && !archived) || view == View::Projects || hint != "←→ up/into"
+        })
         .map(|hint| match (archived, hint) {
             (true, "a archive") => "a unarchive",
             (true, "A archived") => "A back",
@@ -377,11 +451,11 @@ fn hints(width: u16, view: View, archived: bool) -> String {
 pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     // In the agents view the assistant is the tree's root, not pinned.
     let pinned = match ui.view {
-        View::Agents | View::Reviews => 0,
+        View::Agents | View::Reviews | View::Projects => 0,
         View::Active => 1,
     };
-    // Where in the tree the active view is.
-    let crumbs = u16::from(ui.in_tree());
+    // Where in the tree the active view is, or which project.
+    let crumbs = u16::from(ui.in_tree() || ui.view == View::Projects && ui.project.is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -407,7 +481,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
             format!(" {}", fitted_breadcrumb(&ui.breadcrumb(), width)),
             Style::default().fg(Color::Cyan),
         )];
-        if !ui.filter.is_empty() {
+        if !ui.filter.is_empty() && ui.in_tree() {
             line.push(dim("  · the filter searches every level"));
         }
         frame.render_widget(Paragraph::new(Line::from(line)), chunks[2]);
@@ -416,7 +490,8 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     match ui.view {
         View::Agents => draw_tree(frame, chunks[3], ui),
         View::Reviews => draw_reviews(frame, chunks[3], ui),
-        View::Active => draw_list(frame, chunks[3], ui),
+        View::Projects if ui.project.is_none() => draw_projects(frame, chunks[3], ui),
+        View::Projects | View::Active => draw_list(frame, chunks[3], ui),
     }
 
     // What was last done says more than a standing hint.
@@ -480,6 +555,8 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
         tab(View::Agents, "agents", ui.count(View::Agents)),
         Span::raw(" "),
         tab(View::Reviews, "reviews", ui.count(View::Reviews)),
+        Span::raw(" "),
+        tab(View::Projects, "projects", ui.count(View::Projects)),
         Span::raw("   "),
     ];
     if ui.view == View::Agents {
@@ -521,6 +598,7 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     let title = match ui.view {
         View::Agents => " jeet · agents ",
         View::Reviews => " jeet · reviews ",
+        View::Projects => " jeet · projects ",
         View::Active => " jeet · tasks ",
     };
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
@@ -573,10 +651,17 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
 
 fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     // The agents view draws its tree instead ([`draw_tree`]).
-    let archived = ui.archived_tasks;
+    let in_project = ui.view == View::Projects;
+    let archived = match in_project {
+        true => ui.archived_projects,
+        false => ui.archived_tasks,
+    };
     let which = if archived { "archived" } else { "active" };
-    let total = ui.task_count(archived);
-    let nested = ui.in_tree() && !ui.path.is_empty();
+    let total = match in_project {
+        true => ui.proj_members.len(),
+        false => ui.task_count(archived),
+    };
+    let nested = ui.in_tree() && !ui.path().is_empty();
     let mut title = match (ui.filter.is_empty(), ui.visible.len()) {
         (true, 0) if nested => " nothing under it ".to_string(),
         (true, n) if nested => format!(" {n} under it "),
@@ -591,10 +676,10 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .title_bottom(dim(if archived {
-            " A back to active "
-        } else {
-            " A archived tasks "
+        .title_bottom(dim(match (archived, in_project) {
+            (true, _) => " A back to active ",
+            (false, true) => " A archived projects ",
+            (false, false) => " A archived tasks ",
         }))
         .title_style(Style::default().fg(Color::Green));
 
@@ -639,7 +724,7 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
         .map(|&i| {
             let row = &ui.rows[i];
             let path = searching.then(|| {
-                let mut crumbs = vec!["assistant".to_string()];
+                let mut crumbs = ui.crumb_root();
                 crumbs.extend(
                     ui.ancestors(&row.task.id)
                         .iter()
@@ -661,6 +746,105 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     state.select(Some(ui.selected.min(ui.visible.len() - 1)));
     frame.render_stateful_widget(list, area, &mut state);
     ui.list = state;
+}
+
+/// The projects view's top level: one two-line row per repository, with
+/// the most urgent status of anyone in it, how many managers and tasks it
+/// has and when anything last happened.
+fn draw_projects(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
+    let archived = ui.archived_projects;
+    let which = if archived { "archived " } else { "" };
+    let title = match (ui.filter.is_empty(), ui.projects.len()) {
+        (true, 0) => format!(" no {which}projects "),
+        (true, n) => format!(" {n} {which}project{} ", if n == 1 { "" } else { "s" }),
+        (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
+        (false, n) => format!(" {n} {which}match \"{}\" ", ui.filter),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(dim(if archived {
+            " A back to active "
+        } else {
+            " A archived projects "
+        }))
+        .title_style(Style::default().fg(Color::Green));
+    if ui.projects.is_empty() {
+        let hint = match (ui.filter.is_empty(), archived) {
+            (true, false) => {
+                "no projects: no task or manager is active. A shows the archived ones."
+            }
+            (true, true) => "no archived projects. A goes back to the active ones.",
+            _ => "⌫ or esc widens the filter",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(hint)))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = ui
+        .projects
+        .iter()
+        .map(|line| ListItem::new(project_lines(ui, line)))
+        .collect();
+    let list = List::new(items).block(block).highlight_style(highlighted());
+    let mut state = std::mem::take(&mut ui.list);
+    state.select(Some(ui.selected.min(ui.projects.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
+    ui.list = state;
+}
+
+/// A project's two lines: its name, the most urgent status in it, its
+/// managers and tasks and its last activity; under the name, the full
+/// repository.
+fn project_lines(ui: &TasksUi, line: &RepoLine) -> Vec<Line<'static>> {
+    let urgent = line
+        .members
+        .iter()
+        .filter_map(|&i| ui.rolled.get(&ui.rows[i].task.id))
+        .map(|&(urgency, _)| urgency)
+        .max();
+    let (status, color) = match urgent {
+        Some(urgency) if !ui.archived_projects => {
+            let (glyph, color) = urgency_glyph(urgency);
+            (format!("{glyph} {}", urgency_label(urgency)), color)
+        }
+        _ => ("▪".to_string(), Color::DarkGray),
+    };
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let counts = [(line.managers, "manager"), (line.tasks, "task")]
+        .into_iter()
+        .filter(|&(n, _)| n > 0)
+        .map(|(n, word)| plural(n, word))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let full = match line.key.full() {
+        "" => "tasks and managers with no worktree".to_string(),
+        full => full.to_string(),
+    };
+    vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {}", cell(&printable(line.key.name()), 24)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}", cell(&status, 14)),
+                Style::default().fg(color),
+            ),
+            Span::styled(
+                format!(" {}", cell(&counts, 22)),
+                Style::default().fg(Color::Magenta),
+            ),
+            dim(format!(" {:>9}", age_label(line.last_activity))),
+        ]),
+        Line::from(dim(format!(" {}", printable(&full)))),
+    ]
 }
 
 /// The reviews view: one line per review, with its session and where its
@@ -2547,6 +2731,7 @@ mod tests {
     };
     use crate::tui::tasks::{NewTaskForm, Panel};
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use std::path::PathBuf;
 
@@ -2877,6 +3062,69 @@ mod tests {
     }
 
     #[test]
+    fn the_projects_view_lists_repos_and_ends_with_the_hint_for_a() {
+        let mut web = row("ship web", Some(Activity::Waiting { detail: None }));
+        web.worktrees[0].repo_id = "github.com/acme/web".into();
+        let mut old = row("old spike", None);
+        old.task.state = TaskState::Archived;
+        old.worktrees[0].repo_id = "github.com/acme/gone".into();
+        let mut bare = row("bare", None);
+        bare.worktrees.clear();
+        let mut ui = TasksUi::new(vec![
+            row("fix login", Some(Activity::Running { detail: None })),
+            web,
+            old,
+            bare,
+        ]);
+        ui.view = View::Projects;
+        ui.set_rows(ui.rows.clone());
+        let screen = render(&mut ui, 100, 14);
+        let all = screen.join("\n");
+        assert!(all.contains(" projects 3 "), "{all}");
+        assert!(all.contains("3 projects"), "{all}");
+        assert!(all.contains(" A archived projects "), "{all}");
+        let api = line_of(&screen, "api");
+        assert!(api.contains("● running") && api.contains("1 task"), "{api}");
+        assert!(all.contains("github.com/acme/api"), "{all}");
+        let web = line_of(&screen, "web");
+        assert!(web.contains("◆ needs input"), "{web}");
+        // No repo is last, and says what it holds.
+        let at = |what: &str| screen.iter().position(|l| l.contains(what)).unwrap();
+        assert!(at("api") < at("web") && at("web") < at("(no repo)"));
+        assert!(all.contains("no worktree"), "{all}");
+        assert!(!all.contains("gone"), "{all}");
+        // Inside one: its tasks, and where it is.
+        ui.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let all = render(&mut ui, 100, 14).join("\n");
+        assert!(all.contains("projects › "), "{all}");
+        assert!(
+            all.contains("fix login") && !all.contains("old spike"),
+            "{all}"
+        );
+        assert!(all.contains(" A archived projects "), "{all}");
+        // The archived ones, and back.
+        ui.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        let all = render(&mut ui, 100, 14).join("\n");
+        assert!(all.contains(" A back to active "), "{all}");
+        assert!(!all.contains("A archived projects"), "{all}");
+        assert!(all.contains("1 archived project"), "{all}");
+        assert!(all.contains("gone"), "{all}");
+        ui.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let all = render(&mut ui, 100, 14).join("\n");
+        assert!(all.contains("projects › gone"), "{all}");
+        assert!(
+            all.contains("▪ archived") && all.contains("old spike"),
+            "{all}"
+        );
+        assert!(all.contains(" A back to active "), "{all}");
+        // Not in the agents view.
+        ui.view = View::Agents;
+        let all = render(&mut ui, 100, 14).join("\n");
+        assert!(!all.contains("A back to active"), "{all}");
+        assert!(help(View::Projects).iter().any(|(k, _)| *k == "A"));
+    }
+
+    #[test]
     fn the_tab_bar_has_no_archived_tab() {
         let mut ui = TasksUi::new(vec![row("fix login", None)]);
         let screen = render(&mut ui, 100, 14);
@@ -3137,7 +3385,8 @@ mod tests {
         ] {
             assert!(manager.contains(want), "{want}: {manager}");
         }
-        for unwanted in ["repos", "branch", "project"] {
+        // The tab bar has "projects", so the field is told by what follows it.
+        for unwanted in ["repos", "branch", "project "] {
             assert!(!manager.contains(unwanted), "{unwanted}: {manager}");
         }
     }
