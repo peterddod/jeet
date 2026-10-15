@@ -403,7 +403,8 @@ pub fn identify(app: &App) -> Result<Identity> {
             };
             if let (Some(id), Some(review)) = (&claimed, &review) {
                 return Err(Refused::Unconfirmed(format!(
-                    "jeet can't confirm this is review {}'s agent ({id}): jeet has no record of                      starting it, as for an agent an older jeet started; `jeet task open {}` \
+                    "jeet can't confirm this is review {}'s agent ({id}): jeet has no record of \
+                     starting it, as for an agent an older jeet started; `jeet task open {}` \
                      starts it again in a new session, or run this outside the agent's tmux \
                      session",
                     review.label(),

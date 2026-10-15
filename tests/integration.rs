@@ -4774,6 +4774,56 @@ fn a_review_has_its_own_agent_in_one_session() {
     assert_eq!(reviews, 1);
 }
 
+/// `jeet manager stop --all` ends the agent of a review the assistant asked
+/// for, though it is in no tree, and leaves the review itself.
+#[cfg(unix)]
+#[test]
+fn stop_all_ends_the_agent_of_a_review_the_assistant_asked_for() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &env));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    assert!(calls_of(&tmux, "kill-session").is_empty());
+    let (_, _, requested_by, _) = lab.review_row("review-widget-7").unwrap();
+    assert_eq!(requested_by, Some(lab.assistant_id()));
+
+    let output = lab.jeet_at(&["manager", "stop", "--all"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("review-widget-7: stopped its agent"),
+        "{}",
+        stderr_of(&output)
+    );
+    let killed = calls_of(&tmux, "kill-session");
+    assert!(
+        killed
+            .iter()
+            .any(|c| c.contains(&"=jeet-review-widget-7".to_string())),
+        "{killed:?}"
+    );
+    // Stopped, not deleted: still there to be asked for again.
+    assert!(lab.review_row("review-widget-7").is_some());
+}
+
 /// `jeet task send` and `jeet task restart` reach a review's agent as they
 /// do a task's, for the user and for the task that asked for the review,
 /// and for no one else.

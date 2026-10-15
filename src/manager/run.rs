@@ -333,7 +333,8 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
 /// active child of the assistant as the user (M18): write each row, then end
 /// the agent of every node below, leaves first, through `end`, and forget
 /// its pane. The assistant and the node whose session this jeet runs in are
-/// skipped. A stopped node is never started again until resumed. Then
+/// skipped. `--all` also ends the agents and jobs of the reviews the
+/// assistant asked for, which are in no tree. A stopped node is never started again until resumed. Then
 /// start what waits on `max_live`.
 pub fn stop_with(
     app: &App,
@@ -373,6 +374,12 @@ pub fn stop_with(
             outcomes.push(NodeOutcome::new(&node, line));
         }
     }
+    // `--all` is every review the assistant asked for too: they are not in
+    // its tree, but they are its doing, and a kill switch that left them
+    // running would not be one.
+    if target.is_none() {
+        outcomes.extend(stop_assistant_reviews(app)?);
+    }
     let lines = match drain(app) {
         Ok(warnings) => warnings,
         Err(e) => vec![format!("could not start what waits on max_live: {e:#}")],
@@ -382,6 +389,29 @@ pub fn stop_with(
             Some(first) => outcomes.push(NodeOutcome::new(first, line)),
             None => eprintln!("jeet: {line}"),
         }
+    }
+    Ok(outcomes)
+}
+
+/// End the agent and the legacy jobs of every active review the assistant
+/// asked for, and drop them from the `[review] max_live` queue first, so
+/// the drain that follows does not start them.
+fn stop_assistant_reviews(app: &App) -> Result<Vec<NodeOutcome>> {
+    let root = super::root(app)?;
+    let mut outcomes = Vec::new();
+    for review in app.db.list_reviews(Some(TaskState::Active))? {
+        if review.requested_by.as_deref() != Some(root.id.as_str()) {
+            continue;
+        }
+        app.db.unqueue_review(&review.id)?;
+        let line = match review::stop(app, &review) {
+            Ok(line) => line,
+            Err(e) => format!("could not end its agent: {e:#}"),
+        };
+        outcomes.push(NodeOutcome {
+            slug: review.slug,
+            line,
+        });
     }
     Ok(outcomes)
 }
@@ -455,9 +485,9 @@ fn live_tasks(app: &App) -> Result<Vec<TaskRecord>> {
         .collect())
 }
 
-/// The `max_live` a start of `task` counts toward, and what frees a slot
+/// The `max_live` a start of a task counts toward, and what frees a slot
 /// under it.
-pub fn max_live_of(_task: &TaskRecord) -> (&'static str, &'static str) {
+pub fn max_live_of() -> (&'static str, &'static str) {
     ("[managers] max_live", "a task in the tree ends")
 }
 
@@ -659,7 +689,7 @@ fn counted(live: &[TaskRecord]) -> u32 {
 /// queued, so one a hold queued, and nobody told, is told once. Returns
 /// whether it was told now.
 pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32, since: i64) -> bool {
-    let (cap, frees) = max_live_of(task);
+    let (cap, frees) = max_live_of();
     let body = format!("queued on {cap}, {live}/{max} live: it starts when {frees}");
     match reports::auto_status(app, task, StatusEvent::Queued, &body, since, 0) {
         Ok(told) => told.is_some(),
@@ -845,7 +875,7 @@ fn tell_queued(
         return Ok(());
     };
     if report_queued(app, task, live, max, since) {
-        let (cap, frees) = max_live_of(task);
+        let (cap, frees) = max_live_of();
         warnings.push(format!(
             "task {} is queued on {cap} ({live}/{max} live): it starts when {frees}",
             task.slug
@@ -959,8 +989,86 @@ mod tests {
             },
         ];
         assert_eq!(counted(&live), 2);
-        assert_eq!(max_live_of(&live[0]).0, "[managers] max_live");
+        assert_eq!(max_live_of().0, "[managers] max_live");
         assert_eq!(REVIEW_MAX_LIVE.0, "[review] max_live");
+    }
+
+    /// A review asked for by `by` (a task id, or none), in the index.
+    fn review_by(app: &App, id: &str, number: u64, by: Option<&str>) {
+        let mut review = ReviewRecord::new(
+            id.into(),
+            format!("review-api-{number}"),
+            "github.com/acme/api",
+            number,
+            1,
+        );
+        review.requested_by = by.map(str::to_string);
+        app.db.insert_review(&review).unwrap();
+    }
+
+    fn end_nothing(_: &App, _: &TaskRecord) -> Result<String> {
+        Ok(String::new())
+    }
+
+    /// `jeet manager stop --all` ends the job of a review the assistant
+    /// asked for, and not that of one the user did.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_all_ends_the_job_of_a_review_the_assistant_asked_for() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let (_dir, app) = lab();
+        let root = super::super::root(&app).unwrap();
+        review_by(&app, "mine", 7, Some(&root.id));
+        review_by(&app, "yours", 8, None);
+        let spawn = |id: &str| {
+            let job = Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            crate::identity::record(&app.db, id, AnchorKind::Job, None, job.id()).unwrap();
+            job
+        };
+        let (mut mine, mut yours) = (spawn("mine"), spawn("yours"));
+        let outcomes = stop_with(&app, &Caller::User, None, &end_nothing, &nobody).unwrap();
+        let line = outcomes
+            .iter()
+            .find(|o| o.slug == "review-api-7")
+            .map(|o| o.line.as_str());
+        assert_eq!(line, Some("stopped its review job"), "{outcomes:?}");
+        assert!(outcomes.iter().all(|o| o.slug != "review-api-8"));
+        // Ended, not left to run on; the user's runs.
+        assert!(mine.try_wait().unwrap().is_some());
+        assert!(yours.try_wait().unwrap().is_none());
+        yours.kill().unwrap();
+        let _ = yours.wait();
+        // Still a review, not archived or deleted.
+        assert!(app.db.get_review("mine").unwrap().is_some());
+    }
+
+    /// Stopped, an assistant's review no longer waits on `[review]
+    /// max_live` for a slot; the user's still does.
+    #[test]
+    fn a_stop_all_drops_the_assistants_reviews_from_the_queue() {
+        let (_dir, app) = lab();
+        let root = super::super::root(&app).unwrap();
+        review_by(&app, "mine", 7, Some(&root.id));
+        review_by(&app, "yours", 8, None);
+        app.db.queue_review("mine", 5).unwrap();
+        app.db.queue_review("yours", 6).unwrap();
+        // Short of the drain, which would start what is left.
+        stop_assistant_reviews(&app).unwrap();
+        let queued: Vec<String> = app
+            .db
+            .queued_reviews()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(queued, ["yours"]);
     }
 
     #[test]

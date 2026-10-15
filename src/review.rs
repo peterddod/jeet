@@ -671,26 +671,49 @@ fn charge_before_end(app: &App, review: &ReviewRecord, warnings: &mut Vec<String
 /// forget their processes: the agent works in the worktree about to be
 /// removed, and what it wrote after the snapshot would be lost. Refused
 /// from inside the agent's session or under a job, which ending would end
-/// this jeet with.
+/// this jeet with. Returns how many jobs were still running.
 fn end_agent(
     app: &App,
     review: &ReviewRecord,
     verb: &str,
     warnings: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<usize> {
     let dir = dir(app, review);
     runtime::refuse_inside_agent_session(&review.id, &review.slug, &subject(review), verb)?;
     refuse_inside_job(app, &review.id, &dir, verb)?;
     charge_before_end(app, review, warnings);
     runtime::stop_session(&review.slug).context("end the agent's tmux session")?;
-    stop_jobs(&app.db, &review.id).context("end the review's job")?;
-    stop_jobs_in(app, &dir).context("end the review's job")?;
+    let jobs = stop_jobs(&app.db, &review.id).context("end the review's job")?
+        + stop_jobs_in(app, &dir).context("end the review's job")?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Job)?;
     if let Err(e) = runtime::remove_settings(&app.home, &review.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
-    Ok(())
+    Ok(jobs)
+}
+
+/// End `review`'s agent and jobs for `jeet manager stop --all`, and leave
+/// the review as it is: not archived, and started again the next time it is
+/// asked for or opened. Says what came of it.
+pub fn stop(app: &App, review: &ReviewRecord) -> Result<String> {
+    let mut warnings = Vec::new();
+    let alive = tmux::available() && tmux::agent_alive(&session_name(review));
+    let jobs = end_agent(app, review, "stop", &mut warnings)?;
+    let mut ended = Vec::new();
+    if alive {
+        ended.push("stopped its agent".to_string());
+    }
+    match jobs {
+        0 => {}
+        1 => ended.push("stopped its review job".to_string()),
+        n => ended.push(format!("stopped its {n} review jobs")),
+    }
+    ended.extend(warnings);
+    Ok(match ended.is_empty() {
+        true => "not running".to_string(),
+        false => ended.join("; "),
+    })
 }
 
 /// Archive `review`: end its agent, free the disk its worktree takes while
@@ -948,7 +971,7 @@ pub fn ensure_running(
     // Running already: nothing starts, so there is nothing to admit.
     let name = session_name(review);
     if tmux::has_session(&name) && tmux::pane_alive(&name) {
-        return Ok(already_running(review, &name, session));
+        return Ok(already_running(&name, session));
     }
     if prompt.is_some() {
         if let Some(why) = runtime::first_prompt_refusal_for(app, &review.slug) {
@@ -1043,7 +1066,7 @@ pub fn start_with_inbox(
 
 /// The review's agent, running already in tmux session `name`: attached to,
 /// not started, with what to warn of.
-fn already_running(review: &ReviewRecord, name: &str, session: Option<&str>) -> Running {
+fn already_running(name: &str, session: Option<&str>) -> Running {
     let mut warnings = Vec::new();
     if let Some(id) = session {
         warnings.push(format!(
@@ -1051,7 +1074,6 @@ fn already_running(review: &ReviewRecord, name: &str, session: Option<&str>) -> 
              resumed; end it there and open the review again to switch"
         ));
     }
-    let _ = review;
     Running {
         tmux_session: name.to_string(),
         started: Started::AlreadyRunning,
@@ -1069,7 +1091,7 @@ fn start_tmux(
     tmux::require()?;
     let name = session_name(review);
     if runtime::live_session(&name)? {
-        return Ok(already_running(review, &name, session));
+        return Ok(already_running(&name, session));
     }
     let spec = AgentSpec::from_config(&app.config)?;
     let dir = dir(app, review);

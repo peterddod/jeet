@@ -291,7 +291,7 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             called
         ),
         Delivered::StartQueued { live, max } => {
-            let (cap, frees) = run::max_live_of(&task);
+            let (cap, frees) = run::max_live_of();
             eprintln!(
                 "jeet: task {called}'s start waits on {cap} ({live}/{max} live), so the message \
                  is queued; it starts with it when {frees}"
@@ -472,7 +472,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             "jeet: ended task {}'s agent; it waits on {} ({live}/{max} live) to start \
              again, resuming its latest session",
             called,
-            run::max_live_of(&task).0
+            run::max_live_of().0
         ),
     }
     Ok(())
@@ -867,7 +867,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         ),
         Started::AlreadyRunning => {}
         Started::Queued { live, max, .. } => {
-            let (cap, frees) = run::max_live_of(&task);
+            let (cap, frees) = run::max_live_of();
             eprintln!("jeet: queued ({live}/{max} live, {cap}); its agent starts when {frees}");
             return Ok(());
         }

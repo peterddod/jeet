@@ -1134,7 +1134,7 @@ it. The assistant learns of managers from its `jeet-managers` skill.
 jeet manager pause fix-x       # interrupt its turn, and every task's below it
 jeet manager resume fix-x      # hand over what waited, and let it start again
 jeet manager stop fix-x        # end its agent and every one below it
-jeet manager stop --all        # every task under the assistant (only you)
+jeet manager stop --all        # every task under the assistant, and its reviews (only you)
 ```
 
 These need `manager.stop`. A paused or stopped task, and every task below
