@@ -254,7 +254,15 @@ fn start_tmux(
     // A review's session is filed under its worktree: picked up first, so
     // it is the one resumed, not a blank one started beside it.
     warnings.extend(crate::review::adopt_sessions(app, task));
-    // Only a harness with sessions has hooks to install.
+    // Refused before anything is read for the launch, as it always was.
+    if prompt.is_some() && spec.harness.prompt_args("").is_none() {
+        bail!(no_first_prompt(&spec, &task.slug));
+    }
+    // Only a harness with sessions has hooks to install, or sessions to pick.
+    let known_sessions = match spec.supports_sessions() {
+        true => app.db.list_task_sessions(&task.id)?,
+        false => Vec::new(),
+    };
     let hooks = match spec.supports_sessions() {
         true => {
             let exe = std::env::current_exe().context("locate the jeet binary")?;
@@ -267,7 +275,7 @@ fn start_tmux(
         slug: task.slug.clone(),
         name: task.name.clone(),
         dir,
-        known_sessions: app.db.list_task_sessions(&task.id)?,
+        known_sessions,
         ungated_warning: task.parent_id.is_some(),
         spec,
         hooks,
@@ -303,10 +311,9 @@ fn start_tmux(
     Ok(running)
 }
 
-/// What an agent launch needs of what asks for it, so a task and a review
-/// start theirs the same way ([`launch_tmux`]).
+/// What [`launch_tmux`] needs of the one whose agent it starts.
 pub struct Launch {
-    /// The id its hooks and the agent's environment name.
+    /// Its id, as its hooks and `$JEET_TASK_ID` give it.
     pub id: String,
     /// Names its tmux session ([`session_name_for`]).
     pub slug: String,
@@ -320,8 +327,7 @@ pub struct Launch {
     pub known_sessions: Vec<TaskSessionRecord>,
     /// jeet's hooks for it; none for a harness that keeps no sessions.
     pub hooks: Option<HookSetup>,
-    /// Whether it has a parent: with a harness that has no deny rules, it
-    /// is warned of.
+    /// Warn when the harness has no deny rules: it has a parent.
     pub ungated_warning: bool,
     /// What there is to warn of already.
     pub warnings: Vec<String>,
@@ -339,9 +345,8 @@ pub fn live_session(name: &str) -> Result<bool> {
 
 /// Start `launch`'s agent in its tmux session, which is not running,
 /// resuming `session` when given, else its latest, else a new one, with
-/// `prompt` as its first prompt. The caller records what the agent is
-/// known by: `record_anchor` its pane, `record_session` the session it
-/// runs, before the launch.
+/// `prompt` as its first prompt. `record_session` records the session
+/// picked, before the launch; `record_anchor` the pane, once it is there.
 pub fn launch_tmux(
     app: &App,
     launch: &Launch,
@@ -428,7 +433,7 @@ fn already_running(
     })
 }
 
-/// Why `task`'s agent cannot be started with a first prompt on `spec`.
+/// Why `slug`'s agent cannot be started with a first prompt on `spec`.
 fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
     format!(
         "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
@@ -451,8 +456,8 @@ pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
 }
 
 /// The agent's command line. When its harness supports it, it resumes or
-/// starts a recorded session (`record_session` told which, before launch),
-/// carries jeet's hooks and, given one, its first prompt.
+/// starts a recorded session, carries jeet's hooks and, given one, its
+/// first prompt.
 fn launch_argv(
     app: &App,
     launch: &Launch,

@@ -389,8 +389,8 @@ pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let mut cmd = Command::new("nohup");
     cmd.arg(exe).args(["task-startup", id]);
-    if let Some(id) = session {
-        cmd.args(["--session", id]);
+    if let Some(session) = session {
+        cmd.args(["--session", session]);
     }
     cmd.env("JEET_HOME", &app.home)
         .current_dir(&app.home)
