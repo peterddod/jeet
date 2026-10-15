@@ -127,9 +127,20 @@ fn finish(mut child: Child, limit: Duration) -> std::io::Result<Output> {
     })
 }
 
+/// A tmux command whose output jeet reads. `-u`, as tmux replaces the tabs
+/// that jeet's formats split fields on, and anything else outside printable
+/// ASCII, with `_` for a client whose locale is not UTF-8: a launchd job's
+/// or systemd unit's, which sets none. Run so, `jeet watch` could start a
+/// window and then not read which pane it started, so never anchored it.
+fn command() -> Command {
+    let mut cmd = Command::new(binary());
+    cmd.arg("-u");
+    cmd
+}
+
 /// A tmux command that cannot read the terminal and says nothing on it.
 fn quiet() -> Command {
-    let mut cmd = Command::new(binary());
+    let mut cmd = command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -193,7 +204,7 @@ fn refuse_new_server(name: &str) -> Result<()> {
 /// The names of the sessions on the tmux server: none when no server runs,
 /// or tmux cannot be run.
 pub fn list_sessions() -> Vec<String> {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args(["list-sessions", "-F", "#{session_name}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -255,7 +266,7 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         bail!("nothing to run in tmux session {name}");
     }
     refuse_new_server(name)?;
-    let mut cmd = Command::new(binary());
+    let mut cmd = command();
     cmd.args(extended_keys_first())
         .args(["new-session", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}"])
         .args(["-s", name, "-c"])
@@ -315,7 +326,7 @@ fn agent_pane(name: &str) -> String {
 /// What session `name` holds as its agent's pane id, as noted; empty when
 /// nothing is.
 fn recorded_agent_pane(name: &str) -> String {
-    Command::new(binary())
+    command()
         .args(["show-options", "-qv", "-t", &format!("{}:", target(name))])
         .arg(AGENT_PANE_OPTION)
         .stdin(Stdio::null())
@@ -371,7 +382,7 @@ fn paste(pane: &str, text: &str) -> Result<()> {
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let buffer = format!("jeet-{}-{nanos}", std::process::id());
-    let mut load = Command::new(binary())
+    let mut load = command()
         .args(["load-buffer", "-b", &buffer, "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -392,7 +403,7 @@ fn paste(pane: &str, text: &str) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let output = Command::new(binary())
+    let output = command()
         .args(["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -434,7 +445,7 @@ pub struct Window {
 
 /// The windows of session `name`: none when it is not running.
 pub fn windows(name: &str) -> Vec<Window> {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args([
             "list-windows",
             "-t",
@@ -508,7 +519,7 @@ pub fn new_window(
     let mut attempts = 0;
     let output = loop {
         attempts += 1;
-        let mut cmd = Command::new(binary());
+        let mut cmd = command();
         cmd.args(&first);
         match creating {
             true => cmd.args(["new-session", "-d", "-P", "-F", WINDOW_FORMAT, "-s", name]),
@@ -596,7 +607,7 @@ pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
     std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
     // The pane this process runs in, never whichever the client last used.
     let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
-    let output = Command::new(binary())
+    let output = command()
         .args(["display-message", "-p", "-t", &pane])
         .arg(format!(
             "#{{session_name}}\t#{{window_id}}\t#{{{KEY_OPTION}}}"
@@ -628,7 +639,7 @@ fn parse_current_window(line: &str, name: &str) -> Option<(String, Option<String
 
 /// Make window `id` the one its session shows.
 pub fn select_window(id: &str) -> Result<()> {
-    let output = Command::new(binary())
+    let output = command()
         .args(["select-window", "-t", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -647,7 +658,7 @@ pub fn select_window(id: &str) -> Result<()> {
 /// window that is already gone is fine.
 pub fn kill_window(id: &str) -> Result<()> {
     let pids = process_tree(&pane_pids(&["-t", id]));
-    let output = Command::new(binary())
+    let output = command()
         .args(["kill-window", "-t", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -673,7 +684,7 @@ fn window_exists(id: &str) -> bool {
 
 /// Whether the program in window `id` is still running.
 pub fn window_alive(id: &str) -> bool {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args(["list-panes", "-t", id, "-F", "#{pane_dead}"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -710,7 +721,7 @@ pub fn capture_window_styled(window: &str) -> Result<String> {
 }
 
 fn capture_pane(pane: &str, styled: bool) -> Result<String> {
-    let mut cmd = Command::new(binary());
+    let mut cmd = command();
     cmd.args(["capture-pane", "-p"]);
     if styled {
         cmd.arg("-e");
@@ -729,7 +740,7 @@ fn capture_pane(pane: &str, styled: bool) -> Result<String> {
 
 /// Whether anyone is attached to session `name`.
 pub fn attached(name: &str) -> bool {
-    Command::new(binary())
+    command()
         .args(["list-clients", "-t", &target(name)])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -738,7 +749,7 @@ pub fn attached(name: &str) -> bool {
 }
 
 fn send_keys(args: &[&str]) -> Result<()> {
-    let output = Command::new(binary())
+    let output = command()
         .arg("send-keys")
         .args(args)
         .stdin(Stdio::null())
@@ -882,7 +893,7 @@ pub fn kill(name: &str) -> Result<()> {
     // Taken before the kill: once the panes are gone, tmux no longer knows
     // which processes were theirs.
     let pids = process_tree(&live_pane_pids(name));
-    let output = Command::new(binary())
+    let output = command()
         .args(["kill-session", "-t", &target(name)])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -919,7 +930,7 @@ pub fn window_pane_pids(id: &str) -> Vec<u32> {
 
 /// The pids of the live panes `list-panes` with `args` lists.
 fn pane_pids(args: &[&str]) -> Vec<u32> {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .arg("list-panes")
         .args(args)
         .args(["-F", "#{pane_dead} #{pane_pid}"])
@@ -1060,7 +1071,7 @@ pub fn end_processes(pids: &[u32], grace: Duration) -> Result<()> {
 /// The name of the tmux session this process runs in, if it runs in one.
 pub fn current_session() -> Option<String> {
     std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
-    let mut cmd = Command::new(binary());
+    let mut cmd = command();
     cmd.args(["display-message", "-p"]);
     // The pane this process runs in, not whichever the client last used.
     if let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()) {
@@ -1080,7 +1091,7 @@ pub fn current_session() -> Option<String> {
 /// Whether anything is still running in session `name`: false when the
 /// session is gone or every pane in it has exited.
 pub fn pane_alive(name: &str) -> bool {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args([
             "list-panes",
             "-s",
@@ -1113,7 +1124,7 @@ pub fn agent_alive(name: &str) -> bool {
     if pane_or_first_window(name, recorded) != recorded {
         return pane_alive(name);
     }
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args([
             "list-panes",
             "-s",
@@ -1152,7 +1163,7 @@ const LIVE_PANE_FORMAT: &str = "#{pane_dead}\t#{pane_id}\t#{pane_pid}\t#{pane_cu
 /// The pane of session `name` its agent runs in (see [`agent_pane`]),
 /// while its program runs.
 pub fn live_agent_pane(name: &str) -> Option<LivePane> {
-    let output = Command::new(binary())
+    let output = command()
         .args(["display-message", "-p", "-t", &agent_pane(name)])
         .arg(LIVE_PANE_FORMAT)
         .stdin(Stdio::null())
@@ -1166,7 +1177,7 @@ pub fn live_agent_pane(name: &str) -> Option<LivePane> {
 /// The first pane of window `id` (`@3`), the one [`new_window`] started
 /// its program in, while that program runs.
 pub fn live_window_pane(id: &str) -> Option<LivePane> {
-    let output = Command::new(binary())
+    let output = command()
         .args(["list-panes", "-t", id, "-F", LIVE_PANE_FORMAT])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -1192,7 +1203,7 @@ fn parse_live_pane(line: &str) -> Option<LivePane> {
 /// named [`SESSION_PREFIX`]…): every task's and the assistant's, and the
 /// windows the user opened in them.
 pub fn jeet_pane_pids() -> Vec<u32> {
-    let Ok(output) = Command::new(binary())
+    let Ok(output) = command()
         .args([
             "list-panes",
             "-a",

@@ -20,6 +20,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The real-tmux tests need it; ubuntu-latest has it already.
+      - name: Install tmux
+        if: runner.os == 'macOS'
+        run: brew install tmux
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test

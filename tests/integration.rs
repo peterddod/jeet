@@ -2668,6 +2668,13 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# jeet runs every call but an attach as `tmux -u …`, or tmux mangles its
+# output where the locale is not UTF-8 (a launchd job's): the verb follows.
+case "$1" in
+  -u) shift ;;
+  attach-session|switch-client) ;;
+  *) echo "stub tmux: run without -u: $*" >&2; exit 97 ;;
+esac
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
@@ -3776,6 +3783,67 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         .success());
 }
 
+/// Run as launchd and systemd run `jeet watch`, with no UTF-8 locale and on
+/// a server the user started, jeet still reads which pane it started its
+/// agent in, and anchors it: tmux would otherwise print the tabs in its
+/// formats as `_`, and the agent run unanchored.
+#[test]
+fn an_agent_started_from_a_background_job_is_anchored() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        // Not in CI, where it is the regression test for the watch job's
+        // agents going unanchored.
+        assert!(std::env::var_os("CI").is_none(), "tmux is not installed");
+        eprintln!("tmux is not installed; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("bg");
+    let id = task_id(&task);
+    let sockets = TempDir::new().unwrap();
+    let server = TmuxServer(sockets.path().to_path_buf());
+    assert!(server
+        .tmux(&["new-session", "-d", "-s", "user", "--", "sleep", "300"])
+        .status
+        .success());
+    let sockets_env = sockets.path().to_string_lossy().to_string();
+    let home = TempDir::new().unwrap();
+    let home_env = home.path().to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", "tmux"),
+        ("TMUX_TMPDIR", sockets_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+        ("HOME", home_env.as_str()),
+        ("XDG_CONFIG_HOME", home_env.as_str()),
+        ("JEET_BACKGROUND", "1"),
+        ("LC_ALL", "C"),
+        ("LC_CTYPE", "C"),
+        ("LANG", "C"),
+    ];
+
+    let output = lab.jeet_at(&["task", "open", "bg"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("cannot be identified"),
+        "{}",
+        stderr_of(&output)
+    );
+    let anchors: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'pane'",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(anchors, 1);
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    let listed = stdout_of(&output);
+    assert!(listed.contains("running"), "{listed}");
+    assert!(!listed.contains("unanchored"), "{listed}");
+
+    succeeded(&lab.jeet_at(&["task", "archive", "bg"], &lab.home(), &env));
+}
+
 /// jeet turns tmux's extended keys on, for Shift+Enter to reach the agent,
 /// in the same call that starts the session: tmux drops an agent's request
 /// for them made while they are off. A user whose tmux.conf has a say on
@@ -4744,7 +4812,7 @@ fn a_stub_tmux_gives_up_once_its_directory_has_gone() {
     let stub = tmux.parent().unwrap().to_path_buf();
     // A lock left by a call killed part-way.
     std::fs::create_dir(stub.join("lock")).unwrap();
-    let mut call = Command::new(&tmux).arg("-V").spawn().unwrap();
+    let mut call = Command::new(&tmux).args(["-u", "-V"]).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(call.try_wait().unwrap().is_none(), "it did not wait");
     std::fs::remove_dir_all(&stub).unwrap();
@@ -6501,6 +6569,13 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# jeet runs every call but an attach as `tmux -u …`, or tmux mangles its
+# output where the locale is not UTF-8 (a launchd job's): the verb follows.
+case "$1" in
+  -u) shift ;;
+  attach-session|switch-client) ;;
+  *) echo "stub tmux: run without -u: $*" >&2; exit 97 ;;
+esac
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
@@ -8786,7 +8861,7 @@ fn one_stub_tmux_runs_several_tasks_apart() {
     }
     let live = || {
         let output = Command::new(&tmux)
-            .args(["list-sessions", "-F", "#{session_name}"])
+            .args(["-u", "list-sessions", "-F", "#{session_name}"])
             .output()
             .unwrap();
         stdout_of(&output)
