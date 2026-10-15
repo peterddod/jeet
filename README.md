@@ -531,8 +531,7 @@ parent), `→` on a manager goes into it, to the managers and tasks under it,
 `⏎` opens its agent, and `←` or `⌫` backs up to the level above. The line over the list says
 where you are (`assistant › backend › …`). Each task takes two lines: a
 `manager` or `task` tag, its name, what its agent is doing, its project (the
-repository of its own first worktree, `+N` for others, `(no repo)` for none;
-from 120 columns), the worktrees it holds (as of the last look at the disk,
+project it was started from, blank for none; from 120 columns), the worktrees it holds (as of the last look at the disk,
 since the agent adds them as it goes),
 its size and when anything last happened in it; and under the name, dimmed,
 the running agent's latest prompt, else its last report (`progress: …`). A

@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{self, At, NodeInfo, TreeLine, Urgency};
-use super::repos::{Key, RepoLine};
+use super::repos::RepoLine;
 use super::reviews::{PrReview, ReviewLine, Source, Verdict};
 use super::state::human_size;
 use super::tasks::{
@@ -1138,29 +1138,12 @@ impl Columns {
     }
 }
 
-/// A task's project for its row: the short name of the repository of its
-/// first worktree, `+N` for the other repositories it has worktrees in, or
-/// `(no repo)`; the name is cut to leave room for the `+N`, within `width`.
-/// A manager shows its own worktrees' repositories, not those below it.
+/// A task's project for its row: the name of the project it was started
+/// from, cut to `width`, or nothing when it has none.
 fn project_text(row: &TaskRow, width: usize) -> String {
-    let mut repos: Vec<&str> = Vec::new();
-    for wt in &row.worktrees {
-        if !repos.contains(&wt.repo_id.as_str()) {
-            repos.push(&wt.repo_id);
-        }
-    }
-    let Some(first) = repos.first() else {
-        return truncate(Key::NoRepo.name(), width);
-    };
-    let name = Key::Repo(first.to_string());
-    let name = name.name();
-    match repos.len() - 1 {
-        0 => truncate(name, width),
-        more => {
-            let more = format!(" +{more}");
-            let room = width.saturating_sub(more.width());
-            format!("{}{more}", truncate(name, room))
-        }
+    match &row.task.project {
+        Some(name) => truncate(name, width),
+        None => String::new(),
     }
 }
 
@@ -2892,12 +2875,14 @@ mod tests {
 
     #[test]
     fn a_row_is_two_lines_the_snippet_under_the_name() {
-        let mut ui = TasksUi::new(vec![row(
+        let mut r = row(
             "fix-login",
             Some(Activity::Running {
                 detail: Some("Edit the token refresh".into()),
             }),
-        )]);
+        );
+        r.task.project = Some("webstack".into());
+        let mut ui = TasksUi::new(vec![r]);
         let screen = render(&mut ui, 130, 14);
         let at = screen.iter().position(|l| l.contains("fix-login")).unwrap();
         let (first, second) = (&screen[at], &screen[at + 1]);
@@ -2905,8 +2890,8 @@ mod tests {
         for (before, after) in [
             ("task", "fix-login"),
             ("fix-login", "● running"),
-            ("● running", "api"),
-            ("api", "1 wt: api"),
+            ("● running", "webstack"),
+            ("webstack", "1 wt: api"),
             ("1 wt: api", "3.0M"),
             ("3.0M", "2m ago"),
         ] {
@@ -3655,54 +3640,34 @@ mod tests {
         }
     }
 
-    fn in_repos(repos: &[&str]) -> TaskRow {
+    fn in_project(name: Option<&str>) -> TaskRow {
         let mut r = row("x", None);
-        let wt = r.worktrees[0].clone();
-        r.worktrees = repos
-            .iter()
-            .map(|id| TaskWorktreeRecord {
-                repo_id: (*id).into(),
-                ..wt.clone()
-            })
-            .collect();
+        r.task.project = name.map(String::from);
         r
     }
 
     #[test]
-    fn the_project_is_the_first_repo_plus_the_others_or_no_repo() {
-        let a = "github.com/acme/jeet";
-        let b = "github.com/acme/territile";
-        assert_eq!(project_text(&in_repos(&[a]), 14), "jeet");
-        assert_eq!(project_text(&in_repos(&[a, a]), 14), "jeet");
-        assert_eq!(project_text(&in_repos(&[a, b, a]), 14), "jeet +1");
-        assert_eq!(project_text(&in_repos(&[b, a]), 14), "territile +1");
-        assert_eq!(project_text(&in_repos(&[]), 14), "(no repo)");
-        // Cut with the ellipsis, keeping the +N.
-        let long = "github.com/acme/a-very-long-repository";
-        assert_eq!(project_text(&in_repos(&[long]), 12), "a-very-long…");
-        assert_eq!(project_text(&in_repos(&[long, a, b]), 12), "a-very-l… +2");
-        assert_eq!(project_text(&in_repos(&[long, a, b]), 12).width(), 12);
-        // Wide characters and a two-digit count stay within the width.
-        let wide = "github.com/acme/日本語のリポジトリ";
-        assert!(project_text(&in_repos(&[wide, a]), 12).width() <= 12);
-        let many: Vec<String> = (0..13).map(|i| format!("github.com/acme/r{i}")).collect();
-        let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        let text = project_text(&in_repos(&many), 12);
-        assert!(text.ends_with(" +12") && text.width() <= 12, "{text}");
+    fn the_project_is_the_tasks_project_name_or_blank() {
+        assert_eq!(project_text(&in_project(Some("web")), 14), "web");
+        assert_eq!(project_text(&in_project(None), 14), "");
+        assert_eq!(
+            project_text(&in_project(Some("a-very-long-project")), 12),
+            "a-very-long…"
+        );
+        let wide = project_text(&in_project(Some("日本語のプロジェクト")), 12);
+        assert!(wide.width() <= 12, "{wide}");
     }
 
     #[test]
     fn a_row_shows_its_project_and_the_narrow_list_does_not() {
-        let mut ui = TasksUi::new(vec![in_repos(&[
-            "github.com/acme/jeet",
-            "github.com/acme/territile",
-        ])]);
+        let mut ui = TasksUi::new(vec![in_project(Some("webstack"))]);
         let wide = render(&mut ui, 130, 14).join("\n");
-        assert!(wide.contains("jeet +1"), "{wide}");
+        assert!(wide.contains("webstack"), "{wide}");
         let narrow = render(&mut ui, 80, 14).join("\n");
-        assert!(!narrow.contains("jeet +1"), "{narrow}");
-        let mut none = TasksUi::new(vec![in_repos(&[])]);
-        assert!(render(&mut none, 130, 14).join("\n").contains("(no repo)"));
+        assert!(!narrow.contains("webstack"), "{narrow}");
+        let mut none = TasksUi::new(vec![in_project(None)]);
+        let text = render(&mut none, 130, 14).join("\n");
+        assert!(!text.contains("(no repo)"), "{text}");
     }
 
     #[test]
