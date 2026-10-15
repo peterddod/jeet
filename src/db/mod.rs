@@ -468,7 +468,8 @@ const MIGRATIONS: &[&str] = &[
     // v9: the deprecated `[review] command`'s job moves onto its review's row
     // (it was a JSON state file under `$JEET_HOME/reviews`). A job exists
     // while `job_started_at` is set. `review::adopt_jobs` makes reviews of
-    // the files older jeets left.
+    // the files older jeets left, and `review_job_files` records each one it
+    // has been through, so none is looked at twice.
     "
     ALTER TABLE reviews ADD COLUMN job_head TEXT;
     ALTER TABLE reviews ADD COLUMN job_command TEXT;
@@ -481,6 +482,13 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE reviews ADD COLUMN job_exit_code INTEGER;
     ALTER TABLE reviews ADD COLUMN job_pid INTEGER;
     ALTER TABLE reviews ADD COLUMN job_runner_start INTEGER;
+    CREATE TABLE review_job_files (
+        path TEXT PRIMARY KEY,
+        outcome TEXT NOT NULL,
+        review_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        at INTEGER NOT NULL
+    );
     ",
 ];
 

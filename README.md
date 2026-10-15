@@ -1548,21 +1548,28 @@ back.
   command.
 - **Review jobs an older `jeet review` left under `~/.jeet/reviews`
   (`<host>/<owner>/<repo>/<number>.json`, the state of a `[review] command`
-  run) become reviews**, at the first command a person runs after the
-  upgrade, and are no longer shown read-only in the reviews tab. Each job
+  run) become reviews**, at the first commands you run after the upgrade
+  (in a task's shell too, not from hooks or jeet's own background commands),
+  and are no longer shown read-only in the reviews tab. Each job
   whose pull request has no review gets one: **archived** when the job
   finished or was lost (its process is gone), **active** only while the job
   still runs, and then archived like any review once its PR is merged or
   closed. It has no worktree: the one the job ran in is never touched. A PR
   that already has a review keeps it, and gets the file's job only if it has
-  none. These reviews can be brought back, archived and deleted like any
+  none. A job that is not running is stored as ended, so nothing can run it
+  again. These reviews can be brought back, archived and deleted like any
   other. **The files are left where they are, untouched; jeet deletes none of
-  them and reads the directory only this once.** A file that cannot be read
-  is left and logged. Each file is a line of `$JEET_HOME/logs/migrate-v9.log`
-  (adopted, put on a review, skipped, or left), with a one-line summary on
-  stderr. A job still running when you upgrade is kept as running, but an
-  older jeet's runner records its end in the file, which is not read again:
-  the review shows it as stopped once the process is gone.
+  them.** Each file is looked at once: its outcome is recorded in the index,
+  so a review you delete later is not made again from its file. A file that
+  cannot be read is left and logged; one whose review cannot be made is tried
+  up to three times, then left. Each file's outcome is a line of
+  `$JEET_HOME/logs/migrate-v9.log` (adopted, put on a review, skipped, or
+  left), and a one-line summary goes to stderr only by a run that adopted or
+  gave up on something. A job still running during the upgrade is adopted as
+  active, but an older runner records its end in the old file, which is not
+  read again: its row shows "stopped without finishing" once the process
+  exits. Archiving or deleting such a review warns that its job keeps
+  running; jeet did not start it, so it does not stop it.
 - The `<task>/.jeet/review.json` and `brought-back` files are folded into the
   review and no longer read.
 - In the reviews tab, `w` and `p` have nothing to show (a review has one

@@ -78,6 +78,11 @@ impl Job {
         let ago = |at: i64| crate::agent::age_label(at);
         match self.state() {
             JobState::Running => format!("running (started {})", ago(self.started_at)),
+            // Adopted from a job file whose process was gone: no end was
+            // ever recorded.
+            JobState::Finished(_) if self.finished_at.is_none() => {
+                "stopped without finishing".to_string()
+            }
             JobState::Finished(0) => {
                 format!(
                     "finished {}",
@@ -642,6 +647,13 @@ fn end_agent(
         + stop_jobs_in(app, &dir).context("end the review's job")?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Job)?;
+    // An adopted job, started by an older jeet, has no runner jeet knows.
+    if let Some(job) = running_job(app, review) {
+        warnings.push(format!(
+            "its review job (pid {}) keeps running; jeet did not start it, so it is not stopped",
+            job.pid.unwrap_or(0)
+        ));
+    }
     if let Err(e) = runtime::remove_settings(&app.home, &review.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
@@ -1608,6 +1620,10 @@ fn refuse(app: &App, id: &str, me: u32) {
 /// The status a refused runner records: its command never ran.
 const REFUSED: i32 = 126;
 
+/// The status a job lost before it was adopted is stored with, and no end
+/// time: it stopped without finishing.
+const LOST: i32 = 127;
+
 /// `jeet review-job <review id>`: run a review's job's command and record
 /// how it ended.
 ///
@@ -1623,8 +1639,12 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
         bail!("review {id} has no job");
     };
     // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
-    app.db
-        .set_review_job_runner(id, me, identity::start_of(me))?;
+    if !app
+        .db
+        .set_review_job_runner(id, me, identity::start_of(me))?
+    {
+        bail!("review {id}'s job is another runner's, or has ended");
+    }
     println!("$ {}", job.command);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&job.command).current_dir(&job.worktree);
@@ -2125,24 +2145,32 @@ enum Adoption {
 
 /// Older jeets kept each `[review] command` job as a JSON file under
 /// `$JEET_HOME/reviews/<host>/<owner>/<repo>/<n>.json`, and the Reviews tab
-/// listed them read-only. Once, at the first user command after the upgrade
-/// to schema v9, each file whose PR has no review becomes one: archived
-/// when the job finished or was lost (its process is gone), active while it
-/// still runs, so the sweep of done PRs archives it once its PR is merged or
-/// closed. It has a directory of its own like any review and no worktree:
-/// the job's is never touched. A PR that has a review without a job gets
-/// the file's as its job. A file that cannot be read is left.
+/// listed them read-only. At the first commands after the upgrade to schema
+/// v9, each file whose PR has no review becomes one: archived when the job
+/// finished or was lost (its process is gone), active while it still runs,
+/// so the sweep of done PRs archives it once its PR is merged or closed. It
+/// has a directory of its own like any review and no worktree: the job's is
+/// never touched. A PR that has a review without a job gets the file's as
+/// its job. A file that cannot be read is left. A job that is not running
+/// is stored ended, so no runner can take it up.
 ///
-/// Files are never deleted or moved, and read once: [`JOBS_ADOPTED`] stops
-/// the next command looking. A file whose review could not be made is
-/// tried again at the next command. Under a lock, so two commands at once
-/// do not both adopt. Each file is a line of the log, and a summary goes to
-/// stderr once.
+/// Files are never deleted or moved. Each one gone through is recorded in
+/// `review_job_files`, and one with a final outcome is never looked at
+/// again, so a review deleted since is not made anew. A file whose review
+/// could not be made is tried [`ATTEMPTS`] times, then left. [`JOBS_ADOPTED`]
+/// is set once none is pending, and stops the next command looking. Under a
+/// lock, so two commands at once do not both adopt. Each file's outcome is a
+/// line of the log, and a pass that adopted or gave up on something says so
+/// on stderr.
 pub fn adopt_jobs(app: &App) {
     if let Err(e) = adopt(app) {
         eprintln!("jeet: warning: could not adopt the review jobs older jeets left: {e:#}");
     }
 }
+
+/// The start of the outcome of a job file that is to be tried again (up to
+/// [`ATTEMPTS`] times).
+const RETRY: &str = "pending: ";
 
 fn adopt(app: &App) -> Result<()> {
     if app.db.meta(JOBS_ADOPTED)?.is_some() {
@@ -2170,8 +2198,19 @@ fn adopt(app: &App) -> Result<()> {
         return Ok(());
     }
     let root = app.home.join("reviews");
-    let files = job_files(&root);
-    if files.is_empty() {
+    // Each file not yet through, with what was recorded of it.
+    let mut todo = Vec::new();
+    for file in job_files(&root) {
+        let prior = app.db.job_file(&file.to_string_lossy())?;
+        if prior
+            .as_ref()
+            .is_some_and(|(outcome, _)| !outcome.starts_with(RETRY))
+        {
+            continue;
+        }
+        todo.push((file, prior));
+    }
+    if todo.is_empty() {
         return app.db.set_meta(JOBS_ADOPTED, "1");
     }
     let logs = app.home.join("logs");
@@ -2187,16 +2226,43 @@ fn adopt(app: &App) -> Result<()> {
     };
 
     let mut counts = [0usize; 5];
+    let mut gave_up = 0;
     let mut retry = 0;
-    for file in &files {
+    for (file, prior) in &todo {
+        let key = file.to_string_lossy();
+        let attempts = prior.as_ref().map_or(0, |(_, n)| *n);
         match adopt_file(app, &root, file) {
-            Ok((how, line)) => {
-                say(line);
-                counts[how as usize] += 1;
+            Ok(done) => {
+                app.db.record_job_file(
+                    &key,
+                    &done.outcome,
+                    done.review_id.as_deref(),
+                    attempts + 1,
+                    now_secs(),
+                )?;
+                say(done.line);
+                counts[done.how as usize] += 1;
+                gave_up += usize::from(done.how == Adoption::Left);
             }
             Err(e) => {
-                say(format!("{}: not adopted yet: {e:#}", file.display()));
-                retry += 1;
+                let attempts = attempts + 1;
+                let line = format!("{}: not adopted yet: {e:#}", file.display());
+                let outcome = if attempts >= ATTEMPTS {
+                    gave_up += 1;
+                    let outcome = format!("left: could not adopt ({e:#})");
+                    say(format!("{}: {outcome}", file.display()));
+                    outcome
+                } else {
+                    retry += 1;
+                    let outcome = format!("{RETRY}{e:#}");
+                    // Only a change is news.
+                    if prior.as_ref().map(|(o, _)| o) != Some(&outcome) {
+                        say(line);
+                    }
+                    outcome
+                };
+                app.db
+                    .record_job_file(&key, &outcome, None, attempts, now_secs())?;
             }
         }
     }
@@ -2204,28 +2270,31 @@ fn adopt(app: &App) -> Result<()> {
         app.db.set_meta(JOBS_ADOPTED, "1")?;
     }
     let [archived, running, folded, held, left] = counts;
-    eprintln!(
-        "jeet: review jobs older jeets left in {} are now reviews: {} adopted ({archived} \
-         archived, {running} still running), {folded} put on a review that had none, \
-         {held} already held, {left} left unread, {retry} to retry; nothing was deleted; \
-         see {}",
-        root.display(),
-        archived + running,
-        log_path.display()
-    );
+    if archived + running + folded + gave_up > 0 {
+        eprintln!(
+            "jeet: review jobs older jeets left in {} are now reviews: {} adopted ({archived} \
+             archived, {running} still running), {folded} put on a review that had none, \
+             {held} already held, {left} left unread, {gave_up} given up on, {retry} to retry; \
+             nothing was deleted; see {}",
+            root.display(),
+            archived + running,
+            log_path.display()
+        );
+    }
     Ok(())
 }
 
-/// Every `<host>/<owner>/<repo>/<n>.json` under `root`, in path order.
+/// Every `<host>/<owner>/<repo>/<n>.json` under `root` that [`job_key`]
+/// accepts, in path order: the owner may be a group with subgroups.
 fn job_files(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = walkdir::WalkDir::new(root)
         .min_depth(4)
-        .max_depth(4)
         .follow_links(false)
         .into_iter()
         .flatten()
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
         .map(walkdir::DirEntry::into_path)
+        .filter(|path| job_key(root, path).is_some())
         .collect();
     files.sort();
     files
@@ -2246,10 +2315,29 @@ fn job_key(root: &Path, path: &Path) -> Option<(String, u64)> {
     Some((repo_id, number))
 }
 
-/// Adopt the job file at `path`, with the line for the log. An error is a
-/// review that could not be made now: the file is tried again.
-fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)> {
-    let left = |why: String| Ok((Adoption::Left, format!("{}: left: {why}", path.display())));
+/// What [`adopt_file`] did with a file.
+struct Adopted {
+    how: Adoption,
+    /// For the log.
+    line: String,
+    /// For `review_job_files`.
+    outcome: String,
+    /// The review the file's job is on.
+    review_id: Option<String>,
+}
+
+/// Adopt the job file at `path`. An error is a review that could not be
+/// made now: the file is tried again.
+fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
+    let left = |why: String| {
+        let outcome = format!("left: {why}");
+        Ok(Adopted {
+            how: Adoption::Left,
+            line: format!("{}: {outcome}", path.display()),
+            outcome,
+            review_id: None,
+        })
+    };
     let Some((repo_id, number)) = job_key(root, path) else {
         return left("not named <repo>/<number>.json".into());
     };
@@ -2277,6 +2365,12 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)>
         JobState::Finished(code) => format!("finished with status {code}"),
         JobState::Lost => "lost: its process is gone".to_string(),
     };
+    // A job not running is stored ended, whatever the file says: nothing
+    // may run it. A lost one has no end to record.
+    if state == JobState::Lost {
+        job.exit_code = Some(LOST);
+        job.lost = false;
+    }
 
     if let Some(review) = app.db.find_review(&repo_id, number)? {
         if review.job.is_some() {
@@ -2285,7 +2379,12 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)>
                 path.display(),
                 review.slug
             );
-            return Ok((Adoption::Held, line));
+            return Ok(Adopted {
+                how: Adoption::Held,
+                line,
+                outcome: format!("held: review {} has a job already", review.slug),
+                review_id: Some(review.id),
+            });
         }
         app.db.set_review_job(&review.id, &job)?;
         let line = format!(
@@ -2293,7 +2392,12 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)>
             path.display(),
             review.slug
         );
-        return Ok((Adoption::Folded, line));
+        return Ok(Adopted {
+            how: Adoption::Folded,
+            line,
+            outcome: format!("put on review {}", review.slug),
+            review_id: Some(review.id),
+        });
     }
 
     let repo = repo_id.rsplit('/').next().unwrap_or(&repo_id);
@@ -2312,14 +2416,20 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)>
         JobState::Finished(_) | JobState::Lost => TaskState::Archived,
     };
     review.job = Some(job);
+    // The row first: a crash between the two leaves a review without its
+    // directory, not a directory that forces the next slug to `-2`.
+    app.db.insert_review(&review)?;
     let dir = dir(app, &review);
-    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
-    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let made = tasks::write_marker(&dir, &review.id)
-        .and_then(|()| install_skill(&dir))
-        .and_then(|()| app.db.insert_review(&review));
+    let made = std::fs::create_dir_all(app.tasks_root())
+        .context("create the tasks directory")
+        .and_then(|()| {
+            std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))
+        })
+        .and_then(|()| tasks::write_marker(&dir, &review.id))
+        .and_then(|()| install_skill(&dir));
     if let Err(e) = made {
         let _ = std::fs::remove_dir_all(&dir);
+        app.db.delete_review(&review.id)?;
         return Err(e);
     }
     let (how_adopted, kind) = match review.state {
@@ -2331,7 +2441,12 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<(Adoption, String)>
         path.display(),
         review.slug
     );
-    Ok((kind, line))
+    Ok(Adopted {
+        how: kind,
+        line,
+        outcome: format!("adopted as review {} ({how_adopted})", review.slug),
+        review_id: Some(review.id),
+    })
 }
 
 /// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
@@ -3109,7 +3224,16 @@ mod tests {
         let state = |n: u64| job_of(&app, &get(api, n).unwrap()).unwrap().state();
         assert_eq!(state(1), JobState::Finished(0));
         assert_eq!(state(2), JobState::Finished(1));
-        assert_eq!(state(3), JobState::Lost);
+        // Lost is stored ended, with no end time, so no runner takes it up.
+        assert_eq!(state(3), JobState::Finished(LOST));
+        let lost = job_of(&app, &get(api, 3).unwrap()).unwrap();
+        assert_eq!(lost.finished_at, None);
+        assert_eq!(lost.describe(), "stopped without finishing");
+        for n in [1, 2, 3, 9] {
+            let id = get(api, n).unwrap().id;
+            assert!(crate::permissions::check_review_job(&app.db, &id, 5).is_err());
+            assert!(!app.db.set_review_job_runner(&id, 5, None).unwrap());
+        }
         assert_eq!(state(4), JobState::Running);
         // Never launched is recorded as a refused runner is.
         assert_eq!(state(9), JobState::Finished(REFUSED));
@@ -3149,14 +3273,112 @@ mod tests {
         }
         assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
 
+        // Each file is recorded; a review deleted since is not made anew.
+        let recorded = app
+            .db
+            .job_file(
+                &home
+                    .join("reviews")
+                    .join(api)
+                    .join("1.json")
+                    .to_string_lossy(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(recorded.0.starts_with("adopted"), "{recorded:?}");
+        let one = get(api, 1).unwrap();
+        app.db.delete_review(&one.id).unwrap();
+        app.db.delete_meta(JOBS_ADOPTED).unwrap();
+        adopt(&app).unwrap();
+        assert!(get(api, 1).is_none());
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
+        assert_eq!(again, log);
+
         // Looked through once: a file that turns up later is not adopted,
         // and nothing is logged twice.
         put(api, "10", Some(mk(10, "later", Some(5), Some(0))), "");
         adopt(&app).unwrap();
         assert!(get(api, 10).is_none());
-        assert_eq!(app.db.list_reviews(None).unwrap().len(), 8);
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 7);
         let again = std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap();
         assert_eq!(again, log);
+    }
+
+    /// A file whose review cannot be made is tried three times, logged when
+    /// its outcome changes, then left; the marker is set once none is pending.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_file_that_cannot_be_adopted_is_tried_three_times() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let app = test_app(&home);
+        let dir = home.join("reviews/github.com/acme/api");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = job(Some(0), "abc");
+        j.pr = 3;
+        let file = dir.join("3.json");
+        std::fs::write(&file, serde_json::to_string(&j).unwrap()).unwrap();
+        // A file where the tasks directory goes: no review directory can be made.
+        let _ = std::fs::remove_dir_all(app.tasks_root());
+        std::fs::write(app.tasks_root(), "in the way").unwrap();
+        let log = || std::fs::read_to_string(home.join("logs").join(ADOPT_LOG)).unwrap_or_default();
+
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
+        assert_eq!(log().lines().count(), 1);
+        adopt(&app).unwrap();
+        // The same failure is not logged again.
+        assert_eq!(log().lines().count(), 1);
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_none());
+        adopt(&app).unwrap();
+        assert!(app.db.meta(JOBS_ADOPTED).unwrap().is_some());
+        let log = log();
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(log.contains("left: could not adopt"), "{log}");
+        let (outcome, attempts) = app.db.job_file(&file.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(attempts, ATTEMPTS);
+        assert!(outcome.starts_with("left: could not adopt"), "{outcome}");
+        // No row was left behind by the failures, and the file is kept.
+        assert!(app
+            .db
+            .find_review("github.com/acme/api", 3)
+            .unwrap()
+            .is_none());
+        assert!(file.is_file());
+    }
+
+    /// An owner may be a group with subgroups, so a job file lies deeper.
+    #[test]
+    fn job_files_include_nested_owners_only_when_named_for_a_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for rel in [
+            "gitlab.com/group/sub/repo/5.json",
+            "github.com/acme/api/1.json",
+            "github.com/acme/api/1.log",
+            "github.com/acme/api/x.json",
+            "github.com/acme/2.json",
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        let found: Vec<_> = job_files(root)
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "github.com/acme/api/1.json",
+                "gitlab.com/group/sub/repo/5.json"
+            ]
+        );
+        assert_eq!(
+            job_key(root, &root.join("gitlab.com/group/sub/repo/5.json")),
+            Some(("gitlab.com/group/sub/repo".to_string(), 5))
+        );
     }
 
     /// No job files, nothing to log: the marker is set all the same.

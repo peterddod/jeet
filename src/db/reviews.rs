@@ -382,12 +382,14 @@ impl Database {
     }
 
     /// Record the runner of review `id`'s job: its pid and its start as
-    /// [`crate::identity`] reads it. Only for a job not yet ended; whether
-    /// it was recorded.
+    /// [`crate::identity`] reads it. Only for a job not yet ended, and not
+    /// another runner's (none recorded yet, or this pid): so two runners
+    /// cannot both run one job. Whether it was recorded.
     pub fn set_review_job_runner(&self, id: &str, pid: u32, start: Option<i64>) -> Result<bool> {
         let changed = self.conn().execute(
             "UPDATE reviews SET job_pid = ?2, job_runner_start = ?3
-             WHERE id = ?1 AND job_started_at IS NOT NULL AND job_exit_code IS NULL",
+             WHERE id = ?1 AND job_started_at IS NOT NULL AND job_finished_at IS NULL
+               AND job_exit_code IS NULL AND (job_pid IS NULL OR job_pid = ?2)",
             params![id, i64::from(pid), start],
         )?;
         Ok(changed == 1)
@@ -679,6 +681,40 @@ impl Database {
         Ok(())
     }
 
+    /// What was recorded of job file `path`: its outcome and the attempts
+    /// made at it.
+    pub fn job_file(&self, path: &str) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT outcome, attempts FROM review_job_files WHERE path = ?1",
+                params![path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Record job file `path`'s `outcome` (and the review it went to) after
+    /// `attempts` attempts.
+    pub fn record_job_file(
+        &self,
+        path: &str,
+        outcome: &str,
+        review_id: Option<&str>,
+        attempts: i64,
+        at: i64,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO review_job_files (path, outcome, review_id, attempts, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET outcome = excluded.outcome,
+                 review_id = excluded.review_id, attempts = excluded.attempts,
+                 at = excluded.at",
+            params![path, outcome, review_id, attempts, at],
+        )?;
+        Ok(())
+    }
+
     /// The migration's `meta` value for `key`, if it is there.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -948,6 +984,9 @@ mod tests {
         };
         db.set_review_job("r", &job).unwrap();
         assert_eq!(db.get_review("r").unwrap().unwrap().job, Some(job.clone()));
+        assert!(db.set_review_job_runner("r", 42, Some(9)).unwrap());
+        // One runner has the job: not another, and not one that is lost.
+        assert!(!db.set_review_job_runner("r", 43, Some(10)).unwrap());
         assert!(db.set_review_job_runner("r", 42, Some(9)).unwrap());
         // Another runner's end is not recorded; its own is, once.
         assert!(!db.finish_review_job("r", 8, 1, Some(43)).unwrap());

@@ -95,6 +95,10 @@ fn moves_reviews(command: Option<&Commands>) -> bool {
     if std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
         return false;
     }
+    runs_by_a_person(command)
+}
+
+fn runs_by_a_person(command: Option<&Commands>) -> bool {
     !matches!(
         command,
         Some(
@@ -114,9 +118,13 @@ fn moves_reviews(command: Option<&Commands>) -> bool {
 }
 
 fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
-    if moves_reviews(command.as_ref()) {
+    // Adopting the job files older jeets left destroys nothing, so it runs
+    // for a user who works in task shells too; moving reviews does not.
+    if runs_by_a_person(command.as_ref()) {
         if let Ok(app) = context::App::open() {
-            review::migrate_leftovers(&app);
+            if moves_reviews(command.as_ref()) {
+                review::migrate_leftovers(&app);
+            }
             review::adopt_jobs(&app);
         }
     }
