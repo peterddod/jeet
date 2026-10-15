@@ -447,6 +447,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     if let Some(working) = &ui.working {
         draw_working(frame, working);
     }
+    super::term::unhide_on_highlight(frame.buffer_mut());
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
@@ -2692,6 +2693,36 @@ mod tests {
             "{second}"
         );
         assert!(screen.join("\n").contains("active 1"));
+    }
+
+    #[test]
+    fn the_selected_rows_snippet_stands_out_from_the_highlight() {
+        let mut ui = TasksUi::new(vec![row(
+            "fix-login",
+            Some(Activity::Running {
+                detail: Some("Edit the token refresh".into()),
+            }),
+        )]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut ui)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..14)
+            .find(|&y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("Edit the token refresh")
+            })
+            .unwrap();
+        let cells: Vec<_> = (0..120).map(|x| &buffer[(x, y)]).collect();
+        let snippet = cells.iter().find(|c| c.symbol() == "E").unwrap();
+        // Highlighted, and in a grey that is not the highlight's.
+        assert_eq!(snippet.bg, Color::DarkGray);
+        assert_eq!(snippet.fg, Color::Gray);
+        assert!(!buffer
+            .content
+            .iter()
+            .any(|c| c.fg == Color::DarkGray && c.bg == Color::DarkGray));
     }
 
     #[test]

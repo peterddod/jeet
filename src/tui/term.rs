@@ -23,7 +23,7 @@ use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{execute, queue};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
@@ -179,6 +179,18 @@ pub struct Link {
     pub y: u16,
     pub width: u16,
     pub url: String,
+}
+
+/// Every list highlights its selected row with a dark grey background, the
+/// same grey its rows' dim detail — a task's snippet, a time, a size — is
+/// written in. On the selected row that text would vanish: drawn after the
+/// frame, this lifts it to a lighter grey.
+pub fn unhide_on_highlight(buffer: &mut Buffer) {
+    for cell in &mut buffer.content {
+        if cell.fg == Color::DarkGray && cell.bg == Color::DarkGray {
+            cell.set_fg(Color::Gray);
+        }
+    }
 }
 
 /// `url`, if it is fit to put in an OSC 8 sequence: a web address with

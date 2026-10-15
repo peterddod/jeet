@@ -256,6 +256,7 @@ fn draw(frame: &mut Frame, picker: &Picker, working: Option<&str>) {
         (None, None) => Line::from(Span::styled(KEYS, Style::default().fg(Color::DarkGray))),
     };
     frame.render_widget(Paragraph::new(footer), rows[1]);
+    term::unhide_on_highlight(frame.buffer_mut());
 }
 
 pub(crate) fn session_line(s: &Session) -> ListItem<'static> {
