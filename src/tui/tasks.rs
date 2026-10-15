@@ -21,7 +21,8 @@
 //! picks one of its sessions, `t` opens its todo list, `i` its inbox and
 //! activity, and `o` sorts the tasks by the todo items that link them.
 //!
-//! `⇥` cycles active → agents → reviews → archived. The agents view shows the
+//! `⇥` cycles active → agents → reviews, and `A` in the active view lists
+//! the archived tasks instead (a flat list), and back. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
 //! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
@@ -214,7 +215,6 @@ pub enum View {
     /// The active reviews and review jobs with no task, or, toggled with
     /// `A`, the archived reviews: reviews are shown here alone.
     Reviews,
-    Archived,
 }
 
 impl View {
@@ -224,7 +224,6 @@ impl View {
         match self {
             View::Active => Some(TaskState::Active),
             View::Agents | View::Reviews => None,
-            View::Archived => Some(TaskState::Archived),
         }
     }
 
@@ -232,17 +231,15 @@ impl View {
         match self {
             View::Active => View::Agents,
             View::Agents => View::Reviews,
-            View::Reviews => View::Archived,
-            View::Archived => View::Active,
+            View::Reviews => View::Active,
         }
     }
 
     fn prev(self) -> View {
         match self {
-            View::Active => View::Archived,
+            View::Active => View::Reviews,
             View::Agents => View::Active,
             View::Reviews => View::Agents,
-            View::Archived => View::Reviews,
         }
     }
 }
@@ -1109,6 +1106,8 @@ pub struct TasksUi {
     pub reviews: Vec<ReviewLine>,
     /// `A` in the reviews view: it lists the archived reviews instead.
     pub archived_reviews: bool,
+    /// `A` in the active view: it lists the archived tasks instead, flat.
+    pub archived_tasks: bool,
     /// What GitHub last said of each reviewed PR, or why it could not say.
     pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
 }
@@ -1150,6 +1149,7 @@ impl TasksUi {
             legacy: Vec::new(),
             reviews: Vec::new(),
             archived_reviews: false,
+            archived_tasks: false,
             reviewed: HashMap::new(),
         };
         ui.set_rows(rows);
@@ -1250,7 +1250,7 @@ impl TasksUi {
             return;
         }
         self.reviews.clear();
-        let Some(state) = self.view.state() else {
+        let Some(mut state) = self.view.state() else {
             self.visible.clear();
             self.tree = managers::lines(
                 self.assistant_row.as_ref(),
@@ -1269,6 +1269,9 @@ impl TasksUi {
             return;
         };
         self.tree.clear();
+        if self.archived_tasks {
+            state = TaskState::Archived;
+        }
         // A manager gone from the active tasks takes the levels below it.
         if let Some(gone) = self
             .path
@@ -1279,7 +1282,7 @@ impl TasksUi {
         }
         // The active view lists one level; a filter searches them all.
         let here = self.path.last().map(String::as_str);
-        let level = self.view == View::Active && self.filter.is_empty();
+        let level = self.in_tree() && self.filter.is_empty();
         // Reviews are the reviews view's alone.
         let in_view: Vec<usize> = (0..self.rows.len())
             .filter(|&i| self.rows[i].task.state == state)
@@ -1300,12 +1303,18 @@ impl TasksUi {
             .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
     }
 
+    /// Whether the list is the active tasks' tree, walked a level at a time:
+    /// the archived tasks are flat.
+    pub fn in_tree(&self) -> bool {
+        self.view == View::Active && !self.archived_tasks
+    }
+
     /// How many lines the list shows: tasks, or the tree's nodes.
     pub fn shown_len(&self) -> usize {
         match self.view {
             View::Agents => self.tree.len(),
             View::Reviews => self.reviews.len(),
-            View::Active | View::Archived => self.visible.len(),
+            View::Active => self.visible.len(),
         }
     }
 
@@ -1321,9 +1330,7 @@ impl TasksUi {
                 Source::Task(i) => self.rows.get(i),
                 Source::Legacy(_) => None,
             },
-            View::Active | View::Archived => {
-                self.visible.get(self.selected).map(|&i| &self.rows[i])
-            }
+            View::Active => self.visible.get(self.selected).map(|&i| &self.rows[i]),
         }
     }
 
@@ -1462,7 +1469,7 @@ impl TasksUi {
     /// view, on that task's level, wherever the match was.
     fn drop_filter(&mut self, keep: Option<&str>) {
         self.filter.clear();
-        if let Some(id) = keep.filter(|_| self.view == View::Active) {
+        if let Some(id) = keep.filter(|_| self.in_tree()) {
             self.path = self.ancestors(id);
         }
         self.refresh_visible(keep);
@@ -1508,10 +1515,12 @@ impl TasksUi {
                 self.archived_reviews = archived;
                 View::Reviews
             }
-            (_, false) => View::Active,
-            (_, true) => View::Archived,
+            (_, _) => {
+                self.archived_tasks = archived;
+                View::Active
+            }
         };
-        if self.view == View::Active {
+        if self.view == View::Active && !archived {
             self.path = self.ancestors(id);
         }
         self.refresh_visible(Some(id));
@@ -1525,14 +1534,23 @@ impl TasksUi {
     /// and for the reviews view, its active lines.
     pub fn count(&self, view: View) -> usize {
         match view.state() {
-            Some(state) => self
-                .rows
-                .iter()
-                .filter(|row| row.task.state == state && row.task.kind != TaskKind::Review)
-                .count(),
+            Some(_) => self.task_count(false),
             None if view == View::Reviews => self.review_count(false),
             None => self.shown.len(),
         }
+    }
+
+    /// How many tasks the active view has, unfiltered: active, or
+    /// `archived`. Reviews are the reviews view's.
+    pub fn task_count(&self, archived: bool) -> usize {
+        let state = match archived {
+            true => TaskState::Archived,
+            false => TaskState::Active,
+        };
+        self.rows
+            .iter()
+            .filter(|row| row.task.state == state && row.task.kind != TaskKind::Review)
+            .count()
     }
 
     /// How many lines the reviews view has, unfiltered: active, or
@@ -1893,6 +1911,16 @@ impl TasksUi {
                 None
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
+            KeyCode::Char('A') if self.view == View::Active => {
+                self.archived_tasks = !self.archived_tasks;
+                self.selected = 0;
+                self.refresh_visible(None);
+                self.set_status(match self.archived_tasks {
+                    true => "archived tasks · A back to the active ones",
+                    false => "active tasks · A shows the archived ones",
+                });
+                None
+            }
             KeyCode::Char('A') if self.view == View::Reviews => {
                 self.archived_reviews = !self.archived_reviews;
                 self.selected = 0;
@@ -1905,33 +1933,30 @@ impl TasksUi {
             }
             // The active view is a tree, walked like the explorer's folders:
             // → goes into a manager, ⏎ opens its agent, as ctrl-a does.
-            KeyCode::Enter | KeyCode::Right if self.view == View::Active => {
-                match self.selected_row() {
-                    Some(row)
-                        if self.enterable(row)
-                            && (key.code == KeyCode::Right
-                                || row.task.kind != TaskKind::Manager) =>
-                    {
-                        let id = row.task.id.clone();
-                        self.descend(&id);
-                        None
-                    }
-                    Some(_) if key.code == KeyCode::Right => {
-                        self.set_status("a task has nothing under it · ⏎ opens its agent");
-                        None
-                    }
-                    _ => needs_task(self, &|task_id| Action::Open {
-                        task_id,
-                        session: None,
-                    }),
+            KeyCode::Enter | KeyCode::Right if self.in_tree() => match self.selected_row() {
+                Some(row)
+                    if self.enterable(row)
+                        && (key.code == KeyCode::Right || row.task.kind != TaskKind::Manager) =>
+                {
+                    let id = row.task.id.clone();
+                    self.descend(&id);
+                    None
                 }
-            }
-            KeyCode::Left | KeyCode::Backspace if self.view == View::Active => {
+                Some(_) if key.code == KeyCode::Right => {
+                    self.set_status("a task has nothing under it · ⏎ opens its agent");
+                    None
+                }
+                _ => needs_task(self, &|task_id| Action::Open {
+                    task_id,
+                    session: None,
+                }),
+            },
+            KeyCode::Left | KeyCode::Backspace if self.in_tree() => {
                 self.ascend();
                 None
             }
             // The agent under the cursor, as ⏎; the explorer's key.
-            KeyCode::Char('a') if ctrl && self.view == View::Active => {
+            KeyCode::Char('a') if ctrl && self.in_tree() => {
                 needs_task(self, &|task_id| Action::Open {
                     task_id,
                     session: None,
@@ -1953,12 +1978,14 @@ impl TasksUi {
             KeyCode::Char('p') => needs_task(self, &|task_id| Action::Prs { task_id }),
             KeyCode::Char('v') => needs_task(self, &|task_id| Action::ReviewViewer { task_id }),
             KeyCode::Char('a') => match self.view {
+                View::Active if self.archived_tasks => {
+                    needs_task(self, &|task_id| Action::Unarchive { task_id })
+                }
                 View::Active => needs_task(self, &|task_id| Action::Archive {
                     task_id,
                     confirmed: false,
                     recursive: false,
                 }),
-                View::Archived => needs_task(self, &|task_id| Action::Unarchive { task_id }),
                 View::Reviews => match self.selected_row().map(|row| row.task.state) {
                     Some(TaskState::Archived) => {
                         needs_task(self, &|task_id| Action::Unarchive { task_id })
@@ -2798,7 +2825,7 @@ impl TasksUi {
                 if inside {
                     // Active and archived tasks take two lines each.
                     let lines = match self.view {
-                        View::Active | View::Archived => 2,
+                        View::Active => 2,
                         View::Agents | View::Reviews => 1,
                     };
                     let row = self.list.offset() + (mouse.row - area.y - 1) as usize / lines;
@@ -4129,7 +4156,7 @@ impl Screen<'_> {
                 self.refresh(false);
                 match archived {
                     Ok(warnings) => self.ui.set_status(with_warnings(
-                        format!("archived {} — ⇥ shows archived tasks", task.name),
+                        format!("archived {} — A shows archived tasks", task.name),
                         &warnings,
                     )),
                     Err(e) => self.ui.message(
@@ -5183,7 +5210,7 @@ impl Screen<'_> {
         match archived {
             Ok(warnings) => self.ui.set_status(with_warnings(
                 format!(
-                    "archived {} and {} under it — ⇥ shows archived tasks",
+                    "archived {} and {} under it — A shows archived tasks",
                     task.name,
                     plural(nodes.len().saturating_sub(1), "task")
                 ),
@@ -5798,15 +5825,17 @@ mod tests {
         );
         // Only in the active view: the agents view's `a` answers, and an
         // archived task's agent is not opened.
-        for view in [View::Agents, View::Archived] {
+        for (view, archived) in [(View::Agents, false), (View::Active, true)] {
             ui.view = view;
+            ui.archived_tasks = archived;
             let got = ui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
             assert!(
                 !matches!(got, Some(Action::Open { .. })),
-                "{view:?}: {got:?}"
+                "{view:?} archived {archived}: {got:?}"
             );
         }
         ui.view = View::Active;
+        ui.archived_tasks = false;
         ui.refresh_visible(None);
         // Plain `a` still archives.
         assert!(matches!(
@@ -5957,7 +5986,7 @@ mod tests {
         ui.rows
             .iter_mut()
             .for_each(|r| r.task.state = TaskState::Archived);
-        ui.view = View::Archived;
+        ui.archived_tasks = true;
         ui.refresh_visible(None);
         assert_eq!(ui.visible.len(), 6);
         // ⏎ there explains rather than going in.
@@ -6000,11 +6029,35 @@ mod tests {
         let ui = sample();
         assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
         assert_eq!(ui.count(View::Active), 3);
-        assert_eq!(ui.count(View::Archived), 1);
+        assert_eq!(ui.task_count(true), 1);
     }
 
     #[test]
-    fn tab_cycles_active_agents_reviews_archived_and_back_tab_goes_back() {
+    fn a_toggles_the_active_view_to_the_archived_tasks_and_back() {
+        let mut ui = sample();
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(ui.archived_tasks);
+        assert_eq!(ui.view, View::Active);
+        assert_eq!(ui.selected, 0);
+        assert_eq!(shown(&ui), ["old spike"]);
+        assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
+        // The toggle stays across views, as the reviews' does.
+        press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!((ui.view, ui.archived_tasks), (View::Active, true));
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(!ui.archived_tasks);
+        assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+        // The agents view leaves `A` alone.
+        press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(!ui.archived_tasks);
+    }
+
+    #[test]
+    fn tab_cycles_active_agents_reviews_and_back_tab_goes_back() {
         let mut ui = sample();
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Agents);
@@ -6015,13 +6068,8 @@ mod tests {
         // No review tasks.
         assert_eq!(ui.shown_len(), 0);
         press(&mut ui, KeyCode::Tab);
-        assert_eq!(ui.view, View::Archived);
-        assert_eq!(shown(&ui), ["old spike"]);
-        press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Active);
         assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
-        press(&mut ui, KeyCode::BackTab);
-        assert_eq!(ui.view, View::Archived);
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(ui.view, View::Reviews);
         press(&mut ui, KeyCode::BackTab);
@@ -6176,10 +6224,10 @@ mod tests {
         assert!(ui.visible.is_empty());
         press(&mut ui, KeyCode::Esc);
         // Archived: none of the archived reviews.
-        ui.view = View::Archived;
+        ui.archived_tasks = true;
         ui.set_rows(ui.rows.clone());
         assert!(ui.visible.is_empty());
-        assert_eq!(ui.count(View::Archived), 0);
+        assert_eq!(ui.task_count(true), 0);
     }
 
     #[test]
@@ -6468,9 +6516,9 @@ mod tests {
     }
 
     #[test]
-    fn in_the_archived_view_a_unarchives_and_enter_explains() {
+    fn in_the_archived_list_a_unarchives_and_enter_explains() {
         let mut ui = sample();
-        press(&mut ui, KeyCode::BackTab);
+        press(&mut ui, KeyCode::Char('A'));
         assert_eq!(
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Unarchive {
@@ -7053,11 +7101,9 @@ mod tests {
     #[test]
     fn the_tree_thread_runs_only_in_the_agents_view() {
         assert_eq!(tree_wanted(View::Active, View::Agents), Some(true));
-        assert_eq!(tree_wanted(View::Archived, View::Agents), Some(true));
-        assert_eq!(tree_wanted(View::Agents, View::Archived), Some(false));
         assert_eq!(tree_wanted(View::Agents, View::Active), Some(false));
         assert_eq!(tree_wanted(View::Agents, View::Agents), None);
-        assert_eq!(tree_wanted(View::Active, View::Archived), None);
+        assert_eq!(tree_wanted(View::Active, View::Reviews), None);
     }
 
     #[test]
@@ -8254,13 +8300,13 @@ mod tests {
     }
 
     #[test]
-    fn going_to_a_task_finds_it_in_the_archived_view_and_past_the_filter() {
+    fn going_to_a_task_finds_it_in_the_archived_list_and_past_the_filter() {
         let mut ui = with_todo("- [ ] look again @old-spike\n");
         ui.filter = "api".into();
         ui.refresh_visible(None);
         press(&mut ui, KeyCode::Char('t'));
         press(&mut ui, KeyCode::Enter);
-        assert_eq!(ui.view, View::Archived);
+        assert_eq!((ui.view, ui.archived_tasks), (View::Active, true));
         assert_eq!(ui.selected_id(), Some("c"));
     }
 

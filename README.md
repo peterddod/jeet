@@ -511,7 +511,7 @@ jeet          # or `jeet tasks`
 
 ```text
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
-│ active 5   agents 6   reviews 2   archived 1    / filter  ⇥ switch        │
+│ active 5   agents 6   reviews 2    / filter  ⇥ switch                     │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
  assistant
@@ -544,8 +544,9 @@ goes into it.
 Each level is most recently active first. Statuses refresh
 every two seconds and sizes are measured in the background, so the list never
 waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
-[reviews tab](#the-reviews-tab), then the archived tasks (a flat list), and
-back to these (`⇧⇥` the other way).
+[reviews tab](#the-reviews-tab), and back to these (`⇧⇥` the other way). `A`
+lists the archived tasks instead of the active ones (a flat list), and back;
+both lists end with a dim reminder of it.
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
 has, and the active one, the session `c` opens, with what it is doing. While
@@ -562,7 +563,8 @@ read from its files on a thread of its own, like the statuses.
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
-| `a` | archive the task (asks first if its agent is running) — or, in the archived view, bring it back. A task with tasks under it takes them along, after one confirm |
+| `a` | archive the task (asks first if its agent is running) — or, in the archived list (`A`), bring it back. A task with tasks under it takes them along, after one confirm |
+| `A` | list the archived tasks instead of the active ones, and back |
 | `D` | delete the task, after listing any work that would be lost; a task with tasks under it takes them along, after one listing for them all |
 | `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
@@ -584,12 +586,12 @@ due. `jeet projects` on a terminal opens it with the projects panel up.
 
 The second tab shows the tree under the [assistant](#the-assistant): the
 assistant at the root, then its managers and tasks and theirs, as `jeet manager
-ls` orders them (top-level tasks stay in *active*, archived ones in
-*archived*).
+ls` orders them (top-level tasks stay in *active*, archived ones in the
+archived list).
 
 ```text
 ┌ jeet · agents ──────────────────────────────────────────────────────────────┐
-│ active 6   agents 7   archived 0    live 5/8   needs you 1   / filter       │
+│ active 6   agents 7   reviews 0    live 5/8   needs you 1   / filter        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ┌ 6 of 7 agents shown ────────────────────────────────────────────────────────┐
 │✦ assistant          ◆ needs you (1)        3 children   inbox 2  todo 4     │
@@ -650,13 +652,13 @@ active tab's: `⇥` back to it.
 The third tab lists the reviews: each active review task (what `jeet review`
 makes), then any review job an older `jeet review` recorded with no task to
 hold it. Reviews are shown here alone, never in the other tabs. `A` switches
-the tab to the archived reviews (`▪ archived`), and back: they stay in the
-reviews tab rather than joining the archived tasks, so a review is always
-found in the one place.
+the tab to the archived reviews (`▪ archived`), and back, as it does the
+tasks list: they stay in the reviews tab rather than joining the archived
+tasks, so a review is always found in the one place.
 
 ```text
 ┌ jeet · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
-│ active 6   agents 7   reviews 2   archived 2    / filter  ⇥ switch                                     │
+│ active 6   agents 7   reviews 2    / filter  ⇥ switch                                                  │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ 2 reviews ─────────────────────────────────────────────────────────────────────────────────────────────┐
 │● running – Read   api            #131   open    changes requested Refresh tokens         1.2G  just now│
@@ -1116,7 +1118,7 @@ archived tasks under it back top-down, each under a parent already back
 and held to its parent's `max_children`. A failure
 part-way leaves what is done done, and running the command again finishes
 the job. In the tasks list, `a` and `D` on a task with tasks under it are
-recursive, and `a` in the archived view brings its tree back.
+recursive, and `a` in the archived list brings its tree back.
 
 **`delete --reparent`** deletes a manager alone and moves the tasks under
 it, archived ones too, with their own tasks, to its parent; it conflicts

@@ -57,7 +57,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "a",
-        "archive (frees the disk) · unarchive, in the archived view; the tasks under it too",
+        "archive (frees the disk) · unarchive, in the archived list; the tasks under it too",
     ),
     (
         "D",
@@ -83,10 +83,14 @@ pub const HELP: &[(&str, &str)] = &[
         "o",
         "sort tasks by todo priority, or back by latest activity",
     ),
+    (
+        "A",
+        "list the archived tasks instead of the active ones, and back",
+    ),
     ("", ""),
     (
         "⇥ / ⇧⇥",
-        "next / previous view: active, agents (the tree under the assistant), reviews, archived",
+        "next / previous view: active, agents (the tree under the assistant), reviews",
     ),
     (
         "/",
@@ -167,10 +171,7 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
     ),
     ("t", "its todo list: space done, ⏎ go to the task, a add"),
     ("", ""),
-    (
-        "⇥ / ⇧⇥",
-        "next / previous view: active, agents, reviews, archived",
-    ),
+    ("⇥ / ⇧⇥", "next / previous view: active, agents, reviews"),
     (
         "/",
         "filter by name, keeping the managers above a match; esc drops it",
@@ -236,10 +237,7 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
         "delete the review's task, after listing any work that would go",
     ),
     ("", ""),
-    (
-        "⇥ / ⇧⇥",
-        "next / previous view: active, agents, reviews, archived",
-    ),
+    ("⇥ / ⇧⇥", "next / previous view: active, agents, reviews"),
     ("/", "filter by PR, task name or title; esc drops it"),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
     (
@@ -281,7 +279,7 @@ pub fn help(view: View) -> &'static [(&'static str, &'static str)] {
     match view {
         View::Agents => HELP_AGENTS,
         View::Reviews => HELP_REVIEWS,
-        View::Active | View::Archived => HELP,
+        View::Active => HELP,
     }
 }
 
@@ -298,6 +296,7 @@ const HINTS: &[&str] = &[
     "t todo",
     "i inbox",
     "a archive",
+    "A archived",
     "D delete",
     "p PRs",
     "P projects",
@@ -344,7 +343,7 @@ fn hints(width: u16, view: View) -> String {
     let hints = match view {
         View::Agents => HINTS_AGENTS,
         View::Reviews => HINTS_REVIEWS,
-        View::Active | View::Archived => HINTS,
+        View::Active => HINTS,
     };
     let width = width as usize;
     let tail = &hints[hints.len() - 2..];
@@ -372,10 +371,10 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     // In the agents view the assistant is the tree's root, not pinned.
     let pinned = match ui.view {
         View::Agents | View::Reviews => 0,
-        View::Active | View::Archived => 1,
+        View::Active => 1,
     };
     // Where in the tree the active view is.
-    let crumbs = u16::from(ui.view == View::Active);
+    let crumbs = u16::from(ui.in_tree());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -410,7 +409,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     match ui.view {
         View::Agents => draw_tree(frame, chunks[3], ui),
         View::Reviews => draw_reviews(frame, chunks[3], ui),
-        View::Active | View::Archived => draw_list(frame, chunks[3], ui),
+        View::Active => draw_list(frame, chunks[3], ui),
     }
 
     // What was last done says more than a standing hint.
@@ -471,8 +470,6 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
         tab(View::Agents, "agents"),
         Span::raw(" "),
         tab(View::Reviews, "reviews"),
-        Span::raw(" "),
-        tab(View::Archived, "archived"),
         Span::raw("   "),
     ];
     if ui.view == View::Agents {
@@ -514,7 +511,7 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
     let title = match ui.view {
         View::Agents => " jeet · agents ",
         View::Reviews => " jeet · reviews ",
-        View::Active | View::Archived => " jeet · tasks ",
+        View::Active => " jeet · tasks ",
     };
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
@@ -566,12 +563,10 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
 
 fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     // The agents view draws its tree instead ([`draw_tree`]).
-    let which = match ui.view {
-        View::Active | View::Agents | View::Reviews => "active",
-        View::Archived => "archived",
-    };
-    let total = ui.count(ui.view);
-    let nested = ui.view == View::Active && !ui.path.is_empty();
+    let archived = ui.archived_tasks;
+    let which = if archived { "archived" } else { "active" };
+    let total = ui.task_count(archived);
+    let nested = ui.in_tree() && !ui.path.is_empty();
     let mut title = match (ui.filter.is_empty(), ui.visible.len()) {
         (true, 0) if nested => " nothing under it ".to_string(),
         (true, n) if nested => format!(" {n} under it "),
@@ -586,20 +581,25 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .title_bottom(dim(if archived {
+            " A back to active "
+        } else {
+            " A archived tasks "
+        }))
         .title_style(Style::default().fg(Color::Green));
 
     if ui.visible.is_empty() {
-        let hint = match (ui.view, total) {
+        let hint = match (archived, total) {
             _ if nested && ui.filter.is_empty() => {
                 vec!["no active tasks under this manager. ← or ⌫ backs up.".into()]
             }
-            (View::Active, 0) => vec![
+            (false, 0) => vec![
                 "no tasks yet.".to_string(),
                 String::new(),
                 "n starts one: leave everything blank for an empty canvas the agent".to_string(),
                 "adds worktrees to as it goes, or pick a project or repositories.".to_string(),
             ],
-            (View::Archived, 0) => {
+            (true, 0) => {
                 vec!["nothing archived. a on an active task archives it.".into()]
             }
             _ => vec!["⌫ or esc widens the filter".into()],
@@ -620,7 +620,7 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let inner = area.width.saturating_sub(2) as usize;
     let columns = Columns::for_width(inner);
     // A filter searches every level: each match says where it is.
-    let searching = ui.view == View::Active && !ui.filter.is_empty();
+    let searching = ui.in_tree() && !ui.filter.is_empty();
     let items: Vec<ListItem> = ui
         .visible
         .iter()
@@ -666,6 +666,11 @@ fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .title_bottom(dim(if archived {
+            " A back to active "
+        } else {
+            " A archived reviews "
+        }))
         .title_style(Style::default().fg(Color::Green));
     if ui.reviews.is_empty() {
         let hint = match (total, archived) {
@@ -2783,7 +2788,7 @@ mod tests {
         assert!(screen.contains("assistant › ops"), "{screen}");
         assert!(screen.contains("searches every level"), "{screen}");
         // Not in the other views.
-        ui.view = View::Archived;
+        ui.archived_tasks = true;
         assert!(!render(&mut ui, 80, 14)[4].contains("assistant"));
     }
 
@@ -2814,8 +2819,8 @@ mod tests {
         archived.task.id = "old".into();
         archived.task.state = TaskState::Archived;
         let mut ui = TasksUi::new(vec![review, archived]);
-        for view in [View::Active, View::Archived] {
-            ui.view = view;
+        for archived in [false, true] {
+            ui.archived_tasks = archived;
             ui.set_rows(ui.rows.clone());
             let screen = render(&mut ui, 120, 12).join("\n");
             assert!(
@@ -2823,9 +2828,43 @@ mod tests {
                 "{screen}"
             );
             assert!(screen.contains(" active 0 "), "{screen}");
-            assert!(screen.contains(" archived 0 "), "{screen}");
             assert!(screen.contains(" reviews 1 "), "{screen}");
         }
+    }
+
+    #[test]
+    fn the_task_list_ends_with_the_hint_for_a() {
+        let mut ui = TasksUi::new(vec![row("fix login", None), {
+            let mut old = row("old spike", None);
+            old.task.state = TaskState::Archived;
+            old
+        }]);
+        let screen = render(&mut ui, 100, 14).join("\n");
+        assert!(screen.contains(" A archived tasks "), "{screen}");
+        ui.archived_tasks = true;
+        ui.set_rows(ui.rows.clone());
+        let screen = render(&mut ui, 100, 14).join("\n");
+        assert!(screen.contains(" A back to active "), "{screen}");
+        assert!(!screen.contains("A archived tasks"), "{screen}");
+        assert!(screen.contains("1 archived task"), "{screen}");
+        assert!(screen.contains("▪ archived"), "{screen}");
+        // Also on an empty list, and not in the agents view.
+        ui.set_rows(Vec::new());
+        let screen = render(&mut ui, 100, 14).join("\n");
+        assert!(screen.contains(" A back to active "), "{screen}");
+        assert!(screen.contains("nothing archived"), "{screen}");
+        ui.view = View::Agents;
+        let screen = render(&mut ui, 100, 14).join("\n");
+        assert!(!screen.contains("A back to active"), "{screen}");
+        assert!(!screen.contains("A archived"), "{screen}");
+    }
+
+    #[test]
+    fn the_tab_bar_has_no_archived_tab() {
+        let mut ui = TasksUi::new(vec![row("fix login", None)]);
+        let screen = render(&mut ui, 100, 14);
+        assert!(screen[1].contains(" active 1 "), "{screen:?}");
+        assert!(!screen[1].contains("archived"), "{screen:?}");
     }
 
     fn reviews_ui() -> TasksUi {
@@ -2913,6 +2952,7 @@ mod tests {
         assert!(!all.contains("not a review"), "{all}");
         // Archived reviews are not among the active ones.
         assert!(!all.contains("#9"), "{all}");
+        assert!(all.contains(" A archived reviews "), "{all}");
         assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
         // The repository and the PR are columns of their own, aligned.
         for line in [running, legacy] {
@@ -2931,6 +2971,8 @@ mod tests {
         let screen = render(&mut ui, 140, 14);
         let all = screen.join("\n");
         assert!(all.contains("1 archived review"), "{all}");
+        assert!(all.contains(" A back to active "), "{all}");
+        assert!(!all.contains("A archived reviews"), "{all}");
         let archived = line_of(&screen, "#9");
         assert!(archived.contains("▪ archived"), "{archived}");
         assert!(archived.contains("merged") && archived.contains("approved"));
