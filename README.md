@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.12.4
+cargo install --git https://github.com/peterddod/jeet --tag v0.12.5
 ```
 
 ## Quick start
@@ -1662,6 +1662,39 @@ nothing to regenerate.
 
 - **The archived tab is gone**: press `A` in the tasks list instead of
   `⇥`-ing to it.
+
+v0.12.5: projects are jeet's own projects again, managers can start from
+one, and agents started by `jeet watch` are anchored
+([Projects](#projects), [The projects tab](#the-projects-tab)).
+
+- **The projects tab groups by jeet project** (the one a task was started
+  from with `--project`), not by repository. A manager is listed under its own
+  project and under each project an active task below it was started from.
+  Tasks with no project are left out. `A` shows the other projects: those
+  with only archived tasks, and those with no tasks at all.
+- **The project column shows the task's project**, or nothing when it has
+  none, instead of the repository.
+- **`jeet manager new --project <name>`** stores the project on the manager,
+  copies its skills, and copies its AGENTS.md in as `PROJECT.md`, linked from
+  the manager's own AGENTS.md. Tasks and managers made under it default to
+  its project. An explicit `--project` names another. The agents tab's `n`
+  form preselects the parent's project. Managers get no worktrees of the
+  project's repositories and none of its `[agent] args`.
+- **Agents that `jeet watch` starts are anchored.** From launchd or systemd,
+  with no UTF-8 locale, tmux garbled the ids jeet reads back. The window
+  started, but jeet never recorded it, so it showed as unanchored and its
+  jeet commands were refused. Every tmux call now passes `-u`.
+
+**Upgrading to v0.12.5:** no schema change (stays v7), no config change,
+nothing to regenerate.
+
+- **Upgrade the binary the watch job runs.** On macOS that is
+  `brew upgrade jeet`, which updates the `/opt/homebrew/bin/jeet` that
+  launchd runs.
+- **Then `jeet task restart <task>` each unanchored window**, the
+  assistant's included (`jeet task restart assistant`). This keeps the
+  conversation. Windows that were already unanchored stay that way until
+  restarted.
 
 ## What's new in v0.11
 
