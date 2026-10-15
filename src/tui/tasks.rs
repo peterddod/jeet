@@ -5771,6 +5771,22 @@ mod tests {
     }
 
     #[test]
+    fn enter_goes_into_a_plain_task_with_tasks_under_it() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "loose")
+            .unwrap()
+            .task
+            .parent_id = Some("docs".into());
+        ui.set_rows(rows);
+        ui.select("docs");
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(ui.breadcrumb(), ["assistant", "docs"]);
+        assert_eq!(shown(&ui), ["loose"]);
+    }
+
+    #[test]
     fn ctrl_a_opens_a_managers_own_agent() {
         let mut ui = nested();
         assert_eq!(
@@ -5874,10 +5890,18 @@ mod tests {
         press(&mut ui, KeyCode::Esc);
         assert_eq!(ui.path, ["ops", "deploy"]);
         assert_eq!(ui.selected_id(), Some("ship"));
-        // → on a manager among the matches goes into it, filter dropped.
+        // ⏎ on a manager among the matches opens its agent; → goes into
+        // it, filter dropped.
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "deploy");
         press(&mut ui, KeyCode::Enter);
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "deploy".into(),
+                session: None
+            })
+        );
         press(&mut ui, KeyCode::Right);
         assert!(ui.filter.is_empty());
         assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
