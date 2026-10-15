@@ -527,8 +527,8 @@ jeet          # or `jeet tasks`
 
 The active tasks are a tree, walked like the explorer's folders: the list
 opens on the managers and tasks directly under the assistant (and any with no
-parent), `⏎` or `→` on a manager goes into it, to the managers and tasks under
-it, and `←` or `⌫` backs up to the level above. The line over the list says
+parent), `→` on a manager goes into it, to the managers and tasks under it,
+`⏎` opens its agent, and `←` or `⌫` backs up to the level above. The line over the list says
 where you are (`assistant › backend › …`). Each task takes two lines: a
 `manager` or `task` tag, its name, what its agent is doing, the worktrees it
 holds (as of the last look at the disk, since the agent adds them as it goes),
@@ -538,7 +538,7 @@ manager shows the most urgent of its own state and everything below it, as in
 the [agents tab](#the-agents-tab), with how many below are so: running when
 any task under it runs, though its own chat is idle, and needs you over
 running over idle. `/` filters by name the way the explorer does, across every
-level: each match says where it is under its name, and `⏎` on a manager there
+level: each match says where it is under its name, and `→` on a manager there
 goes into it.
 
 Each level is most recently active first. Statuses refresh
@@ -553,10 +553,10 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `⏎` / `→` | on a manager, go into it: the managers and tasks under it |
+| `→` | on a manager, go into it: the managers and tasks under it |
 | `←` / `⌫` | back up a level; with a filter, drop it, the cursor on the match, on its level |
-| `ctrl-a` | attach to the agent of the manager or task under the cursor |
-| `⏎` | on a task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running |
+| `ctrl-a` | attach to the agent of the manager or task under the cursor, as `⏎` |
+| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. On a task with tasks under it, `⏎` goes into it, as `→` |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |

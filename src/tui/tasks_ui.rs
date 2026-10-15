@@ -31,15 +31,15 @@ use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
 pub const HELP: &[(&str, &str)] = &[
-    ("⏎ →", "go into a manager: the managers and tasks under it"),
+    ("→", "go into a manager: the managers and tasks under it"),
     (
         "⏎",
-        "on a task, open its agent in tmux (Ctrl-Q comes back here, leaving it running)",
+        "on a manager or task, open its agent in tmux (Ctrl-Q comes back here, leaving it running)",
     ),
     ("← ⌫", "back up a level, to the manager above"),
     (
         "ctrl-a",
-        "open the agent of the task or manager under the cursor",
+        "open the agent of the task or manager under the cursor, as ⏎",
     ),
     ("e", "explore the task: its canvas or one of its worktrees"),
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),

@@ -1444,7 +1444,7 @@ impl TasksUi {
         crumbs
     }
 
-    /// ⏎ or → on a manager in the active view: list what is under it. From
+    /// → on a manager in the active view: list what is under it. From
     /// a filter's matches, it goes there and drops the filter.
     fn descend(&mut self, id: &str) {
         self.path = self.ancestors(id);
@@ -1903,10 +1903,15 @@ impl TasksUi {
                 });
                 None
             }
-            // The active view is a tree, walked like the explorer's folders.
+            // The active view is a tree, walked like the explorer's folders:
+            // → goes into a manager, ⏎ opens its agent, as ctrl-a does.
             KeyCode::Enter | KeyCode::Right if self.view == View::Active => {
                 match self.selected_row() {
-                    Some(row) if self.enterable(row) => {
+                    Some(row)
+                        if self.enterable(row)
+                            && (key.code == KeyCode::Right
+                                || row.task.kind != TaskKind::Manager) =>
+                    {
                         let id = row.task.id.clone();
                         self.descend(&id);
                         None
@@ -1925,7 +1930,7 @@ impl TasksUi {
                 self.ascend();
                 None
             }
-            // A manager's own agent, which ⏎ goes past; the explorer's key.
+            // The agent under the cursor, as ⏎; the explorer's key.
             KeyCode::Char('a') if ctrl && self.view == View::Active => {
                 needs_task(self, &|task_id| Action::Open {
                     task_id,
@@ -5724,8 +5729,17 @@ mod tests {
         let mut ui = nested();
         assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
         assert_eq!(ui.breadcrumb(), ["assistant"]);
-        // ⏎ goes into a manager, → too; neither opens its agent.
-        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        // ⏎ on a manager opens its agent, as ctrl-a does, and stays put.
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "ops".into(),
+                session: None
+            })
+        );
+        assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
+        // → goes into it.
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
         assert_eq!(shown(&ui), ["deploy", "fix"]);
         assert_eq!(ui.breadcrumb(), ["assistant", "ops"]);
         assert_eq!(press(&mut ui, KeyCode::Right), None);
@@ -5754,6 +5768,22 @@ mod tests {
         assert_eq!(ui.selected_id(), Some("ops"));
         press(&mut ui, KeyCode::Left);
         assert_eq!(ui.status_line, "at the top");
+    }
+
+    #[test]
+    fn enter_goes_into_a_plain_task_with_tasks_under_it() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "loose")
+            .unwrap()
+            .task
+            .parent_id = Some("docs".into());
+        ui.set_rows(rows);
+        ui.select("docs");
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(ui.breadcrumb(), ["assistant", "docs"]);
+        assert_eq!(shown(&ui), ["loose"]);
     }
 
     #[test]
@@ -5798,7 +5828,7 @@ mod tests {
         ui.set_rows(rows);
         ui.selected = 0;
         assert_eq!(ui.selected_id(), Some("deploy"));
-        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Right);
         assert!(ui.visible.is_empty());
         assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
         assert!(ui.status_line.contains("← back up"), "{}", ui.status_line);
@@ -5860,11 +5890,19 @@ mod tests {
         press(&mut ui, KeyCode::Esc);
         assert_eq!(ui.path, ["ops", "deploy"]);
         assert_eq!(ui.selected_id(), Some("ship"));
-        // ⏎ on a manager among the matches goes into it, filter dropped.
+        // ⏎ on a manager among the matches opens its agent; → goes into
+        // it, filter dropped.
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "deploy");
         press(&mut ui, KeyCode::Enter);
-        press(&mut ui, KeyCode::Enter);
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "deploy".into(),
+                session: None
+            })
+        );
+        press(&mut ui, KeyCode::Right);
         assert!(ui.filter.is_empty());
         assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
         assert_eq!(shown(&ui), ["ship"]);
@@ -6129,7 +6167,7 @@ mod tests {
         over.task.kind = TaskKind::Work;
         assert!(!ui.enterable(&over));
         press(&mut ui, KeyCode::Down);
-        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Right);
         assert_eq!(ui.visible.len(), 0);
         press(&mut ui, KeyCode::Left);
         // Filtering searches every level, still without reviews.
