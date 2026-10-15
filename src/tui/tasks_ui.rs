@@ -31,9 +31,15 @@ use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
 pub const HELP: &[(&str, &str)] = &[
+    ("⏎ →", "go into a manager: the managers and tasks under it"),
     (
         "⏎",
-        "open the task's agent in tmux (Ctrl-Q comes back here, leaving it running)",
+        "on a task, open its agent in tmux (Ctrl-Q comes back here, leaving it running)",
+    ),
+    ("← ⌫", "back up a level, to the manager above"),
+    (
+        "ctrl-a",
+        "open the agent of the task or manager under the cursor",
     ),
     ("e", "explore the task: its canvas or one of its worktrees"),
     ("w", "worktrees: n adds one, D removes one, ⏎ explores it"),
@@ -82,7 +88,10 @@ pub const HELP: &[(&str, &str)] = &[
         "⇥ / ⇧⇥",
         "next / previous view: active, agents (the tree under the assistant), reviews, archived",
     ),
-    ("/", "filter by name; ⏎ keeps the filter, esc drops it"),
+    (
+        "/",
+        "filter by name, across every level, each match with its path; ⏎ keeps it, esc drops it",
+    ),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
     ("r", "refresh: re-read tasks and the worktrees on disk"),
     ("?", "this list"),
@@ -92,8 +101,16 @@ pub const HELP: &[(&str, &str)] = &[
     ("status", "● running  ◆ needs input  ○ idle  ✕ not running"),
     ("", "· no agent, or it ended  ▪ archived"),
     (
+        "",
+        "a manager shows the most urgent of its own and those below it (n)",
+    ),
+    (
         "columns",
-        "status · task · worktrees · size · last activity",
+        "manager/task · name · status · worktrees · size · last activity",
+    ),
+    (
+        "",
+        "under the name: the agent's latest prompt, else its last report",
     ),
 ];
 
@@ -265,6 +282,7 @@ const KEY_WIDTH: usize = 10;
 
 const HINTS: &[&str] = &[
     "⏎ open",
+    "←→ up/into",
     "e explore",
     "w worktrees",
     "n new",
@@ -321,7 +339,12 @@ fn hints(width: u16, view: View) -> String {
     };
     let width = width as usize;
     let tail = &hints[hints.len() - 2..];
-    let head = &hints[..hints.len() - 2];
+    // Only the active view is a tree.
+    let head: Vec<&str> = hints[..hints.len() - 2]
+        .iter()
+        .copied()
+        .filter(|&hint| view == View::Active || hint != "←→ up/into")
+        .collect();
     (0..=head.len())
         .rev()
         .map(|keep| {
@@ -342,11 +365,14 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
         View::Agents | View::Reviews => 0,
         View::Active | View::Archived => 1,
     };
+    // Where in the tree the active view is.
+    let crumbs = u16::from(ui.view == View::Active);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(pinned),
+            Constraint::Length(crumbs),
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -360,11 +386,22 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
             chunks[1],
         );
     }
-    ui.list_area = chunks[2];
+    if crumbs > 0 {
+        let width = chunks[2].width.saturating_sub(1) as usize;
+        let mut line = vec![Span::styled(
+            format!(" {}", fitted_breadcrumb(&ui.breadcrumb(), width)),
+            Style::default().fg(Color::Cyan),
+        )];
+        if !ui.filter.is_empty() {
+            line.push(dim("  · the filter searches every level"));
+        }
+        frame.render_widget(Paragraph::new(Line::from(line)), chunks[2]);
+    }
+    ui.list_area = chunks[3];
     match ui.view {
-        View::Agents => draw_tree(frame, chunks[2], ui),
-        View::Reviews => draw_reviews(frame, chunks[2], ui),
-        View::Active | View::Archived => draw_list(frame, chunks[2], ui),
+        View::Agents => draw_tree(frame, chunks[3], ui),
+        View::Reviews => draw_reviews(frame, chunks[3], ui),
+        View::Active | View::Archived => draw_list(frame, chunks[3], ui),
     }
 
     // What was last done says more than a standing hint.
@@ -377,14 +414,14 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
             status,
             Style::default().fg(Color::Yellow),
         ))),
-        chunks[3],
+        chunks[4],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(chunks[4].width, ui.view),
+            hints(chunks[5].width, ui.view),
             Style::default().fg(Color::DarkGray),
         ))),
-        chunks[4],
+        chunks[5],
     );
 
     // Scrolled no further than its end, which only the draw knows.
@@ -558,7 +595,10 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
         View::Archived => "archived",
     };
     let total = ui.count(ui.view);
+    let nested = ui.view == View::Active && !ui.path.is_empty();
     let mut title = match (ui.filter.is_empty(), ui.visible.len()) {
+        (true, 0) if nested => " nothing under it ".to_string(),
+        (true, n) if nested => format!(" {n} under it "),
         (true, 0) => format!(" no {which} tasks "),
         (true, n) => format!(" {n} {which} task{} ", if n == 1 { "" } else { "s" }),
         (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
@@ -574,6 +614,9 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
 
     if ui.visible.is_empty() {
         let hint = match (ui.view, total) {
+            _ if nested && ui.filter.is_empty() => {
+                vec!["no active tasks under this manager. ← or ⌫ backs up.".into()]
+            }
             (View::Active, 0) => vec![
                 "no tasks yet.".to_string(),
                 String::new(),
@@ -600,23 +643,25 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
 
     let inner = area.width.saturating_sub(2) as usize;
     let columns = Columns::for_width(inner);
-    // Every task but the assistant is a row: a parent not among them is it.
-    let slugs: std::collections::HashMap<&str, &str> = ui
-        .rows
-        .iter()
-        .map(|r| (r.task.id.as_str(), r.task.slug.as_str()))
-        .collect();
+    // A filter searches every level: each match says where it is.
+    let searching = ui.view == View::Active && !ui.filter.is_empty();
     let items: Vec<ListItem> = ui
         .visible
         .iter()
         .map(|&i| {
             let row = &ui.rows[i];
-            let parent = row
-                .task
-                .parent_id
-                .as_deref()
-                .map(|id| slugs.get(id).copied().unwrap_or("assistant"));
-            ListItem::new(row_line(row, parent, &columns))
+            let path = searching.then(|| {
+                let mut crumbs = vec!["assistant".to_string()];
+                crumbs.extend(
+                    ui.ancestors(&row.task.id)
+                        .iter()
+                        .filter_map(|id| ui.row(id))
+                        .map(|r| r.task.slug.clone()),
+                );
+                crumbs.join(" › ")
+            });
+            let rolled = ui.rolled.get(&row.task.id).copied();
+            ListItem::new(row_lines(row, path.as_deref(), rolled, &columns))
         })
         .collect();
     let list = List::new(items).block(block).highlight_style(
@@ -841,11 +886,13 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
     Line::from(spans)
 }
 
-/// How wide each column is at a given width; zero drops it.
+/// How wide each column of an active or archived task's first line is at
+/// a given width; zero drops it. The tag column is always there, and the
+/// second line, under the name, runs to the edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Columns {
-    pub status: usize,
     pub name: usize,
+    pub status: usize,
     pub worktrees: usize,
     pub size: usize,
     pub age: usize,
@@ -853,29 +900,48 @@ pub struct Columns {
 
 impl Columns {
     pub fn for_width(width: usize) -> Columns {
-        // The glyph and the gaps between columns.
-        const GLYPH: usize = 2;
         let (status, worktrees, size, age) = match width {
-            w if w >= 110 => (30, 26, 7, 9),
-            w if w >= 90 => (26, 22, 7, 9),
-            w if w >= 72 => (22, 18, 7, 9),
-            w if w >= 56 => (20, 0, 7, 9),
+            w if w >= 110 => (24, 26, 7, 9),
+            w if w >= 90 => (22, 22, 7, 9),
+            w if w >= 72 => (18, 18, 7, 9),
+            w if w >= 56 => (18, 0, 7, 9),
             w if w >= 40 => (14, 0, 0, 9),
             _ => (10, 0, 0, 0),
         };
-        let gaps = [status, worktrees, size, age]
+        // A space before each column after the tag's.
+        let gaps = 1 + [status, worktrees, size, age]
             .iter()
             .filter(|&&w| w > 0)
             .count();
-        let fixed = GLYPH + status + worktrees + size + age + gaps;
+        let fixed = TAG + status + worktrees + size + age + gaps;
         Columns {
-            status,
             name: width.saturating_sub(fixed).max(6),
+            status,
             worktrees,
             size,
             age,
         }
     }
+}
+
+/// The tag column: wide enough for `manager` with a space either side.
+pub const TAG: usize = 9;
+
+/// A task's tag, centred in the tag column, and its colour: 256-colour
+/// orange for a manager and periwinkle for a task, hues nothing else in a
+/// row uses (the 16 named colours are all taken by names, statuses and
+/// columns). Foreground only: the cursor's highlight replaces backgrounds.
+pub fn tag(kind: TaskKind) -> (String, Color) {
+    let (word, color) = match kind {
+        TaskKind::Manager => ("manager", Color::Indexed(208)),
+        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => ("task", Color::Indexed(147)),
+    };
+    let left = (TAG - word.width()) / 2;
+    let right = TAG - word.width() - left;
+    (
+        format!("{}{word}{}", " ".repeat(left), " ".repeat(right)),
+        color,
+    )
 }
 
 /// `text` cut or padded to exactly `width` columns.
@@ -906,7 +972,8 @@ pub fn activity_glyph(activity: Option<&Activity>) -> (&'static str, Color) {
     }
 }
 
-/// What the status column says for a task.
+/// What the status column says for a task: what its agent is doing, its
+/// detail left to the line under the name.
 pub fn status_text(row: &TaskRow) -> String {
     if row.task.state == TaskState::Archived {
         return "archived".to_string();
@@ -914,13 +981,61 @@ pub fn status_text(row: &TaskRow) -> String {
     let label = match &row.activity {
         // Not polled yet: the glyph says so, and a blank beats a guess.
         None => String::new(),
-        Some(activity) => activity.label(),
+        Some(activity) => activity.label_with(false),
     };
     match row.unanchored {
         // First, so a narrow column cuts the activity, not this.
         true => format!("unanchored · {label}"),
         false => label,
     }
+}
+
+/// The glyph, words and colour of a task's status column. A manager with
+/// something below it more urgent than its own state shows that, with how
+/// many are so: running when any task under it runs, though its own chat
+/// is idle (`rolled`, from [`super::managers::active_rollup`]).
+fn row_status(row: &TaskRow, rolled: Option<(Urgency, u32)>) -> (String, Color) {
+    if let Some((urgency, n @ 1..)) = rolled.filter(|_| row.task.state == TaskState::Active) {
+        let (glyph, color) = urgency_glyph(urgency);
+        let words = format!("{} ({n})", urgency_label(urgency));
+        return match row.unanchored {
+            true => (format!("{glyph} unanchored · {words}"), color),
+            false => (format!("{glyph} {words}"), color),
+        };
+    }
+    let (glyph, color) = glyph(row);
+    let text = status_text(row);
+    match text.is_empty() {
+        true => (glyph.to_string(), color),
+        false => (format!("{glyph} {text}"), color),
+    }
+}
+
+/// What the line under a task's name says: the running or waiting agent's
+/// latest prompt, else its last report.
+fn snippet(row: &TaskRow) -> String {
+    let live = match &row.activity {
+        Some(Activity::Running { detail } | Activity::Waiting { detail })
+            if row.task.state == TaskState::Active =>
+        {
+            detail.as_deref()
+        }
+        _ => None,
+    };
+    if let Some(detail) = live {
+        return printable(detail);
+    }
+    row.report
+        .as_ref()
+        .map(|report| {
+            let body = messages::clean(&report.body).replace('\t', " ");
+            format!(
+                "{}: {}",
+                report.kind.as_str(),
+                first_line(&body, 120).unwrap_or_default()
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// What to do about the selected task's agent, when jeet refuses its
@@ -935,74 +1050,53 @@ pub fn unanchored_hint(row: Option<&TaskRow>) -> Option<String> {
     ))
 }
 
-/// The columns of a name a parent marker leaves it, if the name has them.
-const MIN_NAME: usize = 4;
-
-/// `parent` is the slug of the task's parent, `assistant` for the
-/// assistant: a slug, which jeet made, never a name a manager wrote.
-fn row_line(row: &TaskRow, parent: Option<&str>, columns: &Columns) -> Line<'static> {
-    let (glyph, color) = glyph(row);
-    let mut spans = vec![
-        Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(
-            format!("{} ", cell(&status_text(row), columns.status)),
-            Style::default().fg(color),
-        ),
-    ];
+/// An active or archived task's two lines. The first: its tag, its name,
+/// then its status, worktrees, size and last activity. The second, under
+/// the name: `path`, the breadcrumb of a filter's match, then its
+/// [`snippet`]. A terminal row is a whole cell high, so what flanks the
+/// name sits on its line rather than between the two.
+fn row_lines(
+    row: &TaskRow,
+    path: Option<&str>,
+    rolled: Option<(Urgency, u32)>,
+    columns: &Columns,
+) -> Vec<Line<'static>> {
+    let (tag, tag_color) = tag(row.task.kind);
+    let (status, color) = row_status(row, rolled);
     let name = match row.task.kind {
         // Which PR it reviews, when its checkout says.
         TaskKind::Review => tasks::review_label(&row.task, &row.worktrees)
             .unwrap_or_else(|| format!("{} (review)", row.task.name)),
-        TaskKind::Manager => format!("{} (manager)", row.task.name),
-        TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
+        TaskKind::Manager | TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
     };
-    // The name gives way before the marker does: a cut-off marker would pass
-    // for a top-level task. A slug too long to leave the name a few columns
-    // is shortened inside the marker, so `↳` is always there.
-    let marker = parent.map(|p| {
-        let room = columns.name.saturating_sub(MIN_NAME.min(name.width()));
-        format!(" ↳ {}", truncate(p, room.saturating_sub(" ↳ ".width())))
-    });
-    let name = match marker {
-        Some(marker) if columns.name > marker.width() => {
-            format!("{}{marker}", truncate(&name, columns.name - marker.width()))
-        }
-        Some(marker) => truncate(&format!("{name}{marker}"), columns.name),
-        None => truncate(&name, columns.name),
-    };
-    // The last report, dim, in what the name leaves of its column: the
-    // columns after it fill the row.
-    let report = row.report.as_ref().map(|report| {
-        let body = messages::clean(&report.body).replace('\t', " ");
-        format!(
-            " · {}: {}",
-            report.kind.as_str(),
-            first_line(&body, 120).unwrap_or_default()
-        )
-    });
-    let rest = columns.name.saturating_sub(name.width());
-    spans.push(Span::styled(
-        name,
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(dim(cell(report.as_deref().unwrap_or_default(), rest)));
+    let mut first = vec![
+        Span::styled(tag, Style::default().fg(tag_color)),
+        Span::styled(
+            format!(" {}", cell(&printable(&name), columns.name)),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", cell(&status, columns.status)),
+            Style::default().fg(color),
+        ),
+    ];
     if columns.worktrees > 0 {
-        spans.push(Span::styled(
+        first.push(Span::styled(
             format!(" {}", cell(&row.summary(), columns.worktrees)),
             Style::default().fg(Color::Magenta),
         ));
     }
     if columns.size > 0 {
         let size = row.size.map(human_size).unwrap_or_else(|| "…".into());
-        spans.push(Span::styled(
+        first.push(Span::styled(
             format!(" {size:>width$}", width = columns.size),
             Style::default().fg(Color::Blue),
         ));
     }
     if columns.age > 0 {
-        spans.push(Span::styled(
+        first.push(Span::styled(
             format!(
                 " {:>width$}",
                 age_label(row.last_activity),
@@ -1011,7 +1105,39 @@ fn row_line(row: &TaskRow, parent: Option<&str>, columns: &Columns) -> Line<'sta
             Style::default().fg(Color::DarkGray),
         ));
     }
-    Line::from(spans)
+    // Lined up under the name, and as wide as the first line.
+    let width: usize = first.iter().map(|span| span.content.width()).sum();
+    let room = width.saturating_sub(TAG + 1);
+    let snippet = snippet(row);
+    let second = match path {
+        Some(path) if snippet.is_empty() => path.to_string(),
+        Some(path) => format!("{path} · {snippet}"),
+        None => snippet,
+    };
+    vec![
+        Line::from(first),
+        Line::from(vec![
+            Span::raw(" ".repeat(TAG + 1)),
+            dim(cell(&second, room)),
+        ]),
+    ]
+}
+
+/// `crumbs` joined by ` › `, fitted to `width`: the middle gives way to
+/// `…` first, then the end is cut.
+pub fn fitted_breadcrumb(crumbs: &[String], width: usize) -> String {
+    let joined = |crumbs: &[&str]| crumbs.join(" › ");
+    let all: Vec<&str> = crumbs.iter().map(String::as_str).collect();
+    let mut line = joined(&all);
+    // Keep the root and as many of the deepest as fit.
+    let mut keep = all.len().saturating_sub(1);
+    while line.width() > width && keep > 1 {
+        keep -= 1;
+        let mut shown = vec![all[0], "…"];
+        shown.extend(&all[all.len() - keep..]);
+        line = joined(&shown);
+    }
+    truncate(&line, width)
 }
 
 /// The agents view's header cells (Q8): how many agents are live against
@@ -2494,21 +2620,145 @@ mod tests {
             .collect()
     }
 
+    /// The column `what` starts at on `line`, in cells.
+    fn column(line: &str, what: &str) -> usize {
+        line[..line
+            .find(what)
+            .unwrap_or_else(|| panic!("{what} in {line}"))]
+            .width()
+    }
+
     #[test]
-    fn a_row_shows_status_name_worktrees_size_and_age() {
+    fn a_row_is_two_lines_the_snippet_under_the_name() {
         let mut ui = TasksUi::new(vec![row(
             "fix-login",
             Some(Activity::Running {
-                detail: Some("Edit".into()),
+                detail: Some("Edit the token refresh".into()),
             }),
         )]);
-        let screen = render(&mut ui, 120, 12).join("\n");
-        assert!(screen.contains("● running – Edit"), "{screen}");
-        assert!(screen.contains("fix-login"), "{screen}");
-        assert!(screen.contains("1 wt: api"), "{screen}");
-        assert!(screen.contains("3.0M"), "{screen}");
-        assert!(screen.contains("2m ago"), "{screen}");
-        assert!(screen.contains("active 1"), "{screen}");
+        let screen = render(&mut ui, 120, 14);
+        let at = screen.iter().position(|l| l.contains("fix-login")).unwrap();
+        let (first, second) = (&screen[at], &screen[at + 1]);
+        // The first line: tag, name, then status, worktrees, size and age.
+        for (before, after) in [
+            ("task", "fix-login"),
+            ("fix-login", "● running"),
+            ("● running", "1 wt: api"),
+            ("1 wt: api", "3.0M"),
+            ("3.0M", "2m ago"),
+        ] {
+            assert!(column(first, before) < column(first, after), "{first}");
+        }
+        // The detail is not in the status column but under the name.
+        assert!(!first.contains("Edit"), "{first}");
+        assert_eq!(
+            column(second, "Edit the token refresh"),
+            column(first, "fix-login"),
+            "{second}"
+        );
+        assert!(screen.join("\n").contains("active 1"));
+    }
+
+    #[test]
+    fn the_line_under_the_name_falls_back_to_the_last_report() {
+        let mut r = row("fix-login", Some(Activity::Idle { since: 0 }));
+        r.report = Some(TaskReportRecord {
+            id: 1,
+            task_id: "fix-login".into(),
+            to_id: "assistant-id".into(),
+            kind: ReportKind::Progress,
+            body: "tests pass\nmore".into(),
+            at: 0,
+            needs_user: false,
+            answer: None,
+            answered_by: None,
+        });
+        assert_eq!(snippet(&r), "progress: tests pass");
+        r.activity = Some(Activity::Waiting {
+            detail: Some("Allow Bash?".into()),
+        });
+        assert_eq!(snippet(&r), "Allow Bash?");
+    }
+
+    #[test]
+    fn tags_are_centred_in_their_column_and_the_names_line_up() {
+        assert_eq!(tag(TaskKind::Manager).0, " manager ");
+        assert_eq!(tag(TaskKind::Work).0, "  task   ");
+        assert_eq!(tag(TaskKind::Review).0.width(), TAG);
+        // Colours nothing else in a row uses, and the two differ.
+        let (manager, task) = (tag(TaskKind::Manager).1, tag(TaskKind::Work).1);
+        assert_ne!(manager, task);
+        for color in [manager, task] {
+            assert!(matches!(color, Color::Indexed(_)), "{color:?}");
+        }
+        let mut api = row("api", Some(Activity::Idle { since: 0 }));
+        api.task.kind = TaskKind::Manager;
+        api.task.parent_id = Some("assistant-id".into());
+        let mut ui = TasksUi::new(vec![api, row("fix-login", None)]);
+        let screen = render(&mut ui, 120, 14);
+        let line = |what: &str| screen.iter().find(|l| l.contains(what)).unwrap().clone();
+        let (api, fix) = (line(" api "), line("fix-login"));
+        assert_eq!(column(&api, "api"), column(&fix, "fix-login"));
+        assert_eq!(column(&api, "manager"), column(&fix, "task") - 1);
+        // No `(manager)` suffix, and no parent column.
+        let all = screen.join("\n");
+        assert!(!all.contains("(manager)"), "{all}");
+        assert!(!all.contains('↳'), "{all}");
+    }
+
+    #[test]
+    fn a_manager_shows_whats_running_below_it() {
+        let mut ops = row("ops", Some(Activity::Idle { since: 0 }));
+        ops.task.kind = TaskKind::Manager;
+        let mut ship = row("ship", Some(Activity::Running { detail: None }));
+        ship.task.parent_id = Some("ops".into());
+        let mut ui = TasksUi::new(vec![ops, ship]);
+        let screen = render(&mut ui, 120, 14).join("\n");
+        assert!(screen.contains("● running (1)"), "{screen}");
+        // Its child is a level down, not on the top level.
+        assert!(!screen.contains("ship"), "{screen}");
+    }
+
+    #[test]
+    fn the_breadcrumb_says_where_the_list_is() {
+        let mut ops = row("ops", Some(Activity::Idle { since: 0 }));
+        ops.task.kind = TaskKind::Manager;
+        let mut ship = row("ship", None);
+        ship.task.parent_id = Some("ops".into());
+        let mut ui = TasksUi::new(vec![ops, ship]);
+        let screen = render(&mut ui, 80, 14);
+        assert_eq!(screen[4].trim(), "assistant");
+        ui.select("ship");
+        let screen = render(&mut ui, 80, 14);
+        assert_eq!(screen[4].trim(), "assistant › ops");
+        assert!(screen[5].contains("1 under it"), "{}", screen[5]);
+        // A filter's matches each say where they are.
+        ui.filter = "ship".into();
+        ui.select("ship");
+        let screen = render(&mut ui, 80, 14).join("\n");
+        assert!(screen.contains("assistant › ops"), "{screen}");
+        assert!(screen.contains("searches every level"), "{screen}");
+        // Not in the other views.
+        ui.view = View::Archived;
+        assert!(!render(&mut ui, 80, 14)[4].contains("assistant"));
+    }
+
+    #[test]
+    fn a_long_breadcrumb_gives_way_in_the_middle() {
+        let crumbs: Vec<String> = ["assistant", "territile-ui", "deploy", "ship-it"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            fitted_breadcrumb(&crumbs, 80),
+            "assistant › territile-ui › deploy › ship-it"
+        );
+        assert_eq!(
+            fitted_breadcrumb(&crumbs, 32),
+            "assistant › … › deploy › ship-it"
+        );
+        assert_eq!(fitted_breadcrumb(&crumbs, 31), "assistant › … › ship-it");
+        assert!(fitted_breadcrumb(&crumbs, 10).width() <= 10);
     }
 
     #[test]
@@ -2642,12 +2892,26 @@ mod tests {
                 for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
                     let screen = render(&mut ui, w, h);
                     if (w, ui.panel.is_none()) == (160, true) {
-                        let all = screen.join("\n");
-                        assert!(all.contains("c ↳ assistant · blocked: [2J"), "{all}");
+                        let at = screen
+                            .iter()
+                            .position(|l| l.contains("task    c "))
+                            .unwrap();
+                        assert!(
+                            screen[at + 1].contains("blocked: [2J"),
+                            "{}",
+                            screen[at + 1]
+                        );
                     }
                     assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
                 }
             }
+        }
+        // Inside a manager, and searching every level.
+        ui.filter = "c".into();
+        ui.select("c");
+        for (w, h) in [(160, 40), (80, 24), (50, 12), (20, 6), (1, 1)] {
+            let screen = render(&mut ui, w, h);
+            assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
         }
         // The agents view, with and without a tree.
         for mut ui in [agents_ui(), TasksUi::new(Vec::new())] {
@@ -2818,51 +3082,6 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn a_long_name_gives_way_before_the_parent_marker() {
-        let mut child = row(
-            "fix-the-login-redirect-loop-on-safari",
-            Some(Activity::Idle { since: 0 }),
-        );
-        child.task.parent_id = Some("assistant-id".into());
-        let mut ui = TasksUi::new(vec![child]);
-        let screen = render(&mut ui, 80, 12).join("\n");
-        assert!(screen.contains("fix… ↳ assistant"), "{screen}");
-    }
-
-    /// A task under a manager names that manager, not the assistant.
-    #[test]
-    fn a_task_under_a_manager_names_its_manager() {
-        let mut api = row("api", Some(Activity::Idle { since: 0 }));
-        api.task.kind = TaskKind::Manager;
-        api.task.parent_id = Some("assistant-id".into());
-        let mut child = row("fix-x", Some(Activity::Idle { since: 0 }));
-        child.task.parent_id = Some("api".into());
-        let mut ui = TasksUi::new(vec![api, child]);
-        let screen = render(&mut ui, 120, 12).join("\n");
-        assert!(screen.contains("api (manager) ↳ assistant"), "{screen}");
-        assert!(screen.contains("fix-x ↳ api"), "{screen}");
-        assert!(!screen.contains("fix-x ↳ assistant"), "{screen}");
-    }
-
-    /// A manager's slug may be long; its children still show `↳`.
-    #[test]
-    fn a_long_manager_slug_is_shortened_inside_the_marker() {
-        let mut api = row("api-migration", Some(Activity::Idle { since: 0 }));
-        api.task.kind = TaskKind::Manager;
-        api.task.parent_id = Some("assistant-id".into());
-        let mut child = row("fix-the-login-bug", Some(Activity::Idle { since: 0 }));
-        child.task.parent_id = Some("api-migration".into());
-        let mut ui = TasksUi::new(vec![api, child]);
-        let screen = render(&mut ui, 80, 12).join("\n");
-        assert!(screen.contains("fix… ↳ api-migr…"), "{screen}");
-        let screen = render(&mut ui, 160, 12).join("\n");
-        assert!(
-            screen.contains("fix-the-login-bug ↳ api-migration"),
-            "{screen}"
-        );
-    }
-
     fn session(id: &str, primary: bool, running: bool) -> crate::assistant::Session {
         crate::assistant::Session {
             id: id.into(),
@@ -2916,8 +3135,9 @@ mod tests {
         assert!(line.contains("2 sessions  ● *plan name"), "{line}");
         assert!(!line.contains("triage"), "only running sessions: {line}");
         assert!(line.contains("inbox 2 · todo 2 open"), "{line}");
-        // The tasks are below it, as before.
-        assert!(screen[5].contains("fix-login"), "{}", screen[5]);
+        // The breadcrumb, then the tasks.
+        assert_eq!(screen[4].trim(), "assistant");
+        assert!(screen[6].contains("fix-login"), "{}", screen[6]);
     }
 
     #[test]
@@ -2975,7 +3195,7 @@ mod tests {
         for width in [20, 40, 56, 72, 90, 110, 200] {
             let c = Columns::for_width(width);
             assert!(c.name >= 6, "{width}: {c:?}");
-            let used = 2 + c.status + c.worktrees + c.size + c.age + c.name;
+            let used = TAG + c.status + c.worktrees + c.size + c.age + c.name;
             assert!(used <= width + 6, "{width}: {c:?}");
         }
         assert_eq!(Columns::for_width(60).worktrees, 0);

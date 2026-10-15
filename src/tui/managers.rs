@@ -196,18 +196,46 @@ pub fn retree(
     let mut nodes = vec![(root.task.id.clone(), None, root_own)];
     for (i, _) in order(root, rows) {
         let task = &rows[i].task;
-        let node = info.and_then(|info| info.nodes.get(&task.id));
-        let own = own_urgency(
-            rows[i].activity.as_ref(),
-            node.and_then(|n| n.ask).map(|(_, kind, user)| (kind, user)),
-            node.is_some_and(|n| n.done),
-            node.and_then(|n| n.budget.as_ref())
-                .and_then(|(row, used)| budget::percent(row, *used)),
-            task.run_state_by == Some(Setter::Budget),
-        );
-        nodes.push((task.id.clone(), task.parent_id.clone(), own));
+        nodes.push((
+            task.id.clone(),
+            task.parent_id.clone(),
+            row_urgency(&rows[i], info),
+        ));
     }
     rollup(&nodes)
+}
+
+/// [`rollup`] over the active tasks among `rows`, whoever their parent:
+/// what the active view's managers show. A parent not among them, the
+/// assistant's or none, is a root.
+pub fn active_rollup(rows: &[TaskRow], info: Option<&TreeInfo>) -> HashMap<String, (Urgency, u32)> {
+    let nodes: Vec<_> = rows
+        .iter()
+        .filter(|row| row.task.state == TaskState::Active)
+        .map(|row| {
+            (
+                row.task.id.clone(),
+                row.task.parent_id.clone(),
+                row_urgency(row, info),
+            )
+        })
+        .collect();
+    rollup(&nodes)
+}
+
+/// A task's own urgency from its activity and its [`NodeInfo`], if the
+/// tree thread has read one.
+fn row_urgency(row: &TaskRow, info: Option<&TreeInfo>) -> Urgency {
+    let task = &row.task;
+    let node = info.and_then(|info| info.nodes.get(&task.id));
+    own_urgency(
+        row.activity.as_ref(),
+        node.and_then(|n| n.ask).map(|(_, kind, user)| (kind, user)),
+        node.is_some_and(|n| n.done),
+        node.and_then(|n| n.budget.as_ref())
+            .and_then(|(row, used)| budget::percent(row, *used)),
+        task.run_state_by == Some(Setter::Budget),
+    )
 }
 
 /// Read the tree from the index: the tree thread's, never the draw's. tmux

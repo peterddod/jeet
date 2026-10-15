@@ -509,29 +509,41 @@ jeet          # or `jeet tasks`
 
 ```text
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
-│ active 3   agents 1   reviews 2   archived 1    / filter  ⇥ switch        │
+│ active 5   agents 6   reviews 2   archived 1    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
+ assistant
 ┌ 3 active tasks ───────────────────────────────────────────────────────────┐
-│● running – Edit        Fix login          2 wt: api, web    1.2G  just now│
-│◆ needs input – Bash    api-v2             1 wt: api         640M    5m ago│
-│○ idle 1h               notes              empty              12K    1h ago│
+│  task    Fix login        ● running        2 wt: api, web   1.2G just now │
+│          Edit the token refresh                                           │
+│ manager  backend          ◆ needs you (1)  empty             12K   5m ago │
+│          progress: api-docs is up                                         │
+│  task    notes            ○ idle 1h        empty             12K   1h ago │
+│                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-A task under the assistant shows ` ↳ assistant` after its name (a task under
-a manager, ` ↳ ` and that manager's slug), and its last
-report, dimmed, in what the name leaves of its column, before the worktrees
-(` · done: PR #12 is up`); a name that fills the column cuts the report short
-or hides it.
+The active tasks are a tree, walked like the explorer's folders: the list
+opens on the managers and tasks directly under the assistant (and any with no
+parent), `⏎` or `→` on a manager goes into it, to the managers and tasks under
+it, and `←` or `⌫` backs up to the level above. The line over the list says
+where you are (`assistant › backend › …`). Each task takes two lines: a
+`manager` or `task` tag, its name, what its agent is doing, the worktrees it
+holds (as of the last look at the disk, since the agent adds them as it goes),
+its size and when anything last happened in it; and under the name, dimmed,
+the running agent's latest prompt, else its last report (`progress: …`). A
+manager shows the most urgent of its own state and everything below it, as in
+the [agents tab](#the-agents-tab), with how many below are so: running when
+any task under it runs, though its own chat is idle, and needs you over
+running over idle. `/` filters by name the way the explorer does, across every
+level: each match says where it is under its name, and `⏎` on a manager there
+goes into it.
 
-Every task, most recently active first: what its agent is doing, its name, the
-worktrees it holds (as of the last look at the disk, since the agent adds them
-as it goes), its size and when anything last happened in it. Statuses refresh
+Each level is most recently active first. Statuses refresh
 every two seconds and sizes are measured in the background, so the list never
 waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
-[reviews tab](#the-reviews-tab), then the archived tasks, and back to these
-(`⇧⇥` the other way); `/` filters by name the way the explorer does.
+[reviews tab](#the-reviews-tab), then the archived tasks (a flat list), and
+back to these (`⇧⇥` the other way).
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
 has, what each running one is doing (`*` marks the primary one), how many
@@ -540,7 +552,10 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `⏎` | attach to the task's agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running |
+| `⏎` / `→` | on a manager, go into it: the managers and tasks under it |
+| `←` / `⌫` | back up a level; with a filter, back to the level it was on |
+| `ctrl-a` | attach to the agent of the manager or task under the cursor |
+| `⏎` | on a task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
