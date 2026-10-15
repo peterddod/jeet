@@ -1226,11 +1226,12 @@ impl TasksUi {
 
     fn resort(&mut self, keep: Option<&str>) {
         sort_rows(&mut self.rows);
-        self.repos = Groups::new(&self.rows);
         if self.by_priority {
             let items = self.assistant.as_ref().map_or(&[][..], |a| &a.todo[..]);
             sort_by_todo(&mut self.rows, items);
         }
+        // After the last sort: its members are indices into the rows.
+        self.repos = Groups::new(&self.rows);
         self.refresh_visible(keep);
     }
 
@@ -6517,6 +6518,28 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(projects(&ui)[ui.selected].0, "web");
+    }
+
+    #[test]
+    fn a_project_lists_the_right_rows_when_sorted_by_todo_priority() {
+        let mut ui = by_repo();
+        ui.assistant = Some(AssistantInfo {
+            todo: vec![ItemView {
+                id: 1,
+                done: false,
+                text: "docs".into(),
+                title: "docs".into(),
+                priority: Some(1),
+                tasks: vec!["docs".into()],
+            }],
+            ..AssistantInfo::default()
+        });
+        ui.by_priority = true;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.breadcrumb(), ["projects", "web"]);
+        assert_eq!(shown(&ui), ["docs", "ops"]);
     }
 
     #[test]
