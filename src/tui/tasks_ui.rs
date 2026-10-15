@@ -526,7 +526,8 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
 }
 
 /// The assistant, pinned above the list: how many sessions it has, and the
-/// one `c` opens — the most recently active.
+/// one `c` opens — the most recently active. In red, only while there are
+/// any, how many of its windows jeet did not start.
 pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " ✦ assistant  ",
@@ -538,21 +539,28 @@ pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
         spans.push(dim("…"));
         return Line::from(spans);
     };
-    let Some(active) = info.sessions.first() else {
-        spans.push(dim("no sessions yet — c starts one"));
-        return Line::from(spans);
-    };
-    let n = info.sessions.len();
-    spans.push(Span::styled(
-        format!("{n} session{}", if n == 1 { "" } else { "s" }),
-        Style::default().fg(Color::Blue),
-    ));
-    let (glyph, color) = activity_glyph(Some(&active.activity));
-    spans.push(dim(" · active "));
-    spans.push(Span::styled(
-        format!("{glyph} {}", truncate(&printable(&active.name), 32)),
-        Style::default().fg(color),
-    ));
+    match info.sessions.first() {
+        None => spans.push(dim("no sessions yet — c starts one")),
+        Some(active) => {
+            let n = info.sessions.len();
+            spans.push(Span::styled(
+                format!("{n} session{}", if n == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Blue),
+            ));
+            let (glyph, color) = activity_glyph(Some(&active.activity));
+            spans.push(dim(" · active "));
+            spans.push(Span::styled(
+                format!("{glyph} {}", truncate(&printable(&active.name), 32)),
+                Style::default().fg(color),
+            ));
+        }
+    }
+    if info.unanchored > 0 {
+        spans.push(Span::styled(
+            format!(" · {} unanchored", info.unanchored),
+            Style::default().fg(Color::Red),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -2592,13 +2600,25 @@ mod tests {
                 .collect::<String>()
         };
         let mut i = info();
-        i.unanchored = 2;
         // Most recently active first, which is the one `c` opens, whether or
         // not it is running.
         i.sessions.reverse();
         assert_eq!(text(&i), " ✦ assistant  2 sessions · active ✕ triage name");
         i.sessions.truncate(1);
         assert_eq!(text(&i), " ✦ assistant  1 session · active ✕ triage name");
+        // Windows jeet did not start, only while there are any, in red.
+        i.unanchored = 2;
+        let line = assistant_line(Some(&i));
+        assert_eq!(
+            text(&i),
+            " ✦ assistant  1 session · active ✕ triage name · 2 unanchored"
+        );
+        assert_eq!(line.spans.last().unwrap().style.fg, Some(Color::Red));
+        i.sessions.clear();
+        assert_eq!(
+            text(&i),
+            " ✦ assistant  no sessions yet — c starts one · 2 unanchored"
+        );
     }
 
     fn render(ui: &mut TasksUi, width: u16, height: u16) -> Vec<String> {
