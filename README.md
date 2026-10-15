@@ -285,9 +285,11 @@ From anywhere inside a repository, `jeet review` finds or makes the PR's
 the task already has it, brings that checkout up to date if it is clean, and
 brings an archived task back), has the task's agent review it, opens it in
 the review viewer, and `cd`s you into the worktree when you leave. The review
-task is a task like any other: it shows in the tasks list as `review
-<repo>#<number>` (in `jeet task ls` too), and there `v` opens the viewer
-again. Archiving or deleting it frees the disk and ends its agent. A PR from a fork is checked out as `pr/<number>`,
+task is marked as a review from the start, and is shown in the tasks list's
+[reviews tab](#the-reviews-tab) alone — never among the active or archived
+tasks, in the agents tab, or in `jeet task ls` — and there `v` opens the
+viewer again. Archiving or deleting it frees the disk and ends its agent, and
+once the PR is merged or closed jeet archives it itself. A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -644,24 +646,27 @@ active tab's: `⇥` back to it.
 
 ### The reviews tab
 
-The third tab lists every review jeet knows of: each review task (what `jeet
-review` makes), active ones first and then archived ones (`▪ archived`), and
-last any review job an older `jeet review` recorded with no task to hold it.
+The third tab lists the reviews: each active review task (what `jeet review`
+makes), then any review job an older `jeet review` recorded with no task to
+hold it. Reviews are shown here alone, never in the other tabs. `A` switches
+the tab to the archived reviews (`▪ archived`), and back: they stay in the
+reviews tab rather than joining the archived tasks, so a review is always
+found in the one place.
 
 ```text
-┌ jeet · reviews ─────────────────────────────────────────────────────────────┐
-│ active 6   agents 7   reviews 3   archived 2    / filter  ⇥ switch          │
-└─────────────────────────────────────────────────────────────────────────────┘
-┌ 3 reviews ──────────────────────────────────────────────────────────────────┐
-│● running – Read  api#131  open    changes requested  Refresh tokens just now│
-│○ idle 2h         web#88   draft   review required    New login page   2h ago│
-│▪ archived        api#120  merged  approved           Drop v1 routes   3d ago│
-└─────────────────────────────────────────────────────────────────────────────┘
+┌ jeet · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
+│ active 6   agents 7   reviews 2   archived 2    / filter  ⇥ switch                                     │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ 2 reviews ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│● running – Read   api            #131   open    changes requested Refresh tokens         1.2G  just now│
+│○ idle 2h          web            #88    draft   review required   New login page         310M    2h ago│
+└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Each row shows whether the review's session is running (or what holds it back:
 paused at its `[review]` caps or by hand, stopped, or queued on `max_live`), the
-PR, its state on
+repository and the PR number, each in a column of its own, the review task's
+size on disk, its state on
 GitHub (open, draft, merged, closed) and where its review stands: GitHub's
 review decision (approved, changes requested, review required), else what the
 reviewers' latest reviews say (changes requested, approved, commented), else
@@ -676,7 +681,23 @@ keeps what it said before. PR titles are shown as text, never run.
 | `v` | the review's PR in the review viewer, read from the task's checkout when it has one, else the repository's trunk |
 | `s` (in the menu) | open the review's session: attach to the review task's agent, or resume or start it, as `⏎` does in the active tab. A job with no task has none |
 | `e` `w` `p` `a` `D` | the review task's, as in the active tab; `a` brings an archived one back |
+| `A` | show the archived reviews instead of the active ones, and back |
 | `/` | filter by PR (`api#131`), task name or title |
+
+A review whose PR is merged or closed is archived for you, the way `a` (or
+`jeet task archive`) archives it: its agent is ended, its worktree removed,
+and its uncommitted work kept to come back if the PR is reviewed again. It is
+done by each `jeet watch --once` poll and when the reviews tab hears from
+GitHub, and never while the review's agent is mid-turn — running, asking you
+something, or with no hooks to say — so it waits for the agent to go idle. A
+review you bring back (`a`, or `jeet review`) after its PR was done stays
+until you archive it; one that is merged or closed again later is archived
+again.
+Archiving deletes the files git ignores; unattended, that is allowed only for
+build caches a build makes again (`target/`, `node_modules/`, `.venv/`,
+`__pycache__/`, `dist/`, `build/` and the like). A review with any other
+ignored file — a `.env`, local config — is left for you to archive, and the
+watch log or the status line says why.
 
 ### Pull request history
 
@@ -1201,7 +1222,9 @@ checks on your open pull requests, and the items of the GitHub Projects you
 name. What is new since the last poll becomes an event: `review_requested`,
 `mention`, `comment`, `assigned`, `ci_failed`, `ci_passed`, `pr_merged`,
 `pr_closed` or `project_item_changed`. The first poll of each only notes what
-is there, so turning the watcher on is not a flood.
+is there, so turning the watcher on is not a flood. Each poll also archives the
+review tasks whose PR has been merged or closed, once their agent is idle
+([The reviews tab](#the-reviews-tab)).
 
 Rules decide where each event goes; the first that matches wins, and an event
 none matches is a desktop notification:

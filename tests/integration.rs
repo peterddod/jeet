@@ -4281,14 +4281,14 @@ mv "$here/calls/.call.$$" "$here/calls/call.$$"
 [ "$GH_PROMPT_DISABLED" = 1 ] || { echo "gh run without GH_PROMPT_DISABLED" >&2; exit 3; }
 pr() {
   # number title state draft branch cross additions deletions
-  printf '{"number":%s,"title":"%s","url":"https://github.com/acme/widget/pull/%s","state":"%s","isDraft":%s,"reviewDecision":"","headRefName":"%s","headRefOid":"abc123","baseRefName":"main","isCrossRepository":%s,"additions":%s,"deletions":%s,"updatedAt":"2026-10-0%sT00:00:00Z"}' \
-    "$1" "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$(( $1 % 9 + 1 ))"
+  printf '{"number":%s,"title":"%s","url":"https://github.com/acme/widget/pull/%s","state":"%s","isDraft":%s,"reviewDecision":"","headRefName":"%s","headRefOid":"abc123","baseRefName":"main","isCrossRepository":%s,"additions":%s,"deletions":%s,"updatedAt":"2026-10-0%sT00:00:00Z","closedAt":%s}' \
+    "$1" "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$(( $1 % 9 + 1 ))" "${STUB_CLOSED_AT:-null}"
 }
 case "$1 $2" in
   "pr view")
     for arg in "$@"; do [ "$arg" = --web ] && exit 0; done
     case "$3" in
-      7) pr 7 "Widen the store" OPEN false wide-store false 12 3 ;;
+      7) pr 7 "Widen the store" "${STUB_PR7_STATE:-OPEN}" false wide-store false 12 3 ;;
       *) pr "$3" "PR $3" OPEN false "pr-$3" false 1 1 ;;
     esac
     exit 0 ;;
@@ -4354,10 +4354,21 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
     assert!(stderr_of(&output).contains("new task review-widget-7"));
     // The user's: top level.
     assert_eq!(lab.parent_of(&task_id(&task)), None);
-    // A task like any other, marked as a review, with its PR in the history.
-    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &[]));
-    assert!(listed.contains("review-widget-7"), "{listed}");
-    assert!(listed.contains("1 wt: widget"), "{listed}");
+    // Marked as a review from the start, so never in the task lists, with
+    // its PR in the history.
+    let kind: String = lab
+        .index()
+        .query_row(
+            "SELECT kind FROM tasks WHERE id = ?1",
+            [task_id(&task)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "review");
+    for args in [&["task", "ls"][..], &["task", "ls", "--archived"]] {
+        let listed = stdout_of(&lab.jeet_at(args, &lab.home(), &[]));
+        assert!(!listed.contains("review-widget-7"), "{listed}");
+    }
     let prs = lab.jeet_at(
         &["task", "prs", "review-widget-7", "--offline"],
         &lab.home(),
@@ -4401,9 +4412,9 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
         git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
         "wide-store"
     );
-    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &[]));
-    let reviews = listed.lines().filter(|l| l.contains("review-widget"));
-    assert_eq!(reviews.count(), 1, "{listed}");
+    assert!(!lab.home().join("tasks/review-widget-7-2").exists());
+    let listed = stdout_of(&lab.jeet_at(&["task", "ls", "--archived"], &lab.home(), &[]));
+    assert!(!listed.contains("review-widget"), "{listed}");
 
     // Deleting the task takes the branch it made for the review.
     succeeded(&lab.jeet_at(
@@ -4413,6 +4424,103 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
     ));
     assert!(!task.exists());
     assert_eq!(git_stdout(&["branch", "--list", "wide-store"], &trunk), "");
+}
+
+/// `jeet watch --once` archives a review whose PR is merged, as `jeet task
+/// archive` would, keeping its uncommitted work; ignored files that are not
+/// build caches hold it back for the user.
+#[cfg(unix)]
+#[test]
+fn watch_archives_a_review_once_its_pr_is_merged() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let open = [("PATH", path.as_str())];
+    let merged = [("PATH", path.as_str()), ("STUB_PR7_STATE", "MERGED")];
+
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &open);
+    succeeded(&output);
+    let worktree = path_from(&output);
+    std::fs::write(worktree.join(".gitignore"), "target/\n.env\n").unwrap();
+    std::fs::write(worktree.join("notes.md"), "half a review\n").unwrap();
+    std::fs::create_dir_all(worktree.join("target/debug")).unwrap();
+    std::fs::write(worktree.join("target/debug/build.o"), "cache").unwrap();
+    let state = || -> String {
+        lab.index()
+            .query_row(
+                "SELECT state FROM tasks WHERE slug = 'review-widget-7'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    // Open: nothing to do.
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &open);
+    assert!(
+        !stderr_of(&output).contains("review-widget-7"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(state(), "active");
+
+    // Merged, with a .env archiving would delete: kept, and said why.
+    std::fs::write(worktree.join(".env"), "TOKEN=x\n").unwrap();
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &merged);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("review review-widget-7 not archived"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(".env"), "{stderr}");
+    assert_eq!(state(), "active");
+    assert!(worktree.exists());
+
+    // Only a build cache left: archived, its uncommitted work kept.
+    std::fs::remove_file(worktree.join(".env")).unwrap();
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &merged);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("archived review review-widget-7: #7 is merged"),
+        "{stderr}"
+    );
+    assert_eq!(state(), "archived");
+    assert!(!worktree.exists());
+
+    // Reopened and reviewed again, it comes back with that work.
+    let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &open);
+    succeeded(&output);
+    assert_eq!(path_from(&output), worktree);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("notes.md")).unwrap(),
+        "half a review\n"
+    );
+    assert_eq!(state(), "active");
+
+    // Brought back after the PR was done, it is the user's to archive.
+    let closed_before = [
+        ("PATH", path.as_str()),
+        ("STUB_PR7_STATE", "MERGED"),
+        ("STUB_CLOSED_AT", "\"2020-01-01T00:00:00Z\""),
+    ];
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &closed_before);
+    assert!(
+        !stderr_of(&output).contains("review-widget-7"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(state(), "active");
+    // Done again after it was brought back: archived again.
+    let closed_after = [
+        ("PATH", path.as_str()),
+        ("STUB_PR7_STATE", "CLOSED"),
+        ("STUB_CLOSED_AT", "\"2099-01-01T00:00:00Z\""),
+    ];
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &closed_after);
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("#7 is closed"), "{stderr}");
+    assert_eq!(state(), "archived");
 }
 
 /// The review command runs in the PR's worktree, so Claude files its
@@ -4460,14 +4568,9 @@ fn opening_a_review_task_resumes_its_review_session() {
     let id = task_id(&task);
     wait_until("the review to start", || started.exists());
 
-    // Listed as a review of its PR, running while its command does.
+    // A review, so not among the tasks `task ls` lists.
     let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
-    let line = listed
-        .lines()
-        .find(|l| l.starts_with("review-widget-7"))
-        .unwrap_or_else(|| panic!("{listed}"));
-    assert!(line.contains("running – review of #7"), "{line}");
-    assert!(line.ends_with("review widget#7"), "{line}");
+    assert!(!listed.contains("review-widget-7"), "{listed}");
 
     // Still running: there is nothing to attach to, and nothing starts.
     let output = lab.jeet_at(&["task", "open", "review-widget-7"], &lab.home(), &env);
@@ -4572,14 +4675,15 @@ fn a_review_is_its_tasks_agent_in_one_session() {
     assert_eq!(started.len(), 2);
     assert!(started[1].contains(session), "{:?}", started[1]);
     assert_eq!(lab.sessions(&id), sessions);
-    let listed = stdout_of(&lab.jeet_at(&["task", "ls"], &lab.home(), &env));
-    assert_eq!(
-        listed
-            .lines()
-            .filter(|l| l.contains("review-widget"))
-            .count(),
-        1
-    );
+    let reviews: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE kind = 'review'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reviews, 1);
 }
 
 /// A test that fails with a review still running leaves nothing behind:
@@ -4958,13 +5062,16 @@ fn the_tasks_list_shows_pr_history_with_links_and_opens_the_viewer() {
     screen.type_keys(b"q");
     assert!(screen.wait_for_exit().success());
 
-    // A review task opens in the review viewer on v, and esc comes back.
+    // A review task, listed in the reviews view alone, opens in the review
+    // viewer on v, and esc comes back.
     let viewer = stub_viewer_gh(&lab.home());
     let path = path_with(&viewer);
     succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
     let mut screen = Pty::open(&lab, "tasks", &lab.home(), &[("PATH", &path)]);
-    screen.wait_for_text("review widget#7");
-    screen.type_keys(b"/review\r");
+    screen.wait_for_text("Feature");
+    assert!(!screen.screen().contains("review-widget-7"));
+    screen.type_keys(b"\t\t");
+    screen.wait_for_text("1 review ");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"v");
     wait_for_calls(&viewer, 1, "the viewer's diff", |c| {

@@ -7,6 +7,9 @@
 //!   pass, and which of those PRs have since been merged or closed;
 //! - the items of each GitHub Project in `[watch] projects`.
 //!
+//! Each poll also archives the review tasks whose PR has been merged or
+//! closed, once their agent is idle ([`crate::review::sweep`]).
+//!
 //! What is new since the last poll — by `$JEET_HOME/watch.json` — becomes an
 //! [`Event`] of one [`EventKind`], and the first `[[assistant.rules]]` that
 //! matches it decides where it goes: to the assistant, to the task whose
@@ -1142,6 +1145,11 @@ pub fn run_once(app: &App) -> Result<()> {
     // No event fires when a task has sat idle too long; each poll looks.
     if let Err(e) = reports::sweep_idle(app, now_secs()) {
         eprintln!("jeet: warning: {e:#}");
+    }
+    // A reviewed PR merged or closed archives its review, once idle.
+    match crate::review::sweep(app) {
+        Ok(lines) => lines.iter().for_each(|l| eprintln!("jeet: {l}")),
+        Err(e) => eprintln!("jeet: warning: could not look for finished reviews: {e:#}"),
     }
     // Nor when a slot under `max_live` frees up without an `Ended` hook.
     match run::drain(app) {

@@ -2128,6 +2128,8 @@ fn unarchive_one(app: &App, task: &TaskRecord, limit: bool) -> Result<Vec<String
 
     app.db.unarchive_task(&task.id, fan_out)?;
     app.db.touch_task(&task.id, now_secs())?;
+    // A review brought back after its PR was done stays, until archived by hand.
+    review::mark_brought_back(app, task);
     Ok(warnings)
 }
 

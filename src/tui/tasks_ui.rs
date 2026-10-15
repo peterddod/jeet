@@ -224,6 +224,14 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
         "archive the review's task · unarchive, on an archived one",
     ),
     (
+        "A",
+        "show the archived reviews instead of the active ones, and back",
+    ),
+    (
+        "",
+        "a review whose PR is merged or closed is archived once its agent is idle",
+    ),
+    (
         "D",
         "delete the review's task, after listing any work that would go",
     ),
@@ -264,7 +272,7 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
     (
         "columns",
-        "session · PR · PR state · review state · title · last activity",
+        "session · repo · PR · PR state · review state · title · size · last activity",
     ),
 ];
 
@@ -323,6 +331,7 @@ const HINTS_REVIEWS: &[&str] = &[
     "e explore",
     "p PRs",
     "a archive",
+    "A archived",
     "r refresh",
     "/ filter",
     "⇥ switch",
@@ -678,20 +687,26 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
 /// The reviews view: one line per review, with its session and where its
 /// PR and its review stand.
 fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
-    let total = ui.count(View::Reviews);
+    let archived = ui.archived_reviews;
+    let total = ui.review_count(archived);
+    let which = if archived { "archived " } else { "" };
     let title = match (ui.filter.is_empty(), ui.reviews.len()) {
-        (true, 0) => " no reviews ".to_string(),
-        (true, n) => format!(" {n} review{} ", if n == 1 { "" } else { "s" }),
+        (true, 0) => format!(" no {which}reviews "),
+        (true, n) => format!(" {n} {which}review{} ", if n == 1 { "" } else { "s" }),
         (false, 0) => format!(" nothing matches \"{}\" ", ui.filter),
-        (false, n) => format!(" {n} of {total} match \"{}\" ", ui.filter),
+        (false, n) => format!(" {n} of {total} {which}match \"{}\" ", ui.filter),
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .title_style(Style::default().fg(Color::Green));
     if ui.reviews.is_empty() {
-        let hint = match total {
-            0 => "no reviews yet. jeet review <pr> checks one out in a task of its own.",
+        let hint = match (total, archived) {
+            (0, false) => {
+                "no reviews yet. jeet review <pr> checks one out in a task of its own. \
+                 A shows the archived ones."
+            }
+            (0, true) => "no archived reviews. A goes back to the active ones.",
             _ => "⌫ or esc widens the filter",
         };
         frame.render_widget(
@@ -715,37 +730,43 @@ fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     ui.list = state;
 }
 
-/// How wide each column of the reviews view is; zero drops it.
+/// How wide each column of the reviews view is; zero drops it. The
+/// repository and the PR number are columns of their own, always shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReviewColumns {
     pub session: usize,
+    pub repo: usize,
     pub pr: usize,
     pub state: usize,
     pub review: usize,
     pub title: usize,
+    pub size: usize,
     pub age: usize,
 }
 
 impl ReviewColumns {
     pub fn for_width(width: usize) -> ReviewColumns {
         const GLYPH: usize = 2;
-        let (session, pr, state, review, age) = match width {
-            w if w >= 100 => (18, 18, 7, 17, 9),
-            w if w >= 80 => (12, 16, 7, 17, 9),
-            w if w >= 60 => (0, 14, 7, 17, 0),
-            _ => (0, 12, 7, 0, 0),
+        let (session, repo, pr, state, review, size, age) = match width {
+            w if w >= 110 => (18, 14, 6, 7, 17, 7, 9),
+            w if w >= 90 => (12, 12, 6, 7, 17, 7, 9),
+            w if w >= 70 => (0, 10, 6, 7, 17, 7, 0),
+            w if w >= 50 => (0, 10, 6, 7, 0, 7, 0),
+            _ => (0, 8, 6, 7, 0, 0, 0),
         };
-        let gaps = [session, pr, state, review, age]
+        let gaps = [session, repo, pr, state, review, size, age]
             .iter()
             .filter(|&&w| w > 0)
             .count();
-        let fixed = GLYPH + session + pr + state + review + age + gaps;
+        let fixed = GLYPH + session + repo + pr + state + review + size + age + gaps;
         ReviewColumns {
             session,
+            repo,
             pr,
             state,
             review,
             title: width.saturating_sub(fixed),
+            size,
             age,
         }
     }
@@ -793,7 +814,7 @@ pub fn review_session(row: &TaskRow) -> String {
 }
 
 fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line<'static> {
-    let (glyph, color, session, name, when) = match line.source {
+    let (glyph, color, session, name, when, size) = match line.source {
         Source::Task(i) => {
             let row = &ui.rows[i];
             let (glyph, color) = glyph(row);
@@ -803,6 +824,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
                 review_session(row),
                 row.task.name.clone(),
                 row.last_activity,
+                row.size.map(human_size).unwrap_or_else(|| "…".into()),
             )
         }
         Source::Legacy(i) => {
@@ -811,19 +833,21 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
                 true => ("●", Color::Green, "job running"),
                 false => ("·", Color::DarkGray, "no task"),
             };
+            // A job with no task has no directory of its own to measure.
             (
                 glyph,
                 color,
                 session.to_string(),
                 job.title.clone(),
                 job.started_at,
+                String::new(),
             )
         }
     };
     let found = line.pr.as_ref().and_then(|pr| ui.reviewed.get(pr));
-    let pr = match &line.pr {
-        Some(pr) => pr.label(),
-        None => name.clone(),
+    let (repo, pr) = match &line.pr {
+        Some(pr) => (pr.repo().to_string(), format!("#{}", pr.number)),
+        None => (String::new(), String::new()),
     };
     let (state, state_fg, review, review_fg, title) = match found {
         None if line.pr.is_none() => (
@@ -838,6 +862,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             title,
             state,
             verdict,
+            ..
         })) => (
             *state,
             state_color(state),
@@ -849,7 +874,7 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
     };
     // Titles are whoever opened the PR's, and errors are gh's: only their
     // printable text reaches the terminal.
-    let (pr, review, title) = (printable(&pr), printable(&review), printable(&title));
+    let (repo, review, title) = (printable(&repo), printable(&review), printable(&title));
     let mut spans = vec![Span::styled(
         format!("{glyph} "),
         Style::default().fg(color),
@@ -860,6 +885,10 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             Style::default().fg(color),
         ));
     }
+    spans.push(Span::styled(
+        format!("{} ", cell(&repo, columns.repo)),
+        Style::default().fg(Color::Magenta),
+    ));
     spans.push(Span::styled(
         format!("{} ", cell(&pr, columns.pr)),
         Style::default()
@@ -877,6 +906,12 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
         ));
     }
     spans.push(Span::raw(cell(&title, columns.title)));
+    if columns.size > 0 {
+        spans.push(Span::styled(
+            format!(" {size:>width$}", width = columns.size),
+            Style::default().fg(Color::Blue),
+        ));
+    }
     if columns.age > 0 {
         spans.push(Span::styled(
             format!(" {:>width$}", age_label(when), width = columns.age),
@@ -2762,14 +2797,26 @@ mod tests {
     }
 
     #[test]
-    fn a_review_row_names_its_pr() {
+    fn a_review_is_in_neither_task_list() {
         let mut review = row("review-api-55", None);
         review.task.kind = TaskKind::Review;
         review.worktrees[0].pr_number = Some(55);
-        let mut ui = TasksUi::new(vec![review]);
-        let screen = render(&mut ui, 120, 12).join("\n");
-        assert!(screen.contains("review api#55"), "{screen}");
-        assert!(!screen.contains("review-api-55"), "{screen}");
+        let mut archived = review.clone();
+        archived.task.id = "old".into();
+        archived.task.state = TaskState::Archived;
+        let mut ui = TasksUi::new(vec![review, archived]);
+        for view in [View::Active, View::Archived] {
+            ui.view = view;
+            ui.set_rows(ui.rows.clone());
+            let screen = render(&mut ui, 120, 12).join("\n");
+            assert!(
+                !screen.contains("review-api") && !screen.contains("#55"),
+                "{screen}"
+            );
+            assert!(screen.contains(" active 0 "), "{screen}");
+            assert!(screen.contains(" archived 0 "), "{screen}");
+            assert!(screen.contains(" reviews 1 "), "{screen}");
+        }
     }
 
     fn reviews_ui() -> TasksUi {
@@ -2781,6 +2828,7 @@ mod tests {
         let mut running = row("review-api-55", Some(Activity::Running { detail: None }));
         running.task.kind = TaskKind::Review;
         running.worktrees[0].pr_number = Some(55);
+        running.size = Some(2048);
         let mut archived = row("review-api-9", None);
         archived.task.kind = TaskKind::Review;
         archived.task.state = TaskState::Archived;
@@ -2798,6 +2846,7 @@ mod tests {
                 title: "Add \u{1b}]8;;x\u{7}reviews".into(),
                 state: "draft",
                 verdict: Verdict::ChangesRequested,
+                closed_at: None,
             }),
         );
         ui.reviewed.insert(
@@ -2806,6 +2855,7 @@ mod tests {
                 title: "Old fix".into(),
                 state: "merged",
                 verdict: Verdict::Approved,
+                closed_at: None,
             }),
         );
         ui.reviewed
@@ -2838,25 +2888,46 @@ mod tests {
         let mut ui = reviews_ui();
         let screen = render(&mut ui, 140, 14);
         let all = screen.join("\n");
-        assert!(all.contains(" reviews 3 "), "{all}");
-        assert!(all.contains("3 reviews"), "{all}");
-        let running = line_of(&screen, "api#55");
+        assert!(all.contains(" reviews 2 "), "{all}");
+        assert!(all.contains("2 reviews"), "{all}");
+        let running = line_of(&screen, "#55");
         assert!(running.contains("● running"), "{running}");
         assert!(running.contains("draft"), "{running}");
         assert!(running.contains("changes requested"), "{running}");
+        // Its size, as the task lists show one.
+        assert!(running.contains("2.0K"), "{running}");
         // A title is shown, never run: its escapes go.
         assert!(running.contains("Add ]8;;xreviews"), "{running}");
-        let archived = line_of(&screen, "api#9");
-        assert!(archived.contains("▪ archived"), "{archived}");
-        assert!(archived.contains("merged") && archived.contains("approved"));
-        let legacy = line_of(&screen, "api#3");
+        let legacy = line_of(&screen, "#3 ");
         assert!(legacy.contains("no task"), "{legacy}");
         assert!(legacy.contains("unknown: [2Jgh"), "{legacy}");
         assert!(!all.contains("not a review"), "{all}");
+        // Archived reviews are not among the active ones.
+        assert!(!all.contains("#9"), "{all}");
         assert!(screen.iter().all(|l| !l.contains('\u{1b}')), "{screen:?}");
-        // Archived after active, and the job no task holds last.
+        // The repository and the PR are columns of their own, aligned.
+        for line in [running, legacy] {
+            assert!(!line.contains("api#"), "{line}");
+        }
+        let col = |line: &str, what: &str| line[..line.find(what).unwrap()].width();
+        assert_eq!(col(running, " api "), col(legacy, " api "));
+        assert_eq!(col(running, "#55"), col(legacy, "#3 "));
+        assert!(col(running, " api ") < col(running, "#55"));
+        // The active one first, and the job no task holds last.
         let at = |what: &str| screen.iter().position(|l| l.contains(what)).unwrap();
-        assert!(at("api#55") < at("api#9") && at("api#9") < at("api#3"));
+        assert!(at("#55") < at("#3 "));
+        // A: the archived reviews alone.
+        ui.archived_reviews = true;
+        ui.set_rows(ui.rows.clone());
+        let screen = render(&mut ui, 140, 14);
+        let all = screen.join("\n");
+        assert!(all.contains("1 archived review"), "{all}");
+        let archived = line_of(&screen, "#9");
+        assert!(archived.contains("▪ archived"), "{archived}");
+        assert!(archived.contains("merged") && archived.contains("approved"));
+        assert!(!all.contains("#55") && !all.contains("#3 "), "{all}");
+        ui.archived_reviews = false;
+        ui.set_rows(ui.rows.clone());
         for (w, h) in [(160, 40), (90, 24), (70, 20), (40, 12), (1, 1)] {
             for panel in all_panels() {
                 ui.panel = panel;

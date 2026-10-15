@@ -218,6 +218,16 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE task_worktrees ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
     ",
+    // v7: every review is of kind 'review', which keeps it out of the task
+    // lists. Only a review's checkout records a PR number, so a task of
+    // kind 'work' holding one is a review made by hand or before the kind
+    // was set everywhere.
+    "
+    UPDATE tasks SET kind = 'review'
+        WHERE kind = 'work'
+          AND EXISTS (SELECT 1 FROM task_worktrees w
+                      WHERE w.task_id = tasks.id AND w.pr_number IS NOT NULL);
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
@@ -649,6 +659,41 @@ mod tests {
         db.conn()
             .execute_batch("UPDATE tasks SET placement = 'local' WHERE id = 'c';")
             .unwrap();
+    }
+
+    #[test]
+    fn a_v6_index_makes_work_holding_a_pr_checkout_a_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version = 6;
+                 INSERT INTO repos (id, trunk_path, remote_url, default_branch)
+                     VALUES ('github.com/acme/api', '/t', 'u', 'main');
+                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                     VALUES ('r', 'review-api-7', 'review-api-7', 'work', 1, 1);
+                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                     VALUES ('w', 'feature', 'feature', 'work', 1, 1);
+                 INSERT INTO tasks (id, slug, name, kind, created_at, last_activity)
+                     VALUES ('m', 'boss', 'boss', 'manager', 1, 1);
+                 INSERT INTO task_worktrees
+                     (task_id, repo_id, dir_name, branch, pr_number, created_at)
+                     VALUES ('r', 'github.com/acme/api', 'api', 'pr/7', 7, 1),
+                            ('w', 'github.com/acme/api', 'api', 'feat', NULL, 1);
+                 INSERT INTO task_prs (task_id, repo_id, number, title, url, state, updated_at)
+                     VALUES ('w', 'github.com/acme/api', 9, 'x', 'u', 'OPEN', 'z');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let kind = |id: &str| db.get_task(id).unwrap().unwrap().kind;
+        assert_eq!(kind("r"), tasks::TaskKind::Review);
+        // A task with PRs of its own, but no PR checked out, is no review.
+        assert_eq!(kind("w"), tasks::TaskKind::Work);
+        assert_eq!(kind("m"), tasks::TaskKind::Manager);
     }
 
     #[test]

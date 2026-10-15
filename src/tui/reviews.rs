@@ -1,7 +1,8 @@
 //! The reviews view of the tasks list: every review jeet knows of — each
-//! review task, active or archived, and any review job an older `jeet
-//! review` recorded with no task to hold it — with where its PR and its
-//! review stand on GitHub.
+//! active review task, and any review job an older `jeet review` recorded
+//! with no task to hold it, or, toggled, the archived review tasks — with
+//! where its PR and its review stand on GitHub. Reviews are shown here
+//! alone, never among the tasks.
 //!
 //! What GitHub says is asked on a thread of its own ([`look`]) and kept by
 //! the list until asked again, so no draw waits on `gh`. PR titles are
@@ -30,10 +31,14 @@ pub struct PrKey {
 }
 
 impl PrKey {
+    /// `jeet`: the repository's own name.
+    pub fn repo(&self) -> &str {
+        self.repo_id.rsplit('/').next().unwrap_or(&self.repo_id)
+    }
+
     /// `jeet#55`.
     pub fn label(&self) -> String {
-        let repo = self.repo_id.rsplit('/').next().unwrap_or(&self.repo_id);
-        format!("{repo}#{}", self.number)
+        format!("{}#{}", self.repo(), self.number)
     }
 }
 
@@ -114,39 +119,49 @@ pub struct ReviewLine {
     pub pr: Option<PrKey>,
 }
 
-/// The view's lines: active review tasks, newest activity first as `rows`
-/// are, then archived ones, then legacy jobs no task holds; narrowed by
-/// `filter` on the PR, the task's name and the title GitHub last gave.
+/// The view's lines: the active review tasks, newest activity first as
+/// `rows` are, then legacy jobs no task holds; or, `archived`, the
+/// archived review tasks alone. Narrowed by `filter` on the PR, the task's
+/// name and the title GitHub last gave.
 pub fn lines(
     rows: &[TaskRow],
     legacy: &[Legacy],
+    archived: bool,
     filter: &str,
     title: impl Fn(&PrKey) -> Option<String>,
 ) -> Vec<ReviewLine> {
-    let reviews = |state: TaskState| {
-        rows.iter()
-            .enumerate()
-            .filter(move |(_, row)| row.task.kind == TaskKind::Review && row.task.state == state)
-            .map(|(i, row)| ReviewLine {
-                source: Source::Task(i),
-                pr: task_pr(row),
-            })
+    let state = match archived {
+        true => TaskState::Archived,
+        false => TaskState::Active,
     };
-    let mut all: Vec<ReviewLine> = reviews(TaskState::Active)
-        .chain(reviews(TaskState::Archived))
+    let mut all: Vec<ReviewLine> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.task.kind == TaskKind::Review && row.task.state == state)
+        .map(|(i, row)| ReviewLine {
+            source: Source::Task(i),
+            pr: task_pr(row),
+        })
         .collect();
-    let held: HashSet<PrKey> = all.iter().filter_map(|line| line.pr.clone()).collect();
-    let mut seen = HashSet::new();
-    all.extend(
-        legacy
+    if !archived {
+        // A job whose PR has a review task, archived or not, is that task's.
+        let held: HashSet<PrKey> = rows
             .iter()
-            .enumerate()
-            .filter(|(_, job)| !held.contains(&job.pr) && seen.insert(job.pr.clone()))
-            .map(|(i, job)| ReviewLine {
-                source: Source::Legacy(i),
-                pr: Some(job.pr.clone()),
-            }),
-    );
+            .filter(|row| row.task.kind == TaskKind::Review)
+            .filter_map(task_pr)
+            .collect();
+        let mut seen = HashSet::new();
+        all.extend(
+            legacy
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| !held.contains(&job.pr) && seen.insert(job.pr.clone()))
+                .map(|(i, job)| ReviewLine {
+                    source: Source::Legacy(i),
+                    pr: Some(job.pr.clone()),
+                }),
+        );
+    }
     if filter.is_empty() {
         return all;
     }
@@ -219,12 +234,15 @@ pub struct PrReview {
     /// `open`, `draft`, `merged` or `closed`.
     pub state: &'static str,
     pub verdict: Verdict,
+    /// When it was merged or closed, in seconds since the epoch.
+    pub closed_at: Option<i64>,
 }
 
 impl From<ReviewedPr> for PrReview {
     fn from(found: ReviewedPr) -> Self {
         PrReview {
             state: found.pr.state_label(),
+            closed_at: found.closed_at.as_deref().and_then(github::parse_timestamp),
             verdict: verdict(&found.pr.review_decision, &found.latest_reviews),
             title: found.pr.title,
         }

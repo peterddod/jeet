@@ -214,7 +214,7 @@ pub fn retree(
 pub fn active_rollup(rows: &[TaskRow], info: Option<&TreeInfo>) -> HashMap<String, (Urgency, u32)> {
     let nodes: Vec<_> = rows
         .iter()
-        .filter(|row| row.task.state == TaskState::Active)
+        .filter(|row| row.task.state == TaskState::Active && row.task.kind != TaskKind::Review)
         .map(|row| {
             (
                 row.task.id.clone(),
@@ -489,10 +489,13 @@ pub fn id_at<'a>(
 }
 
 /// The active nodes among `rows` under `root`, in [`manager::tree_order`]:
-/// indexes into `rows`, with their depth below the root.
+/// indexes into `rows`, with their depth below the root. Reviews are no
+/// nodes: the reviews view alone shows them.
 fn order(root: &TaskRow, rows: &[TaskRow]) -> Vec<(usize, u32)> {
     let active: Vec<usize> = (0..rows.len())
-        .filter(|&i| rows[i].task.state == TaskState::Active)
+        .filter(|&i| {
+            rows[i].task.state == TaskState::Active && rows[i].task.kind != TaskKind::Review
+        })
         .collect();
     let mut nodes: Vec<TaskRecord> = active.iter().map(|&i| rows[i].task.clone()).collect();
     nodes.push(root.task.clone());
@@ -898,6 +901,26 @@ mod tests {
         );
         assert_eq!(lines[0].at, At::Root);
         assert!(!lines[0].manager);
+    }
+
+    #[test]
+    fn reviews_are_no_nodes_of_the_tree_and_roll_nothing_up() {
+        let (root, mut rows) = tree();
+        rows.push(row("rv", TaskKind::Review, Some("root"), waiting()));
+        rows.push(row("rf", TaskKind::Review, Some("fe"), waiting()));
+        let lines = lines(Some(&root), &rows, &HashSet::new(), "");
+        assert_eq!(
+            layout(&lines, &root, &rows),
+            ["0:root", "1:api", "2:w1", "2:w2", "1:fe", "2:w3"]
+        );
+        assert!(!tree_nodes(&root, &rows)
+            .iter()
+            .any(|(id, _)| id.starts_with('r') && id != "root"));
+        // fe has nothing waiting under it but a review: it shows nothing.
+        let shown = retree(&root, &rows, &[], None);
+        assert!(!shown.contains_key("rf"));
+        assert_eq!(shown["fe"].1, 0);
+        assert!(!active_rollup(&rows, None).contains_key("rf"));
     }
 
     #[test]
