@@ -3671,6 +3671,17 @@ mod tests {
     }
 
     #[test]
+    fn a_row_without_a_project_keeps_the_worktrees_column_in_place() {
+        let at = |project: Option<&str>| {
+            let mut ui = TasksUi::new(vec![in_project(project)]);
+            let screen = render(&mut ui, 130, 14);
+            let line = screen.iter().find(|l| l.contains("wt:")).unwrap().clone();
+            column(&line, "1 wt:")
+        };
+        assert_eq!(at(Some("webstack")), at(None));
+    }
+
+    #[test]
     fn glyphs_tell_the_states_apart() {
         let mut r = row("x", None);
         assert_eq!(glyph(&r).0, "…");
