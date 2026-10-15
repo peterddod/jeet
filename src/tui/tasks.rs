@@ -1064,6 +1064,13 @@ pub struct TasksUi {
     pub tree: Vec<TreeLine>,
     /// The managers whose subtree the agents view hides, by task id.
     pub collapsed: HashSet<String>,
+    /// The managers the active view has gone into, outermost first: it
+    /// lists the tasks under the last, or the top level with none.
+    pub path: Vec<String>,
+    /// What each active task shows rolled up from below, by task id
+    /// ([`managers::active_rollup`]): a manager's own state or its
+    /// subtree's, the most urgent.
+    pub rolled: HashMap<String, (Urgency, u32)>,
     /// Cursor within `visible`, or `tree` in the agents view.
     pub selected: usize,
     pub panel: Option<Panel>,
@@ -1119,6 +1126,8 @@ impl TasksUi {
             visible: Vec::new(),
             tree: Vec::new(),
             collapsed: HashSet::new(),
+            path: Vec::new(),
+            rolled: HashMap::new(),
             selected: 0,
             panel: None,
             status_line: String::new(),
@@ -1173,6 +1182,7 @@ impl TasksUi {
     /// Roll the tree's urgencies up again from what the threads last
     /// found: pure, so the draw reads no index and no tmux.
     pub fn retree(&mut self) {
+        self.rolled = managers::active_rollup(&self.rows, self.tree_info.as_ref());
         self.shown = match &self.assistant_row {
             Some(root) => {
                 let sessions = self.assistant.as_ref().map_or(&[][..], |a| &a.sessions[..]);
@@ -1251,8 +1261,20 @@ impl TasksUi {
             return;
         };
         self.tree.clear();
+        // A manager gone from the active tasks takes the levels below it.
+        if let Some(gone) = self
+            .path
+            .iter()
+            .position(|id| self.active_row(id).is_none())
+        {
+            self.path.truncate(gone);
+        }
+        // The active view lists one level; a filter searches them all.
+        let here = self.path.last().map(String::as_str);
+        let level = self.view == View::Active && self.filter.is_empty();
         let in_view: Vec<usize> = (0..self.rows.len())
             .filter(|&i| self.rows[i].task.state == state)
+            .filter(|&i| !level || self.tree_parent(&self.rows[i]) == here)
             .collect();
         let names = in_view.iter().map(|&i| self.rows[i].task.name.as_str());
         self.visible = rank_matches(names, &self.filter)
@@ -1330,6 +1352,116 @@ impl TasksUi {
         self.rows.iter().find(|row| row.task.id == id)
     }
 
+    fn active_row(&self, id: &str) -> Option<&TaskRow> {
+        self.row(id)
+            .filter(|row| row.task.state == TaskState::Active)
+    }
+
+    /// The active task `row` sits under in the active view's tree; `None`
+    /// at the top level, under the assistant, with no parent, or with one
+    /// no longer active.
+    pub fn tree_parent(&self, row: &TaskRow) -> Option<&str> {
+        let parent = self.active_row(row.task.parent_id.as_deref()?)?;
+        // A task on a cycle of parents, which only a bad index has, is on
+        // top: above it the walk would never end.
+        let mut seen = HashSet::new();
+        let mut at = Some(parent);
+        while let Some(up) = at {
+            if up.task.id == row.task.id || !seen.insert(up.task.id.as_str()) {
+                return None;
+            }
+            at = up
+                .task
+                .parent_id
+                .as_deref()
+                .and_then(|id| self.active_row(id));
+        }
+        Some(parent.task.id.as_str())
+    }
+
+    /// Whether the active view goes into `row`: a manager, or a task with
+    /// active tasks under it all the same.
+    pub fn enterable(&self, row: &TaskRow) -> bool {
+        row.task.kind == TaskKind::Manager
+            || self.rows.iter().any(|r| {
+                r.task.state == TaskState::Active
+                    && r.task.parent_id.as_deref() == Some(&row.task.id)
+            })
+    }
+
+    /// The managers above active task `id`, outermost first: the path that
+    /// shows it.
+    pub fn ancestors(&self, id: &str) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut at = self.active_row(id);
+        while let Some(parent) = at.and_then(|row| self.tree_parent(row)) {
+            // A cycle in the parents stops where it comes round.
+            if path.iter().any(|p| p == parent) {
+                break;
+            }
+            path.push(parent.to_string());
+            at = self.active_row(parent);
+        }
+        path.reverse();
+        path
+    }
+
+    /// The active view's breadcrumb: `assistant`, then the slugs of the
+    /// managers gone into.
+    pub fn breadcrumb(&self) -> Vec<String> {
+        let mut crumbs = vec!["assistant".to_string()];
+        crumbs.extend(
+            self.path
+                .iter()
+                .filter_map(|id| self.row(id))
+                .map(|row| row.task.slug.clone()),
+        );
+        crumbs
+    }
+
+    /// ⏎ or → on a manager in the active view: list what is under it. From
+    /// a filter's matches, it goes there and drops the filter.
+    fn descend(&mut self, id: &str) {
+        self.path = self.ancestors(id);
+        self.path.push(id.to_string());
+        self.filter.clear();
+        self.selected = 0;
+        self.refresh_visible(None);
+        self.set_status(match self.visible.is_empty() {
+            true => "nothing under it yet · ← back up",
+            false => "",
+        });
+    }
+
+    /// Drop the filter, the cursor kept on what it was on: in the active
+    /// view, on that task's level, wherever the match was.
+    fn drop_filter(&mut self, keep: Option<&str>) {
+        self.filter.clear();
+        if let Some(id) = keep.filter(|_| self.view == View::Active) {
+            self.path = self.ancestors(id);
+        }
+        self.refresh_visible(keep);
+    }
+
+    /// ← or ⌫ in the active view: back up a level, the cursor on the
+    /// manager left. With a filter, it drops the filter instead, to the
+    /// level of the match under the cursor.
+    fn ascend(&mut self) {
+        if !self.filter.is_empty() {
+            let keep = self.selected_id().map(str::to_string);
+            self.drop_filter(keep.as_deref());
+            self.set_status("");
+            return;
+        }
+        match self.path.pop() {
+            Some(left) => {
+                self.refresh_visible(Some(&left));
+                self.set_status("");
+            }
+            None => self.set_status("at the top"),
+        }
+    }
+
     /// A node of the tree: a task's row, or the assistant's.
     pub fn node(&self, id: &str) -> Option<&TaskRow> {
         self.row(id).or_else(|| {
@@ -1349,6 +1481,9 @@ impl TasksUi {
             TaskState::Active => View::Active,
             TaskState::Archived => View::Archived,
         };
+        if self.view == View::Active {
+            self.path = self.ancestors(id);
+        }
         self.refresh_visible(Some(id));
         if self.selected_id() != Some(id) {
             self.filter.clear();
@@ -1590,9 +1725,8 @@ impl TasksUi {
         let keep = self.selected_id().map(str::to_string);
         match key.code {
             KeyCode::Esc => {
-                self.filter.clear();
                 self.filtering = false;
-                self.refresh_visible(keep.as_deref());
+                self.drop_filter(keep.as_deref());
             }
             // The filter stays; the letters are commands again.
             KeyCode::Enter => self.filtering = false,
@@ -1600,12 +1734,13 @@ impl TasksUi {
                 if self.filter.pop().is_none() {
                     self.filtering = false;
                 }
-                self.refresh_visible(None);
+                match self.filter.is_empty() {
+                    // Its last letter gone: as esc, onto the match's level.
+                    true => self.drop_filter(keep.as_deref()),
+                    false => self.refresh_visible(None),
+                }
             }
-            KeyCode::Char('u') if ctrl => {
-                self.filter.clear();
-                self.refresh_visible(keep.as_deref());
-            }
+            KeyCode::Char('u') if ctrl => self.drop_filter(keep.as_deref()),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
             KeyCode::PageUp => self.move_cursor(-10),
@@ -1631,6 +1766,7 @@ impl TasksUi {
                 return action;
             }
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let id = self.selected_id().map(str::to_string);
         let needs_task = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match &id {
             Some(id) => Some(make(id.clone())),
@@ -1641,8 +1777,7 @@ impl TasksUi {
         };
         match key.code {
             KeyCode::Esc if !self.filter.is_empty() => {
-                self.filter.clear();
-                self.refresh_visible(id.as_deref());
+                self.drop_filter(id.as_deref());
                 self.set_status("");
                 None
             }
@@ -1723,6 +1858,35 @@ impl TasksUi {
                 None
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
+            // The active view is a tree, walked like the explorer's folders.
+            KeyCode::Enter | KeyCode::Right if self.view == View::Active => {
+                match self.selected_row() {
+                    Some(row) if self.enterable(row) => {
+                        let id = row.task.id.clone();
+                        self.descend(&id);
+                        None
+                    }
+                    Some(_) if key.code == KeyCode::Right => {
+                        self.set_status("a task has nothing under it · ⏎ opens its agent");
+                        None
+                    }
+                    _ => needs_task(self, &|task_id| Action::Open {
+                        task_id,
+                        session: None,
+                    }),
+                }
+            }
+            KeyCode::Left | KeyCode::Backspace if self.view == View::Active => {
+                self.ascend();
+                None
+            }
+            // A manager's own agent, which ⏎ goes past; the explorer's key.
+            KeyCode::Char('a') if ctrl && self.view == View::Active => {
+                needs_task(self, &|task_id| Action::Open {
+                    task_id,
+                    session: None,
+                })
+            }
             KeyCode::Enter => match self.selected_row() {
                 Some(row) if row.task.state == TaskState::Archived => {
                     let name = row.task.name.clone();
@@ -2582,7 +2746,12 @@ impl TasksUi {
                     && mouse.row > area.y
                     && mouse.row < area.y + area.height.saturating_sub(1);
                 if inside {
-                    let row = self.list.offset() + (mouse.row - area.y - 1) as usize;
+                    // Active and archived tasks take two lines each.
+                    let lines = match self.view {
+                        View::Active | View::Archived => 2,
+                        View::Agents | View::Reviews => 1,
+                    };
+                    let row = self.list.offset() + (mouse.row - area.y - 1) as usize / lines;
                     if row < self.shown_len() {
                         self.selected = row;
                     }
@@ -5412,6 +5581,264 @@ mod tests {
             .iter()
             .map(|&i| ui.rows[i].task.name.as_str())
             .collect()
+    }
+
+    /// The assistant's tree as the active view sees it: `ops` (a manager)
+    /// over `deploy` (a manager) over `ship`, and `fix` beside `deploy`;
+    /// `docs` at the top beside `ops`, and `loose` with no parent at all.
+    fn nested() -> TasksUi {
+        let under = |id: &str, kind: TaskKind, parent: Option<&str>, last: i64| {
+            let mut row = task(id, id, TaskState::Active, last);
+            row.task.kind = kind;
+            row.task.parent_id = parent.map(str::to_string);
+            row
+        };
+        TasksUi::new(vec![
+            under("ops", TaskKind::Manager, Some("assistant-id"), 50),
+            under("docs", TaskKind::Work, Some("assistant-id"), 40),
+            under("loose", TaskKind::Work, None, 30),
+            under("deploy", TaskKind::Manager, Some("ops"), 20),
+            under("fix", TaskKind::Work, Some("ops"), 10),
+            under("ship", TaskKind::Work, Some("deploy"), 5),
+        ])
+    }
+
+    #[test]
+    fn the_active_view_opens_on_the_top_level_and_walks_down_and_up() {
+        let mut ui = nested();
+        assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
+        assert_eq!(ui.breadcrumb(), ["assistant"]);
+        // ⏎ goes into a manager, → too; neither opens its agent.
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        assert_eq!(ui.breadcrumb(), ["assistant", "ops"]);
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
+        assert_eq!(shown(&ui), ["ship"]);
+        assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
+        // On a task, ⏎ opens its agent and → says there is nothing below.
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
+        assert!(
+            ui.status_line.contains("nothing under it"),
+            "{}",
+            ui.status_line
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "ship".into(),
+                session: None
+            })
+        );
+        // ← and ⌫ back up, the cursor on the manager left.
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        assert_eq!(ui.selected_id(), Some("deploy"));
+        press(&mut ui, KeyCode::Backspace);
+        assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
+        assert_eq!(ui.selected_id(), Some("ops"));
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.status_line, "at the top");
+    }
+
+    #[test]
+    fn ctrl_a_opens_a_managers_own_agent() {
+        let mut ui = nested();
+        assert_eq!(
+            ui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Some(Action::Open {
+                task_id: "ops".into(),
+                session: None
+            })
+        );
+        // Only in the active view: the agents view's `a` answers, and an
+        // archived task's agent is not opened.
+        for view in [View::Agents, View::Archived] {
+            ui.view = view;
+            let got = ui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            assert!(
+                !matches!(got, Some(Action::Open { .. })),
+                "{view:?}: {got:?}"
+            );
+        }
+        ui.view = View::Active;
+        ui.refresh_visible(None);
+        // Plain `a` still archives.
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Archive { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_manager_is_entered_and_says_so() {
+        let mut ui = nested();
+        ui.select("ship");
+        press(&mut ui, KeyCode::Left);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(ui.selected_id(), Some("fix"));
+        // A manager with nothing under it is still a level.
+        let mut rows = ui.rows.clone();
+        rows.retain(|r| r.task.id != "ship");
+        ui.set_rows(rows);
+        ui.selected = 0;
+        assert_eq!(ui.selected_id(), Some("deploy"));
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.visible.is_empty());
+        assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
+        assert!(ui.status_line.contains("← back up"), "{}", ui.status_line);
+    }
+
+    #[test]
+    fn going_to_a_task_opens_the_levels_above_it() {
+        let mut ui = nested();
+        ui.select("ship");
+        assert_eq!(ui.path, ["ops", "deploy"]);
+        assert_eq!(shown(&ui), ["ship"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
+        ui.select("docs");
+        assert!(ui.path.is_empty());
+        assert_eq!(ui.selected_id(), Some("docs"));
+    }
+
+    #[test]
+    fn a_manager_gone_from_the_active_tasks_takes_its_levels_with_it() {
+        let mut ui = nested();
+        ui.select("ship");
+        let rows = ui
+            .rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if ["deploy", "ship"].contains(&row.task.id.as_str()) {
+                    row.task.state = TaskState::Archived;
+                }
+                row
+            })
+            .collect();
+        ui.set_rows(rows);
+        assert_eq!(ui.path, ["ops"]);
+        assert_eq!(shown(&ui), ["fix"]);
+    }
+
+    #[test]
+    fn the_filter_searches_every_level_and_goes_where_a_match_is() {
+        let mut ui = nested();
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "ship");
+        assert_eq!(shown(&ui), ["ship"]);
+        press(&mut ui, KeyCode::Esc);
+        // From inside a manager, it still finds what is above.
+        ui.select("ship");
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "docs");
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(shown(&ui), ["docs"]);
+        // ← drops the filter, the cursor kept on the match, on its level.
+        press(&mut ui, KeyCode::Left);
+        assert!(ui.filter.is_empty());
+        assert!(ui.path.is_empty());
+        assert_eq!(ui.selected_id(), Some("docs"));
+        // So does esc, from a match levels down.
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "ship");
+        press(&mut ui, KeyCode::Esc);
+        assert_eq!(ui.path, ["ops", "deploy"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
+        // ⏎ on a manager among the matches goes into it, filter dropped.
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "deploy");
+        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.filter.is_empty());
+        assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
+        assert_eq!(shown(&ui), ["ship"]);
+    }
+
+    #[test]
+    fn tasks_on_a_cycle_of_parents_are_on_the_top_level() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        for (id, parent) in [("docs", "loose"), ("loose", "docs")] {
+            rows.iter_mut()
+                .find(|r| r.task.id == id)
+                .unwrap()
+                .task
+                .parent_id = Some(parent.into());
+        }
+        ui.set_rows(rows);
+        assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
+        assert!(ui.ancestors("docs").is_empty());
+    }
+
+    #[test]
+    fn backspacing_the_filter_away_keeps_the_match() {
+        let mut ui = nested();
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "ship");
+        for _ in 0..4 {
+            press(&mut ui, KeyCode::Backspace);
+        }
+        assert!(ui.filter.is_empty());
+        assert_eq!(ui.path, ["ops", "deploy"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
+    }
+
+    #[test]
+    fn a_task_its_own_parent_is_on_the_top_level() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "docs")
+            .unwrap()
+            .task
+            .parent_id = Some("docs".into());
+        ui.set_rows(rows);
+        assert!(shown(&ui).contains(&"docs"));
+        assert!(ui.ancestors("docs").is_empty());
+    }
+
+    #[test]
+    fn the_archived_view_stays_flat() {
+        let mut ui = nested();
+        ui.rows
+            .iter_mut()
+            .for_each(|r| r.task.state = TaskState::Archived);
+        ui.view = View::Archived;
+        ui.refresh_visible(None);
+        assert_eq!(ui.visible.len(), 6);
+        // ⏎ there explains rather than going in.
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
+    }
+
+    #[test]
+    fn a_manager_rolls_up_the_most_urgent_below_it() {
+        let mut ui = nested();
+        let status = |ui: &mut TasksUi, id: &str, activity: Activity| {
+            ui.apply(Update::Status {
+                id: id.into(),
+                activity: Some(activity),
+                last_activity: 0,
+                unanchored: false,
+            })
+        };
+        for id in ["ops", "deploy", "fix", "ship", "docs"] {
+            status(&mut ui, id, Activity::Idle { since: 0 });
+        }
+        assert_eq!(ui.rolled["ops"], (Urgency::Idle, 0));
+        // A task running two levels down makes both managers running,
+        // though their own chats are idle.
+        status(&mut ui, "ship", Activity::Running { detail: None });
+        assert_eq!(ui.rolled["deploy"], (Urgency::Running, 1));
+        assert_eq!(ui.rolled["ops"], (Urgency::Running, 1));
+        assert_eq!(ui.rolled["docs"], (Urgency::Idle, 0));
+        // A prompt beats running, and is the user's above the asker.
+        status(&mut ui, "fix", Activity::Waiting { detail: None });
+        assert_eq!(ui.rolled["ops"], (Urgency::NeedsYou, 1));
+        assert_eq!(ui.rolled["deploy"], (Urgency::Running, 1));
+        status(&mut ui, "ship", Activity::Running { detail: None });
+        status(&mut ui, "deploy", Activity::Running { detail: None });
+        assert_eq!(ui.rolled["ops"], (Urgency::NeedsYou, 1));
     }
 
     #[test]
