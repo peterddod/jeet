@@ -146,6 +146,7 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
     if let Some(working) = &explorer.working {
         draw_working(frame, working);
     }
+    super::term::unhide_on_highlight(frame.buffer_mut());
 }
 
 /// A small banner shown while a background job runs, so a slow push or a big
