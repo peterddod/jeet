@@ -17,7 +17,7 @@
 //!   task with `git worktree move`, work and all. With paths given, only the
 //!   worktrees under them are; and a pull request's checkout — one a review
 //!   job ran in, or one the explorer made before PR checkouts moved into
-//!   review tasks — never is. `git worktree remove` removes one.
+//!   reviews — never is. `git worktree remove` removes one.
 //!
 //! Work a task already has is not offered again. A checkout counts as in a
 //! task only when the task's worktree has its commit and exactly its
@@ -1046,7 +1046,8 @@ fn ensure_in_store(app: &App, repo: &FoundRepo) -> Result<RepoRecord> {
         {
             return Ok(record.clone());
         }
-        let in_use = app.db.task_worktrees_of_repo(&repo.id)?.len();
+        let in_use = app.db.task_worktrees_of_repo(&repo.id)?.len()
+            + app.db.review_worktrees_of_repo(&repo.id)?.len();
         if in_use > 0 {
             bail!(
                 "{} task worktree{} use its trunk at {}; jeet leaves it there",

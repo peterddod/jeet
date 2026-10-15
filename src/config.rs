@@ -70,7 +70,7 @@ pub enum HarnessConfig {
         /// directories under `$JEET_HOME/tasks` (default: off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_trust: Option<bool>,
-        /// With `auto_trust`, accept it for review tasks too, whose
+        /// With `auto_trust`, accept it for reviews too, whose
         /// checkouts are other people's PR branches (default: off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_trust_reviews: Option<bool>,
@@ -84,7 +84,7 @@ pub enum HarnessConfig {
 
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
 
-/// What the review task's agent is asked, unless `[review] prompt` says.
+/// What a review's agent is asked, unless `[review] prompt` says.
 pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{pr} ({url}). It is checked out \
 at the PR's head in {worktree}. Read the change (`gh pr view {pr}`, `gh pr diff {pr}`) and the \
 code around it, then list what is wrong or risky, most serious first, with file and line. Do \
@@ -93,7 +93,7 @@ not push, merge, approve or comment on the PR unless asked.";
 /// `[review]` in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewConfig {
-    /// The first prompt the review task's agent is given, in its tmux pane:
+    /// The first prompt a review's agent is given, in its tmux pane:
     /// `{pr}`, `{url}` and `{worktree}` are substituted. Unset, a prompt
     /// asking it to review the PR in its worktree ([`DEFAULT_REVIEW_PROMPT`]).
     /// The PR's branch and title are never pasted in: whoever opened the

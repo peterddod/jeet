@@ -143,7 +143,7 @@ pub fn ensure_running(
         None => ensure_running_admitted(app, task, session, prompt, &guard)?,
     };
     if let Some((live, max)) = over {
-        let (cap, _) = run::max_live_of(task);
+        let (cap, _) = run::max_live_of();
         running
             .warnings
             .push(format!("over {cap} ({live}/{max} live already)"));
@@ -251,9 +251,6 @@ fn start_tmux(
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
     }
-    // A review's session is filed under its worktree: picked up first, so
-    // it is the one resumed, not a blank one started beside it.
-    warnings.extend(crate::review::adopt_sessions(app, task));
     // Refused before anything is read for the launch, as it always was.
     if prompt.is_some() && spec.harness.prompt_args("").is_none() {
         bail!(no_first_prompt(&spec, &task.slug));
@@ -273,6 +270,7 @@ fn start_tmux(
     let launch = Launch {
         id: task.id.clone(),
         slug: task.slug.clone(),
+        subject: format!("task {}", task.slug),
         name: task.name.clone(),
         dir,
         known_sessions,
@@ -317,6 +315,8 @@ pub struct Launch {
     pub id: String,
     /// Names its tmux session ([`session_name_for`]).
     pub slug: String,
+    /// What messages call it: `task fix-x`, `review api#7`.
+    pub subject: String,
     /// The name its sessions start under.
     pub name: String,
     /// Where the agent runs, and keeps its status.
@@ -362,10 +362,10 @@ pub fn launch_tmux(
     warnings.extend(spec.version_warning());
     if launch.ungated_warning && spec.harness.enforcement() == harness::Enforcement::None {
         warnings.push(format!(
-            "{} has no deny rules, so task {}'s agent is not stopped from force-pushing or \
+            "{} has no deny rules, so {}'s agent is not stopped from force-pushing or \
              merging; only jeet's own commands are gated",
             spec.harness.name(),
-            launch.slug
+            launch.subject
         ));
     }
     let hooks = spec.has_hooks();
@@ -433,7 +433,8 @@ fn already_running(
     })
 }
 
-/// Why `slug`'s agent cannot be started with a first prompt on `spec`.
+/// Why the agent of the task or review `slug` cannot be started with a
+/// first prompt on `spec`.
 fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
     format!(
         "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
@@ -448,10 +449,15 @@ fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
 /// or held, as well as made, so a brief or message is never left waiting
 /// for a start that would not give it.
 pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
+    first_prompt_refusal_for(app, &task.slug)
+}
+
+/// [`first_prompt_refusal`] for the agent of the task or review `slug`.
+pub fn first_prompt_refusal_for(app: &App, slug: &str) -> Option<String> {
     let spec = AgentSpec::from_config(&app.config).ok()?;
     match spec.harness.prompt_args("") {
         Some(_) => None,
-        None => Some(no_first_prompt(&spec, &task.slug)),
+        None => Some(no_first_prompt(&spec, slug)),
     }
 }
 
@@ -514,9 +520,9 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
             }
             if !known.iter().any(|s| s.session_id == id) && !spec.harness.has_session(dir, id) {
                 bail!(
-                    "task {} has no session {id} that jeet or {} knows of; `jeet task ls` \
+                    "{} has no session {id} that jeet or {} knows of; `jeet task ls` \
                      shows its tasks, and ctrl-s in a task's explorer its sessions",
-                    launch.slug,
+                    launch.subject,
                     spec.harness.name()
                 );
             }
@@ -575,7 +581,7 @@ fn task_hooks(
                 }
             }
         }
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {}
+        TaskKind::Work | TaskKind::Assistant => {}
     }
     Ok(HookSetup {
         exe,
@@ -731,10 +737,16 @@ pub fn remove_settings(home: &Path, task_id: &str) -> Result<()> {
 /// End the task's agent, if it is running, returning once it and everything
 /// it started have exited. Without tmux there is none.
 pub fn stop(task: &TaskRecord) -> Result<()> {
+    stop_session(&task.slug)
+}
+
+/// End the agent in the tmux session of whatever has `slug`, if it is
+/// running.
+pub fn stop_session(slug: &str) -> Result<()> {
     if !tmux::available() {
         return Ok(());
     }
-    tmux::kill(&session_name(task))
+    tmux::kill(&session_name_for(slug))
 }
 
 /// What [`interrupt`] did.
@@ -786,8 +798,13 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
 /// Whether this jeet runs inside the task's agent session: as the agent's
 /// own command (`$JEET_TASK_ID`), or in a window the user opened there.
 pub fn is_own_session(task: &TaskRecord) -> bool {
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|id| id.trim() == task.id);
-    in_task || tmux::current_session().is_some_and(|s| s == session_name(task))
+    is_own_agent_session(&task.id, &task.slug)
+}
+
+/// [`is_own_session`] for the task or review with `id` and `slug`.
+pub fn is_own_agent_session(id: &str, slug: &str) -> bool {
+    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| v.trim() == id);
+    in_task || tmux::current_session().is_some_and(|s| s == session_name_for(slug))
 }
 
 /// [`interrupt`] in the task's tmux session.
@@ -859,12 +876,17 @@ fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) ->
 /// session to `verb` the task would end this jeet with it, before it had
 /// done anything.
 pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
-    if is_own_session(task) {
+    refuse_inside_agent_session(&task.id, &task.slug, &format!("task {}", task.name), verb)
+}
+
+/// [`refuse_inside_session`] for the task or review with `id` and `slug`,
+/// called `subject`.
+pub fn refuse_inside_agent_session(id: &str, slug: &str, subject: &str, verb: &str) -> Result<()> {
+    if is_own_agent_session(id, slug) {
         bail!(
-            "this jeet runs inside tmux session {}, the agent's session for task {}, \
-             which ending the agent would end too; {verb} the task from outside that session",
-            session_name(task),
-            task.name
+            "this jeet runs inside tmux session {}, the agent's session for {subject}, \
+             which ending the agent would end too; {verb} it from outside that session",
+            session_name_for(slug),
         );
     }
     Ok(())
@@ -910,16 +932,6 @@ pub fn busy_reason(activity: &Activity, draft: bool, detail: bool) -> Option<Str
 /// on a background thread, not in a draw.
 pub fn activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
     activity_at(&tasks::task_dir(app, task), &session_name(task), tmux_ok)
-}
-
-/// [`activity`] as lists show it: a review task's headless review job,
-/// still running, counts as its agent running. Only for display: what
-/// routes a delivery or charges a budget asks of the agent alone.
-pub fn shown_activity(app: &App, task: &TaskRecord, tmux_ok: bool) -> Activity {
-    crate::review::with_job(
-        activity(app, task, tmux_ok),
-        &crate::review::state_files_of_task(app, task),
-    )
 }
 
 /// [`activity`] for the task in `dir` whose tmux session is `session`, for

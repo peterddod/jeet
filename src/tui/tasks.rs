@@ -33,8 +33,8 @@
 //! the view is shown.
 //! The reviews view lists every review, with where its PR and its review
 //! stand on GitHub, asked on a thread of its own ([`reviews`]); `⏎` offers
-//! its diff in the review viewer or its session, through the task's own
-//! open.
+//! its diff in the review viewer or its session, and `a` archives it and
+//! `D` deletes it, as for a task. Reviews are rows of their own, not tasks.
 //! The projects view groups the active tasks and managers by the project
 //! they were started from ([`projects_tab`](super::projects_tab)): `→` or
 //! `⏎` goes into one, where the active view's walk applies and the task keys
@@ -65,7 +65,7 @@ use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
 use super::projects_tab::{Groups, ProjectGroup};
-use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, Source};
+use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, ReviewRow, Source};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
@@ -75,6 +75,7 @@ use crate::cli::Delegation;
 use crate::commands::{self, task::printable, task::printable_text};
 use crate::config::{self, Config};
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{
     RunState, TaskKind, TaskPrRecord, TaskRecord, TaskReportRecord, TaskState, TaskWorktreeRecord,
 };
@@ -134,11 +135,14 @@ const NOT_USER: &str = "the agents pane acts as you; open jeet from your own ter
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
+/// Said for `w` and `p` on a review.
+const ONE_WORKTREE: &str =
+    "a review has one worktree and one pull request: e explores it, v shows the diff";
 /// Said when a key of the reviews view has no review under the cursor.
 const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
 
-/// Said for opening the session of a review job no task holds.
-const NO_SESSION: &str = "this review has no task, so no session — jeet review <pr> makes one";
+/// Said for opening the session of a review job no review holds.
+const NO_SESSION: &str = "this job has no review, so no session — jeet review <pr> makes one";
 
 /// The review menu's lines, in order: what each opens.
 pub const REVIEW_MENU: &[(&str, &str)] = &[
@@ -151,12 +155,9 @@ pub const REVIEW_MENU: &[(&str, &str)] = &[
 const REVIEW_DIFF: usize = 0;
 const REVIEW_SESSION: usize = 1;
 
-/// `review jeet#55`, for a review with no task to name it.
-pub fn review_name(pr: Option<&PrKey>) -> String {
-    match pr {
-        Some(pr) => format!("review {}", pr.label()),
-        None => "review".to_string(),
-    }
+/// `review jeet#55`, for a review job with no review to name it.
+pub fn review_name(pr: &PrKey) -> String {
+    format!("review {}", pr.label())
 }
 
 /// Said for ⏎ on an empty answer.
@@ -181,14 +182,9 @@ pub struct TaskRow {
     pub size: Option<u64>,
     /// What a task with a parent last told it, or jeet did for it.
     pub report: Option<TaskReportRecord>,
-    /// A review task's review job state files: a job still running is
-    /// shown as its agent running.
-    pub review_jobs: Vec<PathBuf>,
     /// Its agent runs without jeet knowing its process, as the last poll
     /// found ([`runtime::unanchored`]).
     pub unanchored: bool,
-    /// Its start waits on a `max_live`, as the index last said.
-    pub queued: bool,
 }
 
 impl TaskRow {
@@ -199,17 +195,22 @@ impl TaskRow {
     /// Whether the agent is running in the task's tmux session, as far as
     /// the last poll knows.
     pub fn agent_running(&self) -> bool {
-        matches!(
-            self.activity,
-            Some(
-                Activity::Live
-                    | Activity::Starting
-                    | Activity::Idle { .. }
-                    | Activity::Running { .. }
-                    | Activity::Waiting { .. }
-            )
-        )
+        running(self.activity.as_ref())
     }
+}
+
+/// Whether `activity`, as last polled, is an agent running in its session.
+pub fn running(activity: Option<&Activity>) -> bool {
+    matches!(
+        activity,
+        Some(
+            Activity::Live
+                | Activity::Starting
+                | Activity::Idle { .. }
+                | Activity::Running { .. }
+                | Activity::Waiting { .. }
+        )
+    )
 }
 
 /// Which tasks the list shows; ⇥ cycles, ⇧⇥ goes back.
@@ -218,7 +219,7 @@ pub enum View {
     Active,
     /// The tree under the assistant (design §6).
     Agents,
-    /// The active reviews and review jobs with no task, or, toggled with
+    /// The active reviews and review jobs with no review, or, toggled with
     /// `A`, the archived reviews: reviews are shown here alone.
     Reviews,
     /// The active tasks and managers by the project they were
@@ -846,10 +847,10 @@ pub enum Panel {
     },
     /// ⏎ in the reviews view: what to open of a review.
     ReviewMenu {
-        /// None for a review job with no task.
+        /// None for a review job with no review.
         task_id: Option<String>,
-        pr: Option<PrKey>,
-        /// `review jeet#55`, or the task's name.
+        pr: PrKey,
+        /// `review jeet#55`.
         label: String,
         selected: usize,
     },
@@ -1112,7 +1113,10 @@ pub struct TasksUi {
     /// jeet runs as the user, not inside an agent's pane: the agents
     /// view's keys that show an agent's text or act need it (Q2).
     pub user: bool,
-    /// Review jobs on disk, as last read; the view lists those no task holds.
+    /// The reviews, newest activity first: not tasks, so not in `rows`.
+    pub review_rows: Vec<ReviewRow>,
+    /// Review jobs on disk, as last read; the view lists those no review
+    /// holds.
     pub legacy: Vec<Legacy>,
     /// The reviews view's lines, in display order.
     pub reviews: Vec<ReviewLine>,
@@ -1172,6 +1176,7 @@ impl TasksUi {
             tree_failed: false,
             shown: HashMap::new(),
             user: false,
+            review_rows: Vec::new(),
             legacy: Vec::new(),
             reviews: Vec::new(),
             archived_reviews: false,
@@ -1214,6 +1219,33 @@ impl TasksUi {
             .collect();
         self.resort(keep.as_deref());
         self.retree();
+    }
+
+    /// Replace the reviews with a fresh read of the index, keeping what the
+    /// background threads already reported and the cursor where it was.
+    pub fn set_reviews(&mut self, reviews: Vec<ReviewRow>) {
+        let keep = self.selected_id().map(str::to_string);
+        let old = std::mem::take(&mut self.review_rows);
+        self.review_rows = reviews
+            .into_iter()
+            .map(|mut row| {
+                if let Some(was) = old.iter().find(|o| o.id() == row.id()) {
+                    if row.review.state == was.review.state {
+                        row.activity = was.activity.clone();
+                        row.unanchored = was.unanchored;
+                    }
+                    row.size = was.size;
+                    row.last_activity = row.last_activity.max(was.last_activity);
+                }
+                row
+            })
+            .collect();
+        self.resort_reviews(keep.as_deref());
+    }
+
+    fn resort_reviews(&mut self, keep: Option<&str>) {
+        reviews::sort_rows(&mut self.review_rows);
+        self.refresh_visible(keep);
     }
 
     /// Roll the tree's urgencies up again from what the threads last
@@ -1266,15 +1298,15 @@ impl TasksUi {
     fn refresh_visible(&mut self, keep: Option<&str>) {
         if self.view == View::Reviews {
             self.visible.clear();
-            // A job no task holds is kept under the cursor by its PR.
+            // A job no review holds is kept under the cursor by its PR.
             let was = self
                 .reviews
                 .get(self.selected)
                 .filter(|line| matches!(line.source, Source::Legacy(_)))
-                .and_then(|line| line.pr.clone());
+                .map(|line| line.pr.clone());
             let reviewed = &self.reviewed;
             self.reviews = reviews::lines(
-                &self.rows,
+                &self.review_rows,
                 &self.legacy,
                 self.archived_reviews,
                 &self.filter,
@@ -1283,13 +1315,13 @@ impl TasksUi {
             self.selected = keep
                 .and_then(|id| {
                     self.reviews.iter().position(
-                        |line| matches!(line.source, Source::Task(i) if self.rows[i].task.id == id),
+                        |line| matches!(line.source, Source::Review(i) if self.review_rows[i].id() == id),
                     )
                 })
                 .or_else(|| {
                     let was = was?;
                     self.reviews.iter().position(|line| {
-                        matches!(line.source, Source::Legacy(_)) && line.pr.as_ref() == Some(&was)
+                        matches!(line.source, Source::Legacy(_)) && line.pr == was
                     })
                 })
                 .unwrap_or_else(|| self.selected.min(self.reviews.len().saturating_sub(1)));
@@ -1333,10 +1365,8 @@ impl TasksUi {
         // The active view lists one level; a filter searches them all.
         let here = self.path.last().map(String::as_str);
         let level = self.in_tree() && self.filter.is_empty();
-        // Reviews are the reviews view's alone.
         let in_view: Vec<usize> = (0..self.rows.len())
             .filter(|&i| self.rows[i].task.state == state)
-            .filter(|&i| self.rows[i].task.kind != TaskKind::Review)
             .filter(|&i| !level || self.tree_parent(&self.rows[i]) == here)
             .collect();
         self.show_ranked(in_view, keep);
@@ -1447,10 +1477,7 @@ impl TasksUi {
                 At::Root => self.assistant_row.as_ref(),
                 At::Row(i) => self.rows.get(i),
             },
-            View::Reviews => match self.reviews.get(self.selected)?.source {
-                Source::Task(i) => self.rows.get(i),
-                Source::Legacy(_) => None,
-            },
+            View::Reviews => None,
             View::Active | View::Projects => {
                 self.visible.get(self.selected).map(|&i| &self.rows[i])
             }
@@ -1465,13 +1492,20 @@ impl TasksUi {
         }
     }
 
-    /// The active review task of `pr`, when its agent is idle as last
-    /// polled: what to archive now that GitHub says the PR is done.
-    pub fn idle_review_of(&self, pr: &PrKey) -> Option<&TaskRow> {
-        self.rows.iter().find(|row| {
-            row.task.kind == TaskKind::Review
-                && row.task.state == TaskState::Active
-                && reviews::task_pr(row).as_ref() == Some(pr)
+    /// The review under the cursor, in the reviews view; not a legacy job.
+    pub fn selected_review_row(&self) -> Option<&ReviewRow> {
+        match self.selected_review()?.source {
+            Source::Review(i) => self.review_rows.get(i),
+            Source::Legacy(_) => None,
+        }
+    }
+
+    /// The active review of `pr`, when its agent is idle as last polled:
+    /// what to archive now that GitHub says the PR is done.
+    pub fn idle_review_of(&self, pr: &PrKey) -> Option<&ReviewRow> {
+        self.review_rows.iter().find(|row| {
+            !row.archived()
+                && row.pr() == *pr
                 && row.activity.as_ref().is_some_and(crate::review::idle)
         })
     }
@@ -1489,17 +1523,27 @@ impl TasksUi {
     /// what GitHub is asked.
     pub fn reviewed_prs(&self) -> Vec<PrKey> {
         let mut seen = HashSet::new();
-        let lines = |archived| reviews::lines(&self.rows, &self.legacy, archived, "", |_| None);
+        let lines =
+            |archived| reviews::lines(&self.review_rows, &self.legacy, archived, "", |_| None);
         lines(false)
             .into_iter()
             .chain(lines(true))
-            .filter_map(|line| line.pr)
+            .map(|line| line.pr)
             .filter(|pr| seen.insert(pr.clone()))
             .collect()
     }
 
+    /// The id of the task, or in the reviews view the review, under the
+    /// cursor.
     pub fn selected_id(&self) -> Option<&str> {
-        self.selected_row().map(|row| row.task.id.as_str())
+        match self.view {
+            View::Reviews => self.selected_review_row().map(ReviewRow::id),
+            _ => self.selected_row().map(|row| row.task.id.as_str()),
+        }
+    }
+
+    pub fn review_row(&self, id: &str) -> Option<&ReviewRow> {
+        self.review_rows.iter().find(|row| row.id() == id)
     }
 
     pub fn row(&self, id: &str) -> Option<&TaskRow> {
@@ -1564,7 +1608,6 @@ impl TasksUi {
         row.task.kind == TaskKind::Manager
             || self.rows.iter().any(|r| {
                 r.task.state == TaskState::Active
-                    && r.task.kind != TaskKind::Review
                     && r.task.parent_id.as_deref() == Some(&row.task.id)
             })
     }
@@ -1701,16 +1744,17 @@ impl TasksUi {
     /// Put the cursor on task `id`, switching to the view that holds it and
     /// dropping a filter that hides it.
     pub fn select(&mut self, id: &str) {
-        let Some(row) = self.row(id) else {
-            return;
+        let (archived, review) = match (self.row(id), self.review_row(id)) {
+            (Some(row), _) => (row.task.state == TaskState::Archived, false),
+            (None, Some(row)) => (row.archived(), true),
+            (None, None) => return,
         };
-        let archived = row.task.state == TaskState::Archived;
-        self.view = match (row.task.kind, archived) {
-            (TaskKind::Review, _) => {
+        self.view = match review {
+            true => {
                 self.archived_reviews = archived;
                 View::Reviews
             }
-            (_, _) => {
+            false => {
                 self.archived_tasks = archived;
                 View::Active
             }
@@ -1737,7 +1781,7 @@ impl TasksUi {
     }
 
     /// How many tasks the active view has, unfiltered: active, or
-    /// `archived`. Reviews are the reviews view's.
+    /// `archived`.
     pub fn task_count(&self, archived: bool) -> usize {
         let state = match archived {
             true => TaskState::Archived,
@@ -1745,14 +1789,14 @@ impl TasksUi {
         };
         self.rows
             .iter()
-            .filter(|row| row.task.state == state && row.task.kind != TaskKind::Review)
+            .filter(|row| row.task.state == state)
             .count()
     }
 
     /// How many lines the reviews view has, unfiltered: active, or
     /// `archived`.
     pub fn review_count(&self, archived: bool) -> usize {
-        reviews::lines(&self.rows, &self.legacy, archived, "", |_| None).len()
+        reviews::lines(&self.review_rows, &self.legacy, archived, "", |_| None).len()
     }
 
     /// Take in what a background thread found out.
@@ -1765,6 +1809,15 @@ impl TasksUi {
                 last_activity,
                 unanchored,
             } => {
+                if let Some(row) = self.review_rows.iter_mut().find(|r| r.id() == id) {
+                    row.activity = activity;
+                    row.unanchored = unanchored;
+                    if last_activity > row.last_activity {
+                        row.last_activity = last_activity;
+                        self.resort_reviews(keep.as_deref());
+                    }
+                    return;
+                }
                 let Some(row) = self.rows.iter_mut().find(|r| r.task.id == id) else {
                     return;
                 };
@@ -1781,6 +1834,9 @@ impl TasksUi {
             }
             Update::Size { id, bytes } => {
                 if let Some(row) = self.rows.iter_mut().find(|r| r.task.id == id) {
+                    row.size = Some(bytes);
+                }
+                if let Some(row) = self.review_rows.iter_mut().find(|r| r.id() == id) {
                     row.size = Some(bytes);
                 }
             }
@@ -1948,8 +2004,12 @@ impl TasksUi {
                 }
                 // Like the explorer's: quit, leaving the shell in the task.
                 KeyCode::Char('q') => {
-                    let exit = match self.selected_row() {
-                        Some(row) if row.dir.is_dir() => Exit::ChangeDir(row.dir.clone()),
+                    let dir = match self.view {
+                        View::Reviews => self.selected_review_row().map(|row| &row.dir),
+                        _ => self.selected_row().map(|row| &row.dir),
+                    };
+                    let exit = match dir {
+                        Some(dir) if dir.is_dir() => Exit::ChangeDir(dir.clone()),
                         _ => Exit::Stay,
                     };
                     self.quit(exit);
@@ -2109,6 +2169,13 @@ impl TasksUi {
                 None
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
+            // A review has one worktree and one pull request: `e` and `v`
+            // reach them, and the rest of the task keys have nothing to do.
+            KeyCode::Char('w' | 'p') if self.view == View::Reviews => {
+                self.set_status(ONE_WORKTREE);
+                None
+            }
+            KeyCode::Char('S') if self.view == View::Reviews => None,
             KeyCode::Char('A') if self.view == View::Active => {
                 self.archived_tasks = !self.archived_tasks;
                 self.selected = 0;
@@ -2204,18 +2271,20 @@ impl TasksUi {
                     confirmed: false,
                     recursive: false,
                 }),
-                View::Reviews | View::Projects => {
-                    match self.selected_row().map(|row| row.task.state) {
-                        Some(TaskState::Archived) => {
-                            needs_task(self, &|task_id| Action::Unarchive { task_id })
-                        }
-                        _ => needs_task(self, &|task_id| Action::Archive {
-                            task_id,
-                            confirmed: false,
-                            recursive: false,
-                        }),
-                    }
+                View::Reviews if self.archived_reviews => {
+                    needs_task(self, &|task_id| Action::Unarchive { task_id })
                 }
+                View::Projects
+                    if self.selected_row().map(|row| row.task.state)
+                        == Some(TaskState::Archived) =>
+                {
+                    needs_task(self, &|task_id| Action::Unarchive { task_id })
+                }
+                View::Reviews | View::Projects => needs_task(self, &|task_id| Action::Archive {
+                    task_id,
+                    confirmed: false,
+                    recursive: false,
+                }),
                 // Taken by `agents_key`.
                 View::Agents => None,
             },
@@ -2235,13 +2304,14 @@ impl TasksUi {
             return;
         };
         let (task_id, label) = match line.source {
-            Source::Task(i) => {
-                let row = &self.rows[i];
-                let label = tasks::review_label(&row.task, &row.worktrees)
-                    .unwrap_or_else(|| row.task.name.clone());
-                (Some(row.task.id.clone()), label)
+            Source::Review(i) => {
+                let review = &self.review_rows[i].review;
+                (
+                    Some(review.id.clone()),
+                    format!("review {}", review.label()),
+                )
             }
-            Source::Legacy(_) => (None, review_name(line.pr.as_ref())),
+            Source::Legacy(_) => (None, review_name(&line.pr)),
         };
         self.panel = Some(Panel::ReviewMenu {
             task_id,
@@ -2258,15 +2328,13 @@ impl TasksUi {
             return None;
         };
         let task_id = match line.source {
-            Source::Task(i) => Some(self.rows[i].task.id.clone()),
+            Source::Review(i) => Some(self.review_rows[i].id().to_string()),
             Source::Legacy(_) => None,
         };
-        match (line.pr, task_id) {
-            (Some(pr), task_id) => Some(Action::ReviewDiff { task_id, pr }),
-            // Its checkout records no PR: the viewer finds one if it can.
-            (None, Some(task_id)) => Some(Action::ReviewViewer { task_id }),
-            (None, None) => None,
-        }
+        Some(Action::ReviewDiff {
+            task_id,
+            pr: line.pr,
+        })
     }
 
     /// The keys the agents view has of its own (Q22), or `None` for one it
@@ -2557,14 +2625,13 @@ impl TasksUi {
                     });
                     return None;
                 };
-                match (choice, task_id, pr) {
-                    (REVIEW_DIFF, task_id, Some(pr)) => Some(Action::ReviewDiff { task_id, pr }),
-                    (REVIEW_DIFF, Some(task_id), None) => Some(Action::ReviewViewer { task_id }),
-                    (REVIEW_SESSION, Some(task_id), _) => Some(Action::Open {
+                match (choice, task_id) {
+                    (REVIEW_DIFF, task_id) => Some(Action::ReviewDiff { task_id, pr }),
+                    (REVIEW_SESSION, Some(task_id)) => Some(Action::Open {
                         task_id,
                         session: None,
                     }),
-                    (REVIEW_SESSION, None, _) => {
+                    (REVIEW_SESSION, None) => {
                         self.set_status(NO_SESSION);
                         None
                     }
@@ -3384,10 +3451,10 @@ enum TreeAsk {
 }
 
 /// Where to find what was just archived.
-fn shows_archived(kind: TaskKind) -> &'static str {
-    match kind {
-        TaskKind::Review => "A shows archived reviews",
-        _ => "A shows archived tasks",
+fn shows_archived(review: bool) -> &'static str {
+    match review {
+        true => "A shows archived reviews",
+        false => "A shows archived tasks",
     }
 }
 
@@ -3454,35 +3521,42 @@ impl Background {
         }
     }
 
-    /// Point both threads at the tasks now listed, and have them report
-    /// straight away.
-    fn watch(&self, rows: &[TaskRow]) {
-        self.probe(rows);
-        self.resize(rows);
+    /// Point both threads at the tasks and reviews now listed, and have
+    /// them report straight away.
+    fn watch(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        self.probe(rows, reviews);
+        self.resize(rows, reviews);
     }
 
-    /// Have the status poller read every task's status now.
-    fn probe(&self, rows: &[TaskRow]) {
-        let probes = rows
-            .iter()
-            .map(|row| Probe {
-                id: row.task.id.clone(),
-                dir: row.dir.clone(),
-                session: runtime::session_name(&row.task),
-                touched: row.task.last_activity,
-                active: row.task.state == TaskState::Active,
-                review_jobs: row.review_jobs.clone(),
-            })
-            .collect();
-        let _ = self.probes.send(probes);
+    /// Have the status poller read every task's and review's status now.
+    fn probe(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        let tasks = rows.iter().map(|row| Probe {
+            id: row.task.id.clone(),
+            dir: row.dir.clone(),
+            session: runtime::session_name(&row.task),
+            touched: row.task.last_activity,
+            active: row.task.state == TaskState::Active,
+            review_jobs: Vec::new(),
+        });
+        let reviews = reviews.iter().map(|row| Probe {
+            id: row.id().to_string(),
+            dir: row.dir.clone(),
+            session: crate::review::session_name(&row.review),
+            touched: row.review.last_activity,
+            active: !row.archived(),
+            review_jobs: row.jobs.clone(),
+        });
+        let _ = self.probes.send(tasks.chain(reviews).collect());
     }
 
-    fn resize(&self, rows: &[TaskRow]) {
-        let dirs = rows
+    fn resize(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        let tasks = rows
             .iter()
-            .map(|row| (row.task.id.clone(), row.dir.clone()))
-            .collect();
-        let _ = self.sizes.send(dirs);
+            .map(|row| (row.task.id.clone(), row.dir.clone()));
+        let reviews = reviews
+            .iter()
+            .map(|row| (row.id().to_string(), row.dir.clone()));
+        let _ = self.sizes.send(tasks.chain(reviews).collect());
     }
 }
 
@@ -3839,7 +3913,7 @@ impl Screen<'_> {
                 found: Ok(found),
             } if crate::review::pr_done(found.state) => self.ui.idle_review_of(pr).map(|row| {
                 (
-                    row.task.id.clone(),
+                    row.id().to_string(),
                     pr.clone(),
                     found.state,
                     found.closed_at,
@@ -3870,7 +3944,7 @@ impl Screen<'_> {
         }
     }
 
-    /// Archive review task `id`, as `jeet watch` does, now GitHub says its
+    /// Archive review `id`, as `jeet watch` does, now GitHub says its
     /// PR is `state`: not while its agent is mid-turn (a later look tries
     /// again), and not when archiving would delete ignored files a build
     /// does not make again.
@@ -3878,13 +3952,13 @@ impl Screen<'_> {
         if self.kept_reviews.contains(id) {
             return;
         }
-        let Ok(Some(task)) = self.app.db.get_task(id) else {
+        let Ok(Some(review)) = self.app.db.get_review(id) else {
             return;
         };
         let app = self.app;
         let label = format!("archiving the review of {}: it is {state}", pr.label());
         let outcome = self
-            .progress(&label, || crate::review::retire(app, &task, closed_at))
+            .progress(&label, || crate::review::retire(app, &review, closed_at))
             .and_then(|inner| inner);
         match outcome {
             Ok(crate::review::Retired::Archived(warnings)) => {
@@ -4002,9 +4076,9 @@ impl Screen<'_> {
                 // measure: a walk restarted on every action never finishes
                 // a big task.
                 if reconcile || changed {
-                    self.bg.watch(&self.ui.rows);
+                    self.bg.watch(&self.ui.rows, &self.ui.review_rows);
                 } else {
-                    self.bg.probe(&self.ui.rows);
+                    self.bg.probe(&self.ui.rows, &self.ui.review_rows);
                 }
                 // Only on a full refresh — opening, and `r` — as it is a
                 // `gh` call per worktree.
@@ -4043,7 +4117,7 @@ impl Screen<'_> {
         }
         self.read_projects(false);
         if self.set_rows(load_rows(self.app)?) {
-            self.bg.watch(&self.ui.rows);
+            self.bg.watch(&self.ui.rows, &self.ui.review_rows);
             if self.ui.view == View::Reviews {
                 self.look_at_reviews();
             }
@@ -4066,21 +4140,23 @@ impl Screen<'_> {
         }
     }
 
-    /// Replace the rows, saying whether the tasks themselves changed rather
-    /// than only what is known about them.
-    fn set_rows(&mut self, (rows, root): (Vec<TaskRow>, Option<TaskRow>)) -> bool {
-        let tasks = |rows: &[TaskRow]| {
+    /// Replace the rows, saying whether the tasks or reviews themselves
+    /// changed rather than only what is known about them.
+    fn set_rows(&mut self, loaded: Loaded) -> bool {
+        let ids = |rows: &[TaskRow], reviews: &[ReviewRow]| {
             let mut ids: Vec<(String, TaskState)> = rows
                 .iter()
                 .map(|r| (r.task.id.clone(), r.task.state))
+                .chain(reviews.iter().map(|r| (r.id().to_string(), r.review.state)))
                 .collect();
             ids.sort_by(|a, b| a.0.cmp(&b.0));
             ids
         };
-        let before = tasks(&self.ui.rows);
-        self.ui.assistant_row = root;
-        self.ui.set_rows(rows);
-        let changed = tasks(&self.ui.rows) != before;
+        let before = ids(&self.ui.rows, &self.ui.review_rows);
+        self.ui.assistant_row = loaded.root;
+        self.ui.set_rows(loaded.rows);
+        self.ui.set_reviews(loaded.reviews);
+        let changed = ids(&self.ui.rows, &self.ui.review_rows) != before;
         if changed && self.ui.view == View::Agents {
             self.read_tree();
         }
@@ -4123,6 +4199,202 @@ impl Screen<'_> {
         self.ui.row(id).map(|row| row.task.clone())
     }
 
+    /// The review row `id` is, as the index has it now.
+    fn review(&self, id: &str) -> Option<ReviewRecord> {
+        self.ui.review_row(id)?;
+        self.app.db.get_review(id).ok().flatten()
+    }
+
+    /// `a` on a review: archive it, once the user has seen what would not
+    /// be kept.
+    fn archive_review(&mut self, review: ReviewRecord, confirmed: bool) -> Result<()> {
+        let app = self.app;
+        let running = tmux::pane_alive(&crate::review::session_name(&review));
+        let unkept = match confirmed {
+            true => Vec::new(),
+            false => crate::review::unkept(app, &review),
+        };
+        if !confirmed && (running || !unkept.is_empty()) {
+            self.ui.panel = Some(Panel::Confirm {
+                title: format!("archive review {}", review.label()),
+                lines: archive_warning(&review.slug, running, &unkept),
+                action: Pending::Archive {
+                    task_id: review.id.clone(),
+                    recursive: false,
+                },
+            });
+            return Ok(());
+        }
+        let archived = self
+            .progress(&format!("archiving {}", review.label()), || {
+                crate::review::archive(app, &review)
+            })
+            .and_then(|inner| inner);
+        self.refresh(false);
+        match archived {
+            Ok(warnings) => self.ui.set_status(with_warnings(
+                format!("archived {} — {}", review.label(), shows_archived(true)),
+                &warnings,
+            )),
+            Err(e) => self.ui.message(
+                "could not finish archiving",
+                vec![
+                    format!("{e:#}"),
+                    String::new(),
+                    "a on it in the archived list tries again".into(),
+                ],
+                None,
+            ),
+        }
+        Ok(())
+    }
+
+    fn unarchive_review(&mut self, review: ReviewRecord) -> Result<()> {
+        let app = self.app;
+        let back = self
+            .progress(&format!("bringing {} back", review.label()), || {
+                crate::review::unarchive(app, &review)
+            })
+            .and_then(|inner| inner);
+        self.refresh(false);
+        match back {
+            Ok(warnings) => {
+                self.ui.select(&review.id);
+                self.ui.set_status(with_warnings(
+                    format!("{} is back", review.label()),
+                    &warnings,
+                ));
+            }
+            Err(e) => self
+                .ui
+                .message("could not unarchive", vec![format!("{e:#}")], None),
+        }
+        Ok(())
+    }
+
+    fn delete_review(&mut self, review: ReviewRecord) -> Result<()> {
+        let app = self.app;
+        let deleted = self
+            .progress(&format!("deleting {}", review.label()), || {
+                crate::review::delete(app, &review)
+            })
+            .and_then(|inner| inner);
+        self.refresh(false);
+        match deleted {
+            Ok(warnings) => self.ui.set_status(with_warnings(
+                format!("deleted {}", review.label()),
+                &warnings,
+            )),
+            Err(e) => self.ui.message(
+                "could not finish deleting",
+                vec![
+                    format!("{e:#}"),
+                    String::new(),
+                    "D on it again tries again".into(),
+                ],
+                None,
+            ),
+        }
+        Ok(())
+    }
+
+    /// `D` on a review: ask once, naming what it would lose.
+    fn ask_delete_review(&mut self, review: ReviewRecord) -> Result<()> {
+        let app = self.app;
+        let dir = crate::review::dir(app, &review);
+        if crate::commands::task::standing_in(&dir) {
+            self.ui.message(
+                "cannot delete",
+                vec![
+                    format!("the shell jeet runs in is inside {}", dir.display()),
+                    "cd out of it, then delete the review".into(),
+                ],
+                None,
+            );
+            return Ok(());
+        }
+        if let Err(e) = runtime::refuse_inside_agent_session(
+            &review.id,
+            &review.slug,
+            &crate::review::subject(&review),
+            "delete",
+        ) {
+            self.ui
+                .message("cannot delete", vec![format!("{e:#}")], None);
+            return Ok(());
+        }
+        let losses = self
+            .progress("checking what would be lost", || {
+                crate::review::losses(app, &review)
+            })
+            .and_then(|inner| inner)?;
+        let mut lines = vec![
+            format!("removes {} and its worktree", dir.display()),
+            String::new(),
+        ];
+        if losses.is_empty() {
+            lines.push("nothing would be lost — no unpushed or uncommitted work".into());
+        } else {
+            lines.push("⚠ this work would be lost:".into());
+            lines.extend(losses.iter().map(|loss| format!("  {loss}")));
+        }
+        self.ui.panel = Some(Panel::Confirm {
+            title: format!("delete review {}", review.label()),
+            lines,
+            action: Pending::Delete {
+                task_id: review.id.clone(),
+                recursive: false,
+            },
+        });
+        Ok(())
+    }
+
+    /// ⏎ on a review row's session: attach to its agent, starting it first
+    /// if it is not running.
+    fn open_review(&mut self, review: ReviewRecord, session: Option<String>) -> Result<()> {
+        let app = self.app;
+        if review.state == TaskState::Archived {
+            self.ui
+                .set_status(format!("{} is archived — a brings it back", review.label()));
+            return Ok(());
+        }
+        tmux::require()?;
+        let name = crate::review::session_name(&review);
+        let live = tmux::has_session(&name) && tmux::pane_alive(&name);
+        if !live {
+            if let Some(job) = crate::review::running_job(app, &review) {
+                self.ui.message(
+                    "review running",
+                    vec![crate::review::running_refusal(&review, &job)],
+                    None,
+                );
+                return Ok(());
+            }
+        }
+        let running = self
+            .progress(&format!("starting {}'s agent", review.label()), || {
+                crate::review::ensure_running(
+                    app,
+                    &review,
+                    session.as_deref(),
+                    None,
+                    Admission::Bypass,
+                )
+            })
+            .and_then(|inner| inner)?;
+        let attached = term::suspended(self.terminal, || tmux::attach(&running.tmux_session))?;
+        let _ = app.db.touch_review(&review.id, now_secs());
+        self.refresh(false);
+        match attached {
+            Ok(_) => self.ui.set_status(with_warnings(
+                format!("back from {}", review.label()),
+                &running.warnings,
+            )),
+            Err(e) => self.ui.set_status(format!("could not attach: {e:#}")),
+        }
+        Ok(())
+    }
+
     /// Carry out `action`; whatever goes wrong ends up on screen.
     fn perform(&mut self, action: Action) {
         if let Err(e) = self.try_perform(action) {
@@ -4139,10 +4411,14 @@ impl Screen<'_> {
             }
             Action::Open { task_id, session } => self.open(&task_id, session)?,
             Action::Explore { task_id } => {
-                let Some(row) = self.ui.row(&task_id).cloned() else {
-                    return Ok(());
+                let (dir, worktrees) = match self.ui.review_row(&task_id) {
+                    Some(row) => (row.dir.clone(), row.review.worktree().into_iter().collect()),
+                    None => match self.ui.row(&task_id) {
+                        Some(row) => (row.dir.clone(), row.worktrees.clone()),
+                        None => return Ok(()),
+                    },
                 };
-                let places = places(&row.dir, &row.worktrees);
+                let places = places(&dir, &worktrees);
                 match only_place(&places) {
                     Some(place) => self.explore_at(place.clone())?,
                     None => {
@@ -4179,7 +4455,7 @@ impl Screen<'_> {
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
-                self.bg.resize(&self.ui.rows);
+                self.bg.resize(&self.ui.rows, &self.ui.review_rows);
                 match added {
                     Ok(added) => {
                         self.worktrees(&task_id)?;
@@ -4219,7 +4495,7 @@ impl Screen<'_> {
                     })
                     .and_then(|inner| inner);
                 self.refresh(false);
-                self.bg.resize(&self.ui.rows);
+                self.bg.resize(&self.ui.rows, &self.ui.review_rows);
                 match removed {
                     Ok(warnings) => {
                         self.worktrees(&task_id)?;
@@ -4353,6 +4629,9 @@ impl Screen<'_> {
                 confirmed,
                 recursive,
             } => {
+                if let Some(review) = self.review(&task_id) {
+                    return self.archive_review(review, confirmed);
+                }
                 let Some(row) = self.ui.row(&task_id).cloned() else {
                     return Ok(());
                 };
@@ -4403,7 +4682,7 @@ impl Screen<'_> {
                 self.refresh(false);
                 match archived {
                     Ok(warnings) => self.ui.set_status(with_warnings(
-                        format!("archived {} — {}", task.name, shows_archived(task.kind)),
+                        format!("archived {} — {}", task.name, shows_archived(false)),
                         &warnings,
                     )),
                     Err(e) => self.ui.message(
@@ -4418,6 +4697,9 @@ impl Screen<'_> {
                 }
             }
             Action::Unarchive { task_id } => {
+                if let Some(review) = self.review(&task_id) {
+                    return self.unarchive_review(review);
+                }
                 let Some(task) = self.task(&task_id) else {
                     return Ok(());
                 };
@@ -4453,6 +4735,9 @@ impl Screen<'_> {
             }
             Action::AskDelete { task_id } => self.ask_delete(&task_id)?,
             Action::Delete { task_id, recursive } => {
+                if let Some(review) = self.review(&task_id) {
+                    return self.delete_review(review);
+                }
                 let Some(task) = self.task(&task_id) else {
                     return Ok(());
                 };
@@ -4873,7 +5158,7 @@ impl Screen<'_> {
                 return;
             }
         };
-        let asker = manager::label(&answered.asker);
+        let asker = answered.asker.clone();
         let mut lines = vec![commands::report::delivered(
             &asker,
             "the answer",
@@ -5093,6 +5378,9 @@ impl Screen<'_> {
     /// one has to be started and there is more than one session to resume.
     fn open(&mut self, task_id: &str, session: Option<String>) -> Result<()> {
         let app = self.app;
+        if let Some(review) = self.review(task_id) {
+            return self.open_review(review, session);
+        }
         let Some(row) = self.ui.row(task_id).cloned() else {
             return Ok(());
         };
@@ -5106,16 +5394,6 @@ impl Screen<'_> {
         tmux::require()?;
         let name = runtime::session_name(&task);
         let live = tmux::has_session(&name) && tmux::pane_alive(&name);
-        if !live {
-            if let Some(job) = crate::review::running_job(app, &task) {
-                self.ui.message(
-                    "review running",
-                    vec![crate::review::running_refusal(&task, &job)],
-                    None,
-                );
-                return Ok(());
-            }
-        }
         if session.is_none() && !live {
             let spec = AgentSpec::from_config(&app.config)?;
             if spec.supports_sessions() {
@@ -5224,24 +5502,22 @@ impl Screen<'_> {
     /// `v`: the task's PR in the review viewer: a review task's own, else
     /// the one open PR recorded for it, else the PRs panel to pick from.
     fn review_viewer(&mut self, task_id: &str) -> Result<()> {
-        let Some(row) = self.ui.row(task_id).cloned() else {
-            return Ok(());
-        };
-        if row.task.kind == TaskKind::Review {
-            let Some((path, number)) = row
-                .worktrees
-                .iter()
-                .filter_map(|wt| Some((row.dir.join(&wt.dir_name), wt.pr_number?)))
-                .find(|(path, _)| path.is_dir())
+        if let Some(review) = self.review(task_id) {
+            let Some((path, number)) = crate::review::worktree_path(self.app, &review)
+                .filter(|path| path.is_dir())
+                .map(|path| (path, review.pr_number))
             else {
                 self.ui.set_status(format!(
                     "{} has no checkout of its pull request on disk",
-                    row.task.name
+                    review.slug
                 ));
                 return Ok(());
             };
             return self.view_pr_at(&path, number);
         }
+        let Some(row) = self.ui.row(task_id).cloned() else {
+            return Ok(());
+        };
         let prs = self.app.db.list_task_prs(&row.task.id)?;
         match pr_to_view(&prs) {
             PrToView::One(pr) => {
@@ -5268,18 +5544,21 @@ impl Screen<'_> {
     /// has one — else from the repository's trunk: the viewer asks GitHub
     /// for the diff, so any checkout of the repository will do.
     fn view_pr(&mut self, task_id: &str, repo_id: &str, number: u64) -> Result<()> {
-        let Some(row) = self.ui.row(task_id).cloned() else {
-            return Ok(());
+        let (dir, worktrees) = match self.ui.review_row(task_id) {
+            Some(row) => (row.dir.clone(), row.review.worktree().into_iter().collect()),
+            None => match self.ui.row(task_id) {
+                Some(row) => (row.dir.clone(), row.worktrees.clone()),
+                None => return Ok(()),
+            },
         };
-        let mut checkouts: Vec<_> = row
-            .worktrees
+        let mut checkouts: Vec<&TaskWorktreeRecord> = worktrees
             .iter()
             .filter(|wt| wt.repo_id == repo_id)
             .collect();
         checkouts.sort_by_key(|wt| wt.pr_number != Some(number));
         let path = match checkouts
             .iter()
-            .map(|wt| row.dir.join(&wt.dir_name))
+            .map(|wt| dir.join(&wt.dir_name))
             .find(|path| path.is_dir())
         {
             Some(path) => path,
@@ -5310,6 +5589,9 @@ impl Screen<'_> {
 
     fn ask_delete(&mut self, task_id: &str) -> Result<()> {
         let app = self.app;
+        if let Some(review) = self.review(task_id) {
+            return self.ask_delete_review(review);
+        }
         let Some(row) = self.ui.row(task_id).cloned() else {
             return Ok(());
         };
@@ -5386,7 +5668,7 @@ impl Screen<'_> {
             );
             return Ok(());
         }
-        if let Err(e) = tasks::refuse_inside_any(app, &nodes, "delete") {
+        if let Err(e) = tasks::refuse_inside_any(&nodes, "delete") {
             self.ui
                 .message("cannot delete", vec![format!("{e:#}")], None);
             return Ok(());
@@ -5423,7 +5705,7 @@ impl Screen<'_> {
             .filter(|node| node.state == TaskState::Active)
             .collect();
         // Before asking, not after: the answer would count for nothing.
-        if let Err(e) = tasks::refuse_inside_any(app, &nodes, "archive") {
+        if let Err(e) = tasks::refuse_inside_any(&nodes, "archive") {
             self.ui
                 .message("cannot archive", vec![format!("{e:#}")], None);
             return Ok(());
@@ -5461,7 +5743,7 @@ impl Screen<'_> {
                     "archived {} and {} under it — {}",
                     task.name,
                     plural(nodes.len().saturating_sub(1), "task"),
-                    shows_archived(task.kind)
+                    shows_archived(false)
                 ),
                 &warnings,
             )),
@@ -5532,21 +5814,45 @@ impl Screen<'_> {
 }
 
 /// Every task in the index, as rows not yet polled or measured.
-/// Every task's row, and the assistant's, the tree's root, if it has one
-/// yet: this never makes it.
-fn load_rows(app: &App) -> Result<(Vec<TaskRow>, Option<TaskRow>)> {
+/// What the index holds, as rows.
+struct Loaded {
+    rows: Vec<TaskRow>,
+    reviews: Vec<ReviewRow>,
+    /// The assistant's, the tree's root, if it has one yet: this never makes
+    /// it.
+    root: Option<TaskRow>,
+}
+
+/// Every task's row, every review's, and the assistant's.
+fn load_rows(app: &App) -> Result<Loaded> {
     let rows = app
         .db
         .list_tasks(None)?
         .into_iter()
         .map(|task| task_row(app, task))
         .collect::<Result<_>>()?;
+    let reviews = app
+        .db
+        .list_reviews(None)?
+        .into_iter()
+        .map(|review| {
+            let dir = crate::review::dir(app, &review);
+            let jobs = crate::review::state_file_of(app, &review)
+                .into_iter()
+                .collect();
+            ReviewRow::new(review, dir, jobs)
+        })
+        .collect();
     let root = app
         .db
         .get_assistant_task()?
         .map(|task| task_row(app, task))
         .transpose()?;
-    Ok((rows, root))
+    Ok(Loaded {
+        rows,
+        reviews,
+        root,
+    })
 }
 
 fn task_row(app: &App, task: TaskRecord) -> Result<TaskRow> {
@@ -5561,8 +5867,6 @@ fn task_row(app: &App, task: TaskRecord) -> Result<TaskRow> {
             Some(_) => app.db.last_report(&task.id)?,
             None => None,
         },
-        review_jobs: crate::review::state_files_of_task(app, &task),
-        queued: app.db.queued_at(&task.id)?.is_some(),
         task,
     })
 }
@@ -5593,8 +5897,6 @@ pub(crate) fn session_choices(
     task: &TaskRecord,
     dir: &Path,
 ) -> Result<Vec<SessionChoice>> {
-    // A review's sessions, filed under its worktree, are listed too.
-    crate::review::adopt_sessions(app, task);
     let mut choices: Vec<SessionChoice> = app
         .db
         .list_task_sessions(&task.id)?
@@ -5949,9 +6251,7 @@ mod tests {
             last_activity: last,
             size: None,
             report: None,
-            review_jobs: Vec::new(),
             unanchored: false,
-            queued: false,
         }
     }
 
@@ -6675,28 +6975,22 @@ mod tests {
         }
     }
 
-    fn review_row(id: &str, state: TaskState, last: i64, pr: u64) -> TaskRow {
-        let mut row = task(id, &format!("review-api-{pr}"), state, last);
-        row.task.kind = TaskKind::Review;
-        row.worktrees = vec![TaskWorktreeRecord {
-            id: 1,
-            task_id: id.into(),
-            repo_id: "github.com/acme/api".into(),
-            dir_name: "api".into(),
-            branch: None,
-            created_branch: false,
-            head_oid: None,
-            stash_ref: None,
-            pr_number: Some(pr),
-            created_at: 0,
-            read_only: false,
-        }];
-        row
+    fn review_row(id: &str, state: TaskState, last: i64, pr: u64) -> ReviewRow {
+        let mut review = ReviewRecord::new(
+            id.into(),
+            format!("review-api-{pr}"),
+            "github.com/acme/api",
+            pr,
+            last,
+        );
+        review.state = state;
+        review.dir_name = Some("api".into());
+        ReviewRow::new(review, PathBuf::from("/nowhere").join(id), Vec::new())
     }
 
     fn reviews_sample() -> TasksUi {
-        let mut ui = TasksUi::new(vec![
-            task("w", "some work", TaskState::Active, 90),
+        let mut ui = TasksUi::new(vec![task("w", "some work", TaskState::Active, 90)]);
+        ui.set_reviews(vec![
             review_row("old", TaskState::Archived, 80, 4),
             review_row("r1", TaskState::Active, 10, 1),
             review_row("r2", TaskState::Active, 20, 2),
@@ -6707,7 +7001,7 @@ mod tests {
             running: false,
             started_at: 0,
         };
-        // #2 has a task; #7 is an older jeet's job alone.
+        // #2 has a review; #7 is an older jeet's job alone.
         ui.set_legacy(vec![legacy(2, "held"), legacy(7, "headless job")]);
         ui
     }
@@ -6716,14 +7010,14 @@ mod tests {
         ui.reviews
             .iter()
             .map(|line| match line.source {
-                Source::Task(i) => ui.rows[i].task.id.clone(),
+                Source::Review(i) => ui.review_rows[i].id().to_string(),
                 Source::Legacy(i) => format!("job {}", ui.legacy[i].pr.number),
             })
             .collect()
     }
 
     #[test]
-    fn the_reviews_view_lists_every_review_and_jobs_no_task_holds() {
+    fn the_reviews_view_lists_every_review_and_jobs_no_review_holds() {
         let mut ui = reviews_sample();
         assert_eq!(ui.count(View::Reviews), 3);
         press(&mut ui, KeyCode::Tab);
@@ -6786,28 +7080,10 @@ mod tests {
 
     #[test]
     fn reviews_are_in_no_task_list() {
-        let mut parent = task("m", "boss", TaskState::Active, 50);
-        parent.task.kind = TaskKind::Manager;
-        let mut child = review_row("r3", TaskState::Active, 60, 3);
-        child.task.parent_id = Some("m".into());
-        let mut rows = reviews_sample().rows;
-        rows.extend([parent, child]);
-        let mut ui = TasksUi::new(rows);
-        // Active: the work and the manager, not the reviews.
-        assert_eq!(shown(&ui), ["some work", "boss"]);
-        assert_eq!(ui.count(View::Active), 2);
-        // A manager with only a review under it has nothing to go into.
-        let boss = ui.row("m").unwrap().clone();
-        assert!(ui.enterable(&boss));
-        // Nor does a task enter for a review under it.
-        let mut over = ui.row("w").unwrap().clone();
-        over.task.id = "m".into();
-        over.task.kind = TaskKind::Work;
-        assert!(!ui.enterable(&over));
-        press(&mut ui, KeyCode::Down);
-        press(&mut ui, KeyCode::Right);
-        assert_eq!(ui.visible.len(), 0);
-        press(&mut ui, KeyCode::Left);
+        let mut ui = reviews_sample();
+        assert_eq!(ui.rows.len(), 1);
+        assert_eq!(shown(&ui), ["some work"]);
+        assert_eq!(ui.count(View::Active), 1);
         // Filtering searches every level, still without reviews.
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "review");
@@ -6818,6 +7094,99 @@ mod tests {
         ui.set_rows(ui.rows.clone());
         assert!(ui.visible.is_empty());
         assert_eq!(ui.task_count(true), 0);
+        // Nor does a review take part in the tree or the projects.
+        assert!(ui.row("r1").is_none());
+        assert!(ui.node("r1").is_none());
+        assert_eq!(ui.groups.count(false), 0, "the work task has no project");
+    }
+
+    #[test]
+    fn a_review_row_takes_the_polls_findings_and_keeps_them_when_reloaded() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 7"]);
+        ui.apply(Update::Status {
+            id: "r1".into(),
+            activity: Some(Activity::Running { detail: None }),
+            last_activity: 99,
+            unanchored: true,
+        });
+        ui.apply(Update::Size {
+            id: "r1".into(),
+            bytes: 42,
+        });
+        // Newer activity moves it up, and the cursor goes with its review.
+        assert_eq!(reviews_shown(&ui), ["r1", "r2", "job 7"]);
+        assert_eq!(ui.selected_id(), Some("r2"));
+        ui.set_reviews(vec![
+            review_row("r1", TaskState::Active, 10, 1),
+            review_row("r2", TaskState::Active, 20, 2),
+        ]);
+        let row = ui.review_row("r1").unwrap();
+        assert_eq!(row.size, Some(42));
+        assert_eq!(row.last_activity, 99);
+        assert!(row.unanchored && row.agent_running());
+        // Archived, it is no longer running anything.
+        ui.set_reviews(vec![review_row("r1", TaskState::Archived, 10, 1)]);
+        assert_eq!(ui.review_row("r1").unwrap().activity, None);
+        assert!(ui.review_row("r2").is_none());
+    }
+
+    #[test]
+    fn a_archives_unarchives_and_d_deletes_the_review_under_the_cursor() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        assert_eq!(ui.selected_id(), Some("r2"));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Archive {
+                task_id: "r2".into(),
+                confirmed: false,
+                recursive: false,
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDelete {
+                task_id: "r2".into()
+            })
+        );
+        // Archived ones are brought back with a, and deleted with D too.
+        press(&mut ui, KeyCode::Char('A'));
+        assert_eq!(ui.selected_id(), Some("old"));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Unarchive {
+                task_id: "old".into()
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDelete {
+                task_id: "old".into()
+            })
+        );
+        // A job with no review has nothing to act on.
+        press(&mut ui, KeyCode::Char('A'));
+        press(&mut ui, KeyCode::End);
+        for key in ['a', 'D'] {
+            assert_eq!(press(&mut ui, KeyCode::Char(key)), None);
+            assert_eq!(ui.status_line, NO_TASK);
+        }
+    }
+
+    #[test]
+    fn w_and_p_say_a_review_has_one_worktree_and_one_pr() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        for key in ['w', 'p'] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, KeyCode::Char(key)), None);
+            assert_eq!(ui.status_line, ONE_WORKTREE);
+        }
     }
 
     #[test]
@@ -6835,22 +7204,19 @@ mod tests {
         ui.apply(status(Activity::Waiting { detail: None }));
         assert!(ui.idle_review_of(&pr_key(1)).is_none(), "asking");
         ui.apply(status(Activity::Idle { since: 0 }));
-        assert_eq!(ui.idle_review_of(&pr_key(1)).unwrap().task.id, "r1");
-        // An archived review, or a job no task holds, is never archived.
+        assert_eq!(ui.idle_review_of(&pr_key(1)).unwrap().id(), "r1");
+        // An archived review, or a job no review holds, is never archived.
         assert!(ui.idle_review_of(&pr_key(4)).is_none());
         assert!(ui.idle_review_of(&pr_key(7)).is_none());
     }
 
     #[test]
-    fn the_cursor_stays_on_a_job_no_task_holds_as_lines_come_above_it() {
+    fn the_cursor_stays_on_a_job_no_review_holds_as_lines_come_above_it() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
         press(&mut ui, KeyCode::End);
-        assert_eq!(
-            ui.selected_review().and_then(|l| l.pr.clone()),
-            Some(pr_key(7))
-        );
+        assert_eq!(ui.selected_review().map(|l| l.pr.clone()), Some(pr_key(7)));
         let job = |number| Legacy {
             pr: pr_key(number),
             title: String::new(),
@@ -6859,10 +7225,7 @@ mod tests {
         };
         ui.set_legacy(vec![job(8), job(2), job(7)]);
         assert_eq!(reviews_shown(&ui), ["r2", "r1", "job 8", "job 7"]);
-        assert_eq!(
-            ui.selected_review().and_then(|l| l.pr.clone()),
-            Some(pr_key(7))
-        );
+        assert_eq!(ui.selected_review().map(|l| l.pr.clone()), Some(pr_key(7)));
     }
 
     #[test]
@@ -6913,7 +7276,7 @@ mod tests {
             })
         );
         assert!(ui.panel.is_none());
-        // ↓ ⏎, or s: the session, through the task's own open.
+        // ↓ ⏎, or s: the session, through the review's own open.
         press(&mut ui, KeyCode::Enter);
         press(&mut ui, KeyCode::Down);
         let open = Some(Action::Open {
@@ -6926,7 +7289,7 @@ mod tests {
         press(&mut ui, KeyCode::Enter);
         assert_eq!(press(&mut ui, KeyCode::Esc), None);
         assert!(ui.panel.is_none());
-        // The task's own keys act on the review's task.
+        // The explorer and archive keys act on the review.
         assert_eq!(
             press(&mut ui, KeyCode::Char('e')),
             Some(Action::Explore {
@@ -6937,7 +7300,7 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive { task_id, .. }) if task_id == "r2"
         ));
-        // A job no task holds: its diff, but no session to open.
+        // A job no review holds: its diff, but no session to open.
         press(&mut ui, KeyCode::Down);
         press(&mut ui, KeyCode::Down);
         assert_eq!(
@@ -7602,7 +7965,7 @@ mod tests {
         let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
         let mut row = task("t", "t", TaskState::Archived, 3);
         row.dir = dir.path().to_path_buf();
-        bg.watch(&[row]);
+        bg.watch(&[row], &[]);
         let mut got = Vec::new();
         while got.len() < 2 {
             got.push(bg.updates.recv_timeout(Duration::from_secs(10)).unwrap());
@@ -7633,7 +7996,7 @@ mod tests {
         // what it sends.
         const CYCLES: usize = 200;
         for _ in 0..CYCLES {
-            bg.probe(&rows);
+            bg.probe(&rows, &[]);
             std::thread::sleep(Duration::from_millis(2));
         }
         // However slow the machine, the first round lands.
@@ -7649,7 +8012,7 @@ mod tests {
             "{queued} updates piled up over {CYCLES} cycles"
         );
         // Taken again, it answers again.
-        bg.probe(&rows);
+        bg.probe(&rows, &[]);
         assert!(matches!(
             bg.updates.recv_timeout(Duration::from_secs(10)).unwrap(),
             Update::Status { .. }

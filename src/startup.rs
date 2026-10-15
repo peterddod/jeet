@@ -13,7 +13,7 @@
 //! - otherwise marks the task "needs input – trust folder" and tells the
 //!   user with a notification, unless someone is attached to look at it.
 //!
-//! Review tasks are out of scope unless `auto_trust_reviews` is on as well:
+//! Reviews are out of scope unless `auto_trust_reviews` is on as well:
 //! their checkouts are other people's branches, and trusting them lets their
 //! `.claude/settings.json` hooks and `.mcp.json` servers run.
 
@@ -27,6 +27,7 @@ use anyhow::{Context, Result};
 use crate::agent::AgentSpec;
 use crate::config::{self, Config};
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::harness::{Harness, StartupPrompt, TrustStep};
 use crate::manager::run;
@@ -50,18 +51,26 @@ pub const WATCH_ENV: &str = "JEET_STARTUP_WATCH";
 /// What a watcher's log file is called, in the task's `.jeet`.
 const LOG_FILE: &str = "startup.log";
 
-/// Whether jeet may accept the trust prompt by itself for `task`, in
+/// Whose agent's trust prompt may be accepted: a task's, by its kind, or a
+/// review's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    Task(TaskKind),
+    Review,
+}
+
+/// Whether jeet may accept the trust prompt by itself for `who`, in
 /// `dir`: only with `auto_trust` on, only under `$JEET_HOME/tasks`, and for
-/// a review task only with `auto_trust_reviews` on too. A manager follows
+/// a review only with `auto_trust_reviews` on too. A manager follows
 /// `auto_trust` as a worker does: its parent starts it with nobody at its
 /// pane. Never the assistant's.
-pub fn may_auto_trust(config: &Config, home: &Path, task: &TaskRecord, dir: &Path) -> bool {
+pub fn may_auto_trust(config: &Config, home: &Path, who: Trust, dir: &Path) -> bool {
     let (tasks, reviews) = config.auto_trust();
     let in_tasks = dir.starts_with(config::tasks_root(home));
-    match task.kind {
-        TaskKind::Work | TaskKind::Manager => tasks && in_tasks,
-        TaskKind::Review => reviews && in_tasks,
-        TaskKind::Assistant => false,
+    match who {
+        Trust::Task(TaskKind::Work | TaskKind::Manager) => tasks && in_tasks,
+        Trust::Review => reviews && in_tasks,
+        Trust::Task(TaskKind::Assistant) => false,
     }
 }
 
@@ -306,14 +315,39 @@ fn may_accept_now(app: &App, task: &TaskRecord, in_scope: bool) -> bool {
     in_scope && matches!(run::hold(app, task), Ok(None))
 }
 
-/// `jeet task-startup <task>`: watch the start of the task's agent, which
-/// runs session `session` when jeet picked its id.
+/// The agent being watched: a task's, or a review's.
+enum Watched {
+    Task(TaskRecord),
+    Review(Box<ReviewRecord>),
+}
+
+/// `jeet task-startup <task>`: watch the start of the agent of task (or
+/// review) `task_id`, which runs session `session` when jeet picked its id.
 pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
-    let Some(task) = app.db.get_task(task_id)? else {
-        anyhow::bail!("no task {task_id}");
+    let watched = match app.db.get_task(task_id)? {
+        Some(task) => Watched::Task(task),
+        None => match app.db.get_review(task_id)? {
+            Some(review) => Watched::Review(Box::new(review)),
+            None => anyhow::bail!("no task {task_id}"),
+        },
     };
     let spec = AgentSpec::from_config(&app.config)?;
-    let dir = tasks::task_dir(app, &task);
+    let (dir, name, slug, subtitle, trust) = match &watched {
+        Watched::Task(task) => (
+            tasks::task_dir(app, task),
+            runtime::session_name(task),
+            task.slug.clone(),
+            task.name.clone(),
+            Trust::Task(task.kind),
+        ),
+        Watched::Review(review) => (
+            crate::review::dir(app, review),
+            crate::review::session_name(review),
+            review.slug.clone(),
+            crate::review::subject(review),
+            Trust::Review,
+        ),
+    };
     let since = status::launched_at(&dir).unwrap_or_else(now_secs);
     let reported = || {
         let latest = match session {
@@ -322,23 +356,32 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         };
         latest.is_some_and(|s| s.at >= since)
     };
-    let name = runtime::session_name(&task);
-    let in_scope = may_auto_trust(&app.config, &app.home, &task, &dir);
-    let auto = || may_accept_now(app, &task, in_scope);
+    let in_scope = may_auto_trust(&app.config, &app.home, trust, &dir);
+    let auto = || match &watched {
+        Watched::Task(task) => may_accept_now(app, task, in_scope),
+        // Not while paused: accepting would let its prompt run.
+        Watched::Review(review) => {
+            in_scope
+                && app
+                    .db
+                    .get_review(&review.id)
+                    .is_ok_and(|r| r.is_some_and(|r| !r.paused))
+        }
+    };
     let outcome = watch(
         spec.harness,
         &TmuxPane(name.clone()),
         &reported,
         &auto,
         Limits::default(),
-        &|line| eprintln!("jeet task-startup {}: {line}", task.slug),
+        &|line| eprintln!("jeet task-startup {slug}: {line}"),
     )?;
-    eprintln!("jeet task-startup {}: {outcome:?}", task.slug);
+    eprintln!("jeet task-startup {slug}: {outcome:?}");
     let tell = |body: &str| {
         if !tmux::attached(&name) {
             notify::notify(&Notification {
                 title: "jeet",
-                subtitle: Some(&task.name),
+                subtitle: Some(&subtitle),
                 body,
                 url: None,
             });
@@ -349,26 +392,31 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             if let Some(id) = session {
                 status::mark_startup_prompt(&dir, id, "trust folder", now_secs())?;
             }
-            // No hook fires for this prompt, so its parent hears of it here,
-            // once per launch however often startup is watched.
-            if task.parent_id.is_some() {
-                let body = "waiting for the user to trust the folder";
-                let waiting = StatusEvent::Waiting;
-                if let Err(e) = reports::auto_status(app, &task, waiting, body, since, 0) {
-                    eprintln!("jeet task-startup {}: warning: {e:#}", task.slug);
+            // No hook fires for this prompt, so whoever it reports to hears
+            // of it here, once per launch however often startup is watched.
+            let body = "waiting for the user to trust the folder";
+            let waiting = StatusEvent::Waiting;
+            let told = match &watched {
+                Watched::Task(task) if task.parent_id.is_some() => {
+                    reports::auto_status(app, task, waiting, body, since, 0).map(|_| ())
                 }
+                Watched::Task(_) => Ok(()),
+                Watched::Review(review) => {
+                    reports::auto_status_review(app, review, waiting, body, since, 0).map(|_| ())
+                }
+            };
+            if let Err(e) = told {
+                eprintln!("jeet task-startup {slug}: warning: {e:#}");
             }
             tell(&format!(
-                "{} asks whether to trust the task's folder; `jeet task open {}` to answer",
+                "{} asks whether to trust the folder; `jeet task open {slug}` to answer",
                 spec.harness.name(),
-                task.slug
             ));
         }
         Outcome::AcceptedNoHook => tell(&format!(
-            "jeet trusted the task's folder for {}, but no hook has reported since; \
-             `jeet task open {}` to look",
+            "jeet trusted the folder for {}, but no hook has reported since; \
+             `jeet task open {slug}` to look",
             spec.harness.name(),
-            task.slug
         )),
         Outcome::Started | Outcome::Gone | Outcome::NoPrompt | Outcome::Accepted => {}
     }
@@ -677,21 +725,6 @@ mod tests {
     #[test]
     fn auto_trust_covers_tasks_not_reviews_unless_asked() {
         let home = Path::new("/h");
-        let task = |kind| TaskRecord {
-            id: "t".into(),
-            slug: "t".into(),
-            name: "t".into(),
-            project: None,
-            kind,
-            state: crate::db::tasks::TaskState::Active,
-            created_at: 0,
-            last_activity: 0,
-            parent_id: None,
-            placement: crate::placement::Placement::Local,
-            run_state: RunState::Run,
-            run_state_by: None,
-            max_children: None,
-        };
         let in_tasks = config::tasks_root(home).join("t");
         let config = |text: &str| toml::from_str::<Config>(text).unwrap();
         let off = Config::default();
@@ -701,52 +734,47 @@ mod tests {
         assert!(!may_auto_trust(
             &off,
             home,
-            &task(TaskKind::Work),
-            &in_tasks
-        ));
-        assert!(may_auto_trust(&on, home, &task(TaskKind::Work), &in_tasks));
-        assert!(!may_auto_trust(
-            &on,
-            home,
-            &task(TaskKind::Review),
+            Trust::Task(TaskKind::Work),
             &in_tasks
         ));
         assert!(may_auto_trust(
-            &reviews,
+            &on,
             home,
-            &task(TaskKind::Review),
+            Trust::Task(TaskKind::Work),
             &in_tasks
         ));
+        assert!(!may_auto_trust(&on, home, Trust::Review, &in_tasks));
+        assert!(may_auto_trust(&reviews, home, Trust::Review, &in_tasks));
         // A manager follows `auto_trust` as a worker does.
         assert!(!may_auto_trust(
             &off,
             home,
-            &task(TaskKind::Manager),
+            Trust::Task(TaskKind::Manager),
             &in_tasks
         ));
         assert!(may_auto_trust(
             &on,
             home,
-            &task(TaskKind::Manager),
+            Trust::Task(TaskKind::Manager),
             &in_tasks
         ));
         // Never outside the tasks, nor for the assistant.
         assert!(!may_auto_trust(
             &on,
             home,
-            &task(TaskKind::Work),
+            Trust::Task(TaskKind::Work),
             Path::new("/elsewhere")
         ));
         assert!(!may_auto_trust(
             &on,
             home,
-            &task(TaskKind::Manager),
+            Trust::Task(TaskKind::Manager),
             Path::new("/elsewhere")
         ));
         assert!(!may_auto_trust(
             &reviews,
             home,
-            &task(TaskKind::Assistant),
+            Trust::Task(TaskKind::Assistant),
             &in_tasks
         ));
     }

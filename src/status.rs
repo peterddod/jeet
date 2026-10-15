@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::assistant;
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord};
 use crate::harness::{self, EventKind, Harness, HookEvent, StartSource};
 use crate::identity;
@@ -367,6 +368,15 @@ fn handle_hook(
     };
     let ctx = hook_ctx(app, &task_dir, &task_id, launched_for, &hook, now)?;
 
+    if let (Some(EventKind::SessionStarted(_)), app) = (&hook.kind, &ctx.app) {
+        // A review has the one session: this one, from now on.
+        if let Some(review) = &ctx.review {
+            if let Err(e) = app.db.set_review_session(&review.id, session_id) {
+                eprintln!("jeet task-hook {event}: {e:#}");
+            }
+            let _ = app.db.touch_review(&review.id, now);
+        }
+    }
     if let (Some(EventKind::SessionStarted(source)), app) = (&hook.kind, &ctx.app) {
         if let Some(task) = &ctx.task {
             let assistant = task.kind == TaskKind::Assistant;
@@ -417,9 +427,7 @@ fn handle_hook(
                         }
                         manager::context::session_context(app, task, session_id, now)
                     }
-                    TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {
-                        reports::brief_context(app, task)
-                    }
+                    TaskKind::Work | TaskKind::Assistant => reports::brief_context(app, task),
                 };
                 match context {
                     Ok(brief) => {
@@ -461,6 +469,9 @@ fn handle_hook(
     if let (Threshold::Hit100, Some(task)) = (ctx.threshold, &ctx.task) {
         budget::report_blocked(&ctx.app, task);
     }
+    if let (Threshold::Hit100, Some(review)) = (ctx.threshold, &ctx.review) {
+        budget::report_blocked_review(&ctx.app, review);
+    }
     if let Err(e) = report_step(&hook, &ctx, launched_for, now) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
@@ -477,8 +488,10 @@ fn handle_hook(
 /// event, worked out in one step before any of it ([`hook_ctx`]).
 struct HookCtx {
     app: App,
-    /// The task, unless its row is gone.
+    /// The task, unless its row is gone, or it is a review's.
     task: Option<TaskRecord>,
+    /// The review, when the hook is a review agent's.
+    review: Option<ReviewRecord>,
     /// Whether the hook is the task's own agent's ([`attributed`]): asked
     /// only of a task in the tree, for an event that charges it or that its
     /// parent hears of.
@@ -529,6 +542,10 @@ fn hook_ctx_with(
         None => open()?,
     };
     let task = app.db.get_task(task_id)?;
+    let review = match task {
+        Some(_) => None,
+        None => app.db.get_review(task_id)?,
+    };
     let session_id = hook.session_id.as_deref().unwrap_or_default();
     let prev = read_status(task_dir, session_id);
     let busy = prev
@@ -543,15 +560,33 @@ fn hook_ctx_with(
         Some(EventKind::Idle) => busy.is_some(),
         _ => false,
     };
-    let in_tree = task.as_ref().is_some_and(|t| t.parent_id.is_some());
+    // Every review is held to `[review]`'s limits, as a task in the tree is
+    // to its budget.
+    let in_tree = review.is_some() || task.as_ref().is_some_and(|t| t.parent_id.is_some());
     // Asked only when needed: it walks the process tree.
     let attributed =
         in_tree && (charges || matches!(kind, Some(EventKind::NeedsInput(_)))) && ours(&app);
     let mut threshold = Threshold::None;
+    if let (true, Some(review)) = (charges && attributed, &review) {
+        let turns = i64::from(matches!(kind, Some(EventKind::Stopped)));
+        let charged = charge_busy(
+            &app, &review.id, true, task_dir, session_id, busy, turns, now,
+        )
+        .and_then(|()| budget::enforce_review(&app, review));
+        match charged {
+            Ok(crossed) => threshold = crossed,
+            Err(e) => eprintln!(
+                "jeet task-hook {}: could not charge its limits: {e:#}",
+                hook.name
+            ),
+        }
+    }
     if let (true, Some(task)) = (charges && attributed, &task) {
         let turns = i64::from(matches!(kind, Some(EventKind::Stopped)));
-        let charged = charge_busy(&app, task, task_dir, session_id, busy, turns, now)
-            .and_then(|()| budget::enforce(&app, task));
+        let charged = charge_busy(
+            &app, &task.id, false, task_dir, session_id, busy, turns, now,
+        )
+        .and_then(|()| budget::enforce(&app, task));
         match charged {
             Ok(crossed) => threshold = crossed,
             Err(e) => eprintln!(
@@ -564,9 +599,17 @@ fn hook_ctx_with(
         kind,
         Some(EventKind::Stopped | EventKind::Idle | EventKind::Ended { .. })
     );
-    let hold = match &task {
-        Some(task) if in_tree && asks => match run::hold(&app, task) {
+    let hold = match (&task, &review) {
+        (Some(task), _) if in_tree && asks => match run::hold(&app, task) {
             Ok(hold) => hold.map(|(_, state)| state),
+            Err(e) => {
+                eprintln!("jeet task-hook {}: {e:#}", hook.name);
+                None
+            }
+        },
+        // Paused: it has used its limits up, and is handed nothing.
+        (None, Some(review)) if asks => match app.db.get_review(&review.id) {
+            Ok(fresh) => fresh.filter(|r| r.paused).map(|_| RunState::Paused),
             Err(e) => {
                 eprintln!("jeet task-hook {}: {e:#}", hook.name);
                 None
@@ -582,6 +625,7 @@ fn hook_ctx_with(
     Ok(HookCtx {
         app,
         task,
+        review,
         attributed,
         prev,
         busy_since,
@@ -647,13 +691,15 @@ fn with_busy(status: SessionStatus, ctx: &HookCtx) -> SessionStatus {
     }
 }
 
-/// Charge `task` `turns`, and the time session `session_id` has been busy
+/// Charge the task or (with `review`) review `id` `turns`, and the time session `session_id` has been busy
 /// since `busy_since` (none: it is not busy) that is not charged yet. How far
 /// a session is charged is kept beside its status, under a lock, so a
 /// turn's end and a sweep never charge the same time twice.
+#[allow(clippy::too_many_arguments)]
 fn charge_busy(
     app: &App,
-    task: &TaskRecord,
+    id: &str,
+    review: bool,
     task_dir: &Path,
     session_id: &str,
     busy_since: Option<i64>,
@@ -680,7 +726,10 @@ fn charge_busy(
     if secs == 0 && turns == 0 {
         return Ok(());
     }
-    app.db.charge(&task.id, secs, turns)?;
+    match review {
+        true => app.db.charge_review(id, secs, turns)?,
+        false => app.db.charge(id, secs, turns)?,
+    }
     if secs > 0 {
         file.set_len(0)
             .and_then(|()| file.seek(SeekFrom::Start(0)))
@@ -719,7 +768,8 @@ pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<
     }
     charge_busy(
         app,
-        task,
+        &task.id,
+        false,
         &task_dir,
         &status.session_id,
         Some(since),
@@ -727,6 +777,43 @@ pub fn fold_busy(app: &App, task: &TaskRecord, alive: bool, now: i64) -> Result<
         now,
     )?;
     budget::enforce(app, task)
+}
+
+/// [`fold_busy`] for a review, which is charged whatever asked for it.
+pub fn fold_busy_review(
+    app: &App,
+    review: &ReviewRecord,
+    alive: bool,
+    now: i64,
+) -> Result<Threshold> {
+    if !alive {
+        return Ok(Threshold::None);
+    }
+    let dir = crate::review::dir(app, review);
+    let Some(status) = current_status(&dir) else {
+        return Ok(Threshold::None);
+    };
+    if launched_at(&dir).is_some_and(|l| status.at < l) {
+        return Ok(Threshold::None);
+    }
+    let busy = matches!(status.state, State::Running | State::Waiting);
+    let Some(since) = status.busy_since.filter(|_| busy) else {
+        return Ok(Threshold::None);
+    };
+    if !valid_session_id(&status.session_id) {
+        return Ok(Threshold::None);
+    }
+    charge_busy(
+        app,
+        &review.id,
+        true,
+        &dir,
+        &status.session_id,
+        Some(since),
+        0,
+        now,
+    )?;
+    budget::enforce_review(app, review)
 }
 
 /// Where a detached drain's output goes, in jeet's home.
@@ -739,7 +826,7 @@ const DRAIN_LOG: &str = "drain.log";
 /// Nothing when nothing waits.
 fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
     // The test binary is no jeet.
-    if cfg!(test) || app.db.queued_starts()?.is_empty() {
+    if cfg!(test) || (app.db.queued_starts()?.is_empty() && app.db.queued_reviews()?.is_empty()) {
         return Ok(());
     }
     let log = app.home.join(DRAIN_LOG);
@@ -781,7 +868,9 @@ fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
 /// one naming another task than its own, never reports up.
 fn attributed(task: Option<&str>, located: &str, app: &App) -> bool {
     names_task(task, located)
-        && identity::identify(app).is_ok_and(|me| me.task.is_some_and(|t| t.id == located))
+        && identity::identify(app).is_ok_and(|me| {
+            me.task.is_some_and(|t| t.id == located) || me.review.is_some_and(|r| r.id == located)
+        })
 }
 
 /// Whether a hook's `--task` names `located`.
@@ -826,10 +915,7 @@ fn report_step(
     let Some((event, body)) = hook.kind.as_ref().and_then(|k| auto_body(k, prev)) else {
         return Ok(());
     };
-    let Some(task) = ctx.task.as_ref().filter(|_| ctx.attributed) else {
-        return Ok(());
-    };
-    if ctx.hold == Some(RunState::Stopped) {
+    if !ctx.attributed || ctx.hold == Some(RunState::Stopped) {
         return Ok(());
     }
     let since = match event {
@@ -840,7 +926,13 @@ fn report_step(
         | StatusEvent::Queued
         | StatusEvent::Moved => now,
     };
-    reports::auto_status(&ctx.app, task, event, body, since, 0)?;
+    match (&ctx.task, &ctx.review) {
+        (Some(task), _) => reports::auto_status(&ctx.app, task, event, body, since, 0)?,
+        (None, Some(review)) => {
+            reports::auto_status_review(&ctx.app, review, event, body, since, 0)?
+        }
+        (None, None) => None,
+    };
     Ok(())
 }
 
@@ -852,6 +944,15 @@ fn report_step(
 /// written its row, and hands over under that lock only what it sees
 /// typed in, so what queued is handed over here.
 fn held_now(ctx: &HookCtx) -> bool {
+    if let Some(review) = &ctx.review {
+        return match ctx.app.db.get_review(&review.id) {
+            Ok(fresh) => fresh.is_some_and(|r| r.paused),
+            Err(e) => {
+                eprintln!("jeet task-hook: {e:#}");
+                ctx.hold.is_some()
+            }
+        };
+    }
     match &ctx.task {
         Some(task) if task.parent_id.is_some() => match run::hold(&ctx.app, task) {
             Ok(hold) => hold.is_some(),
@@ -964,6 +1065,10 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
     if held_now(ctx) || inbox.read_for(Some(session_id))?.is_empty() {
         return Ok(());
     }
+    if let Some(review) = &ctx.review {
+        let agent = crate::review::ReviewAgent::new(&ctx.app, review);
+        return messages::hand_over_queue(&inbox, &agent).map(|_| ());
+    }
     let Some(task) = &ctx.task else {
         return Ok(());
     };
@@ -991,9 +1096,7 @@ pub(crate) fn idle_agent<'a>(
         TaskKind::Assistant => {
             Box::new(assistant::SessionAgent::for_session(app, task, session_id))
         }
-        TaskKind::Work | TaskKind::Review | TaskKind::Manager => {
-            Box::new(messages::TmuxAgent::new(app, task))
-        }
+        TaskKind::Work | TaskKind::Manager => Box::new(messages::TmuxAgent::new(app, task)),
     }
 }
 
@@ -1012,10 +1115,7 @@ fn locate_task(
 ) -> Result<Option<(PathBuf, String)>> {
     if let Some(id) = task {
         let opened = App::open()?;
-        let found = opened
-            .db
-            .get_task(id)?
-            .map(|task| (tasks::task_dir(&opened, &task), task.id));
+        let found = located(&opened, id)?;
         *app = Some(opened);
         return Ok(found);
     }
@@ -1051,12 +1151,20 @@ fn locate_task(
         Some(opened) => opened,
         None => App::open()?,
     };
-    let found = opened
-        .db
-        .get_task(&id)?
-        .map(|task| (tasks::task_dir(&opened, &task), task.id));
+    let found = located(&opened, &id)?;
     *app = Some(opened);
     Ok(found)
+}
+
+/// The directory and id of the task or review `id`, if the index has it.
+fn located(app: &App, id: &str) -> Result<Option<(PathBuf, String)>> {
+    if let Some(task) = app.db.get_task(id)? {
+        return Ok(Some((tasks::task_dir(app, &task), task.id)));
+    }
+    Ok(app
+        .db
+        .get_review(id)?
+        .map(|review| (crate::review::dir(app, &review), review.id)))
 }
 
 /// Note a session the task's agent started. One the task has not seen,
@@ -1328,6 +1436,7 @@ mod tests {
         HookCtx {
             app,
             task: None,
+            review: None,
             attributed: false,
             prev: None,
             busy_since: 0,

@@ -336,7 +336,7 @@ pub fn summary_text(s: &Summary) -> String {
         };
         let kind = match t.kind {
             TaskKind::Manager => "manager",
-            TaskKind::Work | TaskKind::Review | TaskKind::Assistant => "task",
+            TaskKind::Work | TaskKind::Assistant => "task",
         };
         out.push_str(&format!(
             "- {kind} {}: {}{held}\n",

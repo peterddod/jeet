@@ -1,10 +1,16 @@
-//! Reviews: what `jeet review` starts once the PR is checked out.
+//! Reviews: one per pull request, a row of `reviews` keyed by (repo, PR)
+//! that is not a task. It has no parent, children or brief, one worktree
+//! and one session (columns of its row), and its own directory under
+//! `tasks/`, where its agent runs and keeps its status.
 //!
-//! The review is the review task's own agent, started in the task's tmux
-//! pane like any task's, with `[review] prompt` as its first prompt
-//! ([`start_agent`]). Each review task has one PR, one worktree and one
-//! session: a review asked for again types the prompt into that session,
-//! resuming it if it is not running, never a second.
+//! `jeet review` finds or makes the PR's review ([`review_for`]), checks the
+//! PR out in it, and asks its agent to review it ([`start_agent`]): the
+//! agent runs in the review's tmux pane like a task's, with `[review]
+//! prompt` as its first prompt. A review asked for again types the prompt
+//! into that session, resuming it if it is not running, never a second.
+//! Every review gets `[review]`'s time and turns afresh each time it is
+//! asked ([`give_budget`]), and one gate: it reads, and reports to the task
+//! that asked for it, if any ([`crate::permissions::Caller::Review`]).
 //!
 //! The rest is the legacy, deprecated `[review] command`: a background job.
 //! A job is a JSON state file plus a log under `$JEET_HOME/reviews`, keyed by
@@ -15,6 +21,7 @@
 //! how a review is going — the explorer, a second `jeet review` — reads the
 //! state file back.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,19 +29,27 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+use crate::agent::AgentSpec;
 use crate::config::ReviewConfig;
 use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
-use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskSessionRecord};
+use crate::db::reviews::ReviewRecord;
+use crate::db::tasks::{TaskSessionRecord, TaskState, TaskWorktreeRecord};
 use crate::db::{Database, RepoRecord};
+use crate::git;
 use crate::github::PullRequest;
 use crate::identity;
-use crate::messages::{Delivered, Sender};
+use crate::manager::run::{self, StartGate, StartGuard};
+use crate::messages::{self, Delivered, Inbox, Sender};
 use crate::remote;
-use crate::status::Activity;
+use crate::runtime::{self, Admission, Launch, Running, Started};
+use crate::status::{self, Activity};
+use crate::store;
+use crate::tasks;
 use crate::tmux;
-use crate::worktrees::now_secs;
+use crate::worktrees::{self, now_secs};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -147,34 +162,20 @@ pub fn load_at(path: &Path) -> Option<Job> {
     Some(job)
 }
 
-/// The state files of review task `task`'s jobs, started or not: one per
-/// worktree of it that holds a PR. None for any other kind of task.
-pub fn state_files_of_task(app: &App, task: &TaskRecord) -> Vec<PathBuf> {
-    if task.kind != TaskKind::Review {
-        return Vec::new();
-    }
-    let Ok(rows) = app.db.list_task_worktrees(&task.id) else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|row| {
-            let repo = app.db.get_repo(&row.repo_id).ok()??;
-            state_file(app, &repo, row.pr_number?).ok()
-        })
-        .collect()
+/// The state file of `review`'s PR's legacy job, started or not.
+pub fn state_file_of(app: &App, review: &ReviewRecord) -> Option<PathBuf> {
+    let repo = app.db.get_repo(&review.repo_id).ok()??;
+    state_file(app, &repo, review.pr_number).ok()
 }
 
-/// The jobs recorded for review task `task`'s PRs.
-pub fn jobs_of_task(app: &App, task: &TaskRecord) -> Vec<Job> {
-    state_files_of_task(app, task)
-        .iter()
-        .filter_map(|path| load_at(path))
-        .collect()
+/// The legacy job recorded for `review`'s PR.
+pub fn job_of(app: &App, review: &ReviewRecord) -> Option<Job> {
+    load_at(&state_file_of(app, review)?)
 }
 
-/// `activity`, the task's agent's, with a review job still running in
-/// one of `jobs` (state files) taking the place of an agent that is not:
-/// the job is headless, with no pane or hooks to say it runs.
+/// `activity`, the review's agent's, with a review job still running in
+/// `jobs` (state files) taking the place of an agent that is not: the job
+/// is headless, with no pane or hooks to say it runs.
 pub fn with_job(activity: Activity, jobs: &[PathBuf]) -> Activity {
     if !matches!(
         activity,
@@ -194,82 +195,68 @@ pub fn with_job(activity: Activity, jobs: &[PathBuf]) -> Activity {
     }
 }
 
-/// The review job still running for review task `task`, if one is.
-pub fn running_job(app: &App, task: &TaskRecord) -> Option<Job> {
-    jobs_of_task(app, task)
-        .into_iter()
-        .find(|job| job.state() == JobState::Running)
+/// The review job still running for `review`, if one is.
+pub fn running_job(app: &App, review: &ReviewRecord) -> Option<Job> {
+    job_of(app, review).filter(|job| job.state() == JobState::Running)
 }
 
-/// Why review task `task`'s agent is not opened while its review command
-/// runs: the command is headless, with no pane to attach to, and an agent
-/// started beside it would be a blank session.
-pub fn running_refusal(task: &TaskRecord, job: &Job) -> String {
+/// Why `review`'s agent is not opened while its review command runs: the
+/// command is headless, with no pane to attach to, and an agent started
+/// beside it would be a blank session.
+pub fn running_refusal(review: &ReviewRecord, job: &Job) -> String {
     format!(
         "the review of #{} in {} is still running in the background ({}), headless, so \
-         there is nothing to attach to yet; its output is in {}. Open the task once it has \
+         there is nothing to attach to yet; its output is in {}. Open the review once it has \
          finished to resume its session",
         job.pr,
-        task.name,
+        review.slug,
         job.describe(),
         job.log.display()
     )
 }
 
-/// Make the sessions review task `task`'s review jobs left in its
-/// worktrees the task's own, so opening the task resumes them.
+/// Make the session the review job left in the review's worktree the
+/// review's own, so opening the review resumes it.
 ///
 /// The review command runs in the PR's worktree, so its harness files its
-/// sessions under the worktree, while the task's agent runs in the task
-/// directory and finds only the sessions filed there and recorded for the
-/// task. Copied there and recorded, the latest is the one opening the task
-/// resumes. Only once the job has finished: until then it is still
-/// writing. Best effort: what fails is a warning. Nothing for any other
-/// kind of task, or a harness that keeps no sessions jeet knows of.
-pub fn adopt_sessions(app: &App, task: &TaskRecord) -> Vec<String> {
+/// sessions under the worktree, while the review's agent runs in the review
+/// directory and finds only the sessions filed there. Copied there, the
+/// latest is recorded as the review's one session if it has none yet. Only
+/// once the job has finished: until then it is still writing. Best effort:
+/// what fails is a warning. Nothing for a harness that keeps no sessions
+/// jeet knows of.
+pub fn adopt_sessions(app: &App, review: &ReviewRecord) -> Vec<String> {
     let mut warnings = Vec::new();
-    if task.kind != TaskKind::Review {
-        return warnings;
-    }
-    let Ok(spec) = crate::agent::AgentSpec::from_config(&app.config) else {
+    let Ok(spec) = AgentSpec::from_config(&app.config) else {
         return warnings;
     };
     if !spec.supports_sessions() {
         return warnings;
     }
-    let dir = crate::tasks::task_dir(app, task);
+    let dir = dir(app, review);
     if !dir.is_dir() {
         return warnings;
     }
     // Only a finished job's: a copy is never brought up to date, so one
     // taken mid-review would miss the rest of it.
-    let finished = jobs_of_task(app, task)
-        .into_iter()
-        .filter(|job| job.state() != JobState::Running);
-    for job in finished {
-        let copied = match spec.harness.copy_sessions(&job.worktree, &dir) {
-            Ok(copied) => copied,
-            Err(e) => {
-                warnings.push(format!(
-                    "could not pick up the review of #{}'s {} sessions ({e:#})",
-                    job.pr,
-                    spec.harness.name()
-                ));
-                continue;
-            }
-        };
-        for session in copied {
-            let row = TaskSessionRecord {
-                session_id: session.id.clone(),
-                task_id: task.id.clone(),
-                parent_id: None,
-                name: format!("review of #{}", job.pr),
-                created_at: session.modified,
-                last_activity: session.modified,
-            };
-            if let Err(e) = app.db.upsert_task_session(&row) {
-                warnings.push(format!("could not record session {} ({e:#})", session.id));
-            }
+    let Some(job) = job_of(app, review).filter(|job| job.state() != JobState::Running) else {
+        return warnings;
+    };
+    let copied = match spec.harness.copy_sessions(&job.worktree, &dir) {
+        Ok(copied) => copied,
+        Err(e) => {
+            warnings.push(format!(
+                "could not pick up the review of #{}'s {} sessions ({e:#})",
+                job.pr,
+                spec.harness.name()
+            ));
+            return warnings;
+        }
+    };
+    let latest = copied.iter().max_by_key(|session| session.modified);
+    if let (Some(session), None) = (latest, &review.session_id) {
+        if let Err(e) = app.db.set_review_session(&review.id, &session.id) {
+            warnings.push(format!("could not record session {} ({e:#})", session.id));
         }
     }
     warnings
@@ -342,40 +329,885 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Where the review agent's last prompt is recorded: the PR head it was
-/// asked to review, in the task's marker directory.
-fn asked_file(app: &App, task: &TaskRecord) -> PathBuf {
-    crate::tasks::task_dir(app, task)
-        .join(crate::tasks::MARKER_DIR)
-        .join("review.json")
+// ---------------------------------------------------------------------------
+// A review's life: made, checked out, archived, brought back, deleted
+// ---------------------------------------------------------------------------
+
+/// The review's directory under `tasks/`: where its agent runs and keeps
+/// its status, and where its worktree is.
+pub fn dir(app: &App, review: &ReviewRecord) -> PathBuf {
+    app.tasks_root().join(&review.slug)
 }
 
-/// The PR head review task `task`'s agent was last asked to review.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Asked {
-    pub pr: u64,
-    pub head: String,
-    pub at: i64,
+/// Where the review's worktree is, when it has one.
+pub fn worktree_path(app: &App, review: &ReviewRecord) -> Option<PathBuf> {
+    Some(dir(app, review).join(review.dir_name.as_deref()?))
 }
 
-/// What review task `task`'s agent was last asked to review, if anything.
-pub fn asked(app: &App, task: &TaskRecord) -> Option<Asked> {
-    let text = std::fs::read_to_string(asked_file(app, task)).ok()?;
-    serde_json::from_str(&text).ok()
+/// The review's agent's tmux session.
+pub fn session_name(review: &ReviewRecord) -> String {
+    runtime::session_name_for(&review.slug)
 }
 
-fn record_asked(app: &App, task: &TaskRecord, pr: &PullRequest) -> Result<()> {
-    let path = asked_file(app, task);
-    let asked = Asked {
-        pr: pr.number,
-        head: pr.head_ref_oid.clone(),
-        at: now_secs(),
+/// What names the review's agent in messages: `review jeet#55`.
+pub fn subject(review: &ReviewRecord) -> String {
+    format!("review {}", review.label())
+}
+
+/// `review-<repo>-<n>`: what `jeet review` calls the review of a PR.
+pub fn review_name(repo: &RepoRecord, number: u64) -> String {
+    format!("review-{}-{number}", tasks::repo_short_name(repo))
+}
+
+/// The jeet skill in a review's directory: what its agent may do.
+const SKILL: &str = r#"---
+name: jeet
+description: How to work in this jeet review directory.
+---
+
+# jeet review
+
+You are reviewing one pull request. Its checkout is the worktree in this
+directory; the review is yours to read and judge, not to change.
+
+- `jeet ls`, `jeet path` and `jeet prs` read; nothing else of jeet's runs.
+- You may not push, merge, approve, or comment on the pull request: say what
+  you found in this session, and the user decides.
+- When the assistant asked for this review, `jeet report done|progress|blocked|question "…"`
+  tells it how the review went. When you were asked by the user, there is
+  no one to report to.
+"#;
+
+/// A PR's review, ready to review in.
+pub struct ReviewCheckout {
+    pub review: ReviewRecord,
+    /// The worktree with the PR checked out.
+    pub path: PathBuf,
+    /// The review was made just now.
+    pub created: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Find or make the review of `pr` and check the PR out in it.
+///
+/// The review is found by the PR it is of, so a second repository with the
+/// same short name cannot cross wires, and there is never a second for one
+/// PR. An archived one is brought back; one whose checkout is there already
+/// is brought up to date with the PR when clean. A review made here for a
+/// PR that cannot be checked out is undone — it holds nothing yet.
+///
+/// A review made here is `requested_by` the task that asked, if any; one
+/// found keeps who asked (`jeet review` says who asks now, with
+/// [`start_agent`]).
+pub fn review_for(
+    app: &App,
+    repo: &RepoRecord,
+    pr: &PullRequest,
+    requested_by: Option<&str>,
+) -> Result<ReviewCheckout> {
+    let mut warnings = Vec::new();
+    let (mut review, created) = match app.db.find_review(&repo.id, pr.number)? {
+        Some(review) => (review, false),
+        None => make_review(app, repo, pr, requested_by)?,
     };
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&asked)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
+    if review.state == TaskState::Archived {
+        warnings.extend(unarchive(app, &review)?);
+        review = app.db.get_review(&review.id)?.unwrap_or(review);
+    }
+    match check_out(app, &mut review, repo, pr) {
+        Ok((path, more)) => {
+            warnings.extend(more);
+            if let Err(e) = app
+                .db
+                .set_review_pr(&review.id, &pr.title, &pr.state, Some(&pr.url))
+            {
+                warnings.push(format!("could not record #{}'s title: {e:#}", pr.number));
+            }
+            let _ = app.db.touch_review(&review.id, now_secs());
+            let review = app.db.get_review(&review.id)?.unwrap_or(review);
+            Ok(ReviewCheckout {
+                review,
+                path,
+                created,
+                warnings,
+            })
+        }
+        Err(e) if created => Err(match delete(app, &review) {
+            Ok(_) => e,
+            Err(undo) => e.context(format!(
+                "and the half-made review could not be removed ({undo:#}); \
+                 `jeet task delete {} --force` cleans it up",
+                review.slug
+            )),
+        }),
+        Err(e) => Err(e),
+    }
 }
+
+/// Make the review of `pr`: its directory, marker and skill, then its row.
+/// Another `jeet review` of the same PR may have made it meanwhile: that
+/// one is then the review, and this one's directory goes. True when this
+/// made it.
+fn make_review(
+    app: &App,
+    repo: &RepoRecord,
+    pr: &PullRequest,
+    requested_by: Option<&str>,
+) -> Result<(ReviewRecord, bool)> {
+    let slug = tasks::unique_slug(app, &tasks::slugify(&review_name(repo, pr.number)))?;
+    let mut review = ReviewRecord::new(
+        Uuid::new_v4().to_string(),
+        slug,
+        &repo.id,
+        pr.number,
+        now_secs(),
+    );
+    review.title = pr.title.clone();
+    review.pr_state = Some(pr.state.clone());
+    review.pr_url = Some(pr.url.clone());
+    review.requested_by = requested_by.map(str::to_string);
+    let dir = dir(app, &review);
+    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
+    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let made = tasks::write_marker(&dir, &review.id)
+        .and_then(|()| install_skill(&dir))
+        .and_then(|()| app.db.insert_review(&review));
+    match made {
+        Ok(()) => Ok((review, true)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            match app.db.find_review(&repo.id, pr.number)? {
+                Some(found) => Ok((found, false)),
+                None => Err(e),
+            }
+        }
+    }
+}
+
+fn install_skill(dir: &Path) -> Result<()> {
+    let skill = dir.join(".claude").join("skills").join("jeet");
+    std::fs::create_dir_all(&skill).with_context(|| format!("create {}", skill.display()))?;
+    std::fs::write(skill.join("SKILL.md"), SKILL).context("write the jeet skill")
+}
+
+/// Somewhere in a task to look at `pr`, for the explorer's PR list: the task
+/// worktree that has the PR's branch already — the author's own, say —
+/// brought up to date with the PR when clean, else the PR's review, as
+/// `jeet review` makes it but without starting a review. Never a checkout
+/// outside a task or review.
+pub fn browse_pr(app: &App, repo: &RepoRecord, pr: &PullRequest) -> Result<BrowsedPr> {
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let branch = pr.local_branch();
+    let holder = git::worktree_list(&trunk)?
+        .into_iter()
+        .find(|e| e.branch.as_deref() == Some(branch.as_str()) && e.path.is_dir());
+    if let Some(entry) = holder {
+        if let Some(task) = tasks::task_owning(app, &entry.path)? {
+            if task.state == TaskState::Active {
+                // `gh pr checkout` fetches into the trunk.
+                let _fetch = store::lock_repo(&app.home, &repo.id)?;
+                let warnings = worktrees::refresh_pr_worktree(&entry.path, pr, Some(&branch));
+                let _ = app.db.touch_task(&task.id, now_secs());
+                return Ok(BrowsedPr {
+                    path: entry.path,
+                    warnings,
+                    created: false,
+                    owner: Owner::Task(task),
+                });
+            }
+        }
+    }
+    let checkout = review_for(app, repo, pr, None)?;
+    Ok(BrowsedPr {
+        path: checkout.path,
+        warnings: checkout.warnings,
+        created: checkout.created,
+        owner: Owner::Review(Box::new(checkout.review)),
+    })
+}
+
+/// Who holds the checkout the explorer looks at.
+pub enum Owner {
+    Task(crate::db::tasks::TaskRecord),
+    Review(Box<ReviewRecord>),
+}
+
+/// Where the explorer looks at a PR.
+pub struct BrowsedPr {
+    pub path: PathBuf,
+    pub warnings: Vec<String>,
+    /// Made just now.
+    pub created: bool,
+    pub owner: Owner,
+}
+
+/// The review's checkout of `pr`: the one it has, refreshed, or a new one.
+/// The PR's branch is used unless another worktree has it — the author's
+/// own task, say — and then the checkout is detached at the PR's head
+/// instead, which reviews the same code without taking the branch.
+fn check_out(
+    app: &App,
+    review: &mut ReviewRecord,
+    repo: &RepoRecord,
+    pr: &PullRequest,
+) -> Result<(PathBuf, Vec<String>)> {
+    let dir = dir(app, review);
+    let trunk = PathBuf::from(&repo.trunk_path);
+    if !trunk.is_dir() {
+        bail!("trunk is missing: {}", trunk.display());
+    }
+    // `gh pr checkout` fetches into the trunk: keep a store sync out of its way.
+    let _fetch = store::lock_repo(&app.home, &repo.id)?;
+    // Another `jeet review` of this PR may have made the worktree while this
+    // one waited for the lock: it is the review's one, so use it.
+    if let Some(fresh) = app.db.get_review(&review.id)? {
+        *review = fresh;
+    }
+
+    let existing = review.worktree();
+    if let Some(row) = &existing {
+        let path = dir.join(&row.dir_name);
+        if path.is_dir() {
+            let warnings = worktrees::refresh_pr_worktree(&path, pr, row.branch.as_deref());
+            return Ok((path, warnings));
+        }
+        // Gone from under jeet: forget it, and have git forget it too, or
+        // its branch would still count as checked out there. An archive that
+        // stopped part-way leaves what is needed to bring it back, and that
+        // stays.
+        if row.head_oid.is_none() && row.stash_ref.is_none() {
+            app.db.set_review_worktree(&review.id, None)?;
+            let _ = git::worktree_prune(&trunk);
+        } else {
+            bail!(
+                "the review's checkout was archived and not brought back; \
+                 `jeet task unarchive {}` first",
+                review.slug
+            );
+        }
+    }
+
+    let mut warnings = Vec::new();
+    let branch = pr.local_branch();
+    let use_branch = match tasks::branch_holder(app, &trunk, &branch)? {
+        Some(holder) => {
+            warnings.push(format!(
+                "{branch} is checked out {holder}, so the review is detached at the PR's head"
+            ));
+            None
+        }
+        None => Some(branch.as_str()),
+    };
+    let existed = git::branch_exists(&trunk, &branch)?;
+    let dir_name = tasks::pick_dir_name(&dir, &[], &tasks::repo_short_name(repo));
+    let dest = dir.join(&dir_name);
+    worktrees::add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, use_branch)?;
+
+    // A branch made for a checkout that vanished is still the review's own.
+    let made_before = existing
+        .as_ref()
+        .is_some_and(|gone| gone.created_branch && gone.branch.as_deref() == Some(branch.as_str()));
+    let created_branch = use_branch.is_some() && (!existed || made_before);
+    let record = TaskWorktreeRecord {
+        id: 0,
+        task_id: review.id.clone(),
+        repo_id: repo.id.clone(),
+        dir_name,
+        branch: use_branch.map(str::to_string),
+        created_branch,
+        head_oid: None,
+        stash_ref: None,
+        pr_number: Some(pr.number),
+        created_at: now_secs(),
+        read_only: false,
+    };
+    let recorded = app.db.set_review_worktree(&review.id, Some(&record));
+    if !matches!(recorded, Ok(true)) {
+        let _ = git::worktree_remove(&trunk, &dest, true);
+        if created_branch {
+            let _ = git::delete_local_branch(&trunk, &branch);
+        }
+        if let Err(e) = recorded {
+            return Err(e.context("record the worktree"));
+        }
+        // The row has another worktree by now: that is the review's.
+        let Some(fresh) = app.db.get_review(&review.id)? else {
+            bail!("{} is not in the index", subject(review));
+        };
+        let Some(row) = fresh.worktree() else {
+            bail!(
+                "could not record the worktree: {} has another",
+                subject(review)
+            );
+        };
+        let path = dir.join(&row.dir_name);
+        *review = fresh;
+        return Ok((path, warnings));
+    }
+    review.dir_name = Some(record.dir_name);
+    Ok((dest, warnings))
+}
+
+/// Keep `row` as review `id`'s worktree, the one it already has.
+fn save_worktree(app: &App, id: &str, row: &TaskWorktreeRecord) -> Result<()> {
+    if !app.db.set_review_worktree(id, Some(row))? {
+        bail!("the review has another worktree than {}", row.dir_name);
+    }
+    Ok(())
+}
+
+/// Charge `review` the time its agent's turn in progress has run, before
+/// its session is ended for archiving or deleting: no hook charges it after,
+/// and no sweep looks at it again. A charge that uses a limit up is not
+/// reported, as a stop's is not.
+fn charge_before_end(app: &App, review: &ReviewRecord, warnings: &mut Vec<String>) {
+    let alive = tmux::available() && tmux::agent_alive(&session_name(review));
+    if let Err(e) = status::fold_busy_review(app, review, alive, now_secs()) {
+        warnings.push(format!("could not charge its limits: {e:#}"));
+    }
+}
+
+/// End `review`'s agent and the review jobs that run in its directory, and
+/// forget their processes: the agent works in the worktree about to be
+/// removed, and what it wrote after the snapshot would be lost. Refused
+/// from inside the agent's session or under a job, which ending would end
+/// this jeet with. Returns how many jobs were still running.
+fn end_agent(
+    app: &App,
+    review: &ReviewRecord,
+    verb: &str,
+    warnings: &mut Vec<String>,
+) -> Result<usize> {
+    let dir = dir(app, review);
+    runtime::refuse_inside_agent_session(&review.id, &review.slug, &subject(review), verb)?;
+    refuse_inside_job(app, &review.id, &dir, verb)?;
+    charge_before_end(app, review, warnings);
+    runtime::stop_session(&review.slug).context("end the agent's tmux session")?;
+    let jobs = stop_jobs(&app.db, &review.id).context("end the review's job")?
+        + stop_jobs_in(app, &dir).context("end the review's job")?;
+    app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
+    app.db.delete_task_anchors(&review.id, AnchorKind::Job)?;
+    if let Err(e) = runtime::remove_settings(&app.home, &review.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
+    }
+    Ok(jobs)
+}
+
+/// End `review`'s agent and jobs for `jeet manager stop --all`, and leave
+/// the review as it is: not archived, and started again the next time it is
+/// asked for or opened. Says what came of it.
+pub fn stop(app: &App, review: &ReviewRecord) -> Result<String> {
+    let mut warnings = Vec::new();
+    let alive = tmux::available() && tmux::agent_alive(&session_name(review));
+    let jobs = end_agent(app, review, "stop", &mut warnings)?;
+    let mut ended = Vec::new();
+    if alive {
+        ended.push("stopped its agent".to_string());
+    }
+    match jobs {
+        0 => {}
+        1 => ended.push("stopped its review job".to_string()),
+        n => ended.push(format!("stopped its {n} review jobs")),
+    }
+    ended.extend(warnings);
+    Ok(match ended.is_empty() {
+        true => "not running".to_string(),
+        false => ended.join("; "),
+    })
+}
+
+/// Archive `review`: end its agent, free the disk its worktree takes while
+/// keeping what is needed to bring it back as it was, as `jeet task archive`
+/// does a task's. The review is marked archived first, so a failure
+/// part-way leaves it archived with its worktree still there, and running
+/// archive again finishes the job. Files git ignores are not kept; the
+/// caller has already confirmed what [`unkept`] lists.
+pub fn archive(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    end_agent(app, review, "archive", &mut warnings)?;
+    app.db.set_review_state(&review.id, TaskState::Archived)?;
+    app.db.unqueue_review(&review.id)?;
+    let root = dir(app, review);
+    if let Some(mut row) = review.worktree() {
+        let save = |row: &TaskWorktreeRecord| save_worktree(app, &review.id, row);
+        warnings.extend(tasks::archive_worktree(
+            app, &review.id, &root, &mut row, &save,
+        )?);
+    }
+    Ok(warnings)
+}
+
+/// Bring an archived review's worktree back: on its branch, or detached at
+/// its old HEAD, with its uncommitted changes reapplied. The review becomes
+/// active only once it is back, and is noted as brought back, so one whose
+/// PR is done is not archived again behind the user's back ([`retire`]).
+pub fn unarchive(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
+    let root = dir(app, review);
+    if !root.is_dir() {
+        bail!("the review directory {} is missing", root.display());
+    }
+    let mut warnings = Vec::new();
+    if let Some(mut row) = review.worktree() {
+        let save = |row: &TaskWorktreeRecord| save_worktree(app, &review.id, row);
+        match tasks::restore_worktree(app, &review.id, &root, &mut row, &save, &mut warnings)? {
+            tasks::Restored::Forgotten => {
+                app.db.set_review_worktree(&review.id, None)?;
+            }
+            tasks::Restored::Kept => {}
+        }
+    }
+    app.db.set_review_state(&review.id, TaskState::Active)?;
+    let now = now_secs();
+    app.db.set_review_brought_back(&review.id, now)?;
+    app.db.touch_review(&review.id, now)?;
+    Ok(warnings)
+}
+
+/// What archiving `review` would not keep, one line per worktree: the files
+/// git ignores in it, which go with it. See [`tasks::unkept`].
+pub fn unkept(app: &App, review: &ReviewRecord) -> Vec<String> {
+    let rows: Vec<TaskWorktreeRecord> = review.worktree().into_iter().collect();
+    tasks::unkept_in(&dir(app, review), &rows)
+}
+
+/// What deleting `review` would destroy, one line per problem. See
+/// [`tasks::losses`].
+pub fn losses(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
+    let rows: Vec<TaskWorktreeRecord> = review.worktree().into_iter().collect();
+    tasks::losses_of(app, &review.id, &dir(app, review), &rows)
+}
+
+/// Delete `review` and everything it owns: its agent, its worktree, the
+/// branch it made, its `refs/jeet` refs, its directory and its row. The
+/// caller has already confirmed what [`losses`] lists. The row goes last,
+/// so a failure part-way leaves a review that can be deleted again.
+pub fn delete(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
+    if review.slug.is_empty() || review.slug.starts_with('.') || review.slug.contains(['/', '\\']) {
+        bail!(
+            "refusing to delete a review whose directory name is {:?}",
+            review.slug
+        );
+    }
+    let mut warnings = Vec::new();
+    end_agent(app, review, "delete", &mut warnings)?;
+    let rows: Vec<TaskWorktreeRecord> = review.worktree().into_iter().collect();
+    tasks::remove_owned(app, &review.id, &dir(app, review), &rows, &mut warnings)?;
+    app.db.delete_review(&review.id)?;
+    Ok(warnings)
+}
+
+// ---------------------------------------------------------------------------
+// The review's agent
+// ---------------------------------------------------------------------------
+
+/// What `review`'s agent is let run without a permission prompt: the
+/// read-only commands, and `jeet report` when a task asked for the review.
+fn allowed(review: &ReviewRecord) -> Vec<String> {
+    let mut allow: Vec<String> = ["jeet ls", "jeet prs", "jeet path"]
+        .map(str::to_string)
+        .to_vec();
+    if review.requested_by.is_some() {
+        allow.push("jeet report".to_string());
+    }
+    allow
+}
+
+/// The first prompt of the review's agent is `[review] prompt`, typed or
+/// started as any message to an agent is ([`messages::deliver`]); this is
+/// the agent as that sees it.
+pub struct ReviewAgent<'a> {
+    app: &'a App,
+    review: &'a ReviewRecord,
+    /// May start it when it is not running; see [`ReviewAgent::may_start`].
+    may_start: bool,
+    /// What its start warns of, kept for the caller rather than printed;
+    /// see [`ReviewAgent::keep_warnings`].
+    warnings: Option<RefCell<Vec<String>>>,
+    /// The session a start resumes; see [`ReviewAgent::resuming`].
+    resume: Option<&'a str>,
+}
+
+impl<'a> ReviewAgent<'a> {
+    pub fn new(app: &'a App, review: &'a ReviewRecord) -> Self {
+        Self {
+            app,
+            review,
+            may_start: true,
+            warnings: None,
+            resume: None,
+        }
+    }
+
+    /// A start resumes `session` rather than the review's own.
+    pub fn resuming(self, session: Option<&'a str>) -> Self {
+        Self {
+            resume: session,
+            ..self
+        }
+    }
+
+    /// Keep what its start warns of for [`ReviewAgent::warnings`] rather
+    /// than print it: for a caller with no stderr to print to.
+    pub fn keep_warnings(self) -> Self {
+        Self {
+            warnings: Some(RefCell::new(Vec::new())),
+            ..self
+        }
+    }
+
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings
+            .as_ref()
+            .map_or_else(Vec::new, |w| w.borrow().clone())
+    }
+
+    /// Without `may_start`, a message for it while it is not running waits
+    /// in its inbox rather than start it.
+    pub fn may_start(self, may_start: bool) -> Self {
+        Self { may_start, ..self }
+    }
+}
+
+impl messages::Agent for ReviewAgent<'_> {
+    fn alive(&self) -> bool {
+        tmux::available() && tmux::pane_alive(&session_name(self.review))
+    }
+
+    fn has_hooks(&self) -> bool {
+        AgentSpec::from_config(&self.app.config).is_ok_and(|s| s.has_hooks())
+    }
+
+    fn type_in(&self, text: &str) -> Result<()> {
+        // Before it is typed: a pause that finds it idle in between waits
+        // for the turn this starts, which no hook has reported yet.
+        if let Err(e) = status::mark_typed(&dir(self.app, self.review)) {
+            eprintln!("jeet: warning: could not note the message typed in: {e:#}");
+        }
+        tmux::send_text(&session_name(self.review), text)
+    }
+
+    fn has_draft(&self) -> bool {
+        let Ok(spec) = AgentSpec::from_config(&self.app.config) else {
+            return false;
+        };
+        tmux::capture_styled(&session_name(self.review))
+            .is_ok_and(|pane| spec.harness.has_draft(&pane))
+    }
+
+    fn can_start(&self) -> bool {
+        self.may_start && tmux::may_start_session()
+    }
+
+    fn first_prompt_refusal(&self) -> Option<String> {
+        runtime::first_prompt_refusal_for(self.app, &self.review.slug)
+    }
+
+    /// Paused, as its own limits say now: it is handed nothing until asked
+    /// again.
+    fn held(&self) -> Result<bool> {
+        Ok(self
+            .app
+            .db
+            .get_review(&self.review.id)?
+            .is_some_and(|r| r.paused))
+    }
+
+    fn admit(&self) -> Result<Option<StartGate>> {
+        run::admit_review(self.app, self.review).map(Some)
+    }
+
+    fn queued(&self, live: u32, max: u32) {
+        run::report_review_queued(self.app, self.review, live, max, i64::MAX);
+    }
+
+    fn queue_held_start(&self) -> Result<()> {
+        // Nor is a start queued on a harness that takes no first prompt: it
+        // would start the agent with none, the message left untyped.
+        if self.first_prompt_refusal().is_some() {
+            return Ok(());
+        }
+        self.app.db.queue_review(&self.review.id, now_secs())?;
+        Ok(())
+    }
+
+    fn start(&self, prompt: &str, guard: Option<&StartGuard>) -> Result<Started> {
+        let running = match guard {
+            Some(guard) => {
+                ensure_running_admitted(self.app, self.review, self.resume, Some(prompt), guard)?
+            }
+            None => ensure_running(
+                self.app,
+                self.review,
+                self.resume,
+                Some(prompt),
+                Admission::Gate,
+            )?,
+        };
+        match &self.warnings {
+            Some(kept) => kept.borrow_mut().extend(running.warnings),
+            None => {
+                for warning in &running.warnings {
+                    eprintln!("jeet: {warning}");
+                }
+            }
+        }
+        Ok(running.started)
+    }
+}
+
+/// Make sure `review`'s agent is running, starting it if not: resuming
+/// `session` when given, else the review's session, else a new one. An
+/// agent this starts gets `prompt` as its first prompt; one already
+/// running does not. Given none, it starts with what waits in its inbox, as
+/// a drain would. A start is admitted first ([`run::admit_review`]): by
+/// `admission` while `[review] max_live` agents run.
+pub fn ensure_running(
+    app: &App,
+    review: &ReviewRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+    admission: Admission,
+) -> Result<Running> {
+    // Running already: nothing starts, so there is nothing to admit.
+    let name = session_name(review);
+    if tmux::has_session(&name) && tmux::pane_alive(&name) {
+        return Ok(already_running(&name, session));
+    }
+    if prompt.is_some() {
+        if let Some(why) = runtime::first_prompt_refusal_for(app, &review.slug) {
+            bail!(why);
+        }
+    }
+    let dir = dir(app, review);
+    let inbox = match prompt {
+        None if dir.is_dir() => Some(Inbox::lock(&dir)?),
+        _ => None,
+    };
+    let (guard, over) = match admission {
+        Admission::Gate => match run::admit_review(app, review)? {
+            StartGate::Go(guard) => (guard, None),
+            StartGate::Queue { live, max, .. } => {
+                return Ok(Running {
+                    tmux_session: name,
+                    started: Started::Queued {
+                        live,
+                        max,
+                        prompt: prompt.map(str::to_string),
+                    },
+                    warnings: Vec::new(),
+                })
+            }
+            StartGate::Held(_) => bail!(
+                "{} is paused: it has used its [review] time or turns; ask for the review again",
+                subject(review)
+            ),
+        },
+        Admission::Bypass => run::admit_review_over(app, review)?,
+    };
+    let mut running = match &inbox {
+        Some(inbox) => start_with_inbox(app, review, session, inbox, &guard)?,
+        None => ensure_running_admitted(app, review, session, prompt, &guard)?,
+    };
+    if let Some((live, max)) = over {
+        running.warnings.push(format!(
+            "over [review] max_live ({live}/{max} live already)"
+        ));
+    }
+    Ok(running)
+}
+
+/// [`ensure_running`] for a start admitted already, under `_guard`.
+pub fn ensure_running_admitted(
+    app: &App,
+    review: &ReviewRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+    _guard: &StartGuard,
+) -> Result<Running> {
+    let running = start_tmux(app, review, session, prompt)?;
+    // Started, however it was admitted: no longer waits on `max_live`, or a
+    // drain would start it again once it ends.
+    if running.started == Started::Now {
+        app.db.unqueue_review(&review.id)?;
+    }
+    Ok(running)
+}
+
+/// Start `review`'s agent, admitted under `guard`, resuming `session` when
+/// given, with what waits for it in its locked `inbox` as its first prompt,
+/// as much of it as fits, or with none when nothing does, or when its
+/// harness takes no first prompt from jeet.
+pub fn start_with_inbox(
+    app: &App,
+    review: &ReviewRecord,
+    session: Option<&str>,
+    inbox: &Inbox,
+    guard: &StartGuard,
+) -> Result<Running> {
+    let takes_prompt = AgentSpec::from_config(&app.config)
+        .is_ok_and(|spec| spec.harness.prompt_args("").is_some());
+    if !takes_prompt || inbox.read_for(None)?.is_empty() {
+        return ensure_running_admitted(app, review, session, None, guard);
+    }
+    let agent = ReviewAgent::new(app, review)
+        .keep_warnings()
+        .resuming(session);
+    let started = match messages::start_with_queue(inbox, &agent, Some(guard))? {
+        // It came up meanwhile, and was typed the queue.
+        Delivered::Typed => Started::AlreadyRunning,
+        _ => Started::Now,
+    };
+    Ok(Running {
+        tmux_session: session_name(review),
+        started,
+        warnings: agent.warnings(),
+    })
+}
+
+/// The review's agent, running already in tmux session `name`: attached to,
+/// not started, with what to warn of.
+fn already_running(name: &str, session: Option<&str>) -> Running {
+    let mut warnings = Vec::new();
+    if let Some(id) = session {
+        warnings.push(format!(
+            "the agent is already running in tmux session {name}, so session {id} was not \
+             resumed; end it there and open the review again to switch"
+        ));
+    }
+    Running {
+        tmux_session: name.to_string(),
+        started: Started::AlreadyRunning,
+        warnings,
+    }
+}
+
+/// [`ensure_running`] in the review's tmux session.
+fn start_tmux(
+    app: &App,
+    review: &ReviewRecord,
+    session: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<Running> {
+    tmux::require()?;
+    let name = session_name(review);
+    if runtime::live_session(&name)? {
+        return Ok(already_running(&name, session));
+    }
+    let spec = AgentSpec::from_config(&app.config)?;
+    let dir = dir(app, review);
+    if !dir.is_dir() {
+        bail!("the review directory {} is missing", dir.display());
+    }
+    // A review job's session is filed under its worktree: picked up first,
+    // so it is the one resumed, not a blank one started beside it.
+    let warnings = adopt_sessions(app, review);
+    let review = &app
+        .db
+        .get_review(&review.id)?
+        .unwrap_or_else(|| review.clone());
+    // Only a harness with sessions has hooks to install.
+    let hooks = match spec.supports_sessions() {
+        true => {
+            let exe = std::env::current_exe().context("locate the jeet binary")?;
+            Some(review_hooks(app, review, spec.harness, exe)?)
+        }
+        false => None,
+    };
+    let known_sessions = review
+        .session_id
+        .iter()
+        .map(|id| TaskSessionRecord {
+            session_id: id.clone(),
+            task_id: review.id.clone(),
+            parent_id: None,
+            name: review.slug.clone(),
+            created_at: review.created_at,
+            last_activity: review.last_activity,
+        })
+        .collect();
+    let launch = Launch {
+        id: review.id.clone(),
+        slug: review.slug.clone(),
+        subject: subject(review),
+        name: review.slug.clone(),
+        dir,
+        known_sessions,
+        ungated_warning: true,
+        spec,
+        hooks,
+        warnings,
+    };
+    let running = runtime::launch_tmux(
+        app,
+        &launch,
+        session,
+        prompt,
+        |pane| {
+            identity::record(
+                &app.db,
+                &review.id,
+                AnchorKind::Pane,
+                Some(&pane.id),
+                pane.pid,
+            )
+        },
+        |id| app.db.set_review_session(&review.id, id),
+    )?;
+    let _ = app.db.touch_review(&review.id, now_secs());
+    Ok(running)
+}
+
+/// jeet's hooks for a review's agent run by `harness`: what it is let run
+/// ([`allowed`]), what it is denied ([`crate::permissions::review_deny`]),
+/// and no wake channel, which watches a task's inbox.
+fn review_hooks(
+    app: &App,
+    review: &ReviewRecord,
+    _harness: &dyn crate::harness::Harness,
+    exe: PathBuf,
+) -> Result<crate::harness::HookSetup> {
+    Ok(crate::harness::HookSetup {
+        exe,
+        task_id: review.id.clone(),
+        allow: allowed(review),
+        deny: crate::permissions::review_deny(app)?,
+        wake: false,
+    })
+}
+
+/// What the review's agent is doing. Runs tmux and reads files, so it
+/// belongs on a background thread, not in a draw.
+pub fn activity(app: &App, review: &ReviewRecord, tmux_ok: bool) -> Activity {
+    runtime::activity_at(&dir(app, review), &session_name(review), tmux_ok)
+}
+
+/// [`activity`] as lists show it: a headless review job still running
+/// counts as its agent running. Only for display: what routes a delivery or
+/// charges a limit asks of the agent alone.
+pub fn shown_activity(app: &App, review: &ReviewRecord, tmux_ok: bool) -> Activity {
+    with_job(
+        activity(app, review, tmux_ok),
+        &state_file_of(app, review).into_iter().collect::<Vec<_>>(),
+    )
+}
+
+/// When anything last happened in the review: jeet touching it, a hook
+/// reporting, or a harness recording a session.
+pub fn last_activity(app: &App, review: &ReviewRecord) -> i64 {
+    runtime::last_activity_at(&dir(app, review), review.last_activity)
+}
+
+/// Get `text` to `review`'s agent as any message to it goes: typed in when
+/// it is idle, queued while it is busy, held in its inbox when it may not be
+/// started (`may_start` false).
+pub fn deliver(app: &App, review: &ReviewRecord, text: &str, may_start: bool) -> Result<Delivered> {
+    let agent = ReviewAgent::new(app, review).may_start(may_start);
+    messages::deliver(&dir(app, review), &agent, text, Sender::Agent)
+}
+
+// ---------------------------------------------------------------------------
+// Asking the agent
+// ---------------------------------------------------------------------------
 
 /// `[review] prompt` with `{pr}`, `{url}` and `{worktree}` filled in: all
 /// GitHub's or jeet's own. The PR's branch and title are whoever opened
@@ -418,52 +1250,78 @@ fn reason_not_to_ask(
     }
 }
 
-/// Have review task `task`'s agent review `pr`, checked out at `worktree`:
-/// the one place a review agent is started or asked again, and so where
-/// any limit on reviews belongs.
+/// The PR head a review's agent was last asked to review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asked {
+    pub pr: u64,
+    pub head: String,
+    pub at: i64,
+}
+
+/// What `review`'s agent was last asked to review, if anything.
+pub fn asked(review: &ReviewRecord) -> Option<Asked> {
+    Some(Asked {
+        pr: review.pr_number,
+        head: review.asked_head.clone()?,
+        at: review.asked_at?,
+    })
+}
+
+/// Have `review`'s agent review `pr`, checked out at `worktree`, as asked
+/// by `requested_by` (a task's id; `None`: the user): the one place a
+/// review agent is started or asked again, and so where any limit on
+/// reviews belongs.
 ///
-/// The prompt goes to the task's agent as any message to it does
+/// The prompt goes to the agent as any message to it does
 /// ([`messages::deliver`]): typed into it when it is idle, queued while it
 /// is busy, and otherwise starting it in its tmux pane, resuming its
-/// latest session so a review keeps the one. A paused or stopped task, or
-/// one under a held node, keeps it queued until resumed; one over
-/// `[review] max_live` starts when a review ends. A review in the tree
-/// gets `[review]`'s time and turns afresh ([`give_budget`]). Returns what
+/// session so a review keeps the one. One over `[review] max_live` starts
+/// when a review ends. Each review gets `[review]`'s time and turns afresh
+/// ([`give_budget`]), and its reports go to whoever asks now. Returns what
 /// to tell the user.
 pub fn start_agent(
     app: &App,
     repo: &RepoRecord,
-    task: &TaskRecord,
+    review: &ReviewRecord,
     pr: &PullRequest,
     worktree: &Path,
     rerun: bool,
+    requested_by: Option<&str>,
 ) -> Result<String> {
+    // Who asked sticks: a run by the user never clears the assistant's, and
+    // this holds when nothing is asked again.
+    remember_requester(app, &review.id, requested_by)?;
+    let review = &folded(app, review);
     let job = load(app, repo, pr.number);
-    if let Some(why) = reason_not_to_ask(asked(app, task).as_ref(), job.as_ref(), pr, rerun) {
+    if let Some(why) = reason_not_to_ask(asked(review).as_ref(), job.as_ref(), pr, rerun) {
         return Ok(why);
     }
     let prompt = expand_prompt(app.config.review.prompt(), pr, worktree);
-    let dir = crate::tasks::task_dir(app, task);
+    let dir = dir(app, review);
     // Still waiting in its inbox: the worktree it names is at the new head
     // already, so one is enough, not a second review behind it.
-    let checked = crate::messages::checked(&prompt)?;
-    if crate::messages::peek(&dir)
-        .iter()
-        .any(|q| q.message == checked)
-    {
+    let checked = messages::checked(&prompt)?;
+    if messages::peek(&dir).iter().any(|q| q.message == checked) {
         return Ok(format!(
             "the review of #{} is already queued for the review agent",
             pr.number
         ));
     }
-    give_budget(app, task)?;
-    let agent = crate::messages::TmuxAgent::new(app, task);
-    let delivered = crate::messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
-    if let Err(e) = record_asked(app, task, pr) {
+    give_budget(app, review)?;
+    let review = &app
+        .db
+        .get_review(&review.id)?
+        .unwrap_or_else(|| review.clone());
+    let agent = ReviewAgent::new(app, review);
+    let delivered = messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
+    if let Err(e) = app
+        .db
+        .set_review_asked(&review.id, &pr.head_ref_oid, now_secs())
+    {
         eprintln!("jeet: warning: could not record the review asked for: {e:#}");
     }
-    let session = crate::runtime::session_name(task);
-    let watch = format!("`jeet task open {}` to watch it", task.slug);
+    let session = session_name(review);
+    let watch = format!("`jeet task open {}` to watch it", review.slug);
     Ok(match delivered {
         Delivered::Started => {
             format!(
@@ -480,14 +1338,14 @@ pub fn start_agent(
             pr.number
         ),
         Delivered::Held => format!(
-            "the review of #{} is queued; the agent starts with it when the task is next \
+            "the review of #{} is queued; the agent starts with it when the review is next \
              opened",
             pr.number
         ),
         Delivered::Paused => format!(
-            "task {} is paused or stopped, so the review of #{} is queued; it starts once \
-             resumed",
-            task.slug, pr.number
+            "review {} has used its [review] time or turns, so the review of #{} is queued; \
+             it starts once asked for again",
+            review.slug, pr.number
         ),
         Delivered::StartQueued { live, max } => format!(
             "the review of #{} waits on [review] max_live ({live}/{max} review agents live); \
@@ -497,40 +1355,43 @@ pub fn start_agent(
     })
 }
 
-/// Give review task `task`, in the tree, `[review]`'s caps afresh for the
-/// review it is about to be asked: what it has used so far, and `time` and
-/// `turns` more, held to as a manager's budget is (warned at 80%, paused at
-/// 100%, M21). A pause its own budget set, the last review's, is lifted
-/// for this one; one anybody else set is left. A top-level review has no
-/// budget: nothing charges a task outside the tree (M19).
-fn give_budget(app: &App, task: &TaskRecord) -> Result<()> {
-    if task.parent_id.is_none() {
-        return Ok(());
+/// Record `requested_by`, the task that asks for review `id` now, if there
+/// is one. The user asking leaves who asked before as it was.
+pub fn remember_requester(app: &App, id: &str, requested_by: Option<&str>) -> Result<()> {
+    match requested_by {
+        Some(by) => app.db.set_review_requested_by(id, Some(by)),
+        None => Ok(()),
     }
+}
+
+/// Give `review` `[review]`'s caps afresh for the review it is about to be
+/// asked: what it has used so far, and `time` and `turns` more, held to as
+/// a manager's budget is (warned at 80%, paused at 100%). The pause the
+/// last review's limits set is lifted for this one.
+fn give_budget(app: &App, review: &ReviewRecord) -> Result<()> {
     let caps = app.config.review.policy()?.budget;
-    let (secs, turns) = app.db.subtree_used(&task.id)?;
+    // What it has used, as the index has it now: hooks charge it meanwhile.
+    let Some(review) = app.db.get_review(&review.id)? else {
+        bail!("{} is not in the index", subject(review));
+    };
     let more = |used: i64, cap: Option<i64>| cap.map(|cap| used.saturating_add(cap));
-    app.db
-        .set_budget_max(&task.id, more(secs, caps.secs), more(turns, caps.turns))?;
-    let paused_by_budget = app
-        .db
-        .get_task(&task.id)?
-        .is_some_and(|t| t.run_state == RunState::Paused && t.run_state_by == Some(Setter::Budget));
-    if paused_by_budget {
-        app.db
-            .resume_run_state(&task.id, (RunState::Paused, Some(&Setter::Budget)))?;
-    }
+    app.db.set_review_budget_max(
+        &review.id,
+        more(review.used_secs, caps.secs),
+        more(review.used_turns, caps.turns),
+    )?;
+    app.db.resume_review(&review.id)?;
     Ok(())
 }
 
 /// Start the review command for `pr` in `worktree`, detached from this
 /// terminal so it outlives both jeet and the shell it was started from.
 ///
-/// `as_task` is the review task when it has a parent: the command then runs
-/// as that task's agent, a Node that reports to it, not as whoever started
-/// the review. `runner_for` is the task the runner is recorded as: that
-/// one, else the assistant that started it, else the top-level review task
-/// itself, which runs as the user.
+/// `as_task` is the review's id when a task asked for it: the command then
+/// runs as the review's agent, which reports to that task, not as whoever
+/// started the review. `runner_for` is the review the runner is recorded as
+/// the process of, so archiving or deleting the review finds it to end;
+/// the command of a review nobody asked for runs as the user.
 #[allow(clippy::too_many_arguments)]
 pub fn start(
     app: &App,
@@ -584,9 +1445,9 @@ pub fn start(
     Ok(job)
 }
 
-/// Launch the runner for the job in `state`, recorded as task
-/// `runner_for`'s, so what its command runs is known for the task's, and
-/// archiving or deleting the task finds it to end.
+/// Launch the runner for the job in `state`, recorded as review
+/// `runner_for`'s, so what its command runs is known for the review's, and
+/// archiving or deleting the review finds it to end.
 fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
@@ -607,11 +1468,13 @@ fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    // Recorded as a top-level task, the runner is the user's: a hint it
-    // inherited (the shell of another task's agent, say) would be taken for
-    // a claim to be that task, and what its command runs refused.
-    let task = app.db.get_task(runner_for)?;
-    let users = task.is_some_and(|t| t.parent_id.is_none() && t.kind != TaskKind::Assistant);
+    // Recorded for a review nobody asked for, the runner is the user's: a
+    // hint it inherited (the shell of another task's agent, say) would be
+    // taken for a claim to be that task, and what its command runs refused.
+    let users = app
+        .db
+        .get_review(runner_for)?
+        .is_some_and(|r| r.requested_by.is_none());
     if users {
         cmd.env_remove(crate::tasks::TASK_ID_ENV)
             .env_remove(crate::permissions::ASSISTANT_ENV);
@@ -621,7 +1484,7 @@ fn launch(app: &App, state: &Path, log: &Path, worktree: &Path, runner_for: &str
 }
 
 /// Record `child`, the runner [`launch`] just started for the job in
-/// `state`, as task `runner_for`'s, name it in the job's file, then give it
+/// `state`, as review `runner_for`'s, name it in the job's file, then give it
 /// the go-ahead. When it cannot be recorded it is killed, unless it is the
 /// user's (`users`): the user needs no anchor to be let through, so its
 /// job runs on, with a warning that archive and delete cannot find it.
@@ -638,11 +1501,11 @@ fn hand_over(
     // runner gets going ends it all the same.
     let pid = child.id();
     let recorded = match identity::record(&app.db, runner_for, AnchorKind::Job, None, pid)
-        .context("record the review command as its task's")
+        .context("record the review command as its review's")
     {
         Err(e) if users => {
             eprintln!(
-                "jeet: warning: {e:#}; archiving or deleting the task will not end this review"
+                "jeet: warning: {e:#}; archiving or deleting the review will not end this job"
             );
             Ok(())
         }
@@ -665,17 +1528,16 @@ fn hand_over(
     Ok(())
 }
 
-/// The runners jeet recorded for task `task_id`'s review jobs.
-fn task_jobs(db: &Database, task_id: &str) -> Result<Vec<Anchor>> {
-    db.task_anchors(task_id, AnchorKind::Job)
+/// The runners jeet recorded for review `review_id`'s jobs.
+fn task_jobs(db: &Database, review_id: &str) -> Result<Vec<Anchor>> {
+    db.task_anchors(review_id, AnchorKind::Job)
 }
 
 /// The runners of the review jobs still running in a worktree under `dir`,
-/// whoever they run as: one the assistant started for a top-level review
-/// task is recorded as the assistant's, not the task's, so [`task_jobs`]
-/// does not find it. Only the runner the job recorded as its own, by pid
-/// and start (a pid reused by another job's runner is not it), while it is
-/// still that process.
+/// whoever they are recorded as: one a job file names but a review's
+/// anchors do not, so [`task_jobs`] does not find it. Only the runner the
+/// job recorded as its own, by pid and start (a pid reused by another job's
+/// runner is not it), while it is still that process.
 fn jobs_in(app: &App, dir: &Path) -> Result<Vec<Anchor>> {
     let jobs: Vec<Job> = recorded_jobs(app)
         .filter(|job| job.exit_code.is_none() && job.worktree.starts_with(dir))
@@ -693,21 +1555,21 @@ fn jobs_in(app: &App, dir: &Path) -> Result<Vec<Anchor>> {
 }
 
 /// Fail when this jeet runs under one of the review jobs [`stop_jobs`] or
-/// [`stop_jobs_in`] would end for task `task_id`, in `dir`: ending the job
-/// to `verb` the task would end this jeet with it, part-way through.
-pub fn refuse_inside_job(app: &App, task_id: &str, dir: &Path, verb: &str) -> Result<()> {
-    let mut runners = task_jobs(&app.db, task_id)?;
+/// [`stop_jobs_in`] would end for review `review_id`, in `dir`: ending the
+/// job to `verb` the review would end this jeet with it, part-way through.
+pub fn refuse_inside_job(app: &App, review_id: &str, dir: &Path, verb: &str) -> Result<()> {
+    let mut runners = task_jobs(&app.db, review_id)?;
     runners.extend(jobs_in(app, dir)?);
     if runners.iter().any(identity::runs_under) {
         bail!(
-            "this jeet runs under a review job in the task, which {verb} would end, and this \
-             jeet with it; {verb} the task once the review is done, or from outside it"
+            "this jeet runs under a review job in the review, which {verb} would end, and this \
+             jeet with it; {verb} the review once the job is done, or from outside it"
         );
     }
     Ok(())
 }
 
-/// End the review jobs running for task `task_id`: each runner jeet
+/// End the review jobs running for review `task_id`: each runner jeet
 /// recorded for it, while it is still that process, with its process group
 /// ([`launch`] gives it one), so the command it runs goes too. Returns
 /// once they have exited, with how many were still running.
@@ -859,18 +1721,18 @@ pub fn run_job(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Tell review task `id`'s parent its command exited with `code`, once
+/// Tell whoever asked for review `id` its command exited with `code`, once
 /// for the run that started at `since`, unless that run reported done: the
-/// task is reused for every review of its PR, so an earlier run's done
-/// does not count.
+/// review is reused for every ask of its PR, so an earlier run's done does
+/// not count.
 fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
-    let Some(task) = app.db.get_task(id)? else {
+    let Some(review) = app.db.get_review(id)? else {
         return Ok(());
     };
     let body =
         format!("ended without reporting done; the review command exited with status {code}");
     let ended = crate::reports::StatusEvent::Ended;
-    crate::reports::auto_status(app, &task, ended, &body, since, since)?;
+    crate::reports::auto_status_review(app, &review, ended, &body, since, since)?;
     Ok(())
 }
 
@@ -880,7 +1742,7 @@ fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
 
 /// Whether a PR in GitHub's `state` (as [`PullRequest::state_label`] has
 /// it) has no more review to do: merged, or closed unmerged. A closed PR
-/// may be reopened; `jeet review` then brings its archived task back.
+/// may be reopened; `jeet review` then brings its archived review back.
 pub fn pr_done(state: &str) -> bool {
     matches!(state, "merged" | "closed")
 }
@@ -897,31 +1759,6 @@ pub enum Retired {
     Kept(String),
     /// Brought back by the user after its PR was done: theirs to archive.
     BroughtBack,
-}
-
-/// Under the task directory's `.jeet`: when a review task was last
-/// unarchived, so one brought back after its PR was done is not archived
-/// again behind the user's back.
-const BROUGHT_BACK_FILE: &str = "brought-back";
-
-/// Note that review task `task` was unarchived just now. Best effort.
-pub fn mark_brought_back(app: &App, task: &TaskRecord) {
-    if task.kind != TaskKind::Review {
-        return;
-    }
-    let dir = crate::tasks::task_dir(app, task).join(crate::tasks::MARKER_DIR);
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join(BROUGHT_BACK_FILE), now_secs().to_string());
-}
-
-/// When review task `task` was last unarchived, if it ever was.
-fn brought_back_at(app: &App, task: &TaskRecord) -> Option<i64> {
-    let dir = crate::tasks::task_dir(app, task).join(crate::tasks::MARKER_DIR);
-    std::fs::read_to_string(dir.join(BROUGHT_BACK_FILE))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// Whether `activity` leaves a review free to archive: its agent idle,
@@ -965,50 +1802,48 @@ pub fn rebuildable(path: &str) -> bool {
     CACHES.contains(&name) || name.ends_with(".pyc")
 }
 
-/// Archive review task `task`, whose PR is done, the way `jeet task
-/// archive` does: its agent ended, its worktrees removed, their uncommitted
-/// work kept in the trunk to come back on unarchive. Not while its agent
-/// is mid-turn ([`idle`]), and not when a worktree has ignored files that
-/// are not [`rebuildable`], which archiving would delete with no one there
-/// to say yes. Nor when the user brought it back after the PR was done
-/// at `closed_at` (unknown: any time it was brought back counts).
-pub fn retire(app: &App, task: &TaskRecord, closed_at: Option<i64>) -> Result<Retired> {
-    if task.kind != TaskKind::Review || task.state != crate::db::tasks::TaskState::Active {
+/// Archive `review`, whose PR is done, the way `jeet task archive` does a
+/// task: its agent ended, its worktree removed, its uncommitted work kept in
+/// the trunk to come back on unarchive. Not while its agent is mid-turn
+/// ([`idle`]), and not when the worktree has ignored files that are not
+/// [`rebuildable`], which archiving would delete with no one there to say
+/// yes. Nor when the user brought it back after the PR was done at
+/// `closed_at` (unknown: any time it was brought back counts).
+pub fn retire(app: &App, review: &ReviewRecord, closed_at: Option<i64>) -> Result<Retired> {
+    let review = &folded(app, review);
+    if review.state != TaskState::Active {
         return Ok(Retired::Kept("not an active review".into()));
     }
-    if brought_back_at(app, task).is_some_and(|back| closed_at.is_none_or(|closed| back >= closed))
+    if review
+        .brought_back_at
+        .is_some_and(|back| closed_at.is_none_or(|closed| back >= closed))
     {
         return Ok(Retired::BroughtBack);
     }
-    let activity = crate::runtime::shown_activity(app, task, tmux::available());
+    let activity = shown_activity(app, review, tmux::available());
     if !idle(&activity) {
         return Ok(Retired::Busy(format!(
             "its agent is {}",
             activity.label_with(false)
         )));
     }
-    for row in app.db.list_task_worktrees(&task.id)? {
-        let path = crate::tasks::worktree_dir(app, task, &row.dir_name);
-        if !path.exists() {
-            continue;
-        }
-        let kept: Vec<String> = match crate::git::ignored_paths(&path) {
+    if let Some(path) = worktree_path(app, review).filter(|path| path.exists()) {
+        let what = review.dir_name.as_deref().unwrap_or_default();
+        let kept: Vec<String> = match git::ignored_paths(&path) {
             Ok(paths) => paths.into_iter().filter(|p| !rebuildable(p)).collect(),
             Err(e) => {
                 return Ok(Retired::Kept(format!(
-                    "{}: could not list the files git ignores ({e:#})",
-                    row.dir_name
+                    "{what}: could not list the files git ignores ({e:#})"
                 )))
             }
         };
         if let Some(first) = kept.first() {
             return Ok(Retired::Kept(format!(
-                "{}: archiving would delete ignored files such as {first}",
-                row.dir_name
+                "{what}: archiving would delete ignored files such as {first}"
             )));
         }
     }
-    crate::tasks::archive(app, task, false).map(Retired::Archived)
+    archive(app, review).map(Retired::Archived)
 }
 
 /// Retire every active review whose PR GitHub says is done: one line for
@@ -1016,31 +1851,28 @@ pub fn retire(app: &App, task: &TaskRecord, closed_at: Option<i64>) -> Result<Re
 /// asked about. For `jeet watch`, which runs unattended.
 pub fn sweep(app: &App) -> Result<Vec<String>> {
     let mut lines = Vec::new();
-    let reviews = app
-        .db
-        .list_tasks(Some(crate::db::tasks::TaskState::Active))?
-        .into_iter()
-        .filter(|task| task.kind == TaskKind::Review);
-    for task in reviews {
-        let rows = app.db.list_task_worktrees(&task.id)?;
-        let Some((repo_id, number)) = rows
-            .iter()
-            .find_map(|row| Some((row.repo_id.clone(), row.pr_number?)))
-        else {
-            continue;
-        };
-        let Some(repo) = app.db.get_repo(&repo_id)? else {
+    for review in app.db.list_reviews(Some(TaskState::Active))? {
+        let number = review.pr_number;
+        let Some(repo) = app.db.get_repo(&review.repo_id)? else {
             continue;
         };
         let (state, closed_at) = match crate::github::pr_review(Path::new(&repo.trunk_path), number)
         {
-            Ok(found) => (
-                found.pr.state_label(),
-                found
-                    .closed_at
-                    .as_deref()
-                    .and_then(crate::github::parse_timestamp),
-            ),
+            Ok(found) => {
+                if let Err(e) =
+                    app.db
+                        .set_review_pr(&review.id, &found.pr.title, &found.pr.state, None)
+                {
+                    lines.push(format!("could not record #{number}'s state: {e:#}"));
+                }
+                (
+                    found.pr.state_label(),
+                    found
+                        .closed_at
+                        .as_deref()
+                        .and_then(crate::github::parse_timestamp),
+                )
+            }
             Err(e) => {
                 lines.push(format!("could not ask GitHub about #{number}: {e:#}"));
                 continue;
@@ -1049,25 +1881,323 @@ pub fn sweep(app: &App) -> Result<Vec<String>> {
         if !pr_done(state) {
             continue;
         }
-        match retire(app, &task, closed_at) {
+        match retire(app, &review, closed_at) {
             Ok(Retired::Archived(warnings)) => {
                 lines.push(format!(
                     "archived review {}: #{number} is {state}",
-                    task.slug
+                    review.slug
                 ));
-                lines.extend(warnings.iter().map(|w| format!("{}: {w}", task.slug)));
+                lines.extend(warnings.iter().map(|w| format!("{}: {w}", review.slug)));
             }
             // Tried again on the next poll, once the agent is idle; one
             // the user brought back is theirs.
             Ok(Retired::Busy(_) | Retired::BroughtBack) => {}
             Ok(Retired::Kept(why)) => lines.push(format!(
                 "review {} not archived though #{number} is {state}: {why}",
-                task.slug
+                review.slug
             )),
-            Err(e) => lines.push(format!("could not archive review {}: {e:#}", task.slug)),
+            Err(e) => lines.push(format!("could not archive review {}: {e:#}", review.slug)),
         }
     }
     Ok(lines)
+}
+
+// ---------------------------------------------------------------------------
+// After the move out of `tasks` (schema v8)
+// ---------------------------------------------------------------------------
+
+/// The `meta` flag the v8 migration sets while [`migrate_leftovers`] has
+/// work to do.
+const PENDING: &str = "reviews_v8_pending";
+
+/// Under `$JEET_HOME/logs`: what [`migrate_leftovers`] did, one line each.
+const MIGRATE_LOG: &str = "migrate-v8.log";
+
+/// What the move of reviews out of `tasks` (schema v8) left for jeet to do
+/// on disk, once, at the first command after the upgrade. Best effort, and
+/// idempotent: what it cannot do now it does at the next command.
+///
+/// - What a review task kept in files under its directory — what its agent
+///   was asked, when it was brought back — goes on the review's row.
+/// - Each duplicate review task's worktree is archived the way `jeet task
+///   archive` archives one (uncommitted work kept in the trunk under
+///   `refs/jeet`, the ref logged), unless it has ignored files that are not
+///   [`rebuildable`], when it is left where it is. Nothing is ever deleted
+///   but the worktree an archive removes: not the duplicate's directory,
+///   not a ref.
+///
+/// Under a lock, so two commands at once do not both archive. Each outcome
+/// is a line of the log, and a summary goes to stderr once.
+pub fn migrate_leftovers(app: &App) {
+    if let Err(e) = migrate(app) {
+        eprintln!("jeet: warning: could not finish moving reviews out of the tasks: {e:#}");
+    }
+}
+
+fn migrate(app: &App) -> Result<()> {
+    if app.db.meta(PENDING)?.is_none() {
+        return Ok(());
+    }
+    let locks = app.home.join("locks");
+    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
+    let path = locks.join("reviews-migrate.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        // Another command is at it.
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+    // Done by whoever held the lock before.
+    if app.db.meta(PENDING)?.is_none() {
+        return Ok(());
+    }
+    let logs = app.home.join("logs");
+    std::fs::create_dir_all(&logs).with_context(|| format!("create {}", logs.display()))?;
+    let log_path = logs.join(MIGRATE_LOG);
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let mut say = |line: String| {
+        let _ = writeln!(log, "{} {line}", now_secs());
+    };
+
+    let (mut archived, mut left, mut gone, mut waiting) = (0, 0, 0, 0);
+    for (key, what) in [
+        ("reviews_v8_kept", "kept review"),
+        (
+            "reviews_v8_superseded",
+            "left the worktrees of duplicate review task",
+        ),
+        ("reviews_v8_dropped", "dropped review task with no PR"),
+    ] {
+        if let Some(lines) = app.db.meta(key)? {
+            for line in lines.lines() {
+                say(format!("{what} {line}"));
+            }
+            app.db.delete_meta(key)?;
+        }
+    }
+
+    let reviews = app.db.list_reviews(None)?;
+    for review in &reviews {
+        fold_markers(app, review, &mut say);
+    }
+
+    let root = app.tasks_root();
+    for old in app.db.pending_leftovers()? {
+        let session = runtime::session_name_for(&old.slug);
+        let dir = root.join(&old.slug);
+        let path = dir.join(&old.dir_name);
+        let what = format!("{}/{}", old.slug, old.dir_name);
+        // A kept review's own, whatever else was recorded of it: never
+        // archived, and its session never ended.
+        if let Some(own) = reviews
+            .iter()
+            .find(|r| r.slug == old.slug || r.id == old.task_id)
+        {
+            let note = format!("left in place: belongs to review {}", own.slug);
+            app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+            say(format!("{what}: {note}"));
+            left += 1;
+            continue;
+        }
+        // Ending its session would end this jeet.
+        if tmux::current_session().is_some_and(|s| s == session) {
+            say(format!(
+                "waiting: {what}: this runs inside its tmux session"
+            ));
+            waiting += 1;
+            continue;
+        }
+        if tmux::available() {
+            if let Err(e) = tmux::kill(&session) {
+                say(format!(
+                    "waiting: {what}: could not end its tmux session ({e:#})"
+                ));
+                waiting += 1;
+                continue;
+            }
+        }
+        if !path.exists() {
+            app.db
+                .finish_leftover(&old.task_id, &old.dir_name, "already gone")?;
+            say(format!("{what}: already gone"));
+            gone += 1;
+            continue;
+        }
+        let ignored = match git::ignored_paths(&path) {
+            Ok(paths) => paths.into_iter().find(|p| !rebuildable(p)),
+            Err(e) => {
+                match give_up_after_three(
+                    app,
+                    &old,
+                    &format!("could not list its ignored files: {e:#}"),
+                )? {
+                    Some(note) => {
+                        say(format!("{what}: {note}"));
+                        left += 1;
+                    }
+                    None => {
+                        say(format!(
+                            "waiting: {what}: could not list its ignored files ({e:#})"
+                        ));
+                        waiting += 1;
+                    }
+                }
+                continue;
+            }
+        };
+        if let Some(first) = ignored {
+            let note = format!("left in place: ignored files such as {first}");
+            app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+            say(format!("{what}: {note} (at {})", path.display()));
+            left += 1;
+            continue;
+        }
+        let mut row = TaskWorktreeRecord {
+            id: 0,
+            task_id: old.task_id.clone(),
+            repo_id: old.repo_id.clone(),
+            dir_name: old.dir_name.clone(),
+            branch: old.branch.clone(),
+            created_branch: old.created_branch,
+            head_oid: old.head_oid.clone(),
+            stash_ref: old.stash_ref.clone(),
+            pr_number: old.pr_number,
+            created_at: 0,
+            read_only: false,
+        };
+        let save = |_: &TaskWorktreeRecord| Ok(());
+        match tasks::archive_worktree(app, &old.task_id, &dir, &mut row, &save) {
+            Ok(warnings) => {
+                let stash = row
+                    .stash_ref
+                    .as_deref()
+                    .map_or("nothing uncommitted".to_string(), |r| {
+                        format!("uncommitted work at {r}")
+                    });
+                let note = format!(
+                    "archived: HEAD at {}, {stash}",
+                    tasks::jeet_ref("head", &old.task_id, &old.dir_name)
+                );
+                app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+                say(format!("{what}: {note}"));
+                for warning in warnings {
+                    say(format!("{what}: {warning}"));
+                }
+                archived += 1;
+            }
+            Err(e) => match give_up_after_three(app, &old, &format!("{e:#}"))? {
+                Some(note) => {
+                    say(format!("{what}: {note}"));
+                    left += 1;
+                }
+                None => {
+                    say(format!("waiting: {what}: could not archive it ({e:#})"));
+                    waiting += 1;
+                }
+            },
+        }
+    }
+
+    if waiting == 0 {
+        app.db.delete_meta(PENDING)?;
+    }
+    // Once per change: a leftover that waits to be tried again is not news.
+    if archived + left + gone > 0 {
+        eprintln!(
+            "jeet: reviews moved out of the tasks: {archived} duplicate worktrees archived, \
+             {left} left in place, {waiting} to retry; see {}",
+            log_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Attempts at a leftover before it is left where it is.
+const ATTEMPTS: i64 = 3;
+
+/// Count a failed attempt at `old`; at [`ATTEMPTS`] it is done, left in
+/// place, and the note says why.
+fn give_up_after_three(
+    app: &App,
+    old: &crate::db::reviews::Leftover,
+    error: &str,
+) -> Result<Option<String>> {
+    if app.db.count_leftover_attempt(&old.task_id, &old.dir_name)? < ATTEMPTS {
+        return Ok(None);
+    }
+    let note = format!("left in place: could not archive ({error})");
+    app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
+    Ok(Some(note))
+}
+
+/// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
+/// (what its agent was asked) and `brought-back` — on its row, where they
+/// are not yet.
+///
+/// True when a column was set.
+fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) -> bool {
+    let mut changed = false;
+    let marker = dir(app, review).join(tasks::MARKER_DIR);
+    if review.asked_at.is_none() {
+        let asked = std::fs::read_to_string(marker.join("review.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Asked>(&text).ok())
+            .filter(|asked| asked.pr == review.pr_number);
+        if let Some(asked) = asked {
+            match app.db.set_review_asked(&review.id, &asked.head, asked.at) {
+                Ok(()) => {
+                    changed = true;
+                    say(format!("{}: took what its agent was asked", review.slug));
+                }
+                Err(e) => say(format!("{}: could not record it ({e:#})", review.slug)),
+            }
+        }
+    }
+    if review.brought_back_at.is_none() {
+        let at = std::fs::read_to_string(marker.join("brought-back"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i64>().ok());
+        if let Some(at) = at {
+            match app.db.set_review_brought_back(&review.id, at) {
+                Ok(()) => {
+                    changed = true;
+                    say(format!("{}: took when it was brought back", review.slug));
+                }
+                Err(e) => say(format!("{}: could not record it ({e:#})", review.slug)),
+            }
+        }
+    }
+    changed
+}
+
+/// `review` with what its task kept in files folded into its row first, for
+/// whatever reads whether its agent was asked or when it was brought back:
+/// the post-step of the upgrade ([`migrate_leftovers`]) may not have run, or
+/// not got to it. Cheap: a file or two, and only where a column is empty.
+pub fn folded(app: &App, review: &ReviewRecord) -> ReviewRecord {
+    if review.asked_at.is_some() && review.brought_back_at.is_some() {
+        return review.clone();
+    }
+    if !fold_markers(app, review, &mut |_| {}) {
+        return review.clone();
+    }
+    app.db
+        .get_review(&review.id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| review.clone())
 }
 
 #[cfg(test)]
@@ -1285,27 +2415,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stop_jobs_spares_a_group_whose_pid_was_reused() {
-        use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
-        use crate::placement::Placement;
         use std::os::unix::process::CommandExt;
 
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("index.db")).unwrap();
-        db.insert_task(&TaskRecord {
-            id: "t".into(),
-            slug: "t".into(),
-            name: "t".into(),
-            project: None,
-            kind: TaskKind::Review,
-            state: TaskState::Active,
-            created_at: 0,
-            last_activity: 0,
-            parent_id: None,
-            placement: Placement::Local,
-            run_state: RunState::Run,
-            run_state_by: None,
-            max_children: None,
-        })
+        db.insert_review(&ReviewRecord::new(
+            "t".into(),
+            "t".into(),
+            "github.com/acme/api",
+            7,
+            0,
+        ))
         .unwrap();
         // An unrelated process group, as a job's would be.
         let mut other = Command::new("sleep")
@@ -1415,78 +2535,66 @@ mod tests {
         let _ = other.kill();
         let _ = other.wait();
     }
-    /// Each review asked of a review in the tree gets `[review]`'s time and
-    /// turns afresh on top of what it has used, a pause its last review's
-    /// budget set lifted, any other kept; a top-level one gets no budget.
+    /// Each review asked gets `[review]`'s time and turns afresh on top of
+    /// what it has used, whoever asked, and the pause its last review's
+    /// limits set is lifted.
     #[cfg(unix)]
     #[test]
-    fn each_review_in_the_tree_gets_its_caps_afresh() {
+    fn each_review_gets_its_caps_afresh() {
         let home = tempfile::tempdir().unwrap();
         let app = test_app(home.path());
-        give_budget(&app, &app.db.get_task("t").unwrap().unwrap()).unwrap();
-        assert_eq!(app.db.budget("t").unwrap(), None);
+        let get = || app.db.get_review("t").unwrap().unwrap();
+        give_budget(&app, &get()).unwrap();
+        let r = get();
+        assert_eq!((r.max_secs, r.max_turns), (Some(3600), Some(20)));
 
-        let mut t = app.db.get_task("t").unwrap().unwrap();
-        (t.id, t.slug, t.parent_id) = ("r".into(), "r".into(), Some("a".into()));
-        app.db.insert_task(&t).unwrap();
-        give_budget(&app, &t).unwrap();
-        let row = app.db.budget("r").unwrap().unwrap();
-        assert_eq!((row.max_secs, row.max_turns), (Some(3600), Some(20)));
-
-        // The first review spent: paused by its budget, until the next.
-        app.db.charge("r", 3600, 3).unwrap();
-        crate::manager::budget::enforce(&app, &t).unwrap();
-        let paused = app.db.get_task("r").unwrap().unwrap();
-        assert_eq!(paused.run_state_by, Some(Setter::Budget));
-        give_budget(&app, &t).unwrap();
-        let row = app.db.budget("r").unwrap().unwrap();
-        assert_eq!((row.max_secs, row.max_turns), (Some(7200), Some(23)));
-        assert_eq!(row.warned, 0);
-        assert_eq!(
-            app.db.get_task("r").unwrap().unwrap().run_state,
-            RunState::Run
-        );
-
-        // The user's pause stays.
-        app.db
-            .set_run_state("r", RunState::Paused, Some(&Setter::User))
-            .unwrap();
-        give_budget(&app, &t).unwrap();
-        assert_eq!(
-            app.db.get_task("r").unwrap().unwrap().run_state_by,
-            Some(Setter::User)
-        );
+        // The first review spent: paused, until the next.
+        app.db.charge_review("t", 3600, 3).unwrap();
+        crate::manager::budget::enforce_review(&app, &get()).unwrap();
+        assert!(get().paused);
+        give_budget(&app, &get()).unwrap();
+        let r = get();
+        assert_eq!((r.max_secs, r.max_turns), (Some(7200), Some(23)));
+        assert_eq!(r.warned, 0);
+        assert!(!r.paused);
     }
 
-    /// A test index holding the assistant and one top-level review task `t`.
+    /// A test index holding the assistant and one review `t`.
     #[cfg(unix)]
     fn test_app(home: &Path) -> App {
-        use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskState};
+        use crate::db::tasks::{RunState, TaskKind, TaskRecord};
         use crate::placement::Placement;
         let app = App {
             config: crate::config::load_or_create(home).unwrap(),
             db: Database::open(&crate::config::index_path(home)).unwrap(),
             home: home.to_path_buf(),
         };
-        for (id, kind) in [("a", TaskKind::Assistant), ("t", TaskKind::Review)] {
-            app.db
-                .insert_task(&TaskRecord {
-                    id: id.into(),
-                    slug: id.into(),
-                    name: id.into(),
-                    project: None,
-                    kind,
-                    state: TaskState::Active,
-                    created_at: 0,
-                    last_activity: 0,
-                    parent_id: None,
-                    placement: Placement::Local,
-                    run_state: RunState::Run,
-                    run_state_by: None,
-                    max_children: None,
-                })
-                .unwrap();
-        }
+        app.db
+            .insert_task(&TaskRecord {
+                id: "a".into(),
+                slug: "a".into(),
+                name: "a".into(),
+                project: None,
+                kind: TaskKind::Assistant,
+                state: TaskState::Active,
+                created_at: 0,
+                last_activity: 0,
+                parent_id: None,
+                placement: Placement::Local,
+                run_state: RunState::Run,
+                run_state_by: None,
+                max_children: None,
+            })
+            .unwrap();
+        app.db
+            .insert_review(&ReviewRecord::new(
+                "t".into(),
+                "t".into(),
+                "github.com/acme/api",
+                7,
+                0,
+            ))
+            .unwrap();
         app
     }
 
@@ -1660,5 +2768,436 @@ mod tests {
             .task_anchors("t", AnchorKind::Job)
             .unwrap()
             .is_empty());
+    }
+    // -----------------------------------------------------------------------
+    // The review's life, against real git
+    // -----------------------------------------------------------------------
+
+    fn hermetic_git(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A home with a repository in the store, cloned from a local origin.
+    fn git_lab() -> (tempfile::TempDir, App, RepoRecord) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let home = root.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let origin = root.join("origin");
+        let trunk = root.join("trunk");
+        std::fs::create_dir(&origin).unwrap();
+        hermetic_git(&origin, &["init", "-q", "-b", "main"]);
+        hermetic_git(&origin, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        hermetic_git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                trunk.to_str().unwrap(),
+            ],
+        );
+        let repo = RepoRecord {
+            id: "example.com/o/api".into(),
+            trunk_path: trunk.display().to_string(),
+            remote_url: format!("file://{}", origin.display()),
+            default_branch: "main".into(),
+        };
+        app.db.upsert_repo(&repo).unwrap();
+        (dir, app, repo)
+    }
+
+    /// A review of PR 7 with its directory and a worktree on a branch it
+    /// made, as `review_for` leaves one.
+    fn reviewed(app: &App, repo: &RepoRecord) -> ReviewRecord {
+        let mut review = ReviewRecord::new(
+            "rv-test-id".into(),
+            "zz-review-api-7".into(),
+            &repo.id,
+            7,
+            1,
+        );
+        review.title = "Add x".into();
+        let dir = dir(app, &review);
+        std::fs::create_dir_all(&dir).unwrap();
+        tasks::write_marker(&dir, &review.id).unwrap();
+        let trunk = Path::new(&repo.trunk_path);
+        hermetic_git(
+            trunk,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "pr/7",
+                dir.join("api").to_str().unwrap(),
+            ],
+        );
+        review.dir_name = Some("api".into());
+        review.branch = Some("pr/7".into());
+        review.created_branch = true;
+        app.db.insert_review(&review).unwrap();
+        app.db.get_review(&review.id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_review_is_archived_brought_back_and_deleted_with_its_work_kept() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let trunk = Path::new(&repo.trunk_path);
+        let worktree = worktree_path(&app, &review).unwrap();
+        std::fs::write(worktree.join("notes.md"), "half a review\n").unwrap();
+
+        archive(&app, &review).unwrap();
+        let archived = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(archived.state, TaskState::Archived);
+        assert!(!worktree.exists());
+        assert!(archived.head_oid.is_some() && archived.stash_ref.is_some());
+        let head_ref = tasks::jeet_ref("head", &review.id, "api");
+        assert!(git::ref_exists(trunk, &head_ref).unwrap());
+        // Archiving again, or running it half-way, changes nothing more.
+        archive(&app, &archived).unwrap();
+
+        let warnings = unarchive(&app, &archived).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let back = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(back.state, TaskState::Active);
+        assert!(back.brought_back_at.is_some());
+        assert_eq!((&back.head_oid, &back.stash_ref), (&None, &None));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("notes.md")).unwrap(),
+            "half a review\n"
+        );
+        assert_eq!(git::head_branch(&worktree).as_deref(), Some("pr/7"));
+        assert!(!git::ref_exists(trunk, &head_ref).unwrap());
+
+        let losses = losses(&app, &back).unwrap();
+        assert!(
+            losses.iter().any(|l| l.contains("uncommitted")),
+            "{losses:?}"
+        );
+        delete(&app, &back).unwrap();
+        assert!(app.db.get_review(&review.id).unwrap().is_none());
+        assert!(!dir(&app, &review).exists());
+        // The branch it made goes with it, and so do its refs.
+        assert!(!git::branch_exists(trunk, "pr/7").unwrap());
+        assert!(git::refs_under(trunk, "refs/jeet/")
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_second_ask_for_one_pr_gets_the_same_review() {
+        let (_dir, app, repo) = git_lab();
+        let pr = PullRequest { number: 7, ..pr() };
+        let assistant = crate::assistant::ensure(&app).unwrap();
+        let (first, created) = make_review(&app, &repo, &pr, Some(&assistant.id)).unwrap();
+        assert!(created);
+        assert_eq!(first.requested_by.as_deref(), Some(assistant.id.as_str()));
+        // As two `jeet review`s racing: the slower finds the faster's.
+        let (second, created) = make_review(&app, &repo, &pr, None).unwrap();
+        assert!(!created);
+        assert_eq!(second.id, first.id);
+        assert_eq!(app.db.list_reviews(None).unwrap().len(), 1);
+        assert!(!app.tasks_root().join(format!("{}-2", first.slug)).exists());
+        assert!(dir(&app, &first).join(".jeet/task-id").is_file());
+        // Another PR, another review; the same name is never a task's.
+        let other = PullRequest { number: 8, ..pr };
+        let (third, _) = make_review(&app, &repo, &other, None).unwrap();
+        assert_ne!(third.id, first.id);
+        assert_eq!(
+            app.db.find_review(&repo.id, 8).unwrap().unwrap().id,
+            third.id
+        );
+    }
+
+    /// The worktree of a duplicate review task, as migration to v8 leaves
+    /// it to archive: `dir_name` `api`, on its own branch.
+    fn duplicate(app: &App, repo: &RepoRecord, slug: &str) -> PathBuf {
+        let dir = app.tasks_root().join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        hermetic_git(
+            Path::new(&repo.trunk_path),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                slug,
+                dir.join("api").to_str().unwrap(),
+            ],
+        );
+        dir.join("api")
+    }
+
+    fn leftover_rows(app: &App) -> Vec<(String, i64, Option<String>)> {
+        let conn = rusqlite::Connection::open(crate::config::index_path(&app.home)).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT task_id, done, note FROM review_leftovers ORDER BY rowid")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// What migration to v8 leaves of a duplicate's worktree is archived the
+    /// way `jeet task archive` does it, unless it has ignored files that
+    /// are not caches, when it stays where it is; and a second look finds
+    /// nothing to do.
+    #[test]
+    fn leftovers_are_archived_to_refs_or_left_in_place_and_only_once() {
+        let (_dir, app, repo) = git_lab();
+        let trunk = Path::new(&repo.trunk_path);
+        std::fs::write(trunk.join(".git/info/exclude"), ".env\ntarget/\n").unwrap();
+        let dirty = duplicate(&app, &repo, "zz-dup-dirty");
+        std::fs::write(dirty.join("notes.md"), "half a review\n").unwrap();
+        std::fs::create_dir_all(dirty.join("target")).unwrap();
+        std::fs::write(dirty.join("target/cache"), "x").unwrap();
+        let secret = duplicate(&app, &repo, "zz-dup-secret");
+        std::fs::write(secret.join(".env"), "TOKEN=x\n").unwrap();
+        let gone = app.tasks_root().join("zz-dup-gone");
+        std::fs::create_dir_all(&gone).unwrap();
+
+        let conn = rusqlite::Connection::open(crate::config::index_path(&app.home)).unwrap();
+        for (task, slug) in [
+            ("dup-dirty", "zz-dup-dirty"),
+            ("dup-secret", "zz-dup-secret"),
+            ("dup-gone", "zz-dup-gone"),
+        ] {
+            conn.execute(
+                "INSERT INTO review_leftovers (task_id, slug, repo_id, pr_number, dir_name,
+                     branch, created_branch, was_archived, done)
+                 VALUES (?1, ?2, ?3, 7, 'api', ?2, 1, 0, 0)",
+                rusqlite::params![task, slug, repo.id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('reviews_v8_pending', '1'),
+                 ('reviews_v8_kept', 'zz-review-api-7 example.com/o/api#7')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        migrate(&app).unwrap();
+        // The dirty one: its work kept in the trunk, the worktree gone.
+        assert!(!dirty.exists());
+        let head = tasks::jeet_ref("head", "dup-dirty", "api");
+        let stash = tasks::jeet_ref("stash", "dup-dirty", "api");
+        assert!(git::ref_exists(trunk, &head).unwrap());
+        assert!(git::ref_exists(trunk, &stash).unwrap());
+        // Its task directory is never removed, nor is the branch.
+        assert!(app.tasks_root().join("zz-dup-dirty").is_dir());
+        assert!(git::branch_exists(trunk, "zz-dup-dirty").unwrap());
+        // The one with a .env stays exactly as it was.
+        assert!(secret.join(".env").is_file());
+        let rows = leftover_rows(&app);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0]
+            .2
+            .as_deref()
+            .unwrap()
+            .starts_with("archived: HEAD at "));
+        assert!(rows[1].2.as_deref().unwrap().contains("left in place"));
+        assert_eq!(rows[2].2.as_deref(), Some("already gone"));
+        assert!(rows.iter().all(|r| r.1 == 1));
+        assert_eq!(app.db.meta(PENDING).unwrap(), None);
+        let log = std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap();
+        assert!(log.contains("kept review zz-review-api-7"), "{log}");
+        assert!(log.contains("zz-dup-dirty/api: archived"), "{log}");
+        assert!(log.contains(&stash), "{log}");
+        assert!(
+            log.contains("left in place: ignored files such as .env"),
+            "{log}"
+        );
+
+        // Again: nothing is pending, so nothing changes or is logged.
+        let before = std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap();
+        migrate(&app).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap(),
+            before
+        );
+        assert_eq!(leftover_rows(&app), rows);
+    }
+
+    /// What a review task kept in files under its directory goes on its row.
+    #[test]
+    fn what_a_review_task_kept_in_files_goes_on_its_row() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let marker = dir(&app, &review).join(tasks::MARKER_DIR);
+        std::fs::write(
+            marker.join("review.json"),
+            r#"{"pr": 7, "head": "abc", "at": 123}"#,
+        )
+        .unwrap();
+        std::fs::write(marker.join("brought-back"), "456").unwrap();
+        app.db.set_meta_for_test(PENDING).unwrap();
+        migrate(&app).unwrap();
+        let got = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(
+            (got.asked_head.as_deref(), got.asked_at, got.brought_back_at),
+            (Some("abc"), Some(123), Some(456))
+        );
+        // What was asked of another PR is not this one's.
+        let marker_pr = r#"{"pr": 9, "head": "zzz", "at": 1}"#;
+        std::fs::write(marker.join("review.json"), marker_pr).unwrap();
+        app.db.set_review_asked(&review.id, "newer", 999).unwrap();
+        app.db.set_meta_for_test(PENDING).unwrap();
+        migrate(&app).unwrap();
+        let got = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(got.asked_head.as_deref(), Some("newer"));
+    }
+
+    fn insert_leftover(app: &App, repo: &RepoRecord, task: &str, slug: &str) {
+        let conn = rusqlite::Connection::open(crate::config::index_path(&app.home)).unwrap();
+        conn.execute(
+            "INSERT INTO review_leftovers (task_id, slug, repo_id, pr_number, dir_name,
+                 branch, created_branch, was_archived, done)
+             VALUES (?1, ?2, ?3, 7, 'api', ?2, 1, 0, 0)",
+            rusqlite::params![task, slug, repo.id],
+        )
+        .unwrap();
+        app.db.set_meta_for_test(PENDING).unwrap();
+    }
+
+    /// A leftover recorded under a review's id or slug is the review's own
+    /// worktree: never archived.
+    #[test]
+    fn a_leftover_that_belongs_to_a_review_is_left_in_place() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let worktree = worktree_path(&app, &review).unwrap();
+        insert_leftover(&app, &repo, &review.id, "some-old-slug");
+        insert_leftover(&app, &repo, "old-task", &review.slug);
+        migrate(&app).unwrap();
+        assert!(worktree.is_dir());
+        assert!(git::branch_exists(Path::new(&repo.trunk_path), "pr/7").unwrap());
+        let rows = leftover_rows(&app);
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.1, 1);
+            assert_eq!(
+                row.2.as_deref(),
+                Some(format!("left in place: belongs to review {}", review.slug).as_str())
+            );
+        }
+        let log = std::fs::read_to_string(app.home.join("logs").join(MIGRATE_LOG)).unwrap();
+        assert!(log.contains("belongs to review"), "{log}");
+    }
+
+    /// One that cannot be archived is tried three times, then left.
+    #[test]
+    fn a_leftover_that_cannot_be_archived_is_given_up_after_three_tries() {
+        let (_dir, app, repo) = git_lab();
+        // Not a worktree at all, so listing what git ignores fails.
+        std::fs::create_dir_all(app.tasks_root().join("zz-dup-broken/api")).unwrap();
+        insert_leftover(&app, &repo, "dup-broken", "zz-dup-broken");
+        for _ in 0..2 {
+            migrate(&app).unwrap();
+            assert_eq!(leftover_rows(&app)[0].1, 0);
+            assert!(app.db.meta(PENDING).unwrap().is_some());
+        }
+        migrate(&app).unwrap();
+        let rows = leftover_rows(&app);
+        assert_eq!(rows[0].1, 1);
+        assert!(
+            rows[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .starts_with("left in place: could not archive ("),
+            "{rows:?}"
+        );
+        assert_eq!(app.db.meta(PENDING).unwrap(), None);
+    }
+
+    /// The markers are read from the review's directory when its columns are
+    /// empty, whether or not the post-step has run.
+    #[test]
+    fn markers_are_folded_for_a_reader_before_the_post_step() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        assert!(asked(&review).is_none());
+        let marker = dir(&app, &review).join(tasks::MARKER_DIR);
+        std::fs::write(
+            marker.join("review.json"),
+            r#"{"pr": 7, "head": "abc", "at": 123}"#,
+        )
+        .unwrap();
+        std::fs::write(marker.join("brought-back"), "456").unwrap();
+        let got = folded(&app, &review);
+        assert_eq!(
+            asked(&got).map(|a| (a.head, a.at)),
+            Some(("abc".into(), 123))
+        );
+        assert_eq!(got.brought_back_at, Some(456));
+        // And on the row, so it is read once.
+        let row = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(row.brought_back_at, Some(456));
+        // A PR that was done before it was brought back is not retired.
+        assert!(matches!(
+            retire(&app, &review, Some(100)).unwrap(),
+            Retired::BroughtBack
+        ));
+    }
+
+    /// The second of two `jeet review`s that raced for the lock finds the
+    /// first's worktree recorded and uses it, making no second.
+    #[test]
+    fn a_second_check_out_reuses_the_first_ones_worktree() {
+        let (_dir, app, repo) = git_lab();
+        let recorded = reviewed(&app, &repo);
+        let pr = PullRequest { number: 7, ..pr() };
+        let worktree = worktree_path(&app, &recorded).unwrap();
+        // Uncommitted: the refresh from the PR is not attempted.
+        std::fs::write(worktree.join("notes.md"), "x\n").unwrap();
+        // What the slower one read before the faster one recorded its own.
+        let mut stale = recorded.clone();
+        stale.dir_name = None;
+        stale.branch = None;
+        let (path, _) = check_out(&app, &mut stale, &repo, &pr).unwrap();
+        assert_eq!(path, worktree);
+        assert_eq!(stale.dir_name.as_deref(), Some("api"));
+        let dirs = std::fs::read_dir(dir(&app, &recorded))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().join(".git").exists())
+            .count();
+        assert_eq!(dirs, 1);
+    }
+
+    #[test]
+    fn who_asked_sticks_when_the_user_asks_again() {
+        let (_dir, app, repo) = git_lab();
+        let review = reviewed(&app, &repo);
+        let assistant = crate::assistant::ensure(&app).unwrap();
+        remember_requester(&app, &review.id, Some(&assistant.id)).unwrap();
+        remember_requester(&app, &review.id, None).unwrap();
+        let got = app.db.get_review(&review.id).unwrap().unwrap();
+        assert_eq!(got.requested_by.as_deref(), Some(assistant.id.as_str()));
     }
 }

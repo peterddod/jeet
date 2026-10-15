@@ -220,9 +220,7 @@ mod tests {
             last_activity: last,
             size: None,
             report: None,
-            review_jobs: Vec::new(),
             unanchored: false,
-            queued: false,
         }
     }
 
@@ -330,7 +328,6 @@ mod tests {
             row("gone-api", TaskKind::Work, gone, None, Some("api"), 50),
             row("gone-web", TaskKind::Work, gone, None, Some("web"), 40),
             row("gone-mgr", TaskKind::Manager, gone, None, None, 30),
-            row("review", TaskKind::Review, gone, None, Some("rev"), 60),
         ];
         let got = lines(&rows, &["api", "empty", "web", "zero"], true, "");
         assert_eq!(
@@ -344,8 +341,6 @@ mod tests {
         let groups = Groups::new(&rows, &["empty".to_string()]);
         assert_eq!(groups.members(true, "empty"), Some(&[][..]));
         assert_eq!(groups.members(false, "empty"), None);
-        // Reviews are the reviews view's, in neither.
-        assert_eq!(lines(&rows, &[], false, "").len(), 1);
     }
 
     #[test]

@@ -6,10 +6,12 @@
 use anyhow::{bail, Result};
 
 use crate::context::App;
-use crate::db::tasks::{BudgetRow, RunState, TaskKind, TaskRecord};
+use crate::db::reviews::ReviewRecord;
+use crate::db::tasks::{BudgetRow, RunState, TaskRecord};
 use crate::messages::{Inbox, Sender};
 use crate::permissions::Caller;
 use crate::reports::{self, StatusEvent};
+use crate::review;
 use crate::tasks;
 
 /// A node's caps; `None` is no cap on that unit.
@@ -190,9 +192,7 @@ pub fn cap(
     had: Limits,
     want: Limits,
 ) -> Result<Limits> {
-    // A review spends apart from the budgets above it.
     let parent = match &target.parent_id {
-        Some(_) if target.kind == TaskKind::Review => None,
         Some(id) => app.db.get_task(id)?,
         None => None,
     };
@@ -200,7 +200,7 @@ pub fn cap(
         Some(parent) => remaining(app, parent)?,
         None => Limits::default(),
     };
-    if let (Caller::Node(me), false) = (by, target.kind == TaskKind::Review) {
+    if let Caller::Node(me) = by {
         let mine = remaining(app, me)?;
         left.secs = least(left.secs, mine.secs);
         left.turns = least(left.turns, mine.turns);
@@ -322,14 +322,78 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
 }
 
 /// The nodes whose budgets what `node` uses counts toward: it and its
-/// ancestors, or, for a review, only itself, whose caps come from
-/// `[review]` (M21).
+/// ancestors.
 fn counted_toward(app: &App, node: &TaskRecord) -> Result<Vec<TaskRecord>> {
     let mut chain = vec![node.clone()];
-    if node.kind != TaskKind::Review {
-        chain.extend(app.db.ancestors(&node.id)?);
-    }
+    chain.extend(app.db.ancestors(&node.id)?);
     Ok(chain)
+}
+
+/// Check review `review`'s `[review]` limits once it has been charged, as
+/// [`enforce`] checks a node's budget: at 80% of a limit it and whoever
+/// asked for it are told, and at 100% it is paused until it is asked
+/// again. Each threshold is told once until the limits change. Interrupts
+/// nothing: what runs finishes its turn and then gets nothing new. Returns
+/// `Hit100` when this check newly paused it, for whoever asked to be told
+/// it is blocked ([`report_blocked_review`]), `Warn80` when an 80% was
+/// newly crossed, else `None`.
+pub fn enforce_review(app: &App, review: &ReviewRecord) -> Result<Threshold> {
+    let check = app
+        .db
+        .check_review_budget(&review.id, |row, used| match percent(row, used) {
+            Some(pct) if pct >= 100 => 100,
+            Some(pct) if pct >= 80 => 80,
+            _ => 0,
+        })?;
+    let Some(check) = check.filter(|c| c.newly) else {
+        return Ok(Threshold::None);
+    };
+    if check.level >= 100 {
+        return Ok(Threshold::Hit100);
+    }
+    let pct = percent(&check.row, check.used).unwrap_or(80);
+    let usage = usage(&check.row, check.used);
+    tell_asker(app, review, &format!("budget {pct}% used ({usage})"));
+    let note = format!(
+        "jeet: this review is {pct}% of its [review] limits ({usage}). At 100% you are paused; \
+         wrap up."
+    );
+    let told = Inbox::lock(&review::dir(app, review))
+        .and_then(|inbox| inbox.push_to(&note, None, Sender::Agent));
+    if let Err(e) = told {
+        eprintln!(
+            "jeet: could not tell review {} its limits: {e:#}",
+            review.slug
+        );
+    }
+    Ok(Threshold::Warn80)
+}
+
+/// Tell whoever asked for `review` that its `[review]` limits are used up
+/// and it is paused (see [`report_blocked`]).
+pub fn report_blocked_review(app: &App, review: &ReviewRecord) {
+    let Ok(Some(fresh)) = app.db.get_review(&review.id) else {
+        return;
+    };
+    let used = (fresh.used_secs, fresh.used_turns);
+    let body = format!(
+        "budget used up ({}); blocked: budget. Paused until it is asked for again \
+         (`jeet review --rerun`)",
+        usage(&fresh.budget(), used)
+    );
+    tell_asker(app, &fresh, &body);
+}
+
+/// A `status` report about `review` to whoever asked for it; what goes
+/// wrong is warned of, not failed on.
+fn tell_asker(app: &App, review: &ReviewRecord, body: &str) {
+    if let Err(e) = reports::auto_status_review(app, review, StatusEvent::Budget, body, i64::MAX, 0)
+    {
+        eprintln!(
+            "jeet: could not report review {}'s limits: {e:#}",
+            review.slug
+        );
+    }
 }
 
 /// Whether `task` is stopped, itself or above.
@@ -637,61 +701,52 @@ mod tests {
         assert_eq!(budget_reports(&app, "m").len(), 2);
     }
 
-    /// A review under `m`, beside `w`.
-    fn add_review(app: &App) -> TaskRecord {
-        let mut r = get(app, "w");
-        (r.id, r.slug, r.name, r.kind) = ("r".into(), "r".into(), "r".into(), TaskKind::Review);
-        app.db.insert_task(&r).unwrap();
+    /// A review the assistant asked for, with `[review]`'s turns capped.
+    fn add_review(app: &App, turns: i64) -> ReviewRecord {
+        let root = super::super::root(app).unwrap();
+        let mut r = ReviewRecord::new("r".into(), "r".into(), "github.com/acme/api", 7, 0);
+        r.requested_by = Some(root.id);
+        app.db.insert_review(&r).unwrap();
+        std::fs::create_dir_all(review::dir(app, &r)).unwrap();
+        app.db
+            .set_review_budget_max("r", None, Some(turns))
+            .unwrap();
         r
     }
 
-    /// A review spends apart from the budgets above it, and they apart
-    /// from it: its use counts toward neither its manager's budget nor
-    /// what is left under it, only its own caps hold it, and a limit set on
-    /// it is not held to what is left above.
+    /// A review spends apart from the budgets of the tree, and they apart
+    /// from it: only its own limits hold it, it tells whoever asked for it
+    /// at 80%, and at 100% it is paused until it is asked again.
     #[test]
-    fn a_review_spends_apart_from_the_budgets_above_it() {
+    fn a_review_is_held_to_its_own_limits_and_tells_the_one_who_asked() {
         let (_dir, app) = lab();
-        let r = add_review(&app);
+        let r = add_review(&app, 5);
         app.db.set_budget_max("m", None, Some(10)).unwrap();
-        app.db.set_budget_max("r", None, Some(5)).unwrap();
-        app.db.charge("r", 600, 4).unwrap();
+        app.db.charge_review("r", 600, 4).unwrap();
         assert_eq!(app.db.subtree_used("m").unwrap(), (0, 0));
-        assert_eq!(app.db.subtree_used("r").unwrap(), (600, 4));
-        assert_eq!(remaining(&app, &get(&app, "m")).unwrap().turns, Some(10));
-        assert_eq!(enforce(&app, &r).unwrap(), Threshold::Warn80);
+        assert_eq!(enforce_review(&app, &r).unwrap(), Threshold::Warn80);
         assert_eq!(app.db.budget("m").unwrap().unwrap().warned, 0);
+        let root = super::super::root(&app).unwrap();
+        let told = app.db.reports_for("r", 10).unwrap();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].to_id, root.id);
+        assert!(told[0].body.starts_with("budget 80% used"), "{told:?}");
+        // Not again.
+        assert_eq!(enforce_review(&app, &r).unwrap(), Threshold::None);
 
-        // m spent by w: r runs on, and is held only by its own caps.
+        // m spent by w: r runs on, and is held only by its own limits.
         app.db.charge("w", 0, 10).unwrap();
         assert_eq!(enforce(&app, &get(&app, "w")).unwrap(), Threshold::Hit100);
         app.db.set_run_state("m", RunState::Run, None).unwrap();
-        app.db.charge("r", 0, 1).unwrap();
-        assert_eq!(enforce(&app, &r).unwrap(), Threshold::Hit100);
-        let r = get(&app, "r");
-        assert_eq!(
-            (r.run_state, r.run_state_by.clone()),
-            (RunState::Paused, Some(Setter::Budget))
-        );
+        assert!(!app.db.get_review("r").unwrap().unwrap().paused);
+        app.db.charge_review("r", 0, 1).unwrap();
+        assert_eq!(enforce_review(&app, &r).unwrap(), Threshold::Hit100);
+        assert!(app.db.get_review("r").unwrap().unwrap().paused);
+        report_blocked_review(&app, &r);
+        let told = app.db.reports_for("r", 10).unwrap();
         assert!(
-            blocked_body(&app, &r)
-                .unwrap()
-                .starts_with("budget used up (5 of 5turns)"),
-            "{}",
-            blocked_body(&app, &r).unwrap()
-        );
-        // m, with nothing left, does not cap a limit set on r.
-        let want = parse_limits("50turns").unwrap();
-        assert_eq!(
-            cap(
-                &app,
-                &r,
-                &Caller::Node(get(&app, "m")),
-                Limits::default(),
-                want
-            )
-            .unwrap(),
-            want
+            told[0].body.starts_with("budget used up (5 of 5turns)"),
+            "{told:?}"
         );
     }
 

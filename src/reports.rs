@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 
 use crate::assistant;
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::manager;
 use crate::manager::budget::{self, Limits, Threshold};
@@ -55,6 +56,45 @@ impl StatusEvent {
     }
 }
 
+/// What a report is about and comes from: a task with a parent, or a
+/// review, whose reports go to the task that asked for it.
+pub struct Source {
+    id: String,
+    /// Who it is to the one it reports to: `task fix-x`, `review api#7`.
+    label: String,
+    /// Where it is among them: its path in the tree, or the review's slug.
+    path: String,
+    /// Where its reports go: its parent, or whoever asked for the review.
+    to: Option<String>,
+    /// Why it has nowhere to report to, when `to` is `None`.
+    nowhere: String,
+}
+
+impl Source {
+    fn task(app: &App, task: &TaskRecord) -> Result<Self> {
+        Ok(Self {
+            id: task.id.clone(),
+            label: manager::label(task),
+            path: manager::tree_path(app, task)?,
+            to: task.parent_id.clone(),
+            nowhere: format!("{} has no parent to report to", manager::label(task)),
+        })
+    }
+
+    fn review(review: &ReviewRecord) -> Self {
+        Self {
+            id: review.id.clone(),
+            label: format!("review {}", review.label()),
+            path: review.slug.clone(),
+            to: review.requested_by.clone(),
+            nowhere: format!(
+                "review {} was not asked for by a task, so there is no one to report to",
+                review.label()
+            ),
+        }
+    }
+}
+
 /// Record a report about `task` and deliver it to its parent. Returns the
 /// report's id, and how delivery went: the row is kept either way.
 /// Without `may_start` it never starts a session of the parent's, and a
@@ -68,11 +108,32 @@ pub fn send(
     body: &str,
     may_start: bool,
 ) -> Result<(i64, Result<Delivered>)> {
-    let (parent, body) = checked(app, task, body)?;
+    send_from(app, &Source::task(app, task)?, kind, body, may_start)
+}
+
+/// [`send`] for a review's agent: to the task that asked for the review.
+pub fn send_review(
+    app: &App,
+    review: &ReviewRecord,
+    kind: ReportKind,
+    body: &str,
+    may_start: bool,
+) -> Result<(i64, Result<Delivered>)> {
+    send_from(app, &Source::review(review), kind, body, may_start)
+}
+
+fn send_from(
+    app: &App,
+    src: &Source,
+    kind: ReportKind,
+    body: &str,
+    may_start: bool,
+) -> Result<(i64, Result<Delivered>)> {
+    let (parent, body) = checked(app, src, body)?;
     let id = app
         .db
-        .insert_report(&task.id, &parent.id, kind, &body, now_secs())?;
-    Ok((id, deliver(app, task, &parent, id, kind, &body, may_start)))
+        .insert_report(&src.id, &parent.id, kind, &body, now_secs())?;
+    Ok((id, deliver(app, src, &parent, id, kind, &body, may_start)))
 }
 
 /// Whether a report of `kind` may start a session of the parent's: not
@@ -81,17 +142,20 @@ fn wakes(kind: ReportKind) -> bool {
     !matches!(kind, ReportKind::Progress | ReportKind::Status)
 }
 
-/// `task`'s parent and `body` cleaned, or why it cannot report.
-fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(TaskRecord, String)> {
-    let Some(parent_id) = &task.parent_id else {
-        bail!("task {} has no parent to report to", task.slug);
+/// Where `src`'s report goes and `body` cleaned, or why it cannot report.
+fn checked(app: &App, src: &Source, body: &str) -> Result<(TaskRecord, String)> {
+    let Some(parent_id) = &src.to else {
+        bail!("{}", src.nowhere);
     };
     let Some(parent) = app.db.get_task(parent_id)? else {
-        bail!("task {}'s parent is gone", task.slug);
+        bail!(
+            "{} has no one to report to: who is above it is gone",
+            src.label
+        );
     };
     match parent.kind {
         TaskKind::Assistant | TaskKind::Manager => {}
-        TaskKind::Work | TaskKind::Review => {
+        TaskKind::Work => {
             bail!("only the assistant and managers take reports")
         }
     }
@@ -110,17 +174,17 @@ fn checked(app: &App, task: &TaskRecord, body: &str) -> Result<(TaskRecord, Stri
     Ok((parent, body.to_string()))
 }
 
-/// Deliver report `id`, recorded already, to `task`'s `parent`.
+/// Deliver report `id`, recorded already, to `src`'s `parent`.
 fn deliver(
     app: &App,
-    task: &TaskRecord,
+    src: &Source,
     parent: &TaskRecord,
     id: i64,
     kind: ReportKind,
     body: &str,
     may_start: bool,
 ) -> Result<Delivered> {
-    deliver_with(app, task, parent, id, kind, body, may_start, &|may_start| {
+    deliver_with(app, src, parent, id, kind, body, may_start, &|may_start| {
         Box::new(TmuxAgent::new(app, parent).may_start(may_start))
     })
 }
@@ -130,7 +194,7 @@ fn deliver(
 #[allow(clippy::too_many_arguments)]
 fn deliver_with<'a>(
     app: &App,
-    task: &TaskRecord,
+    src: &Source,
     parent: &TaskRecord,
     id: i64,
     kind: ReportKind,
@@ -138,8 +202,7 @@ fn deliver_with<'a>(
     may_start: bool,
     manager_agent: &dyn Fn(bool) -> Box<dyn Agent + 'a>,
 ) -> Result<Delivered> {
-    let path = manager::tree_path(app, task)?;
-    let fenced = assistant::fence_report(id, &manager::label(task), &path, kind, body);
+    let fenced = assistant::fence_report(id, &src.label, &src.path, kind, body);
     // Started only by a report that wakes it.
     deliver_to_with(
         app,
@@ -176,7 +239,7 @@ fn deliver_to_with<'a>(
         TaskKind::Assistant => assistant::deliver(app, text, may_start).map(|(d, _)| d),
         // Typed into its idle pane, queued while it is busy, and started
         // only with `may_start`; otherwise held in its inbox.
-        TaskKind::Manager | TaskKind::Work | TaskKind::Review => messages::deliver(
+        TaskKind::Manager | TaskKind::Work => messages::deliver(
             &tasks::task_dir(app, to),
             agent(may_start).as_ref(),
             text,
@@ -228,11 +291,12 @@ fn escalate_with(
         Caller::User => bail!("you are the top; answer #{id} with `jeet report answer {id} \"…\"`"),
         Caller::Root => manager::root(app)?,
         Caller::Node(task) => task.clone(),
+        Caller::Review(_) => bail!("a review's agent holds no question"),
     };
     refuse_unless_held(app, &row, &holder)?;
     let to = match holder.kind {
         TaskKind::Assistant => None,
-        TaskKind::Manager | TaskKind::Work | TaskKind::Review => {
+        TaskKind::Manager | TaskKind::Work => {
             let parent = holder
                 .parent_id
                 .as_deref()
@@ -245,13 +309,13 @@ fn escalate_with(
             Some(parent)
         }
     };
-    let path = manager::tree_path(app, &asker)?;
+    let path = asker.path(app)?;
     let to_id = to.as_ref().map_or(&holder.id, |t| &t.id);
     let row = app
         .db
         .escalate_report(id, &holder.id, to_id, to.is_none())?;
     let Some(to) = to else {
-        let (title, subtitle, body) = notification_for(&row, &asker, &path);
+        let (title, subtitle, body) = notification_for(&row, &asker.label(), &path);
         notifier(&Notification {
             title: &title,
             subtitle: Some(&subtitle),
@@ -266,7 +330,7 @@ fn escalate_with(
     };
     let text = assistant::fence_escalated(
         row.id,
-        &manager::label(&asker),
+        &asker.label(),
         &path,
         row.kind,
         &row.body,
@@ -284,13 +348,9 @@ fn escalate_with(
 /// `asker`, at `path` in the tree, needs the user. Names by slug and path,
 /// never a task's name; the notifier drops control characters from the
 /// body and cuts it.
-fn notification_for(
-    row: &TaskReportRecord,
-    asker: &TaskRecord,
-    path: &str,
-) -> (String, String, String) {
+fn notification_for(row: &TaskReportRecord, asker: &str, path: &str) -> (String, String, String) {
     (
-        format!("jeet: {} asks you (#{})", manager::label(asker), row.id),
+        format!("jeet: {asker} asks you (#{})", row.id),
         path.to_string(),
         row.body.clone(),
     )
@@ -355,7 +415,9 @@ fn redeliver_moved_with(
 pub struct Answered {
     /// The row as written.
     pub row: TaskReportRecord,
-    pub asker: TaskRecord,
+    /// Who asked, as the tasks around it are told: `task fix-x`, `review
+    /// api#7`.
+    pub asker: String,
     /// How the answer reached the asker.
     pub to_asker: Result<Delivered>,
     /// The managers on its way up that were copied in, by label, and how
@@ -402,6 +464,7 @@ fn answer_with(
         Caller::User => None,
         Caller::Root => Some(manager::root(app)?),
         Caller::Node(task) => Some(task.clone()),
+        Caller::Review(_) => bail!("a review's agent holds no question"),
     };
     if let Some(answerer) = &answerer {
         refuse_unless_held(app, &row, answerer)?;
@@ -410,23 +473,23 @@ fn answer_with(
         Some(a) => (a.id.as_str(), manager::label(a)),
         None => ("user", "user".to_string()),
     };
-    let path = manager::tree_path(app, &asker)?;
-    let ancestors = app.db.ancestors(&asker.id)?;
+    let path = asker.path(app)?;
+    let ancestors = asker.ancestors(app)?;
     let row = app
         .db
         .answer_report(id, answerer.as_ref().map(|a| a.id.as_str()), text, by_id)?;
-    let to_asker = deliver(
-        &asker,
-        &assistant::fence_answer(id, &from, text, false),
-        true,
-    );
+    let fenced = assistant::fence_answer(id, &from, text, false);
+    let to_asker = match &asker {
+        Asker::Task(task) => deliver(task, &fenced, true),
+        Asker::Review(review) => crate::review::deliver(app, review, &fenced, true),
+    };
     // The path it took: from the asker's parent up to its holder as the
     // answer was written. Above that, nobody saw the question.
     let on_path = match ancestors.iter().position(|a| a.id == row.to_id) {
         Some(holder) => &ancestors[..=holder],
         None => &ancestors[..0],
     };
-    let copy = copy_text(&row, &manager::label(&asker), &path, &from, text);
+    let copy = copy_text(&row, &asker.label(), &path, &from, text);
     let copies = on_path
         .iter()
         .filter(|m| m.id != by_id)
@@ -434,7 +497,7 @@ fn answer_with(
         .collect();
     Ok(Answered {
         row,
-        asker,
+        asker: asker.label(),
         to_asker,
         copies,
     })
@@ -485,10 +548,16 @@ pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
         Caller::Root => app.db.open_asks(Some(&manager::root(app)?.id)),
         Caller::Node(task) => match task.kind {
             TaskKind::Assistant | TaskKind::Manager => app.db.open_asks(Some(&task.id)),
-            TaskKind::Work | TaskKind::Review => {
-                Ok(manager::open_ask(app, task)?.into_iter().collect())
-            }
+            TaskKind::Work => Ok(manager::open_ask(app, task)?.into_iter().collect()),
         },
+        Caller::Review(review) => Ok(app
+            .db
+            .last_closing_report(&review.id)?
+            .filter(|r| {
+                matches!(r.kind, ReportKind::Blocked | ReportKind::Question) && r.answer.is_none()
+            })
+            .into_iter()
+            .collect()),
     }
 }
 
@@ -504,9 +573,93 @@ pub fn answerer(app: &App, answered_by: &str) -> Result<String> {
         .map_or_else(|| "a deleted task".to_string(), |t| manager::label(&t)))
 }
 
+/// Who asked a report: a task, or a review, whose asks go to the task that
+/// asked for it.
+enum Asker {
+    Task(TaskRecord),
+    Review(Box<ReviewRecord>),
+}
+
+impl Asker {
+    /// The task or review report row `task_id` is about.
+    fn find(app: &App, id: &str) -> Result<Option<Self>> {
+        if let Some(task) = app.db.get_task(id)? {
+            return Ok(Some(Asker::Task(task)));
+        }
+        Ok(app.db.get_review(id)?.map(|r| Asker::Review(Box::new(r))))
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Asker::Task(task) => &task.id,
+            Asker::Review(review) => &review.id,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Asker::Task(task) => manager::label(task),
+            Asker::Review(review) => format!("review {}", review.label()),
+        }
+    }
+
+    fn path(&self, app: &App) -> Result<String> {
+        match self {
+            Asker::Task(task) => manager::tree_path(app, task),
+            Asker::Review(review) => Ok(review.slug.clone()),
+        }
+    }
+
+    /// The tasks above it, nearest first. A review has none: its asks go
+    /// straight to the task that asked for it.
+    fn ancestors(&self, app: &App) -> Result<Vec<TaskRecord>> {
+        match self {
+            Asker::Task(task) => app.db.ancestors(&task.id),
+            Asker::Review(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn archived(&self) -> bool {
+        match self {
+            Asker::Task(task) => task.state == TaskState::Archived,
+            Asker::Review(review) => review.state == TaskState::Archived,
+        }
+    }
+}
+
+/// The asker of report row `task_id`, named: a task or a review. None when
+/// it is gone.
+pub fn asker_name(app: &App, task_id: &str) -> Result<Option<AskerName>> {
+    Ok(match Asker::find(app, task_id)? {
+        Some(Asker::Task(task)) => {
+            let path = manager::tree_path(app, &task)?;
+            Some(AskerName {
+                label: manager::label(&task),
+                shown: manager::label_at(&task, &path),
+                path,
+            })
+        }
+        Some(asker @ Asker::Review(_)) => Some(AskerName {
+            label: asker.label(),
+            shown: asker.label(),
+            path: asker.path(app)?,
+        }),
+        None => None,
+    })
+}
+
+/// Who asked, named for `jeet report ls`.
+pub struct AskerName {
+    /// As the one it asked is told: `task fix-x`.
+    pub label: String,
+    /// With its path in the tree: `task assistant/fix-x`.
+    pub shown: String,
+    pub path: String,
+}
+
 /// Report `id` and its asker, or why it is not an open ask anyone may act
 /// on.
-fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, TaskRecord)> {
+fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, Asker)> {
     let Some(row) = app.db.get_report(id)? else {
         bail!("there is no report #{id}");
     };
@@ -516,25 +669,25 @@ fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, TaskRecord)> {
     if let Some(by) = &row.answered_by {
         bail!("#{id} was answered by {}", answerer(app, by)?);
     }
-    let Some(asker) = app.db.get_task(&row.task_id)? else {
+    let Some(asker) = Asker::find(app, &row.task_id)? else {
         bail!("the task that asked #{id} is gone");
     };
     // Only a done, blocked or question report since supersedes it; progress
     // does not.
     if let Some(last) = app
         .db
-        .last_closing_report(&asker.id)?
+        .last_closing_report(asker.id())?
         .filter(|r| r.id != id)
     {
         bail!(
             "{} has filed a {} report since (#{}); #{id} is no longer open",
-            manager::label(&asker),
+            asker.label(),
             last.kind.as_str(),
             last.id
         );
     }
-    if asker.state == TaskState::Archived {
-        bail!("{} is archived; unarchive it first", manager::label(&asker));
+    if asker.archived() {
+        bail!("{} is archived; unarchive it first", asker.label());
     }
     Ok((row, asker))
 }
@@ -542,7 +695,7 @@ fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, TaskRecord)> {
 /// Refuse unless `holder` holds ask `row` and has not passed it to the
 /// user.
 fn refuse_unless_held(app: &App, row: &TaskReportRecord, holder: &TaskRecord) -> Result<()> {
-    if matches!(holder.kind, TaskKind::Work | TaskKind::Review) {
+    if holder.kind == TaskKind::Work {
         bail!("you hold no question #{}", row.id);
     }
     if row.needs_user {
@@ -577,17 +730,51 @@ pub fn auto_status(
     if task.parent_id.is_none() || task.state == TaskState::Archived {
         return Ok(None);
     }
+    auto_status_from(
+        app,
+        &Source::task(app, task)?,
+        event,
+        body,
+        since,
+        done_since,
+    )
+}
+
+/// [`auto_status`] about a review, to the task that asked for it. Nothing
+/// for one nobody asked for, or archived.
+pub fn auto_status_review(
+    app: &App,
+    review: &ReviewRecord,
+    event: StatusEvent,
+    body: &str,
+    since: i64,
+    done_since: i64,
+) -> Result<Option<(i64, Result<Delivered>)>> {
+    if review.requested_by.is_none() || review.state == TaskState::Archived {
+        return Ok(None);
+    }
+    auto_status_from(app, &Source::review(review), event, body, since, done_since)
+}
+
+fn auto_status_from(
+    app: &App,
+    src: &Source,
+    event: StatusEvent,
+    body: &str,
+    since: i64,
+    done_since: i64,
+) -> Result<Option<(i64, Result<Delivered>)>> {
     if matches!(event, StatusEvent::Idle | StatusEvent::Ended) {
-        let own = app.db.last_own_report(&task.id)?;
+        let own = app.db.last_own_report(&src.id)?;
         if own.is_some_and(|r| r.kind == ReportKind::Done && r.at >= done_since) {
             return Ok(None);
         }
     }
-    let (parent, body) = checked(app, task, body)?;
+    let (parent, body) = checked(app, src, body)?;
     // The check and the row in one go: the watch poll and the assistant's
     // Stop hook may sweep the same idle task at once.
     let Some(id) = app.db.insert_status_report_unless_told(
-        &task.id,
+        &src.id,
         &parent.id,
         event.word(),
         &body,
@@ -597,7 +784,7 @@ pub fn auto_status(
     else {
         return Ok(None);
     };
-    let delivered = deliver(app, task, &parent, id, ReportKind::Status, &body, false);
+    let delivered = deliver(app, src, &parent, id, ReportKind::Status, &body, false);
     if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
     }
@@ -619,7 +806,44 @@ pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
         now,
         |task| runtime::activity(app, task, tmux_ok),
         |task| tmux_ok && tmux::agent_alive(&runtime::session_name(task)),
-    )
+    )?;
+    sweep_idle_reviews(app, now, tmux_ok)
+}
+
+/// [`sweep_idle`] for the reviews: each is charged the time its agent has
+/// been busy so far, and whoever asked for it is told when it has been idle
+/// long enough.
+fn sweep_idle_reviews(app: &App, now: i64, tmux_ok: bool) -> Result<()> {
+    let mins = app.config.idle_report_mins();
+    for review in app.db.list_reviews(Some(TaskState::Active))? {
+        let activity = crate::review::activity(app, &review, tmux_ok);
+        let busy = matches!(
+            activity,
+            Activity::Running { .. } | Activity::Waiting { .. }
+        );
+        let alive = busy && tmux_ok && tmux::agent_alive(&crate::review::session_name(&review));
+        match status::fold_busy_review(app, &review, alive, now) {
+            Ok(Threshold::Hit100) => budget::report_blocked_review(app, &review),
+            Ok(_) => {}
+            Err(e) => eprintln!(
+                "jeet: could not charge review {}'s limits: {e:#}",
+                review.slug
+            ),
+        }
+        let Activity::Idle { since } = activity else {
+            continue;
+        };
+        let idle = now - since;
+        if idle < mins as i64 * 60 {
+            continue;
+        }
+        let result = idle_body(app, &review.id, idle)
+            .and_then(|body| auto_status_review(app, &review, StatusEvent::Idle, &body, since, 0));
+        if let Err(e) = result {
+            eprintln!("jeet: could not report review {} idle: {e:#}", review.slug);
+        }
+    }
+    Ok(())
 }
 
 /// [`sweep_idle`], with what each task is doing from `activity`, and
@@ -654,7 +878,7 @@ fn sweep_idle_with(
         if idle < mins as i64 * 60 {
             continue;
         }
-        let result = idle_body(app, &task, idle)
+        let result = idle_body(app, &task.id, idle)
             .and_then(|body| auto_status(app, &task, StatusEvent::Idle, &body, since, 0));
         if let Err(e) = result {
             eprintln!("jeet: could not report task {} idle: {e:#}", task.slug);
@@ -665,8 +889,8 @@ fn sweep_idle_with(
 
 /// `idle 12m; last report #3 (progress)`. Only jeet's own words: a status
 /// report is jeet's, so the task's text stays in its own report.
-fn idle_body(app: &App, task: &TaskRecord, idle: i64) -> Result<String> {
-    let last = app.db.last_own_report(&task.id)?.map_or_else(
+fn idle_body(app: &App, id: &str, idle: i64) -> Result<String> {
+    let last = app.db.last_own_report(id)?.map_or_else(
         || "none".into(),
         |r| format!("#{} ({})", r.id, r.kind.as_str()),
     );
@@ -727,7 +951,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     let to = manager::label(&parent);
     let own = match task.kind {
         TaskKind::Manager => "the tasks below you",
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => "this task",
+        TaskKind::Work | TaskKind::Assistant => "this task",
     };
     lines.push(format!(
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
@@ -898,8 +1122,17 @@ mod tests {
                 started: &started,
             })
         };
-        let delivered =
-            deliver_with(app, task, parent, 1, kind, "news", may_start, &agent).unwrap();
+        let delivered = deliver_with(
+            app,
+            &Source::task(app, task).unwrap(),
+            parent,
+            1,
+            kind,
+            "news",
+            may_start,
+            &agent,
+        )
+        .unwrap();
         (delivered, started.into_inner())
     }
 
@@ -1592,7 +1825,7 @@ mod tests {
         let (answered, sent) = answer_by(&app, &Caller::User, id, " drop it ");
         assert_eq!(answered.row.answer.as_deref(), Some("drop it"));
         assert_eq!(answered.row.answered_by.as_deref(), Some("user"));
-        assert_eq!(answered.asker.slug, "ww");
+        assert_eq!(answered.asker, "task ww");
         assert!(matches!(answered.to_asker, Ok(Delivered::Queued)));
         assert_eq!(
             copied_to(&answered),

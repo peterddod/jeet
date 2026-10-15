@@ -2963,6 +2963,24 @@ impl StoreLab {
         rusqlite::Connection::open(self.home().join("index.db")).unwrap()
     }
 
+    /// The review with this slug, as (id, state, requested_by, session).
+    fn review_row(&self, slug: &str) -> Option<(String, String, Option<String>, Option<String>)> {
+        use rusqlite::OptionalExtension;
+        self.index()
+            .query_row(
+                "SELECT id, state, requested_by, session_id FROM reviews WHERE slug = ?1",
+                [slug],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// A review's state, by slug.
+    fn review_state(&self, slug: &str) -> String {
+        self.review_row(slug).unwrap().1
+    }
+
     /// A task's sessions as (id, parent), oldest first.
     fn sessions(&self, task_id: &str) -> Vec<(String, Option<String>)> {
         let db = self.index();
@@ -4418,45 +4436,51 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
         git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"], &worktree),
         "wide-store"
     );
-    assert!(stderr_of(&output).contains("new task review-widget-7"));
-    // The user's: top level.
-    assert_eq!(lab.parent_of(&task_id(&task)), None);
-    // Marked as a review from the start, so never in the task lists, with
-    // its PR in the history.
-    let kind: String = lab
+    assert!(stderr_of(&output).contains("new review review-widget-7"));
+    // A review is a row of its own, not a task: nobody asked for it, and it
+    // is in no task list, with its PR on its row.
+    let (id, state, requested_by, _) = lab.review_row("review-widget-7").unwrap();
+    assert_eq!((state.as_str(), requested_by), ("active", None));
+    assert_eq!(id, task_id(&task));
+    let tasks_with_it: i64 = lab
         .index()
-        .query_row(
-            "SELECT kind FROM tasks WHERE id = ?1",
-            [task_id(&task)],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = ?1", [&id], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(kind, "review");
+    assert_eq!(tasks_with_it, 0);
     for args in [&["task", "ls"][..], &["task", "ls", "--archived"]] {
         let listed = stdout_of(&lab.jeet_at(args, &lab.home(), &[]));
         assert!(!listed.contains("review-widget-7"), "{listed}");
     }
-    let prs = lab.jeet_at(
-        &["task", "prs", "review-widget-7", "--offline"],
-        &lab.home(),
-        &[],
+    let (title, pr_state): (String, String) = lab
+        .index()
+        .query_row(
+            "SELECT title, pr_state FROM reviews WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (title.as_str(), pr_state.as_str()),
+        ("Widen the store", "OPEN")
     );
-    succeeded(&prs);
-    let prs = stdout_of(&prs);
-    assert!(prs.contains("#7"), "{prs}");
-    assert!(prs.contains("Widen the store"), "{prs}");
-    assert!(prs.contains("+12") && prs.contains("-3"), "{prs}");
 
     // Again: the same task and checkout, brought up to date with the PR.
     let output = lab.jeet_at(&["review", "#7", "--no-command"], &trunk, &env);
     succeeded(&output);
     assert_eq!(path_from(&output), worktree);
     assert!(
-        !stderr_of(&output).contains("new task"),
+        !stderr_of(&output).contains("new review"),
         "{}",
         stderr_of(&output)
     );
     assert!(!lab.home().join("tasks/review-widget-7-2").exists());
+    let reviews: i64 = lab
+        .index()
+        .query_row("SELECT COUNT(*) FROM reviews", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(reviews, 1);
 
     // Its checkout deleted behind jeet's back, the next review makes it
     // again, on the branch.
@@ -4472,6 +4496,7 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
     // Archived, it is brought back rather than made again.
     succeeded(&lab.jeet_at(&["task", "archive", "review-widget-7"], &lab.home(), &[]));
     assert!(!worktree.exists());
+    assert_eq!(lab.review_state("review-widget-7"), "archived");
     let output = lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env);
     succeeded(&output);
     assert_eq!(path_from(&output), worktree);
@@ -4480,16 +4505,18 @@ fn review_makes_a_review_task_and_comes_back_to_it() {
         "wide-store"
     );
     assert!(!lab.home().join("tasks/review-widget-7-2").exists());
+    assert_eq!(lab.review_state("review-widget-7"), "active");
     let listed = stdout_of(&lab.jeet_at(&["task", "ls", "--archived"], &lab.home(), &[]));
     assert!(!listed.contains("review-widget"), "{listed}");
 
-    // Deleting the task takes the branch it made for the review.
+    // Deleting the review takes the branch it made for it.
     succeeded(&lab.jeet_at(
         &["task", "delete", "review-widget-7", "--force"],
         &lab.home(),
         &[],
     ));
     assert!(!task.exists());
+    assert!(lab.review_row("review-widget-7").is_none());
     assert_eq!(git_stdout(&["branch", "--list", "wide-store"], &trunk), "");
 }
 
@@ -4513,15 +4540,7 @@ fn watch_archives_a_review_once_its_pr_is_merged() {
     std::fs::write(worktree.join("notes.md"), "half a review\n").unwrap();
     std::fs::create_dir_all(worktree.join("target/debug")).unwrap();
     std::fs::write(worktree.join("target/debug/build.o"), "cache").unwrap();
-    let state = || -> String {
-        lab.index()
-            .query_row(
-                "SELECT state FROM tasks WHERE slug = 'review-widget-7'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
-    };
+    let state = || -> String { lab.review_state("review-widget-7") };
 
     // Open: nothing to do.
     let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &open);
@@ -4631,8 +4650,6 @@ fn opening_a_review_task_resumes_its_review_session() {
         ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
     ];
     succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
-    let task = lab.home().join("tasks/review-widget-7");
-    let id = task_id(&task);
     wait_until("the review to start", || started.exists());
 
     // A review, so not among the tasks `task ls` lists.
@@ -4659,15 +4676,19 @@ fn opening_a_review_task_resumes_its_review_session() {
     let dash = opened.iter().position(|a| a == "--").unwrap();
     assert_eq!(opened[dash + 1..dash + 4], ["claude", "--resume", session]);
     assert!(!opened.contains(&"--session-id".to_string()), "{opened:?}");
-    assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+    // The one session the review has: the job's, picked up.
+    assert_eq!(
+        lab.review_row("review-widget-7").unwrap().3.as_deref(),
+        Some(session)
+    );
 }
 
-/// With no `[review] command`, the review is the review task's own agent,
+/// With no `[review] command`, the review has an agent of its own,
 /// started in its tmux pane with the review prompt; reviewing again keeps
 /// that one session and worktree, and asks nothing twice of one commit.
 #[cfg(unix)]
 #[test]
-fn a_review_is_its_tasks_agent_in_one_session() {
+fn a_review_has_its_own_agent_in_one_session() {
     let lab = StoreLab::new();
     let trunk = lab.clone_repo("widget");
     let bin = stub_history_gh(&lab.home());
@@ -4687,7 +4708,6 @@ fn a_review_is_its_tasks_agent_in_one_session() {
     succeeded(&output);
     let worktree = path_from(&output);
     let task = lab.home().join("tasks/review-widget-7");
-    let id = task_id(&task);
     assert!(stderr_of(&output).contains("reviewing #7 in tmux session"));
 
     // Started in the task directory, with the prompt and nothing of the
@@ -4699,9 +4719,11 @@ fn a_review_is_its_tasks_agent_in_one_session() {
     assert!(prompt.starts_with("Review pull request #7"), "{prompt}");
     assert!(prompt.contains(&*worktree.to_string_lossy()), "{prompt}");
     assert!(!prompt.contains("Widen the store"), "{prompt}");
-    let sessions = lab.sessions(&id);
-    assert_eq!(sessions.len(), 1);
-    let session = &sessions[0].0;
+    let session = &lab
+        .review_row("review-widget-7")
+        .unwrap()
+        .3
+        .expect("the review records its session");
     assert!(argv.contains(session), "{argv:?}");
 
     // The same commit again: nothing asked, nothing started.
@@ -4741,16 +4763,373 @@ fn a_review_is_its_tasks_agent_in_one_session() {
     let started = calls_of(&tmux, "new-session");
     assert_eq!(started.len(), 2);
     assert!(started[1].contains(session), "{:?}", started[1]);
-    assert_eq!(lab.sessions(&id), sessions);
+    assert_eq!(
+        lab.review_row("review-widget-7").unwrap().3.as_ref(),
+        Some(session)
+    );
     let reviews: i64 = lab
         .index()
-        .query_row(
-            "SELECT COUNT(*) FROM tasks WHERE kind = 'review'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM reviews", [], |r| r.get(0))
         .unwrap();
     assert_eq!(reviews, 1);
+}
+
+/// `jeet manager stop --all` ends the agent of a review the assistant asked
+/// for, though it is in no tree, and leaves the review itself.
+#[cfg(unix)]
+#[test]
+fn stop_all_ends_the_agent_of_a_review_the_assistant_asked_for() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    let claude_dir = scratch.path().join("claude");
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let claude_env = claude_dir.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
+    ];
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "7"], &trunk, &env));
+    assert_eq!(calls_of(&tmux, "new-session").len(), 1);
+    assert!(calls_of(&tmux, "kill-session").is_empty());
+    let (_, _, requested_by, _) = lab.review_row("review-widget-7").unwrap();
+    assert_eq!(requested_by, Some(lab.assistant_id()));
+
+    let output = lab.jeet_at(&["manager", "stop", "--all"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("review-widget-7: stopped its agent"),
+        "{}",
+        stderr_of(&output)
+    );
+    let killed = calls_of(&tmux, "kill-session");
+    assert!(
+        killed
+            .iter()
+            .any(|c| c.contains(&"=jeet-review-widget-7".to_string())),
+        "{killed:?}"
+    );
+    // Stopped, not deleted: still there to be asked for again.
+    assert!(lab.review_row("review-widget-7").is_some());
+}
+
+/// `jeet task send` and `jeet task restart` reach a review's agent as they
+/// do a task's, for the user and for the task that asked for the review,
+/// and for no one else.
+#[cfg(unix)]
+#[test]
+fn task_send_and_restart_reach_a_reviews_agent_for_the_user_and_whoever_asked() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"review.start\", \"task.send\", \"task.open\"]\n\
+         notify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+    ];
+    succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
+    let mut root = lab.assistant_pane();
+    succeeded(&root.jeet(&["review", "8"], &trunk, &env));
+    let (_, _, user_asked, _) = lab.review_row("review-widget-7").unwrap();
+    let (_, _, assistant_asked, _) = lab.review_row("review-widget-8").unwrap();
+    assert_eq!(user_asked, None);
+    assert_eq!(assistant_asked, Some(lab.assistant_id()));
+
+    // The user reaches both: the agent is still starting, so it is queued.
+    for slug in ["review-widget-7", "review-widget-8"] {
+        let output = lab.jeet_at(&["task", "send", slug, "mind the tests"], &lab.home(), &env);
+        succeeded(&output);
+        assert!(
+            stderr_of(&output).contains("busy"),
+            "{}",
+            stderr_of(&output)
+        );
+    }
+    // The assistant reaches the review it asked for, not the user's.
+    let output = root.jeet(
+        &["task", "send", "review-widget-8", "and the docs"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    let output = root.jeet(
+        &["task", "send", "review-widget-7", "hello"],
+        &lab.home(),
+        &env,
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("only for the user, or for the task that asked"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = root.jeet(&["task", "restart", "review-widget-7"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("only for the user, or for the task that asked"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    // A restart waits for the turn like a task's, unless forced, then
+    // resumes the review's one session in a new pane.
+    let output = lab.jeet_at(&["task", "restart", "review-widget-7"], &lab.home(), &env);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("is starting") && stderr.contains("--force"),
+        "{stderr}"
+    );
+    let (_, _, _, session) = lab.review_row("review-widget-7").unwrap();
+    let session = session.expect("the review records its session");
+    let before = calls_of(&tmux, "new-session").len();
+    let output = lab.jeet_at(
+        &["task", "restart", "review-widget-7", "--force"],
+        &lab.home(),
+        &env,
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains(&format!("resuming session {session}")),
+        "{}",
+        stderr_of(&output)
+    );
+    let starts = calls_of(&tmux, "new-session");
+    assert_eq!(starts.len(), before + 1);
+    assert!(starts.last().unwrap().contains(&session), "{starts:?}");
+}
+
+/// A review's agent reports through its hooks as a task's does: its session
+/// is the review's one, and the turns it ends are charged to the review's
+/// `[review]` limits, which pause it once they are used up. Whoever asked
+/// for it, the user included.
+#[cfg(unix)]
+#[test]
+fn a_review_agents_hooks_record_its_session_and_hold_it_to_its_limits() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &[("PATH", &path)]));
+    let dir = lab.home().join("tasks/review-widget-7");
+    let id = task_id(&dir);
+    lab.index()
+        .execute("UPDATE reviews SET max_turns = 2 WHERE id = ?1", [&id])
+        .unwrap();
+    let mut agent = lab.task_pane("review-widget-7");
+    let background = [("JEET_BACKGROUND", "1")];
+    let session = "11111111-2222-4333-8444-555555555555";
+    hook_ok(&agent.hook(
+        &lab,
+        Some(&id),
+        "SessionStart",
+        &hook_input("SessionStart", session, &dir),
+        &background,
+    ));
+    let (_, _, _, recorded) = lab.review_row("review-widget-7").unwrap();
+    assert_eq!(recorded.as_deref(), Some(session));
+    // Not a task's session.
+    assert!(lab.sessions(&id).is_empty());
+
+    let row = || -> (i64, i64, i64) {
+        lab.index()
+            .query_row(
+                "SELECT used_turns, warned, paused FROM reviews WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    for turn in 1..=2 {
+        hook_ok(&agent.hook(
+            &lab,
+            Some(&id),
+            "UserPromptSubmit",
+            &hook_input("UserPromptSubmit", session, &dir),
+            &background,
+        ));
+        hook_ok(&agent.hook(
+            &lab,
+            Some(&id),
+            "Stop",
+            &hook_input("Stop", session, &dir),
+            &background,
+        ));
+        match turn {
+            1 => assert_eq!(row(), (1, 0, 0)),
+            _ => assert_eq!(row(), (2, 100, 1)),
+        }
+    }
+    // The status is in the review's own directory.
+    assert!(dir
+        .join(".jeet/status")
+        .join(format!("{session}.json"))
+        .is_file());
+}
+
+/// Review agents are counted apart from the tree against `[review]
+/// max_live`, whoever asked: one over it waits, queued on its row, and a
+/// review's agent ending starts it.
+#[cfg(unix)]
+#[test]
+fn a_review_past_max_live_waits_for_another_to_end() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[review]\nmax_live = 1\nnotify = false\n",
+    )
+    .unwrap();
+    let bin = stub_history_gh(&lab.home());
+    let path = path_with(&bin);
+    let scratch = TempDir::new().unwrap();
+    let tmux = stub_tmux(scratch.path());
+    multi_session(&tmux);
+    let stub = tmux.parent().unwrap().to_path_buf();
+    // The user's own session keeps the server up once the reviews' go.
+    std::fs::write(stub.join("alive/main"), "").unwrap();
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+    ];
+    let queued = |slug: &str| -> Option<i64> {
+        lab.index()
+            .query_row(
+                "SELECT queued_at FROM reviews WHERE slug = ?1",
+                [slug],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("reviewing #7"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(stub.join("alive/jeet-review-widget-7").exists());
+
+    // The second waits, with its prompt, on its row.
+    let output = lab.jeet_at(&["review", "8"], &trunk, &env);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(said.contains("waits on [review] max_live (1/1"), "{said}");
+    assert!(!stub.join("alive/jeet-review-widget-8").exists());
+    assert_eq!(queued("review-widget-7"), None);
+    assert!(queued("review-widget-8").is_some());
+
+    // The first ending frees its slot; the drain starts the second.
+    std::fs::remove_file(stub.join("alive/jeet-review-widget-7")).unwrap();
+    succeeded(&lab.jeet_at(&["manager", "drain"], &lab.home(), &env));
+    assert!(stub.join("alive/jeet-review-widget-8").exists());
+    assert_eq!(queued("review-widget-8"), None);
+    let started = calls_of(&tmux, "new-session");
+    let last = started.last().unwrap();
+    assert!(
+        last.contains(&"jeet-review-widget-8".to_string()),
+        "{last:?}"
+    );
+    assert!(
+        last.iter()
+            .any(|arg| arg.starts_with("Review pull request #8")),
+        "{last:?}"
+    );
+}
+
+/// The first command after an upgrade finishes what the move of reviews out
+/// of the tasks left on disk: a duplicate review task's worktree is archived
+/// to refs in the trunk, once, and said so on stderr and in the log. Plumbing
+/// (a hook, completions) leaves it for a command a person runs.
+#[cfg(unix)]
+#[test]
+fn the_first_command_after_the_upgrade_archives_a_duplicates_worktree() {
+    let lab = StoreLab::new();
+    let trunk = lab.clone_repo("widget");
+    let dup = lab.home().join("tasks/dup-review");
+    std::fs::create_dir_all(&dup).unwrap();
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "dup-review",
+            dup.join("widget").to_str().unwrap(),
+        ],
+        &trunk,
+    );
+    std::fs::write(dup.join("widget/notes.md"), "half a review\n").unwrap();
+    {
+        let index = lab.index();
+        index
+            .execute(
+                "INSERT INTO review_leftovers (task_id, slug, repo_id, pr_number, dir_name,
+                     branch, created_branch, was_archived, done)
+                 VALUES ('dup-id', 'dup-review', 'github.com/acme/widget', 7, 'widget',
+                         'dup-review', 1, 0, 0)",
+                [],
+            )
+            .unwrap();
+        index
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('reviews_v8_pending', '1')",
+                [],
+            )
+            .unwrap();
+    }
+
+    // Plumbing does not do it.
+    let hook = lab.hook("Stop", "{}", &[]);
+    succeeded(&hook);
+    assert!(dup.join("widget").is_dir());
+
+    let output = lab.jeet_at(&["ls"], &lab.home(), &[]);
+    succeeded(&output);
+    let said = stderr_of(&output);
+    assert!(said.contains("1 duplicate worktrees archived"), "{said}");
+    assert!(said.contains("migrate-v8.log"), "{said}");
+    assert!(!dup.join("widget").exists());
+    assert!(dup.is_dir(), "its task directory is never removed");
+    let refs = git_stdout(&["for-each-ref", "refs/jeet/"], &trunk);
+    assert!(refs.contains("refs/jeet/head/dup-id/widget"), "{refs}");
+    assert!(refs.contains("refs/jeet/stash/dup-id/widget"), "{refs}");
+    let log = read(&lab.home().join("logs/migrate-v8.log"));
+    assert!(log.contains("dup-review/widget: archived"), "{log}");
+
+    // Done once: the next command says nothing.
+    let output = lab.jeet_at(&["ls"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("duplicate"),
+        "{}",
+        stderr_of(&output)
+    );
 }
 
 /// A test that fails with a review still running leaves nothing behind:
@@ -4918,7 +5297,7 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\r");
     let review = lab.home().join("tasks/review-widget-7/widget");
     wait_until("the review task", || review.join(".git").exists());
-    screen.wait_for_text("in new task review-widget-7");
+    screen.wait_for_text("in new review review-widget-7");
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");
@@ -4931,12 +5310,15 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
         !lab.home().join("worktrees").exists(),
         "a checkout outside any task"
     );
-    let prs = stdout_of(&lab.jeet_at(
-        &["task", "prs", "review-widget-7", "--offline"],
-        &lab.home(),
-        &[],
-    ));
-    assert!(prs.contains("#7"), "{prs}");
+    let title: String = lab
+        .index()
+        .query_row(
+            "SELECT title FROM reviews WHERE slug = 'review-widget-7' AND pr_number = 7",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Widen the store");
 
     // With the branch in the author's own task, that is where it goes.
     succeeded(&lab.jeet_at(
@@ -8300,6 +8682,17 @@ impl StoreLab {
     }
 
     /// A task's parent, as the index has it.
+    /// Task `task_id`'s parent, `None` for a top-level task or no task at all.
+    fn parent_of_or_none(&self, task_id: &str) -> Option<String> {
+        self.index()
+            .query_row(
+                "SELECT parent_id FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(None)
+    }
+
     fn parent_of(&self, task_id: &str) -> Option<String> {
         self.index()
             .query_row(
@@ -8683,11 +9076,7 @@ fn a_task_with_a_parent_is_refused_jeet_review() {
     assert!(!lab.home().join("tasks/review-widget-7").exists());
     let reviews: i64 = lab
         .index()
-        .query_row(
-            "SELECT COUNT(*) FROM tasks WHERE kind = 'review'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM reviews", [], |r| r.get(0))
         .unwrap();
     assert_eq!(reviews, 0);
 }
@@ -8709,9 +9098,12 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
     let output = root.jeet(&["review", "7", "--no-command"], &trunk, &env);
     succeeded(&output);
     let task = task_id(&lab.home().join("tasks/review-widget-7"));
-    assert_eq!(lab.parent_of(&task), Some(lab.assistant_id()));
-    // Made as a child of the assistant's, it gets the worker default.
-    assert_eq!(lab.grants_of(&task), ["worktree.add"]);
+    // Asked for by the assistant: its reports go there. Not its child, and
+    // no task: it holds no grant.
+    let (_, _, requested_by, _) = lab.review_row("review-widget-7").unwrap();
+    assert_eq!(requested_by, Some(lab.assistant_id()));
+    assert_eq!(lab.parent_of_or_none(&task), None);
+    assert!(lab.grants_of(&task).is_empty());
 
     // The review command it starts runs as that task's agent, not as the
     // assistant, so what it reports reaches the assistant.
@@ -12673,72 +13065,10 @@ fn archiving_a_review_task_ends_its_job() {
     assert!(!ran.exists(), "the job outlived its task's archive");
 }
 
-/// Stopping a review task ends its job, its agent, and the assistant's
-/// `jeet review` does not start another until it is resumed.
-#[cfg(unix)]
-#[test]
-fn stopping_a_review_task_ends_its_job_until_resumed() {
-    let lab = StoreLab::new();
-    let trunk = lab.clone_repo("widget");
-    let bin = stub_history_gh(&lab.home());
-    let path = path_with(&bin);
-    let started = lab.home().join("started");
-    let ran = lab.home().join("ran");
-    std::fs::write(
-        lab.home().join("config.toml"),
-        format!(
-            "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
-             [review]\ncommand = \"touch {} && sleep 3 && touch {}\"\nnotify = false\n",
-            sh_quote(&started.to_string_lossy()),
-            sh_quote(&ran.to_string_lossy()),
-        ),
-    )
-    .unwrap();
-    let mut root = lab.assistant_pane();
-    let env = [("PATH", path.as_str())];
-    succeeded(&root.jeet(&["review", "7"], &trunk, &env));
-    wait_until("the job to start", || started.exists());
-    let output = lab.jeet_at(&["manager", "stop", "review-widget-7"], &lab.home(), &[]);
-    succeeded(&output);
-    let said = stderr_of(&output);
-    assert!(said.contains("stopped its review job"), "{said}");
-    std::thread::sleep(std::time::Duration::from_secs(4));
-    assert!(!ran.exists(), "the job outlived its task's stop");
-
-    std::fs::remove_file(&started).unwrap();
-    // Only the job is refused: the review and its worktree still open.
-    let output = root.jeet(&["review", "7", "--rerun"], &trunk, &env);
-    succeeded(&output);
-    let said = stderr_of(&output);
-    assert!(said.contains("not reviewing"), "{said}");
-    assert!(
-        said.contains("`jeet manager resume review-widget-7` first"),
-        "{said}"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("review-widget-7"),
-        "the worktree was not handed off"
-    );
-    // The user looking at it, with no rerun, is not refused either.
-    let output = lab.jeet_at(&["review", "7"], &trunk, &env);
-    succeeded(&output);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("review-widget-7"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    assert!(!started.exists(), "a stopped review task's job started");
-
-    // Resumed, a rerun starts its job again.
-    succeeded(&lab.jeet_at(&["manager", "resume", "review-widget-7"], &lab.home(), &[]));
-    let output = root.jeet(&["review", "7", "--rerun"], &trunk, &env);
-    succeeded(&output);
-    let said = stderr_of(&output);
-    assert!(!said.contains("not reviewing"), "{said}");
-    wait_until("the resumed task's job to start", || started.exists());
-    wait_until("the resumed task's job to finish", || ran.exists());
-}
-
-/// The assistant reviewing a PR whose review task the user made, top
-/// level: the task is not moved, and the runner is the assistant's, so it
-/// runs once `jeet review` has gone.
+/// The assistant reviewing a PR the user's review is of: the review is
+/// requested by the assistant from then on, and the runner is recorded as
+/// the review's, so it runs, as the review's agent, once `jeet review` has
+/// gone.
 #[cfg(unix)]
 #[test]
 fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
@@ -12749,7 +13079,7 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
     let env = [("PATH", path.as_str())];
     succeeded(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
     let task = task_id(&lab.home().join("tasks/review-widget-7"));
-    assert_eq!(lab.parent_of(&task), None);
+    assert_eq!(lab.review_row("review-widget-7").unwrap().2, None);
 
     let scratch = TempDir::new().unwrap();
     let seen = scratch.path().join("seen");
@@ -12757,7 +13087,7 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
         lab.home().join("config.toml"),
         format!(
             "scan_roots = []\n[assistant]\nallow = [\"review.start\"]\nnotify = false\n\
-             [review]\ncommand = \"sleep 1 && '{}' todo ls >/dev/null && echo \\\"$JEET_TASK_ID:$JEET_ASSISTANT\\\" > {}.tmp && \
+             [review]\ncommand = \"sleep 1 && '{}' ls >/dev/null && echo \\\"$JEET_TASK_ID:$JEET_ASSISTANT\\\" > {}.tmp && \
              mv {1}.tmp {1}\"\nnotify = false\n",
             env!("CARGO_BIN_EXE_jeet"),
             seen.display()
@@ -12766,7 +13096,10 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
     .unwrap();
     let mut root = lab.assistant_pane();
     succeeded(&root.jeet(&["review", "7"], &trunk, &env));
-    assert_eq!(lab.parent_of(&task), None);
+    assert_eq!(
+        lab.review_row("review-widget-7").unwrap().2,
+        Some(lab.assistant_id())
+    );
     let states = lab.home().join("reviews");
     let state = states.join(
         walk_files(&states)
@@ -12781,19 +13114,18 @@ fn a_review_job_the_assistant_starts_for_a_top_level_task_runs() {
     };
     wait_until("the job to end", || !exit_code().is_null());
     assert_eq!(exit_code(), 0);
+    // Run as the review's agent, not as the assistant that asked for it.
     assert_eq!(
         std::fs::read_to_string(&seen).unwrap().trim(),
-        format!("{}:1", lab.assistant_id())
+        format!("{task}:")
     );
 }
 
-/// A job the assistant starts for a top-level review task is recorded as
-/// the assistant's, not the task's: archiving or deleting the task ends it
-/// all the same, and forgets it, so it is no longer taken for the
-/// assistant's either.
+/// A job the assistant starts for a review is recorded as the review's:
+/// archiving or deleting the review ends it, and only it, and forgets it.
 #[cfg(unix)]
 #[test]
-fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
+fn a_job_the_assistant_starts_for_a_review_ends_with_it() {
     for verb in ["delete", "archive"] {
         let lab = StoreLab::new();
         let trunk = lab.clone_repo("widget");
@@ -12804,7 +13136,7 @@ fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
             succeeded(&lab.jeet_at(&["review", pr, "--no-command"], &trunk, &env));
         }
         let task = task_id(&lab.home().join("tasks/review-widget-7"));
-        assert_eq!(lab.parent_of(&task), None);
+        let other = task_id(&lab.home().join("tasks/review-widget-8"));
 
         let started = |pr: u32| lab.home().join(format!("started-{pr}"));
         let ran = |pr: u32| lab.home().join(format!("ran-{pr}"));
@@ -12827,26 +13159,30 @@ fn a_job_the_assistant_starts_for_a_top_level_task_ends_with_it() {
         wait_until("the jobs to start", || {
             started(7).exists() && started(8).exists()
         });
-        let jobs = || -> i64 {
+        let jobs = |id: &str| -> i64 {
             lab.index()
                 .query_row(
                     "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'job'",
-                    [lab.assistant_id()],
+                    [id],
                     |row| row.get(0),
                 )
                 .unwrap()
         };
-        assert_eq!(jobs(), 2, "{verb}");
+        assert_eq!((jobs(&task), jobs(&other)), (1, 1), "{verb}");
         let flag = if verb == "delete" { "-f" } else { "--force" };
         succeeded(&lab.jeet_at(&["task", verb, "review-widget-7", flag], &lab.home(), &[]));
-        assert_eq!(jobs(), 1, "{verb}: the job is still the assistant's");
+        assert_eq!(
+            (jobs(&task), jobs(&other)),
+            (0, 1),
+            "{verb}: the other's job stays"
+        );
         wait_until("the other task's job to finish", || ran(8).exists());
         assert!(!ran(7).exists(), "the job outlived its task's {verb}");
     }
 }
 
-/// A job the user starts is recorded as its top-level review task's, which
-/// is the user's, so archiving or deleting the task ends it too. It starts
+/// A job the user starts is recorded as its review's, which nobody asked
+/// for, so it runs as the user; archiving or deleting the review ends it. It starts
 /// without the hint of the task whose shell it was started from: that would
 /// disagree with its record, and what it runs would be refused.
 #[cfg(unix)]
@@ -12874,7 +13210,7 @@ fn a_job_the_user_starts_ends_with_its_task() {
         let env = [("PATH", path.as_str()), ("JEET_TASK_ID", other.as_str())];
         succeeded(&lab.jeet_at(&["review", "7"], &trunk, &env));
         let task = task_id(&lab.home().join("tasks/review-widget-7"));
-        assert_eq!(lab.parent_of(&task), None);
+        assert_eq!(lab.review_row("review-widget-7").unwrap().2, None);
         wait_until("the job to start", || started.exists());
         let jobs = || -> i64 {
             lab.index()
@@ -12894,11 +13230,11 @@ fn a_job_the_user_starts_ends_with_its_task() {
     }
 }
 
-/// A review job's command cannot archive or delete its own task, even from
-/// outside its worktree: ending the job would end the jeet doing it
-/// part-way. Whether the job is the
-/// task's (the user started it) or the assistant's (found in the task's
-/// worktree), both are refused and the task is left as it was.
+/// A review job's command cannot archive or delete its own review, even
+/// from outside its worktree. The user's job runs as the user, and ending
+/// the job would end the jeet doing it part-way, so it is refused there; the
+/// assistant's runs as the review's agent, which runs neither at all. The
+/// review is left as it was.
 #[cfg(unix)]
 #[test]
 fn a_review_job_cannot_archive_or_delete_its_own_task() {
@@ -12909,7 +13245,6 @@ fn a_review_job_cannot_archive_or_delete_its_own_task() {
         let path = path_with(&bin);
         let env = [("PATH", path.as_str())];
         let worktree = path_from(&lab.jeet_at(&["review", "7", "--no-command"], &trunk, &env));
-        let task = task_id(&lab.home().join("tasks/review-widget-7"));
 
         let out = |name: &str| lab.home().join(name);
         let quoted = |name: &str| sh_quote(&out(name).to_string_lossy());
@@ -12933,12 +13268,15 @@ fn a_review_job_cannot_archive_or_delete_its_own_task() {
         } else {
             succeeded(&lab.jeet_at(&["review", "7", "--rerun"], &trunk, &env));
         }
-        assert_eq!(lab.parent_of(&task), None);
         wait_until("the job's command to finish", || out("done").exists());
         for verb in ["archive", "delete"] {
             let stderr = std::fs::read_to_string(out(verb)).unwrap();
+            let refused = match by_assistant {
+                true => "may not run that",
+                false => "runs under a review job",
+            };
             assert!(
-                stderr.contains("runs under a review job"),
+                stderr.contains(refused),
                 "{verb}, by the assistant: {by_assistant}: {stderr}"
             );
         }

@@ -1224,8 +1224,8 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
 }
 
 /// ⏎ in the PR list: browse the PR in a task — the one whose worktree has
-/// its branch already, else its review task, made if need be — and record
-/// it in that task's PR history. Deliberately not `jeet review`: no review
+/// its branch already, else the PR's review, made if need be — and record
+/// it in that task's PR history, if it is a task. Deliberately not `jeet review`: no review
 /// command starts from here, this is only a way in.
 fn check_out_pr(
     app: &App,
@@ -1244,12 +1244,15 @@ fn check_out_pr(
         &format!("checking out #{number}"),
         || -> Result<_> {
             let found = github::pr_history(std::path::Path::new(&repo.trunk_path), number)?;
-            let mut checkout = crate::tasks::browse_pr(app, &repo, &found.pr)?;
-            let record = crate::pr_history::to_record(&checkout.task.id, &repo.id, found);
-            if let Err(e) = app.db.upsert_task_pr(&record) {
-                checkout
-                    .warnings
-                    .push(format!("could not record #{number} in the task: {e:#}"));
+            let mut checkout = crate::review::browse_pr(app, &repo, &found.pr)?;
+            // A review keeps the PR on its row already.
+            if let crate::review::Owner::Task(task) = &checkout.owner {
+                let record = crate::pr_history::to_record(&task.id, &repo.id, found);
+                if let Err(e) = app.db.upsert_task_pr(&record) {
+                    checkout
+                        .warnings
+                        .push(format!("could not record #{number} in the task: {e:#}"));
+                }
             }
             Ok(checkout)
         },
@@ -1257,10 +1260,13 @@ fn check_out_pr(
     match outcome {
         Ok(checkout) => {
             switch_worktree(app, explorer, &checkout.path)?;
-            let task = &checkout.task.name;
+            let (kind, name) = match &checkout.owner {
+                crate::review::Owner::Task(task) => ("task", task.name.as_str()),
+                crate::review::Owner::Review(review) => ("review", review.slug.as_str()),
+            };
             let mut status = match checkout.created {
-                true => format!("checked out #{number} in new task {task}"),
-                false => format!("checked out #{number} in task {task}"),
+                true => format!("checked out #{number} in new {kind} {name}"),
+                false => format!("checked out #{number} in {kind} {name}"),
             };
             if !checkout.warnings.is_empty() {
                 status.push_str(&format!(" — {}", checkout.warnings.join("; ")));

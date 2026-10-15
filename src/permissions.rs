@@ -34,6 +34,7 @@ use crate::cli::{
 };
 use crate::config::{self, ManagerPolicy};
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::identity;
 use crate::notify::{self, Notification};
@@ -218,6 +219,21 @@ const ALWAYS_DENY: &[&str] = &[
 /// nothing without `git commit`. A lint, as [`ALWAYS_DENY`] is.
 const MANAGER_DENY: &[&str] = &["git commit", "git push", "git checkout -b", "git switch -c"];
 
+/// What a review's agent is denied besides what a worker without a grant is:
+/// pushing, and commenting on or reviewing a pull request through the API.
+const REVIEW_DENY: &[&str] = &[
+    "git push",
+    "gh api *pulls/*/reviews*",
+    "gh api *pulls/*/comments*",
+    "gh api *issues/*/comments*",
+    "gh api *addPullRequestReview*",
+    "gh api *submitPullRequestReview*",
+    "gh api *addComment*",
+    "curl *pulls/*/reviews*",
+    "curl *pulls/*/comments*",
+    "curl *issues/*/comments*",
+];
+
 /// Default branches assumed whatever the index says.
 const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
@@ -289,6 +305,9 @@ pub enum Caller {
     /// The agent of a task with a parent: gated by [`effective`], and only
     /// over itself.
     Node(TaskRecord),
+    /// A review's agent, whoever asked for the review: gated the same for
+    /// every review ([`review_allows`]).
+    Review(Box<ReviewRecord>),
 }
 
 /// Who the task this jeet runs under makes the caller: the assistant is
@@ -302,11 +321,20 @@ fn classify(task: Option<&TaskRecord>) -> Caller {
     }
 }
 
+/// [`classify`] for the identity [`identity::identify`] found: a review's
+/// agent is a [`Caller::Review`], whoever asked for the review.
+fn classify_identity(me: &identity::Identity) -> Caller {
+    match &me.review {
+        Some(review) => Caller::Review(Box::new(review.clone())),
+        None => classify(me.task.as_ref()),
+    }
+}
+
 /// Who runs this jeet, by the task it runs under ([`identity::identify`]),
 /// never the working directory. A claim jeet cannot confirm, or a database
 /// error, is an error, so what is gated fails closed.
 pub fn caller(app: &App) -> Result<Caller> {
-    Ok(classify(identity::identify(app)?.task.as_ref()))
+    Ok(classify_identity(&identity::identify(app)?))
 }
 
 /// Whether this jeet runs at the user's own terminal, the bar for acting as
@@ -316,14 +344,15 @@ pub fn caller(app: &App) -> Result<Caller> {
 /// cleared does not pass. An identity error is an error, so it fails
 /// closed.
 pub fn at_terminal(app: &App) -> Result<bool> {
-    let task = identity::identify(app)?.task;
+    let me = identity::identify(app)?;
     let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
-    Ok(at_terminal_of(
-        task.as_ref(),
-        env_task.as_deref(),
-        assistant_mode(),
-        || identity::runs_under_any(&crate::tmux::jeet_pane_pids()),
-    ))
+    Ok(me.review.is_none()
+        && at_terminal_of(
+            me.task.as_ref(),
+            env_task.as_deref(),
+            assistant_mode(),
+            || identity::runs_under_any(&crate::tmux::jeet_pane_pids()),
+        ))
 }
 
 /// [`at_terminal`], given the task this jeet runs under, `$JEET_TASK_ID`,
@@ -365,7 +394,7 @@ fn own_list(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
     Ok(match node.kind {
         TaskKind::Assistant => root_list(app),
         TaskKind::Manager => known(app.db.grants(&node.id)?.iter().map(String::as_str)),
-        TaskKind::Work | TaskKind::Review => Vec::new(),
+        TaskKind::Work => Vec::new(),
     })
 }
 
@@ -436,7 +465,7 @@ pub struct Grant {
 /// ancestors cut it at every check ([`effective`]).
 pub fn default_grant(kind: TaskKind, policy: &ManagerPolicy) -> Result<Vec<&'static str>> {
     Ok(match kind {
-        TaskKind::Work | TaskKind::Review => policy.worker_default.clone(),
+        TaskKind::Work => policy.worker_default.clone(),
         TaskKind::Manager => policy.manager_default.clone(),
         TaskKind::Assistant => bail!("the assistant is no task to grant anything to"),
     })
@@ -464,6 +493,7 @@ pub fn check_grant(
     let own = match by {
         Caller::Node(node) => Some((node, effective(app, node)?)),
         Caller::User | Caller::Root => None,
+        Caller::Review(_) => bail!("a review's agent grants nothing"),
     };
     let mut caps: Vec<&'static str> = Vec::new();
     for name in requested {
@@ -527,6 +557,7 @@ fn record_held_with(
             Some(format!("Manager {}", node.slug)),
             "",
         ),
+        Caller::Review(_) => bail!("a review's agent grants nothing"),
     };
     for capability in held {
         let action = format!("granted held `{capability}` to task {}{tag}", target.slug);
@@ -852,6 +883,13 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
             };
             (message, Some(authorized))
         }
+        Caller::Review(review) => (
+            Some(format!(
+                "review {}'s agent may not clone repositories",
+                review.label()
+            )),
+            None,
+        ),
         Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
             true => {
                 let authorized = Authorized {
@@ -975,7 +1013,22 @@ pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                 }
             }
         }
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => {}
+        TaskKind::Work | TaskKind::Assistant => {}
+    }
+    Ok(deny)
+}
+
+/// What a review's agent is denied, whoever asked for the review: what a
+/// worker is denied that holds nothing ([`node_deny`]: force-pushes, merges,
+/// pushes to a default branch, `gh pr comment` and `gh pr review`), no push
+/// of any kind, and the API forms of commenting and reviewing. A lint, as
+/// [`ALWAYS_DENY`] is.
+pub fn review_deny(app: &App) -> Result<Vec<String>> {
+    let mut deny = node_deny(&[], &default_branches(app)?);
+    for command in REVIEW_DENY {
+        if !deny.iter().any(|d| d == command) {
+            deny.push(command.to_string());
+        }
     }
     Ok(deny)
 }
@@ -1038,7 +1091,7 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
             return Ok(None);
         }
     }
-    authorize_as(&app, &classify(me.task.as_ref()), command, terminal)
+    authorize_as(&app, &classify_identity(&me), command, terminal)
 }
 
 /// Check that `caller` may run `command`: the assistant only what
@@ -1054,6 +1107,9 @@ pub fn authorize_as(
     let gate = gate(command, terminal);
     if let Caller::Node(task) = caller {
         return node(app, task, command, gate, terminal);
+    }
+    if let Caller::Review(review) = caller {
+        return review_gate(review, command);
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
@@ -1097,6 +1153,30 @@ pub fn authorize_as(
         log,
         notify: settings.notify(),
     }))
+}
+
+/// What a review's agent may run, the same for every review: the read-only
+/// commands `jeet ls`, `jeet path` and `jeet prs`, and `jeet report` when a
+/// task asked for the review (the report itself finds the task). Nothing
+/// that changes anything, in jeet or outside it ([`review_deny`] is the
+/// harness's half of this).
+fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Option<Authorized>> {
+    match command {
+        Some(Commands::Ls { .. } | Commands::Path { .. } | Commands::Prs { .. }) => Ok(None),
+        Some(Commands::Report { .. }) if review.requested_by.is_some() => Ok(None),
+        Some(Commands::Report { .. }) => bail!(
+            "review {} was not asked for by a task, so there is no one to report to",
+            review.label()
+        ),
+        _ => bail!(
+            "review {} may not run that: a review's agent only reads, with `jeet ls`,              `jeet path` and `jeet prs`{}",
+            review.label(),
+            match review.requested_by {
+                Some(_) => ", and reports with `jeet report`",
+                None => "",
+            }
+        ),
+    }
 }
 
 /// What `command` does that only the root may, for "task … may not …":
@@ -1478,6 +1558,13 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
             target.slug
         );
     }
+    if let Caller::Review(review) = caller {
+        bail!(
+            "review {} may not run `jeet {}`: a review's agent only reads",
+            review.label(),
+            verb.name()
+        );
+    }
     let Caller::Node(node) = caller else {
         return Ok(());
     };
@@ -1535,6 +1622,7 @@ fn out_of_reach(slug: &str, verb: Verb, what: &str) -> String {
 /// with a parent only itself and the tasks below it.
 pub fn lists(app: &App, caller: &Caller, task: &TaskRecord) -> Result<bool> {
     match caller {
+        Caller::Review(_) => Ok(false),
         Caller::Node(node) => {
             Ok(task.id == node.id || app.db.is_strict_descendant(&task.id, &node.id)?)
         }
@@ -3272,5 +3360,73 @@ mod tests {
         assert_eq!(records[0].action, "messaged task x: a\nb");
         assert_eq!(records[1].outcome, Outcome::Denied);
         assert_eq!(records[2].error.as_deref(), Some("no"));
+    }
+    fn review_of(requested_by: Option<&str>) -> Caller {
+        let mut review = ReviewRecord::new(
+            "r-id".into(),
+            "review-api-7".into(),
+            "github.com/acme/api",
+            7,
+            0,
+        );
+        review.requested_by = requested_by.map(str::to_string);
+        Caller::Review(Box::new(review))
+    }
+
+    /// A review's agent may read and, when a task asked for it, report: the
+    /// same for every review, whoever asked, and nothing that changes
+    /// anything.
+    #[test]
+    fn a_reviews_agent_reads_and_reports_only_to_a_task_that_asked() {
+        let (_dir, app, _w) = tree();
+        let asked = review_of(Some("a-id"));
+        let user_asked = review_of(None);
+        for caller in [&asked, &user_asked] {
+            for read in [&["ls"][..], &["prs"], &["path", "api"]] {
+                run_as(&app, caller, read, false).unwrap();
+            }
+            for forbidden in [
+                &["review", "7"][..],
+                &["task", "new", "x"],
+                &["task", "send", "w", "hi"],
+                &["task", "archive", "w"],
+                &["task", "open", "review-api-7"],
+                &["worktree", "add", "api"],
+                &["manager", "pause", "w"],
+                &["notify", "hi"],
+                &["todo"],
+                &["clone", "https://github.com/acme/api"],
+                &["pr", "merge", "7"],
+                &["watch", "install"],
+            ] {
+                let e = run_as(&app, caller, forbidden, false).unwrap_err();
+                assert!(
+                    e.to_string().contains("may not run that"),
+                    "{forbidden:?}: {e}"
+                );
+            }
+        }
+        // `jeet report` only with a task to report to.
+        run_as(&app, &asked, &["report", "done", "ok"], false).unwrap();
+        let e = run_as(&app, &user_asked, &["report", "done", "ok"], false).unwrap_err();
+        assert!(e.to_string().contains("no one to report to"), "{e}");
+    }
+
+    /// The same deny rules and allowed commands for every review.
+    #[test]
+    fn every_review_agent_is_denied_what_a_worker_without_a_grant_is() {
+        let (_dir, app, _w) = tree();
+        let deny = review_deny(&app).unwrap();
+        for pattern in [
+            "git push",
+            "git push --force*",
+            "gh pr merge",
+            "gh pr review",
+            "gh pr comment",
+            "gh api *pulls/*/reviews*",
+        ] {
+            assert!(deny.contains(&pattern.to_string()), "{pattern}: {deny:?}");
+        }
+        assert!(deny.iter().any(|d| d == "git push * main"), "{deny:?}");
     }
 }

@@ -11,22 +11,22 @@ use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
 use super::managers::{self, At, NodeInfo, TreeLine, Urgency};
 use super::projects_tab::ProjectGroup;
-use super::reviews::{PrReview, ReviewLine, Source, Verdict};
+use super::reviews::{PrReview, ReviewLine, ReviewRow, Source, Verdict};
 use super::state::human_size;
 use super::tasks::{
-    review_name, AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField,
-    TaskRow, TasksUi, View, REVIEW_MENU,
+    AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
+    View, REVIEW_MENU,
 };
 use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
 use crate::agent::age_label;
 use crate::commands::task::printable;
-use crate::db::tasks::{RunState, Setter, TaskKind, TaskPrRecord, TaskState};
+use crate::db::tasks::{RunState, TaskKind, TaskPrRecord, TaskState};
 use crate::manager::budget;
 use crate::messages;
 use crate::pr_history;
 use crate::status::{first_line, Activity};
-use crate::tasks;
+
 use crate::todo::ItemView;
 use crate::worktrees::WorktreeStatus;
 
@@ -215,16 +215,10 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
     (
         "",
-        "the session is the review task's agent: attached, resumed or started",
+        "the session is the review's agent: attached, resumed or started",
     ),
-    (
-        "e / w / p",
-        "explore the review's task / its worktrees / its pull requests",
-    ),
-    (
-        "a",
-        "archive the review's task · unarchive, on an archived one",
-    ),
+    ("e", "explore the review's worktree"),
+    ("a", "archive the review · unarchive, on an archived one"),
     (
         "A",
         "show the archived reviews instead of the active ones, and back",
@@ -235,11 +229,11 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
     (
         "D",
-        "delete the review's task, after listing any work that would go",
+        "delete the review, after listing any work that would go",
     ),
     ("", ""),
     ("⇥ / ⇧⇥", "next / previous view: active, agents, reviews"),
-    ("/", "filter by PR, task name or title; esc drops it"),
+    ("/", "filter by PR, name or title; esc drops it"),
     ("↑ ↓ j k", "move · PgUp/PgDn ten rows · g/G top and bottom"),
     (
         "r",
@@ -247,22 +241,16 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ),
     ("?", "this list"),
     ("q / esc", "quit, leaving the shell where it is"),
-    (
-        "ctrl-q",
-        "quit, leaving the shell in the selected review's task",
-    ),
+    ("ctrl-q", "quit, leaving the shell in the selected review"),
     ("", ""),
     (
         "session",
         "● running  ◆ needs input  ○ idle  ✕ not running  · ended  ▪ archived",
     ),
+    ("", "paused at its [review] caps, or queued on max_live"),
     (
         "",
-        "paused (at its [review] caps, or by hand), stopped, or queued on max_live",
-    ),
-    (
-        "",
-        "a review with no task is an older jeet review's job: no session",
+        "a job with no review is an older jeet review's: no session",
     ),
     ("PR", "open · draft · merged · closed, as GitHub last said"),
     (
@@ -390,7 +378,6 @@ const HINTS_REVIEWS: &[&str] = &[
     "⏎ menu",
     "v diff",
     "e explore",
-    "p PRs",
     "a archive",
     "A archived",
     "r refresh",
@@ -870,7 +857,7 @@ fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     if ui.reviews.is_empty() {
         let hint = match (total, archived) {
             (0, false) => {
-                "no reviews yet. jeet review <pr> checks one out in a task of its own. \
+                "no reviews yet. jeet review <pr> checks one out. \
                  A shows the archived ones."
             }
             (0, true) => "no archived reviews. A goes back to the active ones.",
@@ -959,19 +946,16 @@ fn verdict_color(verdict: Verdict) -> Color {
     }
 }
 
-/// A review task's session: what its agent is doing, after what holds it
-/// back — paused (at its `[review]` caps, or by hand), stopped, or queued
-/// on a `max_live`.
-pub fn review_session(row: &TaskRow) -> String {
-    let held = match (row.task.run_state, &row.task.run_state_by) {
-        _ if row.task.state == TaskState::Archived => None,
-        (RunState::Paused, Some(Setter::Budget)) => Some("paused at its caps"),
-        (RunState::Paused, _) => Some("paused"),
-        (RunState::Stopped, _) => Some("stopped"),
-        (RunState::Run, _) if row.queued => Some("queued on max_live"),
-        (RunState::Run, _) => None,
+/// A review's session: what its agent is doing, after what holds it back —
+/// paused at its `[review]` caps, or queued on a `max_live`.
+pub fn review_session(row: &ReviewRow) -> String {
+    let held = match (row.archived(), row.review.paused, row.review.queued_at) {
+        (true, _, _) => None,
+        (_, true, _) => Some("paused at its caps"),
+        (_, _, Some(_)) => Some("queued on max_live"),
+        _ => None,
     };
-    let status = status_text(row);
+    let status = status_label(row.archived(), row.activity.as_ref(), row.unanchored);
     match held {
         // Paused, a turn under way still finishes: say so.
         Some(held) if row.agent_running() => format!("{held} · {status}"),
@@ -982,14 +966,18 @@ pub fn review_session(row: &TaskRow) -> String {
 
 fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line<'static> {
     let (glyph, color, session, name, when, size) = match line.source {
-        Source::Task(i) => {
-            let row = &ui.rows[i];
-            let (glyph, color) = glyph(row);
+        Source::Review(i) => {
+            let row = &ui.review_rows[i];
+            let (glyph, color) = state_glyph(row.archived(), row.activity.as_ref());
+            let name = match row.review.title.is_empty() {
+                true => row.review.slug.clone(),
+                false => row.review.title.clone(),
+            };
             (
                 glyph,
                 color,
                 review_session(row),
-                row.task.name.clone(),
+                name,
                 row.last_activity,
                 row.size.map(human_size).unwrap_or_else(|| "…".into()),
             )
@@ -998,9 +986,9 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             let job = &ui.legacy[i];
             let (glyph, color, session) = match job.running {
                 true => ("●", Color::Green, "job running"),
-                false => ("·", Color::DarkGray, "no task"),
+                false => ("·", Color::DarkGray, "no review"),
             };
-            // A job with no task has no directory of its own to measure.
+            // A job with no review has no directory of its own to measure.
             (
                 glyph,
                 color,
@@ -1011,19 +999,9 @@ fn review_line(ui: &TasksUi, line: &ReviewLine, columns: &ReviewColumns) -> Line
             )
         }
     };
-    let found = line.pr.as_ref().and_then(|pr| ui.reviewed.get(pr));
-    let (repo, pr) = match &line.pr {
-        Some(pr) => (pr.repo().to_string(), format!("#{}", pr.number)),
-        None => (String::new(), String::new()),
-    };
+    let found = ui.reviewed.get(&line.pr);
+    let (repo, pr) = (line.pr.repo().to_string(), format!("#{}", line.pr.number));
     let (state, state_fg, review, review_fg, title) = match found {
-        None if line.pr.is_none() => (
-            "",
-            Color::DarkGray,
-            "no PR recorded".into(),
-            Color::DarkGray,
-            name,
-        ),
         None => ("…", Color::DarkGray, String::new(), Color::DarkGray, name),
         Some(Ok(PrReview {
             title,
@@ -1151,7 +1129,7 @@ pub const TAG: usize = 9;
 pub fn tag(kind: TaskKind) -> (String, Color) {
     let (word, color) = match kind {
         TaskKind::Manager => ("manager", Color::Indexed(208)),
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => ("task", Color::Indexed(147)),
+        TaskKind::Work | TaskKind::Assistant => ("task", Color::Indexed(147)),
     };
     let left = (TAG - word.width()) / 2;
     let right = TAG - word.width() - left;
@@ -1170,10 +1148,15 @@ fn cell(text: &str, width: usize) -> String {
 
 /// The status glyph and its colour, for a task.
 pub fn glyph(row: &TaskRow) -> (&'static str, Color) {
-    if row.task.state == TaskState::Archived {
+    state_glyph(row.task.state == TaskState::Archived, row.activity.as_ref())
+}
+
+/// The glyph and colour of an agent's `activity`, or of an `archived` one.
+fn state_glyph(archived: bool, activity: Option<&Activity>) -> (&'static str, Color) {
+    if archived {
         return ("▪", Color::DarkGray);
     }
-    activity_glyph(row.activity.as_ref())
+    activity_glyph(activity)
 }
 
 /// The glyph and colour for what an agent is doing; `…` before anyone has
@@ -1192,15 +1175,24 @@ pub fn activity_glyph(activity: Option<&Activity>) -> (&'static str, Color) {
 /// What the status column says for a task: what its agent is doing, its
 /// detail left to the line under the name.
 pub fn status_text(row: &TaskRow) -> String {
-    if row.task.state == TaskState::Archived {
+    status_label(
+        row.task.state == TaskState::Archived,
+        row.activity.as_ref(),
+        row.unanchored,
+    )
+}
+
+/// [`status_text`] of an agent's `activity`, or of an `archived` one.
+fn status_label(archived: bool, activity: Option<&Activity>, unanchored: bool) -> String {
+    if archived {
         return "archived".to_string();
     }
-    let label = match &row.activity {
+    let label = match activity {
         // Not polled yet: the glyph says so, and a blank beats a guess.
         None => String::new(),
         Some(activity) => activity.label_with(false),
     };
-    match row.unanchored {
+    match unanchored {
         // First, so a narrow column cuts the activity, not this.
         true => format!("unanchored · {label}"),
         false => label,
@@ -1280,16 +1272,10 @@ fn row_lines(
 ) -> Vec<Line<'static>> {
     let (tag, tag_color) = tag(row.task.kind);
     let (status, color) = row_status(row, rolled);
-    let name = match row.task.kind {
-        // Which PR it reviews, when its checkout says.
-        TaskKind::Review => tasks::review_label(&row.task, &row.worktrees)
-            .unwrap_or_else(|| format!("{} (review)", row.task.name)),
-        TaskKind::Manager | TaskKind::Work | TaskKind::Assistant => row.task.name.clone(),
-    };
     let mut first = vec![
         Span::styled(tag, Style::default().fg(tag_color)),
         Span::styled(
-            format!(" {}", cell(&printable(&name), columns.name)),
+            format!(" {}", cell(&printable(&row.task.name), columns.name)),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -1973,18 +1959,18 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
         }
         Panel::ReviewMenu {
             task_id,
-            pr,
             label,
             selected,
+            ..
         } => {
             let items = REVIEW_MENU
                 .iter()
                 .enumerate()
                 .map(|(i, (key, what))| {
-                    // A review job with no task has no session to open.
+                    // A job with no review has no session to open.
                     let off = i == 1 && task_id.is_none();
                     let what = match off {
-                        true => format!("{what} (it has no task)"),
+                        true => format!("{what} (it has no review)"),
                         false => what.to_string(),
                     };
                     let style = match off {
@@ -2002,10 +1988,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                     ]))
                 })
                 .collect();
-            let label = match task_id {
-                Some(_) => printable(label),
-                None => review_name(pr.as_ref()),
-            };
+            let label = printable(label);
             let area = content_rect(70, REVIEW_MENU.len() + 2, full);
             let title = format!(" {label} · ⏎ choose  esc cancel ");
             render_list(frame, area, title, items, *selected);
@@ -2793,9 +2776,7 @@ mod tests {
             last_activity: crate::worktrees::now_secs() - 120,
             size: Some(3 * 1024 * 1024),
             report: None,
-            review_jobs: Vec::new(),
             unanchored: false,
-            queued: false,
         }
     }
 
@@ -2956,7 +2937,7 @@ mod tests {
     fn tags_are_centred_in_their_column_and_the_names_line_up() {
         assert_eq!(tag(TaskKind::Manager).0, " manager ");
         assert_eq!(tag(TaskKind::Work).0, "  task   ");
-        assert_eq!(tag(TaskKind::Review).0.width(), TAG);
+        assert_eq!(tag(TaskKind::Assistant).0.width(), TAG);
         // Colours nothing else in a row uses, and the two differ.
         let (manager, task) = (tag(TaskKind::Manager).1, tag(TaskKind::Work).1);
         assert_ne!(manager, task);
@@ -3035,13 +3016,10 @@ mod tests {
 
     #[test]
     fn a_review_is_in_neither_task_list() {
-        let mut review = row("review-api-55", None);
-        review.task.kind = TaskKind::Review;
-        review.worktrees[0].pr_number = Some(55);
-        let mut archived = review.clone();
-        archived.task.id = "old".into();
-        archived.task.state = TaskState::Archived;
-        let mut ui = TasksUi::new(vec![review, archived]);
+        let mut archived = review_row("old", 9, None);
+        archived.review.state = TaskState::Archived;
+        let mut ui = TasksUi::new(Vec::new());
+        ui.set_reviews(vec![review_row("review-api-55", 55, None), archived]);
         for archived in [false, true] {
             ui.archived_tasks = archived;
             ui.set_rows(ui.rows.clone());
@@ -3058,6 +3036,19 @@ mod tests {
             assert!(screen.contains(tab), "{screen}");
             assert!(screen.contains(" reviews 1 "), "{screen}");
         }
+    }
+
+    fn review_row(slug: &str, pr: u64, activity: Option<Activity>) -> ReviewRow {
+        let review = crate::db::reviews::ReviewRecord::new(
+            slug.into(),
+            slug.into(),
+            "github.com/acme/api",
+            pr,
+            0,
+        );
+        let mut row = ReviewRow::new(review, std::path::PathBuf::from("/nowhere"), Vec::new());
+        row.activity = activity;
+        row
     }
 
     #[test]
@@ -3163,15 +3154,16 @@ mod tests {
             repo_id: "github.com/acme/api".into(),
             number,
         };
-        let mut running = row("review-api-55", Some(Activity::Running { detail: None }));
-        running.task.kind = TaskKind::Review;
-        running.worktrees[0].pr_number = Some(55);
+        let mut running = review_row(
+            "review-api-55",
+            55,
+            Some(Activity::Running { detail: None }),
+        );
         running.size = Some(2048);
-        let mut archived = row("review-api-9", None);
-        archived.task.kind = TaskKind::Review;
-        archived.task.state = TaskState::Archived;
-        archived.worktrees[0].pr_number = Some(9);
-        let mut ui = TasksUi::new(vec![running, archived, row("not a review", None)]);
+        let mut archived = review_row("review-api-9", 9, None);
+        archived.review.state = TaskState::Archived;
+        let mut ui = TasksUi::new(vec![row("not a review", None)]);
+        ui.set_reviews(vec![running, archived]);
         ui.legacy = vec![Legacy {
             pr: key(3),
             title: "old \u{1b}[2Jjob".into(),
@@ -3205,19 +3197,17 @@ mod tests {
 
     #[test]
     fn a_held_review_says_what_holds_it() {
-        let mut review = row("r", None);
+        let mut review = review_row("r", 1, None);
         assert_eq!(review_session(&review), "");
-        review.queued = true;
+        review.review.queued_at = Some(5);
         assert_eq!(review_session(&review), "queued on max_live");
-        review.task.run_state = RunState::Paused;
-        review.task.run_state_by = Some(Setter::Budget);
+        review.review.paused = true;
         assert_eq!(review_session(&review), "paused at its caps");
         review.activity = Some(Activity::Running { detail: None });
         assert!(review_session(&review).starts_with("paused at its caps · running"));
-        review.task.run_state_by = Some(Setter::User);
         review.activity = Some(Activity::NotRunning);
-        assert_eq!(review_session(&review), "paused");
-        review.task.state = TaskState::Archived;
+        assert_eq!(review_session(&review), "paused at its caps");
+        review.review.state = TaskState::Archived;
         assert_eq!(review_session(&review), "archived");
     }
 
@@ -3237,7 +3227,7 @@ mod tests {
         // A title is shown, never run: its escapes go.
         assert!(running.contains("Add ]8;;xreviews"), "{running}");
         let legacy = line_of(&screen, "#3 ");
-        assert!(legacy.contains("no task"), "{legacy}");
+        assert!(legacy.contains("no review"), "{legacy}");
         assert!(legacy.contains("unknown: [2Jgh"), "{legacy}");
         assert!(!all.contains("not a review"), "{all}");
         // Archived reviews are not among the active ones.
@@ -3252,7 +3242,7 @@ mod tests {
         assert_eq!(col(running, " api "), col(legacy, " api "));
         assert_eq!(col(running, "#55"), col(legacy, "#3 "));
         assert!(col(running, " api ") < col(running, "#55"));
-        // The active one first, and the job no task holds last.
+        // The active one first, and the job no review holds last.
         let at = |what: &str| screen.iter().position(|l| l.contains(what)).unwrap();
         assert!(at("#55") < at("#3 "));
         // A: the archived reviews alone.
@@ -3473,17 +3463,20 @@ mod tests {
             }),
             Some(Panel::ReviewMenu {
                 task_id: Some("a".into()),
-                pr: None,
+                pr: crate::tui::reviews::PrKey {
+                    repo_id: "github.com/acme/api".into(),
+                    number: 7,
+                },
                 label: "review \u{1b}[2Japi#7".into(),
                 selected: 1,
             }),
             Some(Panel::ReviewMenu {
                 task_id: None,
-                pr: Some(crate::tui::reviews::PrKey {
+                pr: crate::tui::reviews::PrKey {
                     repo_id: "github.com/acme/api".into(),
                     number: 7,
-                }),
-                label: String::new(),
+                },
+                label: "review api#7".into(),
                 selected: 0,
             }),
             Some(Panel::Answer {

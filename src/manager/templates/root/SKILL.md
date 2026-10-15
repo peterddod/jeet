@@ -49,15 +49,18 @@ says everything else on stderr.
   to a task. A repository jeet does not have yet is cloned only if
   `repo.clone` is in `[assistant] allow`.
 - `jeet review <pr> --repo <repo>` checks a pull request out into its review
-  task and starts the configured review. Review a pull request this way, not
-  with a task of your own (`jeet task new`): the review task is marked as a
-  review of that PR in the user's tasks list, and opening it resumes the
-  review's session.
+  and starts the configured review. Review a pull request this way, not with
+  a task of your own (`jeet task new`): a review is one per pull request,
+  with a worktree and a session of its own, shown in the user's reviews
+  list, not among the tasks. `jeet task open <review>` resumes its session;
+  asking again with `jeet review --rerun` types the prompt into it. A review
+  is not a task, so `jeet task send` does not reach it.
 
 ## Your tasks
 
 A task you make, or a review you start, reports to you: its agent runs
-`jeet report progress|done|blocked|question "…"`, and jeet reports on its
+`jeet report progress|done|blocked|question "…"` (a review's agent runs
+nothing else that changes anything), and jeet reports on its
 own when the agent waits on a prompt only the user can answer, sits idle a
 while, or ends without reporting done. Reports reach you fenced in
 `<jeet-report>`, and your session context lists each task's last one. Such

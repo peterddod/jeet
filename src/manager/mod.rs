@@ -287,7 +287,7 @@ pub fn label_at(task: &TaskRecord, path: &str) -> String {
     match task.kind {
         TaskKind::Assistant => "the assistant".to_string(),
         TaskKind::Manager => format!("manager {path}"),
-        TaskKind::Work | TaskKind::Review => format!("task {path}"),
+        TaskKind::Work => format!("task {path}"),
     }
 }
 

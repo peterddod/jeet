@@ -16,8 +16,6 @@ use crate::placement::Placement;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
     Work,
-    /// Reviewing someone else's PR.
-    Review,
     /// The global assistant: there is one, and it is kept out of the tasks
     /// list; see [`crate::assistant`].
     Assistant,
@@ -30,7 +28,6 @@ impl TaskKind {
     pub fn as_str(self) -> &'static str {
         match self {
             TaskKind::Work => "work",
-            TaskKind::Review => "review",
             TaskKind::Assistant => "assistant",
             TaskKind::Manager => "manager",
         }
@@ -39,7 +36,6 @@ impl TaskKind {
     fn parse(s: &str) -> rusqlite::Result<Self> {
         match s {
             "work" => Ok(TaskKind::Work),
-            "review" => Ok(TaskKind::Review),
             "assistant" => Ok(TaskKind::Assistant),
             "manager" => Ok(TaskKind::Manager),
             other => Err(bad_enum("kind", other)),
@@ -473,6 +469,16 @@ fn changed_report_in(conn: &Connection, id: i64, changed: usize) -> Result<TaskR
 }
 
 fn insert_task_in(conn: &Connection, task: &TaskRecord) -> Result<()> {
+    // A review's slug names its directory and tmux session, and its id
+    // what its agent's hooks go by: no task takes either.
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM reviews WHERE slug = ?1 OR id = ?2)",
+        params![task.slug, task.id],
+        |row| row.get(0),
+    )?;
+    if taken {
+        bail!("{} is the name of a review already", task.slug);
+    }
     conn.execute(
         &format!(
             "INSERT INTO tasks ({TASK_COLUMNS})
@@ -669,15 +675,14 @@ fn budget_in(conn: &Connection, id: &str) -> Result<Option<BudgetRow>> {
         .optional()?)
 }
 
-/// [`Database::subtree_used`] on `conn`. A review below `id` is left out:
-/// it spends under `[review]`'s caps, not its ancestors' budgets.
+/// [`Database::subtree_used`] on `conn`.
 fn subtree_used_in(conn: &Connection, id: &str) -> Result<(i64, i64)> {
     Ok(conn.query_row(
         "WITH RECURSIVE sub(id, depth) AS (
              SELECT ?1, 0
              UNION
              SELECT t.id, sub.depth + 1 FROM tasks t JOIN sub ON t.parent_id = sub.id
-             WHERE sub.depth < ?2 AND t.kind != 'review'
+             WHERE sub.depth < ?2
          )
          SELECT COALESCE(SUM(b.used_secs), 0), COALESCE(SUM(b.used_turns), 0)
          FROM (SELECT DISTINCT id FROM sub) s JOIN task_budgets b ON b.task_id = s.id",
@@ -934,32 +939,6 @@ impl Database {
             .optional()?)
     }
 
-    /// The review task for PR `number` of `repo_id`: the one with a worktree
-    /// checked out for it, else one whose history records it. Oldest first,
-    /// should there ever be two.
-    pub fn find_review_task(&self, repo_id: &str, number: u64) -> Result<Option<TaskRecord>> {
-        let columns = prefixed_columns("t");
-        Ok(self
-            .conn()
-            .query_row(
-                &format!(
-                    "SELECT {columns},
-                       EXISTS (SELECT 1 FROM task_worktrees w
-                               WHERE w.task_id = t.id AND w.repo_id = ?1 AND w.pr_number = ?2)
-                         AS checked_out
-                     FROM tasks t
-                     WHERE t.kind = 'review' AND (checked_out OR EXISTS (
-                       SELECT 1 FROM task_prs p
-                       WHERE p.task_id = t.id AND p.repo_id = ?1 AND p.number = ?2))
-                     ORDER BY checked_out DESC, t.created_at, t.slug
-                     LIMIT 1"
-                ),
-                params![repo_id, number as i64],
-                task_from_row,
-            )
-            .optional()?)
-    }
-
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {
         self.conn().execute(
             "UPDATE tasks SET state = ?2 WHERE id = ?1",
@@ -984,8 +963,7 @@ impl Database {
     pub fn delete_task(&self, id: &str) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        keep_spend_in(&tx, id)?;
-        tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        delete_task_in(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -1619,7 +1597,7 @@ impl Database {
         Ok(())
     }
 
-    /// What `id` and everything below it, reviews aside, have used:
+    /// What `id` and everything below it have used:
     /// (seconds, turns).
     pub fn subtree_used(&self, id: &str) -> Result<(i64, i64)> {
         subtree_used_in(&self.conn(), id)
@@ -1787,8 +1765,7 @@ impl Database {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in ids {
-            keep_spend_in(&tx, id)?;
-            tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+            delete_task_in(&tx, id)?;
         }
         tx.commit()?;
         Ok(())
@@ -1843,12 +1820,22 @@ impl Database {
                 "UPDATE task_reports SET to_id = ?2 WHERE to_id = ?1",
                 params![deleting, rows.to],
             )?;
-            keep_spend_in(&tx, deleting)?;
-            tx.execute("DELETE FROM tasks WHERE id = ?1", params![deleting])?;
+            delete_task_in(&tx, deleting)?;
         }
         tx.commit()?;
         Ok(moved)
     }
+}
+
+/// Remove task `id`'s row. What it used goes to its parent
+/// ([`keep_spend_in`]); its anchors and the reports it sent go too, which
+/// no foreign key takes since a review's id may stand in `task_id` as well.
+fn delete_task_in(conn: &Connection, id: &str) -> Result<()> {
+    keep_spend_in(conn, id)?;
+    conn.execute("DELETE FROM task_anchors WHERE task_id = ?1", params![id])?;
+    conn.execute("DELETE FROM task_reports WHERE task_id = ?1", params![id])?;
+    conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 /// Add what task `id` used to its parent's use, before `id`'s row goes and
@@ -1962,7 +1949,7 @@ mod tests {
         let (_dir, db) = open();
         db.insert_task(&task("a", "first", 10)).unwrap();
         let mut review = task("b", "second", 30);
-        review.kind = TaskKind::Review;
+        review.kind = TaskKind::Manager;
         review.project = Some("web".into());
         db.insert_task(&review).unwrap();
         db.insert_task(&task("c", "third", 20)).unwrap();
@@ -2183,40 +2170,6 @@ mod tests {
             .tasks_with_pr("github.com/acme/api", 3)
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    fn a_review_task_is_found_by_its_pr() {
-        let (_dir, db) = open();
-        db.upsert_repo(&repo("github.com/acme/api")).unwrap();
-        db.upsert_repo(&repo("github.com/other/api")).unwrap();
-        let mut review = task("r", "review-api-7", 2);
-        review.kind = TaskKind::Review;
-        db.insert_task(&review).unwrap();
-        // A work task that happens to have the same PR is not a review of it.
-        db.insert_task(&task("w", "work", 1)).unwrap();
-        db.upsert_task_pr(&pr("w", 7, "2026-01-01T00:00:00Z"))
-            .unwrap();
-        assert_eq!(db.find_review_task("github.com/acme/api", 7).unwrap(), None);
-
-        let mut wt = worktree("r", "api", Some("feat"));
-        wt.pr_number = Some(7);
-        db.insert_task_worktree(&wt).unwrap();
-        let found = db.find_review_task("github.com/acme/api", 7).unwrap();
-        assert_eq!(found.map(|t| t.id), Some("r".to_string()));
-        // Same number, another repository: another PR.
-        assert_eq!(
-            db.find_review_task("github.com/other/api", 7).unwrap(),
-            None
-        );
-        assert_eq!(db.find_review_task("github.com/acme/api", 8).unwrap(), None);
-
-        // With its worktree gone, the history still says which PR it reviews.
-        db.delete_task_worktree("r", "api").unwrap();
-        db.upsert_task_pr(&pr("r", 7, "2026-01-01T00:00:00Z"))
-            .unwrap();
-        let found = db.find_review_task("github.com/acme/api", 7).unwrap();
-        assert_eq!(found.map(|t| t.id), Some("r".to_string()));
     }
 
     #[test]
@@ -3238,21 +3191,5 @@ mod tests {
         row.read_only = false;
         db.update_task_worktree(&row).unwrap();
         assert!(!db.get_task_worktree("t", "api").unwrap().unwrap().read_only);
-    }
-
-    #[test]
-    fn a_review_task_found_by_its_pr_reads_every_column() {
-        let (_dir, db) = open();
-        db.upsert_repo(&repo("github.com/acme/api")).unwrap();
-        let mut review = task("r", "review-api-7", 2);
-        review.kind = TaskKind::Review;
-        review.max_children = Some(3);
-        db.insert_task(&review).unwrap();
-        db.upsert_task_pr(&pr("r", 7, "2026-01-01T00:00:00Z"))
-            .unwrap();
-        assert_eq!(
-            db.find_review_task("github.com/acme/api", 7).unwrap(),
-            Some(review)
-        );
     }
 }

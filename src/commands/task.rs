@@ -244,14 +244,10 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
         return send_to_assistant(app, message);
     }
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskSend,
-        Target::Key {
-            key: name.to_string(),
-            exact: false,
-        },
-    )?;
+    let task = match super::review::named_agent(app, Verb::TaskSend, name)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::send(app, &review, message),
+    };
     let called = called(app, &task);
     if task.state == TaskState::Archived {
         bail!(
@@ -295,7 +291,7 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             called
         ),
         Delivered::StartQueued { live, max } => {
-            let (cap, frees) = run::max_live_of(&task);
+            let (cap, frees) = run::max_live_of();
             eprintln!(
                 "jeet: task {called}'s start waits on {cap} ({live}/{max} live), so the message \
                  is queued; it starts with it when {frees}"
@@ -315,7 +311,7 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
 /// user's answer (`<jeet-answer from="user">`). A top-level task's agent is
 /// [`Caller::User`] too, so the terminal is checked as answering checks
 /// it.
-fn from_sender(app: &App, caller: &Caller, text: &str) -> Result<(String, Sender)> {
+pub(super) fn from_sender(app: &App, caller: &Caller, text: &str) -> Result<(String, Sender)> {
     match caller == &Caller::User && permissions::at_terminal(app)? {
         true => Ok((text.to_string(), Sender::User)),
         false => Ok((crate::manager::fence::defang(text), Sender::Agent)),
@@ -377,14 +373,10 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
         return restart_assistant(app, force);
     }
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskOpen,
-        Target::Key {
-            key: name.to_string(),
-            exact: false,
-        },
-    )?;
+    let task = match super::review::named_agent(app, Verb::TaskOpen, name)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::restart(app, &review, force),
+    };
     let called = called(app, &task);
     if task.state == TaskState::Archived {
         bail!(
@@ -456,7 +448,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
-        Caller::Root | Caller::Node(_) => Admission::Gate,
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
     };
     let running = runtime::ensure_running(app, &task, Some(&session), None, admission)
         .with_context(|| {
@@ -480,7 +472,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             "jeet: ended task {}'s agent; it waits on {} ({live}/{max} live) to start \
              again, resuming its latest session",
             called,
-            run::max_live_of(&task).0
+            run::max_live_of().0
         ),
     }
     Ok(())
@@ -753,9 +745,8 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     // A task with a parent sees itself and the tasks below it.
     let caller = permissions::caller(app)?;
     let mut list: Vec<(i64, TaskRecord)> = Vec::new();
-    // Reviews are listed in the tasks list's reviews view alone.
     for task in app.db.list_tasks(Some(state))? {
-        if task.kind != TaskKind::Review && permissions::lists(app, &caller, &task)? {
+        if permissions::lists(app, &caller, &task)? {
             list.push((runtime::last_activity(app, &task), task));
         }
     }
@@ -778,9 +769,7 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
         let rows = app.db.list_task_worktrees(&task.id)?;
         let name = shown_name(names_for.as_deref(), &task);
         let status = match task.state {
-            TaskState::Active => {
-                runtime::shown_activity(app, &task, tmux_ok).label_with(name.is_some())
-            }
+            TaskState::Active => runtime::activity(app, &task, tmux_ok).label_with(name.is_some()),
             TaskState::Archived => "archived".to_string(),
         };
         let mut status = shown_status(&caller, &status);
@@ -850,14 +839,10 @@ pub fn unanchored_advice(slugs: &[String], assistant_windows: usize) -> Vec<Stri
 /// if it is not running. Without a terminal there is nobody to attach, so
 /// the agent is left running detached and the directory is printed instead.
 pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskOpen,
-        Target::Key {
-            key: name.to_string(),
-            exact: false,
-        },
-    )?;
+    let task = match super::review::named(app, Verb::TaskOpen, name, false)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::open(app, &review, session),
+    };
     if task.state == TaskState::Archived {
         bail!(
             "task {} is archived; `jeet task unarchive {}` first",
@@ -870,14 +855,8 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     // (M22). Anyone else waits for a slot like any start.
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
-        Caller::Root | Caller::Node(_) => Admission::Gate,
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
     };
-    let name = runtime::session_name(&task);
-    if !(tmux::has_session(&name) && tmux::pane_alive(&name)) {
-        if let Some(job) = crate::review::running_job(app, &task) {
-            bail!(crate::review::running_refusal(&task, &job));
-        }
-    }
     let running = runtime::ensure_running(app, &task, session, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
@@ -888,7 +867,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         ),
         Started::AlreadyRunning => {}
         Started::Queued { live, max, .. } => {
-            let (cap, frees) = run::max_live_of(&task);
+            let (cap, frees) = run::max_live_of();
             eprintln!("jeet: queued ({live}/{max} live, {cap}); its agent starts when {frees}");
             return Ok(());
         }
@@ -916,14 +895,10 @@ pub fn archive(app: &App, name: &str, force: bool, recursive: bool) -> Result<()
     // A subtree teardown names its root exactly, as delete does: with
     // --force nothing asks, so a stale name must not land on a task it is
     // only a prefix of.
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskArchive,
-        Target::Key {
-            key: name.to_string(),
-            exact: recursive,
-        },
-    )?;
+    let task = match super::review::named(app, Verb::TaskArchive, name, recursive)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::archive(app, &review, force),
+    };
     let called = called(app, &task);
     if recursive {
         return archive_subtree(app, &task, force);
@@ -955,7 +930,7 @@ fn archive_subtree(app: &App, task: &TaskRecord, force: bool) -> Result<()> {
         return Ok(());
     }
     // Before asking, not after: the answer would count for nothing.
-    tasks::refuse_inside_any(app, &nodes, "archive")?;
+    tasks::refuse_inside_any(&nodes, "archive")?;
     if !force {
         let mut report = format!(
             "archiving task {called} archives the {} under it first, leaves first, ending \
@@ -988,14 +963,10 @@ fn archive_subtree(app: &App, task: &TaskRecord, force: bool) -> Result<()> {
 /// Bring an archived task back; with `recursive`, every archived task under
 /// it too, top-down.
 pub fn unarchive(app: &App, name: &str, recursive: bool) -> Result<()> {
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskUnarchive,
-        Target::Key {
-            key: name.to_string(),
-            exact: false,
-        },
-    )?;
+    let task = match super::review::named(app, Verb::TaskUnarchive, name, false)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::unarchive(app, &review),
+    };
     let called = called(app, &task);
     let archived = match recursive {
         true => tasks::subtree_leaves_first(app, &task)?
@@ -1035,14 +1006,10 @@ pub fn unarchive(app: &App, name: &str, recursive: bool) -> Result<()> {
 pub fn delete(app: &App, name: &str, force: bool, recursive: bool) -> Result<()> {
     // By exact name only: with --force nothing asks, so a stale name must not
     // land on whichever task it happens to be a prefix of.
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskDelete,
-        Target::Key {
-            key: name.to_string(),
-            exact: true,
-        },
-    )?;
+    let task = match super::review::named(app, Verb::TaskDelete, name, true)? {
+        super::review::Named::Task(task) => task,
+        super::review::Named::Review(review) => return super::review::delete(app, &review, force),
+    };
     let called = called(app, &task);
     if task.kind == TaskKind::Assistant {
         bail!("the assistant cannot be deleted");
@@ -1064,7 +1031,7 @@ pub fn delete(app: &App, name: &str, force: bool, recursive: bool) -> Result<()>
     if !recursive {
         tasks::refuse_delete_with_children(app, &task)?;
     }
-    tasks::refuse_inside_any(app, &nodes, "delete")?;
+    tasks::refuse_inside_any(&nodes, "delete")?;
     if !force {
         match recursive {
             true => confirm_delete_subtree(app, &task, nodes.len() - 1)?,
@@ -1108,7 +1075,7 @@ pub fn delete_reparenting(app: &App, name: &str, force: bool) -> Result<()> {
     }
     // Before asking, not after: the answer would count for nothing.
     let plan = tasks::plan_reparent(app, &caller, &task)?;
-    tasks::refuse_inside_any(app, std::slice::from_ref(&task), "delete")?;
+    tasks::refuse_inside_any(std::slice::from_ref(&task), "delete")?;
     if !force {
         confirm_delete_reparenting(app, &task, &plan)?;
     }
@@ -1187,7 +1154,7 @@ fn confirm_archive(app: &App, task: &TaskRecord) -> Result<()> {
 }
 
 /// Ask before going on, on the terminal; without one, refuse, naming --force.
-fn confirm(report: &str, question: &str, declined: &str) -> Result<()> {
+pub(crate) fn confirm(report: &str, question: &str, declined: &str) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("{report}\npass --force to go ahead without a terminal");
     }
@@ -1337,7 +1304,7 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
 fn fence_for(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Option<String>> {
     match caller {
         Caller::User => Ok(None),
-        Caller::Root | Caller::Node(_) => {
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => {
             let path = crate::manager::tree_path(app, task)?;
             Ok(Some(crate::manager::label_at(task, &path)))
         }
@@ -1360,19 +1327,12 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     let from = fence_for(app, &caller, &task)?;
     let dir = tasks::task_dir(app, &task);
     let status = match task.state {
-        TaskState::Active => {
-            runtime::shown_activity(app, &task, tmux::available()).label_with(named)
-        }
+        TaskState::Active => runtime::activity(app, &task, tmux::available()).label_with(named),
         TaskState::Archived => "archived".to_string(),
     };
     let harness = AgentSpec::from_config(&app.config)?.harness;
-    // A review's session is filed under its worktree until picked up.
-    crate::review::adopt_sessions(app, &task);
     let known = app.db.list_task_sessions(&task.id)?;
     let Some(session) = runtime::latest_session(&dir, &known) else {
-        if let Some(job) = crate::review::running_job(app, &task) {
-            bail!(crate::review::running_refusal(&task, &job));
-        }
         bail!("task {}'s agent has no session yet", called);
     };
     let Some(turn) = harness.last_messages(&dir, &session, count) else {
@@ -1442,7 +1402,7 @@ fn fence_turn(from: Option<&str>, messages: &mut [crate::harness::AgentMessage])
 pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
     match caller {
         Caller::User => printable(label),
-        Caller::Root | Caller::Node(_) => crate::manager::fence::fenced(label),
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => crate::manager::fence::fenced(label),
     }
 }
 
@@ -1453,7 +1413,7 @@ pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
 pub(crate) fn shown_github(caller: &Caller, text: &str) -> String {
     match caller {
         Caller::User => printable(text),
-        Caller::Root | Caller::Node(_) => format!(
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => format!(
             "<github-data untrusted=\"true\">{}</github-data>",
             crate::manager::fence::fenced(text)
         ),
@@ -1468,6 +1428,7 @@ fn names_for(app: &App, caller: &Caller) -> Result<Option<Vec<String>>> {
         Caller::User => None,
         Caller::Root => Some(vec![crate::manager::root(app)?.id]),
         Caller::Node(node) => Some(vec![crate::manager::root(app)?.id, node.id.clone()]),
+        Caller::Review(_) => Some(vec![crate::manager::root(app)?.id]),
     })
 }
 
@@ -1507,15 +1468,11 @@ pub fn printable(text: &str) -> String {
 }
 
 pub fn path(app: &App, name: &str) -> Result<()> {
-    let task = permissions::scoped_target(
-        app,
-        Verb::TaskPath,
-        Target::Key {
-            key: name.to_string(),
-            exact: false,
-        },
-    )?;
-    println!("{}", tasks::task_dir(app, &task).display());
+    let dir = match super::review::named(app, Verb::TaskPath, name, false)? {
+        super::review::Named::Task(task) => tasks::task_dir(app, &task),
+        super::review::Named::Review(review) => crate::review::dir(app, &review),
+    };
+    println!("{}", dir.display());
     Ok(())
 }
 

@@ -19,6 +19,7 @@ use anyhow::{bail, Result};
 
 use crate::context::App;
 use crate::db::anchors::{Anchor, AnchorKind};
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::db::Database;
 use crate::permissions::{self, ASSISTANT_ENV};
@@ -326,6 +327,10 @@ pub enum Refused {
 pub struct Identity {
     /// The task it runs under, if any.
     pub task: Option<TaskRecord>,
+    /// The review it runs under, if any: a review has an id of its own
+    /// that the anchors and `$JEET_TASK_ID` name, as a task's. The user's
+    /// own review job is not one: it runs as the user.
+    pub review: Option<ReviewRecord>,
     /// It is the review job runner jeet started for `task`.
     pub self_job: bool,
 }
@@ -348,15 +353,19 @@ pub fn identify(app: &App) -> Result<Identity> {
         |id| task(id).is_some_and(|t| t.kind == TaskKind::Assistant),
         |id| match db.get_task(id) {
             Ok(Some(t)) => t.parent_id.is_some() || t.kind == TaskKind::Assistant,
-            // An unknown task (deleted, say, under a review job still
-            // running for it) is not taken for the user.
+            // A review's agent is gated whoever asked for it; an unknown
+            // task (deleted, say, under a review job still running for it)
+            // is not taken for the user.
             Ok(None) | Err(_) => true,
         },
     );
     let label = |id: &str| match task(id) {
         Some(t) if t.kind == TaskKind::Assistant => "the assistant".to_string(),
         Some(t) => format!("task {}", t.slug),
-        None => format!("task {id}"),
+        None => match db.get_review(id).ok().flatten() {
+            Some(r) => format!("review {}", r.label()),
+            None => format!("task {id}"),
+        },
     };
     let (id, self_job) = match verdict {
         Verdict::SelfJob(id) => (id, true),
@@ -364,6 +373,7 @@ pub fn identify(app: &App) -> Result<Identity> {
         Verdict::Nobody => {
             return Ok(Identity {
                 task: None,
+                review: None,
                 self_job: false,
             })
         }
@@ -386,6 +396,22 @@ pub fn identify(app: &App) -> Result<Identity> {
         Verdict::Unconfirmed(claimed) => {
             // A lookup that fails is an index error, not a task that is gone.
             let found = claimed.as_deref().map(|id| db.get_task(id)).transpose()?;
+            // A review is not a task, but its agent is claimed the same way.
+            let review = match (&claimed, &found) {
+                (Some(id), Some(None)) => db.get_review(id)?,
+                _ => None,
+            };
+            if let (Some(id), Some(review)) = (&claimed, &review) {
+                return Err(Refused::Unconfirmed(format!(
+                    "jeet can't confirm this is review {}'s agent ({id}): jeet has no record of \
+                     starting it, as for an agent an older jeet started; `jeet task open {}` \
+                     starts it again in a new session, or run this outside the agent's tmux \
+                     session",
+                    review.label(),
+                    review.slug
+                ))
+                .into());
+            }
             let (who, reopen) = match (claimed, found) {
                 (Some(id), Some(None)) => {
                     return Err(Refused::Unconfirmed(format!(
@@ -429,8 +455,25 @@ pub fn identify(app: &App) -> Result<Identity> {
             .into());
         }
     };
+    if let Some(task) = db.get_task(&id)? {
+        return Ok(Identity {
+            task: Some(task),
+            review: None,
+            self_job,
+        });
+    }
+    let review = db.get_review(&id)?;
+    // The command of a review nobody asked for is the user's own: it runs
+    // as the user, as a top-level task's did.
+    let users = review.as_ref().is_some_and(|r| {
+        r.requested_by.is_none()
+            && anchors.iter().any(|a| {
+                a.task_id == id && a.kind == AnchorKind::Job && chain.contains(&(a.pid, a.start))
+            })
+    });
     Ok(Identity {
-        task: db.get_task(&id)?,
+        task: None,
+        review: review.filter(|_| !users),
         self_job,
     })
 }
