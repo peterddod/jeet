@@ -2668,6 +2668,8 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# jeet runs every call but an attach as `tmux -u …`: the verb follows.
+if [ "$1" = -u ]; then shift; fi
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
@@ -3774,6 +3776,64 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
         .tmux(&["has-session", "-t", "=jeet-real"])
         .status
         .success());
+}
+
+/// Run as launchd and systemd run `jeet watch`, with no UTF-8 locale and on
+/// a server the user started, jeet still reads which pane it started its
+/// agent in, and anchors it: tmux would otherwise print the tabs in its
+/// formats as `_`, and the agent run unanchored.
+#[test]
+fn an_agent_started_from_a_background_job_is_anchored() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("tmux is not installed; skipping");
+        return;
+    }
+    let lab = StoreLab::new();
+    let task = lab.new_task("bg");
+    let id = task_id(&task);
+    let sockets = TempDir::new().unwrap();
+    let server = TmuxServer(sockets.path().to_path_buf());
+    assert!(server
+        .tmux(&["new-session", "-d", "-s", "user", "--", "sleep", "300"])
+        .status
+        .success());
+    let sockets_env = sockets.path().to_string_lossy().to_string();
+    let home = TempDir::new().unwrap();
+    let home_env = home.path().to_string_lossy().to_string();
+    let env = [
+        ("JEET_TMUX", "tmux"),
+        ("TMUX_TMPDIR", sockets_env.as_str()),
+        ("JEET_AGENT", "sleep 300"),
+        ("HOME", home_env.as_str()),
+        ("XDG_CONFIG_HOME", home_env.as_str()),
+        ("JEET_BACKGROUND", "1"),
+        ("LC_ALL", "C"),
+        ("LC_CTYPE", "C"),
+        ("LANG", "C"),
+    ];
+
+    let output = lab.jeet_at(&["task", "open", "bg"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(
+        !stderr_of(&output).contains("cannot be identified"),
+        "{}",
+        stderr_of(&output)
+    );
+    let anchors: i64 = lab
+        .index()
+        .query_row(
+            "SELECT COUNT(*) FROM task_anchors WHERE task_id = ?1 AND kind = 'pane'",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(anchors, 1);
+    let output = lab.jeet_at(&["task", "ls"], &lab.home(), &env);
+    let listed = stdout_of(&output);
+    assert!(listed.contains("running"), "{listed}");
+    assert!(!listed.contains("unanchored"), "{listed}");
+
+    succeeded(&lab.jeet_at(&["task", "archive", "bg"], &lab.home(), &env));
 }
 
 /// jeet turns tmux's extended keys on, for Shift+Enter to reach the agent,
@@ -6501,6 +6561,8 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
+# jeet runs every call but an attach as `tmux -u …`: the verb follows.
+if [ "$1" = -u ]; then shift; fi
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
