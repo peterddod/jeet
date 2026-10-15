@@ -1362,7 +1362,10 @@ impl TasksUi {
     /// no longer active.
     pub fn tree_parent(&self, row: &TaskRow) -> Option<&str> {
         let parent = row.task.parent_id.as_deref()?;
-        self.active_row(parent).map(|p| p.task.id.as_str())
+        // A task its own parent, which only a bad index has, is on top.
+        self.active_row(parent)
+            .filter(|p| p.task.id != row.task.id)
+            .map(|p| p.task.id.as_str())
     }
 
     /// Whether the active view goes into `row`: a manager, or a task with
@@ -1419,12 +1422,23 @@ impl TasksUi {
         });
     }
 
+    /// Drop the filter, the cursor kept on what it was on: in the active
+    /// view, on that task's level, wherever the match was.
+    fn drop_filter(&mut self, keep: Option<&str>) {
+        self.filter.clear();
+        if let Some(id) = keep.filter(|_| self.view == View::Active) {
+            self.path = self.ancestors(id);
+        }
+        self.refresh_visible(keep);
+    }
+
     /// ← or ⌫ in the active view: back up a level, the cursor on the
-    /// manager left. With a filter, back to the level from its matches.
+    /// manager left. With a filter, it drops the filter instead, to the
+    /// level of the match under the cursor.
     fn ascend(&mut self) {
         if !self.filter.is_empty() {
-            self.filter.clear();
-            self.refresh_visible(None);
+            let keep = self.selected_id().map(str::to_string);
+            self.drop_filter(keep.as_deref());
             self.set_status("");
             return;
         }
@@ -1700,9 +1714,8 @@ impl TasksUi {
         let keep = self.selected_id().map(str::to_string);
         match key.code {
             KeyCode::Esc => {
-                self.filter.clear();
                 self.filtering = false;
-                self.refresh_visible(keep.as_deref());
+                self.drop_filter(keep.as_deref());
             }
             // The filter stays; the letters are commands again.
             KeyCode::Enter => self.filtering = false,
@@ -1712,10 +1725,7 @@ impl TasksUi {
                 }
                 self.refresh_visible(None);
             }
-            KeyCode::Char('u') if ctrl => {
-                self.filter.clear();
-                self.refresh_visible(keep.as_deref());
-            }
+            KeyCode::Char('u') if ctrl => self.drop_filter(keep.as_deref()),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
             KeyCode::PageUp => self.move_cursor(-10),
@@ -1752,8 +1762,7 @@ impl TasksUi {
         };
         match key.code {
             KeyCode::Esc if !self.filter.is_empty() => {
-                self.filter.clear();
-                self.refresh_visible(id.as_deref());
+                self.drop_filter(id.as_deref());
                 self.set_status("");
                 None
             }
@@ -1857,10 +1866,12 @@ impl TasksUi {
                 None
             }
             // A manager's own agent, which ⏎ goes past; the explorer's key.
-            KeyCode::Char('a') if ctrl => needs_task(self, &|task_id| Action::Open {
-                task_id,
-                session: None,
-            }),
+            KeyCode::Char('a') if ctrl && self.view == View::Active => {
+                needs_task(self, &|task_id| Action::Open {
+                    task_id,
+                    session: None,
+                })
+            }
             KeyCode::Enter => match self.selected_row() {
                 Some(row) if row.task.state == TaskState::Archived => {
                     let name = row.task.name.clone();
@@ -5624,6 +5635,18 @@ mod tests {
                 session: None
             })
         );
+        // Only in the active view: the agents view's `a` answers, and an
+        // archived task's agent is not opened.
+        for view in [View::Agents, View::Archived] {
+            ui.view = view;
+            let got = ui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            assert!(
+                !matches!(got, Some(Action::Open { .. })),
+                "{view:?}: {got:?}"
+            );
+        }
+        ui.view = View::Active;
+        ui.refresh_visible(None);
         // Plain `a` still archives.
         assert!(matches!(
             press(&mut ui, KeyCode::Char('a')),
@@ -5695,10 +5718,17 @@ mod tests {
         type_text(&mut ui, "docs");
         press(&mut ui, KeyCode::Enter);
         assert_eq!(shown(&ui), ["docs"]);
-        // ← drops the filter, back to the level it was on.
+        // ← drops the filter, the cursor kept on the match, on its level.
         press(&mut ui, KeyCode::Left);
         assert!(ui.filter.is_empty());
-        assert_eq!(shown(&ui), ["ship"]);
+        assert!(ui.path.is_empty());
+        assert_eq!(ui.selected_id(), Some("docs"));
+        // So does esc, from a match levels down.
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "ship");
+        press(&mut ui, KeyCode::Esc);
+        assert_eq!(ui.path, ["ops", "deploy"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
         // ⏎ on a manager among the matches goes into it, filter dropped.
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "deploy");
@@ -5707,6 +5737,20 @@ mod tests {
         assert!(ui.filter.is_empty());
         assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
         assert_eq!(shown(&ui), ["ship"]);
+    }
+
+    #[test]
+    fn a_task_its_own_parent_is_on_the_top_level() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "docs")
+            .unwrap()
+            .task
+            .parent_id = Some("docs".into());
+        ui.set_rows(rows);
+        assert!(shown(&ui).contains(&"docs"));
+        assert!(ui.ancestors("docs").is_empty());
     }
 
     #[test]
