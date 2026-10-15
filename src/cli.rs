@@ -286,8 +286,9 @@ pub enum TaskCommands {
     New {
         name: String,
         /// Project to start from: copies its AGENTS.md and skills, and adds a
-        /// worktree of each of its repositories; under a manager with a
-        /// project, that one when this is not given
+        /// worktree of each of its repositories (a --repo for one
+        /// of them, with no --branch, adds nothing twice); under a manager
+        /// with a project, that one when this is not given
         #[arg(long, add = ArgValueCandidates::new(project_candidates))]
         project: Option<String>,
         /// Repository to add a worktree of straight away (repeatable)

@@ -4257,6 +4257,7 @@ impl Screen<'_> {
                                 repos: &spec.repos,
                                 branch: spec.branch.as_deref(),
                                 child: None,
+                                inherit_project: false,
                             },
                         )
                     })
@@ -4290,7 +4291,10 @@ impl Screen<'_> {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
                 let default_name = default_task_name(self.ui.rows.iter().map(|r| &r.task));
-                let form = NewTaskForm::new(default_name, projects, None, repos);
+                // The parent's project is the default; the choice made on
+                // the form is then the whole answer.
+                let form =
+                    NewTaskForm::new(default_name, projects, parent.project.as_deref(), repos);
                 self.ui.panel = Some(Panel::NewTask(Box::new(
                     form.under(named, printable(&manager::label(&parent))),
                 )));
@@ -4678,6 +4682,7 @@ impl Screen<'_> {
                         repos: &spec.repos,
                         branch: spec.branch.as_deref(),
                         child: Some((&user, &plan)),
+                        inherit_project: false,
                     },
                 )
             })

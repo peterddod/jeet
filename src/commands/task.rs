@@ -86,6 +86,7 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
             repos: args.repos,
             branch: args.branch,
             child: plan.as_ref().map(|plan| (&caller, plan)),
+            inherit_project: true,
         },
     )?;
     warn_all(&created.warnings);

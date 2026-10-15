@@ -88,6 +88,7 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
             repos: &[],
             branch: None,
             child: Some((&caller, &plan)),
+            inherit_project: true,
         },
     )?;
     warn_all(&created.warnings);

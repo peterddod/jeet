@@ -28,6 +28,11 @@ time; a single change is a plain `jeet task new`.
     the manager's own instructions) are copied in, and every task it
     makes defaults to the same project unless given another `--project`.
     No worktrees are added; the manager asks for those as it needs them.
+    A task under it also gets a worktree of each of the project's
+    repositories (as `jeet task new --project` does); `--repo` for one
+    of those with no `--branch` adds nothing twice. A project that can
+    no longer be read costs the task its project, with a warning. The
+    project's `[agent] args` are not applied to the manager itself.
   - `--brief-file <file>` adds a longer brief after the goal; the two
     together are at most 8,000 bytes. The file must be in your own
     directory: write the brief there first.

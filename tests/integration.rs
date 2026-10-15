@@ -16679,3 +16679,33 @@ fn project_of_opt(lab: &StoreLab, slug: &str) -> Option<String> {
         .ok()
         .flatten()
 }
+
+/// A project with skills and no AGENTS.md gives a manager its skills and no
+/// link to a file that is not there.
+#[test]
+fn a_manager_from_a_skills_only_project_has_no_project_link() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let project = home.join("projects/skills");
+    std::fs::create_dir_all(project.join("skills/deploy")).unwrap();
+    std::fs::write(project.join("skills/deploy/SKILL.md"), "deploy it\n").unwrap();
+    lab.jeet_at(
+        &[
+            "manager",
+            "new",
+            "api",
+            "--goal",
+            "g",
+            "--project",
+            "skills",
+        ],
+        &home,
+        &[("JEET_AGENT", "claude")],
+    );
+    assert_eq!(project_of(&lab, "api").as_deref(), Some("skills"));
+    let dir = home.join("tasks/api");
+    assert!(dir.join(".claude/skills/deploy/SKILL.md").is_file());
+    assert!(!dir.join("PROJECT.md").exists());
+    let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+    assert!(!agents.contains("PROJECT.md"), "{agents}");
+}

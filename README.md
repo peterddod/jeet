@@ -1063,7 +1063,14 @@ starts it from a [project](#projects): its skills are copied in and its
 them read-only and asks for them when it wants one. The project is stored with
 the manager, and a task or manager made under it (`jeet task new` from its
 agent, `--parent`, or `n` on its node in the agents tab) starts from the same
-project unless given `--project` of its own; there is no way to ask for none. A manager is
+project unless given `--project` of its own (and so with that project's
+repositories as worktrees, a `--repo` for one of them with no `--branch` adding
+nothing twice); the command line has no way to ask for none, but the `n` form
+starts on the parent's project and takes "no project" at its word. A project
+that can no longer be read costs the new task its project, with a warning. The
+project's `[agent] args` are not applied to the manager itself, and relative
+`@` imports inside the project's `AGENTS.md` do not resolve for a manager, whose
+copy is `PROJECT.md`. A manager is
 not made without `--goal` or `--brief-file`: its brief is all it works
 towards. A manager sits at
 most `max_depth` − 1 below the assistant, and needs a harness with recorded sessions, hooks,

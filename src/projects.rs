@@ -301,8 +301,14 @@ pub fn tasks_using(app: &App, name: &str) -> Result<Vec<TaskRecord>> {
 }
 
 /// Extra agent arguments for `task`, from the project it was made from — as
-/// the project is now, unlike its files. None without a project.
+/// the project is now, unlike its files. None without a project, and none
+/// for a manager.
 pub fn agent_args(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    // A manager's launch is jeet's: a project's arguments are for the
+    // coding agents of tasks, and could undo what a manager is run with.
+    if task.kind == TaskKind::Manager {
+        return Ok(Vec::new());
+    }
     match &task.project {
         Some(name) => Ok(load(app, name)?.config.agent.args),
         None => Ok(Vec::new()),
@@ -722,6 +728,46 @@ mod tests {
                        nothex\tCLAUDE.md\n\
                        no tab here\n";
         assert!(parse_manifest(hostile).is_empty());
+    }
+
+    #[test]
+    fn a_projects_agent_args_are_for_tasks_not_managers() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home: home.clone(),
+        };
+        let project = home.join("projects/web");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("project.toml"),
+            "[agent]\nargs = [\"--model\", \"opus\"]\n",
+        )
+        .unwrap();
+        let task = |kind| TaskRecord {
+            id: "t".into(),
+            slug: "t".into(),
+            name: "t".into(),
+            project: Some("web".into()),
+            kind,
+            state: crate::db::tasks::TaskState::Active,
+            created_at: 0,
+            last_activity: 0,
+            parent_id: None,
+            placement: crate::placement::for_new(),
+            run_state: crate::db::tasks::RunState::Run,
+            run_state_by: None,
+            max_children: None,
+        };
+        assert_eq!(
+            agent_args(&app, &task(TaskKind::Work)).unwrap(),
+            ["--model", "opus"]
+        );
+        assert!(agent_args(&app, &task(TaskKind::Manager))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
