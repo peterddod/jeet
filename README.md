@@ -651,40 +651,41 @@ active tab's: `⇥` back to it.
 
 ### The projects tab
 
-The fourth tab groups the active tasks and managers by repository. A project is
-a repository, the one a worktree is of (what `--repo` takes), so a task with
-worktrees of several repositories is listed under each. Tasks and managers with
-no worktree are under `(no repo)`, last; a manager is also under the
-repositories of every task below it, even with no worktree of its own.
+The fourth tab groups the active tasks and managers by project: the jeet
+project a task was started from (`jeet task new --project`, `n` in the form).
+These are the projects `P` manages; `P` makes and edits them, and this tab shows
+the work in them. A manager is listed under every project that a task below it,
+through any tasks in between, was started from, and under its own project if it
+has one. Tasks and managers with no project are not listed here (the active
+tab has them).
 
 ```text
 ┌ jeet · projects ──────────────────────────────────────────────────────────┐
-│ active 5   agents 6   reviews 2   projects 3    / filter  ⇥ switch        │
+│ active 5   agents 6   reviews 2   projects 2    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
-┌ 3 projects ───────────────────────────────────────────────────────────────┐
+┌ 2 projects ───────────────────────────────────────────────────────────────┐
 │ api                      ◆ needs input  1 manager, 2 tasks       just now │
-│ github.com/acme/api                                                       │
+│ ops, deploy, fix-login                                                    │
 │ web                      ● running      1 task                     5m ago │
-│ github.com/acme/web                                                       │
-│ (no repo)                ○ idle         1 task                     1h ago │
-│ tasks and managers with no worktree                                       │
-└ A archived projects ──────────────────────────────────────────────────────┘
+│ ship-web                                                                  │
+└ A other projects ─────────────────────────────────────────────────────────┘
 ```
 
-Each project takes two lines: the repository's name, the most urgent status
-among the tasks and managers in it, how many managers and tasks it has and
-when anything last happened in it, most recent first; and under the name, dimmed,
-the full repository. `→` or `⏎` goes into a project, to every manager and task
+Each project takes two lines: its name, the most urgent status among the tasks
+and managers in it, how many managers and tasks it has and when anything last
+happened in it, most recent first; and under the name, dimmed, who is in it.
+`→` or `⏎` goes into a project, to every manager and task
 in it, drawn as in the active tab and walked the same way: `→` goes into a manager
 or a task with tasks under it, `⏎` opens its agent, `←` or `⌫` backs up a level
 and, from the top of the project, out of it. The line over the list says where
 you are (`projects › api › …`). `e`, `w`, `p`, `v`, `a`, `D`, `n` and `S` act on
-the task under the cursor as in the active tab. (This tab groups by repository; the `P` projects are templates for new tasks, a different thing.) `/` filters the projects by
-repository, or, inside one, its tasks by name.
+the task under the cursor as in the active tab. `/` filters the projects by
+name, or, inside one, its tasks by name.
 
-`A` switches the tab to the archived projects, the repositories with archived
-tasks and no active task or manager, and back; inside one, the archived tasks
-are a flat list, and `a` brings one back. Both lists end with a dim reminder of it.
+`A` switches the tab to the other projects, every one with no active task or
+manager: those with only archived tasks and those with no tasks at all; inside
+one, the archived tasks are a flat list (empty for a project with none), and `a`
+brings one back. Both lists end with a dim reminder of it.
 
 ### The reviews tab
 
