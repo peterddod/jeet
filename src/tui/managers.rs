@@ -122,8 +122,11 @@ pub fn rollup(nodes: &[(String, Option<String>, Urgency)]) -> HashMap<String, (U
         .collect();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (i, (_, parent, _)) in nodes.iter().enumerate() {
+        // A node its own parent is no child of its own.
         if let Some(&p) = parent.as_deref().and_then(|p| index.get(p)) {
-            children[p].push(i);
+            if p != i {
+                children[p].push(i);
+            }
         }
     }
     let lifted = |u: Urgency| match u {
@@ -763,6 +766,12 @@ mod tests {
         add_ask(&mut info, "w3", 3, true);
         assert_eq!(nearest("root", &info), Some(("w3".into(), 3)));
         assert_eq!(nearest("api", &info), Some(("api".into(), 4)));
+    }
+
+    #[test]
+    fn a_node_its_own_parent_rolls_up_nothing_from_itself() {
+        let shown = rollup(&[("x".into(), Some("x".into()), Urgency::Running)]);
+        assert_eq!(shown["x"], (Urgency::Running, 0));
     }
 
     #[test]

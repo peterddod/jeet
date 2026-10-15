@@ -1361,11 +1361,22 @@ impl TasksUi {
     /// at the top level, under the assistant, with no parent, or with one
     /// no longer active.
     pub fn tree_parent(&self, row: &TaskRow) -> Option<&str> {
-        let parent = row.task.parent_id.as_deref()?;
-        // A task its own parent, which only a bad index has, is on top.
-        self.active_row(parent)
-            .filter(|p| p.task.id != row.task.id)
-            .map(|p| p.task.id.as_str())
+        let parent = self.active_row(row.task.parent_id.as_deref()?)?;
+        // A task on a cycle of parents, which only a bad index has, is on
+        // top: above it the walk would never end.
+        let mut seen = HashSet::new();
+        let mut at = Some(parent);
+        while let Some(up) = at {
+            if up.task.id == row.task.id || !seen.insert(up.task.id.as_str()) {
+                return None;
+            }
+            at = up
+                .task
+                .parent_id
+                .as_deref()
+                .and_then(|id| self.active_row(id));
+        }
+        Some(parent.task.id.as_str())
     }
 
     /// Whether the active view goes into `row`: a manager, or a task with
@@ -1723,7 +1734,11 @@ impl TasksUi {
                 if self.filter.pop().is_none() {
                     self.filtering = false;
                 }
-                self.refresh_visible(None);
+                match self.filter.is_empty() {
+                    // Its last letter gone: as esc, onto the match's level.
+                    true => self.drop_filter(keep.as_deref()),
+                    false => self.refresh_visible(None),
+                }
             }
             KeyCode::Char('u') if ctrl => self.drop_filter(keep.as_deref()),
             KeyCode::Up => self.move_cursor(-1),
@@ -5737,6 +5752,35 @@ mod tests {
         assert!(ui.filter.is_empty());
         assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
         assert_eq!(shown(&ui), ["ship"]);
+    }
+
+    #[test]
+    fn tasks_on_a_cycle_of_parents_are_on_the_top_level() {
+        let mut ui = nested();
+        let mut rows = ui.rows.clone();
+        for (id, parent) in [("docs", "loose"), ("loose", "docs")] {
+            rows.iter_mut()
+                .find(|r| r.task.id == id)
+                .unwrap()
+                .task
+                .parent_id = Some(parent.into());
+        }
+        ui.set_rows(rows);
+        assert_eq!(shown(&ui), ["ops", "docs", "loose"]);
+        assert!(ui.ancestors("docs").is_empty());
+    }
+
+    #[test]
+    fn backspacing_the_filter_away_keeps_the_match() {
+        let mut ui = nested();
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "ship");
+        for _ in 0..4 {
+            press(&mut ui, KeyCode::Backspace);
+        }
+        assert!(ui.filter.is_empty());
+        assert_eq!(ui.path, ["ops", "deploy"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
     }
 
     #[test]
