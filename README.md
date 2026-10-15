@@ -416,11 +416,19 @@ second review; new commits do (and `--rerun` forces one). Run for your own
 review, the command runs as you, ungated, as it always has; only the assistant's
 reviews are held to the review agent's gate.
 
+The job is part of the review: its command, the commit it reviewed, when it
+started and ended, its exit status and its runner are columns of the review's
+row in the index (the hidden `jeet review-job <review id>` that runs it only
+runs a job jeet recorded there, once). Only the log is a file. Job files an
+older jeet left under `~/.jeet/reviews` are adopted as reviews on upgrade
+([What's new in v0.13](#whats-new-in-v013)).
+
 `{pr}` and `{url}` are substituted into the command. The PR's branch, base and
 title are not — whoever opened the PR chose those, and pasted into a shell they
 would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
 `$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
-`$JEET_REVIEW_LOG`. Jobs and their logs live under `~/.jeet/reviews`.
+`$JEET_REVIEW_LOG`. A job's log is `~/.jeet/reviews/<host>/<owner>/<repo>/<number>.log`; nothing
+reads that directory to find reviews.
 
 ### Merging
 
@@ -717,9 +725,7 @@ brings one back. Both lists end with a dim reminder of it.
 ### The reviews tab
 
 The third tab lists the reviews: each active review (what `jeet review`
-makes), then any review job an older `jeet review` recorded with no review to
-hold it (shown as it always was, read-only, until a later release adopts
-them). Reviews are shown here alone, never in the other tabs. `A` switches
+makes). Reviews are shown here alone, never in the other tabs. `A` switches
 the tab to the archived reviews (`▪ archived`), and back, as it does the
 tasks list: they stay in the reviews tab rather than joining the archived
 tasks, so a review is always found in the one place. Every review can be
@@ -751,7 +757,7 @@ keeps what it said before. PR titles are shown as text, never run.
 |---|---|
 | `⏎` | the review's menu: `v` view the diff, `s` open the review's session |
 | `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
-| `s` (in the menu) | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab. A job with no review has none |
+| `s` (in the menu) | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `e` | explore the review's worktree |
 | `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
 | `D` | delete the review, after listing any work that would be lost |
@@ -1508,10 +1514,11 @@ the index.
 - **`jeet task send` and `jeet task restart` reach a review's agent**, for you
   and for the task that asked for the review; nobody else may.
 
-**Upgrading to v0.13.0:** the index moves to **schema v8** the first time any
-v0.13 command opens it, and v0.12 and older refuse the index after that, so
-upgrade every jeet you run at once. Before anything changes, the index is
-copied to `$JEET_HOME/backups/index-v7-<unix time>.db` (`~/.jeet/backups/` by
+**Upgrading to v0.13.0:** the index moves to **schema v9** the first time any
+v0.13 command opens it (from v7, two steps run one after the other: v8 moves
+reviews out of the tasks, v9 puts a review's `[review] command` job on its
+row), and v0.12 and older refuse the index after that, so upgrade every jeet
+you run at once. Before anything changes, the index is copied to `$JEET_HOME/backups/index-v7-<unix time>.db` (`~/.jeet/backups/` by
 default), and the migration is refused if the copy cannot be made. The copy
 is a whole index of the old schema: it is what an older jeet opens, if you go
 back.
@@ -1535,13 +1542,27 @@ back.
   recorded gets no review, and its worktrees are handled the same way.
 - This happens at the first command a person runs after the upgrade, not in
   a hook, and says so on stderr in one line. What it did, a line each, is in
-  `$JEET_HOME/logs/migrate-v8.log`; a worktree it could not archive then (its
+  `$JEET_HOME/logs/migrate-v8.log` (the job files' log is
+  `migrate-v9.log`, above); a worktree it could not archive then (its
   agent's tmux session is this very shell, say) is tried again at the next
   command.
-- **Review jobs recorded under `~/.jeet/reviews` by an older `jeet review`
-  with no review of their own are still shown, read-only, in the reviews
-  tab**; a later release adopts them as reviews. Nothing in that directory
-  is changed.
+- **Review jobs an older `jeet review` left under `~/.jeet/reviews`
+  (`<host>/<owner>/<repo>/<number>.json`, the state of a `[review] command`
+  run) become reviews**, at the first command a person runs after the
+  upgrade, and are no longer shown read-only in the reviews tab. Each job
+  whose pull request has no review gets one: **archived** when the job
+  finished or was lost (its process is gone), **active** only while the job
+  still runs, and then archived like any review once its PR is merged or
+  closed. It has no worktree: the one the job ran in is never touched. A PR
+  that already has a review keeps it, and gets the file's job only if it has
+  none. These reviews can be brought back, archived and deleted like any
+  other. **The files are left where they are, untouched; jeet deletes none of
+  them and reads the directory only this once.** A file that cannot be read
+  is left and logged. Each file is a line of `$JEET_HOME/logs/migrate-v9.log`
+  (adopted, put on a review, skipped, or left), with a one-line summary on
+  stderr. A job still running when you upgrade is kept as running, but an
+  older jeet's runner records its end in the file, which is not read again:
+  the review shows it as stopped once the process is gone.
 - The `<task>/.jeet/review.json` and `brought-back` files are folded into the
   review and no longer read.
 - In the reviews tab, `w` and `p` have nothing to show (a review has one

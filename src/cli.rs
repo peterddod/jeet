@@ -79,7 +79,7 @@ pub enum Commands {
         command: PrCommands,
     },
 
-    /// Run a background review job (started by `jeet review`)
+    /// Run the background job recorded on a review (started by `jeet review`)
     #[command(hide = true)]
     ReviewJob { review: String },
 
