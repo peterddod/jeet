@@ -511,7 +511,7 @@ jeet          # or `jeet tasks`
 
 ```text
 ┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
-│ active 5   agents 6   reviews 2    / filter  ⇥ switch                     │
+│ active 5   agents 6   reviews 2   projects 3    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
  assistant
@@ -544,7 +544,8 @@ goes into it.
 Each level is most recently active first. Statuses refresh
 every two seconds and sizes are measured in the background, so the list never
 waits on either. `⇥` goes on to the [agents tab](#the-agents-tab), then the
-[reviews tab](#the-reviews-tab), and back to these (`⇧⇥` the other way). `A`
+[reviews tab](#the-reviews-tab), then the [projects tab](#the-projects-tab), and
+back to these (`⇧⇥` the other way). `A`
 lists the archived tasks instead of the active ones (a flat list), and back;
 both lists end with a dim reminder of it.
 
@@ -591,7 +592,7 @@ archived list).
 
 ```text
 ┌ jeet · agents ──────────────────────────────────────────────────────────────┐
-│ active 6   agents 7   reviews 0    live 5/8   needs you 1   / filter        │
+│ active 6   agents 7   reviews 0   projects 2    live 5/8   needs you 1      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ┌ 6 of 7 agents shown ────────────────────────────────────────────────────────┐
 │✦ assistant          ◆ needs you (1)        3 children   inbox 2  todo 4     │
@@ -647,6 +648,43 @@ how each went is shown when it is done, and a refusal (answered meanwhile,
 say) stays on the form. The worktree, PR, archive and delete keys are the
 active tab's: `⇥` back to it.
 
+### The projects tab
+
+The fourth tab groups the active tasks and managers by repository. A project is
+a repository, the one a worktree is of (what `--repo` takes), so a task with
+worktrees of several repositories is listed under each. Tasks and managers with
+no worktree are under `(no repo)`, last; a manager is also under the
+repositories of every task below it, even with no worktree of its own.
+
+```text
+┌ jeet · projects ──────────────────────────────────────────────────────────┐
+│ active 5   agents 6   reviews 2   projects 3    / filter  ⇥ switch        │
+└───────────────────────────────────────────────────────────────────────────┘
+┌ 3 projects ───────────────────────────────────────────────────────────────┐
+│ api                      ◆ needs input  1 manager, 2 tasks       just now │
+│ github.com/acme/api                                                       │
+│ web                      ● running      1 task                     5m ago │
+│ github.com/acme/web                                                       │
+│ (no repo)                ○ idle         1 task                     1h ago │
+│ tasks and managers with no worktree                                       │
+└ A archived projects ──────────────────────────────────────────────────────┘
+```
+
+Each project takes two lines: the repository's name, the most urgent status
+among the tasks and managers in it, how many managers and tasks it has and
+when anything last happened in it, most recent first; and under the name, dimmed,
+the full repository. `→` or `⏎` goes into a project, to every manager and task
+in it, drawn as in the active tab and walked the same way: `→` goes into a manager
+or a task with tasks under it, `⏎` opens its agent, `←` or `⌫` backs up a level
+and, from the top of the project, out of it. The line over the list says where
+you are (`projects › api › …`). `e`, `w`, `p`, `v`, `a`, `D`, `n` and `S` act on
+the task under the cursor as in the active tab. (This tab groups by repository; the `P` projects are templates for new tasks, a different thing.) `/` filters the projects by
+repository, or, inside one, its tasks by name.
+
+`A` switches the tab to the archived projects, the repositories with archived
+tasks and no active task or manager, and back; inside one, the archived tasks
+are a flat list, and `a` brings one back. Both lists end with a dim reminder of it.
+
 ### The reviews tab
 
 The third tab lists the reviews: each active review task (what `jeet review`
@@ -658,7 +696,7 @@ tasks, so a review is always found in the one place.
 
 ```text
 ┌ jeet · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
-│ active 6   agents 7   reviews 2    / filter  ⇥ switch                                                  │
+│ active 6   agents 7   reviews 2   projects 3    / filter  ⇥ switch                                     │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ 2 reviews ─────────────────────────────────────────────────────────────────────────────────────────────┐
 │● running – Read   api            #131   open    changes requested Refresh tokens         1.2G  just now│

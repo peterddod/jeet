@@ -21,8 +21,8 @@
 //! picks one of its sessions, `t` opens its todo list, `i` its inbox and
 //! activity, and `o` sorts the tasks by the todo items that link them.
 //!
-//! `⇥` cycles active → agents → reviews, and `A` in the active view lists
-//! the archived tasks instead (a flat list), and back. The agents view shows the
+//! `⇥` cycles active → agents → reviews → projects, and `A` in the active
+//! view lists the archived tasks instead (a flat list), and back. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
 //! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
@@ -35,6 +35,10 @@
 //! stand on GitHub, asked on a thread of its own ([`reviews`]); `⏎` offers
 //! its diff in the review viewer or its session, through the task's own
 //! open.
+//! The projects view groups the active tasks and managers by repository
+//! ([`repos`]): `→` or `⏎` goes into one, where the active view's walk
+//! applies and the task keys act on the task under the cursor; `A` lists the
+//! repositories with only archived tasks instead.
 //!
 //! [`TasksUi`] holds the state and turns keys into [`Action`]s without
 //! touching the terminal, the index or git, so the whole key map is unit
@@ -59,6 +63,7 @@ use ratatui::widgets::ListState;
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
+use super::repos::{self, Groups, RepoLine};
 use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, Source};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
@@ -215,6 +220,9 @@ pub enum View {
     /// The active reviews and review jobs with no task, or, toggled with
     /// `A`, the archived reviews: reviews are shown here alone.
     Reviews,
+    /// The active tasks and managers by repository, or, toggled with `A`,
+    /// the repositories with only archived tasks.
+    Projects,
 }
 
 impl View {
@@ -223,7 +231,7 @@ impl View {
     pub fn state(self) -> Option<TaskState> {
         match self {
             View::Active => Some(TaskState::Active),
-            View::Agents | View::Reviews => None,
+            View::Agents | View::Reviews | View::Projects => None,
         }
     }
 
@@ -231,15 +239,17 @@ impl View {
         match self {
             View::Active => View::Agents,
             View::Agents => View::Reviews,
-            View::Reviews => View::Active,
+            View::Reviews => View::Projects,
+            View::Projects => View::Active,
         }
     }
 
     fn prev(self) -> View {
         match self {
-            View::Active => View::Reviews,
+            View::Active => View::Projects,
             View::Agents => View::Active,
             View::Reviews => View::Agents,
+            View::Projects => View::Reviews,
         }
     }
 }
@@ -1110,6 +1120,18 @@ pub struct TasksUi {
     pub archived_tasks: bool,
     /// What GitHub last said of each reviewed PR, or why it could not say.
     pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
+    /// The projects of the rows, grouped when they are read.
+    pub repos: Groups,
+    /// The projects view's top level, in display order.
+    pub projects: Vec<RepoLine>,
+    /// `A` in the projects view: it lists the archived projects instead.
+    pub archived_projects: bool,
+    /// The project the projects view has gone into, or the top level.
+    pub project: Option<repos::Key>,
+    /// The managers gone into within the project, outermost first.
+    pub project_path: Vec<String>,
+    /// The ids of everyone in `project`.
+    pub proj_members: HashSet<String>,
 }
 
 impl Default for TasksUi {
@@ -1151,6 +1173,12 @@ impl TasksUi {
             archived_reviews: false,
             archived_tasks: false,
             reviewed: HashMap::new(),
+            repos: Groups::default(),
+            projects: Vec::new(),
+            archived_projects: false,
+            project: None,
+            project_path: Vec::new(),
+            proj_members: HashSet::new(),
         };
         ui.set_rows(rows);
         ui
@@ -1202,6 +1230,8 @@ impl TasksUi {
             let items = self.assistant.as_ref().map_or(&[][..], |a| &a.todo[..]);
             sort_by_todo(&mut self.rows, items);
         }
+        // After the last sort: its members are indices into the rows.
+        self.repos = Groups::new(&self.rows);
         self.refresh_visible(keep);
     }
 
@@ -1250,6 +1280,10 @@ impl TasksUi {
             return;
         }
         self.reviews.clear();
+        if self.view == View::Projects {
+            self.refresh_projects(keep);
+            return;
+        }
         let Some(mut state) = self.view.state() else {
             self.visible.clear();
             self.tree = managers::lines(
@@ -1289,6 +1323,12 @@ impl TasksUi {
             .filter(|&i| self.rows[i].task.kind != TaskKind::Review)
             .filter(|&i| !level || self.tree_parent(&self.rows[i]) == here)
             .collect();
+        self.show_ranked(in_view, keep);
+    }
+
+    /// Show `in_view` as the filter ranks it, the cursor on `keep` if it is
+    /// still shown.
+    fn show_ranked(&mut self, in_view: Vec<usize>, keep: Option<&str>) {
         let names = in_view.iter().map(|&i| self.rows[i].task.name.as_str());
         self.visible = rank_matches(names, &self.filter)
             .into_iter()
@@ -1303,20 +1343,73 @@ impl TasksUi {
             .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
     }
 
-    /// Whether the list shows the archived ones: the active view's tasks
-    /// or the reviews view's reviews.
+    /// Whether the list shows the archived ones: the active view's tasks,
+    /// the reviews view's reviews or the projects view's projects.
     pub fn archived(&self) -> bool {
         match self.view {
             View::Active => self.archived_tasks,
             View::Reviews => self.archived_reviews,
+            View::Projects => self.archived_projects,
             View::Agents => false,
         }
     }
 
-    /// Whether the list is the active tasks' tree, walked a level at a time:
-    /// the archived tasks are flat.
+    /// The projects view: the projects, or, inside one, its members a level
+    /// at a time (archived ones flat).
+    fn refresh_projects(&mut self, keep: Option<&str>) {
+        let archived = self.archived_projects;
+        let members = self
+            .project
+            .as_ref()
+            .map(|key| self.repos.members(archived, key).to_vec())
+            .filter(|members| !members.is_empty());
+        let Some(members) = members else {
+            // A project nobody is left in takes the levels in it.
+            self.project = None;
+            self.project_path.clear();
+            self.proj_members.clear();
+            self.visible.clear();
+            // The cursor follows its project as they reorder; a key that
+            // moves it to the top empties `projects` first.
+            let was = self
+                .projects
+                .get(self.selected)
+                .map(|line| line.key.clone());
+            self.projects = self.repos.lines(archived, &self.filter);
+            self.selected = was
+                .and_then(|key| self.projects.iter().position(|line| line.key == key))
+                .unwrap_or_else(|| self.selected.min(self.projects.len().saturating_sub(1)));
+            return;
+        };
+        self.projects.clear();
+        self.proj_members = members
+            .iter()
+            .map(|&i| self.rows[i].task.id.clone())
+            .collect();
+        if let Some(gone) = self
+            .project_path
+            .iter()
+            .position(|id| !self.proj_members.contains(id))
+        {
+            self.project_path.truncate(gone);
+        }
+        let here = self.project_path.last().map(String::as_str);
+        let level = self.in_tree() && self.filter.is_empty();
+        let in_view: Vec<usize> = members
+            .into_iter()
+            .filter(|&i| !level || self.level_parent(&self.rows[i]) == here)
+            .collect();
+        self.show_ranked(in_view, keep);
+    }
+
+    /// Whether the list is a tree of active tasks, walked a level at a time:
+    /// the active view, or inside a project. Archived tasks are flat.
     pub fn in_tree(&self) -> bool {
-        self.view == View::Active && !self.archived_tasks
+        match self.view {
+            View::Active => !self.archived_tasks,
+            View::Projects => self.project.is_some() && !self.archived_projects,
+            View::Agents | View::Reviews => false,
+        }
     }
 
     /// How many lines the list shows: tasks, or the tree's nodes.
@@ -1325,6 +1418,8 @@ impl TasksUi {
             View::Agents => self.tree.len(),
             View::Reviews => self.reviews.len(),
             View::Active => self.visible.len(),
+            View::Projects if self.project.is_none() => self.projects.len(),
+            View::Projects => self.visible.len(),
         }
     }
 
@@ -1340,7 +1435,9 @@ impl TasksUi {
                 Source::Task(i) => self.rows.get(i),
                 Source::Legacy(_) => None,
             },
-            View::Active => self.visible.get(self.selected).map(|&i| &self.rows[i]),
+            View::Active | View::Projects => {
+                self.visible.get(self.selected).map(|&i| &self.rows[i])
+            }
         }
     }
 
@@ -1420,6 +1517,13 @@ impl TasksUi {
         Some(parent.task.id.as_str())
     }
 
+    /// [`Self::tree_parent`], within the project when inside one: a parent
+    /// that is not in it leaves the task on top.
+    fn level_parent(&self, row: &TaskRow) -> Option<&str> {
+        self.tree_parent(row)
+            .filter(|parent| self.view != View::Projects || self.proj_members.contains(*parent))
+    }
+
     /// Whether the active view goes into `row`: a manager, or a task with
     /// active tasks under it all the same.
     pub fn enterable(&self, row: &TaskRow) -> bool {
@@ -1428,6 +1532,7 @@ impl TasksUi {
                 r.task.state == TaskState::Active
                     && r.task.kind != TaskKind::Review
                     && r.task.parent_id.as_deref() == Some(&row.task.id)
+                    && (self.view != View::Projects || self.proj_members.contains(&r.task.id))
             })
     }
 
@@ -1436,7 +1541,7 @@ impl TasksUi {
     pub fn ancestors(&self, id: &str) -> Vec<String> {
         let mut path = Vec::new();
         let mut at = self.active_row(id);
-        while let Some(parent) = at.and_then(|row| self.tree_parent(row)) {
+        while let Some(parent) = at.and_then(|row| self.level_parent(row)) {
             // A cycle in the parents stops where it comes round.
             if path.iter().any(|p| p == parent) {
                 break;
@@ -1448,12 +1553,37 @@ impl TasksUi {
         path
     }
 
-    /// The active view's breadcrumb: `assistant`, then the slugs of the
-    /// managers gone into.
+    /// The managers gone into in the view: the active view's, or the
+    /// project's.
+    fn path_mut(&mut self) -> &mut Vec<String> {
+        match self.view {
+            View::Projects => &mut self.project_path,
+            _ => &mut self.path,
+        }
+    }
+
+    /// The managers gone into, outermost first.
+    pub fn path(&self) -> &[String] {
+        match self.view {
+            View::Projects => &self.project_path,
+            _ => &self.path,
+        }
+    }
+
+    /// Where the breadcrumb starts: `assistant`, or `projects` and the
+    /// project gone into.
+    pub fn crumb_root(&self) -> Vec<String> {
+        match (&self.project, self.view) {
+            (Some(key), View::Projects) => vec!["projects".to_string(), key.name().to_string()],
+            _ => vec!["assistant".to_string()],
+        }
+    }
+
+    /// The breadcrumb: its root, then the slugs of the managers gone into.
     pub fn breadcrumb(&self) -> Vec<String> {
-        let mut crumbs = vec!["assistant".to_string()];
+        let mut crumbs = self.crumb_root();
         crumbs.extend(
-            self.path
+            self.path()
                 .iter()
                 .filter_map(|id| self.row(id))
                 .map(|row| row.task.slug.clone()),
@@ -1464,8 +1594,9 @@ impl TasksUi {
     /// → on a manager in the active view: list what is under it. From
     /// a filter's matches, it goes there and drops the filter.
     fn descend(&mut self, id: &str) {
-        self.path = self.ancestors(id);
-        self.path.push(id.to_string());
+        let mut path = self.ancestors(id);
+        path.push(id.to_string());
+        *self.path_mut() = path;
         self.filter.clear();
         self.selected = 0;
         self.refresh_visible(None);
@@ -1480,7 +1611,7 @@ impl TasksUi {
     fn drop_filter(&mut self, keep: Option<&str>) {
         self.filter.clear();
         if let Some(id) = keep.filter(|_| self.in_tree()) {
-            self.path = self.ancestors(id);
+            *self.path_mut() = self.ancestors(id);
         }
         self.refresh_visible(keep);
     }
@@ -1495,13 +1626,33 @@ impl TasksUi {
             self.set_status("");
             return;
         }
-        match self.path.pop() {
+        match self.path_mut().pop() {
             Some(left) => {
                 self.refresh_visible(Some(&left));
                 self.set_status("");
             }
+            None if self.view == View::Projects && self.project.is_some() => {
+                let left = self.project.take();
+                self.refresh_visible(None);
+                if let Some(at) = left.and_then(|k| self.projects.iter().position(|l| l.key == k)) {
+                    self.selected = at;
+                }
+                self.set_status("");
+            }
             None => self.set_status("at the top"),
         }
+    }
+
+    /// → or ⏎ on a project: list who is in it.
+    fn enter_project(&mut self) {
+        let Some(line) = self.projects.get(self.selected) else {
+            return;
+        };
+        self.project = Some(line.key.clone());
+        self.project_path.clear();
+        self.filter.clear();
+        self.selected = 0;
+        self.refresh_visible(None);
     }
 
     /// A node of the tree: a task's row, or the assistant's.
@@ -1546,6 +1697,7 @@ impl TasksUi {
         match view.state() {
             Some(_) => self.task_count(false),
             None if view == View::Reviews => self.review_count(false),
+            None if view == View::Projects => self.repos.count(false),
             None => self.shown.len(),
         }
     }
@@ -1812,6 +1964,7 @@ impl TasksUi {
                 self.filter.push(c);
                 // The best match goes to the top, and so does the cursor.
                 self.selected = 0;
+                self.projects.clear();
                 self.refresh_visible(None);
             }
             _ => {}
@@ -1878,6 +2031,7 @@ impl TasksUi {
                     _ => self.view.prev(),
                 };
                 self.selected = 0;
+                self.projects.clear();
                 self.refresh_visible(None);
                 self.set_status("");
                 None
@@ -1931,6 +2085,26 @@ impl TasksUi {
                 });
                 None
             }
+            KeyCode::Char('A') if self.view == View::Projects => {
+                self.archived_projects = !self.archived_projects;
+                self.project = None;
+                self.project_path.clear();
+                self.selected = 0;
+                self.refresh_visible(None);
+                self.set_status(match self.archived_projects {
+                    true => "archived projects · A back to the active ones",
+                    false => "active projects · A shows the archived ones",
+                });
+                None
+            }
+            // The projects view lists repositories; → or ⏎ goes into one,
+            // and then the active view's walk applies.
+            KeyCode::Enter | KeyCode::Right
+                if self.view == View::Projects && self.project.is_none() =>
+            {
+                self.enter_project();
+                None
+            }
             KeyCode::Char('A') if self.view == View::Reviews => {
                 self.archived_reviews = !self.archived_reviews;
                 self.selected = 0;
@@ -1961,7 +2135,7 @@ impl TasksUi {
                     session: None,
                 }),
             },
-            KeyCode::Left | KeyCode::Backspace if self.in_tree() => {
+            KeyCode::Left | KeyCode::Backspace if self.in_tree() || self.view == View::Projects => {
                 self.ascend();
                 None
             }
@@ -1996,16 +2170,18 @@ impl TasksUi {
                     confirmed: false,
                     recursive: false,
                 }),
-                View::Reviews => match self.selected_row().map(|row| row.task.state) {
-                    Some(TaskState::Archived) => {
-                        needs_task(self, &|task_id| Action::Unarchive { task_id })
+                View::Reviews | View::Projects => {
+                    match self.selected_row().map(|row| row.task.state) {
+                        Some(TaskState::Archived) => {
+                            needs_task(self, &|task_id| Action::Unarchive { task_id })
+                        }
+                        _ => needs_task(self, &|task_id| Action::Archive {
+                            task_id,
+                            confirmed: false,
+                            recursive: false,
+                        }),
                     }
-                    _ => needs_task(self, &|task_id| Action::Archive {
-                        task_id,
-                        confirmed: false,
-                        recursive: false,
-                    }),
-                },
+                }
                 // Taken by `agents_key`.
                 View::Agents => None,
             },
@@ -2835,7 +3011,7 @@ impl TasksUi {
                 if inside {
                     // Active and archived tasks take two lines each.
                     let lines = match self.view {
-                        View::Active => 2,
+                        View::Active | View::Projects => 2,
                         View::Agents | View::Reviews => 1,
                     };
                     let row = self.list.offset() + (mouse.row - area.y - 1) as usize / lines;
@@ -6065,6 +6241,7 @@ mod tests {
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Tab);
+        press(&mut ui, KeyCode::Tab);
         assert_eq!((ui.view, ui.archived_tasks), (View::Active, true));
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_tasks);
@@ -6073,6 +6250,50 @@ mod tests {
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_tasks);
+    }
+
+    /// `nested()` with worktrees: `ops` holds none, `deploy` and `fix` are
+    /// of `api`, `ship` of `api` and `web`, `docs` of `web`, `loose` of
+    /// none, and an archived `old` of `gone`.
+    fn by_repo() -> TasksUi {
+        let ui = nested();
+        let mut rows = ui.rows.clone();
+        let of = |rows: &mut Vec<TaskRow>, id: &str, repos: &[&str]| {
+            let row = rows.iter_mut().find(|r| r.task.id == id).unwrap();
+            row.worktrees = repos
+                .iter()
+                .map(|repo| TaskWorktreeRecord {
+                    id: 0,
+                    task_id: id.into(),
+                    repo_id: format!("github.com/acme/{repo}"),
+                    dir_name: repo.to_string(),
+                    branch: None,
+                    created_branch: false,
+                    head_oid: None,
+                    stash_ref: None,
+                    pr_number: None,
+                    created_at: 0,
+                    read_only: false,
+                })
+                .collect();
+        };
+        of(&mut rows, "deploy", &["api"]);
+        of(&mut rows, "fix", &["api"]);
+        of(&mut rows, "ship", &["api", "web"]);
+        of(&mut rows, "docs", &["web"]);
+        rows.push(task("old", "old", TaskState::Archived, 1));
+        of(&mut rows, "old", &["gone"]);
+        let mut ui = TasksUi::new(rows);
+        ui.view = View::Projects;
+        ui.refresh_visible(None);
+        ui
+    }
+
+    fn projects(ui: &TasksUi) -> Vec<(&str, usize, usize)> {
+        ui.projects
+            .iter()
+            .map(|p| (p.key.name(), p.managers, p.tasks))
+            .collect()
     }
 
     #[test]
@@ -6115,7 +6336,229 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_active_agents_reviews_and_back_tab_goes_back() {
+    fn the_projects_view_groups_by_repo() {
+        let ui = by_repo();
+        assert_eq!(
+            projects(&ui),
+            [("api", 2, 2), ("web", 2, 2), ("(no repo)", 0, 1)]
+        );
+        assert_eq!(ui.count(View::Projects), 3);
+        // The top level has no task under the cursor.
+        assert_eq!(ui.selected_row().map(|r| r.task.id.as_str()), None);
+    }
+
+    #[test]
+    fn a_project_is_walked_like_the_active_tree() {
+        let mut ui = by_repo();
+        // → goes into api: ops, which has none of its own, tops it.
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(shown(&ui), ["ops"]);
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
+        assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        // ⏎ opens, as in the active list.
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "deploy".into(),
+                session: None
+            })
+        );
+        // ← and ⌫ back up, then out of the project, the cursor on it.
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(ui.selected_id(), Some("ops"));
+        press(&mut ui, KeyCode::Backspace);
+        assert!(ui.project.is_none());
+        assert_eq!(projects(&ui)[ui.selected].0, "api");
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(ui.status_line, "at the top");
+        // ⏎ on a project goes into it, without opening anything.
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(ui.breadcrumb(), ["projects", "web"]);
+        assert_eq!(shown(&ui), ["ops", "docs"]);
+    }
+
+    #[test]
+    fn task_keys_work_on_a_task_inside_a_project() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Right);
+        press(&mut ui, KeyCode::Down);
+        assert_eq!(ui.selected_id(), Some("docs"));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('e')),
+            Some(Action::Explore {
+                task_id: "docs".into()
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Archive {
+                task_id: "docs".into(),
+                confirmed: false,
+                recursive: false
+            })
+        );
+        // Not on a project row.
+        press(&mut ui, KeyCode::Left);
+        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+        assert_eq!(ui.status_line, NO_TASK);
+    }
+
+    #[test]
+    fn a_toggles_the_archived_projects_and_back() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(ui.archived_projects);
+        assert_eq!(projects(&ui), [("gone", 0, 1)]);
+        assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
+        // Inside, the archived tasks, flat; ⏎ explains, a brings back.
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(shown(&ui), ["old"]);
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.status_line.contains("archived"), "{}", ui.status_line);
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('a')),
+            Some(Action::Unarchive {
+                task_id: "old".into()
+            })
+        );
+        // ← leaves the project, A the archived ones.
+        press(&mut ui, KeyCode::Left);
+        assert!(ui.project.is_none());
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(!ui.archived_projects);
+        assert_eq!(ui.projects.len(), 3);
+    }
+
+    #[test]
+    fn the_filter_narrows_projects_and_a_project_s_tasks() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "we");
+        assert_eq!(projects(&ui), [("web", 2, 2)]);
+        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Right);
+        assert!(ui.filter.is_empty());
+        press(&mut ui, KeyCode::Char('/'));
+        type_text(&mut ui, "docs");
+        assert_eq!(shown(&ui), ["docs"]);
+    }
+
+    #[test]
+    fn the_cursor_follows_its_project_when_they_reorder() {
+        let mut ui = by_repo();
+        assert_eq!(projects(&ui)[0].0, "api");
+        // Newer activity in web alone puts it first; the cursor stays on api.
+        ui.apply(Update::Status {
+            id: "docs".into(),
+            activity: None,
+            last_activity: 100,
+            unanchored: false,
+        });
+        assert_eq!(projects(&ui)[0].0, "web");
+        assert_eq!(ui.selected, 1);
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+    }
+
+    #[test]
+    fn a_manager_archived_while_inside_takes_its_levels_with_it() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Right);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "ops")
+            .unwrap()
+            .task
+            .state = TaskState::Archived;
+        ui.set_rows(rows);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        // Gone altogether, it is the same.
+        press(&mut ui, KeyCode::Right);
+        let rows = ui
+            .rows
+            .iter()
+            .filter(|r| r.task.id != "deploy")
+            .cloned()
+            .collect();
+        ui.set_rows(rows);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(shown(&ui), ["fix", "ship"]);
+    }
+
+    #[test]
+    fn tab_away_and_back_keeps_the_project_gone_into() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Right);
+        press(&mut ui, KeyCode::Right);
+        for _ in 0..4 {
+            press(&mut ui, KeyCode::Tab);
+        }
+        assert_eq!(ui.view, View::Projects);
+        assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+    }
+
+    #[test]
+    fn a_click_picks_a_project_two_lines_high() {
+        let mut ui = by_repo();
+        ui.list_area = Rect::new(0, 4, 80, 10);
+        // The border, then two lines for each project.
+        ui.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(projects(&ui)[ui.selected].0, "web");
+    }
+
+    #[test]
+    fn a_project_lists_the_right_rows_when_sorted_by_todo_priority() {
+        let mut ui = by_repo();
+        ui.assistant = Some(AssistantInfo {
+            todo: vec![ItemView {
+                id: 1,
+                done: false,
+                text: "docs".into(),
+                title: "docs".into(),
+                priority: Some(1),
+                tasks: vec!["docs".into()],
+            }],
+            ..AssistantInfo::default()
+        });
+        ui.by_priority = true;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Down);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.breadcrumb(), ["projects", "web"]);
+        assert_eq!(shown(&ui), ["docs", "ops"]);
+    }
+
+    #[test]
+    fn a_project_nobody_is_left_in_closes() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Right);
+        let rows = ui
+            .rows
+            .iter()
+            .filter(|r| r.task.id == "loose")
+            .cloned()
+            .collect();
+        ui.set_rows(rows);
+        assert!(ui.project.is_none());
+        assert_eq!(projects(&ui), [("(no repo)", 0, 1)]);
+    }
+
+    #[test]
+    fn tab_cycles_active_agents_reviews_projects_and_back_tab_goes_back() {
         let mut ui = sample();
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Agents);
@@ -6126,8 +6569,14 @@ mod tests {
         // No review tasks.
         assert_eq!(ui.shown_len(), 0);
         press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.view, View::Projects);
+        // The three active tasks have no repo.
+        assert_eq!(projects(&ui), [("(no repo)", 0, 3)]);
+        press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.view, View::Active);
         assert_eq!(shown(&ui), ["api cleanup", "docs", "fix login"]);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Projects);
         press(&mut ui, KeyCode::BackTab);
         assert_eq!(ui.view, View::Reviews);
         press(&mut ui, KeyCode::BackTab);
