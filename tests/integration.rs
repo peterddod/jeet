@@ -2668,8 +2668,13 @@ fn stub_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
-# jeet runs every call but an attach as `tmux -u …`: the verb follows.
-if [ "$1" = -u ]; then shift; fi
+# jeet runs every call but an attach as `tmux -u …`, or tmux mangles its
+# output where the locale is not UTF-8 (a launchd job's): the verb follows.
+case "$1" in
+  -u) shift ;;
+  attach-session|switch-client) ;;
+  *) echo "stub tmux: run without -u: $*" >&2; exit 97 ;;
+esac
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
@@ -3785,6 +3790,9 @@ fn a_task_agent_lives_in_a_real_tmux_session() {
 #[test]
 fn an_agent_started_from_a_background_job_is_anchored() {
     if Command::new("tmux").arg("-V").output().is_err() {
+        // Not in CI, where it is the regression test for the watch job's
+        // agents going unanchored.
+        assert!(std::env::var_os("CI").is_none(), "tmux is not installed");
         eprintln!("tmux is not installed; skipping");
         return;
     }
@@ -4804,7 +4812,7 @@ fn a_stub_tmux_gives_up_once_its_directory_has_gone() {
     let stub = tmux.parent().unwrap().to_path_buf();
     // A lock left by a call killed part-way.
     std::fs::create_dir(stub.join("lock")).unwrap();
-    let mut call = Command::new(&tmux).arg("-V").spawn().unwrap();
+    let mut call = Command::new(&tmux).args(["-u", "-V"]).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(call.try_wait().unwrap().is_none(), "it did not wait");
     std::fs::remove_dir_all(&stub).unwrap();
@@ -6561,8 +6569,13 @@ fn stub_window_tmux(dir: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 here=$(dirname "$0")
-# jeet runs every call but an attach as `tmux -u …`: the verb follows.
-if [ "$1" = -u ]; then shift; fi
+# jeet runs every call but an attach as `tmux -u …`, or tmux mangles its
+# output where the locale is not UTF-8 (a launchd job's): the verb follows.
+case "$1" in
+  -u) shift ;;
+  attach-session|switch-client) ;;
+  *) echo "stub tmux: run without -u: $*" >&2; exit 97 ;;
+esac
 # The tasks list calls tmux from more than one thread: number the calls
 # under a lock, or two can take the same number and one record is lost.
 # Never spin: a lock left by a call killed part-way, or a test that has
@@ -8848,7 +8861,7 @@ fn one_stub_tmux_runs_several_tasks_apart() {
     }
     let live = || {
         let output = Command::new(&tmux)
-            .args(["list-sessions", "-F", "#{session_name}"])
+            .args(["-u", "list-sessions", "-F", "#{session_name}"])
             .output()
             .unwrap();
         stdout_of(&output)
