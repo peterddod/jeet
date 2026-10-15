@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.12.1
+cargo install --git https://github.com/peterddod/jeet --tag v0.12.2
 ```
 
 ## Quick start
@@ -1515,6 +1515,47 @@ still open the index), no config change, nothing to regenerate.
   the breadcrumb say the same.
 - The `manager` (orange) and `task` (periwinkle) tag colours need a
   256-colour terminal.
+
+v0.12.2: reviews keep to the reviews tab ([The reviews
+tab](#the-reviews-tab)).
+
+- **Archived reviews leave the main list**: the reviews tab lists the
+  active reviews (and any review job with no task); `A` switches it to the
+  archived reviews (`▪ archived`) and back.
+- **Merged or closed PRs archive their review**: each `jeet watch --once`
+  poll, and the reviews tab, while it is shown, when it hears from GitHub,
+  archives a review whose PR is merged or closed, as `a` does: agent
+  ended, worktree removed, uncommitted work kept for when it is brought
+  back. Never while its agent
+  is mid-turn; and, since archiving deletes ignored files, only when those
+  are build caches (`target/`, `node_modules/`, `.venv/` and the like). A
+  review holding a `.env` or other local file is left for you, and the
+  watch log or status line says why. A review you bring back after its PR
+  was done stays until you archive it.
+- **A size column** in the reviews tab, and **the repository and the PR
+  number in columns of their own** (`api` · `#131`, no longer `api#131`).
+- **Reviews show in the reviews tab alone**: never in the active or
+  archived tabs or their counts, the filter's results, the agents tab (nor
+  its roll-ups), or `jeet task ls` (with or without `--archived`). The
+  reviews count is of active reviews. Selecting a review from elsewhere
+  opens the reviews tab on it.
+
+**Upgrading to v0.12.2:** jeet migrates the index to schema v7 the first
+time it runs, and an older jeet refuses it after that (copy
+`$JEET_HOME/index.db` first if you may go back). The migration only marks
+as reviews the tasks that hold a PR checkout (only a review makes one) but
+were recorded as plain tasks; nothing else changes. No config change,
+nothing to regenerate.
+
+- **Reviews are gone from the active, archived and agents tabs and from
+  `jeet task ls`**: find them in the reviews tab (`A` for archived ones).
+  A manager with only reviews under it can no longer be gone into.
+- **Reviews of PRs already merged or closed are archived at the next
+  `jeet watch --once` or reviews-tab refresh** once their agent is idle,
+  so expect a batch of them to go the first time. Keep one by bringing it
+  back (`a` in the archived reviews).
+- `jeet watch --once` now asks GitHub about each active review's PR on
+  every poll, one `gh` call each.
 
 ## What's new in v0.11
 
