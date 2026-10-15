@@ -701,17 +701,29 @@ fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
         if effective_version(&tx)? >= version as i64 {
             continue;
         }
+        // v8 deletes rows by hand with foreign keys off: a row it leaves
+        // pointing at one of them fails the step, and the index is as it
+        // was. One that pointed nowhere before, an older jeet's, is not v8's.
+        let before = match version {
+            8 => dangling(&tx)?,
+            _ => Vec::new(),
+        };
         tx.execute_batch(sql)
             .with_context(|| format!("migrate index to v{version}"))?;
-        // v8 deletes rows by hand with foreign keys off: a row left pointing
-        // at one of them fails the step, and the index is as it was.
         if version == 8 {
-            let broken: i64 =
-                tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get(0)
-                })?;
-            if broken > 0 {
-                bail!("migrate index to v{version}: {broken} rows would point at a deleted row");
+            let new: Vec<String> = dangling(&tx)?
+                .into_iter()
+                .filter_map(|(table, after)| {
+                    let was = before.iter().find(|(t, _)| *t == table).map_or(0, |b| b.1);
+                    (after > was).then(|| format!("{} in {table}", after - was))
+                })
+                .collect();
+            if !new.is_empty() {
+                bail!(
+                    "migrate index to v{version}: it would leave rows pointing at a deleted \
+                     row ({}); the index is unchanged, and was backed up first under backups/",
+                    new.join(", ")
+                );
             }
         }
         // PRAGMA takes no bound parameters; `version` is our own integer.
@@ -719,6 +731,18 @@ fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// How many rows of each table point at no row through a foreign key, as
+/// `(table -> parent, count)`. By table, not by rowid: a rebuilt table's
+/// rows may be renumbered.
+fn dangling(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT \"table\" || ' -> ' || parent, COUNT(*) FROM pragma_foreign_key_check
+         GROUP BY \"table\", parent ORDER BY 1",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn effective_version(conn: &Connection) -> Result<i64> {
@@ -1543,11 +1567,12 @@ mod tests {
     }
 
     #[test]
-    fn a_v8_step_that_leaves_a_dangling_row_fails_and_leaves_the_index_at_v7() {
+    fn a_row_dangling_before_v8_does_not_stop_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
         v7_index(&path);
-        // A session of a task that is not there: no step may leave it so.
+        // A session of a task that is not there, left by an older jeet:
+        // not v8's doing, so not v8's to refuse over.
         Connection::open(&path)
             .unwrap()
             .execute_batch(
@@ -1557,16 +1582,13 @@ mod tests {
                      VALUES ('ghost', 'nobody', 'x', 1, 1, 0);",
             )
             .unwrap();
-        let err = Database::open(&path).err().expect("refused");
-        assert!(
-            format!("{err:#}").contains("migrate index to v8"),
-            "{err:#}"
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let conn = db.conn();
+        assert_eq!(
+            dangling(&conn).unwrap(),
+            [("task_sessions -> tasks".to_string(), 1)]
         );
-        let version: i64 = Connection::open(&path)
-            .unwrap()
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 7);
     }
 
     #[test]

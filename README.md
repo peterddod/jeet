@@ -1149,7 +1149,11 @@ of messages its wake channel handed a working agent just before, which
 Claude had not yet shown it, may still start one more turn; that turn's end
 hands it nothing. Stop ends their
 tmux sessions, and any legacy review job running for them or in their
-worktrees (which pause cannot interrupt), and their ending is not reported;
+worktrees (which pause cannot interrupt), and their ending is not reported.
+`--all` also ends the agent and any legacy job of each review the assistant
+asked for (one you ran yourself after it asked counts too, as the assistant
+stays its asker) and takes it off the `max_live` queue; a review holds no
+stop, so it starts again the next time it is asked for;
 Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the

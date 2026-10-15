@@ -378,7 +378,13 @@ pub fn stop_with(
     // its tree, but they are its doing, and a kill switch that left them
     // running would not be one.
     if target.is_none() {
-        outcomes.extend(stop_assistant_reviews(app)?);
+        match stop_assistant_reviews(app) {
+            Ok(ended) => outcomes.extend(ended),
+            Err(e) => outcomes.push(NodeOutcome {
+                slug: "reviews".to_string(),
+                line: format!("could not end the assistant's reviews: {e:#}"),
+            }),
+        }
     }
     let lines = match drain(app) {
         Ok(warnings) => warnings,
@@ -403,8 +409,11 @@ fn stop_assistant_reviews(app: &App) -> Result<Vec<NodeOutcome>> {
         if review.requested_by.as_deref() != Some(root.id.as_str()) {
             continue;
         }
-        app.db.unqueue_review(&review.id)?;
-        let line = match review::stop(app, &review) {
+        let line = match app
+            .db
+            .unqueue_review(&review.id)
+            .and_then(|()| review::stop(app, &review))
+        {
             Ok(line) => line,
             Err(e) => format!("could not end its agent: {e:#}"),
         };
