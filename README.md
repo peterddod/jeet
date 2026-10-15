@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.12.3
+cargo install --git https://github.com/peterddod/jeet --tag v0.12.4
 ```
 
 ## Quick start
@@ -1620,6 +1620,30 @@ less ([The tasks list](#the-tasks-list)).
 nothing to regenerate.
 
 - **`⏎` on a manager no longer goes into it**: use `→`.
+
+v0.12.4: a projects tab, and `A` in place of the archived tab
+([The tasks list](#the-tasks-list), [The projects tab](#the-projects-tab)).
+
+- **The projects tab**, after reviews (`⇥` cycles active → agents →
+  reviews → projects), lists each repository that an active task or manager
+  has a worktree of. Tasks with no worktree are listed under `(no repo)`.
+  `→` goes into a project, showing its managers and tasks with the active
+  tab's tree keys: `→`/`←`/`⌫` move in and out, `⏎` opens, and `e w p v a D S n`
+  work on the selected task. `A` shows the projects with only archived tasks.
+- **The archived tab is gone.** `A` in the tasks list switches between
+  active and archived tasks, as it already did in the reviews tab. `a`
+  unarchives and `D` deletes there. A hint for `A` sits at the bottom of the
+  tasks, reviews and projects lists, and the first tab reads `archived N`
+  while the archived tasks are shown.
+- **A project column** in the tasks list, from about 120 columns, shows the
+  repository of the task's first worktree, `+N` for others, or `(no repo)`.
+  It is the first column dropped on narrower terminals.
+
+**Upgrading to v0.12.4:** no schema change (stays v7), no config change,
+nothing to regenerate.
+
+- **The archived tab is gone**: press `A` in the tasks list instead of
+  `⇥`-ing to it.
 
 ## What's new in v0.11
 
