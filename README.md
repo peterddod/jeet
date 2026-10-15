@@ -1460,31 +1460,32 @@ v0.12.1: the active tab becomes a tree ([The tasks list](#the-tasks-list)).
 
 - **Walk the tree**: the active tab opens on the managers and tasks
   directly under the assistant (and any with no parent, or whose parent is
-  no longer active). `⏎` or `→` on a manager goes into it, even an empty
-  one; `←` or `⌫` backs up a level, the cursor on the manager you left, as
-  in the explorer.
+  no longer active). `⏎` or `→` on a manager, even an empty one, or on a
+  task with tasks under it, goes into it; `←` or `⌫` backs up a level, the
+  cursor on the one you left, as in the explorer.
 - **A breadcrumb** over the list says where you are (`assistant › backend
   › …`), eliding the middle to `…` when it is too wide.
 - **Two-line rows**: a `manager` or `task` tag, the name, status,
   worktrees, size and age; under the name, dimmed, the running agent's
   latest prompt, else its last report. The archived tab stays a flat list
   but uses the same rows.
-- **Managers roll up their subtree**: a manager shows the most urgent state
-  of its own and everything below it, with how many below are so, as in the
-  agents tab (needs you over running over idle), e.g. `● running (1)` while
-  its own chat is idle.
+- **Managers roll up their subtree**: a manager (or any task with tasks
+  under it) shows the most urgent state of its own and everything below it,
+  with how many below are so, as in the agents tab (needs you over running
+  over idle), e.g. `● running (1)` while its own chat is idle.
 - **The filter searches every level**: each match shows its path under its
-  name; `⏎` or `→` on a manager match goes into it and drops the filter, and
-  `←` or `⌫` drops the filter back to the level you were on.
-- **`ctrl-a` opens the agent under the cursor**, the explorer's agent key:
-  a manager's own agent, now that `⏎` goes into it.
+  name. Once the filter is set with `⏎`, `⏎` or `→` on a manager match goes
+  into it and drops the filter, and `←` or `⌫` drops the filter, the cursor
+  on the match, on its level.
+- **`ctrl-a` opens the agent under the cursor** in the active tab, the
+  explorer's agent key: a manager's own agent, now that `⏎` goes into it.
 
 **Upgrading to v0.12.1:** no schema change (stays v6; v0.12.0 and v0.11.0
 still open the index), no config change, nothing to regenerate.
 
-- **`⏎` on a manager now goes into it** instead of attaching to its agent;
-  use `ctrl-a` for that. `⏎` on a task still attaches to its agent, and `→`
-  on a task only says it has nothing under it.
+- **`⏎` on a manager, or on a task with tasks under it, now goes into it**
+  instead of attaching to its agent; use `ctrl-a` for that. `⏎` on any
+  other task still attaches to its agent.
 - **Tasks under a manager are no longer listed at the top level**: go into
   the manager, or type `/` to find one at any level.
 - The ` ↳ parent` marker and the `(manager)` suffix are gone; the tag and
