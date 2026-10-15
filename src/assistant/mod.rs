@@ -172,26 +172,34 @@ pub fn sessions_at(
     primary: Option<&str>,
     windows: &[tmux::Window],
 ) -> Vec<Session> {
-    let mut out: Vec<Session> = records
+    let mut out: Vec<(Session, i64)> = records
         .into_iter()
         .map(|s| {
+            let created = s.created_at;
             let window = windows
                 .iter()
                 .find(|w| w.alive && w.key.as_deref() == Some(s.session_id.as_str()))
                 .map(|w| w.id.clone());
             let reported = status::read_status(dir, &s.session_id);
-            Session {
+            let session = Session {
                 last: s.last_activity.max(reported.as_ref().map_or(0, |st| st.at)),
                 activity: status::activity(reported.as_ref(), window.is_some()),
                 primary: primary == Some(s.session_id.as_str()),
                 id: s.session_id,
                 name: s.name,
                 window,
-            }
+            };
+            (session, created)
         })
         .collect();
-    out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.id.cmp(&b.id)));
-    out
+    // As [`runtime::latest_session`] ranks them, so the first is the one
+    // `jeet chat` opens.
+    out.sort_by(|(a, a_created), (b, b_created)| {
+        (b.last, b_created)
+            .cmp(&(a.last, a_created))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out.into_iter().map(|(session, _)| session).collect()
 }
 
 /// Which session `jeet chat` opens.
