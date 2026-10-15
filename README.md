@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.12.2
+cargo install --git https://github.com/peterddod/jeet --tag v0.12.3
 ```
 
 ## Quick start
@@ -1557,6 +1557,27 @@ nothing to regenerate.
   back (`a` in the archived reviews).
 - `jeet watch --once` now asks GitHub about each active review's PR on
   every poll, one `gh` call each.
+
+v0.12.3: `⏎` on a manager opens its agent, and the assistant's line says
+less ([The tasks list](#the-tasks-list)).
+
+- **`⏎` on a manager opens its agent** in the active tab, as `ctrl-a` does;
+  `→` goes into it, `←` or `⌫` back out. With a filter set, `→` on a
+  manager among the matches goes into it. `⏎` on a task is unchanged (one
+  with tasks under it is still gone into).
+- **The assistant's line shows how many sessions it has and the active
+  one**, the session `c` opens, with what it is doing. The running
+  sessions, the inbox and todo counts and the key hints are gone from it
+  (`i`, `t` and `C` still open them); a red `N unanchored` follows only
+  while any of its windows were not started by jeet.
+- **Dim text stays readable on the selected row**: a task's snippet, and
+  the dim cells of the agents, reviews, explorer and session-picker rows,
+  turn light grey under the highlight instead of vanishing into it.
+
+**Upgrading to v0.12.3:** no schema change (stays v7), no config change,
+nothing to regenerate.
+
+- **`⏎` on a manager no longer goes into it**: use `→`.
 
 ## What's new in v0.11
 
