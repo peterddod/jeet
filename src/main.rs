@@ -87,7 +87,38 @@ fn main() -> Result<()> {
     result
 }
 
+/// Whether `command` is one a person runs, as against jeet's own plumbing
+/// (hooks, background jobs, completions): what finishes moving reviews out
+/// of the tasks after an upgrade ([`review::migrate_leftovers`]) waits for
+/// one. Nor from inside an agent's session.
+fn moves_reviews(command: Option<&Commands>) -> bool {
+    if std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        return false;
+    }
+    !matches!(
+        command,
+        Some(
+            Commands::Completions { .. }
+                | Commands::Complete { .. }
+                | Commands::InitShell
+                | Commands::ReviewJob { .. }
+                | Commands::StoreSync
+                | Commands::TaskHook { .. }
+                | Commands::TaskStartup { .. }
+                | Commands::Inbox { .. }
+                | Commands::Manager {
+                    command: ManagerCommands::Drain { .. }
+                }
+        )
+    )
+}
+
 fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
+    if moves_reviews(command.as_ref()) {
+        if let Ok(app) = context::App::open() {
+            review::migrate_leftovers(&app);
+        }
+    }
     let Some(command) = command else {
         let app = context::App::open()?;
         return commands::tasks::run(&app);

@@ -1,8 +1,8 @@
 //! The reviews view of the tasks list: every review jeet knows of — each
-//! active review task, and any review job an older `jeet review` recorded
-//! with no task to hold it, or, toggled, the archived review tasks — with
-//! where its PR and its review stand on GitHub. Reviews are shown here
-//! alone, never among the tasks.
+//! active review, and any review job an older `jeet review` recorded with
+//! no review to hold it, or, toggled, the archived reviews — with where its
+//! PR and its review stand on GitHub. Reviews are rows of their own
+//! ([`ReviewRow`]), never among the tasks.
 //!
 //! What GitHub says is asked on a thread of its own ([`look`]) and kept by
 //! the list until asked again, so no draw waits on `gh`. PR titles are
@@ -14,11 +14,12 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use super::state::rank_matches;
-use super::tasks::{Outbox, TaskRow, Update};
-use crate::db::tasks::{TaskKind, TaskState};
+use super::tasks::{self, Outbox, Update};
+use crate::db::reviews::ReviewRecord;
+use crate::db::tasks::TaskState;
 use crate::github::{self, LatestReview, ReviewedPr};
 use crate::review::{self, JobState};
-use crate::status::first_line;
+use crate::status::{first_line, Activity};
 
 /// How often GitHub is asked again while the view is shown.
 pub const LOOK_EVERY: Duration = Duration::from_secs(120);
@@ -42,18 +43,72 @@ impl PrKey {
     }
 }
 
-/// The PR a review task's checkout holds, if it records one.
-pub fn task_pr(row: &TaskRow) -> Option<PrKey> {
-    row.worktrees.iter().find_map(|wt| {
-        Some(PrKey {
-            repo_id: wt.repo_id.clone(),
-            number: wt.pr_number?,
-        })
-    })
+/// One review, with what the background threads have found out about it.
+#[derive(Debug, Clone)]
+pub struct ReviewRow {
+    pub review: ReviewRecord,
+    /// Its directory under the tasks root: the worktree is in it.
+    pub dir: PathBuf,
+    /// None until the poller first reports, and for archived reviews.
+    pub activity: Option<Activity>,
+    /// Unix seconds; the poller raises it from status files and transcripts.
+    pub last_activity: i64,
+    /// Bytes on disk, once the size walker has been through the directory.
+    pub size: Option<u64>,
+    /// Its agent runs without jeet knowing its process, as the last poll
+    /// found.
+    pub unanchored: bool,
+    /// Its legacy job's state file: a job still running is shown as its
+    /// agent running.
+    pub jobs: Vec<PathBuf>,
 }
 
-/// A review job with no task: one an older `jeet review` ran headless, or
-/// whose task has since been deleted.
+impl ReviewRow {
+    pub fn new(review: ReviewRecord, dir: PathBuf, jobs: Vec<PathBuf>) -> Self {
+        ReviewRow {
+            last_activity: review.last_activity,
+            review,
+            dir,
+            activity: None,
+            size: None,
+            unanchored: false,
+            jobs,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.review.id
+    }
+
+    pub fn archived(&self) -> bool {
+        self.review.state == TaskState::Archived
+    }
+
+    /// The PR it reviews.
+    pub fn pr(&self) -> PrKey {
+        PrKey {
+            repo_id: self.review.repo_id.clone(),
+            number: self.review.pr_number,
+        }
+    }
+
+    /// Whether its agent is running, as far as the last poll knows.
+    pub fn agent_running(&self) -> bool {
+        tasks::running(self.activity.as_ref())
+    }
+}
+
+/// Newest activity first, as the tasks are.
+pub fn sort_rows(rows: &mut [ReviewRow]) {
+    rows.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| a.review.slug.cmp(&b.review.slug))
+            .then_with(|| a.review.id.cmp(&b.review.id))
+    });
+}
+
+/// A review job with no review: one an older `jeet review` ran headless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Legacy {
     pub pr: PrKey,
@@ -105,8 +160,8 @@ fn legacy_at(root: &Path, path: &Path) -> Option<Legacy> {
 /// Where a line of the view comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Index into the list's rows: a review task.
-    Task(usize),
+    /// Index into the list's review rows.
+    Review(usize),
     /// Index into the legacy jobs.
     Legacy(usize),
 }
@@ -115,41 +170,32 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewLine {
     pub source: Source,
-    /// None for a review task whose checkout records no PR.
-    pub pr: Option<PrKey>,
+    pub pr: PrKey,
 }
 
-/// The view's lines: the active review tasks, newest activity first as
-/// `rows` are, then legacy jobs no task holds; or, `archived`, the
-/// archived review tasks alone. Narrowed by `filter` on the PR, the task's
-/// name and the title GitHub last gave.
+/// The view's lines: the active reviews, newest activity first as `rows`
+/// are, then legacy jobs no review holds; or, `archived`, the archived
+/// reviews alone. Narrowed by `filter` on the PR, the review's name and the
+/// title GitHub last gave.
 pub fn lines(
-    rows: &[TaskRow],
+    rows: &[ReviewRow],
     legacy: &[Legacy],
     archived: bool,
     filter: &str,
     title: impl Fn(&PrKey) -> Option<String>,
 ) -> Vec<ReviewLine> {
-    let state = match archived {
-        true => TaskState::Archived,
-        false => TaskState::Active,
-    };
     let mut all: Vec<ReviewLine> = rows
         .iter()
         .enumerate()
-        .filter(|(_, row)| row.task.kind == TaskKind::Review && row.task.state == state)
+        .filter(|(_, row)| row.archived() == archived)
         .map(|(i, row)| ReviewLine {
-            source: Source::Task(i),
-            pr: task_pr(row),
+            source: Source::Review(i),
+            pr: row.pr(),
         })
         .collect();
     if !archived {
-        // A job whose PR has a review task, archived or not, is that task's.
-        let held: HashSet<PrKey> = rows
-            .iter()
-            .filter(|row| row.task.kind == TaskKind::Review)
-            .filter_map(task_pr)
-            .collect();
+        // A job whose PR has a review, archived or not, is that review's.
+        let held: HashSet<PrKey> = rows.iter().map(ReviewRow::pr).collect();
         let mut seen = HashSet::new();
         all.extend(
             legacy
@@ -158,7 +204,7 @@ pub fn lines(
                 .filter(|(_, job)| !held.contains(&job.pr) && seen.insert(job.pr.clone()))
                 .map(|(i, job)| ReviewLine {
                     source: Source::Legacy(i),
-                    pr: Some(job.pr.clone()),
+                    pr: job.pr.clone(),
                 }),
         );
     }
@@ -169,13 +215,11 @@ pub fn lines(
         .iter()
         .map(|line| {
             let name = match line.source {
-                Source::Task(i) => rows[i].task.name.as_str(),
+                Source::Review(i) => rows[i].review.slug.as_str(),
                 Source::Legacy(i) => legacy[i].title.as_str(),
             };
-            let pr = line.pr.as_ref();
-            let label = pr.map(PrKey::label).unwrap_or_default();
-            let title = pr.and_then(&title).unwrap_or_default();
-            format!("{label} {name} {title}")
+            let title = title(&line.pr).unwrap_or_default();
+            format!("{} {name} {title}", line.pr.label())
         })
         .collect();
     rank_matches(text.iter().map(String::as_str), filter)
@@ -325,6 +369,79 @@ mod tests {
             number: 55,
         };
         assert_eq!(key.label(), "jeet#55");
+    }
+
+    fn review_row(id: &str, pr: u64, state: TaskState, last: i64) -> ReviewRow {
+        let mut review = ReviewRecord::new(
+            id.into(),
+            format!("review-api-{pr}"),
+            "github.com/acme/api",
+            pr,
+            last,
+        );
+        review.state = state;
+        ReviewRow::new(review, PathBuf::from("/nowhere"), Vec::new())
+    }
+
+    fn key(number: u64) -> PrKey {
+        PrKey {
+            repo_id: "github.com/acme/api".into(),
+            number,
+        }
+    }
+
+    fn job(number: u64) -> Legacy {
+        Legacy {
+            pr: key(number),
+            title: format!("job {number}"),
+            running: false,
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn lines_are_the_reviews_of_a_state_then_the_jobs_no_review_holds() {
+        let rows = [
+            review_row("a", 1, TaskState::Active, 5),
+            review_row("b", 2, TaskState::Archived, 4),
+            review_row("c", 3, TaskState::Active, 3),
+        ];
+        // Job 2 belongs to the archived review of #2; job 9 is nobody's.
+        let legacy = [job(2), job(9), job(9)];
+        let shown = |archived, filter| -> Vec<(Source, u64)> {
+            lines(&rows, &legacy, archived, filter, |_| None)
+                .into_iter()
+                .map(|line| (line.source, line.pr.number))
+                .collect()
+        };
+        assert_eq!(
+            shown(false, ""),
+            [
+                (Source::Review(0), 1),
+                (Source::Review(2), 3),
+                (Source::Legacy(1), 9)
+            ]
+        );
+        // Archived: the archived reviews alone, never the jobs.
+        assert_eq!(shown(true, ""), [(Source::Review(1), 2)]);
+        // The filter matches the PR, the review's name and the title.
+        assert_eq!(shown(false, "api-3"), [(Source::Review(2), 3)]);
+        assert_eq!(shown(false, "job 9"), [(Source::Legacy(1), 9)]);
+        let titled = lines(&rows, &[], false, "login", |pr| {
+            (pr.number == 1).then(|| "Speed up login".to_string())
+        });
+        assert_eq!(titled.len(), 1);
+        assert_eq!(titled[0].source, Source::Review(0));
+    }
+
+    #[test]
+    fn rows_sort_newest_activity_first() {
+        let mut rows = vec![
+            review_row("a", 1, TaskState::Active, 1),
+            review_row("b", 2, TaskState::Active, 9),
+        ];
+        sort_rows(&mut rows);
+        assert_eq!(rows[0].id(), "b");
     }
 
     #[test]

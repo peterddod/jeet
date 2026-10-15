@@ -24,9 +24,13 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
     let Ok(tasks) = app.db.list_tasks(None) else {
         return Vec::new();
     };
+    // Reviews are named as tasks are, by `jeet task open|archive|…`.
+    let reviews = app.db.list_reviews(None).unwrap_or_default();
     tasks
         .into_iter()
-        .map(|t| CompletionCandidate::new(t.slug))
+        .map(|t| t.slug)
+        .chain(reviews.into_iter().map(|r| r.slug))
+        .map(CompletionCandidate::new)
         .collect()
 }
 
@@ -141,6 +145,9 @@ pub fn branch_names(filter: Option<&str>) -> Vec<String> {
     for repo in repos {
         out.push(repo.default_branch.clone());
         if let Ok(rows) = app.db.task_worktrees_of_repo(&repo.id) {
+            out.extend(rows.into_iter().filter_map(|row| row.branch));
+        }
+        if let Ok(rows) = app.db.review_worktrees_of_repo(&repo.id) {
             out.extend(rows.into_iter().filter_map(|row| row.branch));
         }
     }

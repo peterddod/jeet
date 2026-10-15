@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{RunState, Setter, TaskKind, TaskRecord, TaskState};
 use crate::messages::{self, Agent, Inbox, Route, TmuxAgent};
 use crate::permissions::Caller;
@@ -68,6 +69,9 @@ pub fn setter_of(by: &Caller) -> Setter {
         Caller::User => Setter::User,
         Caller::Root => Setter::Root,
         Caller::Node(node) => Setter::Node(node.id.clone()),
+        // A review's agent runs no `jeet manager` verb; were it to, it
+        // would hold nothing above a budget's pause.
+        Caller::Review(_) => Setter::Budget,
     }
 }
 
@@ -80,6 +84,7 @@ pub fn outranks(app: &App, by: &Caller, setter: &Setter) -> Result<bool> {
         (Caller::User, _) => true,
         (_, Setter::User) => false,
         (Caller::Root, _) => true,
+        (Caller::Review(_), _) => false,
         (Caller::Node(_), Setter::Root) => false,
         (_, Setter::Budget) => true,
         (Caller::Node(me), Setter::Node(id)) => {
@@ -411,29 +416,18 @@ fn end_line(app: &App, node: &TaskRecord, live: bool, end: EndAgent, own: OwnSes
     }
 }
 
-/// End `node`'s agent for a stop: its tmux session, and the review jobs
-/// that run as it or in its directory (a review task's agent is its
-/// review command, with no session), as an archive would. Says which
-/// review jobs it ended, if any. Refused when this jeet runs under one.
-pub fn end_agent(app: &App, node: &TaskRecord) -> Result<String> {
-    let dir = tasks::task_dir(app, node);
-    review::refuse_inside_job(app, &node.id, &dir, "stop")?;
+/// End `node`'s agent for a stop: its tmux session. Says what else it
+/// ended, if anything.
+pub fn end_agent(_app: &App, node: &TaskRecord) -> Result<String> {
     runtime::stop(node)?;
-    let jobs = review::stop_jobs(&app.db, &node.id).context("end the task's review job")?
-        + review::stop_jobs_in(app, &dir).context("end the task's review job")?;
-    Ok(match jobs {
-        0 => String::new(),
-        1 => "stopped its review job".to_string(),
-        n => format!("stopped its {n} review jobs"),
-    })
+    Ok(String::new())
 }
 
 /// The active tasks in the tree, below the assistant, whose agent's pane
-/// is live, managers and reviews included, the assistant and top-level
-/// tasks not: what `[managers] max_live` counts, less the reviews, which
-/// count toward `[review] max_live` ([`counted`]). A session left open
-/// after its agent exited, by `remain-on-exit` or a window the user opened
-/// there, does not count.
+/// is live, managers included, the assistant and top-level tasks not: what
+/// `[managers] max_live` counts. A session left open after its agent
+/// exited, by `remain-on-exit` or a window the user opened there, does not
+/// count.
 pub fn live_set(app: &App) -> Result<HashSet<String>> {
     Ok(live_tasks(app)?
         .into_iter()
@@ -462,13 +456,14 @@ fn live_tasks(app: &App) -> Result<Vec<TaskRecord>> {
 }
 
 /// The `max_live` a start of `task` counts toward, and what frees a slot
-/// under it: review agents are counted apart from the rest of the tree.
-pub fn max_live_of(task: &TaskRecord) -> (&'static str, &'static str) {
-    match task.kind {
-        TaskKind::Review => ("[review] max_live", "a review ends"),
-        _ => ("[managers] max_live", "a task in the tree ends"),
-    }
+/// under it.
+pub fn max_live_of(_task: &TaskRecord) -> (&'static str, &'static str) {
+    ("[managers] max_live", "a task in the tree ends")
 }
+
+/// The `max_live` a start of a review counts toward, and what frees a slot
+/// under it: review agents are counted apart from the tree.
+pub const REVIEW_MAX_LIVE: (&str, &str) = ("[review] max_live", "a review ends");
 
 /// Where the start lock is kept, beside the watch's.
 const START_LOCK: &str = ".start.lock";
@@ -482,7 +477,7 @@ pub struct StartGuard {
 /// Take the start lock, waiting for whoever holds it: a start must not be
 /// skipped, only made to wait. Not re-entrant: what holds a guard passes
 /// it down rather than locking again.
-fn start_lock(app: &App) -> Result<StartGuard> {
+pub fn start_lock(app: &App) -> Result<StartGuard> {
     std::fs::create_dir_all(&app.home).with_context(|| format!("create {}", app.home.display()))?;
     let path = app.home.join(START_LOCK);
     let file = OpenOptions::new()
@@ -527,13 +522,87 @@ pub fn admit_start(app: &App, task: &TaskRecord) -> Result<StartGate> {
     }
 }
 
-/// [`admit_start`] for a start `max_live` does not count, a review job run
-/// as `task`: the start lock, and what holds `task` (itself or above it)
-/// when it may not start. The guard is held until the job is recorded, so
-/// a stop either sees the job or is seen by it.
-pub fn admit_job(app: &App, task: &TaskRecord) -> Result<(StartGuard, Option<TaskRecord>)> {
+/// [`admit_start`] for a review's agent: not while it is paused (it has
+/// used its `[review]` time or turns), nor while `[review] max_live` review
+/// agents run, when it is queued, keeping its place if queued already. One
+/// running already goes. Whoever is delivering to it holds its inbox lock
+/// first. A pause is not returned as held: the delivery asks
+/// [`messages::Agent::held`] first.
+pub fn admit_review(app: &App, review: &ReviewRecord) -> Result<StartGate> {
     let guard = start_lock(app)?;
-    Ok((guard, hold(app, task)?.map(|(holder, _)| holder)))
+    match full_reviews(app, review)? {
+        Some((live, max)) => {
+            let fresh = app.db.queue_review(&review.id, now_secs())?;
+            Ok(StartGate::Queue { live, max, fresh })
+        }
+        None => Ok(StartGate::Go(guard)),
+    }
+}
+
+/// [`admit_review`] for the user opening the review at a terminal, who asked
+/// for it: one over `[review] max_live` goes, with how many run and the
+/// limit.
+pub fn admit_review_over(
+    app: &App,
+    review: &ReviewRecord,
+) -> Result<(StartGuard, Option<(u32, u32)>)> {
+    let guard = start_lock(app)?;
+    Ok((guard, full_reviews(app, review)?))
+}
+
+/// The review agents whose pane is live: one `tmux list-sessions`, then a
+/// look at the agent's pane of each active review's session in it.
+pub fn live_reviews(app: &App) -> Result<Vec<ReviewRecord>> {
+    let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(app
+        .db
+        .list_reviews(Some(TaskState::Active))?
+        .into_iter()
+        .filter(|r| {
+            let name = review::session_name(r);
+            sessions.contains(&name) && tmux::agent_alive(&name)
+        })
+        .collect())
+}
+
+/// How many review agents run, and `[review] max_live`, when starting
+/// `review` would take one more than that: never for one running already.
+fn full_reviews(app: &App, review: &ReviewRecord) -> Result<Option<(u32, u32)>> {
+    let live = live_reviews(app)?;
+    if live.iter().any(|r| r.id == review.id) {
+        return Ok(None);
+    }
+    let max = app.config.review.max_live()?;
+    let n = live.len() as u32;
+    Ok((n >= max).then_some((n, max)))
+}
+
+/// Tell whoever asked for `review` that its start waits on `[review]
+/// max_live`, with `live` of `max` running, unless they were told at or
+/// after `since`; see [`report_queued`]. Returns whether they were told
+/// now.
+pub fn report_review_queued(
+    app: &App,
+    review: &ReviewRecord,
+    live: u32,
+    max: u32,
+    since: i64,
+) -> bool {
+    let (cap, frees) = REVIEW_MAX_LIVE;
+    let body = format!("queued on {cap}, {live}/{max} live: it starts when {frees}");
+    match reports::auto_status_review(app, review, StatusEvent::Queued, &body, since, 0) {
+        Ok(told) => told.is_some(),
+        Err(e) => {
+            eprintln!(
+                "jeet: could not report review {}'s queued start: {e:#}",
+                review.slug
+            );
+            false
+        }
+    }
 }
 
 /// [`admit_start`] for the user opening `task` at a terminal, who asked
@@ -561,41 +630,26 @@ pub fn held_refusal(task: &TaskRecord, holder: &TaskRecord) -> String {
     )
 }
 
-/// How many run, and the `max_live` that counts them, when starting
-/// `task` would take one more than that: never for a task running
-/// already, the assistant, or a top-level task other than a review. A
-/// review counts review agents against `[review] max_live`, top-level ones
-/// included; any other task counts the rest of the tree against
-/// `[managers] max_live`.
+/// How many run, and `[managers] max_live`, when starting `task` would
+/// take one more than that: never for a task running already, the
+/// assistant, or a top-level task.
 fn full(app: &App, task: &TaskRecord) -> Result<Option<(u32, u32)>> {
-    let review = task.kind == TaskKind::Review;
-    if task.kind == TaskKind::Assistant || (task.parent_id.is_none() && !review) {
+    if task.kind == TaskKind::Assistant || task.parent_id.is_none() {
         return Ok(None);
     }
     let live = live_tasks(app)?;
     if live.iter().any(|t| t.id == task.id) {
         return Ok(None);
     }
-    let max = match review {
-        true => app.config.review.max_live()?,
-        false => app.config.manager_policy()?.max_live,
-    };
-    let n = counted(&live, task);
+    let max = app.config.manager_policy()?.max_live;
+    let n = counted(&live);
     Ok((n >= max).then_some((n, max)))
 }
 
-/// Of the `live` tasks, how many count toward the `max_live` that `task`
-/// does ([`max_live_of`]): review agents, top-level ones included, for a
-/// review; the rest of the tree for anything else.
-fn counted(live: &[TaskRecord], task: &TaskRecord) -> u32 {
-    let n = match task.kind == TaskKind::Review {
-        true => live.iter().filter(|t| t.kind == TaskKind::Review).count(),
-        false => live
-            .iter()
-            .filter(|t| t.parent_id.is_some() && t.kind != TaskKind::Review)
-            .count(),
-    };
-    n as u32
+/// Of the `live` tasks, how many count toward `[managers] max_live`: those
+/// in the tree, below the assistant.
+fn counted(live: &[TaskRecord]) -> u32 {
+    live.iter().filter(|t| t.parent_id.is_some()).count() as u32
 }
 
 /// Tell `task`'s parent that its start waits on `max_live`, with `live` of
@@ -634,15 +688,9 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
     if !tmux::may_start_session() {
         return Ok(warnings);
     }
-    // `live` of `max` once the tree is found full; reviews, counted apart,
-    // fill up apart.
-    let mut full_tree: Option<(u32, u32)> = None;
-    let mut full_reviews: Option<(u32, u32)> = None;
+    // `live` of `max` once the tree is found full.
+    let mut full: Option<(u32, u32)> = None;
     for task in app.db.queued_starts()? {
-        let full = match task.kind == TaskKind::Review {
-            true => &mut full_reviews,
-            false => &mut full_tree,
-        };
         if task.state != TaskState::Active {
             app.db.unqueue(&task.id)?;
             continue;
@@ -667,7 +715,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             app.db.unqueue(&task.id)?;
             continue;
         }
-        if let Some((live, max)) = *full {
+        if let Some((live, max)) = full {
             if hold(app, &task)?.is_none() {
                 tell_queued(app, &task, live, max, &mut warnings)?;
             }
@@ -678,7 +726,7 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             StartGate::Go(guard) => guard,
             StartGate::Held(_) => continue,
             StartGate::Queue { live, max, .. } => {
-                *full = Some((live, max));
+                full = Some((live, max));
                 tell_queued(app, &task, live, max, &mut warnings)?;
                 continue;
             }
@@ -696,7 +744,91 @@ pub fn drain(app: &App) -> Result<Vec<String>> {
             Err(e) => warnings.push(format!("could not start queued task {}: {e:#}", task.slug)),
         }
     }
+    drain_reviews(app, &mut warnings)?;
     Ok(warnings)
+}
+
+/// [`drain`] for the reviews waiting on `[review] max_live`, which fill up
+/// apart from the tree: oldest first, each under its inbox lock, then the
+/// start lock. One archived leaves the queue; one paused, or that fails to
+/// start, stays.
+fn drain_reviews(app: &App, warnings: &mut Vec<String>) -> Result<()> {
+    let mut full: Option<(u32, u32)> = None;
+    for review in app.db.queued_reviews()? {
+        if review.state != TaskState::Active {
+            app.db.unqueue_review(&review.id)?;
+            continue;
+        }
+        let dir = review::dir(app, &review);
+        if !dir.is_dir() {
+            app.db.unqueue_review(&review.id)?;
+            warnings.push(format!(
+                "did not start queued review {}: its directory {} is missing",
+                review.slug,
+                dir.display()
+            ));
+            continue;
+        }
+        let session = review::session_name(&review);
+        if tmux::pane_alive(&session) && !review.paused {
+            app.db.unqueue_review(&review.id)?;
+            continue;
+        }
+        if let Some((live, max)) = full {
+            if !review.paused {
+                tell_review_queued(app, &review, live, max, warnings);
+            }
+            continue;
+        }
+        if review.paused {
+            continue;
+        }
+        let inbox = Inbox::lock(&dir)?;
+        let guard = match admit_review(app, &review)? {
+            StartGate::Go(guard) => guard,
+            StartGate::Held(_) => continue,
+            StartGate::Queue { live, max, .. } => {
+                full = Some((live, max));
+                tell_review_queued(app, &review, live, max, warnings);
+                continue;
+            }
+        };
+        if tmux::pane_alive(&session) {
+            app.db.unqueue_review(&review.id)?;
+            continue;
+        }
+        match review::start_with_inbox(app, &review, None, &inbox, &guard) {
+            Ok(running) => {
+                app.db.unqueue_review(&review.id)?;
+                warnings.extend(running.warnings);
+            }
+            Err(e) => warnings.push(format!(
+                "could not start queued review {}: {e:#}",
+                review.slug
+            )),
+        }
+    }
+    Ok(())
+}
+
+/// [`tell_queued`] for a review.
+fn tell_review_queued(
+    app: &App,
+    review: &ReviewRecord,
+    live: u32,
+    max: u32,
+    warnings: &mut Vec<String>,
+) {
+    let Some(since) = review.queued_at else {
+        return;
+    };
+    if report_review_queued(app, review, live, max, since) {
+        let (cap, frees) = REVIEW_MAX_LIVE;
+        warnings.push(format!(
+            "review {} is queued on {cap} ({live}/{max} live): it starts when {frees}",
+            review.slug
+        ));
+    }
 }
 
 /// Tell `task`'s parent, for [`drain`], that its queued start waits on
@@ -814,16 +946,10 @@ mod tests {
         false
     }
 
-    /// Review agents and the rest of the tree fill their `max_live`s
-    /// apart: a review counts reviews, top-level ones too; anything else
-    /// counts the tree's other tasks, never a review or a top-level task.
+    /// The tree's `max_live` counts the tasks in the tree, below the
+    /// assistant: not a top-level task.
     #[test]
-    fn reviews_and_the_tree_are_counted_apart() {
-        let review = |slug: &str, parent: Option<&str>| TaskRecord {
-            kind: TaskKind::Review,
-            parent_id: parent.map(str::to_string),
-            ..task(slug, TaskKind::Work, "a")
-        };
+    fn the_tree_counts_its_tasks_below_the_assistant() {
         let live = [
             task("w", TaskKind::Work, "a"),
             task("m", TaskKind::Manager, "a"),
@@ -831,17 +957,10 @@ mod tests {
                 parent_id: None,
                 ..task("top", TaskKind::Work, "a")
             },
-            review("r1", Some("a")),
-            review("r2", None),
         ];
-        assert_eq!(counted(&live, &review("r3", Some("m"))), 2);
-        assert_eq!(counted(&live, &review("r3", None)), 2);
-        assert_eq!(counted(&live, &task("w2", TaskKind::Work, "m")), 2);
-        assert_eq!(
-            max_live_of(&review("r3", None)),
-            ("[review] max_live", "a review ends")
-        );
+        assert_eq!(counted(&live), 2);
         assert_eq!(max_live_of(&live[0]).0, "[managers] max_live");
+        assert_eq!(REVIEW_MAX_LIVE.0, "[review] max_live");
     }
 
     #[test]
@@ -1262,79 +1381,6 @@ mod tests {
         let outcomes = stop_with(&app, &Caller::User, Some(&root), &end, &nobody).unwrap();
         assert_eq!(outcomes.last().unwrap().line, "the assistant; not stopped");
         assert!(ended.borrow().iter().all(|(slug, _)| *slug != root.slug));
-    }
-
-    /// A review task's agent is its review command, which has no session:
-    /// a stop ends it, and says so.
-    #[cfg(unix)]
-    #[test]
-    fn a_stop_ends_a_review_tasks_job() {
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let (_dir, app) = lab();
-        let root = super::super::root(&app).unwrap();
-        app.db
-            .insert_task(&task("r", TaskKind::Review, &root.id))
-            .unwrap();
-        let mut job = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        crate::identity::record(&app.db, "r", AnchorKind::Job, None, job.id()).unwrap();
-        let outcomes = stop(&app, &Caller::User, Some(&get(&app, "r"))).unwrap();
-        assert_eq!(outcomes[0].line, "stopped its review job", "{outcomes:?}");
-        // Ended, not left to run on.
-        assert!(job.try_wait().unwrap().is_some());
-        assert_eq!(get(&app, "r").run_state, RunState::Stopped);
-    }
-
-    /// A review job is admitted under the start lock, held until its runner
-    /// is recorded: a stop landing meanwhile waits for it, then ends it,
-    /// and the next is refused.
-    #[cfg(unix)]
-    #[test]
-    fn a_stop_waits_for_an_admitted_review_job_and_ends_it() {
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let (dir, app) = lab();
-        let root = super::super::root(&app).unwrap();
-        app.db
-            .insert_task(&task("r", TaskKind::Review, &root.id))
-            .unwrap();
-        let (guard, holder) = admit_job(&app, &get(&app, "r")).unwrap();
-        assert!(holder.is_none());
-
-        let home = dir.path().to_path_buf();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let app = App {
-                config: config::load_or_create(&home).unwrap(),
-                db: Database::open(&config::index_path(&home)).unwrap(),
-                home,
-            };
-            let outcomes = stop(&app, &Caller::User, Some(&get(&app, "r"))).unwrap();
-            tx.send(outcomes[0].line.clone()).unwrap();
-        });
-        let wait = std::time::Duration::from_millis(300);
-        assert!(rx.recv_timeout(wait).is_err(), "the stop did not wait");
-
-        let mut job = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        crate::identity::record(&app.db, "r", AnchorKind::Job, None, job.id()).unwrap();
-        drop(guard);
-        let line = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
-        assert_eq!(line, "stopped its review job");
-        assert!(job.try_wait().unwrap().is_some());
-        let (_guard, holder) = admit_job(&app, &get(&app, "r")).unwrap();
-        assert_eq!(holder.map(|h| h.id), Some("r".to_string()));
     }
 
     /// Run `f` on the index at `home` in a thread of its own, failing

@@ -124,6 +124,7 @@ fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
         Caller::User => None,
         Caller::Root => Some(tasks::task_dir(app, &manager::root(app)?)),
         Caller::Node(node) => Some(tasks::task_dir(app, node)),
+        Caller::Review(review) => Some(crate::review::dir(app, review)),
     };
     // Where `path` leads now, if inside `home`: asked again once it is
     // open, since a link in the home can be swapped in between.
@@ -204,7 +205,7 @@ pub fn ls(app: &App, json: bool) -> Result<()> {
     let top = match caller {
         Caller::Node(node) => node,
         // A read makes no assistant; with none there is no tree.
-        Caller::User | Caller::Root => match app.db.get_assistant_task()? {
+        Caller::User | Caller::Root | Caller::Review(_) => match app.db.get_assistant_task()? {
             Some(root) => root,
             None => {
                 return finish_ls(&[], json);
@@ -407,7 +408,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             // read, so an agent gets them fenced, as it does reports.
             let fence = |text: String| match caller {
                 Caller::User => text,
-                Caller::Root | Caller::Node(_) => {
+                Caller::Root | Caller::Node(_) | Caller::Review(_) => {
                     crate::manager::fence::fence_message(&from, &text)
                 }
             };
@@ -437,8 +438,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         max_turns: row.as_ref().and_then(|r| r.max_turns),
         used_secs,
         used_turns,
-        note: (task.kind == TaskKind::Review)
-            .then_some("review job: no hooks, so nothing is counted"),
+        note: None,
     };
     let (effective_run, holder) = app.db.effective_run_state(&task.id)?;
     // A node that set it by its name, not its id.
@@ -461,10 +461,12 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         let shown_report = |r: TaskReportRecord| {
             let body = match caller {
                 Caller::User => r.body,
-                Caller::Root | Caller::Node(_) => crate::manager::fence::fence_message(
-                    &manager::label_at(&child, &format!("{path}/{}", child.slug)),
-                    &r.body,
-                ),
+                Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+                    crate::manager::fence::fence_message(
+                        &manager::label_at(&child, &format!("{path}/{}", child.slug)),
+                        &r.body,
+                    )
+                }
             };
             Report {
                 task: child.slug.clone(),
@@ -487,19 +489,30 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
     // close an ask.
     let mut open = Vec::new();
     for r in app.db.open_asks(Some(&task.id))? {
-        let Some(asker) = app.db.get_task(&r.task_id)? else {
-            continue;
+        // A task, or a review asked for by this one.
+        let (asker_slug, asker_path, asker_label) = match app.db.get_task(&r.task_id)? {
+            Some(asker) => {
+                let path = manager::tree_path(app, &asker)?;
+                let label = manager::label_at(&asker, &path);
+                (asker.slug, path, label)
+            }
+            None => match app.db.get_review(&r.task_id)? {
+                Some(review) => (
+                    review.slug.clone(),
+                    review.slug.clone(),
+                    format!("review {}", review.label()),
+                ),
+                None => continue,
+            },
         };
-        let asker_path = manager::tree_path(app, &asker)?;
         let body = match caller {
             Caller::User => r.body,
-            Caller::Root | Caller::Node(_) => crate::manager::fence::fence_message(
-                &manager::label_at(&asker, &asker_path),
-                &r.body,
-            ),
+            Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+                crate::manager::fence::fence_message(&asker_label, &r.body)
+            }
         };
         open.push(OpenAsk {
-            task: asker.slug,
+            task: asker_slug,
             path: asker_path,
             id: r.id,
             kind: r.kind.as_str(),
@@ -717,12 +730,6 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
         budget::label(want),
         secs / 60
     );
-    if task.kind == TaskKind::Review {
-        eprintln!(
-            "jeet: it is a review: the next review asked of it gets [review] time and turns \
-             afresh in place of this"
-        );
-    }
     // No hook charges an idle task, so nothing else would check it before
     // it ran a turn past the new limit.
     if matches!(budget::enforce(app, &task)?, budget::Threshold::Hit100) {

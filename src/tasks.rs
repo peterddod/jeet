@@ -42,7 +42,6 @@ use crate::projects::{self, Project};
 use crate::remote;
 use crate::reports::{self, StatusEvent};
 use crate::resolve;
-use crate::review;
 use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
@@ -118,7 +117,7 @@ are refused. Ask your parent instead.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
     match task.kind {
         TaskKind::Assistant => crate::config::assistant_dir(&app.home),
-        TaskKind::Work | TaskKind::Review | TaskKind::Manager => app.tasks_root().join(&task.slug),
+        TaskKind::Work | TaskKind::Manager => app.tasks_root().join(&task.slug),
     }
 }
 
@@ -153,9 +152,9 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
-/// `base`, or `base-2`, `base-3`… — the first that neither another task nor
-/// a stray directory already has.
-fn unique_slug(app: &App, base: &str) -> Result<String> {
+/// `base`, or `base-2`, `base-3`… — the first that neither another task or
+/// review nor a stray directory already has.
+pub(crate) fn unique_slug(app: &App, base: &str) -> Result<String> {
     let root = app.tasks_root();
     let mut n = 1;
     loop {
@@ -167,6 +166,8 @@ fn unique_slug(app: &App, base: &str) -> Result<String> {
         if !reserved
             && app.db.get_task(&candidate)?.is_none()
             && app.db.get_task_by_slug(&candidate)?.is_none()
+            && app.db.get_review(&candidate)?.is_none()
+            && app.db.find_review_by_slug(&candidate)?.is_none()
             && !root.join(&candidate).exists()
         {
             return Ok(candidate);
@@ -485,6 +486,7 @@ pub fn plan_child(
         Caller::User => "user".to_string(),
         Caller::Root => crate::manager::root(app)?.id,
         Caller::Node(node) => node.id.clone(),
+        Caller::Review(_) => bail!("a review's agent makes no tasks"),
     };
     let record = TaskRecord {
         max_children,
@@ -593,8 +595,7 @@ pub(crate) fn format_char(c: char) -> bool {
 /// A new child's budget: what `--budget` asks for, which must fit in what
 /// is left above it, else `[managers] default_budget` for a manager or a
 /// manager's child (M20), cut to what is left. A child of the assistant
-/// gets none unless asked, and a review none here: [`crate::review::start_agent`]
-/// gives it `[review]`'s.
+/// gets none unless asked.
 fn child_budget(
     app: &App,
     parent: &TaskRecord,
@@ -602,13 +603,6 @@ fn child_budget(
     d: &Delegation,
     policy: &crate::config::ManagerPolicy,
 ) -> Result<Option<Limits>> {
-    // Capped by `[review]` as each review is asked, not by what is above.
-    if kind == TaskKind::Review {
-        if !d.budget.is_empty() {
-            bail!("a review's budget is [review] time and turns, given as each review is asked");
-        }
-        return Ok(None);
-    }
     let left = budget::remaining(app, parent)?;
     // Spent in either unit, whatever is asked: nothing more is born there.
     if left.secs == Some(0) || left.turns == Some(0) {
@@ -724,7 +718,7 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
                 link_project_instructions(dir, &project.name)?;
             }
         }
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => install_skill(dir)?,
+        TaskKind::Work | TaskKind::Assistant => install_skill(dir)?,
     }
     Ok(notes)
 }
@@ -897,6 +891,8 @@ pub fn task_at(app: &App, dir: &Path) -> Result<Option<TaskRecord>> {
     };
     match app.db.get_task(&id)? {
         Some(task) => Ok(Some(task)),
+        // A review's directory is no task's.
+        None if app.db.get_review(&id)?.is_some() => Ok(None),
         None => bail!(
             "{} is marked as task {id}, which is no task jeet knows",
             dir.display()
@@ -985,7 +981,7 @@ pub fn add_worktree(
     let read_only = match task.kind {
         TaskKind::Manager if branch.is_some() => bail!("{MANAGER_READ_ONLY}"),
         TaskKind::Manager => true,
-        TaskKind::Work | TaskKind::Review | TaskKind::Assistant => false,
+        TaskKind::Work | TaskKind::Assistant => false,
     };
     if let Some(name) = name {
         validate_dir_name(name)?;
@@ -1092,229 +1088,6 @@ pub fn add_worktree(
     })
 }
 
-/// `review-<repo>-<n>`: what `jeet review` calls the task for a PR.
-pub fn review_task_name(repo: &RepoRecord, number: u64) -> String {
-    // Within a child's name, as an agent's review is made under it: a
-    // repository's name may be as long.
-    let number = format!("-{number}");
-    let room = MAX_CHILD_NAME.saturating_sub("review-".len() + number.len());
-    let short: String = repo_short_name(repo).chars().take(room).collect();
-    format!("review-{short}{number}")
-}
-
-/// How a review task is shown in lists: `review jeet#55`, from the PR its
-/// worktree holds. None for any other task, or a review whose checkout is
-/// not recorded.
-pub fn review_label(task: &TaskRecord, worktrees: &[TaskWorktreeRecord]) -> Option<String> {
-    if task.kind != TaskKind::Review {
-        return None;
-    }
-    let row = worktrees.iter().find(|row| row.pr_number.is_some())?;
-    let repo = row.repo_id.rsplit('/').next().unwrap_or(&row.repo_id);
-    Some(format!("review {repo}#{}", row.pr_number?))
-}
-
-/// A PR's review task, ready to review in.
-pub struct ReviewCheckout {
-    pub task: TaskRecord,
-    /// The worktree with the PR checked out.
-    pub path: PathBuf,
-    /// The task was made just now.
-    pub created: bool,
-    pub warnings: Vec<String>,
-}
-
-/// Find or make the review task for `pr` and check the PR out in it.
-///
-/// The task is found by the PR it reviews, not by name, so renaming nothing
-/// and a second repository with the same short name cannot cross wires. An
-/// archived one is brought back; one whose checkout is there already is
-/// brought up to date with the PR when clean. A task made here for a PR
-/// that cannot be checked out is undone — it holds nothing yet.
-///
-/// A task made here for `by` reports to its default parent (the assistant,
-/// for the assistant); one found is never moved.
-pub fn review_task(
-    app: &App,
-    repo: &RepoRecord,
-    pr: &crate::github::PullRequest,
-    by: Option<&Caller>,
-) -> Result<ReviewCheckout> {
-    let mut warnings = Vec::new();
-    // Who made it and the held capabilities it was granted, to log once
-    // its checkout is there.
-    let mut held = None;
-    let (mut task, created) = match app.db.find_review_task(&repo.id, pr.number)? {
-        Some(task) => (task, false),
-        None => {
-            let name = review_task_name(repo, pr.number);
-            let (task, notes) = match by {
-                Some(by) => {
-                    let plan = plan_child(
-                        app,
-                        by,
-                        TaskKind::Review,
-                        &name,
-                        &Delegation::default(),
-                        None,
-                    )?;
-                    let made = commit_child(app, &plan, None)?;
-                    held = Some((by, plan.grant.held));
-                    made
-                }
-                None => make_task(app, &name, None, TaskKind::Review)?,
-            };
-            warnings.extend(notes);
-            (task, true)
-        }
-    };
-    if task.state == TaskState::Archived {
-        warnings.extend(unarchive(app, &task, false)?);
-        task.state = TaskState::Active;
-    }
-
-    match review_worktree(app, &task, repo, pr) {
-        Ok((path, more)) => {
-            warnings.extend(more);
-            if let Some((by, held)) = held {
-                record_child_held(app, by, &task, &held, &mut warnings);
-            }
-            let _ = app.db.touch_task(&task.id, now_secs());
-            Ok(ReviewCheckout {
-                task,
-                path,
-                created,
-                warnings,
-            })
-        }
-        Err(e) if created => Err(match delete(app, &task, false) {
-            Ok(_) => e,
-            Err(undo) => e.context(format!(
-                "and the half-made task could not be removed ({undo:#}); \
-                 `jeet task delete {} --force` cleans it up",
-                task.slug
-            )),
-        }),
-        Err(e) => Err(e),
-    }
-}
-
-/// Somewhere in a task to look at `pr`, for the explorer's PR list: the task
-/// worktree that has the PR's branch already — the author's own, say —
-/// brought up to date with the PR when clean, else the PR's review task, as
-/// `jeet review` makes it but without starting a review. Never a checkout
-/// outside a task.
-pub fn browse_pr(
-    app: &App,
-    repo: &RepoRecord,
-    pr: &crate::github::PullRequest,
-) -> Result<ReviewCheckout> {
-    let trunk = PathBuf::from(&repo.trunk_path);
-    let branch = pr.local_branch();
-    let holder = git::worktree_list(&trunk)?
-        .into_iter()
-        .find(|e| e.branch.as_deref() == Some(branch.as_str()) && e.path.is_dir());
-    if let Some(entry) = holder {
-        if let Some(task) = task_owning(app, &entry.path)? {
-            if task.state == TaskState::Active {
-                // `gh pr checkout` fetches into the trunk.
-                let _fetch = store::lock_repo(&app.home, &repo.id)?;
-                let warnings = worktrees::refresh_pr_worktree(&entry.path, pr, Some(&branch));
-                let _ = app.db.touch_task(&task.id, now_secs());
-                return Ok(ReviewCheckout {
-                    task,
-                    path: entry.path,
-                    created: false,
-                    warnings,
-                });
-            }
-        }
-    }
-    review_task(app, repo, pr, None)
-}
-
-/// The review task's checkout of `pr`: the one it has, refreshed, or a new
-/// one. The PR's branch is used unless another worktree has it — the
-/// author's own task, say — and then the checkout is detached at the PR's
-/// head instead, which reviews the same code without taking the branch.
-fn review_worktree(
-    app: &App,
-    task: &TaskRecord,
-    repo: &RepoRecord,
-    pr: &crate::github::PullRequest,
-) -> Result<(PathBuf, Vec<String>)> {
-    let dir = task_dir(app, task);
-    let trunk = PathBuf::from(&repo.trunk_path);
-    if !trunk.is_dir() {
-        bail!("trunk is missing: {}", trunk.display());
-    }
-    // `gh pr checkout` fetches into the trunk: keep a store sync out of its way.
-    let _fetch = store::lock_repo(&app.home, &repo.id)?;
-
-    let rows = app.db.list_task_worktrees(&task.id)?;
-    let existing = rows
-        .iter()
-        .find(|r| r.repo_id == repo.id && r.pr_number == Some(pr.number));
-    if let Some(row) = existing {
-        let path = dir.join(&row.dir_name);
-        if path.is_dir() {
-            let warnings = worktrees::refresh_pr_worktree(&path, pr, row.branch.as_deref());
-            return Ok((path, warnings));
-        }
-        // Gone from under jeet: forget it, and have git forget it too, or
-        // its branch would still count as checked out there.
-        app.db.delete_task_worktree(&task.id, &row.dir_name)?;
-        let _ = git::worktree_prune(&trunk);
-    }
-
-    let mut warnings = Vec::new();
-    let branch = pr.local_branch();
-    let use_branch = match branch_holder(app, &trunk, &branch)? {
-        Some(holder) => {
-            warnings.push(format!(
-                "{branch} is checked out {holder}, so the review is detached at the PR's head"
-            ));
-            None
-        }
-        None => Some(branch.as_str()),
-    };
-    let existed = git::branch_exists(&trunk, &branch)?;
-    let taken: Vec<String> = rows
-        .iter()
-        .filter(|r| !matches!(existing, Some(gone) if gone.id == r.id))
-        .map(|r| r.dir_name.clone())
-        .collect();
-    let dir_name = pick_dir_name(&dir, &taken, &repo_short_name(repo));
-    let dest = dir.join(&dir_name);
-    worktrees::add_pr_worktree(&trunk, &repo.default_branch, &dest, pr, use_branch)?;
-
-    // A branch made for a checkout that vanished is still the task's own.
-    let made_before = existing
-        .is_some_and(|gone| gone.created_branch && gone.branch.as_deref() == Some(branch.as_str()));
-    let created_branch = use_branch.is_some() && (!existed || made_before);
-    let record = TaskWorktreeRecord {
-        id: 0,
-        task_id: task.id.clone(),
-        repo_id: repo.id.clone(),
-        dir_name,
-        branch: use_branch.map(str::to_string),
-        created_branch,
-        head_oid: None,
-        stash_ref: None,
-        pr_number: Some(pr.number),
-        created_at: now_secs(),
-        read_only: false,
-    };
-    if let Err(e) = app.db.insert_task_worktree(&record) {
-        let _ = git::worktree_remove(&trunk, &dest, true);
-        if created_branch {
-            let _ = git::delete_local_branch(&trunk, &branch);
-        }
-        return Err(e.context("record the worktree"));
-    }
-    Ok((dest, warnings))
-}
-
 /// Check `branch` out at `dest`, returning whether this made the branch.
 fn check_out_branch(
     app: &App,
@@ -1346,31 +1119,54 @@ fn check_out_branch(
 
 /// Where `branch` is checked out already, phrased for an error: in which
 /// task, named as the caller is shown it, or at which path.
-fn branch_holder(app: &App, trunk: &Path, branch: &str) -> Result<Option<String>> {
+pub(crate) fn branch_holder(app: &App, trunk: &Path, branch: &str) -> Result<Option<String>> {
     for entry in git::worktree_list(trunk)? {
         if entry.branch.as_deref() != Some(branch) {
             continue;
         }
-        return Ok(Some(match task_owning(app, &entry.path)? {
-            Some(task) => format!(
+        let in_review = match task_owning(app, &entry.path)? {
+            Some(_) => None,
+            None => review_owning(app, &entry.path)?,
+        };
+        return Ok(Some(match (task_owning(app, &entry.path)?, in_review) {
+            (Some(task), _) => format!(
                 "in task {} ({})",
                 crate::commands::task::called(app, &task),
                 entry.path.display()
             ),
-            None => format!("at {}", entry.path.display()),
+            (None, Some(review)) => {
+                format!("in review {} ({})", review.label(), entry.path.display())
+            }
+            (None, None) => format!("at {}", entry.path.display()),
         }));
     }
     Ok(None)
 }
 
-/// The task whose directory a worktree path is in, judged by path alone.
-fn task_owning(app: &App, path: &Path) -> Result<Option<TaskRecord>> {
+/// The slug of the task or review directory a worktree path is in, judged
+/// by path alone.
+fn owner_slug(app: &App, path: &Path) -> Option<String> {
     let root = canonical_tasks_root(app);
-    let Ok(rel) = path.strip_prefix(&root) else {
-        return Ok(None);
-    };
-    match rel.components().next() {
-        Some(slug) => app.db.get_task_by_slug(&slug.as_os_str().to_string_lossy()),
+    let rel = path.strip_prefix(&root).ok()?;
+    let slug = rel.components().next()?;
+    Some(slug.as_os_str().to_string_lossy().to_string())
+}
+
+/// The task whose directory a worktree path is in, judged by path alone.
+pub(crate) fn task_owning(app: &App, path: &Path) -> Result<Option<TaskRecord>> {
+    match owner_slug(app, path) {
+        Some(slug) => app.db.get_task_by_slug(&slug),
+        None => Ok(None),
+    }
+}
+
+/// The review whose directory a worktree path is in, judged by path alone.
+pub(crate) fn review_owning(
+    app: &App,
+    path: &Path,
+) -> Result<Option<crate::db::reviews::ReviewRecord>> {
+    match owner_slug(app, path) {
+        Some(slug) => app.db.find_review_by_slug(&slug),
         None => Ok(None),
     }
 }
@@ -1478,7 +1274,7 @@ pub fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
 
 /// `refs/jeet/<kind>/<task-id>/<dir>`, with `dir` escaped into one ref
 /// component by [`ref_component`], so no two worktrees share a ref.
-fn jeet_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
+pub(crate) fn jeet_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
     format!("refs/jeet/{kind}/{task_id}/{}", ref_component(dir_name))
 }
 
@@ -1517,16 +1313,17 @@ pub fn keep(trunk: &Path, task_id: &str, dir_name: &str, kind: &str, oid: &str) 
     }
 }
 
-/// Every ref set aside by [`keep`] for `task`, in any repository: a worktree
-/// may have been removed from the task since, taking its row with it.
-fn kept_refs(app: &App, task: &TaskRecord) -> Result<Vec<(PathBuf, String)>> {
+/// Every ref set aside by [`keep`] for the task or review `owner_id`, in
+/// any repository: a worktree may have been removed since, taking its row
+/// with it.
+fn kept_refs(app: &App, owner_id: &str) -> Result<Vec<(PathBuf, String)>> {
     let mut out = Vec::new();
     for repo in app.db.list_repos(None)? {
         let trunk = PathBuf::from(&repo.trunk_path);
         if !trunk.is_dir() {
             continue;
         }
-        let Ok(names) = git::refs_under(&trunk, &format!("refs/jeet/kept/{}/", task.id)) else {
+        let Ok(names) = git::refs_under(&trunk, &format!("refs/jeet/kept/{owner_id}/")) else {
             continue;
         };
         for name in names {
@@ -1829,8 +1626,7 @@ fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
 /// finishes the job. It is refused from inside the agent's tmux session,
-/// which ending the agent would end too, and from under the task's review
-/// job, likewise.
+/// which ending the agent would end too.
 ///
 /// Files git ignores are not kept: removing a worktree deletes them. The
 /// caller has already confirmed what [`unkept`] lists.
@@ -1851,7 +1647,7 @@ pub fn archive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<Stri
         .into_iter()
         .filter(|node| node.state == TaskState::Active)
         .collect();
-    refuse_inside_any(app, &nodes, "archive")?;
+    refuse_inside_any(&nodes, "archive")?;
     let mut warnings = end_agents(app, &nodes)?;
     // A failure part-way leaves those done archived, and their parents
     // active: running it again finishes the job.
@@ -1866,20 +1662,14 @@ pub fn archive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<Stri
 fn archive_one(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     app.db.check_archive(&task.id)?;
     runtime::refuse_inside_session(task, "archive")?;
-    review::refuse_inside_job(app, &task.id, &task_dir(app, task), "archive")?;
     let mut warnings = Vec::new();
     charge_before_end(app, task, &mut warnings);
     // The agent goes first, and is gone before anything is saved: it works
     // in the worktrees about to be removed, and what it wrote after the
     // snapshot would be lost.
     runtime::stop(task).context("end the agent's tmux session")?;
-    // Its review job too, for the same reason: one recorded as the task's,
-    // or one the assistant started in its worktree.
-    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
-    review::stop_jobs_in(app, &task_dir(app, task)).context("end the task's review job")?;
-    // An agent or job that outlives its session is no longer the task's.
+    // An agent that outlives its session is no longer the task's.
     app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
-    app.db.delete_task_anchors(&task.id, AnchorKind::Job)?;
     if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
         warnings.push(format!("could not remove the agent's settings: {e:#}"));
     }
@@ -1892,63 +1682,85 @@ fn archive_one(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let task_root = task_dir(app, task);
 
     for mut row in app.db.list_task_worktrees(&task.id)? {
-        let path = worktree_dir(app, task, &row.dir_name);
-        if !path.exists() {
-            continue;
-        }
-        let repo = repo_of(app, &row)?;
-        let trunk = PathBuf::from(&repo.trunk_path);
-        let what = &row.dir_name;
+        let save = |row: &TaskWorktreeRecord| app.db.update_task_worktree(row);
+        warnings.extend(archive_worktree(
+            app, &task.id, &task_root, &mut row, &save,
+        )?);
+    }
+    Ok(warnings)
+}
 
-        let Some(head) = git::rev_parse(&path, "HEAD") else {
-            bail!("{what}: could not read its HEAD");
-        };
-        let ignored = git::status_counts(&path).map(|(_, i)| i).unwrap_or(0);
-        let snapshot = git::snapshot_changes(&path)
-            .with_context(|| format!("{what}: save its uncommitted changes"))?;
+/// Archive one worktree of the task or review `owner_id`, whose directory
+/// is `owner_root`: the worktree's uncommitted changes, untracked files
+/// included, are saved under `refs/jeet/stash/…`, HEAD is pinned under
+/// `refs/jeet/head/…`, both are recorded on `row`, which `save` writes
+/// before anything is removed, and only then is the worktree removed. One
+/// that is gone already is skipped. Returns what to warn of.
+pub(crate) fn archive_worktree(
+    app: &App,
+    owner_id: &str,
+    owner_root: &Path,
+    row: &mut TaskWorktreeRecord,
+    save: &dyn Fn(&TaskWorktreeRecord) -> Result<()>,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let path = owner_root.join(&row.dir_name);
+    if !path.exists() {
+        return Ok(warnings);
+    }
+    let repo = repo_of(app, row)?;
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let what = row.dir_name.clone();
+    let what = &what;
 
-        let kept = set_aside_leftovers(&trunk, &task.id, what, &head, snapshot.as_deref())
-            .with_context(|| format!("{what}: keep what an earlier unarchive left"))?;
-        for name in kept {
-            warnings.push(format!(
-                "{what}: work an earlier unarchive could not put back is kept at {name}"
-            ));
-        }
-        let head_ref = jeet_ref("head", &task.id, what);
-        git::update_ref(&trunk, &head_ref, &head).with_context(|| format!("{what}: pin HEAD"))?;
-        let stash_ref = jeet_ref("stash", &task.id, what);
-        row.stash_ref = match snapshot {
-            Some(oid) => {
-                git::update_ref(&trunk, &stash_ref, &oid)
-                    .with_context(|| format!("{what}: keep its uncommitted changes"))?;
-                Some(stash_ref)
-            }
-            None => {
-                // Left by an earlier attempt, and stale now there is nothing;
-                // anything else it held was set aside above.
-                let _ = git::delete_ref(&trunk, &stash_ref);
-                None
-            }
-        };
-        let branch = git::head_branch(&path);
-        if branch != row.branch {
-            row.created_branch = false;
-            row.branch = branch;
-        }
-        row.head_oid = Some(head);
-        // Recorded before anything is removed: from here on the row alone is
-        // enough to restore the worktree.
-        app.db.update_task_worktree(&row)?;
+    let Some(head) = git::rev_parse(&path, "HEAD") else {
+        bail!("{what}: could not read its HEAD");
+    };
+    let ignored = git::status_counts(&path).map(|(_, i)| i).unwrap_or(0);
+    let snapshot = git::snapshot_changes(&path)
+        .with_context(|| format!("{what}: save its uncommitted changes"))?;
 
-        git::worktree_remove(&trunk, &path, true)
-            .with_context(|| format!("{what}: remove the worktree"))?;
-        worktrees::prune_empty_parents(&path, std::slice::from_ref(&task_root));
-        if ignored > 0 {
-            warnings.push(format!(
-                "{what}: {} not kept",
-                plural(ignored, "ignored file or directory")
-            ));
+    let kept = set_aside_leftovers(&trunk, owner_id, what, &head, snapshot.as_deref())
+        .with_context(|| format!("{what}: keep what an earlier unarchive left"))?;
+    for name in kept {
+        warnings.push(format!(
+            "{what}: work an earlier unarchive could not put back is kept at {name}"
+        ));
+    }
+    let head_ref = jeet_ref("head", owner_id, what);
+    git::update_ref(&trunk, &head_ref, &head).with_context(|| format!("{what}: pin HEAD"))?;
+    let stash_ref = jeet_ref("stash", owner_id, what);
+    row.stash_ref = match snapshot {
+        Some(oid) => {
+            git::update_ref(&trunk, &stash_ref, &oid)
+                .with_context(|| format!("{what}: keep its uncommitted changes"))?;
+            Some(stash_ref)
         }
+        None => {
+            // Left by an earlier attempt, and stale now there is nothing;
+            // anything else it held was set aside above.
+            let _ = git::delete_ref(&trunk, &stash_ref);
+            None
+        }
+    };
+    let branch = git::head_branch(&path);
+    if branch != row.branch {
+        row.created_branch = false;
+        row.branch = branch;
+    }
+    row.head_oid = Some(head);
+    // Recorded before anything is removed: from here on the row alone is
+    // enough to restore the worktree.
+    save(row)?;
+
+    git::worktree_remove(&trunk, &path, true)
+        .with_context(|| format!("{what}: remove the worktree"))?;
+    worktrees::prune_empty_parents(&path, std::slice::from_ref(&owner_root.to_path_buf()));
+    if ignored > 0 {
+        warnings.push(format!(
+            "{what}: {} not kept",
+            plural(ignored, "ignored file or directory")
+        ));
     }
     Ok(warnings)
 }
@@ -1964,9 +1776,15 @@ pub fn unkept(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.state == TaskState::Active {
         let _ = reconcile(app);
     }
+    let rows = app.db.list_task_worktrees(&task.id)?;
+    Ok(unkept_in(&task_dir(app, task), &rows))
+}
+
+/// [`unkept`] for the worktrees `rows` in `root`.
+pub(crate) fn unkept_in(root: &Path, rows: &[TaskWorktreeRecord]) -> Vec<String> {
     let mut out = Vec::new();
-    for row in app.db.list_task_worktrees(&task.id)? {
-        let path = worktree_dir(app, task, &row.dir_name);
+    for row in rows {
+        let path = root.join(&row.dir_name);
         if !path.exists() {
             continue;
         }
@@ -1979,7 +1797,7 @@ pub fn unkept(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             )),
         }
     }
-    Ok(out)
+    out
 }
 
 /// What archiving `task` and every active task below it would not keep:
@@ -2017,20 +1835,8 @@ pub struct ForeignCheckout {
     pub common_dir: Option<PathBuf>,
 }
 
-/// Every git checkout under the task directory that is not one of the
-/// task's own worktrees, outermost only: what is inside a checkout is that
-/// checkout's. Symlinks are not followed.
-pub fn foreign_checkouts(app: &App, task: &TaskRecord) -> Result<Vec<ForeignCheckout>> {
-    let dir = task_dir(app, task);
-    let own: Vec<PathBuf> = app
-        .db
-        .list_task_worktrees(&task.id)?
-        .iter()
-        .map(|row| worktree_dir(app, task, &row.dir_name))
-        .collect();
-    Ok(checkouts_under(&dir, &own))
-}
-
+/// Every git checkout under `dir` that is none of `own`, outermost only:
+/// what is inside a checkout is that checkout's. Symlinks are not followed.
 fn checkouts_under(dir: &Path, own: &[PathBuf]) -> Vec<ForeignCheckout> {
     let mut out = Vec::new();
     if !dir.is_dir() {
@@ -2144,101 +1950,130 @@ fn unarchive_one(app: &App, task: &TaskRecord, limit: bool) -> Result<Vec<String
     let mut warnings = Vec::new();
 
     for mut row in app.db.list_task_worktrees(&task.id)? {
-        let path = worktree_dir(app, task, &row.dir_name);
-        if path.exists() {
-            continue;
+        let save = |row: &TaskWorktreeRecord| app.db.update_task_worktree(row);
+        match restore_worktree(app, &task.id, &dir, &mut row, &save, &mut warnings)? {
+            Restored::Forgotten => app.db.delete_task_worktree(&task.id, &row.dir_name)?,
+            Restored::Kept => {}
         }
-        let what = row.dir_name.clone();
-        let Some(head) = row.head_oid.clone() else {
-            warnings.push(format!(
-                "{what}: nothing was recorded to restore it from; forgotten"
-            ));
-            app.db.delete_task_worktree(&task.id, &row.dir_name)?;
-            continue;
-        };
-        let repo = repo_of(app, &row)?;
-        let trunk = PathBuf::from(&repo.trunk_path);
-        let head_ref = jeet_ref("head", &task.id, &what);
-        let mut keep_head_ref = false;
-
-        match row.branch.clone() {
-            Some(branch) if git::branch_exists(&trunk, &branch)? => {
-                if let Some(holder) = branch_holder(app, &trunk, &branch)? {
-                    bail!("{what}: branch {branch} is checked out {holder}; free it and unarchive again");
-                }
-                git::worktree_add_existing_branch(&trunk, &path, &branch)
-                    .with_context(|| format!("{what}: check out {branch}"))?;
-                let tip = git::rev_parse(&trunk, &format!("refs/heads/{branch}"));
-                if tip.as_deref() != Some(head.as_str())
-                    && !tip.is_some_and(|tip| git::is_ancestor(&trunk, &head, &tip))
-                {
-                    // Under a name of its own: the next archive reuses
-                    // head_ref, and the task is active again either way.
-                    let kept = match keep(&trunk, &task.id, &what, "head", &head) {
-                        Ok(kept) => kept,
-                        Err(_) => {
-                            keep_head_ref = true;
-                            head_ref.clone()
-                        }
-                    };
-                    warnings.push(format!(
-                        "{what}: {branch} moved while the task was archived; \
-                         the commit it was on is kept at {kept}"
-                    ));
-                }
-            }
-            Some(branch) => {
-                git::worktree_add_new_branch(&trunk, &path, &branch, &head)
-                    .with_context(|| format!("{what}: recreate {branch}"))?;
-                warnings.push(format!(
-                    "{what}: branch {branch} had been deleted; recreated it where it was"
-                ));
-            }
-            None => git::worktree_add_detached(&trunk, &path, &head)
-                .with_context(|| format!("{what}: check out {head}"))?,
-        }
-
-        if let Some(stash) = row.stash_ref.clone() {
-            // Staged changes come back staged when they can.
-            let applied = git::stash_apply(&path, &stash, true)
-                .or_else(|_| git::stash_apply(&path, &stash, false));
-            match applied {
-                Ok(()) => {
-                    let _ = git::delete_ref(&trunk, &stash);
-                    row.stash_ref = None;
-                }
-                Err(e) => {
-                    // Moved under a name of its own, as archive reuses this one.
-                    let kept = git::rev_parse(&trunk, &stash)
-                        .and_then(|oid| keep(&trunk, &task.id, &what, "stash", &oid).ok());
-                    let at = match kept {
-                        Some(kept) => {
-                            let _ = git::delete_ref(&trunk, &stash);
-                            row.stash_ref = None;
-                            kept
-                        }
-                        None => stash,
-                    };
-                    warnings.push(format!(
-                        "{what}: could not reapply its uncommitted changes ({e:#}); \
-                         they are kept at {at}: `git stash apply {at}` in the worktree \
-                         retries, and `git update-ref -d {at}` drops them"
-                    ));
-                }
-            }
-        }
-        if !keep_head_ref {
-            let _ = git::delete_ref(&trunk, &head_ref);
-            row.head_oid = None;
-        }
-        app.db.update_task_worktree(&row)?;
     }
 
     app.db.unarchive_task(&task.id, fan_out)?;
     app.db.touch_task(&task.id, now_secs())?;
-    // A review brought back after its PR was done stays, until archived by hand.
-    review::mark_brought_back(app, task);
     Ok(warnings)
+}
+
+/// What [`restore_worktree`] did with a worktree.
+pub(crate) enum Restored {
+    /// Present, back or already there.
+    Kept,
+    /// Nothing was recorded to restore it from: its row is to go.
+    Forgotten,
+}
+
+/// Bring back one archived worktree of the task or review `owner_id`, whose
+/// directory is `owner_root`: on its branch, or detached at its old HEAD,
+/// with its uncommitted changes reapplied. One already present is left as
+/// it is, so running it again after a failure picks up where it stopped.
+/// `row` is updated as work is put back and written by `save`; what to warn
+/// of goes to `warnings`.
+pub(crate) fn restore_worktree(
+    app: &App,
+    owner_id: &str,
+    owner_root: &Path,
+    row: &mut TaskWorktreeRecord,
+    save: &dyn Fn(&TaskWorktreeRecord) -> Result<()>,
+    warnings: &mut Vec<String>,
+) -> Result<Restored> {
+    let path = owner_root.join(&row.dir_name);
+    if path.exists() {
+        return Ok(Restored::Kept);
+    }
+    let what = row.dir_name.clone();
+    let Some(head) = row.head_oid.clone() else {
+        warnings.push(format!(
+            "{what}: nothing was recorded to restore it from; forgotten"
+        ));
+        return Ok(Restored::Forgotten);
+    };
+    let repo = repo_of(app, row)?;
+    let trunk = PathBuf::from(&repo.trunk_path);
+    let head_ref = jeet_ref("head", owner_id, &what);
+    let mut keep_head_ref = false;
+
+    match row.branch.clone() {
+        Some(branch) if git::branch_exists(&trunk, &branch)? => {
+            if let Some(holder) = branch_holder(app, &trunk, &branch)? {
+                bail!(
+                    "{what}: branch {branch} is checked out {holder}; free it and unarchive again"
+                );
+            }
+            git::worktree_add_existing_branch(&trunk, &path, &branch)
+                .with_context(|| format!("{what}: check out {branch}"))?;
+            let tip = git::rev_parse(&trunk, &format!("refs/heads/{branch}"));
+            if tip.as_deref() != Some(head.as_str())
+                && !tip.is_some_and(|tip| git::is_ancestor(&trunk, &head, &tip))
+            {
+                // Under a name of its own: the next archive reuses
+                // head_ref, and the task is active again either way.
+                let kept = match keep(&trunk, owner_id, &what, "head", &head) {
+                    Ok(kept) => kept,
+                    Err(_) => {
+                        keep_head_ref = true;
+                        head_ref.clone()
+                    }
+                };
+                warnings.push(format!(
+                    "{what}: {branch} moved while the task was archived; \
+                     the commit it was on is kept at {kept}"
+                ));
+            }
+        }
+        Some(branch) => {
+            git::worktree_add_new_branch(&trunk, &path, &branch, &head)
+                .with_context(|| format!("{what}: recreate {branch}"))?;
+            warnings.push(format!(
+                "{what}: branch {branch} had been deleted; recreated it where it was"
+            ));
+        }
+        None => git::worktree_add_detached(&trunk, &path, &head)
+            .with_context(|| format!("{what}: check out {head}"))?,
+    }
+
+    if let Some(stash) = row.stash_ref.clone() {
+        // Staged changes come back staged when they can.
+        let applied = git::stash_apply(&path, &stash, true)
+            .or_else(|_| git::stash_apply(&path, &stash, false));
+        match applied {
+            Ok(()) => {
+                let _ = git::delete_ref(&trunk, &stash);
+                row.stash_ref = None;
+            }
+            Err(e) => {
+                // Moved under a name of its own, as archive reuses this one.
+                let kept = git::rev_parse(&trunk, &stash)
+                    .and_then(|oid| keep(&trunk, owner_id, &what, "stash", &oid).ok());
+                let at = match kept {
+                    Some(kept) => {
+                        let _ = git::delete_ref(&trunk, &stash);
+                        row.stash_ref = None;
+                        kept
+                    }
+                    None => stash,
+                };
+                warnings.push(format!(
+                    "{what}: could not reapply its uncommitted changes ({e:#}); \
+                     they are kept at {at}: `git stash apply {at}` in the worktree \
+                     retries, and `git update-ref -d {at}` drops them"
+                ));
+            }
+        }
+    }
+    if !keep_head_ref {
+        let _ = git::delete_ref(&trunk, &head_ref);
+        row.head_oid = None;
+    }
+    save(row)?;
+    Ok(Restored::Kept)
 }
 
 /// How many active tasks `task`'s parent may hold: its own `max_children`,
@@ -2264,7 +2099,7 @@ fn fan_out_of(app: &App, parent: &TaskRecord) -> Result<Option<u32>> {
             Some(n) => Ok(Some(n)),
             None => Ok(Some(app.config.manager_policy()?.max_children)),
         },
-        TaskKind::Work | TaskKind::Review => Ok(parent.max_children),
+        TaskKind::Work => Ok(parent.max_children),
     }
 }
 
@@ -2281,8 +2116,20 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     if task.state == TaskState::Active {
         let _ = reconcile(app);
     }
+    let rows = app.db.list_task_worktrees(&task.id)?;
+    losses_of(app, &task.id, &task_dir(app, task), &rows)
+}
+
+/// [`losses`] of the task or review `owner_id`, whose directory is
+/// `owner_root` and whose worktrees are `rows`.
+pub(crate) fn losses_of(
+    app: &App,
+    owner_id: &str,
+    owner_root: &Path,
+    rows: &[TaskWorktreeRecord],
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for row in app.db.list_task_worktrees(&task.id)? {
+    for row in rows {
         let what = &match &row.branch {
             Some(branch) => format!("{} ({branch})", row.dir_name),
             None => row.dir_name.clone(),
@@ -2291,7 +2138,7 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
             continue;
         };
         let trunk = PathBuf::from(&repo.trunk_path);
-        let path = worktree_dir(app, task, &row.dir_name);
+        let path = owner_root.join(&row.dir_name);
         let live = path.exists();
 
         if live {
@@ -2308,7 +2155,7 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         let stash = row
             .stash_ref
             .clone()
-            .unwrap_or_else(|| jeet_ref("stash", &task.id, &row.dir_name));
+            .unwrap_or_else(|| jeet_ref("stash", owner_id, &row.dir_name));
         if git::ref_exists(&trunk, &stash).unwrap_or(false) {
             out.push(format!(
                 "{what}: uncommitted changes saved at archive ({stash})"
@@ -2363,7 +2210,7 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
         // HEAD as pinned at archive. Normally its branch or the commits just
         // counted hold it, but not if the branch moved while the task was
         // archived, or an unarchive stopped before releasing it.
-        let head_ref = jeet_ref("head", &task.id, &row.dir_name);
+        let head_ref = jeet_ref("head", owner_id, &row.dir_name);
         if git::ref_exists(&trunk, &head_ref).unwrap_or(false) {
             let mut exclude = vec!["--remotes", "--tags", "--branches"];
             exclude.extend(counted.iter().map(String::as_str));
@@ -2379,7 +2226,7 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     }
 
     // Work unarchive could not put back, whichever worktree it came from.
-    for (trunk, name) in kept_refs(app, task)? {
+    for (trunk, name) in kept_refs(app, owner_id)? {
         let kind = name.rsplit('/').next().unwrap_or_default();
         if kind.starts_with("stash-") {
             out.push(format!(
@@ -2399,9 +2246,12 @@ pub fn losses(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 
     // Checkouts on the canvas that are none of the task's worktrees: the
     // directory goes, and they go with it.
-    let dir = task_dir(app, task);
-    for checkout in foreign_checkouts(app, task)? {
-        out.push(describe_foreign(&dir, &checkout));
+    let own: Vec<PathBuf> = rows
+        .iter()
+        .map(|row| owner_root.join(&row.dir_name))
+        .collect();
+    for checkout in checkouts_under(owner_root, &own) {
+        out.push(describe_foreign(owner_root, &checkout));
     }
     Ok(out)
 }
@@ -2439,7 +2289,7 @@ pub fn delete(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<Strin
             );
         }
     }
-    refuse_inside_any(app, &nodes, "delete")?;
+    refuse_inside_any(&nodes, "delete")?;
     if !recursive {
         let warnings = remove_from_disk(app, task)?;
         app.db.delete_task(&task.id)?;
@@ -2471,8 +2321,8 @@ pub fn delete(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<Strin
     Ok(warnings)
 }
 
-/// [`delete`] everything of one task but its row: its agent, its review
-/// jobs, its worktrees, branches and refs, its directory and its settings.
+/// [`delete`] everything of one task but its row: its agent, its worktrees,
+/// branches and refs, its directory and its settings.
 fn remove_from_disk(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     // Stopped, and gone, before anything is removed: a running agent would
@@ -2481,25 +2331,39 @@ fn remove_from_disk(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     // first, so what its turn ran goes up to its parent with the rest.
     charge_before_end(app, task, &mut warnings);
     runtime::stop(task).context("end the agent's tmux session")?;
-    // Its review job too: with the task's rows gone, its jeet commands
-    // would be refused, and its worktree is about to go. That includes one
-    // the assistant started in its worktree, recorded as the assistant's.
-    review::stop_jobs(&app.db, &task.id).context("end the task's review job")?;
-    review::stop_jobs_in(app, &task_dir(app, task)).context("end the task's review job")?;
     if task.state == TaskState::Active {
         if let Err(e) = reconcile(app) {
             warnings.push(format!("could not reconcile worktrees ({e:#})"));
         }
     }
     let dir = task_dir(app, task);
+    let rows = app.db.list_task_worktrees(&task.id)?;
+    remove_owned(app, &task.id, &dir, &rows, &mut warnings)?;
+    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
+        warnings.push(format!("could not remove the agent's settings: {e:#}"));
+    }
+    Ok(warnings)
+}
+
+/// Remove everything on disk that the task or review `owner_id` owns,
+/// whose directory is `dir` and whose worktrees are `rows`: the worktrees,
+/// the branches it made (kept when checked out elsewhere), its
+/// `refs/jeet` refs, and the directory with whatever else is on its canvas.
+pub(crate) fn remove_owned(
+    app: &App,
+    owner_id: &str,
+    dir: &Path,
+    rows: &[TaskWorktreeRecord],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let mut trunks: Vec<PathBuf> = Vec::new();
 
-    for row in app.db.list_task_worktrees(&task.id)? {
+    for row in rows {
         let Some(repo) = app.db.get_repo(&row.repo_id)? else {
             continue;
         };
         let trunk = PathBuf::from(&repo.trunk_path);
-        let path = worktree_dir(app, task, &row.dir_name);
+        let path = dir.join(&row.dir_name);
         if path.exists() {
             git::worktree_remove(&trunk, &path, true)
                 .with_context(|| format!("{}: remove the worktree", row.dir_name))?;
@@ -2522,28 +2386,26 @@ fn remove_from_disk(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 
     for trunk in &trunks {
         for kind in ["stash", "head"] {
-            for name in git::refs_under(trunk, &format!("refs/jeet/{kind}/{}/", task.id))? {
+            for name in git::refs_under(trunk, &format!("refs/jeet/{kind}/{owner_id}/"))? {
                 git::delete_ref(trunk, &name).with_context(|| format!("delete {name}"))?;
             }
         }
         let _ = git::worktree_prune(trunk);
     }
-    for (trunk, name) in kept_refs(app, task)? {
+    for (trunk, name) in kept_refs(app, owner_id)? {
         git::delete_ref(&trunk, &name).with_context(|| format!("delete {name}"))?;
     }
     // Worktrees of other repositories on the canvas go with the directory;
     // their repositories are told, so they do not keep a record of them.
-    let foreign = foreign_checkouts(app, task)?;
+    let own: Vec<PathBuf> = rows.iter().map(|row| dir.join(&row.dir_name)).collect();
+    let foreign = checkouts_under(dir, &own);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+        std::fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
     }
     for common in foreign.iter().filter_map(|c| c.common_dir.as_ref()) {
         let _ = git::worktree_prune(common);
     }
-    if let Err(e) = runtime::remove_settings(&app.home, &task.id) {
-        warnings.push(format!("could not remove the agent's settings: {e:#}"));
-    }
-    Ok(warnings)
+    Ok(())
 }
 
 /// What deleting `task` and everything below it would destroy: [`losses`]
@@ -2567,13 +2429,11 @@ pub fn subtree_leaves_first(app: &App, task: &TaskRecord) -> Result<Vec<TaskReco
     Ok(nodes)
 }
 
-/// Refuse to `verb` `nodes` when this jeet runs inside the agent's session,
-/// or under the review job, of any of them: ending it would end this jeet
-/// part-way through.
-pub fn refuse_inside_any(app: &App, nodes: &[TaskRecord], verb: &str) -> Result<()> {
+/// Refuse to `verb` `nodes` when this jeet runs inside the agent's session
+/// of any of them: ending it would end this jeet part-way through.
+pub fn refuse_inside_any(nodes: &[TaskRecord], verb: &str) -> Result<()> {
     for node in nodes {
         runtime::refuse_inside_session(node, verb)?;
-        review::refuse_inside_job(app, &node.id, &task_dir(app, node), verb)?;
     }
     Ok(())
 }
@@ -2766,7 +2626,7 @@ pub fn delete_reparenting(
             task.slug
         );
     }
-    refuse_inside_any(app, std::slice::from_ref(&task), "delete")?;
+    refuse_inside_any(std::slice::from_ref(&task), "delete")?;
     // The agent ends first, since it could change the tree as it runs, and
     // the move is checked again once it has: a plan gone stale during the
     // confirmation is refused while nothing of the task is removed.
@@ -2808,6 +2668,7 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<
         Caller::User => "the user".to_string(),
         Caller::Root => "the assistant".to_string(),
         Caller::Node(node) => manager::label(node),
+        Caller::Review(review) => format!("review {}", review.label()),
     };
     let mut nodes = Vec::new();
     for (id, _, _) in &plan.rows.grants {
@@ -2908,22 +2769,6 @@ fn delivered_words(delivered: &Result<Delivered>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_review_task_name_fits_a_child_name_however_long_the_repo() {
-        let repo = |id: &str| RepoRecord {
-            id: id.to_string(),
-            trunk_path: String::new(),
-            remote_url: String::new(),
-            default_branch: "main".to_string(),
-        };
-        assert_eq!(review_task_name(&repo("acme/api"), 12), "review-api-12");
-        let long = format!("acme/{}", "r".repeat(100));
-        let name = review_task_name(&repo(&long), 123_456);
-        assert!(name.ends_with("-123456"), "{name}");
-        assert_eq!(name.chars().count(), MAX_CHILD_NAME);
-        assert!(child_name(&name).is_ok());
-    }
 
     #[test]
     fn foreign_checkouts_are_the_outermost_ones_the_task_does_not_hold() {
@@ -3478,16 +3323,6 @@ mod tests {
         assert_eq!(plan.budget.unwrap().secs, Some(1800));
         app.db.charge(&w3.id, 1800, 0).unwrap();
         refused(&user, TaskKind::Work, &under("m"), "nothing is left");
-        // A review is born with no budget, however little is left above:
-        // `[review]` caps it as each review is asked.
-        let plan = plan_child(&app, &user, TaskKind::Review, "x", &under("m"), None).unwrap();
-        assert_eq!(plan.budget, None);
-        refused(
-            &user,
-            TaskKind::Review,
-            &budget("30m"),
-            "[review] time and turns",
-        );
 
         assert_eq!((rows(), dirs()), (before + 6, before_dirs + 6));
     }

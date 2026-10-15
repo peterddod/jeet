@@ -186,7 +186,7 @@ pub fn choose_method(
 
 /// Write the merge into the history of every task that has the PR: the ones
 /// whose history records it, or with a worktree on its branch or checked out
-/// for it.
+/// for it, and into the PR's review.
 fn record(app: &App, repo: &RepoRecord, status: &MergeStatus) -> Result<()> {
     let pr = &status.history.pr;
     let mut tasks = app.db.tasks_with_pr(&repo.id, pr.number)?;
@@ -198,7 +198,8 @@ fn record(app: &App, repo: &RepoRecord, status: &MergeStatus) -> Result<()> {
     }
     tasks.sort();
     tasks.dedup();
-    if tasks.is_empty() {
+    let review = app.db.find_review(&repo.id, pr.number)?;
+    if tasks.is_empty() && review.is_none() {
         return Ok(());
     }
     // What GitHub says now, merged; the merge succeeded whatever it says.
@@ -209,6 +210,10 @@ fn record(app: &App, repo: &RepoRecord, status: &MergeStatus) -> Result<()> {
     for task in tasks {
         app.db
             .upsert_task_pr(&pr_history::to_record(&task, &repo.id, merged.clone()))?;
+    }
+    if let Some(review) = review {
+        app.db
+            .set_review_pr(&review.id, &merged.pr.title, "MERGED", Some(&merged.pr.url))?;
     }
     Ok(())
 }

@@ -7,8 +7,8 @@
 //!   pass, and which of those PRs have since been merged or closed;
 //! - the items of each GitHub Project in `[watch] projects`.
 //!
-//! Each poll also archives the review tasks whose PR has been merged or
-//! closed, once their agent is idle ([`crate::review::sweep`]).
+//! Each poll also archives the reviews whose PR has been merged or closed,
+//! once their agent is idle ([`crate::review::sweep`]).
 //!
 //! What is new since the last poll — by `$JEET_HOME/watch.json` — becomes an
 //! [`Event`] of one [`EventKind`], and the first `[[assistant.rules]]` that
@@ -42,6 +42,7 @@ use crate::config::{
     self, Config, EventKind, ProjectRef, Rule, RuleAction, WatchConfig, DEFAULT_WATCH_INTERVAL_SECS,
 };
 use crate::context::App;
+use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::manager::run;
@@ -813,6 +814,19 @@ fn owning_task(app: &App, event: &Event) -> Result<Option<TaskRecord>> {
     Ok(best.map(|(_, task)| task))
 }
 
+/// The active review of the pull request `event` is about, if it has one:
+/// where its news goes when no task has the PR recorded.
+fn owning_review(app: &App, event: &Event) -> Result<Option<ReviewRecord>> {
+    let Some(number) = event.number else {
+        return Ok(None);
+    };
+    Ok(app
+        .db
+        .list_reviews(Some(TaskState::Active))?
+        .into_iter()
+        .find(|r| r.pr_number == number && repo_id_is(&r.repo_id, &event.repo)))
+}
+
 /// The manager a rule names by `slug`, when it is an active one. By slug
 /// alone: a task's name is no key here, since a manager writes the names
 /// of the tasks it makes.
@@ -839,6 +853,8 @@ pub fn repo_id_is(repo_id: &str, repo: &str) -> bool {
 pub enum Sent {
     Assistant,
     Task(String),
+    /// A review's agent, by the review's slug.
+    Review(String),
     Manager(String),
     Notified,
 }
@@ -848,6 +864,7 @@ impl Sent {
         match self {
             Sent::Assistant => "the assistant".to_string(),
             Sent::Task(slug) => format!("task {slug}"),
+            Sent::Review(slug) => format!("review {slug}"),
             Sent::Manager(slug) => format!("manager {slug}"),
             Sent::Notified => "notified".to_string(),
         }
@@ -883,7 +900,30 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                         }
                     }
                 }
-                Ok(None) => for_assistant.push((i, event)),
+                Ok(None) => match owning_review(app, event) {
+                    Ok(Some(review)) => {
+                        let dir = crate::review::dir(app, &review);
+                        let agent = crate::review::ReviewAgent::new(app, &review);
+                        match messages::deliver(&dir, &agent, &task_message(event), Sender::Agent) {
+                            Ok(delivered) => {
+                                sent[i] = Sent::Review(review.slug.clone());
+                                held[i] = still_notified(delivered);
+                            }
+                            Err(e) => {
+                                eprintln!("jeet: could not tell review {}: {e:#}", review.slug);
+                                for_assistant.push((i, event));
+                            }
+                        }
+                    }
+                    Ok(None) => for_assistant.push((i, event)),
+                    Err(e) => {
+                        eprintln!(
+                            "jeet: could not look for the review of {}: {e:#}",
+                            event.place()
+                        );
+                        for_assistant.push((i, event));
+                    }
+                },
                 Err(e) => {
                     eprintln!(
                         "jeet: could not look for the task of {}: {e:#}",
@@ -2364,6 +2404,26 @@ mod tests {
         // With no worker holding it, the news is notified instead.
         app.db.set_task_state("w", TaskState::Archived).unwrap();
         assert!(owning_task(&app, &ev).unwrap().is_none());
+
+        // Unless a review is of the PR: the review's agent is told.
+        assert!(owning_review(&app, &ev).unwrap().is_none());
+        app.db
+            .insert_review(&ReviewRecord::new(
+                "r".into(),
+                "review-api-1".into(),
+                "github.com/acme/api",
+                1,
+                0,
+            ))
+            .unwrap();
+        assert_eq!(
+            owning_review(&app, &ev).unwrap().map(|r| r.slug),
+            Some("review-api-1".to_string())
+        );
+        let other = event(EventKind::CiFailed, "acme/web");
+        assert!(owning_review(&app, &other).unwrap().is_none());
+        app.db.set_review_state("r", TaskState::Archived).unwrap();
+        assert!(owning_review(&app, &ev).unwrap().is_none());
     }
 
     /// A rule's `manager:<slug>` is an active manager's slug, and nothing

@@ -55,14 +55,17 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Check a pull request out into its review task and open the review viewer
+    /// Check a pull request out into its review, have the review's agent
+    /// review it, and open the review viewer (a review is one per pull
+    /// request, with a worktree and a session of its own; open, archive and
+    /// delete it with `jeet task open|archive|delete <review>`)
     Review {
         /// PR number, with or without a leading #, or the PR's URL
         pr: String,
         /// Repository the PR belongs to; defaults to the one containing the current directory
         #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
         repo: Option<String>,
-        /// Only check the PR out: do not ask the review task's agent to review it
+        /// Only check the PR out: do not ask the review's agent to review it
         #[arg(long, visible_alias = "no-agent")]
         no_command: bool,
         /// Ask for the review again even if this commit was reviewed already
@@ -312,7 +315,8 @@ pub enum TaskCommands {
     },
 
     /// Attach to the task's agent in tmux, starting it if needed (prints the
-    /// task directory instead of attaching when not interactive)
+    /// task directory instead of attaching when not interactive); a review's
+    /// name works too
     Open {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -323,7 +327,8 @@ pub enum TaskCommands {
 
     /// Send the task's agent a message: typed in when it is idle, queued
     /// for when it stops or sits idle when it is busy or waiting on you, its
-    /// first prompt when it is not running (`assistant` for the assistant)
+    /// first prompt when it is not running (`assistant` for the assistant; a
+    /// review's name reaches its agent, for you and the task that asked for it)
     Send {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -341,7 +346,8 @@ pub enum TaskCommands {
     /// End the task's agent and resume its latest session in a new one, so
     /// it runs on this jeet and keeps its conversation (`assistant`: each of
     /// the assistant's windows). Whatever it left running in the background
-    /// (subagents, workflows, /loop schedules) ends with it
+    /// (subagents, workflows, /loop schedules) ends with it (a review's name
+    /// works too)
     Restart {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -361,6 +367,7 @@ pub enum TaskCommands {
     },
 
     /// Remove a task's worktrees to free the disk, keeping what restores them
+    /// (a review's name works too)
     Archive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -372,7 +379,7 @@ pub enum TaskCommands {
         recursive: bool,
     },
 
-    /// Bring an archived task's worktrees back
+    /// Bring an archived task's worktrees back (a review's name works too)
     Unarchive {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -381,7 +388,7 @@ pub enum TaskCommands {
         recursive: bool,
     },
 
-    /// Delete a task and everything it owns
+    /// Delete a task and everything it owns (a review's name works too)
     Delete {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -396,7 +403,7 @@ pub enum TaskCommands {
         reparent: bool,
     },
 
-    /// Print a task's directory
+    /// Print a task's directory (a review's name works too)
     Path {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,

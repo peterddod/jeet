@@ -15,7 +15,8 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
     println!("{:<45} TRUNK", "REPO ID");
     println!("{}", "-".repeat(100));
     for repo in repos {
-        let in_tasks = app.db.task_worktrees_of_repo(&repo.id)?.len();
+        let in_tasks = app.db.task_worktrees_of_repo(&repo.id)?.len()
+            + app.db.review_worktrees_of_repo(&repo.id)?.len();
         let mut notes = vec![
             format!("default: {}", repo.default_branch),
             format!("{in_tasks} in tasks"),

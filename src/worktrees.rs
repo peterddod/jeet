@@ -313,7 +313,7 @@ fn mark_pr_checkout(path: &Path, number: u64) -> Result<()> {
 }
 
 /// Whether the worktree at `path` is a pull request's, made by
-/// [`add_pr_worktree`]. Those are made in review tasks now; one outside any
+/// [`add_pr_worktree`]. Those are made in reviews now; one outside any
 /// task was made by the explorer of a build from before that, and is not
 /// the user's own work, so `jeet import` leaves it alone.
 pub fn is_pr_checkout(path: &Path) -> bool {

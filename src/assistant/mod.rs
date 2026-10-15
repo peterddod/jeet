@@ -709,15 +709,12 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
         .collect();
     active.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     for (at, t) in &active {
-        let worktrees = app.db.list_task_worktrees(&t.id)?;
         let name = match t.parent_id.as_deref() {
-            None => Some(tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone())),
-            Some(parent) if parent == task.id => {
-                Some(tasks::review_label(t, &worktrees).unwrap_or_else(|| t.name.clone()))
-            }
+            None => Some(t.name.clone()),
+            Some(parent) if parent == task.id => Some(t.name.clone()),
             Some(_) => None,
         };
-        let status = runtime::shown_activity(app, t, tmux_ok).label_with(name.is_some());
+        let status = runtime::activity(app, t, tmux_ok).label_with(name.is_some());
         task_lines.push(TaskLine {
             slug: t.slug.clone(),
             name,
@@ -738,7 +735,30 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
                 title: pr.title.clone(),
                 url: pr.url.clone(),
                 draft: pr.is_draft,
-                review: t.kind == TaskKind::Review,
+                review: false,
+                checks: None,
+            });
+        }
+    }
+    // The reviews are listed beside the tasks, by their PR.
+    for review in app.db.list_reviews(Some(TaskState::Active))? {
+        let at = crate::review::last_activity(app, &review);
+        let status = crate::review::shown_activity(app, &review, tmux_ok).label_with(true);
+        task_lines.push(TaskLine {
+            slug: review.slug.clone(),
+            name: Some(format!("review {}", review.label())),
+            status,
+            active: agent::age_label(at),
+        });
+        if review.pr_state.as_deref() == Some("OPEN") {
+            prs.push(PrLine {
+                task: review.slug.clone(),
+                repo: review.repo_id.clone(),
+                number: review.pr_number,
+                title: review.title.clone(),
+                url: review.pr_url.clone().unwrap_or_default(),
+                draft: false,
+                review: true,
                 checks: None,
             });
         }

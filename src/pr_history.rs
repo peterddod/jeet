@@ -20,7 +20,7 @@ use crate::tasks;
 /// How one worktree's PRs are looked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lookup {
-    /// The worktree is a checkout of this PR: a review task's.
+    /// The worktree is a checkout of this PR: a review's.
     Number(u64),
     /// PRs whose head is this branch, open or not.
     Branch(String),
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn each_kind_of_worktree_has_its_lookup() {
-        // A review task's checkout knows its PR, whatever branch it is on.
+        // A review's checkout knows its PR, whatever branch it is on.
         assert_eq!(
             choose(Some(7), Some("feat"), None, false),
             Some(Lookup::Number(7))

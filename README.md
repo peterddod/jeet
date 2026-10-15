@@ -249,7 +249,7 @@ and all, rather than posting a second one.
 
 `ctrl-o` lists every open PR in the repository — the same list as
 `jeet prs` — and `⏎` switches the explorer to it in a task: the task whose
-worktree has the PR's branch already, or else the PR's review task, which it
+worktree has the PR's branch already, or else the PR's review, which it
 makes just as `jeet review` would. It is a way in, not `jeet review`: no
 review agent is asked to review it.
 
@@ -281,15 +281,20 @@ github.com/acme/widget: 3 open pull requests
 ```
 
 From anywhere inside a repository, `jeet review` finds or makes the PR's
-**review task**, `review-<repo>-<number>`, checks the PR out in it (or, when
-the task already has it, brings that checkout up to date if it is clean, and
-brings an archived task back), has the task's agent review it, opens it in
-the review viewer, and `cd`s you into the worktree when you leave. The review
-task is marked as a review from the start, and is shown in the tasks list's
+**review**, `review-<repo>-<number>`, checks the PR out in it (or, when it
+has the PR already, brings that checkout up to date if it is clean, and
+brings an archived review back), has the review's agent review it, opens it
+in the review viewer, and `cd`s you into the worktree when you leave. A
+review is not a task: it is its own thing, one per pull request (a
+repository and a PR number), with exactly one worktree and one session, and
+flat, with no parent and nothing under it. It is shown in the tasks list's
 [reviews tab](#the-reviews-tab) alone — never among the active or archived
-tasks, in the agents tab, or in `jeet task ls` — and there `v` opens the
-viewer again. Archiving or deleting it frees the disk and ends its agent, and
-once the PR is merged or closed jeet archives it itself. A PR from a fork is checked out as `pr/<number>`,
+tasks, in the agents tab, in the projects tab, or in `jeet task ls` — and
+there `v` opens the viewer again, `a` archives it and brings it back, and
+`D` deletes it. `jeet task open|archive|unarchive|delete|path|send|restart
+review-<repo>-<number>` take its name too. Archiving or deleting it frees the
+disk and ends its agent, and once the PR is merged or closed jeet archives it
+itself. A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
 checked out detached at the PR's head instead.
@@ -313,10 +318,12 @@ it was on.
 
 ### The review agent
 
-The review is done by the review task's own agent — your harness (Claude
-Code), started in the task's tmux pane like any task's agent — so `⏎` on the
-task (or `jeet task open review-<repo>-<number>`) shows it at work, and you can
-talk to it there. It starts with this prompt:
+The review is done by the review's own agent — your harness (Claude Code),
+started in the review's tmux pane like a task's agent — so `⏎` on the review
+(or `jeet task open review-<repo>-<number>`) shows it at work, and you can
+talk to it there (`jeet task send` and `jeet task restart` reach it too, for
+you and for the assistant when it asked for the review). It starts with this
+prompt:
 
 ```toml
 [review]
@@ -329,24 +336,33 @@ them — so the agent reads them with `gh`. The prompt is sent as a message is:
 one starting with `/`, `!` or `#` is marked so Claude does not run it as a
 command.
 
-One review is one task, one worktree and one session. Running `jeet review`
+One review is one worktree and one session. Running `jeet review`
 again for the same commit asks nothing; a new head commit, or `--rerun`,
 brings the worktree up to the PR's head (when it is clean) and sends the
 prompt again into the same session: typed in when the agent is idle, queued
 while it works (once: a prompt still waiting is not queued twice), and
 resuming its session in a new pane when it has ended — or, run with no tmux
-server to start it on, waiting until the task is next opened. Once its agent
+server to start it on, waiting until the review is next opened. Once its agent
 has been asked, a review stays with it even if `[review] command` is set
-later.
-The review agent is gated like any task's: under the assistant it reports to
-it, and a paused or stopped task (or one under a held manager) keeps the
-prompt until resumed. `--no-agent` only checks the PR out.
+later. A review paused at its [limits](#review-limits) keeps the prompt until
+the review is asked for again. `--no-agent` only checks the PR out.
+
+Every review agent has the same fixed gate, whoever asked for the review. It
+reads: `jeet ls`, `jeet path` and `jeet prs`, and nothing else in jeet. It has
+the worker deny rules: no push, force-push, merge, `gh pr review` or
+approval, or `gh pr comment`, nor their API equivalents. And it may
+`jeet report progress|done|blocked|question` only when a task asked for the
+review: a review the assistant asked for reports to the assistant (as a
+sender labelled `review <repo>#<number>`), and a review you asked for reports
+to no one. The assistant is not its parent: the review is in no tree, takes
+no manager's budget or `max_live` slot, and nothing is delegated to it.
 
 #### Review limits
 
 Reviews have limits of their own, apart from `[managers]`: review agents
 neither take a `[managers] max_live` slot nor spend any budget above them,
-and tasks and managers take nothing from the review limits.
+and tasks and managers take nothing from the review limits. They apply to
+every review, yours included.
 
 ```toml
 [review]
@@ -358,14 +374,14 @@ turns = 20      # turns each review may take
 `max_live` counts every review agent, yours included: a review past it is
 queued, and starts when a review agent's session ends (`jeet task open`
 from your terminal starts it anyway, with a warning). `time` and `turns`
-apply to reviews in the tree, the ones the assistant starts: each review
-asked of the agent (a first one, a new head commit or `--rerun`) gets them
-afresh, on top of what it has used, and is held to them as a task is to its
-budget (see [Reporting to the parent](#reporting-to-the-parent)): at 80% it
-is told, at 100% it is paused until the next review is asked. Your own
-`jeet review` makes a top-level task, which, as any top-level task, has no
-budget: its agent works for you, and nothing charges it. A task with a parent may not run
-`jeet review` at all, so no agent's review escapes these caps that way. The defaults keep
+apply to every review: each time a review is asked of the agent (a first
+one, a new head commit or `--rerun`) it gets them afresh, on top of what it
+has used. At 80% the review's agent is told, and so is the assistant when it
+asked for the review; at 100% the review is paused until the next review is
+asked, and the assistant is told it is blocked. A review you asked for
+reports to no one: the reviews tab shows it `paused at its caps`. A task
+with a parent may not run `jeet review` at all, so no agent's review escapes
+these caps that way. The defaults keep
 reviews from crowding out other work (2 at once) and stop a stuck one
 (an hour of busy time, or 20 turns, a turn being one prompt answered: a
 review is one or a few). Like `[managers]`, these are checked when used: 0,
@@ -386,9 +402,9 @@ notify = true   # desktop notification when it finishes (the default)
 The command runs detached from your terminal, so quitting the explorer or
 closing the window does not stop it. When it finishes you get a notification,
 the header's `review running` turns to `review ready`, and `v` in the PR panel
-opens its output. While it runs the task reads `running – review of #<number>`,
+opens its output. While it runs the review reads `running – review of #<number>`,
 and opening it is refused — headless, there is nothing to attach to; once it
-has finished, opening the task resumes the session it left (jeet picks it up
+has finished, opening the review resumes the session it left (jeet picks it up
 from the PR's worktree), and so does the review agent if you later remove the
 command. Running `jeet review` again for the same commit does not start a
 second review; new commits do (and `--rerun` forces one).
@@ -575,7 +591,7 @@ read from its files on a thread of its own, like the statuses.
 | `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
 | `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser, `v` in the review viewer |
-| `v` | the task's pull request in the review viewer: a review task's own, else the task's one open PR, else the `p` list to pick one |
+| `v` | the task's pull request in the review viewer: the task's one open PR, else the `p` list to pick one |
 | `c` | talk to the assistant: attach to its most recently active session, starting one if need be |
 | `C` | the assistant's sessions: `⏎` attach, `n` new, `R` rename, `x` end, `*` primary |
 | `t` | the todo list: `space` ticks an item off (or back), `⏎` goes to the task it links, `a` adds one |
@@ -693,12 +709,14 @@ brings one back. Both lists end with a dim reminder of it.
 
 ### The reviews tab
 
-The third tab lists the reviews: each active review task (what `jeet review`
-makes), then any review job an older `jeet review` recorded with no task to
-hold it. Reviews are shown here alone, never in the other tabs. `A` switches
+The third tab lists the reviews: each active review (what `jeet review`
+makes), then any review job an older `jeet review` recorded with no review to
+hold it (shown as it always was, read-only, until a later release adopts
+them). Reviews are shown here alone, never in the other tabs. `A` switches
 the tab to the archived reviews (`▪ archived`), and back, as it does the
 tasks list: they stay in the reviews tab rather than joining the archived
-tasks, so a review is always found in the one place.
+tasks, so a review is always found in the one place. Every review can be
+archived, brought back and deleted here.
 
 ```text
 ┌ jeet · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
@@ -711,8 +729,8 @@ tasks, so a review is always found in the one place.
 ```
 
 Each row shows whether the review's session is running (or what holds it back:
-paused at its `[review]` caps or by hand, stopped, or queued on `max_live`), the
-repository and the PR number, each in a column of its own, the review task's
+paused at its `[review]` caps, or queued on `max_live`), the
+repository and the PR number, each in a column of its own, the review's
 size on disk, its state on
 GitHub (open, draft, merged, closed) and where its review stands: GitHub's
 review decision (approved, changes requested, review required), else what the
@@ -725,11 +743,16 @@ keeps what it said before. PR titles are shown as text, never run.
 | Key | |
 |---|---|
 | `⏎` | the review's menu: `v` view the diff, `s` open the review's session |
-| `v` | the review's PR in the review viewer, read from the task's checkout when it has one, else the repository's trunk |
-| `s` (in the menu) | open the review's session: attach to the review task's agent, or resume or start it, as `⏎` does in the active tab. A job with no task has none |
-| `e` `w` `p` `a` `D` | the review task's, as in the active tab; `a` brings an archived one back |
+| `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
+| `s` (in the menu) | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab. A job with no review has none |
+| `e` | explore the review's worktree |
+| `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
+| `D` | delete the review, after listing any work that would be lost |
 | `A` | show the archived reviews instead of the active ones, and back |
-| `/` | filter by PR (`api#131`), task name or title |
+| `/` | filter by PR (`api#131`), the review's name or title |
+
+A review has one worktree and one pull request, so `w` and `p` have nothing to
+show here.
 
 A review whose PR is merged or closed is archived for you, the way `a` (or
 `jeet task archive`) archives it: its agent is ended, its worktree removed,
@@ -751,8 +774,8 @@ watch log or the status line says why.
 A task remembers the pull requests that came out of it. When the tasks list
 opens (and on `r`, and on `p` for the one task), each worktree is looked up on
 GitHub in the background through `gh`: PRs from its branch, open or not; for a
-detached checkout with commits of its own, the PRs that hold its HEAD; for a
-review task, the PR it reviews. What comes back is kept, so the history
+detached checkout with commits of its own, the PRs that hold its HEAD. What
+comes back is kept, so the history
 outlives the branches — a merged PR still shows long after its worktree is
 gone.
 
@@ -1120,8 +1143,7 @@ Claude had not yet shown it, may still start one more turn; that turn's end
 hands it nothing. Stop ends their
 tmux sessions, and any legacy review job running for them or in their
 worktrees (which pause cannot interrupt), and their ending is not reported;
-`jeet review` of a held review task keeps the prompt for its agent until it
-is resumed (it says so, and still opens the review and its worktree). Resume is refused while a
+Resume is refused while a
 task above holds it, while its budget is used up (`manager budget` first),
 and to anyone ranked below whoever paused or stopped it: you, then the
 assistant, then a manager above, so what you stop only you resume. Once
@@ -1284,7 +1306,7 @@ name. What is new since the last poll becomes an event: `review_requested`,
 `mention`, `comment`, `assigned`, `ci_failed`, `ci_passed`, `pr_merged`,
 `pr_closed` or `project_item_changed`. The first poll of each only notes what
 is there, so turning the watcher on is not a flood. Each poll also archives the
-review tasks whose PR has been merged or closed, once their agent is idle
+reviews whose PR has been merged or closed, once their agent is idle
 ([The reviews tab](#the-reviews-tab)).
 
 Rules decide where each event goes; the first that matches wins, and an event
@@ -1450,6 +1472,69 @@ into tasks.
 | `jeet worktree list` | `jeet worktree ls` |
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
+
+## What's new in v0.13
+
+Reviews stop being tasks: a review is its own thing, with its own table in
+the index.
+
+- **A review is not a task.** One per pull request (a repository and a PR
+  number), with exactly one worktree and one session, flat: no parent, no
+  tasks under it, no brief, grants or project. `jeet review` finds or makes
+  it as before, and `jeet task open|archive|unarchive|delete|path|send|
+  restart review-<repo>-<number>` still take its name. It is in no task
+  list, tree, manager or project; the [reviews tab](#the-reviews-tab) lists
+  it, and there `a` archives it and brings it back (`A` toggles the archived
+  ones) and `D` deletes it, for every review.
+- **Limits apply to every review.** `[review] time` and `turns` held only the
+  reviews the assistant started; now they hold every review, yours included,
+  given afresh each time a review is asked ([Review limits](#review-limits)).
+- **Who a review reports to.** A review the assistant asked for reports to
+  the assistant (not as its child); one you asked for reports to no one.
+- **One gate for every review agent**: read-only jeet, the worker deny rules
+  (no push, merge, approval or PR comment), and `jeet report` only when a
+  task asked for the review ([The review agent](#the-review-agent)).
+- **`jeet task send` and `jeet task restart` reach a review's agent**, for you
+  and for the task that asked for the review; nobody else may.
+
+**Upgrading to v0.13.0:** the index moves to **schema v8** the first time any
+v0.13 command opens it, and v0.12 and older refuse the index after that, so
+upgrade every jeet you run at once. Before anything changes, the index is
+copied to `$JEET_HOME/backups/index-v7-<unix time>.db` (`~/.jeet/backups/` by
+default), and the migration is refused if the copy cannot be made. The copy
+is a whole index of the old schema: it is what an older jeet opens, if you go
+back.
+
+- Each review task becomes a review, keeping its slug (so its tmux session
+  `jeet-<slug>`, its hooks and its `$JEET_TASK_ID` carry on), its worktree,
+  its session, its limits and use, its place in a `max_live` queue, and its
+  archived or active state. A review under the assistant becomes one the
+  assistant asked for.
+- **Reports between review tasks and the assistant are not carried over**: a
+  review's `done`, `blocked` and other reports from before the upgrade are
+  gone from `jeet report ls`, as are any the assistant had sent a review.
+- **Only one review per pull request survives.** Where several review tasks
+  were for one PR, the newest is kept. The others' worktrees are archived the
+  way `jeet task archive` does it, into `refs/jeet/head/<old-task-id>/…` and
+  `refs/jeet/stash/<old-task-id>/…` in the repository's trunk (the old task id
+  is in the log), or, when one holds ignored files that are not build caches (a
+  `.env`, local config), left in place on disk untouched. Their task
+  directories stay on disk; jeet deletes nothing. A review task with no PR
+  recorded gets no review, and its worktrees are handled the same way.
+- This happens at the first command a person runs after the upgrade, not in
+  a hook, and says so on stderr in one line. What it did, a line each, is in
+  `$JEET_HOME/logs/migrate-v8.log`; a worktree it could not archive then (its
+  agent's tmux session is this very shell, say) is tried again at the next
+  command.
+- **Review jobs recorded under `~/.jeet/reviews` by an older `jeet review`
+  with no review of their own are still shown, read-only, in the reviews
+  tab**; a later release adopts them as reviews. Nothing in that directory
+  is changed.
+- The `<task>/.jeet/review.json` and `brought-back` files are folded into the
+  review and no longer read.
+- In the reviews tab, `w` and `p` have nothing to show (a review has one
+  worktree and one PR), and a review is no longer "paused by hand" or
+  "stopped": it is paused only at its caps.
 
 ## What's new in v0.12
 
@@ -2068,8 +2153,8 @@ starts straight into its brief. It selects "Yes, I trust this folder", checks
 that it shows selected, and only then presses Enter (Enter on the default
 "No, exit" would quit). Trusting a folder lets Claude Code act on what is in
 it: its `.claude/settings.json` hooks and `.mcp.json` servers run. In your own
-tasks that is your own code; in a **review task** it is someone else's PR
-branch, so review tasks are left to you unless `auto_trust_reviews` is on as
+tasks that is your own code; in a **review** it is someone else's PR
+branch, so reviews are left to you unless `auto_trust_reviews` is on as
 well. Some per-folder settings, such as `.claude/settings.local.json` and
 `.mcp.json`, reportedly need the exact folder trusted, not just a parent.
 The assistant's session is never answered for.
@@ -2152,10 +2237,12 @@ code changes to a worker. When the assistant reads what a task
 said with `jeet task last`, it gets it fenced as untrusted, as it gets
 reports, and the status beside it (which the task's agent can write) unable
 to close or open a fence. The assistant's own
-reach is unchanged: all tasks, yours included. Review tasks it starts with
-`jeet review` report to it too: their review agent is the review task's,
-gated like any task under it. A legacy `[review] command` runs as the review
-task too, and jeet tells the assistant when it exits without reporting done.
+reach is unchanged: all tasks, yours included. Reviews it starts with
+`jeet review` report to it too, though they are not under it: their review
+agent has the fixed gate every review agent has ([The review
+agent](#the-review-agent)), plus `jeet report` to the assistant. A legacy
+`[review] command` runs as the review too, and jeet tells the assistant when
+it exits without reporting done.
 No harness launches that command, so it gets none of
 the settings jeet gives Claude Code: if it runs Claude Code with its sandbox
 on, exclude `jeet` from the sandbox yourself (`--settings
@@ -2206,7 +2293,7 @@ commit through the API (the contents endpoint, `createCommitOnBranch`) or a
 merge mutation read from a file gets past them too: they catch
 mistakes, and branch protection on GitHub is the real control. A task with
 a parent on a harness without deny rules starts with a warning, as does the
-legacy `[review] command` of a review task the assistant starts: no harness
+legacy `[review] command` of a review the assistant starts: no harness
 launches it, so it gets no deny rules.
 
 ```toml

@@ -30,6 +30,7 @@ pub fn run(app: &App, what: ReportCommands) -> Result<()> {
 fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
     let task = match permissions::caller(app)? {
         Caller::Node(task) => task,
+        Caller::Review(review) => return send_review(app, &review, kind, message),
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
         Caller::User => match std::env::var(TASK_ID_ENV)
             .ok()
@@ -69,6 +70,37 @@ fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
     Ok(())
 }
 
+/// A review's agent reports to the task that asked for the review.
+fn send_review(
+    app: &App,
+    review: &crate::db::reviews::ReviewRecord,
+    kind: ReportKind,
+    message: &str,
+) -> Result<()> {
+    let Some(asker) = review.requested_by.as_deref() else {
+        bail!(
+            "review {} was not asked for by a task, so there is no one to report to",
+            review.label()
+        );
+    };
+    let (id, delivered) = reports::send_review(app, review, kind, message, true)?;
+    let to = match app.db.get_task(asker)? {
+        Some(parent) => manager::label(&parent),
+        None => "the task that asked".to_string(),
+    };
+    eprintln!("jeet: reported {} to {to} (#{id})", kind.as_str());
+    eprintln!(
+        "{}",
+        delivered_line(
+            &to,
+            "the report",
+            &format!("report #{id} recorded, but not delivered"),
+            &delivered
+        )
+    );
+    Ok(())
+}
+
 /// Who runs this, refused when it is the user's word and this is not the
 /// user's own terminal: a top-level task's agent, or a window in one of
 /// jeet's sessions, is [`Caller::User`] too (R8).
@@ -87,10 +119,10 @@ fn answer(app: &App, id: i64, message: &str) -> Result<()> {
     let caller = caller_at_terminal(app, "answering")?;
     let answered = reports::answer(app, &caller, id, message)?;
     let id = answered.row.id;
-    let asker = manager::label(&answered.asker);
+    let asker = answered.asker;
     let by = match caller {
         Caller::User => " (as the user)",
-        Caller::Root | Caller::Node(_) => "",
+        Caller::Root | Caller::Node(_) | Caller::Review(_) => "",
     };
     eprintln!("jeet: answered #{id} for {asker}{by}");
     eprintln!(
@@ -149,6 +181,7 @@ fn ls(app: &App) -> Result<()> {
         Caller::User => None,
         Caller::Root => Some(manager::root(app)?.id),
         Caller::Node(task) => Some(task.id.clone()),
+        Caller::Review(review) => Some(review.id.clone()),
     };
     for row in &held {
         print!("{}", listed(app, me.as_deref(), row)?);
@@ -160,10 +193,9 @@ fn ls(app: &App) -> Result<()> {
 /// question task assistant/api/w 12m ago, with you`, then the question,
 /// as written for the user, fenced as the asker's claim for an agent.
 fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String> {
-    let Some(asker) = app.db.get_task(&row.task_id)? else {
+    let Some(asker) = reports::asker_name(app, &row.task_id)? else {
         return Ok(String::new());
     };
-    let path = manager::tree_path(app, &asker)?;
     let at = match (row.needs_user, me) {
         (true, None) => ", with you".to_string(),
         (true, Some(_)) => ", with the user".to_string(),
@@ -180,7 +212,7 @@ fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String>
         "#{} {} {} {}{at}\n",
         row.id,
         row.kind.as_str(),
-        manager::label_at(&asker, &path),
+        asker.shown,
         age_label(row.at)
     );
     match me {
@@ -192,8 +224,8 @@ fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String>
         Some(_) => {
             out.push_str(&assistant::fence_report(
                 row.id,
-                &manager::label(&asker),
-                &path,
+                &asker.label,
+                &asker.path,
                 row.kind,
                 &row.body,
             ));
