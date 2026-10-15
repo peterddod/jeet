@@ -291,12 +291,12 @@ const HINTS: &[&str] = &[
     "←→ up/into",
     "e explore",
     "w worktrees",
+    "a archive",
+    "A archived",
     "n new",
     "c assistant",
     "t todo",
     "i inbox",
-    "a archive",
-    "A archived",
     "D delete",
     "p PRs",
     "P projects",
@@ -339,7 +339,9 @@ const HINTS_REVIEWS: &[&str] = &[
 ];
 
 /// As many of `view`'s hints as fit, always ending with help and quit.
-fn hints(width: u16, view: View) -> String {
+/// `archived`: the list shows the archived ones, so `a` brings back and
+/// `A` goes back.
+fn hints(width: u16, view: View, archived: bool) -> String {
     let hints = match view {
         View::Agents => HINTS_AGENTS,
         View::Reviews => HINTS_REVIEWS,
@@ -351,7 +353,12 @@ fn hints(width: u16, view: View) -> String {
     let head: Vec<&str> = hints[..hints.len() - 2]
         .iter()
         .copied()
-        .filter(|&hint| view == View::Active || hint != "←→ up/into")
+        .filter(|&hint| (view == View::Active && !archived) || hint != "←→ up/into")
+        .map(|hint| match (archived, hint) {
+            (true, "a archive") => "a unarchive",
+            (true, "A archived") => "A back",
+            _ => hint,
+        })
         .collect();
     (0..=head.len())
         .rev()
@@ -426,7 +433,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(chunks[5].width, ui.view),
+            hints(chunks[5].width, ui.view, ui.archived()),
             Style::default().fg(Color::DarkGray),
         ))),
         chunks[5],
@@ -450,8 +457,8 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
-    let tab = |view: View, label: &str| {
-        let text = format!(" {label} {} ", ui.count(view));
+    let tab = |view: View, label: &str, count: usize| {
+        let text = format!(" {label} {count} ");
         if ui.view == view {
             Span::styled(
                 text,
@@ -465,11 +472,14 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
         }
     };
     let mut spans = vec![
-        tab(View::Active, "active"),
+        match ui.archived_tasks {
+            true => tab(View::Active, "archived", ui.task_count(true)),
+            false => tab(View::Active, "active", ui.count(View::Active)),
+        },
         Span::raw(" "),
-        tab(View::Agents, "agents"),
+        tab(View::Agents, "agents", ui.count(View::Agents)),
         Span::raw(" "),
-        tab(View::Reviews, "reviews"),
+        tab(View::Reviews, "reviews", ui.count(View::Reviews)),
         Span::raw("   "),
     ];
     if ui.view == View::Agents {
@@ -600,7 +610,9 @@ fn draw_list(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
                 "adds worktrees to as it goes, or pick a project or repositories.".to_string(),
             ],
             (true, 0) => {
-                vec!["nothing archived. a on an active task archives it.".into()]
+                vec!["nothing archived. a on an active task archives it. \
+                     A goes back to the active ones."
+                    .into()]
             }
             _ => vec!["⌫ or esc widens the filter".into()],
         };
@@ -2827,7 +2839,12 @@ mod tests {
                 !screen.contains("review-api") && !screen.contains("#55"),
                 "{screen}"
             );
-            assert!(screen.contains(" active 0 "), "{screen}");
+            let tab = if archived {
+                " archived 0 "
+            } else {
+                " active 0 "
+            };
+            assert!(screen.contains(tab), "{screen}");
             assert!(screen.contains(" reviews 1 "), "{screen}");
         }
     }
@@ -3895,14 +3912,76 @@ mod tests {
     #[test]
     fn hints_always_keep_help_and_quit() {
         for width in [10u16, 20, 40, 80, 200] {
-            let line = hints(width, View::Active);
+            let line = hints(width, View::Active, false);
             assert!(line.width() <= width as usize, "{width}: {line}");
         }
-        assert!(hints(20, View::Active).contains("q quit"));
-        assert!(hints(200, View::Active).contains("⏎ open"));
-        assert!(hints(200, View::Agents).contains("l worklog"));
-        assert!(hints(200, View::Reviews).contains("⏎ menu"));
+        assert!(hints(20, View::Active, false).contains("q quit"));
+        assert!(hints(200, View::Active, false).contains("⏎ open"));
+        assert!(hints(200, View::Agents, false).contains("l worklog"));
+        assert!(hints(200, View::Reviews, false).contains("⏎ menu"));
         assert!(help(View::Reviews).iter().any(|(k, _)| *k == "v"));
-        assert!(!hints(200, View::Agents).contains("archive"));
+        assert!(!hints(200, View::Agents, false).contains("archive"));
+    }
+
+    #[test]
+    fn the_hints_follow_the_archived_toggle() {
+        let on = hints(200, View::Active, false);
+        assert!(
+            on.contains("a archive") && on.contains("A archived"),
+            "{on}"
+        );
+        assert!(on.contains("←→ up/into"), "{on}");
+        let off = hints(200, View::Active, true);
+        assert!(
+            off.contains("a unarchive") && off.contains("A back"),
+            "{off}"
+        );
+        assert!(
+            !off.contains("A archived") && !off.contains("up/into"),
+            "{off}"
+        );
+        let off = hints(200, View::Reviews, true);
+        assert!(
+            off.contains("a unarchive") && off.contains("A back"),
+            "{off}"
+        );
+        assert!(!off.contains("A archived"), "{off}");
+        // A survives a normal width in both lists, either way.
+        for view in [View::Active, View::Reviews] {
+            for archived in [false, true] {
+                let line = hints(100, view, archived);
+                assert!(line.contains("A arch") || line.contains("A back"), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_tab_says_archived_while_the_list_is() {
+        let mut old = row("old spike", None);
+        old.task.state = TaskState::Archived;
+        let mut ui = TasksUi::new(vec![row("fix login", None), old.clone(), {
+            let mut o = old;
+            o.task.id = "old2".into();
+            o.task.name = "old two".into();
+            o
+        }]);
+        let screen = render(&mut ui, 100, 14);
+        assert!(screen[1].contains(" active 1 "), "{screen:?}");
+        ui.archived_tasks = true;
+        // Across views too, as the toggle stays.
+        for view in [View::Active, View::Reviews] {
+            ui.view = view;
+            ui.set_rows(ui.rows.clone());
+            let screen = render(&mut ui, 100, 14);
+            assert!(screen[1].contains(" archived 2 "), "{screen:?}");
+            assert!(!screen[1].contains("active"), "{screen:?}");
+        }
+        ui.view = View::Active;
+        ui.set_rows(Vec::new());
+        let screen = render(&mut ui, 100, 14).join("\n");
+        assert!(
+            screen.contains("A goes back to the active ones"),
+            "{screen}"
+        );
     }
 }

@@ -1303,6 +1303,16 @@ impl TasksUi {
             .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
     }
 
+    /// Whether the list shows the archived ones: the active view's tasks
+    /// or the reviews view's reviews.
+    pub fn archived(&self) -> bool {
+        match self.view {
+            View::Active => self.archived_tasks,
+            View::Reviews => self.archived_reviews,
+            View::Agents => false,
+        }
+    }
+
     /// Whether the list is the active tasks' tree, walked a level at a time:
     /// the archived tasks are flat.
     pub fn in_tree(&self) -> bool {
@@ -3163,6 +3173,14 @@ enum TreeAsk {
     Stop,
 }
 
+/// Where to find what was just archived.
+fn shows_archived(kind: TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Review => "A shows archived reviews",
+        _ => "A shows archived tasks",
+    }
+}
+
 /// Whether the tree thread should start (`Some(true)`) or stop
 /// (`Some(false)`) when the view goes from `was` to `now`, or go on as it is.
 fn tree_wanted(was: View, now: View) -> Option<bool> {
@@ -4156,7 +4174,7 @@ impl Screen<'_> {
                 self.refresh(false);
                 match archived {
                     Ok(warnings) => self.ui.set_status(with_warnings(
-                        format!("archived {} — A shows archived tasks", task.name),
+                        format!("archived {} — {}", task.name, shows_archived(task.kind)),
                         &warnings,
                     )),
                     Err(e) => self.ui.message(
@@ -5210,9 +5228,10 @@ impl Screen<'_> {
         match archived {
             Ok(warnings) => self.ui.set_status(with_warnings(
                 format!(
-                    "archived {} and {} under it — A shows archived tasks",
+                    "archived {} and {} under it — {}",
                     task.name,
-                    plural(nodes.len().saturating_sub(1), "task")
+                    plural(nodes.len().saturating_sub(1), "task"),
+                    shows_archived(task.kind)
                 ),
                 &warnings,
             )),
@@ -6054,6 +6073,45 @@ mod tests {
         press(&mut ui, KeyCode::Tab);
         press(&mut ui, KeyCode::Char('A'));
         assert!(!ui.archived_tasks);
+    }
+
+    #[test]
+    fn the_archived_list_deletes_and_explores_its_task() {
+        let mut ui = sample();
+        press(&mut ui, KeyCode::Char('A'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDelete {
+                task_id: "c".into()
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('e')),
+            Some(Action::Explore {
+                task_id: "c".into()
+            })
+        );
+    }
+
+    #[test]
+    fn selecting_an_active_task_leaves_the_archived_list_and_walks_to_it() {
+        let mut ui = nested();
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(ui.archived_tasks);
+        ui.select("ship");
+        assert!(!ui.archived_tasks);
+        assert_eq!(ui.view, View::Active);
+        assert_eq!(ui.breadcrumb(), ["assistant", "ops", "deploy"]);
+        assert_eq!(ui.selected_id(), Some("ship"));
+    }
+
+    #[test]
+    fn a_capital_a_typed_in_the_filter_is_text() {
+        let mut ui = sample();
+        press(&mut ui, KeyCode::Char('/'));
+        press(&mut ui, KeyCode::Char('A'));
+        assert!(!ui.archived_tasks);
+        assert_eq!(ui.filter, "A");
     }
 
     #[test]
