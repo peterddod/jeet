@@ -228,7 +228,7 @@ pub fn active_rollup(rows: &[TaskRow], info: Option<&TreeInfo>) -> HashMap<Strin
 
 /// A task's own urgency from its activity and its [`NodeInfo`], if the
 /// tree thread has read one.
-fn row_urgency(row: &TaskRow, info: Option<&TreeInfo>) -> Urgency {
+pub(super) fn row_urgency(row: &TaskRow, info: Option<&TreeInfo>) -> Urgency {
     let task = &row.task;
     let node = info.and_then(|info| info.nodes.get(&task.id));
     own_urgency(

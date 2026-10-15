@@ -678,7 +678,7 @@ in it, drawn as in the active tab and walked the same way: `→` goes into a man
 or a task with tasks under it, `⏎` opens its agent, `←` or `⌫` backs up a level
 and, from the top of the project, out of it. The line over the list says where
 you are (`projects › api › …`). `e`, `w`, `p`, `v`, `a`, `D`, `n` and `S` act on
-the task under the cursor as in the active tab. `/` filters the projects by
+the task under the cursor as in the active tab. (This tab groups by repository; the `P` projects are templates for new tasks, a different thing.) `/` filters the projects by
 repository, or, inside one, its tasks by name.
 
 `A` switches the tab to the archived projects, the repositories with archived

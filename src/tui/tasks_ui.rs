@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::assistant_info::{FeedEntry, FeedKind, Info as AssistantInfo};
 use super::chat;
-use super::managers::{At, NodeInfo, TreeLine, Urgency};
+use super::managers::{self, At, NodeInfo, TreeLine, Urgency};
 use super::repos::RepoLine;
 use super::reviews::{PrReview, ReviewLine, Source, Verdict};
 use super::state::human_size;
@@ -287,15 +287,21 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
         "inside a project, open the agent of the task or manager under the cursor",
     ),
     (
+        "ctrl-a",
+        "open the agent of the task or manager under the cursor, as ⏎",
+    ),
+    (
         "e / w / p",
         "explore the task / its worktrees / its pull requests",
     ),
+    ("v", "the task's pull request in the review viewer"),
     (
         "a",
         "archive the task (the tasks under it too) · unarchive, in an archived project",
     ),
     ("D", "delete the task, after listing any work that would go"),
-    ("n", "new task"),
+    ("S", "copy the task's project files in again"),
+    ("n", "new task (pick its repos in the form)"),
     (
         "A",
         "show the archived projects (repos with only archived tasks) instead, and back",
@@ -317,7 +323,7 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
     ("", ""),
     (
         "project",
-        "a repository: its tasks and managers hold a worktree of it",
+        "a repository: its tasks and managers hold a worktree of it; not P's templates",
     ),
     (
         "",
@@ -804,8 +810,7 @@ fn project_lines(ui: &TasksUi, line: &RepoLine) -> Vec<Line<'static>> {
     let urgent = line
         .members
         .iter()
-        .filter_map(|&i| ui.rolled.get(&ui.rows[i].task.id))
-        .map(|&(urgency, _)| urgency)
+        .map(|&i| managers::row_urgency(&ui.rows[i], ui.tree_info.as_ref()))
         .max();
     let (status, color) = match urgent {
         Some(urgency) if !ui.archived_projects => {

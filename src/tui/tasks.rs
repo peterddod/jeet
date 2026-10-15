@@ -63,7 +63,7 @@ use ratatui::widgets::ListState;
 use super::assistant_info::{self, Info as AssistantInfo};
 use super::chat::{self as session_picker, Pick, Step};
 use super::managers::{self, At, TreeInfo, TreeLine, Urgency};
-use super::repos::{self, RepoLine};
+use super::repos::{self, Groups, RepoLine};
 use super::reviews::{self, Legacy, PrKey, PrReview, ReviewLine, Source};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
@@ -1120,6 +1120,8 @@ pub struct TasksUi {
     pub archived_tasks: bool,
     /// What GitHub last said of each reviewed PR, or why it could not say.
     pub reviewed: HashMap<PrKey, Result<PrReview, String>>,
+    /// The projects of the rows, grouped when they are read.
+    pub repos: Groups,
     /// The projects view's top level, in display order.
     pub projects: Vec<RepoLine>,
     /// `A` in the projects view: it lists the archived projects instead.
@@ -1171,6 +1173,7 @@ impl TasksUi {
             archived_reviews: false,
             archived_tasks: false,
             reviewed: HashMap::new(),
+            repos: Groups::default(),
             projects: Vec::new(),
             archived_projects: false,
             project: None,
@@ -1223,6 +1226,7 @@ impl TasksUi {
 
     fn resort(&mut self, keep: Option<&str>) {
         sort_rows(&mut self.rows);
+        self.repos = Groups::new(&self.rows);
         if self.by_priority {
             let items = self.assistant.as_ref().map_or(&[][..], |a| &a.todo[..]);
             sort_by_todo(&mut self.rows, items);
@@ -1356,7 +1360,7 @@ impl TasksUi {
         let members = self
             .project
             .as_ref()
-            .map(|key| repos::members(&self.rows, archived, key))
+            .map(|key| self.repos.members(archived, key).to_vec())
             .filter(|members| !members.is_empty());
         let Some(members) = members else {
             // A project nobody is left in takes the levels in it.
@@ -1364,12 +1368,13 @@ impl TasksUi {
             self.project_path.clear();
             self.proj_members.clear();
             self.visible.clear();
+            // The cursor follows its project as they reorder; a key that
+            // moves it to the top empties `projects` first.
             let was = self
                 .projects
                 .get(self.selected)
-                .filter(|_| self.selected > 0)
                 .map(|line| line.key.clone());
-            self.projects = repos::lines(&self.rows, archived, &self.filter);
+            self.projects = self.repos.lines(archived, &self.filter);
             self.selected = was
                 .and_then(|key| self.projects.iter().position(|line| line.key == key))
                 .unwrap_or_else(|| self.selected.min(self.projects.len().saturating_sub(1)));
@@ -1691,7 +1696,7 @@ impl TasksUi {
         match view.state() {
             Some(_) => self.task_count(false),
             None if view == View::Reviews => self.review_count(false),
-            None if view == View::Projects => repos::lines(&self.rows, false, "").len(),
+            None if view == View::Projects => self.repos.count(false),
             None => self.shown.len(),
         }
     }
@@ -1958,6 +1963,7 @@ impl TasksUi {
                 self.filter.push(c);
                 // The best match goes to the top, and so does the cursor.
                 self.selected = 0;
+                self.projects.clear();
                 self.refresh_visible(None);
             }
             _ => {}
@@ -2024,6 +2030,7 @@ impl TasksUi {
                     _ => self.view.prev(),
                 };
                 self.selected = 0;
+                self.projects.clear();
                 self.refresh_visible(None);
                 self.set_status("");
                 None
@@ -6438,6 +6445,78 @@ mod tests {
         press(&mut ui, KeyCode::Char('/'));
         type_text(&mut ui, "docs");
         assert_eq!(shown(&ui), ["docs"]);
+    }
+
+    #[test]
+    fn the_cursor_follows_its_project_when_they_reorder() {
+        let mut ui = by_repo();
+        assert_eq!(projects(&ui)[0].0, "api");
+        // Newer activity in web alone puts it first; the cursor stays on api.
+        ui.apply(Update::Status {
+            id: "docs".into(),
+            activity: None,
+            last_activity: 100,
+            unanchored: false,
+        });
+        assert_eq!(projects(&ui)[0].0, "web");
+        assert_eq!(ui.selected, 1);
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+    }
+
+    #[test]
+    fn a_manager_archived_while_inside_takes_its_levels_with_it() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Right);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
+        let mut rows = ui.rows.clone();
+        rows.iter_mut()
+            .find(|r| r.task.id == "ops")
+            .unwrap()
+            .task
+            .state = TaskState::Archived;
+        ui.set_rows(rows);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+        // Gone altogether, it is the same.
+        press(&mut ui, KeyCode::Right);
+        let rows = ui
+            .rows
+            .iter()
+            .filter(|r| r.task.id != "deploy")
+            .cloned()
+            .collect();
+        ui.set_rows(rows);
+        assert_eq!(ui.breadcrumb(), ["projects", "api"]);
+        assert_eq!(shown(&ui), ["fix"]);
+    }
+
+    #[test]
+    fn tab_away_and_back_keeps_the_project_gone_into() {
+        let mut ui = by_repo();
+        press(&mut ui, KeyCode::Right);
+        press(&mut ui, KeyCode::Right);
+        for _ in 0..4 {
+            press(&mut ui, KeyCode::Tab);
+        }
+        assert_eq!(ui.view, View::Projects);
+        assert_eq!(ui.breadcrumb(), ["projects", "api", "ops"]);
+        assert_eq!(shown(&ui), ["deploy", "fix"]);
+    }
+
+    #[test]
+    fn a_click_picks_a_project_two_lines_high() {
+        let mut ui = by_repo();
+        ui.list_area = Rect::new(0, 4, 80, 10);
+        // The border, then two lines for each project.
+        ui.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(projects(&ui)[ui.selected].0, "web");
     }
 
     #[test]

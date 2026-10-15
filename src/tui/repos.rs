@@ -8,7 +8,7 @@
 //! tasks below it, and is under `NoRepo` only if nothing below it has a
 //! repository either.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::state::rank_matches;
 use super::tasks::TaskRow;
@@ -51,36 +51,60 @@ pub struct RepoLine {
     pub members: Vec<usize>,
 }
 
-/// The projects of the active tasks, or, `archived`, those of the archived
-/// tasks that no active task is in; newest activity first, `NoRepo` last.
-/// Narrowed by `filter` on the repository, best match first.
-pub fn lines(rows: &[TaskRow], archived: bool, filter: &str) -> Vec<RepoLine> {
-    let mut all = groups(rows, TaskState::Active);
-    if archived {
-        let active: HashSet<Key> = all.into_iter().map(|line| line.key).collect();
-        all = groups(rows, TaskState::Archived);
-        all.retain(|line| !active.contains(&line.key));
-    }
-    if filter.is_empty() {
-        return all;
-    }
-    let text: Vec<String> = all
-        .iter()
-        .map(|line| format!("{} {}", line.key.name(), line.key.full()))
-        .collect();
-    rank_matches(text.iter().map(String::as_str), filter)
-        .into_iter()
-        .map(|i| all[i].clone())
-        .collect()
+/// Both lists of projects, grouped once per read of the rows rather than
+/// per draw or key.
+#[derive(Debug, Default, Clone)]
+pub struct Groups {
+    active: Vec<RepoLine>,
+    /// Without any repository an active task is in.
+    archived: Vec<RepoLine>,
 }
 
-/// Who is in project `key`, as indices into `rows`, in `rows` order.
-pub fn members(rows: &[TaskRow], archived: bool, key: &Key) -> Vec<usize> {
-    lines(rows, archived, "")
-        .into_iter()
-        .find(|line| &line.key == key)
-        .map(|line| line.members)
-        .unwrap_or_default()
+impl Groups {
+    pub fn new(rows: &[TaskRow]) -> Groups {
+        let active = groups(rows, TaskState::Active);
+        let held: HashSet<&Key> = active.iter().map(|line| &line.key).collect();
+        let mut archived = groups(rows, TaskState::Archived);
+        archived.retain(|line| !held.contains(&line.key));
+        Groups { active, archived }
+    }
+
+    fn all(&self, archived: bool) -> &[RepoLine] {
+        match archived {
+            true => &self.archived,
+            false => &self.active,
+        }
+    }
+
+    /// How many projects there are, active or `archived`.
+    pub fn count(&self, archived: bool) -> usize {
+        self.all(archived).len()
+    }
+
+    /// Who is in project `key`, as indices into the rows.
+    pub fn members(&self, archived: bool, key: &Key) -> &[usize] {
+        self.all(archived)
+            .iter()
+            .find(|line| &line.key == key)
+            .map_or(&[], |line| &line.members)
+    }
+
+    /// The projects, newest activity first with `NoRepo` last, narrowed by
+    /// `filter` on the repository, best match first.
+    pub fn lines(&self, archived: bool, filter: &str) -> Vec<RepoLine> {
+        let all = self.all(archived);
+        if filter.is_empty() {
+            return all.to_vec();
+        }
+        let text: Vec<String> = all
+            .iter()
+            .map(|line| format!("{} {}", line.key.name(), line.key.full()))
+            .collect();
+        rank_matches(text.iter().map(String::as_str), filter)
+            .into_iter()
+            .map(|i| all[i].clone())
+            .collect()
+    }
 }
 
 /// The projects of the tasks and managers in `state`, sorted.
@@ -98,6 +122,11 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<RepoLine> {
         }
         keys
     };
+    let at: HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| (row.task.id.as_str(), i))
+        .collect();
     // What each task is in by itself; a manager's own comes below.
     let mut keys: Vec<Vec<Key>> = rows
         .iter()
@@ -108,16 +137,13 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<RepoLine> {
         .collect();
     let mut added: Vec<Vec<Key>> = vec![Vec::new(); rows.len()];
     for (i, row) in rows.iter().enumerate().filter(|(_, row)| in_scope(row)) {
-        // A task with no repository is under `NoRepo`, and so are the
-        // managers above it.
-        let theirs = match keys[i].is_empty() && row.task.kind == TaskKind::Work {
-            true => vec![Key::NoRepo],
-            false => keys[i].clone(),
-        };
+        // Only real repositories go up: a manager is under `NoRepo` just
+        // when it ends up in none.
+        let theirs = keys[i].clone();
         // Up the parents that are in scope; a cycle stops where it comes round.
         let mut seen = HashSet::from([row.task.id.as_str()]);
-        let mut at = row.task.parent_id.as_deref();
-        while let Some(parent) = at.and_then(|id| rows.iter().position(|r| r.task.id == id)) {
+        let mut up_from = row.task.parent_id.as_deref();
+        while let Some(parent) = up_from.and_then(|id| at.get(id).copied()) {
             let up = &rows[parent];
             if !in_scope(up) || !seen.insert(up.task.id.as_str()) {
                 break;
@@ -125,7 +151,7 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<RepoLine> {
             if up.task.kind == TaskKind::Manager {
                 added[parent].extend(theirs.iter().cloned());
             }
-            at = up.task.parent_id.as_deref();
+            up_from = up.task.parent_id.as_deref();
         }
     }
     for (i, _) in rows.iter().enumerate().filter(|(_, row)| in_scope(row)) {
@@ -141,8 +167,8 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<RepoLine> {
     let mut out: Vec<RepoLine> = Vec::new();
     for (i, row) in rows.iter().enumerate().filter(|(_, row)| in_scope(row)) {
         for key in &keys[i] {
-            let at = match out.iter().position(|line| &line.key == key) {
-                Some(at) => at,
+            let slot = match out.iter().position(|line| &line.key == key) {
+                Some(slot) => slot,
                 None => {
                     out.push(RepoLine {
                         key: key.clone(),
@@ -154,7 +180,7 @@ fn groups(rows: &[TaskRow], state: TaskState) -> Vec<RepoLine> {
                     out.len() - 1
                 }
             };
-            let line = &mut out[at];
+            let line = &mut out[slot];
             match row.task.kind {
                 TaskKind::Manager => line.managers += 1,
                 _ => line.tasks += 1,
@@ -231,6 +257,10 @@ mod tests {
 
     fn work(id: &str, repos: &[&str], last: i64) -> TaskRow {
         row(id, TaskKind::Work, TaskState::Active, None, repos, last)
+    }
+
+    fn lines(rows: &[TaskRow], archived: bool, filter: &str) -> Vec<RepoLine> {
+        Groups::new(rows).lines(archived, filter)
     }
 
     fn summary(lines: &[RepoLine], rows: &[TaskRow]) -> Vec<(String, Vec<String>)> {
@@ -347,6 +377,37 @@ mod tests {
     }
 
     #[test]
+    fn a_manager_with_repos_below_it_is_not_also_under_no_repo() {
+        let rows = vec![
+            row("ops", TaskKind::Manager, TaskState::Active, None, &[], 5),
+            row(
+                "has",
+                TaskKind::Work,
+                TaskState::Active,
+                Some("ops"),
+                &["api"],
+                6,
+            ),
+            row(
+                "bare",
+                TaskKind::Work,
+                TaskState::Active,
+                Some("ops"),
+                &[],
+                7,
+            ),
+        ];
+        let got = summary(&lines(&rows, false, ""), &rows);
+        assert_eq!(
+            got,
+            [
+                ("api".into(), vec!["ops".into(), "has".into()]),
+                ("(no repo)".into(), vec!["bare".into()]),
+            ]
+        );
+    }
+
+    #[test]
     fn archived_projects_are_those_with_only_archived_tasks() {
         let rows = vec![
             work("live", &["api"], 10),
@@ -424,9 +485,8 @@ mod tests {
         let got = lines(&rows, false, "we");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].key.name(), "web");
-        assert_eq!(
-            members(&rows, false, &Key::Repo("github.com/acme/api".into())),
-            [0]
-        );
+        let api = Key::Repo("github.com/acme/api".into());
+        assert_eq!(Groups::new(&rows).members(false, &api), [0]);
+        assert_eq!(Groups::new(&rows).count(false), 2);
     }
 }
