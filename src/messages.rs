@@ -353,6 +353,48 @@ pub fn queued_reason(queued: &[Queued]) -> String {
     )
 }
 
+/// The most the Stop hook hands over at once, as [`queued_reason`] renders
+/// it, from a session without a wake channel that works.
+pub const STOP_CAP: usize = 2_048;
+
+/// Take what session `me` takes, oldest first, as far as [`queued_reason`]
+/// of it stays within `cap` bytes: whole messages that fit. A first message
+/// that does not fit alone is split: its head, ending in a line saying how
+/// much follows, is taken, and the tail stays queued in front, as the same
+/// message. Everything not taken stays queued.
+pub fn take_capped(inbox: &Inbox, me: Option<&str>, cap: usize) -> Result<Vec<Queued>> {
+    let mut mine = inbox.read_for(me)?;
+    if mine.is_empty() {
+        return Ok(mine);
+    }
+    let limit = cap.saturating_sub(queued_reason(&[]).len());
+    let n = fitting_within(&mine, limit, QUEUE_SEPARATOR);
+    let mut taken: Vec<Queued> = mine.drain(..n).collect();
+    if n == 1 && taken[0].message.len() > limit {
+        let first = taken.remove(0);
+        let more = |bytes: usize| format!("\n[… {bytes} more bytes follow at your next stop]");
+        // However many digits the count turns out to have.
+        let mut cut = limit.saturating_sub(more(first.message.len()).len());
+        while !first.message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (head, tail) = first.message.split_at(cut);
+        taken.push(Queued {
+            message: format!("{head}{}", more(tail.len())),
+            ..first.clone()
+        });
+        mine.insert(
+            0,
+            Queued {
+                message: tail.to_string(),
+                ..first
+            },
+        );
+    }
+    inbox.replace_for(me, &mine)?;
+    Ok(taken)
+}
+
 /// What goes between the messages of a queue handed over in one go, by the
 /// Stop hook or the wake channel.
 pub(crate) const QUEUE_SEPARATOR: &str = "\n\n---\n\n";
@@ -893,7 +935,7 @@ impl Agent for TmuxAgent<'_> {
 
     fn watched(&self) -> bool {
         let dir = tasks::task_dir(self.app, self.task);
-        status::current_status(&dir).is_some_and(|s| waiter::watched(&dir, &s.session_id))
+        status::current_status(&dir).is_some_and(|s| waiter::watched(self.app, &dir, &s.session_id))
     }
 
     fn queue_held_start(&self) -> Result<()> {
@@ -1619,6 +1661,88 @@ mod tests {
         ];
         let reason = queued_reason(&queued);
         assert!(reason.contains("add tests\n\n---\n\nand docs"), "{reason}");
+    }
+
+    fn msg(at: i64, message: &str, to: Option<&str>) -> Queued {
+        Queued {
+            at,
+            message: message.into(),
+            to: to.map(str::to_string),
+            from: Sender::Agent,
+        }
+    }
+
+    #[test]
+    fn a_capped_take_leaves_what_does_not_fit_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::lock(dir.path()).unwrap();
+        let limit = STOP_CAP - queued_reason(&[]).len();
+        let big = "a".repeat(limit / 2 - QUEUE_SEPARATOR.len());
+        let queue = [
+            msg(1, &big, Some("s")),
+            msg(2, &big, None),
+            msg(3, "three", Some("s")),
+            msg(4, "other session's", Some("t")),
+        ];
+        inbox.replace(&queue).unwrap();
+        let taken = take_capped(&inbox, Some("s"), STOP_CAP).unwrap();
+        assert_eq!(taken, queue[..2]);
+        assert!(queued_reason(&taken).len() <= STOP_CAP);
+        // Oldest first, whole messages: the third would not fit, and the
+        // small one behind it does not jump the queue.
+        assert_eq!(inbox.read().unwrap(), [queue[2].clone(), queue[3].clone()]);
+        // Under the cap, all of it goes.
+        let taken = take_capped(&inbox, Some("s"), STOP_CAP).unwrap();
+        assert_eq!(taken, [queue[2].clone()]);
+        assert_eq!(inbox.read().unwrap(), [queue[3].clone()]);
+        assert!(take_capped(&inbox, Some("s"), STOP_CAP).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_message_over_the_cap_is_split_without_losing_a_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::lock(dir.path()).unwrap();
+        // Multi-byte, so the cut has to find a character boundary.
+        let long = "é€𝄞x".repeat(700);
+        let first = Queued {
+            from: Sender::User,
+            ..msg(1, &long, Some("s"))
+        };
+        let second = msg(2, "after", Some("s"));
+        inbox.replace(&[first.clone(), second.clone()]).unwrap();
+        let mut heard = String::new();
+        for round in 0..10 {
+            let taken = take_capped(&inbox, Some("s"), STOP_CAP).unwrap();
+            assert!(queued_reason(&taken).len() <= STOP_CAP, "round {round}");
+            let [head] = &taken[..] else {
+                // The last of it, then the message behind it.
+                assert_eq!(taken.last().unwrap().message, "after");
+                heard.push_str(&taken[0].message);
+                break;
+            };
+            assert_eq!(
+                (head.at, head.to.as_deref(), head.from),
+                (1, Some("s"), Sender::User)
+            );
+            match head.message.rsplit_once("\n[… ") {
+                Some((text, footer)) => {
+                    heard.push_str(text);
+                    assert!(
+                        footer.ends_with(" more bytes follow at your next stop]"),
+                        "{footer}"
+                    );
+                    // Queued in front of the message behind it, as itself.
+                    let queued = inbox.read().unwrap();
+                    assert_eq!(queued.len(), 2);
+                    assert_eq!((queued[0].at, queued[0].from), (1, Sender::User));
+                    let more: usize = footer.split(' ').next().unwrap().parse().unwrap();
+                    assert_eq!(queued[0].message.len(), more);
+                }
+                None => heard.push_str(&head.message),
+            }
+        }
+        assert!(heard == long, "{} bytes of {}", heard.len(), long.len());
+        assert!(inbox.read().unwrap().is_empty());
     }
 
     /// One of several sessions sharing an inbox.

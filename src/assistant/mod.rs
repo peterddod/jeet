@@ -608,7 +608,7 @@ impl Agent for SessionAgent<'_> {
 
     fn watched(&self) -> bool {
         self.session.as_deref().is_some_and(|session| {
-            crate::waiter::watched(&tasks::task_dir(self.app, self.task), session)
+            crate::waiter::watched(self.app, &tasks::task_dir(self.app, self.task), session)
         })
     }
 }

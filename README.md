@@ -925,8 +925,21 @@ as a message from another session, which Claude Code tells the agent cannot
 approve anything, and `jeet task send` says "it gets it now, through its
 wake channel". If Claude Code refuses the message (a repo's
 `crossSessionInbound: "refuse"`, say), jeet notices it never arrived and
-falls back to the queue and typing for that session. `[harness] wake =
-false` turns the channel off ([The coding agent's
+falls back to the queue and typing for that session, and tries the channel
+again after 10 minutes, then after an hour. A third refusal ends that
+session's watcher, and the next `jeet watch --once` poll repairs it: once the
+agent is idle, has no unsent text and nobody has typed in its window for two
+minutes, jeet ends it and resumes the same session in the same place (the
+conversation is kept; the cost is one prompt-cache write), which starts a new
+watcher. This is also how an agent started before the channel existed, or
+whose watcher died, gets one. It happens at most once per session per day and
+is logged in the assistant's `actions.log`; a refusal after a repair turns the
+channel off for that session for good, and tells its parent. A Stop leaves
+the queue to a working watcher; without one it hands over at most 2 KB at a
+time. Like `jeet task restart`, a repair ends the session's process, so background
+work it left running (background shells, subagents) ends with it. `jeet doctor wake` shows each running session's channel. `[harness]
+wake = false` turns the channel off, and `wake_repair = "off"` keeps the
+repair, the back-off and the Stop's cap from happening ([The coding agent's
 harness](#the-coding-agents-harness)).
 
 A message holds at most 8,000 bytes, which keeps what is typed in under
@@ -2193,6 +2206,7 @@ command = "/opt/bin/claude --model opus"   # program and arguments (default: cla
 auto_trust = true                          # default: false
 auto_trust_reviews = false                 # default: false
 wake = true                                # default: true
+wake_repair = "auto"                       # default: "auto"; "off" for no repairs
 ```
 
 The command is taken from `$JEET_AGENT` first, then `[harness] command`, then

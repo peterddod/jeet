@@ -12,8 +12,11 @@
 //! for the nonce in the session's transcript: found, the batch was delivered;
 //! not found while the session sat idle for [`CONFIRM_SECS`], the post was
 //! dropped (a session that refuses them drops them silently), and the
-//! batch goes back to the front of the queue, the watcher stops for good for
-//! that session (`<session>.off`), and today's path delivers it.
+//! batch goes back to the front of the queue, and today's path delivers it.
+//! The session's channel then backs off (`<session>.off`): the watcher tries
+//! again after 10 minutes, then after an hour, and a third refusal ends it,
+//! for the watch poll to resume the session with a new one ([`crate::wake`]).
+//! A refusal after that repair turns the channel off for good.
 //!
 //! Its files are in `<task>/.jeet/wait/`, beside the inbox:
 //! - `<session>.lock`: an flock it holds for its life. A session is watched
@@ -22,7 +25,10 @@
 //! - `<session>.inflight`: the batch posted and not yet seen, written before
 //!   it is taken from the inbox, so a watcher killed at any point loses
 //!   nothing ([`recover`]);
-//! - `<session>.off`: a post was refused; no watcher posts for it again.
+//! - `<session>.off`: posts were refused ([`Off`]); until it clears, or for
+//!   good, the session counts as unwatched ([`wake_state`]);
+//! - `<session>.repaired`: when the session was last resumed to get a new
+//!   watcher ([`Repaired`]).
 //!
 //! The token is in none of them, nor in any argv or log line.
 //!
@@ -49,6 +55,8 @@ use crate::manager::run;
 use crate::messages::{
     self, open_regular, Agent, Inbox, Queued, Sender, MAX_MESSAGE, QUEUE_SEPARATOR,
 };
+use crate::permissions;
+use crate::reports::{self, StatusEvent};
 use crate::status::{self, State};
 use crate::tasks;
 use crate::worktrees::now_secs;
@@ -78,6 +86,10 @@ const LOCK_RETRY: Duration = Duration::from_millis(250);
 /// How much of the end of a transcript beside the session's is searched.
 const BESIDE_TAIL: u64 = 1024 * 1024;
 const NONCE_LEN: usize = 16;
+/// A session is refused this many times before its repair is due.
+const REFUSALS_BEFORE_REPAIR: u32 = 3;
+/// How long the watcher waits after its first and its second refusal.
+const RETRY_AFTER: [i64; 2] = [10 * 60, 60 * 60];
 
 /// What a batch starts with. It is never a message's own text, so one
 /// starting with `!`, `/` or `#` is never at the start of what is posted.
@@ -128,7 +140,7 @@ pub struct Start {
 }
 
 /// `<task>/.jeet/wait`.
-pub fn wait_dir(task_dir: &Path) -> PathBuf {
+pub(crate) fn wait_dir(task_dir: &Path) -> PathBuf {
     task_dir.join(tasks::MARKER_DIR).join("wait")
 }
 
@@ -138,7 +150,7 @@ fn wait_file(task_dir: &Path, session: &str, ext: &str) -> PathBuf {
 
 /// Whether a live watcher holds `session`'s wait lock. Makes nothing: no
 /// lock file means no watcher.
-pub fn watched(task_dir: &Path, session: &str) -> bool {
+fn lock_held(task_dir: &Path, session: &str) -> bool {
     if !status::valid_session_id(session) {
         return false;
     }
@@ -146,6 +158,167 @@ pub fn watched(task_dir: &Path, session: &str) -> bool {
         return false;
     };
     matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+/// Whether a watcher is posting for `session`: see [`wake_state`]. One
+/// backing off, or off, is not, whatever holds its lock. Without
+/// `wake_repair`, whether one holds the lock.
+pub fn watched(app: &App, task_dir: &Path, session: &str) -> bool {
+    match app.config.wake_repair() {
+        true => wake_state(task_dir, session, now_secs()) == WakeState::Watched,
+        false => lock_held(task_dir, session),
+    }
+}
+
+/// What `<session>.off` says: posts to the session were refused. Written
+/// whole, readable by its owner only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Off {
+    /// How many times a post was refused since one last got through.
+    pub refusals: u32,
+    /// The watcher posts nothing before this.
+    pub retry_at: i64,
+    /// When the session was resumed for a new watcher, if it was since.
+    #[serde(default)]
+    pub repaired_at: Option<i64>,
+    /// The next refusal after a repair: no watcher posts for it again.
+    #[serde(default)]
+    pub permanent: bool,
+}
+
+impl Off {
+    /// What an empty or unreadable file, as older jeets wrote it, means:
+    /// refused three times, so its repair is due.
+    fn legacy() -> Self {
+        Off {
+            refusals: REFUSALS_BEFORE_REPAIR,
+            retry_at: 0,
+            repaired_at: None,
+            permanent: false,
+        }
+    }
+
+    /// Refused often enough, and not repaired since.
+    fn repair_due(&self) -> bool {
+        !self.permanent && self.refusals >= REFUSALS_BEFORE_REPAIR && self.repaired_at.is_none()
+    }
+
+    /// What one more refusal at `now` makes of `prev`.
+    fn refused(prev: Option<&Off>, now: i64) -> Off {
+        let refusals = prev
+            .map_or(0, |p| p.refusals)
+            .saturating_add(1)
+            .min(REFUSALS_BEFORE_REPAIR);
+        let repaired_at = prev.and_then(|p| p.repaired_at);
+        Off {
+            refusals,
+            retry_at: match RETRY_AFTER.get(refusals as usize - 1) {
+                Some(secs) => now + secs,
+                None => now,
+            },
+            repaired_at,
+            permanent: repaired_at.is_some(),
+        }
+    }
+}
+
+/// `session`'s `.off`, if it has one.
+fn read_off(task_dir: &Path, session: &str) -> Option<Off> {
+    let mut text = String::new();
+    match open_regular(&wait_file(task_dir, session, "off"))
+        .and_then(|mut f| f.read_to_string(&mut text))
+    {
+        Ok(_) => Some(serde_json::from_str(&text).unwrap_or_else(|_| Off::legacy())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(Off::legacy()),
+    }
+}
+
+fn write_off(task_dir: &Path, session: &str, off: &Off) -> Result<()> {
+    write_json(&wait_file(task_dir, session, "off"), off)
+}
+
+/// Why a session was resumed for a new watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepairWhy {
+    /// No watcher held its lock.
+    Unwatched,
+    /// Its posts were refused three times.
+    Refused,
+}
+
+/// `<session>.repaired`: the last time jeet resumed the session to start a
+/// watcher for it, whatever the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Repaired {
+    pub at: i64,
+    pub why: RepairWhy,
+}
+
+pub fn read_repaired(task_dir: &Path, session: &str) -> Option<Repaired> {
+    let mut text = String::new();
+    open_regular(&wait_file(task_dir, session, "repaired"))
+        .and_then(|mut f| f.read_to_string(&mut text))
+        .ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Record that `session` is being resumed at `now`, and in its `.off`, if
+/// it has one, that its next refusal is its last.
+pub fn record_repair(task_dir: &Path, session: &str, why: RepairWhy, now: i64) -> Result<()> {
+    let dir = wait_dir(task_dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    write_json(
+        &wait_file(task_dir, session, "repaired"),
+        &Repaired { at: now, why },
+    )?;
+    match read_off(task_dir, session) {
+        Some(off) => write_off(
+            task_dir,
+            session,
+            &Off {
+                repaired_at: Some(now),
+                ..off
+            },
+        ),
+        None => Ok(()),
+    }
+}
+
+/// How a session's wake channel stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeState {
+    /// A watcher holds its lock and posts what is queued.
+    Watched,
+    /// Posts were refused: backing off until `retry_at`, due a repair, or
+    /// off for good. Nothing is posted meanwhile.
+    Off {
+        refusals: u32,
+        retry_at: i64,
+        permanent: bool,
+        repair_due: bool,
+    },
+    /// No watcher holds its lock.
+    Unwatched,
+}
+
+/// [`WakeState`] of `session` at `now`.
+pub fn wake_state(task_dir: &Path, session: &str, now: i64) -> WakeState {
+    if let Some(off) = read_off(task_dir, session) {
+        if off.permanent || off.repair_due() || off.retry_at > now {
+            return WakeState::Off {
+                refusals: off.refusals,
+                retry_at: off.retry_at,
+                permanent: off.permanent,
+                repair_due: off.repair_due(),
+            };
+        }
+    }
+    match lock_held(task_dir, session) {
+        true => WakeState::Watched,
+        false => WakeState::Unwatched,
+    }
 }
 
 /// A batch posted and not yet seen in the session's transcript.
@@ -172,16 +345,17 @@ fn read_inflight(path: &Path) -> Result<Option<Inflight>> {
     Ok(Some(inflight))
 }
 
-/// Replace `path` whole with `inflight`, readable by its owner only.
-fn write_inflight(path: &Path, inflight: &Inflight) -> Result<()> {
-    let tmp = path.with_extension("inflight.tmp");
+/// Replace `path` whole with `value`, readable by its owner only.
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let ext = path.extension().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_extension(format!("{ext}.tmp"));
     let written = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
         .open(&tmp)
-        .and_then(|mut f| f.write_all(&serde_json::to_vec(inflight)?));
+        .and_then(|mut f| f.write_all(&serde_json::to_vec(value)?));
     written.with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))
 }
@@ -219,7 +393,7 @@ fn push_back(inbox: &Inbox, msgs: &[Queued]) -> Result<bool> {
 /// What is still queued (a watcher killed before its take) is not queued
 /// twice. True when anything was pushed back. The caller holds the lock.
 pub fn recover(inbox: &Inbox, task_dir: &Path, session: &str, now: i64) -> Result<bool> {
-    if !status::valid_session_id(session) || watched(task_dir, session) {
+    if !status::valid_session_id(session) || lock_held(task_dir, session) {
         return Ok(false);
     }
     recover_unwatched(inbox, task_dir, session, now)
@@ -416,12 +590,14 @@ pub struct Watcher<'a> {
     pending: bool,
     /// Held when last asked: not asked again until then.
     held_until: i64,
+    /// Backing off after a refusal: nothing is posted before this.
+    retry_at: i64,
     tick: u64,
 }
 
 impl<'a> Watcher<'a> {
     /// The watcher of `start`'s session of `task`: `None` when the session
-    /// is off, its agent's process cannot be read, or another watcher holds
+    /// is off for good, its agent's process cannot be read, or another watcher holds
     /// its lock. Recovers what earlier watchers left in flight.
     pub fn open(
         app: &'a App,
@@ -445,7 +621,12 @@ impl<'a> Watcher<'a> {
             return Ok(None);
         }
         let task_dir = tasks::task_dir(app, &task);
-        if wait_file(&task_dir, &start.session, "off").exists() {
+        // Off in whole, as before, unless refusals back off and are mended.
+        let off = read_off(&task_dir, &start.session);
+        if off
+            .as_ref()
+            .is_some_and(|o| o.permanent || !app.config.wake_repair())
+        {
             return Ok(None);
         }
         let Some(s0) = identity::start_of(env.claude_pid) else {
@@ -497,6 +678,7 @@ impl<'a> Watcher<'a> {
             last_inbox: None,
             pending: true,
             held_until: i64::MIN,
+            retry_at: off.map_or(0, |o| o.retry_at),
             tick: 0,
         }))
     }
@@ -585,13 +767,15 @@ impl<'a> Watcher<'a> {
                 });
             }
             remove(&self.inflight_path())?;
+            // It got through: the channel works, and the count starts over.
+            remove(&wait_file(&self.task_dir, &self.start.session, "off"))?;
             self.flight = None;
             self.pending = true;
         }
         if self.inbox_changed() {
             self.pending = true;
         }
-        if !self.pending || now < self.held_until || self.capped(now) {
+        if !self.pending || now < self.held_until.max(self.retry_at) || self.capped(now) {
             return Ok(Next::Wait);
         }
         self.take_and_post(now)
@@ -643,7 +827,7 @@ impl<'a> Watcher<'a> {
         };
         // Before the take: a watcher killed between the two leaves the batch
         // both queued and in flight, which `recover` puts right.
-        write_inflight(&self.inflight_path(), &record)?;
+        write_json(&self.inflight_path(), &record)?;
         let mut rest = inbox.read_for(Some(&session))?;
         for taken in &queue[..n] {
             if let Some(i) = rest.iter().position(|q| q == taken) {
@@ -689,13 +873,58 @@ impl<'a> Watcher<'a> {
                 .is_some_and(|s| s.session_id == self.start.session)
     }
 
+    /// A post was refused (`step` said `Exit(Refused)`, or failed): with
+    /// `wake_repair` on, and unless this is the third refusal or one after a
+    /// repair, the batch goes back to the queue, as [`close`] does it, the
+    /// session is marked backing off, and the watcher carries on, posting
+    /// nothing until `retry_at`. Otherwise `Exit(Refused)`, for [`close`].
+    ///
+    /// [`close`]: Watcher::close
+    pub fn refused(&mut self, agent: &dyn Agent, now: i64) -> Result<Next> {
+        if !self.app.config.wake_repair() {
+            return Ok(Next::Exit(Why::Refused));
+        }
+        let session = self.start.session.clone();
+        let prev = read_off(&self.task_dir, &session);
+        let off = Off::refused(prev.as_ref(), now);
+        if off.permanent || off.refusals >= REFUSALS_BEFORE_REPAIR {
+            return Ok(Next::Exit(Why::Refused));
+        }
+        let inbox = Inbox::lock(&self.task_dir)?;
+        // Taken only once put back: on an error, `close` still has it.
+        put_back(
+            self.app,
+            &self.task,
+            &self.task_dir,
+            &session,
+            &inbox,
+            self.flight.as_mut(),
+            Why::Refused,
+        )?;
+        self.flight = None;
+        // Before the hand-over: it is unwatched from here, so it is typed.
+        write_off(&self.task_dir, &session, &off)?;
+        self.retry_at = off.retry_at;
+        self.pending = true;
+        hand_over_idle(
+            self.app,
+            &self.task,
+            &self.task_dir,
+            &session,
+            &inbox,
+            agent,
+        )?;
+        Ok(Next::Wait)
+    }
+
     /// End the watcher, under the inbox lock: an unseen batch in flight
     /// goes back to the front of the queue, and the lock is let go before
     /// the inbox's, so a delivery either found it watched with its message
     /// queued before this, or finds it unwatched. Refused, the session is
-    /// marked off and, when it is idle, not held and the task's current
-    /// one, what is queued is typed into `agent`. Gone or ended, nothing is
-    /// typed: the queue waits for the next session.
+    /// marked off (due its repair, or for good after one, and then its
+    /// parent is told) and, when it is idle, not held and the task's
+    /// current one, what is queued is typed into `agent`. Gone or ended,
+    /// nothing is typed: the queue waits for the next session.
     pub fn close(self, why: Why, agent: &dyn Agent) -> Result<()> {
         let Watcher {
             app,
@@ -703,50 +932,117 @@ impl<'a> Watcher<'a> {
             task_dir,
             start,
             lock,
-            flight,
+            mut flight,
             ..
         } = self;
         let session = start.session.as_str();
         let inbox = Inbox::lock(&task_dir)?;
-        // A take that failed after writing its batch: still queued, and
-        // typed below, so not to be put back later.
-        if flight.is_none() {
-            remove(&wait_file(&task_dir, session, "inflight"))?;
-        }
-        if let Some(mut flight) = flight {
-            let record = &flight.record;
-            let found = seen(&record.transcript, &mut flight.pos, &record.nonce).unwrap_or(false)
-                || (why == Why::Ended
-                    && seen_beside(&record.transcript, record.posted_at, &record.nonce));
-            if !found {
-                let msgs = match (why, task.kind) {
-                    (Why::Ended, TaskKind::Assistant) => {
-                        readdressed(app, &task, session, &record.msgs)
-                    }
-                    _ => record.msgs.clone(),
-                };
-                push_back(&inbox, &msgs)?;
-            }
-            remove(&wait_file(&task_dir, session, "inflight"))?;
-            if let (Why::Refused, Some(at)) = (why, flight.wake_at) {
-                status::revert_wake(&task_dir, session, at)?;
-            }
-        }
+        put_back(app, &task, &task_dir, session, &inbox, flight.as_mut(), why)?;
         if why == Why::Refused {
-            let off = wait_file(&task_dir, session, "off");
-            std::fs::write(&off, b"").with_context(|| format!("write {}", off.display()))?;
+            mark_off(app, &task, &task_dir, session, now_secs())?;
         }
         drop(lock);
-        if why != Why::Refused || run::hold(app, &task)?.is_some() {
+        if why != Why::Refused {
             return Ok(());
         }
-        let idle = status::read_status(&task_dir, session).is_some_and(|s| s.state == State::Idle);
-        let current = task.kind == TaskKind::Assistant
-            || status::current_status(&task_dir).is_some_and(|s| s.session_id == session);
-        if idle && current {
-            messages::hand_over_queue(&inbox, agent)?;
-        }
-        Ok(())
+        hand_over_idle(app, &task, &task_dir, session, &inbox, agent)
+    }
+}
+
+/// Under the inbox lock: an unseen batch in flight of `session` goes back to
+/// the front of the queue, and what the take wrote for it is let go. Refused,
+/// the status the watcher wrote for it is put back as it was.
+fn put_back(
+    app: &App,
+    task: &TaskRecord,
+    task_dir: &Path,
+    session: &str,
+    inbox: &Inbox,
+    flight: Option<&mut Flight>,
+    why: Why,
+) -> Result<()> {
+    // A take that failed after writing its batch: still queued, and
+    // typed after, so not to be put back later.
+    if flight.is_none() {
+        remove(&wait_file(task_dir, session, "inflight"))?;
+    }
+    let Some(flight) = flight else {
+        return Ok(());
+    };
+    let record = &flight.record;
+    let found = seen(&record.transcript, &mut flight.pos, &record.nonce).unwrap_or(false)
+        || (why == Why::Ended && seen_beside(&record.transcript, record.posted_at, &record.nonce));
+    if !found {
+        let msgs = match (why, task.kind) {
+            (Why::Ended, TaskKind::Assistant) => readdressed(app, task, session, &record.msgs),
+            _ => record.msgs.clone(),
+        };
+        push_back(inbox, &msgs)?;
+    }
+    remove(&wait_file(task_dir, session, "inflight"))?;
+    if let (Why::Refused, Some(at)) = (why, flight.wake_at) {
+        status::revert_wake(task_dir, session, at)?;
+    }
+    Ok(())
+}
+
+/// Type what is queued into `agent` when `session` is idle, not held and
+/// the task's current one.
+fn hand_over_idle(
+    app: &App,
+    task: &TaskRecord,
+    task_dir: &Path,
+    session: &str,
+    inbox: &Inbox,
+    agent: &dyn Agent,
+) -> Result<()> {
+    if run::hold(app, task)?.is_some() {
+        return Ok(());
+    }
+    let idle = status::read_status(task_dir, session).is_some_and(|s| s.state == State::Idle);
+    let current = task.kind == TaskKind::Assistant
+        || status::current_status(task_dir).is_some_and(|s| s.session_id == session);
+    if idle && current {
+        messages::hand_over_queue(inbox, agent)?;
+    }
+    Ok(())
+}
+
+/// The watcher of `session` ends refused: it is due its repair, or, when it
+/// was repaired already, off for good and its parent is told. Without
+/// `wake_repair` it is off for good at once, and nobody is told.
+fn mark_off(app: &App, task: &TaskRecord, task_dir: &Path, session: &str, now: i64) -> Result<()> {
+    let prev = read_off(task_dir, session);
+    let off = match app.config.wake_repair() {
+        true => Off {
+            refusals: REFUSALS_BEFORE_REPAIR,
+            ..Off::refused(prev.as_ref(), now)
+        },
+        false => Off {
+            permanent: true,
+            ..Off::legacy()
+        },
+    };
+    write_off(task_dir, session, &off)?;
+    if off.permanent && app.config.wake_repair() {
+        tell_off(app, task, session, now);
+    }
+    Ok(())
+}
+
+/// Tell `task`'s parent that `session`'s wake channel is off for good; the
+/// assistant has none, so its actions log says.
+fn tell_off(app: &App, task: &TaskRecord, session: &str, now: i64) {
+    let body = format!(
+        "wake channel off for session {session}: its posts were refused after a repair; \
+         messages reach it at Stop or typed"
+    );
+    let told = match task.parent_id {
+        Some(_) => reports::auto_status(app, task, StatusEvent::Wake, &body, now, 0).map(|_| ()),
+        None => permissions::log_wake(&app.home, &body, permissions::Outcome::Failed),
+    };
+    if let Err(e) = told {
+        eprintln!("jeet inbox watch: {e:#}");
     }
 }
 
@@ -842,14 +1138,24 @@ pub fn run(harness: &dyn Harness, task_id: &str, env: WakeEnv) -> Result<()> {
         return Ok(());
     };
     let why = loop {
-        match watcher.step(now_secs()) {
-            Ok(Next::Wait) => std::thread::sleep(TICK),
-            Ok(Next::Exit(why)) => break why,
-            // Today's path takes over.
-            Err(e) => {
-                eprintln!("jeet inbox watch: {e:#}");
-                break Why::Refused;
+        // An error counts as a refusal: today's path takes over.
+        let next = watcher.step(now_secs()).unwrap_or_else(|e| {
+            eprintln!("jeet inbox watch: {e:#}");
+            Next::Exit(Why::Refused)
+        });
+        let next = match next {
+            Next::Exit(Why::Refused) => {
+                let agent = status::idle_agent(&app, &task, &start.session);
+                watcher.refused(&*agent, now_secs()).unwrap_or_else(|e| {
+                    eprintln!("jeet inbox watch: {e:#}");
+                    Next::Exit(Why::Refused)
+                })
             }
+            next => next,
+        };
+        match next {
+            Next::Wait => std::thread::sleep(TICK),
+            Next::Exit(why) => break why,
         }
     };
     let agent = status::idle_agent(&app, &task, &start.session);
@@ -885,7 +1191,7 @@ pub(crate) fn left_in_flight_for_test(
         posted_at,
         msgs,
     };
-    write_inflight(&wait_file(task_dir, session, "inflight"), &inflight).unwrap();
+    write_json(&wait_file(task_dir, session, "inflight"), &inflight).unwrap();
 }
 
 /// For other modules' tests: whether `session` has a batch in flight.
@@ -1015,6 +1321,42 @@ mod tests {
             )
             .unwrap()
             .unwrap()
+        }
+
+        /// A watcher for `s`, unless it is off.
+        fn try_open(&self) -> Option<Watcher<'_>> {
+            std::fs::write(self.transcript(), b"{\"type\":\"start\"}\n").unwrap();
+            Watcher::open_retrying(
+                &self.app,
+                self.task(),
+                self.env(std::process::id()),
+                self.start(),
+                0,
+                Duration::ZERO,
+            )
+            .unwrap()
+        }
+
+        /// `s` repaired since its `.off`.
+        fn repair_off(&self) {
+            record_repair(&self.dir(), "s", RepairWhy::Refused, 1).unwrap();
+        }
+
+        /// Run `s` through its post being sent and never seen, the session
+        /// sitting idle, until `Exit(Refused)`, from `at`.
+        fn refuse(&self, w: &mut Watcher<'_>, at: i64) {
+            assert_eq!(w.step(at).unwrap(), Next::Wait);
+            assert_eq!(w.step(at + CONFIRM_SECS - 1).unwrap(), Next::Wait);
+            assert_eq!(w.step(at + CONFIRM_SECS).unwrap(), Next::Exit(Why::Refused));
+        }
+
+        fn off(&self) -> Option<Off> {
+            read_off(&self.dir(), "s")
+        }
+
+        fn set_off(&self, off: &Off) {
+            std::fs::create_dir_all(wait_dir(&self.dir())).unwrap();
+            write_off(&self.dir(), "s", off).unwrap();
         }
 
         fn send(&self, message: &str) {
@@ -1221,16 +1563,16 @@ mod tests {
     fn watched_means_a_lock_someone_holds_and_never_makes_one() {
         let lab = Lab::new();
         let dir = lab.dir();
-        assert!(!watched(&dir, "s"));
+        assert!(!watched(&lab.app, &dir, "s"));
         assert!(!wait_dir(&dir).exists());
-        assert!(!watched(&dir, "../s"));
+        assert!(!watched(&lab.app, &dir, "../s"));
         std::fs::create_dir_all(wait_dir(&dir)).unwrap();
         let held = lock_within(&wait_file(&dir, "s", "lock"), 1, Duration::ZERO)
             .unwrap()
             .unwrap();
-        assert!(watched(&dir, "s"));
+        assert!(watched(&lab.app, &dir, "s"));
         drop(held);
-        assert!(!watched(&dir, "s"));
+        assert!(!watched(&lab.app, &dir, "s"));
     }
 
     #[test]
@@ -1267,17 +1609,154 @@ mod tests {
         .unwrap();
         assert!(again.is_none());
         drop(first);
-        std::fs::write(wait_file(&lab.dir(), "s", "off"), b"").unwrap();
-        let off = Watcher::open_retrying(
-            &lab.app,
-            lab.task(),
-            lab.env(std::process::id()),
-            lab.start(),
-            0,
-            Duration::ZERO,
+        write_off(
+            &lab.dir(),
+            "s",
+            &Off {
+                permanent: true,
+                ..Off::legacy()
+            },
         )
         .unwrap();
-        assert!(off.is_none());
+        assert!(lab.try_open().is_none());
+    }
+
+    #[test]
+    fn an_empty_off_of_an_older_jeet_is_a_repair_due_not_the_end() {
+        let lab = Lab::new();
+        let off = wait_file(&lab.dir(), "s", "off");
+        std::fs::create_dir_all(wait_dir(&lab.dir())).unwrap();
+        std::fs::write(&off, b"").unwrap();
+        assert_eq!(read_off(&lab.dir(), "s"), Some(Off::legacy()));
+        std::fs::write(&off, b"not json").unwrap();
+        assert_eq!(read_off(&lab.dir(), "s"), Some(Off::legacy()));
+        std::fs::write(&off, b"").unwrap();
+        assert_eq!(
+            wake_state(&lab.dir(), "s", 5),
+            WakeState::Off {
+                refusals: 3,
+                retry_at: 0,
+                permanent: false,
+                repair_due: true
+            }
+        );
+        // A watcher may start for it: the session may be resumed to get one.
+        assert!(lab.try_open().is_some());
+        lab.repair_off();
+        assert!(lab.try_open().is_some());
+    }
+
+    #[test]
+    fn a_session_is_watched_unwatched_or_off() {
+        let lab = Lab::new();
+        let dir = lab.dir();
+        assert_eq!(wake_state(&dir, "s", 100), WakeState::Unwatched);
+        assert_eq!(wake_state(&dir, "../s", 100), WakeState::Unwatched);
+        let held = held_for_test(&dir, "s");
+        assert_eq!(wake_state(&dir, "s", 100), WakeState::Watched);
+        assert!(watched(&lab.app, &dir, "s"));
+        // Backing off, though its watcher holds the lock.
+        let mut off = Off {
+            refusals: 1,
+            retry_at: 700,
+            repaired_at: None,
+            permanent: false,
+        };
+        write_off(&dir, "s", &off).unwrap();
+        let backing = WakeState::Off {
+            refusals: 1,
+            retry_at: 700,
+            permanent: false,
+            repair_due: false,
+        };
+        assert_eq!(wake_state(&dir, "s", 100), backing);
+        assert_eq!(wake_state(&dir, "s", 699), backing);
+        assert_eq!(wake_state(&dir, "s", 700), WakeState::Watched);
+        // Backed off, with no watcher: unwatched, and not yet due.
+        drop(held);
+        assert_eq!(wake_state(&dir, "s", 700), WakeState::Unwatched);
+        // Refused three times.
+        off.refusals = 3;
+        write_off(&dir, "s", &off).unwrap();
+        assert!(matches!(
+            wake_state(&dir, "s", 800),
+            WakeState::Off {
+                refusals: 3,
+                repair_due: true,
+                permanent: false,
+                ..
+            }
+        ));
+        // Repaired: its new watcher is trusted until it is refused again.
+        let _held = held_for_test(&dir, "s");
+        off.repaired_at = Some(750);
+        write_off(&dir, "s", &off).unwrap();
+        assert_eq!(wake_state(&dir, "s", 800), WakeState::Watched);
+        // And for good.
+        off.permanent = true;
+        write_off(&dir, "s", &off).unwrap();
+        assert!(matches!(
+            wake_state(&dir, "s", 800),
+            WakeState::Off {
+                permanent: true,
+                repair_due: false,
+                ..
+            }
+        ));
+        assert!(!watched(&lab.app, &dir, "s"));
+    }
+
+    #[test]
+    fn without_wake_repair_watched_is_only_the_lock() {
+        let mut lab = Lab::new();
+        let _held = held_for_test(&lab.dir(), "s");
+        lab.set_off(&Off {
+            refusals: 1,
+            retry_at: i64::MAX,
+            repaired_at: None,
+            permanent: false,
+        });
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
+        lab.app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: None,
+            command: None,
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: None,
+            wake_repair: Some(crate::config::WakeRepair::Off),
+        });
+        assert!(watched(&lab.app, &lab.dir(), "s"));
+    }
+
+    #[test]
+    fn a_repair_is_recorded_for_the_day_and_in_the_off() {
+        let lab = Lab::new();
+        let dir = lab.dir();
+        assert_eq!(read_repaired(&dir, "s"), None);
+        record_repair(&dir, "s", RepairWhy::Unwatched, 100).unwrap();
+        assert_eq!(
+            read_repaired(&dir, "s"),
+            Some(Repaired {
+                at: 100,
+                why: RepairWhy::Unwatched
+            })
+        );
+        // No back-off to mark.
+        assert_eq!(read_off(&dir, "s"), None);
+        std::fs::write(wait_file(&dir, "s", "off"), b"").unwrap();
+        record_repair(&dir, "s", RepairWhy::Refused, 200).unwrap();
+        assert_eq!(
+            read_off(&dir, "s"),
+            Some(Off {
+                repaired_at: Some(200),
+                ..Off::legacy()
+            })
+        );
+        assert_eq!(read_repaired(&dir, "s").unwrap().why, RepairWhy::Refused);
+        let mode = std::fs::metadata(wait_file(&dir, "s", "off"))
+            .unwrap()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
@@ -1451,7 +1930,217 @@ mod tests {
         assert_eq!((state.state, state.busy_since), (State::Idle, None));
         assert!(wait_file(&lab.dir(), "s", "off").exists());
         assert!(lab.inflight().is_none());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
+    }
+
+    #[test]
+    fn refusals_back_off_twice_and_the_third_ends_the_watcher() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let mut w = lab.watcher();
+        let typist = Typist::default();
+        lab.send("one");
+        lab.refuse(&mut w, 10);
+        // First: the batch is handed over by typing, and the watcher
+        // carries on, holding its lock, for ten minutes.
+        assert!(received(&listener).is_some());
+        assert_eq!(w.refused(&typist, 30).unwrap(), Next::Wait);
+        assert_eq!(*typist.typed.borrow(), ["one"]);
+        assert!(lab.queued().is_empty());
+        assert!(lab.inflight().is_none());
+        assert_eq!(
+            lab.off(),
+            Some(Off {
+                refusals: 1,
+                retry_at: 30 + 600,
+                repaired_at: None,
+                permanent: false
+            })
+        );
+        assert!(matches!(
+            wake_state(&lab.dir(), "s", 31),
+            WakeState::Off {
+                refusals: 1,
+                repair_due: false,
+                ..
+            }
+        ));
+        assert_eq!(wake_state(&lab.dir(), "s", 630), WakeState::Watched);
+        let state = lab.state();
+        assert_eq!((state.state, state.busy_since), (State::Idle, None));
+        // Nothing is posted until then.
+        lab.send("two");
+        assert_eq!(w.step(100).unwrap(), Next::Wait);
+        assert_eq!(w.step(629).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        assert_eq!(lab.queued().len(), 1);
+        // Second: an hour.
+        lab.refuse(&mut w, 630);
+        assert!(content(&received(&listener).unwrap()).contains("two"));
+        assert_eq!(w.refused(&typist, 650).unwrap(), Next::Wait);
+        assert_eq!(typist.typed.borrow().len(), 2);
+        let off = lab.off().unwrap();
+        assert_eq!((off.refusals, off.retry_at), (2, 650 + 3600));
+        lab.send("three");
+        assert_eq!(w.step(4249).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        // Third: the watcher ends, and a repair is due.
+        lab.refuse(&mut w, 4250);
+        assert!(content(&received(&listener).unwrap()).contains("three"));
+        assert_eq!(w.refused(&typist, 4270).unwrap(), Next::Exit(Why::Refused));
+        w.close(Why::Refused, &typist).unwrap();
+        assert_eq!(typist.typed.borrow().len(), 3);
+        let off = lab.off().unwrap();
+        assert_eq!((off.refusals, off.permanent), (3, false));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
+        assert!(matches!(
+            wake_state(&lab.dir(), "s", now_secs()),
+            WakeState::Off {
+                repair_due: true,
+                permanent: false,
+                ..
+            }
+        ));
+        assert!(lab.queued().is_empty());
+    }
+
+    #[test]
+    fn a_post_that_gets_through_clears_the_back_off() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let mut w = lab.watcher();
+        lab.send("one");
+        lab.refuse(&mut w, 10);
+        assert_eq!(w.refused(&Typist::default(), 30).unwrap(), Next::Wait);
+        assert!(lab.off().is_some());
+        let _ = received(&listener);
+        lab.send("two");
+        assert_eq!(w.step(630).unwrap(), Next::Wait);
+        assert!(received(&listener).is_some());
+        lab.deliver();
+        assert_eq!(w.step(631).unwrap(), Next::Wait);
+        // The count starts over.
+        assert_eq!(lab.off(), None);
+        assert!(lab.inflight().is_none());
+    }
+
+    #[test]
+    fn a_watcher_opened_into_a_back_off_waits_it_out() {
+        let lab = Lab::new();
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let off = Off {
+            refusals: 1,
+            retry_at: 500,
+            repaired_at: None,
+            permanent: false,
+        };
+        lab.set_off(&off);
+        let mut w = lab.try_open().unwrap();
+        lab.send("hi");
+        assert_eq!(w.step(499).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        assert_eq!(w.step(500).unwrap(), Next::Wait);
+        assert!(received(&listener).is_some());
+    }
+
+    #[test]
+    fn a_refusal_after_a_repair_is_the_last_and_the_parent_is_told() {
+        let lab = Lab::new();
+        let _listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        let before = Off {
+            refusals: 3,
+            retry_at: 0,
+            repaired_at: None,
+            permanent: false,
+        };
+        lab.set_off(&before);
+        record_repair(&lab.dir(), "s", RepairWhy::Refused, 5).unwrap();
+        // The resumed session's watcher is trusted again.
+        assert_eq!(wake_state(&lab.dir(), "s", 6), WakeState::Unwatched);
+        let mut w = lab.try_open().unwrap();
+        assert_eq!(wake_state(&lab.dir(), "s", 6), WakeState::Watched);
+        lab.send("hi");
+        lab.refuse(&mut w, 10);
+        let typist = Typist::default();
+        // No back-off this time.
+        assert_eq!(w.refused(&typist, 30).unwrap(), Next::Exit(Why::Refused));
+        assert!(typist.typed.borrow().is_empty());
+        assert!(lab.app.db.last_status_report("w").unwrap().is_none());
+        w.close(Why::Refused, &typist).unwrap();
+        let off = lab.off().unwrap();
+        assert!(off.permanent);
+        assert_eq!(off.repaired_at, Some(5));
+        assert_eq!(*typist.typed.borrow(), ["hi"]);
+        assert!(matches!(
+            wake_state(&lab.dir(), "s", now_secs()),
+            WakeState::Off {
+                permanent: true,
+                ..
+            }
+        ));
+        let report = lab.app.db.last_status_report("w").unwrap().unwrap();
+        assert_eq!(
+            report.body,
+            "wake channel off for session s: its posts were refused after a repair; \
+             messages reach it at Stop or typed"
+        );
+        // Never again.
+        assert!(lab.try_open().is_none());
+    }
+
+    #[test]
+    fn each_session_going_off_for_good_is_told_to_the_parent() {
+        let lab = Lab::new();
+        let task = lab.task();
+        let at = now_secs();
+        tell_off(&lab.app, &task, "s1", at);
+        tell_off(&lab.app, &task, "s2", at + 10);
+        let reports = lab.app.db.reports_for("w", 10).unwrap();
+        let told: Vec<&str> = reports.iter().map(|r| r.body.as_str()).collect();
+        assert!(told.iter().any(|b| b.contains("session s1")), "{told:?}");
+        assert!(told.iter().any(|b| b.contains("session s2")), "{told:?}");
+    }
+
+    #[test]
+    fn the_assistant_has_no_parent_so_its_log_says_the_channel_is_off() {
+        let lab = Lab::new();
+        let root = crate::manager::root(&lab.app).unwrap();
+        let dir = tasks::task_dir(&lab.app, &root);
+        std::fs::create_dir_all(dir.join(".jeet")).unwrap();
+        tell_off(&lab.app, &root, "s", 5);
+        let log = std::fs::read_to_string(permissions::actions_log(&lab.app.home)).unwrap();
+        assert!(log.contains("wake channel off for session s"), "{log}");
+    }
+
+    #[test]
+    fn with_wake_repair_off_a_refusal_is_for_good_as_before() {
+        let mut lab = Lab::new();
+        lab.app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: None,
+            command: None,
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: None,
+            wake_repair: Some(crate::config::WakeRepair::Off),
+        });
+        lab.status(State::Idle, "SessionStart", 1);
+        let _listener = lab.listen();
+        let mut w = lab.watcher();
+        lab.send("hi");
+        lab.refuse(&mut w, 10);
+        let typist = Typist::default();
+        assert_eq!(w.refused(&typist, 30).unwrap(), Next::Exit(Why::Refused));
+        w.close(Why::Refused, &typist).unwrap();
+        assert_eq!(*typist.typed.borrow(), ["hi"]);
+        assert!(lab.off().unwrap().permanent);
+        assert!(lab.app.db.last_status_report("w").unwrap().is_none());
+        // Any `.off` keeps a watcher from starting, an empty one too.
+        std::fs::write(wait_file(&lab.dir(), "s", "off"), b"").unwrap();
+        assert!(lab.try_open().is_none());
     }
 
     #[test]
@@ -1540,7 +2229,7 @@ mod tests {
         assert!(typist.typed.borrow().is_empty());
         assert_eq!(lab.queued().len(), 1);
         assert!(!wait_file(&lab.dir(), "s", "off").exists());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]
@@ -1636,7 +2325,7 @@ mod tests {
         assert!(typist.typed.borrow().is_empty());
         assert_eq!(lab.queued().len(), 1);
         assert!(lab.inflight().is_none());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]

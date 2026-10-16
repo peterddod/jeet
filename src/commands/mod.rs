@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod clone;
 pub mod completions;
+pub mod doctor;
 pub mod exec;
 pub mod explore;
 pub mod import;

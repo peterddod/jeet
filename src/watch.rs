@@ -1191,6 +1191,10 @@ pub fn run_once(app: &App) -> Result<()> {
         Ok(lines) => lines.iter().for_each(|l| eprintln!("jeet: {l}")),
         Err(e) => eprintln!("jeet: warning: could not look for finished reviews: {e:#}"),
     }
+    // A session whose wake channel stopped is resumed for a new watcher.
+    if let Err(e) = crate::wake::sweep_wake(app, now_secs(), true) {
+        eprintln!("jeet: warning: could not look at the wake channels: {e:#}");
+    }
     // Nor when a slot under `max_live` frees up without an `Ended` hook.
     match run::drain(app) {
         Ok(warnings) => warnings

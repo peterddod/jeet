@@ -1099,6 +1099,7 @@ mod tests {
             auto_trust: None,
             auto_trust_reviews: None,
             wake: Some(false),
+            wake_repair: None,
         });
         assert!(!wake(&app, claude));
         assert!(
