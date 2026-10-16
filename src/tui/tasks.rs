@@ -5664,6 +5664,7 @@ impl Screen<'_> {
 
     fn show_projects(&mut self, select: Option<&str>) -> Result<()> {
         self.read_projects(true);
+        self.ui.panel = None;
         self.ui.show_project(select);
         Ok(())
     }
