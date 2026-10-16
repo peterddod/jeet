@@ -755,17 +755,17 @@ keeps what it said before. PR titles are shown as text, never run.
 
 | Key | |
 |---|---|
-| `⏎` | the review's menu: `v` view the diff, `s` open the review's session |
+| `⏎` | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
-| `s` (in the menu) | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `e` | explore the review's worktree |
+| `R` | ask the review's agent to review again, as `jeet review <pr> --rerun` does (without opening the viewer) |
 | `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
 | `D` | delete the review, after listing any work that would be lost |
 | `A` | show the archived reviews instead of the active ones, and back |
 | `/` | filter by PR (`api#131`), the review's name or title |
 
-A review has one worktree and one pull request, so `w` and `p` have nothing to
-show here.
+A review has one worktree and one pull request, so the task keys `w`, `p`, `S`,
+`n` and `o` do nothing here.
 
 A review whose PR is merged or closed is archived for you, the way `a` (or
 `jeet task archive`) archives it: its agent is ended, its worktree removed,
