@@ -51,7 +51,9 @@ fn run_job(app: &App, name: &str, args: &[String]) -> Result<()> {
         }
         (status, _) => {
             let why = outcome.error.unwrap_or_default();
-            bail!("worker job {} {}: {why}", outcome.id, status.as_str())
+            // The error may quote what the model said, or what it read.
+            let message = format!("worker job {} {}: {why}", outcome.id, status.as_str());
+            bail!(shown(&caller, &message))
         }
     }
 }

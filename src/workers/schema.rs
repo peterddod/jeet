@@ -27,8 +27,27 @@ const TYPES: &[&str] = &["object", "array", "string", "boolean", "integer", "num
 
 /// Refuse `schema` unless it uses only what [`validate`] understands. The
 /// error names the keyword and where it is, as a JSON path into the schema.
+/// The top level must be an object: `claude --json-schema` takes no other.
 pub fn check_schema(schema: &Value) -> Result<()> {
+    check_any(schema)?;
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        bail!("schema $: must have `\"type\": \"object\"` at the top");
+    }
+    Ok(())
+}
+
+/// [`check_schema`] for a schema that need not be an object.
+fn check_any(schema: &Value) -> Result<()> {
     check_at(schema, "$")
+}
+
+/// `text` cut to 60 characters: what an answer echoes of the model's words.
+fn clip(text: &str) -> String {
+    const MAX: usize = 60;
+    match text.chars().count() > MAX {
+        true => format!("{}…", text.chars().take(MAX - 1).collect::<String>()),
+        false => text.to_string(),
+    }
 }
 
 fn check_at(schema: &Value, path: &str) -> Result<()> {
@@ -100,8 +119,9 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> 
         if !allowed.contains(value) {
             let list: Vec<String> = allowed.iter().map(Value::to_string).collect();
             return Err(format!(
-                "{path}: must be one of {}, got {value}",
-                list.join(", ")
+                "{path}: must be one of {}, got {}",
+                list.join(", "),
+                clip(&value.to_string())
             ));
         }
     }
@@ -118,7 +138,7 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> 
             match props.and_then(|props| props.get(name)) {
                 Some(sub) => validate_at(sub, member, &format!("{path}.{name}"))?,
                 None if map.get("additionalProperties") == Some(&Value::Bool(false)) => {
-                    return Err(format!("{path}: unexpected property `{name}`"));
+                    return Err(format!("{path}: unexpected property `{}`", clip(name)));
                 }
                 None => {}
             }
@@ -250,7 +270,7 @@ mod tests {
         ];
         for (t, good, bad) in cases {
             let schema = json!({"type": t});
-            check_schema(&schema).unwrap();
+            check_any(&schema).unwrap();
             validate(&schema, &good).unwrap_or_else(|e| panic!("{t}: {e}"));
             assert!(validate(&schema, &bad).is_err(), "{t}");
         }
@@ -316,7 +336,22 @@ mod tests {
             assert!(check_schema(&schema).is_err(), "{schema}");
         }
         // Notes are allowed.
-        check_schema(&json!({"type": "string", "description": "d", "title": "t"})).unwrap();
+        check_any(&json!({"type": "string", "description": "d", "title": "t"})).unwrap();
+    }
+
+    #[test]
+    fn the_top_level_must_be_an_object_and_echoes_are_short() {
+        check_schema(&json!({"type": "object"})).unwrap();
+        for schema in [json!({"type": "string"}), json!({}), json!({"enum": [1]})] {
+            let e = check_schema(&schema).unwrap_err().to_string();
+            assert!(e.contains("\"type\": \"object\""), "{schema}: {e}");
+        }
+        let schema = json!({"type": "object", "additionalProperties": false});
+        let long = "p".repeat(500);
+        let e = validate(&schema, &json!({ long.clone(): 1 })).unwrap_err();
+        assert!(e.len() < 120, "{e}");
+        let e = validate(&json!({"enum": ["a"]}), &json!(long)).unwrap_err();
+        assert!(e.len() < 120 && e.ends_with("…"), "{e}");
     }
 
     #[test]

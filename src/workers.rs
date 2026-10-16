@@ -416,7 +416,8 @@ fn launch(app: &App, id: &str) -> Result<Child> {
         // asked for it: a hint it inherited would be taken for a claim to
         // be that task.
         .env_remove(crate::tasks::TASK_ID_ENV)
-        .env_remove(permissions::ASSISTANT_ENV);
+        .env_remove(permissions::ASSISTANT_ENV)
+        .env_remove(permissions::WORKER_ENV);
     // A process group of its own, so a ctrl-c meant for this jeet does not
     // reach it: it sees the asker gone and ends the job itself.
     #[cfg(unix)]
@@ -510,6 +511,8 @@ pub fn sweep_lost(app: &App) {
     for job in running {
         let gone = match (job.pid, job.start) {
             (Some(pid), Some(start)) => identity::start_of(pid) != Some(start),
+            // No start recorded: gone only if nothing runs under the pid.
+            (Some(pid), None) => identity::start_of(pid).is_none(),
             // Between its row and its runner: a moment, unless `run` died.
             _ => now_secs() - job.started_at > LOST_AFTER_SECS,
         };
@@ -568,11 +571,13 @@ pub fn refused(id: &str) {
 
 /// `jeet worker-job <id>`: run job `id` and record how it ended.
 pub fn run_job(id: &str) -> Result<()> {
-    run_as_runner(&App::open()?, id, std::process::id())
+    // Before anything else: the parent that started it, to see it go.
+    let parent = parent_pid();
+    run_as_runner(&App::open()?, id, std::process::id(), parent)
 }
 
-/// [`run_job`] as the runner with pid `me`.
-fn run_as_runner(app: &App, id: &str, me: u32) -> Result<()> {
+/// [`run_job`] as the runner with pid `me`, started by `parent`.
+fn run_as_runner(app: &App, id: &str, me: u32, parent: u32) -> Result<()> {
     permissions::check_worker_job(&app.db, id, me)?;
     if !app
         .db
@@ -580,7 +585,7 @@ fn run_as_runner(app: &App, id: &str, me: u32) -> Result<()> {
     {
         bail!("worker job {id} is another runner's, or has ended");
     }
-    let end = match run_claude(app, id) {
+    let end = match run_claude(app, id, parent) {
         Ok(end) => end,
         Err(e) => WorkerEnd {
             status: Status::Failed,
@@ -595,7 +600,7 @@ fn run_as_runner(app: &App, id: &str, me: u32) -> Result<()> {
 }
 
 /// Run `claude` for job `id` and judge what it printed.
-fn run_claude(app: &App, id: &str) -> Result<WorkerEnd> {
+fn run_claude(app: &App, id: &str, parent: u32) -> Result<WorkerEnd> {
     let path = input_path(&app.home, id);
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -605,10 +610,11 @@ fn run_claude(app: &App, id: &str) -> Result<WorkerEnd> {
 
     let scratch = scratch_dir(&app.home, id);
     std::fs::create_dir_all(&scratch).with_context(|| format!("create {}", scratch.display()))?;
-    let deny: Vec<String> = permissions::review_deny(app)?
+    let mut deny: Vec<String> = permissions::review_deny(app)?
         .iter()
         .flat_map(|pattern| deny_rules(pattern))
         .collect();
+    deny.extend(read_denies(&app.home));
     let args = claude_args(
         &input.prompt,
         app.config.assistant.workers.model(),
@@ -616,20 +622,22 @@ fn run_claude(app: &App, id: &str) -> Result<WorkerEnd> {
         &system_prompt(&app.home)?,
         &deny,
     );
-    let argv = claude_argv(&app.config);
+    let program = claude_program(&app.config);
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path(&app.home, id))?;
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .args(&args)
+    let mut cmd = Command::new(&program);
+    cmd.args(&args)
         .current_dir(&scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(log)
         .env_remove(crate::tasks::TASK_ID_ENV)
-        .env_remove(permissions::ASSISTANT_ENV);
+        .env_remove(permissions::ASSISTANT_ENV)
+        // A hint for jeet, which then asks who it is even for plumbing; the
+        // runner's anchor is what decides.
+        .env(permissions::WORKER_ENV, id);
     // Its own process group, to end it and what it started without ending
     // this runner.
     #[cfg(unix)]
@@ -637,18 +645,40 @@ fn run_claude(app: &App, id: &str) -> Result<WorkerEnd> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let child = cmd.spawn().with_context(|| format!("start {}", argv[0]))?;
-    let ran = supervise(child, TIMEOUT, parent_pid());
+    let child = cmd.spawn().with_context(|| format!("start {program}"))?;
+    let ran = supervise(child, TIMEOUT, parent);
     Ok(judge(ran, &input.schema))
 }
 
-/// The program that runs `claude`, with the arguments configured for it:
-/// the configured agent when it is Claude Code, else `claude`.
-fn claude_argv(config: &config::Config) -> Vec<String> {
+/// The program that runs `claude`: the configured agent's when it is Claude
+/// Code, else `claude`. Only the program, never the arguments configured for
+/// it (`--dangerously-skip-permissions`, say): a worker's flags are its own.
+fn claude_program(config: &config::Config) -> String {
     match AgentSpec::from_config(config) {
-        Ok(spec) if spec.harness.id() == "claude-code" => spec.argv,
-        _ => vec!["claude".to_string()],
+        Ok(spec) if spec.harness.id() == "claude-code" => spec.argv[0].clone(),
+        _ => "claude".to_string(),
     }
+}
+
+/// What a worker may not read besides: credentials, `/proc` (which holds the
+/// environment of every process) and jeet's own index. Absolute paths are
+/// written with a leading `//` in Claude's rules, `~` is the home directory.
+pub fn read_denies(home: &Path) -> Vec<String> {
+    let mut deny: Vec<String> = [
+        "Read(~/.ssh/**)",
+        "Read(~/.aws/**)",
+        "Read(~/.config/gh/**)",
+        "Read(~/.gnupg/**)",
+        "Read(~/.netrc)",
+        "Read(//proc/**)",
+    ]
+    .map(String::from)
+    .to_vec();
+    let home = home.to_string_lossy();
+    let home = home.trim_start_matches('/');
+    deny.push(format!("Read(//{home}/index.db*)"));
+    deny.push(format!("Read(//{home}/backups/**)"));
+    deny
 }
 
 /// `$JEET_HOME/workers/system.md` if it says anything, else
@@ -690,6 +720,13 @@ pub fn claude_args(
         "dontAsk".to_string(),
         "--allowedTools".to_string(),
         ALLOWED_TOOLS.to_string(),
+        // Only these tools exist for it, no MCP server, and none of the
+        // user's own settings (allow rules, hooks) apply.
+        "--tools".to_string(),
+        "Read,Grep,Glob,Bash".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--setting-sources".to_string(),
+        String::new(),
     ];
     if !deny.is_empty() {
         args.push("--disallowedTools".to_string());
@@ -745,11 +782,13 @@ fn supervise(mut child: Child, timeout: Duration, parent: u32) -> Ran {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // What it left running must not hold the pipe open.
+                kill_group(child.id());
                 return Ran::Exited {
                     success: status.success(),
                     status: status.to_string(),
                     stdout: reader.join().unwrap_or_default(),
-                }
+                };
             }
             Ok(None) => {}
             Err(_) => {
@@ -773,13 +812,24 @@ fn supervise(mut child: Child, timeout: Duration, parent: u32) -> Ran {
     }
 }
 
-/// Kill `child`'s process group (`claude` leads one) and reap it.
+/// Kill process group `pgid` (`claude` leads one), and what is in it.
+#[cfg(unix)]
+fn kill_group(pgid: u32) {
+    if let Ok(pgid) = libc::pid_t::try_from(pgid) {
+        if pgid > 1 {
+            // SAFETY: a plain signal to a process group; any error (it is
+            // gone) is of no use here.
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pgid: u32) {}
+
+/// Kill `child`'s process group and reap it.
 fn end_group(child: &mut Child) {
-    let _ = Command::new("kill")
-        .args(["-s", "KILL", "--", &format!("-{}", child.id())])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1016,6 +1066,11 @@ mod tests {
                 "dontAsk",
                 "--allowedTools",
                 ALLOWED_TOOLS,
+                "--tools",
+                "Read,Grep,Glob,Bash",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "",
                 "--disallowedTools",
                 "Bash(git push *),Bash(gh pr merge *)",
                 "--json-schema",
@@ -1028,6 +1083,42 @@ mod tests {
         // A prompt that starts like an option is still a prompt.
         let args = claude_args("- one\n- two", "haiku", &schema, "s", &deny);
         assert_eq!(args[1], "Task:\n- one\n- two");
+    }
+
+    #[test]
+    fn only_the_program_of_the_configured_agent_is_used() {
+        let (_dir, mut app) = app_in_tempdir();
+        // Whatever the environment says, the config is what is under test.
+        std::env::remove_var("JEET_AGENT");
+        app.config.agent = Some("/opt/bin/claude --dangerously-skip-permissions --verbose".into());
+        assert_eq!(claude_program(&app.config), "/opt/bin/claude");
+        app.config.agent = Some("some-other-agent --yolo".into());
+        assert_eq!(claude_program(&app.config), "claude");
+        app.config.agent = None;
+        assert_eq!(claude_program(&app.config), "claude");
+        // The arguments are the worker's own and carry nothing configured.
+        let args = claude_args("p", "haiku", &default_schema(), "s", &[]);
+        assert!(!args.iter().any(|a| a.starts_with("--dangerously")));
+        for flag in ["--tools", "--strict-mcp-config", "--setting-sources"] {
+            assert!(args.contains(&flag.to_string()), "{flag}");
+        }
+    }
+
+    #[test]
+    fn credentials_proc_and_the_index_are_denied_to_reads() {
+        let deny = read_denies(Path::new("/Users/me/.jeet"));
+        for rule in [
+            "Read(~/.ssh/**)",
+            "Read(~/.aws/**)",
+            "Read(~/.config/gh/**)",
+            "Read(~/.gnupg/**)",
+            "Read(~/.netrc)",
+            "Read(//proc/**)",
+            "Read(//Users/me/.jeet/index.db*)",
+            "Read(//Users/me/.jeet/backups/**)",
+        ] {
+            assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");
+        }
     }
 
     #[test]
@@ -1236,6 +1327,22 @@ mod tests {
     }
 
     #[test]
+    fn what_claude_left_running_does_not_hold_the_runner() {
+        // A grandchild keeps the pipe open; the runner does not wait for it.
+        let started = Instant::now();
+        let ran = supervise(
+            sh("sleep 60 & echo hi"),
+            Duration::from_secs(60),
+            parent_pid(),
+        );
+        match ran {
+            Ran::Exited { stdout, .. } => assert_eq!(stdout.trim(), "hi"),
+            other => panic!("{other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
     fn claude_is_read_to_the_end_and_ended_when_it_runs_too_long_or_its_asker_goes() {
         let parent = parent_pid();
         match supervise(sh("printf hello"), Duration::from_secs(60), parent) {
@@ -1314,18 +1421,30 @@ mod tests {
         let out = dir.join("seen");
         std::fs::create_dir_all(&out).unwrap();
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{out}/args'\nls -A > '{out}/cwd'\npwd > '{out}/pwd'\n\
+            "#!/bin/sh\n[ \"$1\" = --ready ] && exit 0\nprintf '%s\\n' \"$@\" > '{out}/args'\nls -A > '{out}/cwd'\npwd > '{out}/pwd'\n\
              printf 'to stderr' >&2\ncat <<'JEET_EOF'\n{stdout}\nJEET_EOF\n",
             out = out.display()
         );
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Executing a script just written can fail with ETXTBSY while
+        // another test's fork still holds the file open for writing.
+        for _ in 0..500 {
+            match Command::new(&path).arg("--ready").output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                _ => break,
+            }
+        }
         path
     }
 
     /// Job `id` as `jeet worker run` leaves it for its runner, run as this
     /// process, with `claude` printing `stdout`.
     fn run_runner(stdout: &str) -> (tempfile::TempDir, App, WorkerJobRecord) {
+        // Whatever the environment says, the fake is what runs.
+        std::env::remove_var("JEET_AGENT");
         let (dir, mut app) = app_in_tempdir();
         app.config.agent = Some(fake_claude(&app.home, stdout).to_string_lossy().to_string());
         let id = "wk-test".to_string();
@@ -1347,7 +1466,7 @@ mod tests {
             serde_json::to_vec(&input).unwrap(),
         )
         .unwrap();
-        run_as_runner(&app, &id, std::process::id()).unwrap();
+        run_as_runner(&app, &id, std::process::id(), parent_pid()).unwrap();
         let job = app.db.get_worker_job(&id).unwrap().unwrap();
         (dir, app, job)
     }
@@ -1380,6 +1499,10 @@ mod tests {
         assert_eq!(after("--json-schema"), default_schema().to_string());
         assert_eq!(after("--append-system-prompt"), SYSTEM_PROMPT);
         assert!(after("--disallowedTools").contains("Bash(gh pr merge"));
+        assert!(after("--disallowedTools").contains("Read(~/.ssh/**)"));
+        assert_eq!(after("--tools"), "Read,Grep,Glob,Bash");
+        assert_eq!(after("--setting-sources"), "");
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
         // Where it ran: an empty directory of the job's, gone afterwards.
         assert_eq!(std::fs::read_to_string(seen.join("cwd")).unwrap(), "");
@@ -1415,7 +1538,7 @@ mod tests {
     fn a_job_ended_is_not_run_again() {
         let (_dir, app, job) =
             run_runner(&envelope(json!({"structured_output": {"summary": "x"}})));
-        let e = run_as_runner(&app, &job.id, std::process::id()).unwrap_err();
+        let e = run_as_runner(&app, &job.id, std::process::id(), parent_pid()).unwrap_err();
         assert!(e.to_string().contains("has ended"), "{e}");
     }
 
@@ -1431,7 +1554,10 @@ mod tests {
         let mut mine = WorkerJobRecord::new("wk-mine".into(), "j", None, now_secs());
         mine.pid = Some(std::process::id());
         mine.start = identity::start_of(std::process::id());
-        for job in [&lost, &norunner, &fresh, &mine] {
+        // A runner alive but with no start recorded is not lost either.
+        let mut nostart = WorkerJobRecord::new("wk-nostart".into(), "j", None, now_secs());
+        nostart.pid = Some(std::process::id());
+        for job in [&lost, &norunner, &fresh, &mine, &nostart] {
             app.db.insert_worker_job(job).unwrap();
         }
         sweep_lost(&app);
@@ -1440,5 +1566,6 @@ mod tests {
         assert_eq!(status("wk-old"), Status::Failed);
         assert_eq!(status("wk-new"), Status::Running);
         assert_eq!(status("wk-mine"), Status::Running);
+        assert_eq!(status("wk-nostart"), Status::Running);
     }
 }

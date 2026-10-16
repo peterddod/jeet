@@ -17101,6 +17101,7 @@ fn fake_worker_claude(home: &std::path::Path, envelope: &str) -> std::path::Path
     let path = bin.join("claude");
     let script = format!(
         r#"#!/bin/sh
+[ "$1" = --ready ] && exit 0
 out="$SEEN"
 mkdir -p "$out"
 printf '%s\n' "$@" > "$out/args"
@@ -17110,7 +17111,10 @@ if [ ! -e "$out/nested" ]; then
     "$JEET_BIN" report done hi > "$out/report.txt" 2>&1; echo $? > "$out/report.code"
     "$JEET_BIN" worker run pr-status > "$out/run.txt" 2>&1; echo $? > "$out/run.code"
     "$JEET_BIN" task new sneaky > "$out/new.txt" 2>&1; echo $? > "$out/new.code"
+    "$JEET_BIN" task-hook Stop > "$out/hook.txt" 2>&1; echo $? > "$out/hook.code"
     "$JEET_BIN" worker ls > "$out/ls.txt" 2>&1; echo $? > "$out/ls.code"
+    "$JEET_BIN" task last alpha > "$out/last.txt" 2>&1; echo $? > "$out/last.code"
+    "$JEET_BIN" task prs alpha > "$out/prs.txt" 2>&1; echo $? > "$out/prs.code"
 fi
 cat <<'JEET_EOF'
 {envelope}
@@ -17119,6 +17123,16 @@ JEET_EOF
     );
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Running a script just written can fail with ETXTBSY while another
+    // test's fork still holds it open for writing.
+    for _ in 0..500 {
+        match Command::new(&path).arg("--ready").output() {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => break,
+        }
+    }
     path
 }
 
@@ -17161,6 +17175,7 @@ fn worker_run(
 #[test]
 fn worker_run_runs_a_named_job_and_prints_its_checked_output() {
     let (lab, home, claude) = worker_lab(WORKER_ENVELOPE);
+    succeeded(&lab.jeet_at(&["task", "new", "alpha"], &home, &[]));
     let output = worker_run(
         &lab,
         &home,
@@ -17200,6 +17215,8 @@ fn worker_run_runs_a_named_job_and_prints_its_checked_output() {
         ("report", "a worker job only reads"),
         ("run", "a worker job only reads"),
         ("new", "a worker job only reads"),
+        // Plumbing, which a worker's `claude` is marked to be asked about.
+        ("hook", "a worker job only reads"),
     ] {
         assert_ne!(read(&format!("{what}.code")).trim(), "0", "{what}");
         assert!(
@@ -17209,6 +17226,19 @@ fn worker_run_runs_a_named_job_and_prints_its_checked_output() {
         );
     }
     assert_eq!(read("ls.code").trim(), "0", "{}", read("ls.txt"));
+    // Its reads of tasks work, with the reach of who asked (the user).
+    // `task last` got as far as the task, which has no session to read.
+    assert!(
+        read("last.txt").contains("agent has no session yet"),
+        "{}",
+        read("last.txt")
+    );
+    assert_eq!(read("prs.code").trim(), "0", "{}", read("prs.txt"));
+    assert!(
+        !read("prs.txt").contains("worker job"),
+        "{}",
+        read("prs.txt")
+    );
     // The refused attempts started no job and made no task.
     let db = lab.index();
     let jobs: i64 = db

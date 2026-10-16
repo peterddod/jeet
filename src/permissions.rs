@@ -45,6 +45,11 @@ use crate::worktrees::now_secs;
 /// checks on.
 pub const ASSISTANT_ENV: &str = "JEET_ASSISTANT";
 
+/// Set, to the job's id, in the environment of a worker job's `claude`: a
+/// hint that makes jeet ask who it is even for plumbing it would not
+/// otherwise ask for. Only a hint: the runner's anchor decides.
+pub const WORKER_ENV: &str = "JEET_WORKER";
+
 /// One thing the assistant can be allowed to do.
 pub struct Capability {
     pub name: &'static str,
@@ -1104,7 +1109,9 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     // Only what is gated, scoped, or only the root may do, opens the
     // index: plumbing like hooks and `jeet report` never does.
-    if gate(command, terminal) == Gate::Free
+    let worker_hint = std::env::var(WORKER_ENV).is_ok_and(|v| !v.trim().is_empty());
+    if !worker_hint
+        && gate(command, terminal) == Gate::Free
         && node_only(command).is_none()
         && matches!(node_scope(command), Some(Scope::NoTarget | Scope::Listed))
     {
@@ -1380,6 +1387,9 @@ impl std::fmt::Display for Target {
 /// itself or a task below it, so no name or prefix reaches outside its
 /// subtree; for anyone else, as the commands find tasks.
 pub fn resolve(app: &App, caller: &Caller, target: &Target) -> Result<TaskRecord> {
+    if let Caller::Worker(job) = caller {
+        return resolve(app, &asker_of(app, job)?, target);
+    }
     let Caller::Node(node) = caller else {
         return match target {
             Target::Key { key, exact: false } => crate::tasks::find(app, key),
@@ -1406,6 +1416,23 @@ pub fn resolve(app: &App, caller: &Caller, target: &Target) -> Result<TaskRecord
     reach.extend(app.db.descendants(&node.id)?.into_iter().map(|(t, _)| t));
     crate::tasks::find_in(&reach, key, !exact)
         .with_context(|| format!("among task {} and the tasks below it", node.slug))
+}
+
+/// Who a worker job reads for: the caller that asked for it, whose reach it
+/// has. The assistant for the assistant, a task with a parent for that task,
+/// and the user for the user or a top-level task. A job whose asker is gone
+/// reads nothing.
+fn asker_of(app: &App, job: &WorkerJobRecord) -> Result<Caller> {
+    let Some(id) = &job.requested_by else {
+        return Ok(Caller::User);
+    };
+    match app.db.get_task(id)? {
+        Some(task) => Ok(classify(Some(&task))),
+        None => bail!(
+            "worker job {} was asked for by task {id}, which jeet no longer knows",
+            job.id
+        ),
+    }
 }
 
 /// [`resolve`], for the caller running this jeet: how a command finds the
@@ -1657,11 +1684,24 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
         );
     }
     if let Caller::Worker(job) = caller {
-        bail!(
-            "worker job {} may not run `jeet {}`: a worker job only reads",
-            job.id,
-            verb.name()
+        let read = matches!(
+            verb,
+            Verb::TaskLast
+                | Verb::TaskPath
+                | Verb::TaskPrs
+                | Verb::WorktreeLs
+                | Verb::WorktreePath
+                | Verb::ManagerShow
         );
+        if !read {
+            bail!(
+                "worker job {} may not run `jeet {}`: a worker job only reads",
+                job.id,
+                verb.name()
+            );
+        }
+        // With the reach of whoever asked for it.
+        return in_scope(app, &asker_of(app, job)?, verb, target);
     }
     let Caller::Node(node) = caller else {
         return Ok(());
@@ -1720,7 +1760,8 @@ fn out_of_reach(slug: &str, verb: Verb, what: &str) -> String {
 /// with a parent only itself and the tasks below it.
 pub fn lists(app: &App, caller: &Caller, task: &TaskRecord) -> Result<bool> {
     match caller {
-        Caller::Review(_) | Caller::Worker(_) => Ok(false),
+        Caller::Review(_) => Ok(false),
+        Caller::Worker(job) => lists(app, &asker_of(app, job)?, task),
         Caller::Node(node) => {
             Ok(task.id == node.id || app.db.is_strict_descendant(&task.id, &node.id)?)
         }
@@ -3689,8 +3730,66 @@ mod tests {
             self_job: false,
         };
         assert!(matches!(classify_identity(&me), Caller::Worker(_)));
+    }
+
+    /// A worker job reads with the reach of whoever asked for it.
+    #[test]
+    fn a_worker_job_reads_as_far_as_its_asker() {
         let (_dir, app, w) = tree();
-        assert!(!lists(&app, &worker_of(), &w).unwrap());
+        let sib = app.db.get_task("sib-id").unwrap().unwrap();
+        let asked_by = |by: Option<&str>| {
+            Caller::Worker(Box::new(WorkerJobRecord::new(
+                "wk-1".into(),
+                "j",
+                by.map(str::to_string),
+                0,
+            )))
+        };
+        let root = crate::assistant::ensure(&app).unwrap();
+        for (by, sees_w, sees_sib) in [
+            (None, true, true),
+            (Some(root.id.as_str()), true, true),
+            (Some("w-id"), true, false),
+        ] {
+            let job = asked_by(by);
+            assert_eq!(lists(&app, &job, &w).unwrap(), sees_w, "{by:?}");
+            assert_eq!(lists(&app, &job, &sib).unwrap(), sees_sib, "{by:?}");
+            let own = resolve(
+                &app,
+                &job,
+                &Target::Key {
+                    key: "w".into(),
+                    exact: false,
+                },
+            );
+            assert!(own.is_ok(), "{by:?}");
+            let other = resolve(
+                &app,
+                &job,
+                &Target::Key {
+                    key: "sib".into(),
+                    exact: false,
+                },
+            );
+            assert_eq!(other.is_ok(), sees_sib, "{by:?}");
+            in_scope(&app, &job, Verb::TaskLast, &w).unwrap();
+            assert_eq!(
+                in_scope(&app, &job, Verb::TaskPrs, &sib).is_ok(),
+                sees_sib,
+                "{by:?}"
+            );
+            // Never more than a read.
+            for verb in [
+                Verb::TaskSend,
+                Verb::TaskArchive,
+                Verb::ManagerPause,
+                Verb::WorktreeAdd,
+            ] {
+                assert!(in_scope(&app, &job, verb, &w).is_err(), "{verb:?}");
+            }
+        }
+        // An asker that is gone leaves it nothing to read.
+        assert!(lists(&app, &asked_by(Some("gone")), &w).is_err());
     }
 
     /// A worker job runs only what `jeet worker run` recorded, once, as the
