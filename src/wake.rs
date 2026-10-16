@@ -117,6 +117,23 @@ pub fn sweep_wake(app: &App, now: i64, repair: bool) -> Result<Vec<WakeRow>> {
     Ok(rows)
 }
 
+/// [`sweep_wake`] for the one session a hook runs for, `session` of the task
+/// in `task_dir`: whether it is due a resume. Reads files only; a hook never
+/// resumes, as it runs under the process a resume would end.
+pub fn sweep_own(app: &App, task_dir: &std::path::Path, session: &str, now: i64) -> bool {
+    let hook = AgentSpec::from_config(&app.config).is_ok_and(|s| s.harness.wake_hook());
+    let state = waiter::wake_state(task_dir, session, now);
+    let repaired = waiter::read_repaired(task_dir, session);
+    repair_due(
+        app.config.wake_repair(),
+        hook,
+        &state,
+        repaired.as_ref(),
+        now,
+    )
+    .is_some()
+}
+
 fn row_of(app: &App, live: &Live, hook: bool, now: i64) -> WakeRow {
     let dir = tasks::task_dir(app, &live.task);
     let state = waiter::wake_state(&dir, &live.session, now);

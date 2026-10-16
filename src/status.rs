@@ -475,6 +475,20 @@ fn handle_hook(
     if let Err(e) = report_step(&hook, &ctx, launched_for, now) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
+    // A session without a working watcher is resumed by the next poll: one
+    // due now, rather than at the poll's own interval. Not at its start,
+    // which is what starts the watcher.
+    if !matches!(
+        hook.kind,
+        Some(EventKind::SessionStarted(_) | EventKind::Ended { .. })
+    ) && ctx.task.is_some()
+        && crate::wake::sweep_own(&ctx.app, &task_dir, session_id, now)
+    {
+        // The test binary is no jeet.
+        if !cfg!(test) {
+            crate::watch::maybe_background(&ctx.app.home, &ctx.app.config);
+        }
+    }
     // A slot under `max_live` may be free now.
     if let Some(EventKind::Ended { cleared: false }) = hook.kind {
         if let Err(e) = spawn_drain(&ctx.app, &task_id) {
