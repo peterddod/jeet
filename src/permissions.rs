@@ -181,11 +181,12 @@ const fn ext(
 /// `git -C . push -f`, `sh -c '…'` and aliases get past them: a lint
 /// against mistakes, with branch protection as the real control.
 ///
-/// [`HookSetup::deny`]: crate::harness::HookSetup::deny
 /// `--force` is denied as a whole word, so `--force-with-lease` and
 /// `--force-if-includes`, which refuse to drop commits the agent has not
 /// seen, still run. Repository settings are out of reach too: `gh repo
 /// edit`, `gh secret`, and deleting through the API.
+///
+/// [`HookSetup::deny`]: crate::harness::HookSetup::deny
 const ALWAYS_DENY: &[&str] = &[
     "git push --force",
     "git push * --force",
