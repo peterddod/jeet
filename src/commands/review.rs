@@ -127,14 +127,16 @@ pub fn run(
 /// the viewer or the `cd`. Returns what to tell the user; the TUI owns the
 /// terminal, so nothing is printed.
 pub fn rerun(app: &App, review: &ReviewRecord) -> Result<String> {
+    if app.config.review.command().is_some()
+        && review::asked(&review::folded(app, review)).is_none()
+    {
+        bail!("[review] command is deprecated and runs from `jeet review --rerun`, not here");
+    }
     let Some(repo) = app.db.get_repo(&review.repo_id)? else {
         bail!("{} is no longer in the store", review.repo_id);
     };
     let trunk = std::path::Path::new(&repo.trunk_path);
     let pr = github::pr_view(trunk, review.pr_number)?;
-    if app.config.review.command().is_some() && review::asked(review).is_none() {
-        bail!("[review] command is deprecated and runs from `jeet review --rerun`, not here");
-    }
     let checkout = review::review_for(app, &repo, &pr, None)?;
     review::start_agent(app, &checkout.review, &pr, &checkout.path, true, None)
 }

@@ -7151,6 +7151,20 @@ mod tests {
     }
 
     #[test]
+    fn r_in_the_archived_reviews_still_emits_the_rerun_which_try_perform_refuses() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Char('A'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('R')),
+            Some(Action::ReviewRerun {
+                task_id: "old".into()
+            })
+        );
+    }
+
+    #[test]
     fn r_and_enter_with_no_review_say_so() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;

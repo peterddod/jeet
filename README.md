@@ -758,7 +758,7 @@ keeps what it said before. PR titles are shown as text, never run.
 | `⏎` | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
 | `e` | explore the review's worktree |
-| `R` | ask the review's agent to review again, as `jeet review <pr> --rerun` does (without opening the viewer) |
+| `R` | ask an active review's agent to review again, as `jeet review <pr> --rerun` does (without opening the viewer); on an archived review, `a` brings it back first |
 | `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
 | `D` | delete the review, after listing any work that would be lost |
 | `A` | show the archived reviews instead of the active ones, and back |
@@ -1590,8 +1590,9 @@ back.
   running; jeet did not start it, so it does not stop it.
 - The `<task>/.jeet/review.json` and `brought-back` files are folded into the
   review and no longer read.
-- In the reviews tab, `w` and `p` have nothing to show (a review has one
-  worktree and one PR), and a review is no longer "paused by hand" or
+- In the reviews tab, `⏎` opens the review's session and `R` reruns it; `w`,
+  `p`, `S`, `n` and `o` do nothing (a review has one worktree and one PR),
+  and a review is no longer "paused by hand" or
   "stopped" from a tree: it is paused only at its caps. `jeet manager stop
   --all` still ends the agents (and legacy jobs) of the reviews the
   assistant asked for, and drops them from the `max_live` queue.

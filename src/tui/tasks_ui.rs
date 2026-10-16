@@ -216,7 +216,7 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ("e", "explore the review's worktree"),
     (
         "R",
-        "ask the review's agent to review again, as jeet review <pr> --rerun",
+        "ask the review's agent to review again, as jeet review <pr> --rerun · an archived review: a first",
     ),
     ("a", "archive the review · unarchive, on an archived one"),
     (
