@@ -65,7 +65,6 @@ pub const HELP: &[(&str, &str)] = &[
         "delete the task, and the tasks under it, after listing any work that would go",
     ),
     ("S", "copy the task's project files in again"),
-    ("P", "projects: n new, e edit, D delete, ⏎ start a task"),
     ("", ""),
     (
         "c",
@@ -283,9 +282,14 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
         "a",
         "archive the task (the tasks under it too) · unarchive, in the other projects",
     ),
-    ("D", "delete the task, after listing any work that would go"),
+    (
+        "D",
+        "delete the task, after listing any work that would go; on a project, the project",
+    ),
     ("S", "copy the task's project files in again"),
-    ("n", "new task (pick its repos in the form)"),
+    ("n", "new task; on a project, one already in it"),
+    ("N", "on a project: new project"),
+    ("E", "on a project: edit its project.toml"),
     (
         "A",
         "show the other projects (no active work) instead, and back",
@@ -307,7 +311,7 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
     ("", ""),
     (
         "project",
-        "a jeet project, as P manages: a task started from it is in it",
+        "a jeet project (project.toml): a task started from it is in it",
     ),
     (
         "",
@@ -345,7 +349,6 @@ const HINTS: &[&str] = &[
     "i inbox",
     "D delete",
     "p PRs",
-    "P projects",
     "S resync",
     "/ filter",
     "⇥ switch",
@@ -384,6 +387,21 @@ const HINTS_REVIEWS: &[&str] = &[
     "q quit",
 ];
 
+/// On a project's row: the project's keys.
+const HINTS_PROJECT_ROWS: &[&str] = &[
+    "⏎ into",
+    "n new task",
+    "N new project",
+    "E edit",
+    "D delete",
+    "A archived",
+    "/ filter",
+    "⇥ switch",
+    "? help",
+    "q quit",
+];
+
+/// Inside a project: the tasks list's keys.
 const HINTS_PROJECTS: &[&str] = &[
     "⏎ open",
     "←→ up/into",
@@ -392,6 +410,8 @@ const HINTS_PROJECTS: &[&str] = &[
     "p PRs",
     "a archive",
     "A archived",
+    "n new",
+    "D delete",
     "/ filter",
     "⇥ switch",
     "? help",
@@ -400,11 +420,12 @@ const HINTS_PROJECTS: &[&str] = &[
 
 /// As many of `view`'s hints as fit, always ending with help and quit.
 /// `archived`: the list shows the archived ones, so `a` brings back and
-/// `A` goes back.
-fn hints(width: u16, view: View, archived: bool) -> String {
+/// `A` goes back. `project_rows`: the projects view is on its projects.
+fn hints(width: u16, view: View, archived: bool, project_rows: bool) -> String {
     let hints = match view {
         View::Agents => HINTS_AGENTS,
         View::Reviews => HINTS_REVIEWS,
+        View::Projects if project_rows => HINTS_PROJECT_ROWS,
         View::Projects => HINTS_PROJECTS,
         View::Active => HINTS,
     };
@@ -497,7 +518,12 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(chunks[5].width, ui.view, ui.archived()),
+            hints(
+                chunks[5].width,
+                ui.view,
+                ui.archived(),
+                ui.project.is_none(),
+            ),
             Style::default().fg(Color::DarkGray),
         ))),
         chunks[5],
@@ -2034,45 +2060,6 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             };
             render_text(frame, area, title, Color::Green, body);
         }
-        Panel::Projects { lines, selected } => {
-            let area = centered_rect(85, 60, full);
-            let title = " projects · ⏎ new task  n new  e edit  D delete  r refresh ".to_string();
-            if lines.is_empty() {
-                let body = vec![
-                    Line::from("no projects yet"),
-                    Line::from(""),
-                    Line::from(dim(
-                        "a project presets repositories, AGENTS.md and skills for new tasks;",
-                    )),
-                    Line::from(dim("n makes one")),
-                ];
-                render_text(frame, area, title, Color::Green, body);
-                return Vec::new();
-            }
-            let items = lines
-                .iter()
-                .map(|line| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:<20}", truncate(&line.name, 19)),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{:<9}", format!("{} tasks", line.tasks)),
-                            Style::default().fg(Color::Blue),
-                        ),
-                        Span::styled(
-                            format!("{:<22}", truncate(&line.contents, 21)),
-                            Style::default().fg(Color::Magenta),
-                        ),
-                        dim(line.repos.clone()),
-                    ]))
-                })
-                .collect();
-            render_list(frame, area, title, items, *selected);
-        }
         Panel::NewProject(form) => {
             let body = new_project_lines(form);
             // Room for the hint to wrap on a narrow terminal.
@@ -2627,7 +2614,7 @@ fn new_task_lines(form: &NewTaskForm) -> Vec<Line<'static>> {
                 },
                 field,
                 match form.projects.is_empty() {
-                    true => "  no projects yet (P makes one)",
+                    true => "  no projects yet (N in the projects view makes one)",
                     false => "  ←→ choose",
                 },
             )),
@@ -3353,10 +3340,6 @@ mod tests {
                 NewTaskForm::new("task 1".into(), Vec::new(), None, Vec::new())
                     .under("assistant".into(), "the assistant".into()),
             ))),
-            Some(Panel::Projects {
-                lines: Vec::new(),
-                selected: 0,
-            }),
             Some(Panel::Worktrees {
                 task_id: "a".into(),
                 lines: Vec::new(),
@@ -4153,26 +4136,32 @@ mod tests {
     #[test]
     fn hints_always_keep_help_and_quit() {
         for width in [10u16, 20, 40, 80, 200] {
-            let line = hints(width, View::Active, false);
+            let line = hints(width, View::Active, false, false);
             assert!(line.width() <= width as usize, "{width}: {line}");
         }
-        assert!(hints(20, View::Active, false).contains("q quit"));
-        assert!(hints(200, View::Active, false).contains("⏎ open"));
-        assert!(hints(200, View::Agents, false).contains("l worklog"));
-        assert!(hints(200, View::Reviews, false).contains("⏎ session"));
+        assert!(hints(20, View::Active, false, false).contains("q quit"));
+        assert!(hints(200, View::Active, false, false).contains("⏎ open"));
+        assert!(hints(200, View::Agents, false, false).contains("l worklog"));
+        assert!(hints(200, View::Reviews, false, false).contains("⏎ session"));
+        let rows = hints(200, View::Projects, false, true);
+        assert!(
+            rows.contains("N new project") && !rows.contains("explore"),
+            "{rows}"
+        );
+        assert!(hints(200, View::Projects, false, false).contains("e explore"));
         assert!(help(View::Reviews).iter().any(|(k, _)| *k == "v"));
-        assert!(!hints(200, View::Agents, false).contains("archive"));
+        assert!(!hints(200, View::Agents, false, false).contains("archive"));
     }
 
     #[test]
     fn the_hints_follow_the_archived_toggle() {
-        let on = hints(200, View::Active, false);
+        let on = hints(200, View::Active, false, false);
         assert!(
             on.contains("a archive") && on.contains("A archived"),
             "{on}"
         );
         assert!(on.contains("←→ up/into"), "{on}");
-        let off = hints(200, View::Active, true);
+        let off = hints(200, View::Active, true, false);
         assert!(
             off.contains("a unarchive") && off.contains("A back"),
             "{off}"
@@ -4181,7 +4170,7 @@ mod tests {
             !off.contains("A archived") && !off.contains("up/into"),
             "{off}"
         );
-        let off = hints(200, View::Reviews, true);
+        let off = hints(200, View::Reviews, true, false);
         assert!(
             off.contains("a unarchive") && off.contains("A back"),
             "{off}"
@@ -4190,7 +4179,7 @@ mod tests {
         // A survives a normal width in both lists, either way.
         for view in [View::Active, View::Reviews] {
             for archived in [false, true] {
-                let line = hints(100, view, archived);
+                let line = hints(100, view, archived, false);
                 assert!(line.contains("A arch") || line.contains("A back"), "{line}");
             }
         }
