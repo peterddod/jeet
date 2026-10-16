@@ -419,6 +419,7 @@ mod tests {
                     message: fence_report(4, "task w", "assistant/api/w", ReportKind::Done, "ok"),
                     to: None,
                     from: crate::messages::Sender::Agent,
+                    meta: None,
                 },
                 // `jeet task send` from its parent or the user, queued raw.
                 Queued {
@@ -426,6 +427,7 @@ mod tests {
                     message: "stop work on X, do Y".into(),
                     to: None,
                     from: crate::messages::Sender::Agent,
+                    meta: None,
                 },
             ]),
         };
@@ -489,12 +491,14 @@ mod tests {
             message: crate::manager::fence::fence_answer(4, "manager api", "go", false),
             to: None,
             from: crate::messages::Sender::Agent,
+            meta: None,
         };
         let report = Queued {
             at: 1,
             message: fence_report(4, "task w", "assistant/api/w", ReportKind::Done, "ok"),
             to: None,
             from: crate::messages::Sender::Agent,
+            meta: None,
         };
         for text in [
             manager_inbox_text(std::slice::from_ref(&answer)),

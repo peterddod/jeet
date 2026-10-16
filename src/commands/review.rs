@@ -287,7 +287,7 @@ pub fn send(app: &App, review: &ReviewRecord, message: &str) -> Result<()> {
     }
     let (message, from) = from_sender(app, &permissions::caller(app)?, message)?;
     let agent = review::ReviewAgent::new(app, review);
-    let delivered = messages::deliver(&review::dir(app, review), &agent, &message, from)?;
+    let delivered = messages::deliver(&review::dir(app, review), &agent, &message, from, None)?;
     let _ = app.db.touch_review(&review.id, now_secs());
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {called}'s agent"),

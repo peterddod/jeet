@@ -614,6 +614,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Report { .. }
         // Its own todo list.
         | Commands::Todo { .. }
+        // Reads only, and cuts itself to what the caller reaches.
+        | Commands::Show { .. }
         // Reads only.
         | Commands::Doctor { .. }
         // Started by jeet itself, under the command that was checked.
@@ -1480,6 +1482,9 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             command: None | Some(WatchCommands::Status),
             ..
         } => Some(Scope::NoTarget),
+        // Cuts itself to the reports and messages of the caller and the
+        // tasks below it.
+        Commands::Show { .. } => Some(Scope::Listed),
         Commands::Worktree(WorktreeArgs { command, task }) => {
             let current = Target::Current(task.clone());
             match command {
@@ -2904,6 +2909,7 @@ mod tests {
             (&["report", "answer", "4", "x"], true),
             (&["report", "escalate", "4"], true),
             (&["report", "ls"], true),
+            (&["show", "r1"], true),
             (&["init-shell"], true),
             (&["install-shell"], false),
             (&["completions", "zsh"], true),

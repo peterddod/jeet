@@ -15,6 +15,7 @@ use crate::manager::budget::{self, Limits, Threshold};
 use crate::messages::{self, Agent, Delivered, Sender, TmuxAgent};
 use crate::notify::{self, Notification};
 use crate::permissions::{self, Caller};
+use crate::render::{self, Meta};
 use crate::runtime;
 use crate::status::{self, Activity};
 use crate::tasks;
@@ -42,6 +43,8 @@ pub enum StatusEvent {
     Moved,
     /// A session's wake channel is off for good.
     Wake,
+    /// Lines of its inbox could not be read and were moved aside.
+    Rejected,
 }
 
 impl StatusEvent {
@@ -55,6 +58,7 @@ impl StatusEvent {
             StatusEvent::Queued => "queued",
             StatusEvent::Moved => "moved",
             StatusEvent::Wake => "wake",
+            StatusEvent::Rejected => "rejected",
         }
     }
 }
@@ -206,12 +210,20 @@ fn deliver_with<'a>(
     manager_agent: &dyn Fn(bool) -> Box<dyn Agent + 'a>,
 ) -> Result<Delivered> {
     let fenced = assistant::fence_report(id, &src.label, &src.path, kind, body);
+    let meta = Meta::new(
+        render::class_of_report(kind),
+        kind.as_str(),
+        &src.label,
+        body,
+        Some(format!("r{id}")),
+    );
     // Started only by a report that wakes it.
     deliver_to_with(
         app,
         parent,
         &fenced,
         may_start && wakes(kind),
+        Some(meta),
         manager_agent,
     )
 }
@@ -224,22 +236,23 @@ type DeliverFn<'a> = dyn Fn(&TaskRecord, &str, bool) -> Result<Delivered> + 'a;
 /// Deliver `text` to `to`'s agent, started only with `may_start`: the
 /// assistant's through its sessions, which never start without it.
 fn deliver_to(app: &App, to: &TaskRecord, text: &str, may_start: bool) -> Result<Delivered> {
-    deliver_to_with(app, to, text, may_start, &|may_start| {
+    deliver_to_with(app, to, text, may_start, None, &|may_start| {
         Box::new(TmuxAgent::new(app, to).may_start(may_start))
     })
 }
 
-/// [`deliver_to`], with any other task's agent, allowed to start or not,
-/// from `agent`.
+/// [`deliver_to`], queued with `meta`, and with any other task's agent,
+/// allowed to start or not, from `agent`.
 fn deliver_to_with<'a>(
     app: &App,
     to: &TaskRecord,
     text: &str,
     may_start: bool,
+    meta: Option<Meta>,
     agent: &dyn Fn(bool) -> Box<dyn Agent + 'a>,
 ) -> Result<Delivered> {
     match to.kind {
-        TaskKind::Assistant => assistant::deliver(app, text, may_start).map(|(d, _)| d),
+        TaskKind::Assistant => assistant::deliver(app, text, may_start, meta).map(|(d, _)| d),
         // Typed into its idle pane, queued while it is busy, and started
         // only with `may_start`; otherwise held in its inbox.
         TaskKind::Manager | TaskKind::Work => messages::deliver(
@@ -247,6 +260,7 @@ fn deliver_to_with<'a>(
             agent(may_start).as_ref(),
             text,
             Sender::Agent,
+            meta,
         ),
     }
 }
@@ -1164,6 +1178,20 @@ mod tests {
             "{}",
             held[0].message
         );
+        // Each is queued with its class, from its kind, and the id of its row.
+        let metas: Vec<_> = held.iter().map(|q| q.meta.clone().unwrap()).collect();
+        let classes: Vec<_> = metas.iter().map(|m| (m.class, m.kind.as_str())).collect();
+        assert_eq!(
+            classes,
+            [
+                (render::Class::Digest, "status"),
+                (render::Class::Digest, "progress"),
+                (render::Class::Line, "done"),
+            ]
+        );
+        assert_eq!(metas[0].from, "task mw");
+        assert_eq!(metas[0].summary, "news");
+        assert_eq!(metas[0].r#ref.as_deref(), Some("r1"));
         // Done, from a caller that may, starts it with all that was held.
         let (delivered, started) = to_stopped(&app, &mw, &m, ReportKind::Done, true);
         assert_eq!(delivered, Delivered::Started);

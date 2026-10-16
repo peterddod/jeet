@@ -1035,6 +1035,7 @@ its inbox when it is not running, unless the report is one that starts it.
 jeet report ls                 # the open questions you hold
 jeet report answer <id> "…"    # answer one
 jeet report escalate <id>      # pass one up
+jeet show r123                 # a report, whole (m45: a message)
 ```
 
 A `question` or `blocked` report stays open until it is answered or the
@@ -2239,6 +2240,39 @@ next start (`jeet task restart` one that is running), and messages are
 queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
+
+### Quiet messages for the assistant
+
+```toml
+[messages]
+render = { orchestrator = "quiet", front = "quiet" }   # each "quiet" or "full"; default "quiet"
+digest_mins = 15                                      # default: 15
+```
+
+What is queued for the assistant is posted by class, from the kind of each
+item, never from who sent it. A one-line header comes first
+(`jeet: 1 question, 2 updates (jeet show <ref> for any)`), then:
+
+- **full**: `question` and `blocked` reports, answers, and anything jeet has
+  no kind for (your own words) in their whole fenced text;
+- **line**: a `done` report, an agent's `jeet task send` and a `jeet watch`
+  batch, one line each with the start of its text and a reference;
+- **digest**: `progress` and `status` reports, and a note that jeet resumed a
+  session to repair its wake channel, one line per task. A queue of nothing
+  else is held for `digest_mins`; a full or line item sends it with it.
+
+The nonce stays last, and a Stop's 2 KB cap applies to the rendered post.
+Managers and work tasks always get the full text, as does the assistant with
+`orchestrator = "full"`. The front does not exist yet: its key is read and used
+nowhere. Typing into an idle pane stays full text.
+
+`jeet show r123` prints report 123 and `jeet show m45` a message, whole;
+`m` messages are kept 30 days in the task's `.jeet/delivered.jsonl`. It only
+reads, and shows you what you reach: everything for you and the assistant, and
+for a task with a parent only the reports and messages of itself and the tasks
+below it. A line in a task's inbox that cannot be read is moved to
+`.jeet/inbox.rejected.jsonl` rather than dropped, and the task's parent gets
+a `status` report about it (the assistant's log says so).
 
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).

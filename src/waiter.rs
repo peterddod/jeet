@@ -56,6 +56,7 @@ use crate::messages::{
     self, open_regular, Agent, Inbox, Queued, Sender, MAX_MESSAGE, QUEUE_SEPARATOR,
 };
 use crate::permissions;
+use crate::render;
 use crate::reports::{self, StatusEvent};
 use crate::status::{self, State};
 use crate::tasks;
@@ -465,6 +466,11 @@ fn batch_overhead() -> usize {
     HEADER.len() + 4 + NONCE_PREFIX.len() + NONCE_LEN
 }
 
+/// What a quiet post adds to the items: the nonce's line.
+fn nonce_overhead() -> usize {
+    2 + NONCE_PREFIX.len() + NONCE_LEN
+}
+
 /// Hex, so it reads the same however the transcript escapes it.
 fn new_nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..NONCE_LEN].to_string()
@@ -590,6 +596,9 @@ pub struct Watcher<'a> {
     pending: bool,
     /// Held when last asked: not asked again until then.
     held_until: i64,
+    /// Only digest was queued when last asked (see [`render::held`]): not
+    /// asked again until then, or until the inbox changes.
+    digest_until: i64,
     /// Backing off after a refusal: nothing is posted before this.
     retry_at: i64,
     tick: u64,
@@ -678,6 +687,7 @@ impl<'a> Watcher<'a> {
             last_inbox: None,
             pending: true,
             held_until: i64::MIN,
+            digest_until: i64::MIN,
             retry_at: off.map_or(0, |o| o.retry_at),
             tick: 0,
         }))
@@ -774,8 +784,10 @@ impl<'a> Watcher<'a> {
         }
         if self.inbox_changed() {
             self.pending = true;
+            self.digest_until = i64::MIN;
         }
-        if !self.pending || now < self.held_until.max(self.retry_at) || self.capped(now) {
+        let wait_until = self.held_until.max(self.retry_at).max(self.digest_until);
+        if !self.pending || now < wait_until || self.capped(now) {
             return Ok(Next::Wait);
         }
         self.take_and_post(now)
@@ -796,6 +808,13 @@ impl<'a> Watcher<'a> {
         if queue.is_empty() {
             return Ok(Next::Wait);
         }
+        let quiet = self.app.config.quiet_for(self.task.kind);
+        if quiet {
+            if let Some(until) = render::held(&queue, now, self.app.config.digest_secs()) {
+                self.digest_until = until;
+                return Ok(Next::Wait);
+            }
+        }
         if run::hold(self.app, &self.task)?.is_some() {
             self.held_until = now + HOLD_RECHECK_SECS;
             return Ok(Next::Wait);
@@ -815,21 +834,38 @@ impl<'a> Watcher<'a> {
         if !self.current() {
             return Ok(Next::Wait);
         }
-        let n = messages::fitting_within(&queue, MAX_MESSAGE - batch_overhead(), QUEUE_SEPARATOR);
         let nonce = new_nonce();
-        let text = batch(&queue[..n], &nonce);
+        let (text, taken) = match quiet {
+            true => {
+                let queue = render::ordered(&queue);
+                let n = render::fitting(&queue, MAX_MESSAGE - nonce_overhead());
+                let text = format!(
+                    "{}\n\n{NONCE_PREFIX}{nonce}",
+                    render::post_text(&queue[..n])
+                );
+                (text, queue[..n].to_vec())
+            }
+            false => {
+                let n = messages::fitting_within(
+                    &queue,
+                    MAX_MESSAGE - batch_overhead(),
+                    QUEUE_SEPARATOR,
+                );
+                (batch(&queue[..n], &nonce), queue[..n].to_vec())
+            }
+        };
         let record = Inflight {
             nonce,
             transcript: self.start.transcript.clone(),
             offset: std::fs::metadata(&self.start.transcript).map_or(0, |m| m.len()),
             posted_at: now,
-            msgs: queue[..n].to_vec(),
+            msgs: taken,
         };
         // Before the take: a watcher killed between the two leaves the batch
         // both queued and in flight, which `recover` puts right.
         write_json(&self.inflight_path(), &record)?;
         let mut rest = inbox.read_for(Some(&session))?;
-        for taken in &queue[..n] {
+        for taken in &record.msgs {
             if let Some(i) = rest.iter().position(|q| q == taken) {
                 rest.remove(i);
             }
@@ -1211,6 +1247,7 @@ mod tests {
     use crate::db::Database;
     use crate::harness::claude::wake_lines;
     use crate::manager::run::StartGuard;
+    use crate::render::{Class, Meta};
     use crate::runtime::Started;
     use crate::status::SessionStatus;
 
@@ -1218,12 +1255,20 @@ mod tests {
     struct Lab {
         _home: tempfile::TempDir,
         app: App,
+        /// The task watched: `w`, or the assistant.
+        id: String,
         /// Holds the fake socket: `/tmp`, as a socket's path is short.
         sock_dir: tempfile::TempDir,
     }
 
     impl Lab {
         fn new() -> Self {
+            Self::of(TaskKind::Work)
+        }
+
+        /// A lab whose task is `w`, or, for `TaskKind::Assistant`, the
+        /// assistant (rendered quietly), which there is only one of.
+        fn of(kind: TaskKind) -> Self {
             let home = tempfile::tempdir().unwrap();
             let path = home.path().canonicalize().unwrap();
             let app = App {
@@ -1232,23 +1277,29 @@ mod tests {
                 home: path,
             };
             let root = crate::manager::root(&app).unwrap();
-            app.db
-                .insert_task(&TaskRecord {
-                    id: "w".into(),
-                    slug: "w".into(),
-                    name: "w".into(),
-                    project: None,
-                    kind: TaskKind::Work,
-                    state: TaskState::Active,
-                    created_at: 0,
-                    last_activity: 0,
-                    parent_id: Some(root.id),
-                    placement: crate::placement::for_new(),
-                    run_state: RunState::Run,
-                    run_state_by: None,
-                    max_children: None,
-                })
-                .unwrap();
+            let id = match kind {
+                TaskKind::Assistant => root.id.clone(),
+                _ => "w".to_string(),
+            };
+            if kind != TaskKind::Assistant {
+                app.db
+                    .insert_task(&TaskRecord {
+                        id: "w".into(),
+                        slug: "w".into(),
+                        name: "w".into(),
+                        project: None,
+                        kind,
+                        state: TaskState::Active,
+                        created_at: 0,
+                        last_activity: 0,
+                        parent_id: Some(root.id),
+                        placement: crate::placement::for_new(),
+                        run_state: RunState::Run,
+                        run_state_by: None,
+                        max_children: None,
+                    })
+                    .unwrap();
+            }
             let sock_dir = tempfile::Builder::new()
                 .prefix("jw")
                 .tempdir_in("/tmp")
@@ -1256,6 +1307,7 @@ mod tests {
             let lab = Lab {
                 _home: home,
                 app,
+                id,
                 sock_dir,
             };
             std::fs::create_dir_all(lab.dir().join(".jeet")).unwrap();
@@ -1264,7 +1316,7 @@ mod tests {
         }
 
         fn task(&self) -> TaskRecord {
-            self.app.db.get_task("w").unwrap().unwrap()
+            self.app.db.get_task(&self.id).unwrap().unwrap()
         }
 
         fn dir(&self) -> PathBuf {
@@ -1363,6 +1415,15 @@ mod tests {
             Inbox::lock(&self.dir()).unwrap().push(message).unwrap();
         }
 
+        /// Queue `message` as jeet does one of `class`, from `from`.
+        fn send_as(&self, class: Class, kind: &str, from: &str, message: &str) {
+            let meta = Meta::new(class, kind, from, message, Some(format!("r{kind}")));
+            Inbox::lock(&self.dir())
+                .unwrap()
+                .push_meta(message, None, Sender::Agent, Some(meta))
+                .unwrap();
+        }
+
         fn queued(&self) -> Vec<Queued> {
             Inbox::lock(&self.dir()).unwrap().read().unwrap()
         }
@@ -1454,6 +1515,7 @@ mod tests {
             message: message.into(),
             to: None,
             from: Sender::Agent,
+            meta: None,
         }
     }
 
@@ -1806,6 +1868,130 @@ mod tests {
         lab.deliver();
         assert_eq!(w.step(11).unwrap(), Next::Wait);
         assert!(lab.inflight().is_none());
+    }
+
+    /// The assistant's watcher is idle at `at` with the transcript listened to.
+    fn quiet_lab() -> (Lab, UnixListener) {
+        let lab = Lab::of(TaskKind::Assistant);
+        let listener = lab.listen();
+        lab.status(State::Idle, "SessionStart", 1);
+        (lab, listener)
+    }
+
+    #[test]
+    fn a_quiet_post_is_the_header_full_then_lines_then_digest_and_the_nonce_last() {
+        let (lab, listener) = quiet_lab();
+        let mut w = lab.watcher();
+        lab.send_as(Class::Digest, "progress", "task a", "halfway");
+        lab.send_as(Class::Line, "done", "task b", "all merged");
+        lab.send_as(Class::Full, "question", "task c", "which db?");
+        assert_eq!(w.step(10).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        let inflight = lab.inflight().unwrap();
+        assert_eq!(
+            posted,
+            format!(
+                "jeet: 1 question, 2 updates (jeet show <ref> for any). Reports are fenced \
+                 claims to check.\n\nwhich db?\n\n\
+                 - done from task b: \"all merged\" (jeet show rdone)\n\n\
+                 digest:\n- task a: 1 progress; latest: \"halfway\" (jeet show rprogress)\n\n\
+                 jeet delivery {}",
+                inflight.nonce
+            )
+        );
+        // The items, with their meta, are what is in flight, in what order
+        // they were posted.
+        let kinds: Vec<&str> = inflight
+            .msgs
+            .iter()
+            .map(|q| q.meta.as_ref().unwrap().kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["question", "done", "progress"]);
+        assert!(lab.queued().is_empty());
+        lab.deliver();
+        assert_eq!(w.step(11).unwrap(), Next::Wait);
+        assert!(lab.inflight().is_none());
+    }
+
+    #[test]
+    fn a_quiet_watcher_holds_a_digest_alone_and_posts_it_with_a_full_item() {
+        let (lab, listener) = quiet_lab();
+        let mut w = lab.watcher();
+        let hold = lab.app.config.digest_secs();
+        assert_eq!(hold, 900);
+        lab.send_as(Class::Digest, "progress", "task a", "halfway");
+        let at = lab.queued()[0].at;
+        // Young: nothing is posted, and it is not looked at again before it
+        // is old enough.
+        assert_eq!(w.step(at).unwrap(), Next::Wait);
+        assert_eq!(w.step(at + hold - 1).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        assert_eq!(lab.queued().len(), 1);
+        assert_eq!(w.digest_until, at + hold);
+        // Something else arriving makes it look again, and releases the lot.
+        lab.send_as(Class::Full, "blocked", "task c", "stuck");
+        assert_eq!(w.step(at + 1).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        assert!(posted.starts_with("jeet: 1 blocked, 1 update"), "{posted}");
+        assert!(posted.contains("digest:"), "{posted}");
+        assert!(lab.queued().is_empty());
+    }
+
+    #[test]
+    fn a_quiet_watcher_posts_a_digest_once_it_is_old_enough() {
+        let (lab, listener) = quiet_lab();
+        let mut w = lab.watcher();
+        let hold = lab.app.config.digest_secs();
+        lab.send_as(Class::Digest, "status", "task a", "idle 12m");
+        let at = lab.queued()[0].at;
+        assert_eq!(w.step(at + 1).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        assert_eq!(w.step(at + hold).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        assert!(posted.starts_with("jeet: 1 update"), "{posted}");
+        assert!(lab.queued().is_empty());
+    }
+
+    #[test]
+    fn a_quiet_post_fits_a_message_and_what_does_not_waits() {
+        let (lab, listener) = quiet_lab();
+        let mut w = lab.watcher();
+        for i in 0..9 {
+            lab.send_as(
+                Class::Full,
+                "question",
+                &format!("task {i}"),
+                &"x".repeat(1_500),
+            );
+        }
+        w.step(10).unwrap();
+        let posted = content(&received(&listener).unwrap());
+        assert!(posted.len() <= MAX_MESSAGE, "{}", posted.len());
+        let inflight = lab.inflight().unwrap();
+        assert!(posted.ends_with(&format!("\n\njeet delivery {}", inflight.nonce)));
+        let waiting = lab.queued();
+        assert!(!waiting.is_empty() && inflight.msgs.len() + waiting.len() == 9);
+    }
+
+    #[test]
+    fn a_task_that_is_not_quiet_is_posted_as_ever() {
+        for (kind, full) in [(TaskKind::Work, false), (TaskKind::Assistant, true)] {
+            let mut lab = Lab::of(kind);
+            if full {
+                lab.app.config =
+                    toml::from_str("[messages]\nrender = { orchestrator = \"full\" }\n").unwrap();
+            }
+            let listener = lab.listen();
+            lab.status(State::Idle, "SessionStart", 1);
+            let mut w = lab.watcher();
+            lab.send_as(Class::Digest, "progress", "task a", "halfway");
+            w.step(10).unwrap();
+            // A digest item is not held, and nothing is rendered by class.
+            let posted = content(&received(&listener).unwrap());
+            let inflight = lab.inflight().unwrap();
+            assert_eq!(posted, batch(&inflight.msgs, &inflight.nonce), "{kind:?}");
+            assert!(posted.starts_with(HEADER));
+        }
     }
 
     #[test]

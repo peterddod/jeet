@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::db::tasks::TaskKind;
 use crate::github::MergeMethod;
 use crate::manager::budget::{self, Limits};
 use crate::permissions;
@@ -51,6 +52,10 @@ pub struct Config {
     /// How tasks with a parent are watched over (`[managers]`).
     #[serde(default, skip_serializing_if = "managers_is_empty")]
     pub managers: Option<ManagersConfig>,
+
+    /// How what is queued for an agent is rendered (`[messages]`).
+    #[serde(default, skip_serializing_if = "MessagesConfig::is_empty")]
+    pub messages: MessagesConfig,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -437,6 +442,57 @@ fn managers_is_empty(managers: &Option<ManagersConfig>) -> bool {
     managers.as_ref().is_none_or(ManagersConfig::is_empty)
 }
 
+/// `[messages]` in config.toml.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagesConfig {
+    /// How each level's queue is rendered when it is posted or handed over
+    /// at a Stop (default: `quiet` for both).
+    #[serde(default, skip_serializing_if = "RenderConfig::is_empty")]
+    pub render: RenderConfig,
+
+    /// Minutes a queue of nothing but digest items is held for, unless
+    /// something else is queued (default: 15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_mins: Option<u64>,
+}
+
+/// `[messages] render`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderConfig {
+    /// For the assistant, the orchestrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<Render>,
+    /// For the front. Nothing reads it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub front: Option<Render>,
+}
+
+impl RenderConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How a queue is rendered: `[messages] render`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Render {
+    /// A header, then each item by its class: whole, as a line, or in a digest.
+    Quiet,
+    /// Every item whole, as it was queued.
+    Full,
+}
+
+pub const DEFAULT_DIGEST_MINS: u64 = 15;
+
+impl MessagesConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 6;
@@ -484,6 +540,7 @@ impl Default for Config {
             assistant: AssistantConfig::default(),
             watch: None,
             managers: None,
+            messages: MessagesConfig::default(),
         }
     }
 }
@@ -544,6 +601,23 @@ impl Config {
             }
             _ => true,
         }
+    }
+
+    /// Whether what is queued for a task of `kind` is rendered quietly:
+    /// only the assistant's, unless `[messages] render` says `full`.
+    pub fn quiet_for(&self, kind: TaskKind) -> bool {
+        match kind {
+            TaskKind::Assistant => {
+                self.messages.render.orchestrator.unwrap_or(Render::Quiet) == Render::Quiet
+            }
+            TaskKind::Manager | TaskKind::Work => false,
+        }
+    }
+
+    /// `[messages] digest_mins`, in seconds.
+    pub fn digest_secs(&self) -> i64 {
+        let mins = self.messages.digest_mins.unwrap_or(DEFAULT_DIGEST_MINS);
+        i64::try_from(mins.saturating_mul(60)).unwrap_or(i64::MAX)
     }
 
     /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
@@ -884,6 +958,40 @@ mod tests {
         assert!(!read("[harness]\nwake = false\nwake_repair = \"auto\"\n"));
         // Another value is an error, as an unknown key is.
         assert!(toml::from_str::<Config>("[harness]\nwake_repair = \"on\"\n").is_err());
+    }
+
+    #[test]
+    fn quiet_rendering_is_for_the_orchestrator_unless_set_full() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap();
+        let quiet = |c: &Config| c.quiet_for(TaskKind::Assistant);
+        assert!(quiet(&Config::default()));
+        assert!(quiet(&read("[messages]\ndigest_mins = 5\n")));
+        assert!(quiet(&read(
+            "[messages]\nrender = { orchestrator = \"quiet\", front = \"full\" }\n"
+        )));
+        // The front's key is read and used nowhere.
+        assert!(quiet(&read("[messages]\nrender = { front = \"full\" }\n")));
+        let full = read("[messages]\nrender = { orchestrator = \"full\" }\n");
+        assert!(!quiet(&full));
+        // Managers and work tasks are never quiet.
+        for config in [Config::default(), full] {
+            assert!(!config.quiet_for(TaskKind::Manager));
+            assert!(!config.quiet_for(TaskKind::Work));
+        }
+        assert!(
+            toml::from_str::<Config>("[messages]\nrender = { orchestrator = \"loud\" }\n").is_err()
+        );
+        assert!(toml::from_str::<Config>("[messages]\nrender = { back = \"full\" }\n").is_err());
+        assert!(toml::from_str::<Config>("[messages]\nextra = 1\n").is_err());
+    }
+
+    #[test]
+    fn the_digest_is_held_fifteen_minutes_unless_set() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap().digest_secs();
+        assert_eq!(Config::default().digest_secs(), 900);
+        assert_eq!(read("[messages]\ndigest_mins = 2\n"), 120);
+        assert_eq!(read("[messages]\ndigest_mins = 0\n"), 0);
+        assert!(toml::from_str::<Config>("[messages]\ndigest_mins = \"x\"\n").is_err());
     }
 
     #[test]

@@ -48,6 +48,7 @@ use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::manager::run;
 use crate::messages::{self, Delivered, Sender, TmuxAgent};
 use crate::notify;
+use crate::render::{Class, Meta};
 use crate::reports;
 use crate::store;
 use crate::tasks;
@@ -889,7 +890,8 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                 Ok(Some(task)) => {
                     let dir = tasks::task_dir(app, &task);
                     let agent = TmuxAgent::new(app, &task);
-                    match messages::deliver(&dir, &agent, &task_message(event), Sender::Agent) {
+                    match messages::deliver(&dir, &agent, &task_message(event), Sender::Agent, None)
+                    {
                         Ok(delivered) => {
                             sent[i] = Sent::Task(task.slug.clone());
                             held[i] = still_notified(delivered);
@@ -904,7 +906,13 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
                     Ok(Some(review)) => {
                         let dir = crate::review::dir(app, &review);
                         let agent = crate::review::ReviewAgent::new(app, &review);
-                        match messages::deliver(&dir, &agent, &task_message(event), Sender::Agent) {
+                        match messages::deliver(
+                            &dir,
+                            &agent,
+                            &task_message(event),
+                            Sender::Agent,
+                            None,
+                        ) {
                             Ok(delivered) => {
                                 sent[i] = Sent::Review(review.slug.clone());
                                 held[i] = still_notified(delivered);
@@ -956,7 +964,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         // rule is there so that it acts on them.
         let agent = TmuxAgent::new(app, &manager);
         for (text, carried) in batched(MANAGER_HEAD, theirs) {
-            match messages::deliver(&dir, &agent, &text, Sender::Agent) {
+            match messages::deliver(&dir, &agent, &text, Sender::Agent, None) {
                 Ok(delivered) => {
                     for &i in &carried {
                         sent[i] = Sent::Manager(manager.slug.clone());
@@ -976,7 +984,18 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     // In the order they came, whatever sent them here.
     for_assistant.sort_by_key(|(i, _)| *i);
     for (text, carried) in batched(ASSISTANT_HEAD, &for_assistant) {
-        match assistant::deliver(app, &text, true) {
+        let first = &events[carried[0]];
+        let body = match carried.len() {
+            1 => format!("{} {}: {}", first.kind.name(), first.place(), first.title),
+            n => format!(
+                "{n} events, first {} {}: {}",
+                first.kind.name(),
+                first.place(),
+                first.title
+            ),
+        };
+        let meta = Meta::new(Class::Line, "watch", "github", &body, None);
+        match assistant::deliver(app, &text, true, Some(meta)) {
             Ok((delivered, _)) => {
                 for &i in &carried {
                     sent[i] = Sent::Assistant;
@@ -1194,6 +1213,17 @@ pub fn run_once(app: &App) -> Result<()> {
     // A session whose wake channel stopped is resumed for a new watcher.
     if let Err(e) = crate::wake::sweep_wake(app, now_secs(), true) {
         eprintln!("jeet: warning: could not look at the wake channels: {e:#}");
+    }
+    // Lines a task's inbox could not take are told of once. The assistant is
+    // no task to list.
+    match app.db.list_tasks(Some(TaskState::Active)) {
+        Ok(mut tasks) => {
+            tasks.extend(app.db.get_assistant_task().ok().flatten());
+            tasks
+                .iter()
+                .for_each(|task| messages::sweep_rejected(app, task));
+        }
+        Err(e) => eprintln!("jeet: warning: could not look for rejected inbox lines: {e:#}"),
     }
     // Nor when a slot under `max_live` frees up without an `Ended` hook.
     match run::drain(app) {

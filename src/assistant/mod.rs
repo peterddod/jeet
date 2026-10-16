@@ -38,6 +38,7 @@ use crate::identity;
 use crate::messages::{self, Agent, Delivered, Queued, Sender};
 use crate::permissions;
 use crate::placement::Placement;
+use crate::render::{Class, Meta};
 use crate::runtime::{self, Started};
 use crate::status::{self, Activity, SessionStatus};
 use crate::tasks;
@@ -491,7 +492,8 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// fenced as untrusted, with who sent it: see [`fence_message`].
 pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
-    deliver(app, &fence_message(from, &message), true)
+    let meta = Meta::new(Class::Line, "message", from, &message, None);
+    deliver(app, &fence_message(from, &message), true, Some(meta))
 }
 
 /// Get `text`, already fenced as whatever it is, to the assistant: in the
@@ -501,9 +503,22 @@ pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<S
 ///
 /// Without `may_start`, it never starts a session: with none running, it is
 /// held for the next one. For what is not worth a session of its own.
-pub fn deliver(app: &App, text: &str, may_start: bool) -> Result<(Delivered, Option<String>)> {
+///
+/// `meta` is what jeet knows of it to render it by (see [`crate::render`]).
+/// One with no ref yet is not a report: its whole text is kept in the
+/// assistant's `delivered.jsonl`, and it gets the ref `m<id>` of that.
+pub fn deliver(
+    app: &App,
+    text: &str,
+    may_start: bool,
+    meta: Option<Meta>,
+) -> Result<(Delivered, Option<String>)> {
     let task = ensure(app)?;
     let dir = tasks::task_dir(app, &task);
+    let meta = match meta {
+        Some(meta) if meta.r#ref.is_none() => Some(messages::number(&app.home, &dir, meta, text)?),
+        meta => meta,
+    };
     let sessions = sessions(app, &task)?;
     // Messages left for a session that has since ended go to this one.
     messages::Inbox::lock(&dir)?.release_orphans(|| {
@@ -523,7 +538,7 @@ pub fn deliver(app: &App, text: &str, may_start: bool) -> Result<(Delivered, Opt
     };
     // Never the user's, whoever sent it (see `send`): through its wake
     // channel even at an idle prompt.
-    let delivered = messages::deliver(&dir, &agent, text, Sender::Agent)?;
+    let delivered = messages::deliver(&dir, &agent, text, Sender::Agent, meta)?;
     Ok((delivered, target.map(|s| s.name.clone())))
 }
 
@@ -1021,6 +1036,7 @@ mod tests {
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
             from: Sender::Agent,
+            meta: None,
         }];
         let watched = Watched {
             last_run: Some(1),
@@ -1117,6 +1133,7 @@ mod tests {
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
             from: Sender::Agent,
+            meta: None,
         }];
         let text = context_text(
             "2026-10-10",

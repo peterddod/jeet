@@ -1533,6 +1533,7 @@ mod tests {
                 &TmuxAgent::new(app, &w1),
                 "hi",
                 messages::Sender::Agent,
+                None,
             )
             .unwrap_err();
             assert!(err.to_string().contains(tmux::INSTALL_HINT), "{err:#}");

@@ -259,7 +259,7 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
     let (message, from) = from_sender(app, &permissions::caller(app)?, message)?;
     let dir = tasks::task_dir(app, &task);
     let agent = messages::TmuxAgent::new(app, &task);
-    let delivered = messages::deliver(&dir, &agent, &message, from)?;
+    let delivered = messages::deliver(&dir, &agent, &message, from, None)?;
     let _ = app.db.touch_task(&task.id, now_secs());
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to {}'s agent", called),
