@@ -1,5 +1,5 @@
-//! Quiet rendering: what the orchestrator (the assistant) is posted when it
-//! has several things queued. jeet gives each queued item a class from its
+//! Quiet rendering: what the assistant and the managers are posted when they
+//! have several things queued. jeet gives each queued item a class from its
 //! kind, never from who sent it, and posts the items by class: the whole
 //! text of what needs an answer, one line for what is only news, and one
 //! line per sender for what can wait. `jeet show <ref>` prints the rest.

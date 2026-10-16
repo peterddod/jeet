@@ -534,7 +534,7 @@ pub fn deliver(
 ) -> Result<(Delivered, Option<String>)> {
     let task = ensure(app)?;
     let dir = tasks::task_dir(app, &task);
-    let meta = number_if_quiet(app, &dir, meta, text)?;
+    let meta = messages::number_if_quiet(app, TaskKind::Assistant, &dir, meta, text)?;
     let sessions = sessions(app, &task)?;
     // Messages left for a session that has since ended go to this one.
     messages::Inbox::lock(&dir)?.release_orphans(|| {
@@ -556,26 +556,6 @@ pub fn deliver(
     // channel even at an idle prompt.
     let delivered = messages::deliver(&dir, &agent, text, Sender::Agent, meta)?;
     Ok((delivered, target.map(|s| s.name.clone())))
-}
-
-/// `meta` with no ref yet, of `text` for the assistant in `dir`, given the ref
-/// `m<id>` and kept whole in `delivered.jsonl`, when the assistant is
-/// rendered quietly; otherwise as it was, with no ref and no file.
-fn number_if_quiet(app: &App, dir: &Path, meta: Option<Meta>, text: &str) -> Result<Option<Meta>> {
-    match meta {
-        // Never fails the delivery: without a ref it is rendered all the same,
-        // and the assistant still hears from its tasks.
-        Some(meta) if meta.r#ref.is_none() && app.config.quiet_for(TaskKind::Assistant) => {
-            match messages::number(&app.home, dir, meta.clone(), text) {
-                Ok(numbered) => Ok(Some(numbered)),
-                Err(e) => {
-                    eprintln!("jeet: warning: could not keep the message for `jeet show`: {e:#}");
-                    Ok(Some(meta))
-                }
-            }
-        }
-        meta => Ok(meta),
-    }
 }
 
 /// One of the assistant's sessions, as far as sending it messages goes;
@@ -999,6 +979,22 @@ mod tests {
     }
 
     #[test]
+    fn a_line_for_a_manager_is_numbered_only_when_managers_are_rendered_quietly() {
+        let meta = || Some(Meta::new(RenderClass::Line, "watch", "github", "ev", None));
+        let number = |app: &App, kind| {
+            let dir = tempfile::tempdir().unwrap();
+            messages::number_if_quiet(app, kind, dir.path(), meta(), "whole")
+                .unwrap()
+                .unwrap()
+        };
+        let (_home, app) = quiet_app("");
+        assert_eq!(number(&app, TaskKind::Manager).r#ref.as_deref(), Some("m1"));
+        assert_eq!(number(&app, TaskKind::Work).r#ref, None);
+        let (_home, app) = quiet_app("[messages]\nrender = { managers = \"full\" }\n");
+        assert_eq!(number(&app, TaskKind::Manager).r#ref, None);
+    }
+
+    #[test]
     fn a_line_is_numbered_and_kept_only_when_the_assistant_is_rendered_quietly() {
         let meta = || {
             Some(Meta::new(
@@ -1011,15 +1007,15 @@ mod tests {
         };
         let (_home, app) = quiet_app("");
         let dir = tempfile::tempdir().unwrap();
-        let got = number_if_quiet(&app, dir.path(), meta(), "whole")
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
             .unwrap()
             .unwrap();
         assert_eq!(got.r#ref.as_deref(), Some("m1"));
         assert_eq!(messages::read_delivered(dir.path())[0].message, "whole");
         // Rendered in full: today's behaviour, no ref and no file.
-        let (_home, app) = quiet_app("[messages]\nrender = { orchestrator = \"full\" }\n");
+        let (_home, app) = quiet_app("[messages]\nrender = { assistant = \"full\" }\n");
         let dir = tempfile::tempdir().unwrap();
-        let got = number_if_quiet(&app, dir.path(), meta(), "whole")
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
             .unwrap()
             .unwrap();
         assert_eq!(got.r#ref, None);
@@ -1031,12 +1027,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(app.home.join("run")).unwrap();
         std::fs::write(app.home.join("run/messages.seq"), "garbage").unwrap();
-        let got = number_if_quiet(&app, dir.path(), meta(), "whole")
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
             .unwrap()
             .unwrap();
         assert_eq!(got, meta().unwrap());
         // None stays none.
-        assert_eq!(number_if_quiet(&app, dir.path(), None, "x").unwrap(), None);
+        assert_eq!(
+            messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), None, "x").unwrap(),
+            None
+        );
     }
     use crate::manager::context::MAX_TODO;
     use crate::manager::ReportLine;

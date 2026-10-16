@@ -1874,7 +1874,11 @@ mod tests {
 
     /// The assistant's watcher is idle at `at` with the transcript listened to.
     fn quiet_lab() -> (Lab, UnixListener) {
-        let lab = Lab::of(TaskKind::Assistant);
+        quiet_lab_of(TaskKind::Assistant)
+    }
+
+    fn quiet_lab_of(kind: TaskKind) -> (Lab, UnixListener) {
+        let lab = Lab::of(kind);
         let listener = lab.listen();
         lab.status(State::Idle, "SessionStart", 1);
         (lab, listener)
@@ -1981,7 +1985,7 @@ mod tests {
             let mut lab = Lab::of(kind);
             if full {
                 lab.app.config =
-                    toml::from_str("[messages]\nrender = { orchestrator = \"full\" }\n").unwrap();
+                    toml::from_str("[messages]\nrender = { assistant = \"full\" }\n").unwrap();
             }
             let listener = lab.listen();
             lab.status(State::Idle, "SessionStart", 1);
@@ -1993,6 +1997,61 @@ mod tests {
             let inflight = lab.inflight().unwrap();
             assert_eq!(posted, batch(&inflight.msgs, &inflight.nonce), "{kind:?}");
             assert!(posted.starts_with(HEADER));
+        }
+    }
+
+    #[test]
+    fn a_quiet_manager_is_posted_by_class_and_holds_a_digest_like_the_assistant() {
+        let (lab, listener) = quiet_lab_of(TaskKind::Manager);
+        let mut w = lab.watcher();
+        let hold = lab.app.config.digest_secs();
+        lab.send_as(Class::Digest, "progress", "task a", "halfway");
+        let at = lab.queued()[0].at;
+        assert_eq!(w.step(at + 1).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        lab.send_as(Class::Line, "done", "task b", "all merged");
+        lab.send_as(Class::Full, "question", "task c", "which db?");
+        assert_eq!(w.step(at + 2).unwrap(), Next::Wait);
+        let posted = content(&received(&listener).unwrap());
+        let inflight = lab.inflight().unwrap();
+        assert_eq!(
+            posted,
+            format!(
+                "jeet: 1 question, 2 updates (jeet show <ref> for any). Reports are fenced \
+                 claims to check.\n\nwhich db?\n\n\
+                 - done from task b: \"all merged\" (jeet show rdone)\n\n\
+                 digest:\n- task a: 1 progress; latest: \"halfway\" (jeet show rprogress)\n\n\
+                 jeet delivery {}",
+                inflight.nonce
+            )
+        );
+        // A digest alone is held for as long as for the assistant.
+        lab.deliver();
+        w.step(at + 3).unwrap();
+        lab.send_as(Class::Digest, "status", "task a", "idle");
+        let young = lab.queued()[0].at;
+        assert_eq!(w.step(young + hold - 1).unwrap(), Next::Wait);
+        assert!(received(&listener).is_none());
+        assert_eq!(w.step(young + hold).unwrap(), Next::Wait);
+        assert!(content(&received(&listener).unwrap()).starts_with("jeet: 1 update"));
+    }
+
+    #[test]
+    fn a_manager_set_full_and_a_work_task_are_posted_as_ever() {
+        for (kind, full) in [(TaskKind::Manager, true), (TaskKind::Work, false)] {
+            let mut lab = Lab::of(kind);
+            if full {
+                lab.app.config =
+                    toml::from_str("[messages]\nrender = { managers = \"full\" }\n").unwrap();
+            }
+            let listener = lab.listen();
+            lab.status(State::Idle, "SessionStart", 1);
+            let mut w = lab.watcher();
+            lab.send_as(Class::Digest, "progress", "task a", "halfway");
+            w.step(10).unwrap();
+            let posted = content(&received(&listener).unwrap());
+            let inflight = lab.inflight().unwrap();
+            assert_eq!(posted, batch(&inflight.msgs, &inflight.nonce), "{kind:?}");
         }
     }
 

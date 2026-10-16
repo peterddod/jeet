@@ -778,6 +778,22 @@ fn batched(head: &str, events: &[(usize, &Event)]) -> Vec<(String, Vec<usize>)> 
     out
 }
 
+/// The meta of a batch of `events`, by index `carried`, for an agent that is
+/// rendered quietly: a line from GitHub, summed up by its first event.
+fn watch_meta(events: &[Event], carried: &[usize]) -> Meta {
+    let first = &events[carried[0]];
+    let body = match carried.len() {
+        1 => format!("{} {}: {}", first.kind.name(), first.place(), first.title),
+        n => format!(
+            "{n} events, first {} {}: {}",
+            first.kind.name(),
+            first.place(),
+            first.title
+        ),
+    };
+    Meta::new(Class::Line, "watch", "github", &body, None)
+}
+
 fn task_message(event: &Event) -> String {
     format!("{TASK_HEAD}\n\n{}", fence(event))
 }
@@ -964,7 +980,11 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         // rule is there so that it acts on them.
         let agent = TmuxAgent::new(app, &manager);
         for (text, carried) in batched(MANAGER_HEAD, theirs) {
-            match messages::deliver(&dir, &agent, &text, Sender::Agent, None) {
+            let meta = watch_meta(events, &carried);
+            // Rendered quietly, a batch is a line, kept whole for `jeet show`.
+            let meta = messages::number_if_quiet(app, TaskKind::Manager, &dir, Some(meta), &text)
+                .unwrap_or(None);
+            match messages::deliver(&dir, &agent, &text, Sender::Agent, meta) {
                 Ok(delivered) => {
                     for &i in &carried {
                         sent[i] = Sent::Manager(manager.slug.clone());
@@ -984,17 +1004,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     // In the order they came, whatever sent them here.
     for_assistant.sort_by_key(|(i, _)| *i);
     for (text, carried) in batched(ASSISTANT_HEAD, &for_assistant) {
-        let first = &events[carried[0]];
-        let body = match carried.len() {
-            1 => format!("{} {}: {}", first.kind.name(), first.place(), first.title),
-            n => format!(
-                "{n} events, first {} {}: {}",
-                first.kind.name(),
-                first.place(),
-                first.title
-            ),
-        };
-        let meta = Meta::new(Class::Line, "watch", "github", &body, None);
+        let meta = watch_meta(events, &carried);
         match assistant::deliver(app, &text, true, Some(meta)) {
             Ok((delivered, _)) => {
                 for &i in &carried {

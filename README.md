@@ -2241,15 +2241,15 @@ queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
 
-### Quiet messages for the assistant
+### Quiet messages for the assistant and managers
 
 ```toml
 [messages]
-render = { orchestrator = "quiet", front = "quiet" }   # each "quiet" or "full"; default "quiet"
+render = { assistant = "quiet", managers = "quiet" }   # each "quiet" or "full"; default "quiet"
 digest_mins = 15                                      # default: 15
 ```
 
-What is queued for the assistant is posted by class, from the kind of each
+What is queued for the assistant, and for every manager, is posted by class, from the kind of each
 item, never from who sent it. A one-line header comes first
 (`jeet: 1 question, 2 updates (jeet show <ref> for any)`), then:
 
@@ -2262,9 +2262,10 @@ item, never from who sent it. A one-line header comes first
   else is held for `digest_mins`; a full or line item sends it with it.
 
 The nonce stays last, and a Stop's 2 KB cap applies to the rendered post.
-Managers and work tasks always get the full text, as does the assistant with
-`orchestrator = "full"`. The front does not exist yet: its key is read and used
-nowhere. Typing into an idle pane stays full text.
+Work tasks always get the full text, as does the assistant with
+`assistant = "full"` and every manager with `managers = "full"` (one key for
+all managers). What a manager's parent or you send it stays whole. Typing into
+an idle pane stays full text.
 
 `jeet show r123` prints report 123 and `jeet show m45` a message, whole;
 `m` messages are kept 30 days in the task's `.jeet/delivered.jsonl`. It only

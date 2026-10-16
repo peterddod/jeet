@@ -237,6 +237,38 @@ mod tests {
     }
 
     #[test]
+    fn a_manager_reaches_its_own_subtree_and_not_a_sibling_managers() {
+        let (_home, app) = lab();
+        let root = assistant::ensure(&app).unwrap();
+        app.db
+            .insert_task(&task("m2", TaskKind::Manager, Some(&root.id)))
+            .unwrap();
+        app.db
+            .insert_task(&task("m2w", TaskKind::Work, Some("m2")))
+            .unwrap();
+        app.db
+            .insert_report("m2w", "m2", ReportKind::Done, "theirs", 12)
+            .unwrap();
+        let m2 = app.db.get_task("m2").unwrap().unwrap();
+        let meta = Meta::new(Class::Line, "watch", "github", "ev", None);
+        let sibling =
+            messages::number(&app.home, &crate::tasks::task_dir(&app, &m2), meta, "ev").unwrap();
+        let sibling_ref = sibling.r#ref.unwrap();
+        let m = as_node(&app, "m");
+        // Its subtree's report (r1, mw to m) and its own message (m2).
+        assert!(shown(&app, &m, "r1").is_ok());
+        assert!(shown(&app, &m, "m2").unwrap().contains("to the manager"));
+        // The sibling manager's subtree and its messages are not its own.
+        assert!(shown(&app, &m, "r3").is_err());
+        assert!(shown(&app, &m, &sibling_ref).is_err());
+        // The sibling reaches its own.
+        let other = as_node(&app, "m2");
+        assert!(shown(&app, &other, "r3").is_ok());
+        assert!(shown(&app, &other, &sibling_ref).is_ok());
+        assert!(shown(&app, &other, "r1").is_err());
+    }
+
+    #[test]
     fn a_missing_a_malformed_and_an_unreached_ref_read_the_same() {
         let (_home, app) = lab();
         let m = as_node(&app, "m");

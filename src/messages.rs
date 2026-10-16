@@ -318,6 +318,32 @@ fn highest_delivered(home: &Path, task_dir: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// `meta` with no ref yet, of `text` for a task of `kind` in `dir`, given the
+/// ref `m<id>` and kept whole in `delivered.jsonl`, when that kind is
+/// rendered quietly; otherwise as it was, with no ref and no file. It never
+/// fails the delivery: without a ref the item is rendered all the same, and
+/// the task still hears from the others.
+pub fn number_if_quiet(
+    app: &App,
+    kind: TaskKind,
+    dir: &Path,
+    meta: Option<Meta>,
+    text: &str,
+) -> Result<Option<Meta>> {
+    match meta {
+        Some(meta) if meta.r#ref.is_none() && app.config.quiet_for(kind) => {
+            match number(&app.home, dir, meta.clone(), text) {
+                Ok(numbered) => Ok(Some(numbered)),
+                Err(e) => {
+                    eprintln!("jeet: warning: could not keep the message for `jeet show`: {e:#}");
+                    Ok(Some(meta))
+                }
+            }
+        }
+        meta => Ok(meta),
+    }
+}
+
 /// Add `entry` to the task's `delivered.jsonl`; when its first line is
 /// older than [`DELIVERED_KEEP_SECS`], rewrite it without the old ones.
 fn append_delivered(task_dir: &Path, entry: &Delivery, now: i64) -> Result<()> {

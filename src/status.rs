@@ -2011,6 +2011,45 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_manager_stop_takes_by_class_within_the_cap_and_holds_a_young_digest() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let manager = TaskRecord {
+            kind: TaskKind::Manager,
+            ..app.db.get_task("w").unwrap().unwrap()
+        };
+        assert!(app.config.quiet_for(manager.kind));
+        let dir = busy_w(&app);
+        let big = "q".repeat(900);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        inbox
+            .replace(&[
+                classed(1, Class::Digest, "progress", "task a", "halfway"),
+                classed(2, Class::Full, "question", "task c", &format!("1{big}")),
+                classed(3, Class::Full, "blocked", "task d", &format!("2{big}")),
+                classed(4, Class::Full, "question", "task e", &format!("3{big}")),
+            ])
+            .unwrap();
+        let quiet = app.config.quiet_for(manager.kind);
+        let (taken, rendered) = take_at_stop(&inbox, &dir, "s", &app, quiet, 400).unwrap();
+        assert!(rendered);
+        assert!(crate::render::post_text(&taken).len() <= messages::STOP_CAP);
+        let ats: Vec<i64> = taken.iter().map(|q| q.at).collect();
+        assert_eq!(ats, [2, 3]);
+        // A digest alone is held while young.
+        inbox
+            .replace(&[classed(1_000, Class::Digest, "status", "task a", "idle")])
+            .unwrap();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, quiet, 1_001).unwrap();
+        assert!(taken.is_empty());
+        // A manager set full, and a work task, are handed the queue as ever.
+        let mut full = app_at(&app.home);
+        full.config = toml::from_str("[messages]\nrender = { managers = \"full\" }\n").unwrap();
+        assert!(!full.config.quiet_for(TaskKind::Manager));
+        assert!(!app.config.quiet_for(TaskKind::Work));
+    }
+
+    #[test]
     fn a_stop_for_the_assistant_hands_over_the_rendered_post_and_a_workers_is_as_ever() {
         use crate::render::Class;
         let (_home, app) = lab();

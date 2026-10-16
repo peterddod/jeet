@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn a_repair_is_not_noted_when_the_assistant_is_rendered_in_full() {
-        let (_home, app) = assistant_app("[messages]\nrender = { orchestrator = \"full\" }\n");
+        let (_home, app) = assistant_app("[messages]\nrender = { assistant = \"full\" }\n");
         note_in_digest(&app, "resumed").unwrap();
         assert!(assistant_queue(&app).is_empty());
     }

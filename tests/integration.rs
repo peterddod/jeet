@@ -9547,7 +9547,7 @@ fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[managers]\nidle_report_mins = 1\n[messages]\nrender = { orchestrator = \"full\" }\n",
+        "scan_roots = []\n[managers]\nidle_report_mins = 1\n[messages]\nrender = { assistant = \"full\" }\n",
     )
     .unwrap();
     let x = lab.new_task_with("x", &["--parent", "assistant"]);

@@ -461,12 +461,12 @@ pub struct MessagesConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderConfig {
-    /// For the assistant, the orchestrator.
+    /// For the assistant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orchestrator: Option<Render>,
-    /// For the front. Nothing reads it yet.
+    pub assistant: Option<Render>,
+    /// For every manager; there is no setting for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub front: Option<Render>,
+    pub managers: Option<Render>,
 }
 
 impl RenderConfig {
@@ -603,14 +603,18 @@ impl Config {
         }
     }
 
-    /// Whether what is queued for a task of `kind` is rendered quietly:
-    /// only the assistant's, unless `[messages] render` says `full`.
+    /// Whether what is queued for a task of `kind` is rendered quietly: the
+    /// assistant's and the managers', unless `[messages] render` says `full`
+    /// for them. A work task's never is.
     pub fn quiet_for(&self, kind: TaskKind) -> bool {
         match kind {
             TaskKind::Assistant => {
-                self.messages.render.orchestrator.unwrap_or(Render::Quiet) == Render::Quiet
+                self.messages.render.assistant.unwrap_or(Render::Quiet) == Render::Quiet
             }
-            TaskKind::Manager | TaskKind::Work => false,
+            TaskKind::Manager => {
+                self.messages.render.managers.unwrap_or(Render::Quiet) == Render::Quiet
+            }
+            TaskKind::Work => false,
         }
     }
 
@@ -961,28 +965,36 @@ mod tests {
     }
 
     #[test]
-    fn quiet_rendering_is_for_the_orchestrator_unless_set_full() {
+    fn quiet_rendering_is_for_the_assistant_and_managers_unless_set_full() {
         let read = |text: &str| toml::from_str::<Config>(text).unwrap();
-        let quiet = |c: &Config| c.quiet_for(TaskKind::Assistant);
-        assert!(quiet(&Config::default()));
-        assert!(quiet(&read("[messages]\ndigest_mins = 5\n")));
-        assert!(quiet(&read(
-            "[messages]\nrender = { orchestrator = \"quiet\", front = \"full\" }\n"
-        )));
-        // The front's key is read and used nowhere.
-        assert!(quiet(&read("[messages]\nrender = { front = \"full\" }\n")));
-        let full = read("[messages]\nrender = { orchestrator = \"full\" }\n");
-        assert!(!quiet(&full));
-        // Managers and work tasks are never quiet.
-        for config in [Config::default(), full] {
-            assert!(!config.quiet_for(TaskKind::Manager));
+        let assistant = |c: &Config| c.quiet_for(TaskKind::Assistant);
+        let managers = |c: &Config| c.quiet_for(TaskKind::Manager);
+        assert!(assistant(&Config::default()) && managers(&Config::default()));
+        let digest = read("[messages]\ndigest_mins = 5\n");
+        assert!(assistant(&digest) && managers(&digest));
+        let both = read("[messages]\nrender = { assistant = \"quiet\", managers = \"quiet\" }\n");
+        assert!(assistant(&both) && managers(&both));
+        // Each level has its own key.
+        let full = read("[messages]\nrender = { assistant = \"full\" }\n");
+        assert!(!assistant(&full) && managers(&full));
+        let managers_full = read("[messages]\nrender = { managers = \"full\" }\n");
+        assert!(assistant(&managers_full) && !managers(&managers_full));
+        // Work tasks are never quiet.
+        for config in [Config::default(), full, managers_full] {
             assert!(!config.quiet_for(TaskKind::Work));
         }
-        assert!(
-            toml::from_str::<Config>("[messages]\nrender = { orchestrator = \"loud\" }\n").is_err()
-        );
-        assert!(toml::from_str::<Config>("[messages]\nrender = { back = \"full\" }\n").is_err());
-        assert!(toml::from_str::<Config>("[messages]\nextra = 1\n").is_err());
+        for bad in [
+            "render = { assistant = \"loud\" }",
+            "render = { orchestrator = \"full\" }",
+            "render = { front = \"full\" }",
+            "render = { manager = \"full\" }",
+            "extra = 1",
+        ] {
+            assert!(
+                toml::from_str::<Config>(&format!("[messages]\n{bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
