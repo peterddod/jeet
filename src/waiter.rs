@@ -1646,13 +1646,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             drop(probe);
         });
-        // A loaded machine may run the release late: far more tries than
-        // a watcher makes, so only a probe that is never let go fails it.
-        assert!(lock_within(&path, LOCK_TRIES * 20, LOCK_RETRY)
-            .unwrap()
-            .is_some());
+        // A loaded machine may run the release late, and a process another
+        // test forks holds a copy of a lock until it execs: far more tries
+        // than a watcher makes, so only a lock that is never let go fails.
+        let patient = || lock_within(&path, LOCK_TRIES * 20, LOCK_RETRY).unwrap();
+        assert!(patient().is_some());
         release.join().unwrap();
-        let _watcher = lock_within(&path, 1, Duration::ZERO).unwrap().unwrap();
+        let _watcher = patient().unwrap();
         assert!(lock_within(&path, LOCK_TRIES, Duration::ZERO)
             .unwrap()
             .is_none());
