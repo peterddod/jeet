@@ -1422,7 +1422,7 @@ pub fn resolve(app: &App, caller: &Caller, target: &Target) -> Result<TaskRecord
 /// has. The assistant for the assistant, a task with a parent for that task,
 /// and the user for the user or a top-level task. A job whose asker is gone
 /// reads nothing.
-fn asker_of(app: &App, job: &WorkerJobRecord) -> Result<Caller> {
+pub(crate) fn asker_of(app: &App, job: &WorkerJobRecord) -> Result<Caller> {
     let Some(id) = &job.requested_by else {
         return Ok(Caller::User);
     };

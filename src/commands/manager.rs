@@ -203,20 +203,28 @@ struct Row {
 /// The tree under the assistant, or, for a task with a parent, under it.
 pub fn ls(app: &App, json: bool) -> Result<()> {
     let caller = permissions::caller(app)?;
-    let top = match caller {
-        Caller::Node(node) => node,
-        // A read makes no assistant; with none there is no tree.
-        Caller::User | Caller::Root | Caller::Review(_) | Caller::Worker(_) => {
-            match app.db.get_assistant_task()? {
-                Some(root) => root,
-                None => {
-                    return finish_ls(&[], json);
-                }
-            }
-        }
+    // A read makes no assistant; with none there is no tree.
+    let Some(top) = ls_top(app, &caller)? else {
+        return finish_ls(&[], json);
     };
     let rows = tree(app, &top)?;
     finish_ls(&rows, json)
+}
+
+/// The task `caller`'s listing starts at: a task with a parent itself, and a
+/// worker job the task that asked for it, if that is one with a parent;
+/// anyone else the assistant.
+fn ls_top(app: &App, caller: &Caller) -> Result<Option<TaskRecord>> {
+    let caller = match caller {
+        Caller::Worker(job) => permissions::asker_of(app, job)?,
+        other => other.clone(),
+    };
+    match caller {
+        Caller::Node(node) => Ok(Some(node)),
+        Caller::User | Caller::Root | Caller::Review(_) | Caller::Worker(_) => {
+            app.db.get_assistant_task()
+        }
+    }
 }
 
 fn finish_ls(rows: &[Row], json: bool) -> Result<()> {
@@ -935,6 +943,35 @@ mod tests {
         app.db.insert_task(&task).unwrap();
         app.db.set_grants(&task.id, grants).unwrap();
         task
+    }
+
+    /// A worker job lists from the task that asked for it, if that has a
+    /// parent, else from the assistant.
+    #[test]
+    fn a_worker_jobs_listing_starts_where_its_askers_would() {
+        use crate::db::workers::WorkerJobRecord;
+        let (_dir, app, root) = lab();
+        let api = add(&app, "api", TaskKind::Manager, &root, &[]);
+        let worker = |by: Option<&str>| {
+            Caller::Worker(Box::new(WorkerJobRecord::new(
+                "wk-1".into(),
+                "j",
+                by.map(str::to_string),
+                0,
+            )))
+        };
+        let top = |by: Option<&str>| ls_top(&app, &worker(by)).unwrap().map(|t| t.slug);
+        assert_eq!(top(Some("api-id")).as_deref(), Some("api"));
+        assert_eq!(top(None), Some(root.slug.clone()));
+        assert_eq!(top(Some(&root.id)), Some(root.slug.clone()));
+        assert!(ls_top(&app, &worker(Some("gone"))).is_err());
+        assert_eq!(
+            ls_top(&app, &Caller::Node(api))
+                .unwrap()
+                .map(|t| t.slug)
+                .as_deref(),
+            Some("api")
+        );
     }
 
     /// `manager show --json` on a manager whose grant names what the

@@ -234,6 +234,8 @@ struct Hint {
     task: Option<String>,
     /// `$JEET_ASSISTANT`.
     assistant: bool,
+    /// `$JEET_WORKER`: set on a worker job's `claude`.
+    worker: Option<String>,
 }
 
 impl Hint {
@@ -244,6 +246,10 @@ impl Hint {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
             assistant: permissions::assistant_mode(),
+            worker: std::env::var(permissions::WORKER_ENV)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
         }
     }
 }
@@ -264,6 +270,9 @@ enum Verdict {
     /// The hints claim a task that needs an anchor (`None`: the assistant),
     /// and there is none.
     Unconfirmed(Option<String>),
+    /// The hints say it is worker job `id`'s, and no anchor of that job
+    /// confirms it: refused, never taken for the user.
+    UnconfirmedWorker(String),
     Nobody,
 }
 
@@ -284,6 +293,13 @@ fn resolve(
             .find(|a| a.pid == *pid && a.start == *start)
             .map(|a| (depth, a))
     });
+    if let Some(id) = &hint.worker {
+        let confirmed =
+            nearest.is_some_and(|(_, a)| a.role == Some(AnchorRole::Worker) && a.task_id == *id);
+        if !confirmed {
+            return Verdict::UnconfirmedWorker(id.clone());
+        }
+    }
     if let Some((depth, anchor)) = nearest {
         let anchored = anchor.task_id.clone();
         // The runner inherits whoever started it's environment: only its
@@ -374,6 +390,14 @@ pub fn identify(app: &App) -> Result<Identity> {
     let (id, self_job) = match verdict {
         Verdict::SelfJob(id) => (id, true),
         Verdict::Anchored(id) => (id, false),
+        Verdict::UnconfirmedWorker(id) => {
+            return Err(Refused::Unconfirmed(format!(
+                "jeet can't confirm this is worker job {id}: it has no record of starting it \
+                 here, or cannot read the processes above this jeet; a worker job's commands \
+                 are refused rather than run as the user"
+            ))
+            .into());
+        }
         Verdict::Nobody => {
             return Ok(Identity {
                 task: None,
@@ -632,6 +656,7 @@ mod tests {
         Hint {
             task: task.map(Into::into),
             assistant,
+            worker: None,
         }
     }
 
@@ -639,6 +664,40 @@ mod tests {
     /// does not, and any other task is unknown.
     fn verdict(chain: &[(u32, i64)], anchors: &[Anchor], hint: &Hint) -> Verdict {
         resolve(chain, anchors, hint, |id| id == "root", |id| id != "top")
+    }
+
+    #[test]
+    fn a_worker_hint_is_confirmed_by_its_jobs_anchor_or_refused() {
+        let chain = [(30, 3), (20, 2)];
+        let hinted = Hint {
+            worker: Some("wk-1".into()),
+            ..hint(None, false)
+        };
+        // No anchor at all (unreadable ancestry, a sandbox): refused, not the user.
+        let none: [Anchor; 0] = [];
+        assert_eq!(
+            verdict(&chain, &none, &hinted),
+            Verdict::UnconfirmedWorker("wk-1".into())
+        );
+        // An anchor that is not the worker's, or another job's.
+        let pane = anchor(20, 2, "w", AnchorKind::Pane);
+        assert_eq!(
+            verdict(&chain, &[pane], &hinted),
+            Verdict::UnconfirmedWorker("wk-1".into())
+        );
+        let worker = |task: &str| Anchor {
+            role: Some(AnchorRole::Worker),
+            ..anchor(20, 2, task, AnchorKind::Job)
+        };
+        assert_eq!(
+            verdict(&chain, &[worker("wk-2")], &hinted),
+            Verdict::UnconfirmedWorker("wk-1".into())
+        );
+        // The worker's own anchor, one process up: the worker.
+        assert_eq!(
+            verdict(&chain, &[worker("wk-1")], &hinted),
+            Verdict::Anchored("wk-1".into())
+        );
     }
 
     fn sleeper() -> std::process::Child {
