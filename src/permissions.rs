@@ -614,6 +614,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Report { .. }
         // Its own todo list.
         | Commands::Todo { .. }
+        // Reads only.
+        | Commands::Doctor { .. }
         // Started by jeet itself, under the command that was checked.
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
@@ -1711,6 +1713,12 @@ pub fn check_review_job(db: &crate::db::Database, review_id: &str, runner: u32) 
         bail!("review {}'s job is another runner's", review.slug);
     }
     Ok(())
+}
+
+/// Log something jeet did to keep an agent's wake channel working, as its own
+/// words in the assistant's log.
+pub fn log_wake(home: &Path, action: &str, outcome: Outcome) -> Result<()> {
+    append(&actions_log(home), "wake", action, outcome, None)
 }
 
 /// Log that `who`, the agent jeet identified, claimed to be another
@@ -2887,6 +2895,7 @@ mod tests {
             (&["watch", "install"], false),
             (&["watch", "uninstall"], false),
             (&["watch", "status"], true),
+            (&["doctor", "wake"], false),
             (&["notify", "t"], true),
             (&["report", "done", "x"], true),
             (&["report", "progress", "x"], true),

@@ -116,6 +116,12 @@ pub enum Commands {
         command: Option<TodoCommands>,
     },
 
+    /// Check that jeet's own machinery works
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommands,
+    },
+
     /// Tasks: a workspace directory with any number of worktrees in it
     Task {
         #[command(subcommand)]
@@ -583,6 +589,14 @@ pub enum PrCommands {
         #[arg(long)]
         keep_branch: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DoctorCommands {
+    /// Show each live session's wake channel: watched, backing off after a
+    /// refused post, due a repair, or off, and when it was last resumed to
+    /// get a new watcher (read-only)
+    Wake,
 }
 
 #[derive(Subcommand)]

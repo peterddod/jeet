@@ -748,6 +748,41 @@ pub fn attached(name: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
+/// When each client attached to session `name` last had input, in seconds
+/// since the epoch, for those showing `window` (any, for `None`). `None`
+/// when tmux cannot say.
+pub fn client_activity(name: &str, window: Option<&str>) -> Option<Vec<i64>> {
+    let output = command()
+        .args([
+            "list-clients",
+            "-F",
+            "#{client_activity}\t#{session_name}\t#{window_id}",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .bounded_output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(parse_client_activity(
+        &String::from_utf8_lossy(&output.stdout),
+        name,
+        window,
+    ))
+}
+
+fn parse_client_activity(listing: &str, name: &str, window: Option<&str>) -> Vec<i64> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (at, session, shown) = (fields.next()?, fields.next()?, fields.next()?);
+            (session == name && window.is_none_or(|w| w == shown))
+                .then(|| at.parse().ok())
+                .flatten()
+        })
+        .collect()
+}
+
 fn send_keys(args: &[&str]) -> Result<()> {
     let output = command()
         .arg("send-keys")
@@ -1238,6 +1273,22 @@ mod tests {
 
     /// A tmux that hangs is killed once its time is up, rather than
     /// holding up whoever called it; one that answers is read in full.
+    #[test]
+    fn client_activity_is_that_of_the_clients_showing_the_window() {
+        let listing = "1700000100\tjeet-a\t@1\n1700000200\tjeet-a\t@2\n\
+                       1700000300\tother\t@1\nnot a client\n";
+        assert_eq!(
+            parse_client_activity(listing, "jeet-a", Some("@2")),
+            [1_700_000_200]
+        );
+        assert_eq!(
+            parse_client_activity(listing, "jeet-a", None),
+            [1_700_000_100, 1_700_000_200]
+        );
+        assert!(parse_client_activity(listing, "jeet-a", Some("@9")).is_empty());
+        assert!(parse_client_activity("", "jeet-a", None).is_empty());
+    }
+
     #[test]
     fn a_tmux_call_that_hangs_is_given_up_on() {
         let child = Command::new("sh")

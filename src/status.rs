@@ -924,7 +924,8 @@ fn report_step(
         | StatusEvent::Idle
         | StatusEvent::Budget
         | StatusEvent::Queued
-        | StatusEvent::Moved => now,
+        | StatusEvent::Moved
+        | StatusEvent::Wake => now,
     };
     match (&ctx.task, &ctx.review) {
         (Some(task), _) => reports::auto_status(&ctx.app, task, event, body, since, 0)?,
@@ -1000,10 +1001,12 @@ fn stop(
     // session start, not here: a hook that could not reach tmux would take
     // the messages of sessions busy elsewhere.
     let queued = match &inbox {
-        Some(inbox) => inbox.take_for(Some(session_id)).unwrap_or_else(|e| {
-            eprintln!("jeet task-hook {event}: {e:#}");
-            Vec::new()
-        }),
+        Some(inbox) => {
+            take_at_stop(inbox, task_dir, session_id, &ctx.app, now).unwrap_or_else(|e| {
+                eprintln!("jeet task-hook {event}: {e:#}");
+                Vec::new()
+            })
+        }
         None => Vec::new(),
     };
     if !queued.is_empty() {
@@ -1034,6 +1037,25 @@ fn stop(
         write_status(task_dir, &status)?;
     }
     Ok(None)
+}
+
+/// What a Stop takes of the queue for `session_id`. With `wake_repair` on, a
+/// session a watcher posts to is left to it; one that has none, or whose is
+/// off, gets [`messages::STOP_CAP`] bytes of it, and the rest at its next stop.
+fn take_at_stop(
+    inbox: &messages::Inbox,
+    task_dir: &Path,
+    session_id: &str,
+    app: &App,
+    now: i64,
+) -> Result<Vec<messages::Queued>> {
+    if !app.config.wake_repair() {
+        return inbox.take_for(Some(session_id));
+    }
+    match waiter::wake_state(task_dir, session_id, now) {
+        waiter::WakeState::Watched => Ok(Vec::new()),
+        _ => messages::take_capped(inbox, Some(session_id), messages::STOP_CAP),
+    }
 }
 
 /// The agent has sat idle at its prompt. A turn the user interrupted, or a
@@ -1760,6 +1782,100 @@ mod tests {
             .read()
             .unwrap()
             .is_empty());
+    }
+
+    /// A Stop of `s` at 400, with `w`'s app opened from `app`.
+    fn stop_of(app: App, dir: &Path) -> (HookCtx, Option<String>) {
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let ctx = hook_ctx_with(Some(app), &open, dir, "w", &stop_hook, 400, &|_| true).unwrap();
+        let output = stop(harness, dir, &stop_hook, "s", &ctx, 400).unwrap();
+        (ctx, output)
+    }
+
+    fn queued_for_w(dir: &Path) -> Vec<messages::Queued> {
+        messages::Inbox::lock(dir).unwrap().read().unwrap()
+    }
+
+    #[test]
+    fn a_stop_leaves_the_queue_to_a_watcher_that_posts() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        messages::Inbox::lock(&dir).unwrap().push("more").unwrap();
+        let watcher = waiter::held_for_test(&dir, "s");
+        let (_, output) = stop_of(app, &dir);
+        assert_eq!(output, None);
+        assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
+        assert_eq!(queued_for_w(&dir).len(), 1);
+        drop(watcher);
+    }
+
+    #[test]
+    fn a_stop_takes_a_bounded_part_from_a_session_with_no_working_watcher() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        let big = "x".repeat(900);
+        for i in 0..3 {
+            inbox.push(&format!("{i}{big}")).unwrap();
+        }
+        drop(inbox);
+        // Unwatched.
+        let (ctx, output) = stop_of(app, &dir);
+        let output = output.unwrap();
+        assert!(output.contains(&format!("0{big}")) && output.contains(&format!("1{big}")));
+        assert!(!output.contains(&format!("2{big}")));
+        assert_eq!(queued_for_w(&dir).len(), 1);
+        // Backing off, with a watcher holding the lock: the same.
+        let _watcher = waiter::held_for_test(&dir, "s");
+        let off = serde_json::json!({
+            "refusals": 1, "retry_at": i64::MAX, "repaired_at": null, "permanent": false
+        });
+        std::fs::write(waiter::wait_dir(&dir).join("s.off"), off.to_string()).unwrap();
+        let harness = harness::by_id("claude-code").unwrap();
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let output = stop(harness, &dir, &stop_hook, "s", &ctx, 400).unwrap();
+        assert!(output.unwrap().contains(&format!("2{big}")));
+        assert!(queued_for_w(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_stop_splits_a_first_message_over_the_cap_and_keeps_the_tail() {
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let long = "é€x".repeat(1_000);
+        messages::Inbox::lock(&dir).unwrap().push(&long).unwrap();
+        let (_, output) = stop_of(app, &dir);
+        let output = output.unwrap();
+        assert!(output.contains("more bytes follow at your next stop]"));
+        // The head is cut on a character, and the tail is what it names.
+        let [tail] = &queued_for_w(&dir)[..] else {
+            panic!("the tail is queued");
+        };
+        assert!(long.ends_with(&tail.message));
+        assert!(output.contains(&format!("[… {} more bytes", tail.message.len())));
+    }
+
+    #[test]
+    fn with_wake_repair_off_a_stop_takes_the_whole_queue_as_before() {
+        let (_home, mut app) = lab();
+        app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: None,
+            command: None,
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: None,
+            wake_repair: Some(crate::config::WakeRepair::Off),
+        });
+        let dir = busy_w(&app);
+        let big = "x".repeat(3_000);
+        messages::Inbox::lock(&dir).unwrap().push(&big).unwrap();
+        // Even watched.
+        let _watcher = waiter::held_for_test(&dir, "s");
+        let (_, output) = stop_of(app, &dir);
+        assert!(output.unwrap().contains(&big));
+        assert!(queued_for_w(&dir).is_empty());
     }
 
     #[test]

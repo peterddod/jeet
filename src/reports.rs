@@ -40,6 +40,8 @@ pub enum StatusEvent {
     Queued,
     /// It was moved under this parent.
     Moved,
+    /// A session's wake channel is off for good.
+    Wake,
 }
 
 impl StatusEvent {
@@ -52,6 +54,7 @@ impl StatusEvent {
             StatusEvent::Budget => "budget",
             StatusEvent::Queued => "queued",
             StatusEvent::Moved => "moved",
+            StatusEvent::Wake => "wake",
         }
     }
 }

@@ -79,7 +79,22 @@ pub enum HarnessConfig {
         /// than at the end of its turn (default: on).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wake: Option<bool>,
+        /// Mend a wake channel that has stopped (default: `auto`): see
+        /// [`WakeRepair`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake_repair: Option<WakeRepair>,
     },
+}
+
+/// `[harness] wake_repair`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WakeRepair {
+    /// A refused post backs off and is tried again, and a session without
+    /// a working watcher is resumed to get one.
+    Auto,
+    /// A refused post turns the session's wake channel off for good.
+    Off,
 }
 
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
@@ -521,6 +536,16 @@ impl Config {
         }
     }
 
+    /// `[harness] wake_repair`: on unless set `off`, or the wake channel is.
+    pub fn wake_repair(&self) -> bool {
+        match &self.harness {
+            Some(HarnessConfig::Table { wake_repair, .. }) => {
+                self.wake() && wake_repair.unwrap_or(WakeRepair::Auto) == WakeRepair::Auto
+            }
+            _ => true,
+        }
+    }
+
     /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
     /// command`, then `agent`, then the harness's `default`.
     pub fn agent_command(&self, default: Option<&str>) -> Option<String> {
@@ -807,6 +832,7 @@ mod tests {
                 auto_trust: None,
                 auto_trust_reviews: None,
                 wake: None,
+                wake_repair: None,
             })
         );
         let out = toml::to_string_pretty(&config).unwrap();
@@ -845,6 +871,19 @@ mod tests {
         assert!(read("[harness]\nname = \"claude-code\"\n"));
         assert!(read("[harness]\nwake = true\n"));
         assert!(!read("[harness]\nwake = false\n"));
+    }
+
+    #[test]
+    fn wake_repair_is_auto_unless_set_off_or_the_wake_channel_is() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap().wake_repair();
+        assert!(Config::default().wake_repair());
+        assert!(read("harness = \"claude-code\"\n"));
+        assert!(read("[harness]\nwake_repair = \"auto\"\n"));
+        assert!(!read("[harness]\nwake_repair = \"off\"\n"));
+        assert!(!read("[harness]\nwake = false\n"));
+        assert!(!read("[harness]\nwake = false\nwake_repair = \"auto\"\n"));
+        // Another value is an error, as an unknown key is.
+        assert!(toml::from_str::<Config>("[harness]\nwake_repair = \"on\"\n").is_err());
     }
 
     #[test]

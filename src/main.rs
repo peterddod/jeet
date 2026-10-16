@@ -34,6 +34,7 @@ mod tmux;
 mod todo;
 mod tui;
 mod waiter;
+mod wake;
 mod watch;
 mod worktrees;
 
@@ -42,8 +43,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands,
-    TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands,
+    TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -152,6 +153,12 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                 (false, Some(WatchCommands::Install)) => watch::install(&app)?,
                 (false, Some(WatchCommands::Uninstall)) => watch::uninstall()?,
                 (false, None | Some(WatchCommands::Status)) => watch::status(&app)?,
+            }
+        }
+        Commands::Doctor { command } => {
+            let app = context::App::open()?;
+            match command {
+                DoctorCommands::Wake => commands::doctor::wake(&app)?,
             }
         }
         Commands::Clone { url } => {

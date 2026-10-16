@@ -440,24 +440,11 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
             task.slug
         );
     };
-    // Its busy time so far, before its session ends, as a stop charges it.
-    if let Err(e) = status::fold_busy(app, &task, true, now_secs()) {
-        eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug);
-    }
-    runtime::stop(&task)?;
-    app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
         Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
     };
-    let running = runtime::ensure_running(app, &task, Some(&session), None, admission)
-        .with_context(|| {
-            format!(
-                "ended task {}'s agent, but could not start it again; `jeet task open {} \
-                 --session {session}` resumes it",
-                called, task.slug
-            )
-        })?;
+    let running = end_and_resume(app, &task, &session, admission)?;
     warn_all(&running.warnings);
     match running.started {
         Started::Now => eprintln!(
@@ -476,6 +463,30 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// End `task`'s agent and start it again resuming `session`, in the same
+/// tmux session. The part of [`restart`] that needs no one's say-so.
+pub(crate) fn end_and_resume(
+    app: &App,
+    task: &TaskRecord,
+    session: &str,
+    admission: Admission,
+) -> Result<runtime::Running> {
+    // Its busy time so far, before its session ends, as a stop charges it.
+    if let Err(e) = status::fold_busy(app, task, true, now_secs()) {
+        eprintln!("jeet: could not charge task {}'s budget: {e:#}", task.slug);
+    }
+    runtime::stop(task)?;
+    app.db.delete_task_anchors(&task.id, AnchorKind::Pane)?;
+    runtime::ensure_running(app, task, Some(session), None, admission).with_context(|| {
+        format!(
+            "ended task {}'s agent, but could not start it again; `jeet task open {} \
+             --session {session}` resumes it",
+            called(app, task),
+            task.slug
+        )
+    })
 }
 
 /// [`restart`] for the assistant: each of its running windows, ended and
