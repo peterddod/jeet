@@ -219,6 +219,14 @@ pub enum Commands {
         what: ReportCommands,
     },
 
+    /// Print the whole text of a report (r123) or a message (m45) that jeet
+    /// gave you as a line or in a digest
+    Show {
+        /// The reference: r and a report's number, or m and a message's
+        #[arg(value_name = "REF")]
+        reference: String,
+    },
+
     /// Print shell integration snippet for native cd command
     InitShell,
 

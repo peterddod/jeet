@@ -1166,7 +1166,7 @@ pub fn last_activity(app: &App, review: &ReviewRecord) -> i64 {
 /// started (`may_start` false).
 pub fn deliver(app: &App, review: &ReviewRecord, text: &str, may_start: bool) -> Result<Delivered> {
     let agent = ReviewAgent::new(app, review).may_start(may_start);
-    messages::deliver(&dir(app, review), &agent, text, Sender::Agent)
+    messages::deliver(&dir(app, review), &agent, text, Sender::Agent, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,7 +1276,7 @@ pub fn start_agent(
         .get_review(&review.id)?
         .unwrap_or_else(|| review.clone());
     let agent = ReviewAgent::new(app, review);
-    let delivered = messages::deliver(&dir, &agent, &prompt, Sender::Agent)?;
+    let delivered = messages::deliver(&dir, &agent, &prompt, Sender::Agent, None)?;
     if let Err(e) = app
         .db
         .set_review_asked(&review.id, &pr.head_ref_oid, now_secs())

@@ -16,6 +16,7 @@ pub mod prs;
 pub mod report;
 pub mod review;
 pub mod shell;
+pub mod show;
 pub mod sync;
 pub mod task;
 pub mod tasks;

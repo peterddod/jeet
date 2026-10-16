@@ -477,6 +477,9 @@ fn handle_hook(
     if let Err(e) = report_step(&hook, &ctx, launched_for, now) {
         eprintln!("jeet task-hook {event}: {e:#}");
     }
+    if let Some(task) = &ctx.task {
+        messages::sweep_rejected(&ctx.app, task);
+    }
     // A session without a working watcher is resumed by the next poll: one
     // due now, rather than at the poll's own interval. Not at its start,
     // which is what starts the watcher.
@@ -941,7 +944,8 @@ fn report_step(
         | StatusEvent::Budget
         | StatusEvent::Queued
         | StatusEvent::Moved
-        | StatusEvent::Wake => now,
+        | StatusEvent::Wake
+        | StatusEvent::Rejected => now,
     };
     match (&ctx.task, &ctx.review) {
         (Some(task), _) => reports::auto_status(&ctx.app, task, event, body, since, 0)?,
@@ -1016,17 +1020,24 @@ fn stop(
     // What was sent to one that has ended is let go by the next send or
     // session start, not here: a hook that could not reach tmux would take
     // the messages of sessions busy elsewhere.
-    let queued = match &inbox {
-        Some(inbox) => {
-            take_at_stop(inbox, task_dir, session_id, &ctx.app, now).unwrap_or_else(|e| {
+    let quiet = ctx
+        .task
+        .as_ref()
+        .is_some_and(|t| ctx.app.config.quiet_for(t.kind));
+    let (queued, rendered) = match &inbox {
+        Some(inbox) => take_at_stop(inbox, task_dir, session_id, &ctx.app, quiet, now)
+            .unwrap_or_else(|e| {
                 eprintln!("jeet task-hook {event}: {e:#}");
-                Vec::new()
-            })
-        }
-        None => Vec::new(),
+                (Vec::new(), false)
+            }),
+        None => (Vec::new(), false),
     };
     if !queued.is_empty() {
-        let output = harness.continue_output(&messages::queued_reason(&queued));
+        let reason = match rendered {
+            true => crate::render::post_text(&queued),
+            false => messages::queued_reason(&queued),
+        };
+        let output = harness.continue_output(&reason);
         // Not stopping after all: on to the messages. They are out of the
         // inbox now, so a status that fails to write is warned of, not
         // failed on: failing would never print them, and they would be lost.
@@ -1058,21 +1069,38 @@ fn stop(
 /// What a Stop takes of the queue for `session_id`. With `wake_repair` on, a
 /// session a watcher posts to is left to it; one that has none, or whose is
 /// off, gets [`messages::STOP_CAP`] bytes of it, and the rest at its next stop.
+/// With `quiet` that is rendered by class ([`crate::render`]), and the flag
+/// returned says so: the caller hands it over as [`crate::render::post_text`]
+/// rather than [`messages::queued_reason`].
 fn take_at_stop(
     inbox: &messages::Inbox,
     task_dir: &Path,
     session_id: &str,
     app: &App,
+    quiet: bool,
     now: i64,
-) -> Result<Vec<messages::Queued>> {
+) -> Result<(Vec<messages::Queued>, bool)> {
     let wakes =
         AgentSpec::from_config(&app.config).is_ok_and(|spec| runtime::wake(app, spec.harness));
     if !(wakes && app.config.wake_repair()) {
-        return inbox.take_for(Some(session_id));
+        return Ok((inbox.take_for(Some(session_id))?, false));
     }
-    match waiter::wake_state(task_dir, session_id, now) {
-        waiter::WakeState::Watched => Ok(Vec::new()),
-        _ => messages::take_capped(inbox, Some(session_id), messages::STOP_CAP),
+    match (waiter::wake_state(task_dir, session_id, now), quiet) {
+        (waiter::WakeState::Watched, _) => Ok((Vec::new(), false)),
+        (_, true) => {
+            let taken = messages::take_capped_quiet(
+                inbox,
+                Some(session_id),
+                messages::STOP_CAP,
+                now,
+                app.config.digest_secs(),
+            )?;
+            Ok((taken, true))
+        }
+        (_, false) => {
+            let taken = messages::take_capped(inbox, Some(session_id), messages::STOP_CAP)?;
+            Ok((taken, false))
+        }
     }
 }
 
@@ -1774,6 +1802,7 @@ mod tests {
             message: "posted and lost".into(),
             to: Some("s".into()),
             from: crate::messages::Sender::Agent,
+            meta: None,
         };
         // Posted 10 s before the Stop: the session may hold it yet, and
         // deliver it when this Stop's turn ends.
@@ -1873,6 +1902,198 @@ mod tests {
         };
         assert!(long.ends_with(&tail.message));
         assert!(output.contains(&format!("[… {} more bytes", tail.message.len())));
+    }
+
+    /// An item as jeet queues one of `class`, from `from`, at `at`.
+    fn classed(
+        at: i64,
+        class: crate::render::Class,
+        kind: &str,
+        from: &str,
+        body: &str,
+    ) -> messages::Queued {
+        messages::Queued {
+            at,
+            message: body.into(),
+            to: None,
+            from: messages::Sender::Agent,
+            meta: Some(crate::render::Meta::new(class, kind, from, body, None)),
+        }
+    }
+
+    #[test]
+    fn a_quiet_stop_takes_what_fits_the_cap_by_class_and_leaves_the_rest() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let big = "q".repeat(900);
+        let queue = [
+            classed(1, Class::Digest, "progress", "task a", "halfway"),
+            classed(2, Class::Line, "done", "task b", "all merged"),
+            classed(3, Class::Full, "question", "task c", &format!("1{big}")),
+            classed(4, Class::Full, "blocked", "task d", &format!("2{big}")),
+            classed(5, Class::Full, "question", "task e", &format!("3{big}")),
+        ];
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        inbox.replace(&queue).unwrap();
+        // Unwatched, so the Stop takes its capped part.
+        let (taken, rendered) = take_at_stop(&inbox, &dir, "s", &app, true, 400).unwrap();
+        assert!(rendered);
+        let text = crate::render::post_text(&taken);
+        assert!(text.len() <= messages::STOP_CAP, "{}", text.len());
+        // Full items first, in order; what did not fit waits, behind.
+        let ats: Vec<i64> = taken.iter().map(|q| q.at).collect();
+        assert_eq!(ats, [3, 4]);
+        let left: Vec<i64> = inbox.read().unwrap().iter().map(|q| q.at).collect();
+        assert_eq!(left, [1, 2, 5]);
+        // The next Stop takes the last full item, then the line, the digest.
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, true, 400).unwrap();
+        let ats: Vec<i64> = taken.iter().map(|q| q.at).collect();
+        assert_eq!(ats, [5, 2, 1]);
+        assert!(inbox.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_quiet_stop_holds_a_young_digest_and_releases_an_old_one() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        inbox
+            .replace(&[classed(1_000, Class::Digest, "status", "task a", "idle")])
+            .unwrap();
+        let hold = app.config.digest_secs();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, true, 1_000 + hold - 1).unwrap();
+        assert!(taken.is_empty());
+        assert_eq!(inbox.read().unwrap().len(), 1);
+        let (taken, rendered) = take_at_stop(&inbox, &dir, "s", &app, true, 1_000 + hold).unwrap();
+        assert_eq!((taken.len(), rendered), (1, true));
+    }
+
+    #[test]
+    fn a_quiet_stop_splits_a_full_item_too_long_for_the_cap() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let long = "é€x".repeat(1_000);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        inbox
+            .replace(&[classed(1, Class::Full, "question", "task a", &long)])
+            .unwrap();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, true, 400).unwrap();
+        assert!(crate::render::post_text(&taken).len() <= messages::STOP_CAP);
+        let [tail] = &inbox.read().unwrap()[..] else {
+            panic!("the tail is queued");
+        };
+        assert!(long.ends_with(&tail.message));
+        assert!(taken[0]
+            .message
+            .contains(&format!("[… {} more bytes", tail.message.len())));
+    }
+
+    #[test]
+    fn a_quiet_stop_splits_a_full_item_that_fits_the_cap_but_not_with_its_header() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        let body = "x".repeat(messages::STOP_CAP - 10);
+        let item = classed(1, Class::Full, "question", "task a", &body);
+        assert!(item.message.len() < messages::STOP_CAP);
+        assert!(crate::render::post_text(std::slice::from_ref(&item)).len() > messages::STOP_CAP);
+        inbox.replace(&[item]).unwrap();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, true, 400).unwrap();
+        assert!(crate::render::post_text(&taken).len() <= messages::STOP_CAP);
+        let [tail] = &inbox.read().unwrap()[..] else {
+            panic!("the tail is queued");
+        };
+        assert!(body.ends_with(&tail.message) && !tail.message.is_empty());
+    }
+
+    #[test]
+    fn a_quiet_manager_stop_takes_by_class_within_the_cap_and_holds_a_young_digest() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let manager = TaskRecord {
+            kind: TaskKind::Manager,
+            ..app.db.get_task("w").unwrap().unwrap()
+        };
+        assert!(app.config.quiet_for(manager.kind));
+        let dir = busy_w(&app);
+        let big = "q".repeat(900);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        inbox
+            .replace(&[
+                classed(1, Class::Digest, "progress", "task a", "halfway"),
+                classed(2, Class::Full, "question", "task c", &format!("1{big}")),
+                classed(3, Class::Full, "blocked", "task d", &format!("2{big}")),
+                classed(4, Class::Full, "question", "task e", &format!("3{big}")),
+            ])
+            .unwrap();
+        let quiet = app.config.quiet_for(manager.kind);
+        let (taken, rendered) = take_at_stop(&inbox, &dir, "s", &app, quiet, 400).unwrap();
+        assert!(rendered);
+        assert!(crate::render::post_text(&taken).len() <= messages::STOP_CAP);
+        let ats: Vec<i64> = taken.iter().map(|q| q.at).collect();
+        assert_eq!(ats, [2, 3]);
+        // A digest alone is held while young.
+        inbox
+            .replace(&[classed(1_000, Class::Digest, "status", "task a", "idle")])
+            .unwrap();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, quiet, 1_001).unwrap();
+        assert!(taken.is_empty());
+        // A manager set full, and a work task, are not quiet: their Stop
+        // takes the queue as ever (posting is tested in the waiter).
+        let mut full = app_at(&app.home);
+        full.config = toml::from_str("[messages]\nrender = { managers = \"full\" }\n").unwrap();
+        assert!(!full.config.quiet_for(TaskKind::Manager));
+        assert!(!app.config.quiet_for(TaskKind::Work));
+    }
+
+    #[test]
+    fn a_stop_for_the_assistant_hands_over_the_rendered_post_and_a_workers_is_as_ever() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let item = classed(1, Class::Line, "done", "task b", "all merged");
+        messages::Inbox::lock(&dir)
+            .unwrap()
+            .replace(std::slice::from_ref(&item))
+            .unwrap();
+        // A worker: the whole text, under the usual lead-in, whatever the
+        // item's class.
+        let (ctx, output) = stop_of(app, &dir);
+        let output = output.unwrap();
+        assert!(
+            output.contains("Messages and reports were sent to you"),
+            "{output}"
+        );
+        assert!(!output.contains("jeet show"), "{output}");
+        // The same task rendered quietly: one line, headed.
+        messages::Inbox::lock(&dir)
+            .unwrap()
+            .replace(&[item])
+            .unwrap();
+        let open = || -> Result<App> { panic!("the app is open already") };
+        let stop_hook = hook("Stop", EventKind::Stopped);
+        let mut quiet = hook_ctx_with(
+            Some(app_at(&ctx.app.home)),
+            &open,
+            &dir,
+            "w",
+            &stop_hook,
+            400,
+            &|_| true,
+        )
+        .unwrap();
+        quiet.task.as_mut().unwrap().kind = TaskKind::Assistant;
+        let harness = harness::by_id("claude-code").unwrap();
+        let output = stop(harness, &dir, &stop_hook, "s", &quiet, 400)
+            .unwrap()
+            .unwrap();
+        assert!(output.contains("jeet: 1 update (jeet show"), "{output}");
+        assert!(output.contains("done from task b"), "{output}");
+        assert!(!output.contains("Messages and reports"), "{output}");
     }
 
     #[test]

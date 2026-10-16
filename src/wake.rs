@@ -15,9 +15,11 @@ use crate::agent::AgentSpec;
 use crate::assistant;
 use crate::commands::task::{end_and_resume, warn_all};
 use crate::context::App;
-use crate::db::tasks::{TaskRecord, TaskState};
+use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::manager::run;
+use crate::messages::{self, Sender};
 use crate::permissions;
+use crate::render::{Class, Meta};
 use crate::runtime::{self, Admission};
 use crate::status::{self, SessionStatus, State};
 use crate::tasks;
@@ -257,7 +259,28 @@ fn resume(app: &App, live: &Live, why: RepairWhy, now: i64) -> Result<()> {
     if let Err(e) = permissions::log_wake(&app.home, &action, permissions::Outcome::Done) {
         eprintln!("jeet: warning: {e:#}");
     }
+    if let Err(e) = note_in_digest(app, &action) {
+        eprintln!("jeet: warning: could not note the repair for the assistant: {e:#}");
+    }
     Ok(())
+}
+
+/// Queue `action` as a digest item for the assistant, if it is rendered
+/// quietly: it rides the next post, which this neither types nor starts.
+fn note_in_digest(app: &App, action: &str) -> Result<()> {
+    if !app.config.quiet_for(TaskKind::Assistant) {
+        return Ok(());
+    }
+    let Some(task) = app.db.get_assistant_task()? else {
+        return Ok(());
+    };
+    let meta = Meta::new(Class::Digest, "wake", "jeet", action, None);
+    messages::Inbox::lock(&tasks::task_dir(app, &task))?.push_meta(
+        action,
+        None,
+        Sender::Agent,
+        Some(meta),
+    )
 }
 
 #[cfg(test)]
@@ -366,5 +389,63 @@ mod tests {
         assert!(!ok(Some(&status), true, false, None));
         assert!(!ok(Some(&status), false, true, None));
         assert!(!ok(Some(&status), false, false, Some(now - QUIET_SECS + 1)));
+    }
+
+    fn assistant_app(config: &str) -> (tempfile::TempDir, App) {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap();
+        let app = App {
+            config: toml::from_str(config).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            home: path,
+        };
+        assistant::ensure(&app).unwrap();
+        (home, app)
+    }
+
+    fn assistant_queue(app: &App) -> Vec<messages::Queued> {
+        let task = app.db.get_assistant_task().unwrap().unwrap();
+        messages::Inbox::lock(&tasks::task_dir(app, &task))
+            .unwrap()
+            .read()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_repair_is_noted_in_the_assistants_next_digest_and_nothing_is_typed() {
+        let (_home, app) = assistant_app("");
+        let action = "resumed session s of task fix-x to restart its wake channel (unwatched)";
+        note_in_digest(&app, action).unwrap();
+        let [item] = &assistant_queue(&app)[..] else {
+            panic!("one item is queued");
+        };
+        assert_eq!((item.message.as_str(), item.to.as_deref()), (action, None));
+        let meta = item.meta.as_ref().unwrap();
+        assert_eq!(meta.class, Class::Digest);
+        assert_eq!((meta.kind.as_str(), meta.from.as_str()), ("wake", "jeet"));
+        assert_eq!(meta.summary, action);
+        assert_eq!(meta.r#ref, None);
+        // It is held to ride the next post, not posted by itself.
+        assert!(crate::render::held(&assistant_queue(&app), item.at, 900).is_some());
+    }
+
+    #[test]
+    fn a_repair_is_not_noted_when_the_assistant_is_rendered_in_full() {
+        let (_home, app) = assistant_app("[messages]\nrender = { assistant = \"full\" }\n");
+        note_in_digest(&app, "resumed").unwrap();
+        assert!(assistant_queue(&app).is_empty());
+    }
+
+    #[test]
+    fn a_repair_is_not_noted_when_there_is_no_assistant() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::Config::default(),
+            db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            home: path,
+        };
+        note_in_digest(&app, "resumed").unwrap();
+        assert!(app.db.get_assistant_task().unwrap().is_none());
     }
 }

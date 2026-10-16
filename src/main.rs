@@ -22,6 +22,7 @@ mod placement;
 mod pr_history;
 mod projects;
 mod remote;
+mod render;
 mod reports;
 mod resolve;
 mod review;
@@ -144,6 +145,10 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Report { what } => {
             let app = context::App::open()?;
             commands::report::run(&app, what)?
+        }
+        Commands::Show { reference } => {
+            let app = context::App::open()?;
+            commands::show::run(&app, &reference)?
         }
         Commands::InstallShell => commands::install_shell::run()?,
         Commands::Watch { once, command } => {

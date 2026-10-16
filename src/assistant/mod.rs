@@ -38,6 +38,7 @@ use crate::identity;
 use crate::messages::{self, Agent, Delivered, Queued, Sender};
 use crate::permissions;
 use crate::placement::Placement;
+use crate::render::{Class, Meta};
 use crate::runtime::{self, Started};
 use crate::status::{self, Activity, SessionStatus};
 use crate::tasks;
@@ -489,9 +490,29 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 ///
 /// It is not the user typing to the assistant, whatever it says, so it goes
 /// fenced as untrusted, with who sent it: see [`fence_message`].
-pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<String>)> {
+///
+/// `from_user` is the user's own `jeet task send` at their terminal
+/// ([`permissions::at_terminal`]): the class comes from the kind, and the
+/// user's words are not an agent's message, so it carries no meta and is
+/// rendered whole.
+pub fn send(
+    app: &App,
+    from: &str,
+    message: &str,
+    from_user: bool,
+) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
-    deliver(app, &fence_message(from, &message), true)
+    let meta = send_meta(from, &message, from_user);
+    deliver(app, &fence_message(from, &message), true, meta)
+}
+
+/// The meta of `message` from `from` to the assistant: a line for an
+/// agent's, none for the user's.
+fn send_meta(from: &str, message: &str, from_user: bool) -> Option<Meta> {
+    match from_user {
+        true => None,
+        false => Some(Meta::new(Class::Line, "message", from, message, None)),
+    }
 }
 
 /// Get `text`, already fenced as whatever it is, to the assistant: in the
@@ -501,9 +522,19 @@ pub fn send(app: &App, from: &str, message: &str) -> Result<(Delivered, Option<S
 ///
 /// Without `may_start`, it never starts a session: with none running, it is
 /// held for the next one. For what is not worth a session of its own.
-pub fn deliver(app: &App, text: &str, may_start: bool) -> Result<(Delivered, Option<String>)> {
+///
+/// `meta` is what jeet knows of it to render it by (see [`crate::render`]).
+/// One with no ref yet is not a report: rendered quietly, its whole text is
+/// kept in the assistant's `delivered.jsonl`, and it gets the ref `m<id>`.
+pub fn deliver(
+    app: &App,
+    text: &str,
+    may_start: bool,
+    meta: Option<Meta>,
+) -> Result<(Delivered, Option<String>)> {
     let task = ensure(app)?;
     let dir = tasks::task_dir(app, &task);
+    let meta = messages::number_if_quiet(app, TaskKind::Assistant, &dir, meta, text)?;
     let sessions = sessions(app, &task)?;
     // Messages left for a session that has since ended go to this one.
     messages::Inbox::lock(&dir)?.release_orphans(|| {
@@ -523,7 +554,7 @@ pub fn deliver(app: &App, text: &str, may_start: bool) -> Result<(Delivered, Opt
     };
     // Never the user's, whoever sent it (see `send`): through its wake
     // channel even at an idle prompt.
-    let delivered = messages::deliver(&dir, &agent, text, Sender::Agent)?;
+    let delivered = messages::deliver(&dir, &agent, text, Sender::Agent, meta)?;
     Ok((delivered, target.map(|s| s.name.clone())))
 }
 
@@ -923,6 +954,89 @@ fn event_line(logged: &watch::Logged) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::Class as RenderClass;
+
+    fn quiet_app(config: &str) -> (tempfile::TempDir, App) {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap();
+        let app = App {
+            config: toml::from_str(config).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            home: path,
+        };
+        (home, app)
+    }
+
+    #[test]
+    fn only_an_agents_message_is_a_line_and_the_users_is_whole() {
+        let agent = send_meta("task fix-x", "done it", false).unwrap();
+        assert_eq!(agent.class, RenderClass::Line);
+        assert_eq!(
+            (agent.kind.as_str(), agent.from.as_str()),
+            ("message", "task fix-x")
+        );
+        assert_eq!(send_meta("the command line", "do it", true), None);
+    }
+
+    #[test]
+    fn a_line_for_a_manager_is_numbered_only_when_managers_are_rendered_quietly() {
+        let meta = || Some(Meta::new(RenderClass::Line, "watch", "github", "ev", None));
+        let number = |app: &App, kind| {
+            let dir = tempfile::tempdir().unwrap();
+            messages::number_if_quiet(app, kind, dir.path(), meta(), "whole")
+                .unwrap()
+                .unwrap()
+        };
+        let (_home, app) = quiet_app("");
+        assert_eq!(number(&app, TaskKind::Manager).r#ref.as_deref(), Some("m1"));
+        assert_eq!(number(&app, TaskKind::Work).r#ref, None);
+        let (_home, app) = quiet_app("[messages]\nrender = { managers = \"full\" }\n");
+        assert_eq!(number(&app, TaskKind::Manager).r#ref, None);
+    }
+
+    #[test]
+    fn a_line_is_numbered_and_kept_only_when_the_assistant_is_rendered_quietly() {
+        let meta = || {
+            Some(Meta::new(
+                RenderClass::Line,
+                "message",
+                "task x",
+                "hi",
+                None,
+            ))
+        };
+        let (_home, app) = quiet_app("");
+        let dir = tempfile::tempdir().unwrap();
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.r#ref.as_deref(), Some("m1"));
+        assert_eq!(messages::read_delivered(dir.path())[0].message, "whole");
+        // Rendered in full: today's behaviour, no ref and no file.
+        let (_home, app) = quiet_app("[messages]\nrender = { assistant = \"full\" }\n");
+        let dir = tempfile::tempdir().unwrap();
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.r#ref, None);
+        assert!(!messages::delivered_path(dir.path()).exists());
+        assert!(!app.home.join("run/messages.seq").exists());
+        // A counter that cannot be read does not fail the delivery: the item
+        // goes without a ref.
+        let (_home, app) = quiet_app("");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(app.home.join("run")).unwrap();
+        std::fs::write(app.home.join("run/messages.seq"), "garbage").unwrap();
+        let got = messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), meta(), "whole")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, meta().unwrap());
+        // None stays none.
+        assert_eq!(
+            messages::number_if_quiet(&app, TaskKind::Assistant, dir.path(), None, "x").unwrap(),
+            None
+        );
+    }
     use crate::manager::context::MAX_TODO;
     use crate::manager::ReportLine;
 
@@ -1021,6 +1135,7 @@ mod tests {
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
             from: Sender::Agent,
+            meta: None,
         }];
         let watched = Watched {
             last_run: Some(1),
@@ -1117,6 +1232,7 @@ mod tests {
             message: fence_message("task fix-login", "also look at #7"),
             to: None,
             from: Sender::Agent,
+            meta: None,
         }];
         let text = context_text(
             "2026-10-10",

@@ -2715,7 +2715,7 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<
         let agent = messages::TmuxAgent::new(app, mover).may_start(false);
         if messages::Agent::alive(&agent) {
             let told = reports::brief_context(app, mover).and_then(|brief| {
-                messages::deliver(&task_dir(app, mover), &agent, &brief, Sender::Agent)
+                messages::deliver(&task_dir(app, mover), &agent, &brief, Sender::Agent, None)
             });
             lines.push(format!("{who}'s new brief: {}", delivered_words(&told)));
         }
