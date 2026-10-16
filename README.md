@@ -936,7 +936,8 @@ whose watcher died, gets one. It happens at most once per session per day and
 is logged in the assistant's `actions.log`; a refusal after a repair turns the
 channel off for that session for good, and tells its parent. A Stop leaves
 the queue to a working watcher; without one it hands over at most 2 KB at a
-time. `jeet doctor wake` shows each running session's channel. `[harness]
+time. Like `jeet task restart`, a repair ends the session's process, so background
+work it left running (background shells, subagents) ends with it. `jeet doctor wake` shows each running session's channel. `[harness]
 wake = false` turns the channel off, and `wake_repair = "off"` keeps the
 repair, the back-off and the Stop's cap from happening ([The coding agent's
 harness](#the-coding-agents-harness)).

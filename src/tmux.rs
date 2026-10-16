@@ -1271,8 +1271,6 @@ fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
 mod tests {
     use super::*;
 
-    /// A tmux that hangs is killed once its time is up, rather than
-    /// holding up whoever called it; one that answers is read in full.
     #[test]
     fn client_activity_is_that_of_the_clients_showing_the_window() {
         let listing = "1700000100\tjeet-a\t@1\n1700000200\tjeet-a\t@2\n\
@@ -1289,6 +1287,8 @@ mod tests {
         assert!(parse_client_activity("", "jeet-a", None).is_empty());
     }
 
+    /// A tmux that hangs is killed once its time is up, rather than
+    /// holding up whoever called it; one that answers is read in full.
     #[test]
     fn a_tmux_call_that_hangs_is_given_up_on() {
         let child = Command::new("sh")

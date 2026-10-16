@@ -935,7 +935,7 @@ impl Agent for TmuxAgent<'_> {
 
     fn watched(&self) -> bool {
         let dir = tasks::task_dir(self.app, self.task);
-        status::current_status(&dir).is_some_and(|s| waiter::watched(&dir, &s.session_id))
+        status::current_status(&dir).is_some_and(|s| waiter::watched(self.app, &dir, &s.session_id))
     }
 
     fn queue_held_start(&self) -> Result<()> {

@@ -161,9 +161,13 @@ fn lock_held(task_dir: &Path, session: &str) -> bool {
 }
 
 /// Whether a watcher is posting for `session`: see [`wake_state`]. One
-/// backing off, or off, is not, whatever holds its lock.
-pub fn watched(task_dir: &Path, session: &str) -> bool {
-    wake_state(task_dir, session, now_secs()) == WakeState::Watched
+/// backing off, or off, is not, whatever holds its lock. Without
+/// `wake_repair`, whether one holds the lock.
+pub fn watched(app: &App, task_dir: &Path, session: &str) -> bool {
+    match app.config.wake_repair() {
+        true => wake_state(task_dir, session, now_secs()) == WakeState::Watched,
+        false => lock_held(task_dir, session),
+    }
 }
 
 /// What `<session>.off` says: posts to the session were refused. Written
@@ -887,15 +891,17 @@ impl<'a> Watcher<'a> {
             return Ok(Next::Exit(Why::Refused));
         }
         let inbox = Inbox::lock(&self.task_dir)?;
+        // Taken only once put back: on an error, `close` still has it.
         put_back(
             self.app,
             &self.task,
             &self.task_dir,
             &session,
             &inbox,
-            self.flight.take(),
+            self.flight.as_mut(),
             Why::Refused,
         )?;
+        self.flight = None;
         // Before the hand-over: it is unwatched from here, so it is typed.
         write_off(&self.task_dir, &session, &off)?;
         self.retry_at = off.retry_at;
@@ -926,12 +932,12 @@ impl<'a> Watcher<'a> {
             task_dir,
             start,
             lock,
-            flight,
+            mut flight,
             ..
         } = self;
         let session = start.session.as_str();
         let inbox = Inbox::lock(&task_dir)?;
-        put_back(app, &task, &task_dir, session, &inbox, flight, why)?;
+        put_back(app, &task, &task_dir, session, &inbox, flight.as_mut(), why)?;
         if why == Why::Refused {
             mark_off(app, &task, &task_dir, session, now_secs())?;
         }
@@ -952,7 +958,7 @@ fn put_back(
     task_dir: &Path,
     session: &str,
     inbox: &Inbox,
-    flight: Option<Flight>,
+    flight: Option<&mut Flight>,
     why: Why,
 ) -> Result<()> {
     // A take that failed after writing its batch: still queued, and
@@ -960,7 +966,7 @@ fn put_back(
     if flight.is_none() {
         remove(&wait_file(task_dir, session, "inflight"))?;
     }
-    let Some(mut flight) = flight else {
+    let Some(flight) = flight else {
         return Ok(());
     };
     let record = &flight.record;
@@ -1557,16 +1563,16 @@ mod tests {
     fn watched_means_a_lock_someone_holds_and_never_makes_one() {
         let lab = Lab::new();
         let dir = lab.dir();
-        assert!(!watched(&dir, "s"));
+        assert!(!watched(&lab.app, &dir, "s"));
         assert!(!wait_dir(&dir).exists());
-        assert!(!watched(&dir, "../s"));
+        assert!(!watched(&lab.app, &dir, "../s"));
         std::fs::create_dir_all(wait_dir(&dir)).unwrap();
         let held = lock_within(&wait_file(&dir, "s", "lock"), 1, Duration::ZERO)
             .unwrap()
             .unwrap();
-        assert!(watched(&dir, "s"));
+        assert!(watched(&lab.app, &dir, "s"));
         drop(held);
-        assert!(!watched(&dir, "s"));
+        assert!(!watched(&lab.app, &dir, "s"));
     }
 
     #[test]
@@ -1648,7 +1654,7 @@ mod tests {
         assert_eq!(wake_state(&dir, "../s", 100), WakeState::Unwatched);
         let held = held_for_test(&dir, "s");
         assert_eq!(wake_state(&dir, "s", 100), WakeState::Watched);
-        assert!(watched(&dir, "s"));
+        assert!(watched(&lab.app, &dir, "s"));
         // Backing off, though its watcher holds the lock.
         let mut off = Off {
             refusals: 1,
@@ -1697,7 +1703,29 @@ mod tests {
                 ..
             }
         ));
-        assert!(!watched(&dir, "s"));
+        assert!(!watched(&lab.app, &dir, "s"));
+    }
+
+    #[test]
+    fn without_wake_repair_watched_is_only_the_lock() {
+        let mut lab = Lab::new();
+        let _held = held_for_test(&lab.dir(), "s");
+        lab.set_off(&Off {
+            refusals: 1,
+            retry_at: i64::MAX,
+            repaired_at: None,
+            permanent: false,
+        });
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
+        lab.app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: None,
+            command: None,
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: None,
+            wake_repair: Some(crate::config::WakeRepair::Off),
+        });
+        assert!(watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]
@@ -1902,7 +1930,7 @@ mod tests {
         assert_eq!((state.state, state.busy_since), (State::Idle, None));
         assert!(wait_file(&lab.dir(), "s", "off").exists());
         assert!(lab.inflight().is_none());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]
@@ -1965,7 +1993,7 @@ mod tests {
         assert_eq!(typist.typed.borrow().len(), 3);
         let off = lab.off().unwrap();
         assert_eq!((off.refusals, off.permanent), (3, false));
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
         assert!(matches!(
             wake_state(&lab.dir(), "s", now_secs()),
             WakeState::Off {
@@ -2062,6 +2090,19 @@ mod tests {
         );
         // Never again.
         assert!(lab.try_open().is_none());
+    }
+
+    #[test]
+    fn each_session_going_off_for_good_is_told_to_the_parent() {
+        let lab = Lab::new();
+        let task = lab.task();
+        let at = now_secs();
+        tell_off(&lab.app, &task, "s1", at);
+        tell_off(&lab.app, &task, "s2", at + 10);
+        let reports = lab.app.db.reports_for("w", 10).unwrap();
+        let told: Vec<&str> = reports.iter().map(|r| r.body.as_str()).collect();
+        assert!(told.iter().any(|b| b.contains("session s1")), "{told:?}");
+        assert!(told.iter().any(|b| b.contains("session s2")), "{told:?}");
     }
 
     #[test]
@@ -2188,7 +2229,7 @@ mod tests {
         assert!(typist.typed.borrow().is_empty());
         assert_eq!(lab.queued().len(), 1);
         assert!(!wait_file(&lab.dir(), "s", "off").exists());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]
@@ -2284,7 +2325,7 @@ mod tests {
         assert!(typist.typed.borrow().is_empty());
         assert_eq!(lab.queued().len(), 1);
         assert!(lab.inflight().is_none());
-        assert!(!watched(&lab.dir(), "s"));
+        assert!(!watched(&lab.app, &lab.dir(), "s"));
     }
 
     #[test]

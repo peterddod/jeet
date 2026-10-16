@@ -33,6 +33,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentSpec;
 use crate::assistant;
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
@@ -44,6 +45,7 @@ use crate::manager::budget::{self, Threshold};
 use crate::manager::run;
 use crate::messages;
 use crate::reports::{self, StatusEvent};
+use crate::runtime;
 use crate::tasks;
 use crate::waiter;
 use crate::worktrees::now_secs;
@@ -1063,7 +1065,9 @@ fn take_at_stop(
     app: &App,
     now: i64,
 ) -> Result<Vec<messages::Queued>> {
-    if !app.config.wake_repair() {
+    let wakes =
+        AgentSpec::from_config(&app.config).is_ok_and(|spec| runtime::wake(app, spec.harness));
+    if !(wakes && app.config.wake_repair()) {
         return inbox.take_for(Some(session_id));
     }
     match waiter::wake_state(task_dir, session_id, now) {
@@ -1890,6 +1894,24 @@ mod tests {
         let (_, output) = stop_of(app, &dir);
         assert!(output.unwrap().contains(&big));
         assert!(queued_for_w(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_harness_with_no_wake_hook_keeps_the_uncapped_stop() {
+        let (_home, mut app) = lab();
+        app.config.harness = Some(crate::config::HarnessConfig::Table {
+            name: Some("generic".into()),
+            command: Some("agent".into()),
+            auto_trust: None,
+            auto_trust_reviews: None,
+            wake: None,
+            wake_repair: None,
+        });
+        let dir = busy_w(&app);
+        let big = "x".repeat(3_000);
+        messages::Inbox::lock(&dir).unwrap().push(&big).unwrap();
+        let (_, output) = stop_of(app, &dir);
+        assert!(output.unwrap().contains(&big));
     }
 
     #[test]
