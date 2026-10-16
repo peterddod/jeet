@@ -64,7 +64,8 @@ pub fn class_of_report(kind: ReportKind) -> Class {
 }
 
 /// The start of `body`: cleaned, on one line, cut to [`SUMMARY_CHARS`], with
-/// `<` and `>` turned to `‹` and `›` as a fence's body has them.
+/// `<` and `>` turned to `‹` and `›` as a fence's body has them, and `"` to
+/// `'` as a fence's attribute has it: it is shown in quotes.
 pub fn summary(body: &str) -> String {
     let flat = crate::messages::clean(body)
         .split_whitespace()
@@ -75,6 +76,7 @@ pub fn summary(body: &str) -> String {
         .map(|c| match c {
             '<' => '‹',
             '>' => '›',
+            '"' => '\'',
             c => c,
         })
         .collect()
@@ -290,6 +292,7 @@ mod tests {
     #[test]
     fn a_summary_is_one_clean_line_of_a_hundred_characters() {
         assert_eq!(summary("  a <b>\n\tc\u{1b}[0m  "), "a ‹b› c[0m");
+        assert_eq!(summary("say \"hi\""), "say 'hi'");
         let long = "é".repeat(150);
         assert_eq!(summary(&long).chars().count(), 100);
     }

@@ -680,7 +680,8 @@ fn confirm_typed(report: &str, word: &str) -> Result<()> {
 }
 
 fn send_to_assistant(app: &App, message: &str) -> Result<()> {
-    let (delivered, session) = assistant::send(app, &sender(app), message)?;
+    let (delivered, session) =
+        assistant::send(app, &sender(app), message, permissions::at_terminal(app)?)?;
     let session = session.map(|name| printable(&name)).unwrap_or_default();
     match delivered {
         Delivered::Typed => eprintln!("jeet: sent to the assistant's session {session}"),

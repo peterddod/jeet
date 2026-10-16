@@ -154,27 +154,48 @@ fn tell_rejected(app: &App, task: &TaskRecord) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
+    // Under a lock on the count, so two sweeps file one report between them.
     let seen_path = rejected_seen_path(&dir);
-    let seen = std::fs::read_to_string(&seen_path)
-        .ok()
-        .and_then(|t| t.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    let mut seen_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&seen_path)
+        .with_context(|| format!("open {}", seen_path.display()))?;
+    seen_file
+        .lock()
+        .with_context(|| format!("lock {}", seen_path.display()))?;
+    let mut text = String::new();
+    seen_file.read_to_string(&mut text)?;
+    let seen = text.trim().parse::<usize>().unwrap_or(0);
     if count <= seen {
         return Ok(());
     }
+    let write_seen = |file: &mut File, n: usize| {
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(n.to_string().as_bytes()))
+            .with_context(|| format!("write {}", seen_path.display()))
+    };
+    write_seen(&mut seen_file, count)?;
     let body = format!(
         "rejected: {} inbox line(s) could not be read and were moved to {}",
         count - seen,
         path.display()
     );
-    match task.parent_id {
+    let told = match task.parent_id {
         // Counted above, so never held back as told already.
-        Some(_) => reports::auto_status(app, task, StatusEvent::Rejected, &body, i64::MAX, 0)
-            .map(|_| ())?,
-        None => permissions::log_wake(&app.home, &body, permissions::Outcome::Failed)?,
+        Some(_) => {
+            reports::auto_status(app, task, StatusEvent::Rejected, &body, i64::MAX, 0).map(|_| ())
+        }
+        None => permissions::log_wake(&app.home, &body, permissions::Outcome::Failed),
+    };
+    if told.is_err() {
+        // Not told: the next sweep tries again.
+        write_seen(&mut seen_file, seen)?;
     }
-    std::fs::write(&seen_path, count.to_string())
-        .with_context(|| format!("write {}", seen_path.display()))
+    told
 }
 
 /// `<task>/.jeet/delivered.jsonl`: the whole text of each message that went
@@ -222,24 +243,33 @@ pub fn number(home: &Path, task_dir: &Path, meta: Meta, message: &str) -> Result
 fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) -> Result<Meta> {
     let run = home.join("run");
     std::fs::create_dir_all(&run).with_context(|| format!("create {}", run.display()))?;
-    let seq_path = run.join("messages.seq");
-    let mut seq = OpenOptions::new()
+    // The counter is replaced whole, so its lock is on a file of its own.
+    let lock_path = run.join("messages.seq.lock");
+    let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
-        .read(true)
         .write(true)
-        .open(&seq_path)
-        .with_context(|| format!("open {}", seq_path.display()))?;
-    seq.lock()
-        .with_context(|| format!("lock {}", seq_path.display()))?;
-    let mut text = String::new();
-    seq.read_to_string(&mut text)
-        .with_context(|| format!("read {}", seq_path.display()))?;
-    let id = text.trim().parse::<i64>().unwrap_or(0) + 1;
-    seq.set_len(0)
-        .and_then(|()| seq.seek(SeekFrom::Start(0)))
-        .and_then(|_| seq.write_all(id.to_string().as_bytes()))
-        .with_context(|| format!("write {}", seq_path.display()))?;
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock {}", lock_path.display()))?;
+    let seq_path = run.join("messages.seq");
+    let last = match std::fs::read_to_string(&seq_path) {
+        Ok(text) => text.trim().parse::<i64>().map_err(|_| {
+            anyhow::anyhow!(
+                "{} holds no number; not restarting message ids at 1, so remove it once \
+                 you have checked it",
+                seq_path.display()
+            )
+        })?,
+        // None yet: after the highest id any task's file already holds.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => highest_delivered(home, task_dir),
+        Err(e) => return Err(e).with_context(|| format!("read {}", seq_path.display())),
+    };
+    let id = last + 1;
+    let tmp = seq_path.with_extension("seq.tmp");
+    std::fs::write(&tmp, id.to_string()).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &seq_path).with_context(|| format!("write {}", seq_path.display()))?;
     let entry = Delivery {
         id,
         at: now,
@@ -252,6 +282,22 @@ fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) 
         r#ref: Some(format!("m{id}")),
         ..meta
     })
+}
+
+/// The highest id in `task_dir`'s `delivered.jsonl` and those of the task
+/// directories under `home/tasks`: where a counter lost starts again from.
+fn highest_delivered(home: &Path, task_dir: &Path) -> i64 {
+    let others = std::fs::read_dir(home.join("tasks"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path());
+    others
+        .chain([task_dir.to_path_buf()])
+        .flat_map(|dir| read_delivered(&dir))
+        .map(|d| d.id)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Add `entry` to the task's `delivered.jsonl`; when its first line is
@@ -440,11 +486,17 @@ impl Inbox {
             }
         }
         if !rejected.is_empty() {
-            // Left in the inbox if they cannot be kept: not lost for want of
-            // a place to put them.
-            match self.reject(&rejected).and_then(|()| self.replace(&queued)) {
-                Ok(()) => {}
-                Err(e) => eprintln!("jeet: warning: could not move rejected inbox lines: {e:#}"),
+            // The inbox is rewritten first, so a failure after never leaves
+            // lines to be moved twice; if they cannot be kept, they go back.
+            let moved = self.replace(&queued).and_then(|()| self.reject(&rejected));
+            if let Err(e) = moved {
+                if let Err(e) = std::fs::write(&self.path, &text) {
+                    eprintln!(
+                        "jeet: warning: could not restore {}: {e}",
+                        self.path.display()
+                    );
+                }
+                eprintln!("jeet: warning: could not move rejected inbox lines: {e:#}");
             }
         }
         Ok(queued)
@@ -2542,5 +2594,100 @@ mod tests {
             .with_extension("jsonl.tmp")
             .exists());
         assert!(read_delivered(home.path()).is_empty());
+    }
+
+    #[test]
+    fn the_counter_never_restarts_silently() {
+        let home = tempfile::tempdir().unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let meta = || Meta::new(render::Class::Line, "message", "task x", "hi", None);
+        // Lost, it starts after the highest id the tasks' files hold.
+        let other = home.path().join("tasks").join("o");
+        std::fs::create_dir_all(other.join(tasks::MARKER_DIR)).unwrap();
+        let old = Delivery {
+            id: 41,
+            at: 1,
+            kind: "message".into(),
+            from: "x".into(),
+            message: "m".into(),
+        };
+        std::fs::write(
+            delivered_path(&other),
+            format!("{}\n", serde_json::to_string(&old).unwrap()),
+        )
+        .unwrap();
+        let got = number(home.path(), task.path(), meta(), "hi").unwrap();
+        assert_eq!(got.r#ref.as_deref(), Some("m42"));
+        let seq = home.path().join("run/messages.seq");
+        assert_eq!(std::fs::read_to_string(&seq).unwrap(), "42");
+        assert!(!seq.with_extension("seq.tmp").exists());
+        // A counter that holds no number is an error, left as it is.
+        std::fs::write(&seq, "garbage").unwrap();
+        assert!(number(home.path(), task.path(), meta(), "hi").is_err());
+        assert_eq!(std::fs::read_to_string(&seq).unwrap(), "garbage");
+        assert_eq!(read_delivered(task.path()).len(), 1);
+    }
+
+    #[test]
+    fn numbering_prunes_what_is_older_than_thirty_days() {
+        let home = tempfile::tempdir().unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let now = now_secs();
+        let entry = |id, at| Delivery {
+            id,
+            at,
+            kind: "message".into(),
+            from: "x".into(),
+            message: "m".into(),
+        };
+        let text: String = [entry(1, now - 31 * 86_400), entry(2, now - 29 * 86_400)]
+            .iter()
+            .map(|d| format!("{}\n", serde_json::to_string(d).unwrap()))
+            .collect();
+        std::fs::create_dir_all(task.path().join(tasks::MARKER_DIR)).unwrap();
+        std::fs::write(delivered_path(task.path()), text).unwrap();
+        let meta = Meta::new(render::Class::Line, "message", "task x", "hi", None);
+        number(home.path(), task.path(), meta, "new").unwrap();
+        let ids: Vec<i64> = read_delivered(task.path()).iter().map(|d| d.id).collect();
+        assert_eq!(ids, [2, 3]);
+    }
+
+    #[test]
+    fn rejected_lines_that_cannot_be_kept_stay_put_and_are_moved_once_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::lock(dir.path()).unwrap();
+        let text = format!("junk\n{}\n", line(1, "one"));
+        std::fs::write(inbox_path(dir.path()), &text).unwrap();
+        // Nowhere to put them: a directory is in the way.
+        std::fs::create_dir(rejected_path(dir.path())).unwrap();
+        for _ in 0..2 {
+            assert_eq!(inbox.read().unwrap().len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(inbox_path(dir.path())).unwrap(),
+                text
+            );
+        }
+        std::fs::remove_dir(rejected_path(dir.path())).unwrap();
+        assert_eq!(inbox.read().unwrap().len(), 1);
+        assert_eq!(inbox.read().unwrap().len(), 1);
+        let rejected = std::fs::read_to_string(rejected_path(dir.path())).unwrap();
+        assert_eq!(rejected.lines().count(), 1);
+    }
+
+    #[test]
+    fn the_count_is_written_before_the_report_is_filed() {
+        let (_home, app, w) = app_with_worker();
+        let dir = tasks::task_dir(&app, &w);
+        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::write(inbox_path(&dir), "junk\nmore\n").unwrap();
+        assert!(peek(&dir).is_empty());
+        sweep_rejected(&app, &w);
+        assert_eq!(
+            std::fs::read_to_string(rejected_seen_path(&dir)).unwrap(),
+            "2"
+        );
+        // A second sweep, as a concurrent one would find it, files nothing.
+        sweep_rejected(&app, &w);
+        assert_eq!(app.db.reports_for("w", 10).unwrap().len(), 1);
     }
 }

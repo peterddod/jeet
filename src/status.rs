@@ -1992,6 +1992,25 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_stop_splits_a_full_item_that_fits_the_cap_but_not_with_its_header() {
+        use crate::render::Class;
+        let (_home, app) = lab();
+        let dir = busy_w(&app);
+        let inbox = messages::Inbox::lock(&dir).unwrap();
+        let body = "x".repeat(messages::STOP_CAP - 10);
+        let item = classed(1, Class::Full, "question", "task a", &body);
+        assert!(item.message.len() < messages::STOP_CAP);
+        assert!(crate::render::post_text(std::slice::from_ref(&item)).len() > messages::STOP_CAP);
+        inbox.replace(&[item]).unwrap();
+        let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, true, 400).unwrap();
+        assert!(crate::render::post_text(&taken).len() <= messages::STOP_CAP);
+        let [tail] = &inbox.read().unwrap()[..] else {
+            panic!("the tail is queued");
+        };
+        assert!(body.ends_with(&tail.message) && !tail.message.is_empty());
+    }
+
+    #[test]
     fn a_stop_for_the_assistant_hands_over_the_rendered_post_and_a_workers_is_as_ever() {
         use crate::render::Class;
         let (_home, app) = lab();

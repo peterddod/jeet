@@ -435,4 +435,17 @@ mod tests {
         note_in_digest(&app, "resumed").unwrap();
         assert!(assistant_queue(&app).is_empty());
     }
+
+    #[test]
+    fn a_repair_is_not_noted_when_there_is_no_assistant() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::Config::default(),
+            db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            home: path,
+        };
+        note_in_digest(&app, "resumed").unwrap();
+        assert!(app.db.get_assistant_task().unwrap().is_none());
+    }
 }
