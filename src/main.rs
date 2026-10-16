@@ -36,6 +36,7 @@ mod tui;
 mod waiter;
 mod wake;
 mod watch;
+mod workers;
 mod worktrees;
 
 use anyhow::Result;
@@ -70,13 +71,22 @@ fn main() -> Result<()> {
             return Err(e);
         }
     }
+    // The same for a worker job's runner, started by `jeet worker run`.
+    if let Some(Commands::WorkerJob { job }) = &cli.command {
+        if let Err(e) = workers::await_go() {
+            workers::refused(job);
+            return Err(e);
+        }
+    }
     // Who the caller is and what it may do, before the command does
     // anything.
     let authorized = match permissions::authorize(cli.command.as_ref()) {
         Ok(authorized) => authorized,
         Err(e) => {
-            if let Some(Commands::ReviewJob { review }) = &cli.command {
-                review::refused(review);
+            match &cli.command {
+                Some(Commands::ReviewJob { review }) => review::refused(review),
+                Some(Commands::WorkerJob { job }) => workers::refused(job),
+                _ => {}
             }
             return Err(e);
         }
@@ -107,6 +117,7 @@ fn runs_by_a_person(command: Option<&Commands>) -> bool {
                 | Commands::Complete { .. }
                 | Commands::InitShell
                 | Commands::ReviewJob { .. }
+                | Commands::WorkerJob { .. }
                 | Commands::StoreSync
                 | Commands::TaskHook { .. }
                 | Commands::TaskStartup { .. }
@@ -238,6 +249,11 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             }
         }
         Commands::ReviewJob { review } => review::run_job(&review)?,
+        Commands::WorkerJob { job } => workers::run_job(&job)?,
+        Commands::Worker { command } => {
+            let app = context::App::open()?;
+            commands::worker::run(&app, command)?;
+        }
         Commands::Sync { repo } => {
             let app = context::App::open()?;
             commands::sync::run(&app, repo.as_deref())?;

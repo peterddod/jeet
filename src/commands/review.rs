@@ -58,6 +58,7 @@ pub fn run(
         Caller::User => None,
         Caller::Node(node) => bail!("task {} may not run `jeet review`", node.slug),
         Caller::Review(review) => bail!("review {} may not run `jeet review`", review.label()),
+        Caller::Worker(_) => bail!("a worker job only reads; it may not run `jeet review`"),
     };
     let checkout = review::review_for(app, &repo, &pr, requested_by.as_deref())?;
     let review = &checkout.review;
@@ -261,7 +262,7 @@ pub fn named_agent(app: &App, verb: permissions::Verb, name: &str) -> Result<Nam
                 let assistant = app.db.get_assistant_task()?.map(|task| task.id);
                 review.requested_by.is_some() && review.requested_by == assistant
             }
-            Caller::Node(_) | Caller::Review(_) => false,
+            Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => false,
         };
         if !asked {
             bail!(
@@ -389,7 +390,7 @@ pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => Admission::Gate,
     };
     let running = review::ensure_running(app, review, Some(&session), None, admission)
         .with_context(|| {

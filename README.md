@@ -2271,8 +2271,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
-(`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`)
-and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
+(`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`),
+`worker.run` (`jeet worker run`, a headless read-only `claude` job whose cost is
+yours; `[assistant.workers] max = 0` turns them off) and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr

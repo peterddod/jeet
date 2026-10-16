@@ -1,8 +1,8 @@
 //! Who runs this jeet: the task whose agent it was started under, found by
 //! walking up the process tree to a process jeet launched for that task.
 //!
-//! The jeet that starts a task's pane, an assistant window or a review job
-//! records the process it started as the task's anchor: its pid and start
+//! The jeet that starts a task's pane, an assistant window, a review job or
+//! a worker job records the process it started as the task's anchor: its pid and start
 //! time, read from the kernel, never re-bound. A process never records its
 //! own. The one other writer is [`adopt`]: the user, at a terminal outside
 //! every pane of jeet's, vouching for an agent an older jeet started. The
@@ -18,9 +18,10 @@
 use anyhow::{bail, Result};
 
 use crate::context::App;
-use crate::db::anchors::{Anchor, AnchorKind};
+use crate::db::anchors::{Anchor, AnchorKind, AnchorRole};
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
+use crate::db::workers::WorkerJobRecord;
 use crate::db::Database;
 use crate::permissions::{self, ASSISTANT_ENV};
 use crate::tasks::TASK_ID_ENV;
@@ -331,6 +332,9 @@ pub struct Identity {
     /// that the anchors and `$JEET_TASK_ID` name, as a task's. The user's
     /// own review job is not one: it runs as the user.
     pub review: Option<ReviewRecord>,
+    /// The worker job it runs under, if any: the runner jeet anchored with
+    /// the role `worker` under the job's id, or `claude` below it.
+    pub worker: Option<WorkerJobRecord>,
     /// It is the review job runner jeet started for `task`.
     pub self_job: bool,
 }
@@ -374,6 +378,7 @@ pub fn identify(app: &App) -> Result<Identity> {
             return Ok(Identity {
                 task: None,
                 review: None,
+                worker: None,
                 self_job: false,
             })
         }
@@ -459,6 +464,24 @@ pub fn identify(app: &App) -> Result<Identity> {
         return Ok(Identity {
             task: Some(task),
             review: None,
+            worker: None,
+            self_job,
+        });
+    }
+    // A worker job's runner, or what runs under it: anchored with the role,
+    // so it is never taken for the user. A job jeet has no record of is an
+    // error, not the user.
+    let under_worker = anchors.iter().any(|a| {
+        a.task_id == id && a.role == Some(AnchorRole::Worker) && chain.contains(&(a.pid, a.start))
+    });
+    if under_worker {
+        let Some(worker) = db.get_worker_job(&id)? else {
+            bail!("this jeet runs under worker job {id}, which jeet has no record of");
+        };
+        return Ok(Identity {
+            task: None,
+            review: None,
+            worker: Some(worker),
             self_job,
         });
     }
@@ -474,6 +497,7 @@ pub fn identify(app: &App) -> Result<Identity> {
     Ok(Identity {
         task: None,
         review: review.filter(|_| !users),
+        worker: None,
         self_job,
     })
 }
@@ -502,6 +526,18 @@ pub fn record(
     pane_id: Option<&str>,
     pid: u32,
 ) -> Result<()> {
+    record_as(db, task_id, kind, None, pane_id, pid)
+}
+
+/// [`record`] with the anchor's `role`.
+pub fn record_as(
+    db: &Database,
+    task_id: &str,
+    kind: AnchorKind,
+    role: Option<AnchorRole>,
+    pane_id: Option<&str>,
+    pid: u32,
+) -> Result<()> {
     if pid <= 1 {
         bail!("no process id for it ({pid})");
     }
@@ -513,6 +549,7 @@ pub fn record(
         start: info.start,
         task_id: task_id.to_string(),
         kind,
+        role,
         created_at: now_secs(),
     };
     if db.insert_anchor(&anchor, pane_id).is_err() {
@@ -586,6 +623,7 @@ mod tests {
             start,
             task_id: task.into(),
             kind,
+            role: None,
             created_at: 0,
         }
     }
@@ -779,6 +817,60 @@ mod tests {
         })
         .unwrap();
         (dir, db)
+    }
+
+    #[test]
+    fn a_worker_jobs_runner_is_identified_as_its_job() {
+        use crate::config::Config;
+        let (dir, db) = db();
+        let app = App {
+            home: dir.path().to_path_buf(),
+            config: Config::default(),
+            db,
+        };
+        app.db
+            .insert_worker_job(&WorkerJobRecord::new(
+                "wk-1".into(),
+                "pr-status",
+                Some("t".into()),
+                1,
+            ))
+            .unwrap();
+        let me = std::process::id();
+        record_as(
+            &app.db,
+            "wk-1",
+            AnchorKind::Job,
+            Some(AnchorRole::Worker),
+            None,
+            me,
+        )
+        .unwrap();
+        // This process is the runner, whatever it inherited.
+        let who = identify(&app).unwrap();
+        assert!(who.self_job);
+        assert!(who.task.is_none() && who.review.is_none());
+        let worker = who.worker.unwrap();
+        assert_eq!(
+            (worker.id.as_str(), worker.job.as_str()),
+            ("wk-1", "pr-status")
+        );
+
+        // An anchor with the role whose job jeet has no record of is refused,
+        // not taken for the user.
+        let start = start_of(me).unwrap();
+        app.db.delete_anchor(me, start).unwrap();
+        record_as(
+            &app.db,
+            "wk-gone",
+            AnchorKind::Job,
+            Some(AnchorRole::Worker),
+            None,
+            me,
+        )
+        .unwrap();
+        let err = identify(&app).err().expect("refused");
+        assert!(err.to_string().contains("wk-gone"), "{err}");
     }
 
     #[test]

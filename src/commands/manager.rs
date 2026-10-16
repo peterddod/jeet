@@ -125,6 +125,7 @@ fn read_brief_file(app: &App, caller: &Caller, path: &Path) -> Result<String> {
         Caller::Root => Some(tasks::task_dir(app, &manager::root(app)?)),
         Caller::Node(node) => Some(tasks::task_dir(app, node)),
         Caller::Review(review) => Some(crate::review::dir(app, review)),
+        Caller::Worker(_) => bail!("a worker job only reads; it may not write a brief"),
     };
     // Where `path` leads now, if inside `home`: asked again once it is
     // open, since a link in the home can be swapped in between.
@@ -205,12 +206,14 @@ pub fn ls(app: &App, json: bool) -> Result<()> {
     let top = match caller {
         Caller::Node(node) => node,
         // A read makes no assistant; with none there is no tree.
-        Caller::User | Caller::Root | Caller::Review(_) => match app.db.get_assistant_task()? {
-            Some(root) => root,
-            None => {
-                return finish_ls(&[], json);
+        Caller::User | Caller::Root | Caller::Review(_) | Caller::Worker(_) => {
+            match app.db.get_assistant_task()? {
+                Some(root) => root,
+                None => {
+                    return finish_ls(&[], json);
+                }
             }
-        },
+        }
     };
     let rows = tree(app, &top)?;
     finish_ls(&rows, json)
@@ -408,7 +411,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             // read, so an agent gets them fenced, as it does reports.
             let fence = |text: String| match caller {
                 Caller::User => text,
-                Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+                Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => {
                     crate::manager::fence::fence_message(&from, &text)
                 }
             };
@@ -461,7 +464,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         let shown_report = |r: TaskReportRecord| {
             let body = match caller {
                 Caller::User => r.body,
-                Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+                Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => {
                     crate::manager::fence::fence_message(
                         &manager::label_at(&child, &format!("{path}/{}", child.slug)),
                         &r.body,
@@ -507,7 +510,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
         };
         let body = match caller {
             Caller::User => r.body,
-            Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+            Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => {
                 crate::manager::fence::fence_message(&asker_label, &r.body)
             }
         };

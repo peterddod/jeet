@@ -295,6 +295,7 @@ fn escalate_with(
         Caller::Root => manager::root(app)?,
         Caller::Node(task) => task.clone(),
         Caller::Review(_) => bail!("a review's agent holds no question"),
+        Caller::Worker(_) => bail!("a worker job holds no question"),
     };
     refuse_unless_held(app, &row, &holder)?;
     let to = match holder.kind {
@@ -468,6 +469,7 @@ fn answer_with(
         Caller::Root => Some(manager::root(app)?),
         Caller::Node(task) => Some(task.clone()),
         Caller::Review(_) => bail!("a review's agent holds no question"),
+        Caller::Worker(_) => bail!("a worker job holds no question"),
     };
     if let Some(answerer) = &answerer {
         refuse_unless_held(app, &row, answerer)?;
@@ -561,6 +563,7 @@ pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
             })
             .into_iter()
             .collect()),
+        Caller::Worker(_) => Ok(Vec::new()),
     }
 }
 

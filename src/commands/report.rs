@@ -31,6 +31,7 @@ fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
     let task = match permissions::caller(app)? {
         Caller::Node(task) => task,
         Caller::Review(review) => return send_review(app, &review, kind, message),
+        Caller::Worker(_) => bail!("a worker job only reads; it may not report"),
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
         Caller::User => match std::env::var(TASK_ID_ENV)
             .ok()
@@ -122,7 +123,7 @@ fn answer(app: &App, id: i64, message: &str) -> Result<()> {
     let asker = answered.asker;
     let by = match caller {
         Caller::User => " (as the user)",
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => "",
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => "",
     };
     eprintln!("jeet: answered #{id} for {asker}{by}");
     eprintln!(
@@ -182,6 +183,7 @@ fn ls(app: &App) -> Result<()> {
         Caller::Root => Some(manager::root(app)?.id),
         Caller::Node(task) => Some(task.id.clone()),
         Caller::Review(review) => Some(review.id.clone()),
+        Caller::Worker(job) => Some(job.id.clone()),
     };
     for row in &held {
         print!("{}", listed(app, me.as_deref(), row)?);

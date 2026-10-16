@@ -1,5 +1,5 @@
 //! The processes jeet launched for a task (schema v5, `task_anchors`): a
-//! task's agent pane, or a review job's runner, keyed by pid and start time
+//! task's agent pane, or a review or worker job's runner, keyed by pid and start time
 //! so a reused pid never matches. Written only by the jeet that launched the
 //! process, and never re-bound; see [`crate::identity`].
 
@@ -12,8 +12,36 @@ use super::Database;
 pub enum AnchorKind {
     /// The process tmux started in a task's pane.
     Pane,
-    /// A review job's runner.
+    /// A review job's or a worker job's runner.
     Job,
+}
+
+/// What an anchored process is besides its kind (schema v10). Rows from
+/// before it have none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorRole {
+    /// A worker job's runner: its `task_id` is the id of a worker job
+    /// ([`crate::db::workers`]), not of a task or a review.
+    Worker,
+}
+
+impl AnchorRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            AnchorRole::Worker => "worker",
+        }
+    }
+
+    fn parse(s: &str) -> rusqlite::Result<Self> {
+        match s {
+            "worker" => Ok(AnchorRole::Worker),
+            other => Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                format!("unknown anchor role {other:?}").into(),
+            )),
+        }
+    }
 }
 
 impl AnchorKind {
@@ -44,11 +72,12 @@ pub struct Anchor {
     pub start: i64,
     pub task_id: String,
     pub kind: AnchorKind,
+    pub role: Option<AnchorRole>,
     /// When the row was written, in seconds.
     pub created_at: i64,
 }
 
-const ANCHOR_COLUMNS: &str = "pid, start, task_id, kind, created_at";
+const ANCHOR_COLUMNS: &str = "pid, start, task_id, kind, created_at, role";
 
 fn anchor_from_row(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
     Ok(Anchor {
@@ -57,6 +86,10 @@ fn anchor_from_row(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
         task_id: row.get(2)?,
         kind: AnchorKind::parse(&row.get::<_, String>(3)?)?,
         created_at: row.get(4)?,
+        role: row
+            .get::<_, Option<String>>(5)?
+            .map(|role| AnchorRole::parse(&role))
+            .transpose()?,
     })
 }
 
@@ -66,8 +99,8 @@ impl Database {
     /// error, never re-bound to another task.
     pub fn insert_anchor(&self, anchor: &Anchor, pane_id: Option<&str>) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO task_anchors (pid, start, task_id, kind, pane_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO task_anchors (pid, start, task_id, kind, pane_id, created_at, role)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 anchor.pid,
                 anchor.start,
@@ -75,6 +108,7 @@ impl Database {
                 anchor.kind.as_str(),
                 pane_id,
                 anchor.created_at,
+                anchor.role.map(AnchorRole::as_str),
             ],
         )?;
         Ok(())
@@ -166,6 +200,7 @@ mod tests {
             start,
             task_id: task.into(),
             kind,
+            role: None,
             created_at: at,
         }
     }
@@ -197,6 +232,22 @@ mod tests {
         assert_eq!(db.task_anchors("b", AnchorKind::Job).unwrap().len(), 1);
         db.delete_anchor(11, 6).unwrap();
         assert_eq!(db.all_anchors().unwrap(), vec![pane]);
+    }
+
+    #[test]
+    fn an_anchor_keeps_its_role() {
+        let (_dir, db) = open();
+        let worker = Anchor {
+            role: Some(AnchorRole::Worker),
+            ..anchor(10, 5, "wk-1", AnchorKind::Job, 1)
+        };
+        db.insert_anchor(&worker, None).unwrap();
+        db.insert_anchor(&anchor(11, 5, "a", AnchorKind::Pane, 1), None)
+            .unwrap();
+        let mut found = db.all_anchors().unwrap();
+        found.sort_by_key(|a| a.pid);
+        assert_eq!(found[0], worker);
+        assert_eq!(found[1].role, None);
     }
 
     #[test]

@@ -254,15 +254,59 @@ pub struct AssistantConfig {
     /// the first rule that matches decides; none matching, it is notified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
+
+    /// The headless worker jobs (`[assistant.workers]`).
+    #[serde(default, skip_serializing_if = "WorkersConfig::is_empty")]
+    pub workers: WorkersConfig,
 }
 
 impl AssistantConfig {
     fn is_empty(&self) -> bool {
-        self.allow.is_empty() && self.notify.is_none() && self.rules.is_empty()
+        self.allow.is_empty()
+            && self.notify.is_none()
+            && self.rules.is_empty()
+            && self.workers.is_empty()
     }
 
     pub fn notify(&self) -> bool {
         self.notify.unwrap_or(true)
+    }
+}
+
+/// `[assistant.workers]` in config.toml.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkersConfig {
+    /// The model worker jobs run on, as `claude --model` takes it
+    /// (default: `"haiku"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Worker jobs that may run at once (default: 5). 0 turns worker jobs
+    /// off, unlike `[review] max_live`, where 0 is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
+pub const DEFAULT_WORKERS_MODEL: &str = "haiku";
+pub const DEFAULT_WORKERS_MAX: u32 = 5;
+
+impl WorkersConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The model, or its default when unset or blank.
+    pub fn model(&self) -> &str {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(DEFAULT_WORKERS_MODEL)
+    }
+
+    /// `max`, or its default. 0 is allowed and means worker jobs are off.
+    pub fn max(&self) -> u32 {
+        self.max.unwrap_or(DEFAULT_WORKERS_MAX)
     }
 }
 
@@ -973,6 +1017,32 @@ mod tests {
         assert!(Config::default().assistant.notify());
         let out = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!out.contains("assistant"), "{out}");
+    }
+
+    #[test]
+    fn reads_the_workers_section() {
+        let config = Config::default();
+        assert_eq!(config.assistant.workers.model(), "haiku");
+        assert_eq!(config.assistant.workers.max(), 5);
+
+        let text = "[assistant.workers]\nmodel = \"sonnet\"\nmax = 2\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.assistant.workers.model(), "sonnet");
+        assert_eq!(config.assistant.workers.max(), 2);
+        let out = toml::to_string_pretty(&config).unwrap();
+        let again: Config = toml::from_str(&out).unwrap();
+        assert_eq!(again.assistant.workers, config.assistant.workers);
+
+        // 0 is allowed here: it turns worker jobs off.
+        let config: Config = toml::from_str("[assistant.workers]\nmax = 0\n").unwrap();
+        assert_eq!(config.assistant.workers.max(), 0);
+        // A blank model is the default.
+        let config: Config = toml::from_str("[assistant.workers]\nmodel = \" \"\n").unwrap();
+        assert_eq!(config.assistant.workers.model(), "haiku");
+        // Nothing set writes nothing back.
+        let config: Config = toml::from_str("[assistant.workers]\n").unwrap();
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("workers"), "{out}");
     }
 
     #[test]

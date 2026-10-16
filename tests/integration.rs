@@ -11457,6 +11457,7 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "jeet worktree path",
         "jeet manager ls",
         "jeet manager show",
+        "jeet worker ls",
         "jeet notify",
         "jeet task new",
         "jeet task open",
@@ -17084,4 +17085,261 @@ fn a_manager_from_a_skills_only_project_has_no_project_link() {
     assert!(!dir.join("PROJECT.md").exists());
     let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
     assert!(!agents.contains("PROJECT.md"), "{agents}");
+}
+
+// ---------------------------------------------------------------------------
+// worker jobs
+// ---------------------------------------------------------------------------
+
+/// A `claude` that records how it was run, tries what a worker may not do
+/// through jeet (once), and prints `envelope`.
+#[cfg(unix)]
+fn fake_worker_claude(home: &std::path::Path, envelope: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = home.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("claude");
+    let script = format!(
+        r#"#!/bin/sh
+out="$SEEN"
+mkdir -p "$out"
+printf '%s\n' "$@" > "$out/args"
+ls -A > "$out/cwd"
+if [ ! -e "$out/nested" ]; then
+    touch "$out/nested"
+    "$JEET_BIN" report done hi > "$out/report.txt" 2>&1; echo $? > "$out/report.code"
+    "$JEET_BIN" worker run pr-status > "$out/run.txt" 2>&1; echo $? > "$out/run.code"
+    "$JEET_BIN" task new sneaky > "$out/new.txt" 2>&1; echo $? > "$out/new.code"
+    "$JEET_BIN" worker ls > "$out/ls.txt" 2>&1; echo $? > "$out/ls.code"
+fi
+cat <<'JEET_EOF'
+{envelope}
+JEET_EOF
+"#
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+const WORKER_ENVELOPE: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"summary":"all good"},"total_cost_usd":0.5,"session_id":"s","num_turns":1,"permission_denials":[]}"#;
+
+#[cfg(unix)]
+fn worker_lab(envelope: &str) -> (StoreLab, std::path::PathBuf, std::path::PathBuf) {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    let jobs = home.join("workers/jobs");
+    std::fs::create_dir_all(&jobs).unwrap();
+    std::fs::write(
+        jobs.join("pr-status.md"),
+        "---\ndescription: Where a PR stands\n---\nSay where the PR stands.\n",
+    )
+    .unwrap();
+    let claude = fake_worker_claude(&home, envelope);
+    (lab, home, claude)
+}
+
+#[cfg(unix)]
+fn worker_run(
+    lab: &StoreLab,
+    home: &std::path::Path,
+    claude: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    lab.jeet_at(
+        args,
+        home,
+        &[
+            ("JEET_AGENT", &claude.to_string_lossy()),
+            ("JEET_BIN", env!("CARGO_BIN_EXE_jeet")),
+            ("SEEN", &home.join("seen").to_string_lossy()),
+        ],
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_run_runs_a_named_job_and_prints_its_checked_output() {
+    let (lab, home, claude) = worker_lab(WORKER_ENVELOPE);
+    let output = worker_run(
+        &lab,
+        &home,
+        &claude,
+        &["worker", "run", "pr-status", "12", "acme/api"],
+    );
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "{\"summary\":\"all good\"}\n");
+
+    // How claude was run: the job's prompt and its input, read-only.
+    let seen = home.join("seen");
+    let args = std::fs::read_to_string(seen.join("args")).unwrap();
+    assert!(
+        args.contains("Say where the PR stands.\n\nInput: 12 acme/api\n"),
+        "{args}"
+    );
+    for arg in [
+        "dontAsk",
+        "haiku",
+        "--no-session-persistence",
+        "--json-schema",
+    ] {
+        assert!(args.contains(arg), "{arg}: {args}");
+    }
+    // In an empty directory, since removed.
+    assert_eq!(std::fs::read_to_string(seen.join("cwd")).unwrap(), "");
+    let leftovers: Vec<_> = std::fs::read_dir(home.join("run/workers"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| !name.starts_with("slot-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // What the worker's claude may do through jeet: only read.
+    let read = |name: &str| std::fs::read_to_string(seen.join(name)).unwrap();
+    for (what, words) in [
+        ("report", "a worker job only reads"),
+        ("run", "a worker job only reads"),
+        ("new", "a worker job only reads"),
+    ] {
+        assert_ne!(read(&format!("{what}.code")).trim(), "0", "{what}");
+        assert!(
+            read(&format!("{what}.txt")).contains(words),
+            "{what}: {}",
+            read(&format!("{what}.txt"))
+        );
+    }
+    assert_eq!(read("ls.code").trim(), "0", "{}", read("ls.txt"));
+    // The refused attempts started no job and made no task.
+    let db = lab.index();
+    let jobs: i64 = db
+        .query_row("SELECT COUNT(*) FROM worker_jobs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(jobs, 1);
+    let tasks: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE slug = 'sneaky'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tasks, 0);
+    let (status, cost, by, anchored): (String, f64, Option<String>, i64) = db
+        .query_row(
+            "SELECT status, cost_usd, requested_by,
+                    (SELECT COUNT(*) FROM task_anchors WHERE role = 'worker')
+             FROM worker_jobs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), cost, by, anchored),
+        ("done", 0.5, None, 1)
+    );
+
+    // `worker ls` lists the job, the pool and the job that ran.
+    let listed = lab.jeet(&["worker", "ls"]);
+    succeeded(&listed);
+    let text = stdout_of(&listed);
+    assert!(text.contains("pr-status  Where a PR stands"), "{text}");
+    assert!(text.contains("0 of 5 slots busy"), "{text}");
+    assert!(
+        text.contains("recent:") && text.contains("by user  done"),
+        "{text}"
+    );
+    assert!(text.contains("$0.5000"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_run_fails_with_why_when_the_output_does_not_match() {
+    let envelope = WORKER_ENVELOPE.replace(r#"{"summary":"all good"}"#, r#"{"summary":7}"#);
+    let (lab, home, claude) = worker_lab(&envelope);
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "pr-status"]);
+    assert!(!output.status.success());
+    assert_eq!(stdout_of(&output), "");
+    let err = stderr_of(&output);
+    assert!(err.contains("invalid"), "{err}");
+    assert!(
+        err.contains("$.summary: expected string, got number"),
+        "{err}"
+    );
+
+    let envelope = WORKER_ENVELOPE.replace(r#""is_error":false"#, r#""is_error":true"#);
+    let (lab, home, claude) = worker_lab(&envelope);
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "pr-status"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("failed"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_run_refuses_an_unknown_job_and_a_job_with_a_bad_schema() {
+    let (lab, home, claude) = worker_lab(WORKER_ENVELOPE);
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "nope"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("no worker job nope"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "../config"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("not a job name"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    std::fs::write(
+        home.join("workers/jobs/loose.md"),
+        "---\nschema: {\"type\":\"string\",\"pattern\":\"a\"}\n---\nGo.\n",
+    )
+    .unwrap();
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "loose"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("`pattern`"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!home.join("seen").exists(), "claude ran");
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_jobs_are_off_at_max_0() {
+    let (lab, home, claude) = worker_lab(WORKER_ENVELOPE);
+    std::fs::write(home.join("config.toml"), "[assistant.workers]\nmax = 0\n").unwrap();
+    let output = worker_run(&lab, &home, &claude, &["worker", "run", "pr-status"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("[assistant.workers] max"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!home.join("seen").exists(), "claude ran");
+    let listed = lab.jeet(&["worker", "ls"]);
+    succeeded(&listed);
+    assert!(
+        stdout_of(&listed).contains("worker jobs are off ([assistant.workers] max = 0"),
+        "{}",
+        stdout_of(&listed)
+    );
+}
+
+#[test]
+fn worker_job_is_not_run_by_hand() {
+    let lab = StoreLab::new();
+    let output = lab.jeet(&["worker-job", "wk-nope"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("started only by `jeet worker run`"),
+        "{}",
+        stderr_of(&output)
+    );
 }

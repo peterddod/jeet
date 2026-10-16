@@ -3005,6 +3005,7 @@ mod tests {
             start: identity::start_of(std::process::id()).unwrap(),
             task_id: "t".into(),
             kind: AnchorKind::Job,
+            role: None,
             created_at: 0,
         };
         app.db.insert_anchor(&me, None).unwrap();

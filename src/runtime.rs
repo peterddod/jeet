@@ -1004,6 +1004,7 @@ mod tests {
             allow: vec!["task.send".into()],
             notify: None,
             rules: Vec::new(),
+            workers: Default::default(),
         };
         let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
         assert!(
@@ -1115,6 +1116,7 @@ mod tests {
             allow: Vec::new(),
             notify: None,
             rules: Vec::new(),
+            workers: Default::default(),
         };
         let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
         for denied in ["gh pr merge", "git push --force*", "git push * main"] {
@@ -1146,6 +1148,7 @@ mod tests {
             allow: every,
             notify: None,
             rules: Vec::new(),
+            workers: Default::default(),
         };
         let exe = format!("/{}/jeet", "d".repeat(200));
         let hooks = assistant_hooks(exe.into(), &settings, &branches, &task, true);
@@ -1208,6 +1211,7 @@ mod tests {
             allow: Vec::new(),
             notify: None,
             rules: Vec::new(),
+            workers: Default::default(),
         };
         let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task, true);
         let claude = &crate::harness::claude::ClaudeCode;

@@ -487,6 +487,7 @@ pub fn plan_child(
         Caller::Root => crate::manager::root(app)?.id,
         Caller::Node(node) => node.id.clone(),
         Caller::Review(_) => bail!("a review's agent makes no tasks"),
+        Caller::Worker(_) => bail!("a worker job makes no tasks"),
     };
     let record = TaskRecord {
         max_children,
@@ -2669,6 +2670,7 @@ fn after_move(app: &App, caller: &Caller, plan: &MovePlan, kept: &[i64]) -> Vec<
         Caller::Root => "the assistant".to_string(),
         Caller::Node(node) => manager::label(node),
         Caller::Review(review) => format!("review {}", review.label()),
+        Caller::Worker(job) => format!("worker job {}", job.id),
     };
     let mut nodes = Vec::new();
     for (id, _, _) in &plan.rows.grants {

@@ -442,7 +442,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     };
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => Admission::Gate,
     };
     let running = end_and_resume(app, &task, &session, admission)?;
     warn_all(&running.warnings);
@@ -866,7 +866,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     // (M22). Anyone else waits for a slot like any start.
     let admission = match permissions::caller(app)? {
         Caller::User => Admission::Bypass,
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => Admission::Gate,
     };
     let running = runtime::ensure_running(app, &task, session, None, admission)?;
     warn_all(&running.warnings);
@@ -1315,7 +1315,7 @@ pub fn prs(app: &App, name: Option<&str>, offline: bool) -> Result<()> {
 fn fence_for(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Option<String>> {
     match caller {
         Caller::User => Ok(None),
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => {
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => {
             let path = crate::manager::tree_path(app, task)?;
             Ok(Some(crate::manager::label_at(task, &path)))
         }
@@ -1413,7 +1413,9 @@ fn fence_turn(from: Option<&str>, messages: &mut [crate::harness::AgentMessage])
 pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
     match caller {
         Caller::User => printable(label),
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => crate::manager::fence::fenced(label),
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => {
+            crate::manager::fence::fenced(label)
+        }
     }
 }
 
@@ -1424,7 +1426,7 @@ pub(crate) fn shown_status(caller: &Caller, label: &str) -> String {
 pub(crate) fn shown_github(caller: &Caller, text: &str) -> String {
     match caller {
         Caller::User => printable(text),
-        Caller::Root | Caller::Node(_) | Caller::Review(_) => format!(
+        Caller::Root | Caller::Node(_) | Caller::Review(_) | Caller::Worker(_) => format!(
             "<github-data untrusted=\"true\">{}</github-data>",
             crate::manager::fence::fenced(text)
         ),
@@ -1439,7 +1441,7 @@ fn names_for(app: &App, caller: &Caller) -> Result<Option<Vec<String>>> {
         Caller::User => None,
         Caller::Root => Some(vec![crate::manager::root(app)?.id]),
         Caller::Node(node) => Some(vec![crate::manager::root(app)?.id, node.id.clone()]),
-        Caller::Review(_) => Some(vec![crate::manager::root(app)?.id]),
+        Caller::Review(_) | Caller::Worker(_) => Some(vec![crate::manager::root(app)?.id]),
     })
 }
 

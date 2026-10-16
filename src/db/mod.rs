@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 pub mod anchors;
 pub mod reviews;
 pub mod tasks;
+pub mod workers;
 
 /// The schema as it stood before versioning: v0. Idempotent, so it runs on
 /// every open and a fresh index and a legacy one start from the same place.
@@ -489,6 +490,27 @@ const MIGRATIONS: &[&str] = &[
         attempts INTEGER NOT NULL DEFAULT 0,
         at INTEGER NOT NULL
     );
+    ",
+    // v10: worker jobs. A runner's anchor can name its role (`worker`: its
+    // `task_id` is then a `worker_jobs` id), and each job has a row. Rows
+    // of earlier anchors have no role.
+    "
+    ALTER TABLE task_anchors ADD COLUMN role TEXT CHECK (role IS NULL OR role IN ('worker'));
+    CREATE TABLE worker_jobs (
+        id TEXT PRIMARY KEY,
+        job TEXT NOT NULL,
+        requested_by TEXT,
+        pid INTEGER,
+        start INTEGER,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL
+            CHECK (status IN ('queued', 'running', 'done', 'invalid', 'failed', 'refused')),
+        result TEXT,
+        error TEXT,
+        cost_usd REAL
+    );
+    CREATE INDEX worker_jobs_started ON worker_jobs(started_at);
     ",
 ];
 
@@ -1614,6 +1636,81 @@ mod tests {
             dangling(&conn).unwrap(),
             [("task_sessions -> tasks".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn a_v9_index_keeps_its_anchors_and_gains_worker_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(BASELINE).unwrap();
+            for sql in &MIGRATIONS[..9] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "PRAGMA user_version = 9;
+                 INSERT INTO tasks (id, slug, name, created_at, last_activity)
+                     VALUES ('t', 't', 't', 1, 1);
+                 INSERT INTO task_anchors (pid, start, task_id, kind, pane_id, created_at)
+                     VALUES (10, 20, 't', 'pane', '%1', 1),
+                            (11, 20, 'rv', 'job', NULL, 2);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(MIGRATIONS.len(), 10);
+
+        // The anchors it had are as they were, with no role.
+        let mut anchors = db.all_anchors().unwrap();
+        anchors.sort_by_key(|a| a.pid);
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(
+            (
+                anchors[0].task_id.as_str(),
+                anchors[0].kind,
+                anchors[0].role
+            ),
+            ("t", anchors::AnchorKind::Pane, None)
+        );
+        assert_eq!(
+            (
+                anchors[1].task_id.as_str(),
+                anchors[1].kind,
+                anchors[1].role
+            ),
+            ("rv", anchors::AnchorKind::Job, None)
+        );
+
+        // And it takes a worker's.
+        db.insert_anchor(
+            &anchors::Anchor {
+                pid: 12,
+                start: 20,
+                task_id: "wk-1".into(),
+                kind: anchors::AnchorKind::Job,
+                role: Some(anchors::AnchorRole::Worker),
+                created_at: 3,
+            },
+            None,
+        )
+        .unwrap();
+        db.insert_worker_job(&workers::WorkerJobRecord::new("wk-1".into(), "j", None, 3))
+            .unwrap();
+        assert_eq!(scalar(&db, "SELECT COUNT(*) FROM worker_jobs"), 1);
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM task_anchors WHERE role = 'worker'"
+            ),
+            1
+        );
+        // A role jeet does not know is refused by the table.
+        let bad = db
+            .conn()
+            .execute("UPDATE task_anchors SET role = 'boss' WHERE pid = 10", []);
+        assert!(bad.is_err());
     }
 
     #[test]

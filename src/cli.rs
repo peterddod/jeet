@@ -4,6 +4,7 @@ use clap_complete::engine::ArgValueCandidates;
 use crate::completion_candidates::{
     all_branch_candidates, capability_candidates, manager_candidates, parent_candidates,
     project_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
+    worker_job_candidates,
 };
 use crate::manager::budget::{BudgetPart, Change};
 use crate::permissions::parse_capability;
@@ -83,6 +84,10 @@ pub enum Commands {
     #[command(hide = true)]
     ReviewJob { review: String },
 
+    /// Run the headless job recorded for a worker job (started by `jeet worker run`)
+    #[command(hide = true)]
+    WorkerJob { job: String },
+
     /// Fetch every repository in the store, fast-forwarding clean trunks
     Sync {
         /// Sync only this repository
@@ -132,6 +137,12 @@ pub enum Commands {
     Manager {
         #[command(subcommand)]
         command: ManagerCommands,
+    },
+
+    /// Worker jobs: read-only headless agents that answer in JSON
+    Worker {
+        #[command(subcommand)]
+        command: WorkerCommands,
     },
 
     /// Projects: repositories, AGENTS.md and skills a task can start from
@@ -568,6 +579,22 @@ pub enum ManagerCommands {
         #[arg(long, value_name = "TASK_ID")]
         after: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WorkerCommands {
+    /// Run a named job (`$JEET_HOME/workers/jobs/<job>.md`) and print its
+    /// output as one line of JSON, checked against the job's schema
+    Run {
+        /// The job's name
+        #[arg(add = ArgValueCandidates::new(worker_job_candidates))]
+        job: String,
+        /// Input for the job, joined with spaces and added to its prompt
+        args: Vec<String>,
+    },
+
+    /// The jobs there are, and the pool: what runs, and what ran lately
+    Ls,
 }
 
 #[derive(Subcommand)]

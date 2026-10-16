@@ -30,12 +30,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{
     Commands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands, WatchCommands,
-    WorktreeArgs, WorktreeCommands,
+    WorkerCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::{self, ManagerPolicy};
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
+use crate::db::workers::{WorkerJobRecord, WorkerStatus};
 use crate::identity;
 use crate::notify::{self, Notification};
 use crate::worktrees::now_secs;
@@ -106,6 +107,11 @@ pub const CAPABILITIES: &[Capability] = &[
         &["gh pr review"],
     ),
     cap("pr.merge", "merge pull requests", &["jeet pr merge"]),
+    cap(
+        "worker.run",
+        "run worker jobs (headless, read-only agents that cost money)",
+        &["jeet worker run"],
+    ),
     cap("project.read", "list projects", &["jeet projects ls"]),
     cap("project.create", "make projects", &["jeet projects new"]),
     cap("project.delete", "delete projects", &["jeet projects rm"]),
@@ -256,6 +262,7 @@ const READ_ONLY: &[&str] = &[
     "jeet worktree path",
     "jeet manager ls",
     "jeet manager show",
+    "jeet worker ls",
     "jeet notify",
 ];
 
@@ -296,7 +303,7 @@ pub fn assistant_mode() -> bool {
 }
 
 /// Who runs this jeet, as far as what it may do goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Caller {
     /// A person, or an agent of a top-level task: not gated.
     User,
@@ -308,6 +315,9 @@ pub enum Caller {
     /// A review's agent, whoever asked for the review: gated the same for
     /// every review ([`review_allows`]).
     Review(Box<ReviewRecord>),
+    /// A worker job's `claude`: it only reads, and is refused every
+    /// capability ([`worker_gate`]).
+    Worker(Box<WorkerJobRecord>),
 }
 
 /// Who the task this jeet runs under makes the caller: the assistant is
@@ -322,11 +332,13 @@ fn classify(task: Option<&TaskRecord>) -> Caller {
 }
 
 /// [`classify`] for the identity [`identity::identify`] found: a review's
-/// agent is a [`Caller::Review`], whoever asked for the review.
+/// agent is a [`Caller::Review`], whoever asked for the review, and a worker
+/// job's a [`Caller::Worker`].
 fn classify_identity(me: &identity::Identity) -> Caller {
-    match &me.review {
-        Some(review) => Caller::Review(Box::new(review.clone())),
-        None => classify(me.task.as_ref()),
+    match (&me.review, &me.worker) {
+        (Some(review), _) => Caller::Review(Box::new(review.clone())),
+        (None, Some(worker)) => Caller::Worker(Box::new(worker.clone())),
+        (None, None) => classify(me.task.as_ref()),
     }
 }
 
@@ -347,6 +359,7 @@ pub fn at_terminal(app: &App) -> Result<bool> {
     let me = identity::identify(app)?;
     let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
     Ok(me.review.is_none()
+        && me.worker.is_none()
         && at_terminal_of(
             me.task.as_ref(),
             env_task.as_deref(),
@@ -494,6 +507,7 @@ pub fn check_grant(
         Caller::Node(node) => Some((node, effective(app, node)?)),
         Caller::User | Caller::Root => None,
         Caller::Review(_) => bail!("a review's agent grants nothing"),
+        Caller::Worker(_) => bail!("a worker job grants nothing"),
     };
     let mut caps: Vec<&'static str> = Vec::new();
     for name in requested {
@@ -558,6 +572,7 @@ fn record_held_with(
             "",
         ),
         Caller::Review(_) => bail!("a review's agent grants nothing"),
+        Caller::Worker(_) => bail!("a worker job grants nothing"),
     };
     for capability in held {
         let action = format!("granted held `{capability}` to task {}{tag}", target.slug);
@@ -618,6 +633,7 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Doctor { .. }
         // Started by jeet itself, under the command that was checked.
         | Commands::ReviewJob { .. }
+        | Commands::WorkerJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. }
         | Commands::TaskStartup { .. }
@@ -662,6 +678,12 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
             }
         },
         Commands::Task { command } => task_gate(command),
+        Commands::Worker { command } => match command {
+            WorkerCommands::Run { job, .. } => {
+                needs("worker.run", format!("ran worker job {job}"))
+            }
+            WorkerCommands::Ls => Gate::Free,
+        },
         Commands::Manager { command } => match command {
             ManagerCommands::New { name, .. } => needs(
                 "manager.create",
@@ -892,6 +914,10 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
             )),
             None,
         ),
+        Caller::Worker(_) => (
+            Some("a worker job may not clone repositories".to_string()),
+            None,
+        ),
         Caller::Node(node) => match effective(app, &node)?.contains(&"repo.clone") {
             true => {
                 let authorized = Authorized {
@@ -1093,6 +1119,13 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
             return Ok(None);
         }
     }
+    if let Some(Commands::WorkerJob { job }) = command {
+        check_worker_job(&app.db, job, std::process::id())?;
+        // The runner `jeet worker run` started, as the job it runs for.
+        if me.self_job {
+            return Ok(None);
+        }
+    }
     authorize_as(&app, &classify_identity(&me), command, terminal)
 }
 
@@ -1112,6 +1145,9 @@ pub fn authorize_as(
     }
     if let Caller::Review(review) = caller {
         return review_gate(review, command);
+    }
+    if let Caller::Worker(job) = caller {
+        return worker_gate(job, command, gate);
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
@@ -1181,6 +1217,55 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
     }
 }
 
+/// What a worker job may run: only reads, and of those only the ones that
+/// show what jeet knows. Every capability is refused it, and so is every
+/// command that is free for the assistant but not a read (`jeet report`,
+/// `jeet notify`, `jeet todo`, `jeet task send` and the plumbing). Whatever
+/// `[assistant] allow` says. `claude`'s own rules ([`review_deny`] and the
+/// allowed tools) are the harness's half of this.
+fn worker_gate(
+    job: &WorkerJobRecord,
+    command: Option<&Commands>,
+    gate: Gate,
+) -> Result<Option<Authorized>> {
+    let refused = |about: &str| {
+        anyhow!(
+            "a worker job only reads; it may not {about} (worker job {} of {})",
+            job.id,
+            job.job
+        )
+    };
+    match gate {
+        Gate::Needs { capability, .. } => {
+            let about = self::capability(capability).map_or("do that", |c| c.about);
+            return Err(refused(about));
+        }
+        Gate::Interactive => return Err(refused("open a screen or shell")),
+        Gate::Free => {}
+    }
+    match command {
+        Some(Commands::Ls { .. } | Commands::Path { .. } | Commands::Prs { .. }) => Ok(None),
+        Some(Commands::Task {
+            command:
+                TaskCommands::Last { .. }
+                | TaskCommands::Prs { .. }
+                | TaskCommands::Ls { .. }
+                | TaskCommands::Path { .. },
+        }) => Ok(None),
+        Some(Commands::Worktree(WorktreeArgs {
+            command: WorktreeCommands::Ls | WorktreeCommands::Path { .. },
+            ..
+        })) => Ok(None),
+        Some(Commands::Manager {
+            command: ManagerCommands::Ls { .. } | ManagerCommands::Show { .. },
+        }) => Ok(None),
+        Some(Commands::Worker {
+            command: WorkerCommands::Ls,
+        }) => Ok(None),
+        _ => Err(refused("run that")),
+    }
+}
+
 /// What `command` does that only the root may, for "task … may not …":
 /// reaching the user, and the assistant's own list.
 fn node_only(command: Option<&Commands>) -> Option<&'static str> {
@@ -1189,6 +1274,7 @@ fn node_only(command: Option<&Commands>) -> Option<&'static str> {
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         // Only `jeet review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
+        Commands::WorkerJob { .. } => Some("run worker jobs"),
         _ if stops_all(command) => Some("stop every task under the assistant"),
         _ => None,
     }
@@ -1464,10 +1550,13 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::Report { .. }
         | Commands::Todo { .. }
         | Commands::ReviewJob { .. }
+        | Commands::WorkerJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. }
         | Commands::TaskStartup { .. }
         | Commands::Inbox { .. }
+        // Held by name like any capability: `worker.run`.
+        | Commands::Worker { .. }
         // Into the store, which no task owns: only with `repo.clone`.
         | Commands::Clone { .. }
         | Commands::Tasks
@@ -1567,6 +1656,13 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
             verb.name()
         );
     }
+    if let Caller::Worker(job) = caller {
+        bail!(
+            "worker job {} may not run `jeet {}`: a worker job only reads",
+            job.id,
+            verb.name()
+        );
+    }
     let Caller::Node(node) = caller else {
         return Ok(());
     };
@@ -1624,7 +1720,7 @@ fn out_of_reach(slug: &str, verb: Verb, what: &str) -> String {
 /// with a parent only itself and the tasks below it.
 pub fn lists(app: &App, caller: &Caller, task: &TaskRecord) -> Result<bool> {
     match caller {
-        Caller::Review(_) => Ok(false),
+        Caller::Review(_) | Caller::Worker(_) => Ok(false),
         Caller::Node(node) => {
             Ok(task.id == node.id || app.db.is_strict_descendant(&task.id, &node.id)?)
         }
@@ -1719,6 +1815,22 @@ pub fn check_review_job(db: &crate::db::Database, review_id: &str, runner: u32) 
 /// words in the assistant's log.
 pub fn log_wake(home: &Path, action: &str, outcome: Outcome) -> Result<()> {
     append(&actions_log(home), "wake", action, outcome, None)
+}
+
+/// A worker job runs the prompt and schema `jeet worker run` recorded
+/// for it, so only a job it recorded runs, once, as the runner it launched
+/// (`runner`, the pid `jeet worker run` recorded, or none yet).
+pub fn check_worker_job(db: &crate::db::Database, id: &str, runner: u32) -> Result<()> {
+    let Some(job) = db.get_worker_job(id)? else {
+        bail!("worker jobs run only for a job jeet knows; {id} is none");
+    };
+    if job.status != WorkerStatus::Running || job.finished_at.is_some() {
+        bail!("worker job {id} has ended already");
+    }
+    if job.pid.is_some_and(|pid| pid != runner) {
+        bail!("worker job {id} is another runner's");
+    }
+    Ok(())
 }
 
 /// Log that `who`, the agent jeet identified, claimed to be another
@@ -2767,6 +2879,7 @@ mod tests {
             &["todo", "add", "x"],
             &["todo", "ls"],
             &["review-job", "s"],
+            &["worker-job", "w"],
             &["tasks"],
         ];
         for args in refused {
@@ -2793,6 +2906,7 @@ mod tests {
             &["task", "prs"],
             &["worktree", "ls"],
             &["worktree", "path", "r"],
+            &["worker", "ls"],
             &["report", "done", "x"],
             &["watch", "status"],
             &["task-hook", "Stop"],
@@ -2843,6 +2957,9 @@ mod tests {
             (&["review", "1"], false),
             (&["pr", "merge", "1"], true),
             (&["review-job", "s"], true),
+            (&["worker-job", "w"], true),
+            (&["worker", "run", "j"], true),
+            (&["worker", "ls"], true),
             (&["sync"], false),
             (&["store-sync"], true),
             (&["tasks"], true),
@@ -3421,6 +3538,198 @@ mod tests {
         run_as(&app, &asked, &["report", "done", "ok"], false).unwrap();
         let e = run_as(&app, &user_asked, &["report", "done", "ok"], false).unwrap_err();
         assert!(e.to_string().contains("no one to report to"), "{e}");
+    }
+
+    fn worker_of() -> Caller {
+        Caller::Worker(Box::new(WorkerJobRecord::new(
+            "wk-1".into(),
+            "pr-status",
+            Some("a-id".into()),
+            0,
+        )))
+    }
+
+    /// One command that needs each capability that has a jeet command.
+    fn command_needing(capability: &str) -> &'static [&'static str] {
+        match capability {
+            "task.create" => &["task", "new", "x"],
+            "task.open" => &["task", "open", "w"],
+            "task.send" => &["task", "send", "w", "hi"],
+            "task.archive" => &["task", "archive", "w"],
+            "task.unarchive" => &["task", "unarchive", "w"],
+            "task.delete" => &["task", "delete", "w"],
+            "task.resync" => &["task", "resync", "w"],
+            "worktree.add" => &["worktree", "add", "api"],
+            "worktree.rm" => &["worktree", "rm", "api"],
+            "review.start" => &["review", "7"],
+            "pr.merge" => &["pr", "merge", "7"],
+            "worker.run" => &["worker", "run", "pr-status"],
+            "project.read" => &["projects", "ls"],
+            "project.create" => &["projects", "new", "p"],
+            "project.delete" => &["projects", "rm", "p"],
+            "repo.clone" => &["clone", "https://github.com/acme/api"],
+            "repo.import" => &["import"],
+            "repo.sync" => &["sync"],
+            "shell.install" => &["install-shell"],
+            "watch.install" => &["watch", "install"],
+            "manager.create" => &["manager", "new", "m"],
+            "manager.grant" => &["manager", "grant", "w", "--none"],
+            "manager.stop" => &["manager", "pause", "w"],
+            // Used outside jeet only.
+            "pr.comment" | "pr.review" => &[],
+            other => panic!("add a command that needs `{other}`"),
+        }
+    }
+
+    /// A worker job only reads: no capability is its to use, whatever
+    /// `[assistant] allow` holds, and of what is free it may run reads alone.
+    #[test]
+    fn a_worker_job_is_refused_every_capability_and_everything_but_reads() {
+        let (_dir, mut app, _w) = tree();
+        app.config.assistant.allow = every().iter().map(|c| c.to_string()).collect();
+        let worker = worker_of();
+        for capability in CAPABILITIES {
+            let args = command_needing(capability.name);
+            if args.is_empty() {
+                assert!(!capability.external.is_empty(), "{}", capability.name);
+                continue;
+            }
+            let e = run_as(&app, &worker, args, false).unwrap_err().to_string();
+            assert!(
+                e.contains("a worker job only reads") && e.contains(capability.about),
+                "{}: {e}",
+                capability.name
+            );
+        }
+        // Screens, too, at a terminal or not.
+        for terminal in [false, true] {
+            for args in [
+                &["tasks"][..],
+                &["explore"],
+                &["chat"],
+                &["task", "adopt", "w"],
+            ] {
+                let e = run_as(&app, &worker, args, terminal).unwrap_err();
+                assert!(e.to_string().contains("only reads"), "{args:?}: {e}");
+            }
+        }
+        // What is free for the assistant but is not a read.
+        for args in [
+            &["report", "done", "x"][..],
+            &["report", "ls"],
+            &["notify", "hi"],
+            &["todo"],
+            &["todo", "add", "x"],
+            &["task-hook", "Stop"],
+            &["inbox", "watch", "--task", "w"],
+            &["store-sync"],
+            &["review-job", "s"],
+            &["worker-job", "wk-1"],
+            &["manager", "drain"],
+            &["watch"],
+            &["watch", "status"],
+            &["init-shell"],
+            &["completions", "zsh"],
+        ] {
+            let e = run_as(&app, &worker, args, false).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("a worker job only reads; it may not run that"),
+                "{args:?}: {e}"
+            );
+        }
+        let e = run_as(&app, &worker, &["worker", "run", "j"], false).unwrap_err();
+        assert!(e.to_string().contains("run worker jobs"), "{e}");
+
+        // Reads.
+        for args in [
+            &["ls"][..],
+            &["path", "api"],
+            &["prs"],
+            &["task", "ls"],
+            &["task", "last", "w"],
+            &["task", "prs"],
+            &["task", "path", "w"],
+            &["worktree", "ls"],
+            &["worktree", "path", "r"],
+            &["manager", "ls"],
+            &["manager", "show", "w"],
+            &["worker", "ls"],
+        ] {
+            run_as(&app, &worker, args, false).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_worker_job_grants_nothing_and_clones_nothing() {
+        let (_dir, app, w) = tree();
+        let policy = app.config.manager_policy().unwrap();
+        let e = check_grant(
+            &app,
+            &worker_of(),
+            &w,
+            TaskKind::Work,
+            Some(&["worktree.add".to_string()]),
+            &policy,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("a worker job grants nothing"), "{e}");
+        let e = record_held_with(&app, &worker_of(), &w, &["task.create"], &|_| {}).unwrap_err();
+        assert!(e.to_string().contains("a worker job grants nothing"), "{e}");
+    }
+
+    /// A worker job sees only what a review's agent does, and is never at
+    /// the user's terminal.
+    #[test]
+    fn a_worker_job_is_a_caller_of_its_own() {
+        let me = identity::Identity {
+            task: None,
+            review: None,
+            worker: Some(WorkerJobRecord::new("wk-1".into(), "j", None, 0)),
+            self_job: false,
+        };
+        assert!(matches!(classify_identity(&me), Caller::Worker(_)));
+        let (_dir, app, w) = tree();
+        assert!(!lists(&app, &worker_of(), &w).unwrap());
+    }
+
+    /// A worker job runs only what `jeet worker run` recorded, once, as the
+    /// runner it launched.
+    #[test]
+    fn a_worker_job_runs_only_what_jeet_recorded_for_its_runner() {
+        use crate::db::workers::WorkerEnd;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("index.db")).unwrap();
+        assert!(check_worker_job(&db, "wk-1", 10).is_err());
+        db.insert_worker_job(&WorkerJobRecord::new("wk-1".into(), "j", None, 1))
+            .unwrap();
+        // Pending, or this runner's.
+        check_worker_job(&db, "wk-1", 10).unwrap();
+        db.set_worker_job_runner("wk-1", 10, None).unwrap();
+        check_worker_job(&db, "wk-1", 10).unwrap();
+        // Another runner's, or one that has ended.
+        assert!(check_worker_job(&db, "wk-1", 11).is_err());
+        let end = WorkerEnd {
+            status: WorkerStatus::Failed,
+            result: None,
+            error: None,
+            cost_usd: None,
+        };
+        db.finish_worker_job("wk-1", 2, &end, None).unwrap();
+        assert!(check_worker_job(&db, "wk-1", 10).is_err());
+    }
+
+    #[test]
+    fn worker_run_is_a_capability_the_assistant_must_be_given() {
+        assert!(capability("worker.run").is_some());
+        assert!(config::Config::default().assistant.allow.is_empty());
+        let allow = vec!["task.create".to_string()];
+        let refused = refusal("worker.run", &allow, Path::new("/h/config.toml")).unwrap();
+        assert!(refused.contains("`worker.run`"), "{refused}");
+        let rules = allowed_commands(&["worker.run".into()]);
+        assert!(rules.contains(&"jeet worker run".to_string()));
+        assert!(allowed_commands(&[]).contains(&"jeet worker ls".to_string()));
+        assert!(!allowed_commands(&[]).contains(&"jeet worker run".to_string()));
     }
 
     /// The same deny rules and allowed commands for every review.

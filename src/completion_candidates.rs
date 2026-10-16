@@ -156,3 +156,14 @@ pub fn branch_names(filter: Option<&str>) -> Vec<String> {
     out.dedup();
     out
 }
+
+/// The named worker jobs, for `jeet worker run`.
+pub fn worker_job_candidates() -> Vec<CompletionCandidate> {
+    let Ok(home) = crate::config::jeet_home() else {
+        return Vec::new();
+    };
+    crate::workers::list_jobs(&home)
+        .into_iter()
+        .map(|(name, about)| CompletionCandidate::new(name).help(Some(about.into())))
+        .collect()
+}

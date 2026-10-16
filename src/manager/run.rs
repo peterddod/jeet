@@ -71,7 +71,7 @@ pub fn setter_of(by: &Caller) -> Setter {
         Caller::Node(node) => Setter::Node(node.id.clone()),
         // A review's agent runs no `jeet manager` verb; were it to, it
         // would hold nothing above a budget's pause.
-        Caller::Review(_) => Setter::Budget,
+        Caller::Review(_) | Caller::Worker(_) => Setter::Budget,
     }
 }
 
@@ -84,7 +84,7 @@ pub fn outranks(app: &App, by: &Caller, setter: &Setter) -> Result<bool> {
         (Caller::User, _) => true,
         (_, Setter::User) => false,
         (Caller::Root, _) => true,
-        (Caller::Review(_), _) => false,
+        (Caller::Review(_) | Caller::Worker(_), _) => false,
         (Caller::Node(_), Setter::Root) => false,
         (_, Setter::Budget) => true,
         (Caller::Node(me), Setter::Node(id)) => {
