@@ -156,6 +156,11 @@ fn tell_rejected(app: &App, task: &TaskRecord) -> Result<()> {
     };
     // Under a lock on the count, so two sweeps file one report between them.
     let seen_path = rejected_seen_path(&dir);
+    // The agent writes in this directory: only a regular file is opened,
+    // checked before and after, as the inbox lock is.
+    if std::fs::symlink_metadata(&seen_path).is_ok_and(|m| !m.is_file()) {
+        anyhow::bail!("{} is not a regular file", seen_path.display());
+    }
     let mut seen_file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -163,6 +168,9 @@ fn tell_rejected(app: &App, task: &TaskRecord) -> Result<()> {
         .write(true)
         .open(&seen_path)
         .with_context(|| format!("open {}", seen_path.display()))?;
+    if !seen_file.metadata()?.is_file() {
+        anyhow::bail!("{} is not a regular file", seen_path.display());
+    }
     seen_file
         .lock()
         .with_context(|| format!("lock {}", seen_path.display()))?;
@@ -254,21 +262,31 @@ fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) 
     lock.lock()
         .with_context(|| format!("lock {}", lock_path.display()))?;
     let seq_path = run.join("messages.seq");
-    let last = match std::fs::read_to_string(&seq_path) {
-        Ok(text) => text.trim().parse::<i64>().map_err(|_| {
+    let text = match std::fs::read_to_string(&seq_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", seq_path.display())),
+    };
+    // Missing or empty, it starts after the highest id any task's file
+    // already holds; one that holds anything else is not guessed at.
+    let last = match text.trim() {
+        "" => highest_delivered(home, task_dir),
+        n => n.parse::<i64>().map_err(|_| {
             anyhow::anyhow!(
                 "{} holds no number; not restarting message ids at 1, so remove it once \
                  you have checked it",
                 seq_path.display()
             )
         })?,
-        // None yet: after the highest id any task's file already holds.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => highest_delivered(home, task_dir),
-        Err(e) => return Err(e).with_context(|| format!("read {}", seq_path.display())),
     };
     let id = last + 1;
     let tmp = seq_path.with_extension("seq.tmp");
-    std::fs::write(&tmp, id.to_string()).with_context(|| format!("write {}", tmp.display()))?;
+    File::create(&tmp)
+        .and_then(|mut f| {
+            f.write_all(id.to_string().as_bytes())
+                .and_then(|()| f.sync_all())
+        })
+        .with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &seq_path).with_context(|| format!("write {}", seq_path.display()))?;
     let entry = Delivery {
         id,
@@ -486,32 +504,43 @@ impl Inbox {
             }
         }
         if !rejected.is_empty() {
-            // The inbox is rewritten first, so a failure after never leaves
-            // lines to be moved twice; if they cannot be kept, they go back.
-            let moved = self.replace(&queued).and_then(|()| self.reject(&rejected));
+            // Kept before they are let go: a crash between the two loses
+            // nothing, and a failed rewrite is not kept twice on the retry.
+            let moved = self.reject(&rejected).and_then(|()| self.replace(&queued));
             if let Err(e) = moved {
-                if let Err(e) = std::fs::write(&self.path, &text) {
-                    eprintln!(
-                        "jeet: warning: could not restore {}: {e}",
-                        self.path.display()
-                    );
-                }
                 eprintln!("jeet: warning: could not move rejected inbox lines: {e:#}");
             }
         }
         Ok(queued)
     }
 
-    /// Append `lines`, each with why it was refused, to the rejected file.
+    /// Append `lines`, each with why it was refused, to the rejected file,
+    /// but those it holds already.
     fn reject(&self, lines: &[(&str, &str)]) -> Result<()> {
         let path = self.path.with_file_name("inbox.rejected.jsonl");
+        let held: Vec<String> = match open_regular(&path) {
+            Ok(mut file) => {
+                let mut text = String::new();
+                file.read_to_string(&mut text)
+                    .with_context(|| format!("read {}", path.display()))?;
+                text.lines()
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .filter_map(|v| v["line"].as_str().map(str::to_string))
+                    .collect()
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
         let mut text = String::new();
         let at = now_secs();
-        for (line, why) in lines {
+        for (line, why) in lines.iter().filter(|(l, _)| !held.iter().any(|h| h == l)) {
             text.push_str(&serde_json::to_string(
                 &serde_json::json!({ "at": at, "line": line, "why": why }),
             )?);
             text.push('\n');
+        }
+        if text.is_empty() {
+            return Ok(());
         }
         OpenOptions::new()
             .create(true)
@@ -2689,5 +2718,59 @@ mod tests {
         // A second sweep, as a concurrent one would find it, files nothing.
         sweep_rejected(&app, &w);
         assert_eq!(app.db.reports_for("w", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_line_already_recorded_as_rejected_is_not_recorded_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::lock(dir.path()).unwrap();
+        let text = format!("junk\n{}\n", line(1, "one"));
+        std::fs::write(inbox_path(dir.path()), &text).unwrap();
+        // As a rewrite that failed after the append leaves it.
+        let recorded = r#"{"at":1,"line":"junk","why":"unparseable"}"#;
+        std::fs::write(rejected_path(dir.path()), format!("{recorded}\n")).unwrap();
+        assert_eq!(inbox.read().unwrap().len(), 1);
+        let rejected = std::fs::read_to_string(rejected_path(dir.path())).unwrap();
+        assert_eq!(rejected, format!("{recorded}\n"));
+        assert!(!std::fs::read_to_string(inbox_path(dir.path()))
+            .unwrap()
+            .contains("junk"));
+    }
+
+    #[test]
+    fn the_seen_count_is_not_opened_through_a_link_or_a_fifo() {
+        let (_home, app, w) = app_with_worker();
+        let dir = tasks::task_dir(&app, &w);
+        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::write(inbox_path(&dir), "junk\n").unwrap();
+        assert!(peek(&dir).is_empty());
+        let seen = rejected_seen_path(&dir);
+        let target = dir.join("elsewhere");
+        std::os::unix::fs::symlink(&target, &seen).unwrap();
+        assert!(tell_rejected(&app, &w).is_err());
+        assert!(!target.exists());
+        std::fs::remove_file(&seen).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&seen)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(tell_rejected(&app, &w).is_err());
+        assert!(app.db.last_status_report("w").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_empty_counter_counts_as_missing_but_garbage_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let meta = || Meta::new(render::Class::Line, "message", "task x", "hi", None);
+        std::fs::create_dir_all(home.path().join("run")).unwrap();
+        let seq = home.path().join("run/messages.seq");
+        number(home.path(), task.path(), meta(), "a").unwrap();
+        std::fs::write(&seq, " \n").unwrap();
+        let got = number(home.path(), task.path(), meta(), "b").unwrap();
+        assert_eq!(got.r#ref.as_deref(), Some("m2"));
+        std::fs::write(&seq, "x").unwrap();
+        assert!(number(home.path(), task.path(), meta(), "c").is_err());
     }
 }

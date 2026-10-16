@@ -563,8 +563,16 @@ pub fn deliver(
 /// rendered quietly; otherwise as it was, with no ref and no file.
 fn number_if_quiet(app: &App, dir: &Path, meta: Option<Meta>, text: &str) -> Result<Option<Meta>> {
     match meta {
+        // Never fails the delivery: without a ref it is rendered all the same,
+        // and the assistant still hears from its tasks.
         Some(meta) if meta.r#ref.is_none() && app.config.quiet_for(TaskKind::Assistant) => {
-            Ok(Some(messages::number(&app.home, dir, meta, text)?))
+            match messages::number(&app.home, dir, meta.clone(), text) {
+                Ok(numbered) => Ok(Some(numbered)),
+                Err(e) => {
+                    eprintln!("jeet: warning: could not keep the message for `jeet show`: {e:#}");
+                    Ok(Some(meta))
+                }
+            }
         }
         meta => Ok(meta),
     }
@@ -1017,6 +1025,16 @@ mod tests {
         assert_eq!(got.r#ref, None);
         assert!(!messages::delivered_path(dir.path()).exists());
         assert!(!app.home.join("run/messages.seq").exists());
+        // A counter that cannot be read does not fail the delivery: the item
+        // goes without a ref.
+        let (_home, app) = quiet_app("");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(app.home.join("run")).unwrap();
+        std::fs::write(app.home.join("run/messages.seq"), "garbage").unwrap();
+        let got = number_if_quiet(&app, dir.path(), meta(), "whole")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, meta().unwrap());
         // None stays none.
         assert_eq!(number_if_quiet(&app, dir.path(), None, "x").unwrap(), None);
     }
