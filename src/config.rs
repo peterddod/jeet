@@ -56,6 +56,10 @@ pub struct Config {
     /// How what is queued for an agent is rendered (`[messages]`).
     #[serde(default, skip_serializing_if = "MessagesConfig::is_empty")]
     pub messages: MessagesConfig,
+
+    /// Where notifications go and which are sent (`[notify]`).
+    #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
+    pub notify: NotifyConfig,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -269,6 +273,91 @@ impl AssistantConfig {
     pub fn notify(&self) -> bool {
         self.notify.unwrap_or(true)
     }
+}
+
+/// `[notify]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotifyConfig {
+    /// The backends each notification is sent through (default:
+    /// `["desktop"]`); `[]` sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Vec<String>>,
+
+    /// The program the `command` backend runs, split like `agent`, with the
+    /// notification in its environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Notifications sent in any hour before the rest fold into one "N
+    /// more" (default: 6); 0 never folds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_hour: Option<u32>,
+
+    /// Which notifications are sent (`[[notify.rules]]`): the first rule
+    /// that matches decides; none matching, it is sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<NotifyRule>,
+}
+
+pub const DEFAULT_NOTIFY_VIA: &str = "desktop";
+pub const DEFAULT_NOTIFY_MAX_PER_HOUR: u32 = 6;
+
+impl NotifyConfig {
+    fn is_empty(&self) -> bool {
+        self.via.is_none()
+            && self.command.is_none()
+            && self.max_per_hour.is_none()
+            && self.rules.is_empty()
+    }
+
+    pub fn via(&self) -> Vec<String> {
+        match &self.via {
+            Some(via) => via.clone(),
+            None => vec![DEFAULT_NOTIFY_VIA.to_string()],
+        }
+    }
+
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref().filter(|c| !c.trim().is_empty())
+    }
+
+    pub fn max_per_hour(&self) -> u32 {
+        self.max_per_hour.unwrap_or(DEFAULT_NOTIFY_MAX_PER_HOUR)
+    }
+}
+
+/// One `[[notify.rules]]` entry. Each list left empty matches anything;
+/// one that is not matches only a notification with one of its values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyRule {
+    /// Kinds of notification, e.g. `question` or `review`.
+    #[serde(default)]
+    pub kind: Vec<String>,
+    /// Where it comes from: `assistant`, `manager`, `task` or `review`.
+    #[serde(default)]
+    pub level: Vec<NotifyLevel>,
+    /// The slugs of the tasks it comes from.
+    #[serde(default)]
+    pub task: Vec<String>,
+    pub action: NotifyAction,
+}
+
+/// Where a notification comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyLevel {
+    Assistant,
+    Manager,
+    Task,
+    Review,
+}
+
+/// What a `[[notify.rules]]` entry does with what it matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyAction {
+    Notify,
+    Ignore,
 }
 
 /// One `[[assistant.rules]]` entry.
@@ -541,6 +630,7 @@ impl Default for Config {
             watch: None,
             managers: None,
             messages: MessagesConfig::default(),
+            notify: NotifyConfig::default(),
         }
     }
 }

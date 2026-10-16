@@ -100,6 +100,7 @@ jeet manager ls                          # the tree under it; show, grant, budge
 jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
+jeet notify install                      # send notifications from a background sender
 
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
@@ -2280,12 +2281,43 @@ see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
 ### Notifications
 
-`jeet notify "<title>" [--body B] [--url U]` raises a desktop notification:
-through `terminal-notifier` on macOS when it is installed (a click opens
-`--url`), else Notification Center via `osascript`, and `notify-send`
-elsewhere. Review jobs use it to say they are done. `JEET_NOTIFY_CMD` runs a
-command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
-`JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
+`jeet notify "<title>" [--body B] [--url U]` notifies you, as jeet itself
+does when a review is ready, a question reaches you, an agent waits on a
+startup prompt, the assistant acts, or `jeet watch` has events for you.
+
+Each notification is queued, owner-only, in `$JEET_HOME/run/notify/outbox.jsonl`.
+`jeet notify serve` sends what is queued as it comes; `jeet notify install`
+keeps it running (a launchd agent, `dev.jeet.notify`, on macOS; a systemd user
+unit, `jeet-notify.service`, elsewhere) and `jeet notify uninstall` removes it.
+Nothing installs it but that command. Without it, the process that queued a
+notification sends it itself through every backend that needs no token, so
+`desktop` and `command` work as they always have; a backend that needs a
+token (none yet) waits for the sender, and `jeet task ls` and the tasks
+screen say so.
+
+```toml
+[notify]
+via = ["desktop"]   # the default; [] sends nothing
+command = "/usr/local/bin/page-me"   # for via = ["command"]
+max_per_hour = 6    # the default; the rest of the hour folds into one "N more"; 0 never folds
+
+[[notify.rules]]    # the first that matches decides; none matching, it is sent
+kind = ["review"]   # question, blocked, review, startup-prompt, action, grant, message, a GitHub event's kind…
+level = ["review"]  # assistant, manager, task or review
+task = []           # task slugs
+action = "ignore"   # or "notify"
+```
+
+- `desktop`: `terminal-notifier` on macOS when it is installed (a click opens
+  the link), else Notification Center via `osascript`, and `notify-send`
+  elsewhere.
+- `command`: `[notify] command`, run directly, with the notification in
+  `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and
+  `JEET_NOTIFY_URL`. `JEET_NOTIFY_CMD`, in the environment of the process that
+  sends, runs a command the same way in place of `desktop`.
+
+A notification about the same thing for the same reason (a question's
+`r41`, one run of a review) is sent once.
 
 ### The assistant's permissions
 

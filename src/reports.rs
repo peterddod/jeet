@@ -7,13 +7,14 @@
 use anyhow::{bail, Result};
 
 use crate::assistant;
+use crate::config::NotifyLevel;
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord, TaskState};
 use crate::manager;
 use crate::manager::budget::{self, Limits, Threshold};
 use crate::messages::{self, Agent, Delivered, Sender, TmuxAgent};
-use crate::notify::{self, Notification};
+use crate::notify::{self, Event, Why};
 use crate::permissions::{self, Caller};
 use crate::render::{self, Meta};
 use crate::runtime;
@@ -291,7 +292,7 @@ pub fn escalate(app: &App, by: &Caller, id: i64) -> Result<Escalated> {
         by,
         id,
         &|to, text, may_start| deliver_to(app, to, text, may_start),
-        &notify::notify,
+        &|e| notify::event(app, e),
     )
 }
 
@@ -301,7 +302,7 @@ fn escalate_with(
     by: &Caller,
     id: i64,
     deliver: &DeliverFn,
-    notifier: &dyn Fn(&Notification),
+    notifier: &dyn Fn(Event),
 ) -> Result<Escalated> {
     let (row, asker) = open_ask_row(app, id)?;
     let holder = match by {
@@ -333,11 +334,17 @@ fn escalate_with(
         .escalate_report(id, &holder.id, to_id, to.is_none())?;
     let Some(to) = to else {
         let (title, subtitle, body) = notification_for(&row, &asker.label(), &path);
-        notifier(&Notification {
-            title: &title,
-            subtitle: Some(&subtitle),
-            body: &body,
-            url: None,
+        notifier(Event {
+            why: Why::NeedsUser,
+            kind: row.kind.as_str().into(),
+            level: Some(asker.level()),
+            task: Some(asker.slug().to_string()),
+            reference: Some(format!("r{}", row.id)),
+            title,
+            subtitle: Some(subtitle),
+            body,
+            link: None,
+            only: Vec::new(),
         });
         return Ok(Escalated {
             row,
@@ -610,6 +617,20 @@ impl Asker {
         match self {
             Asker::Task(task) => &task.id,
             Asker::Review(review) => &review.id,
+        }
+    }
+
+    fn slug(&self) -> &str {
+        match self {
+            Asker::Task(task) => &task.slug,
+            Asker::Review(review) => &review.slug,
+        }
+    }
+
+    fn level(&self) -> NotifyLevel {
+        match self {
+            Asker::Task(task) => notify::level(task.kind),
+            Asker::Review(_) => NotifyLevel::Review,
         }
     }
 
@@ -1674,13 +1695,15 @@ mod tests {
         let id = asked_and_passed(&app, &[]);
         let sent = Sent::default();
         let notified = RefCell::new(Vec::new());
-        let notifier = |n: &Notification| {
-            notified.borrow_mut().push((
-                n.title.to_string(),
-                n.subtitle.map(str::to_string),
-                n.body.to_string(),
-                n.url.is_some(),
-            ))
+        let notifier = |e: Event| {
+            assert_eq!(e.why, Why::NeedsUser);
+            assert_eq!(e.kind, "question");
+            assert_eq!(e.level, Some(NotifyLevel::Task));
+            assert_eq!(e.task.as_deref(), Some("ww"));
+            assert!(e.reference.as_deref().is_some_and(|r| r.starts_with('r')));
+            notified
+                .borrow_mut()
+                .push((e.title, e.subtitle, e.body, e.link.is_some()))
         };
         let up = escalate_with(&app, &node(&app, "sub"), id, &recording(&sent), &notifier).unwrap();
         assert_eq!(up.to.unwrap().slug, "api");

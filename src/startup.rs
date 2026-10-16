@@ -25,13 +25,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::agent::AgentSpec;
+use crate::config::NotifyLevel;
 use crate::config::{self, Config};
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::harness::{Harness, StartupPrompt, TrustStep};
 use crate::manager::run;
-use crate::notify::{self, Notification};
+use crate::notify::{self, Event, Why};
 use crate::reports::{self, StatusEvent};
 use crate::runtime;
 use crate::status;
@@ -377,14 +378,25 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         &|line| eprintln!("jeet task-startup {slug}: {line}"),
     )?;
     eprintln!("jeet task-startup {slug}: {outcome:?}");
-    let tell = |body: &str| {
+    let level = match &watched {
+        Watched::Task(task) => notify::level(task.kind),
+        Watched::Review(_) => NotifyLevel::Review,
+    };
+    let tell = |why: Why, body: &str| {
         if !tmux::attached(&name) {
-            notify::notify(&Notification {
-                title: "jeet",
-                subtitle: Some(&subtitle),
-                body,
-                url: None,
-            });
+            notify::event(
+                app,
+                Event {
+                    why,
+                    kind: "startup-prompt".into(),
+                    level: Some(level),
+                    task: Some(slug.clone()),
+                    title: "jeet".into(),
+                    subtitle: Some(subtitle.clone()),
+                    body: body.into(),
+                    ..Event::default()
+                },
+            );
         }
     };
     match outcome {
@@ -408,16 +420,22 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             if let Err(e) = told {
                 eprintln!("jeet task-startup {slug}: warning: {e:#}");
             }
-            tell(&format!(
-                "{} asks whether to trust the folder; `jeet task open {slug}` to answer",
-                spec.harness.name(),
-            ));
+            tell(
+                Why::NeedsUser,
+                &format!(
+                    "{} asks whether to trust the folder; `jeet task open {slug}` to answer",
+                    spec.harness.name(),
+                ),
+            );
         }
-        Outcome::AcceptedNoHook => tell(&format!(
-            "jeet trusted the folder for {}, but no hook has reported since; \
+        Outcome::AcceptedNoHook => tell(
+            Why::Info,
+            &format!(
+                "jeet trusted the folder for {}, but no hook has reported since; \
              `jeet task open {slug}` to look",
-            spec.harness.name(),
-        )),
+                spec.harness.name(),
+            ),
+        ),
         Outcome::Started | Outcome::Gone | Outcome::NoPrompt | Outcome::Accepted => {}
     }
     Ok(())

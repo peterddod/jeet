@@ -1077,6 +1077,9 @@ pub struct TasksUi {
     pub selected: usize,
     pub panel: Option<Panel>,
     pub status_line: String,
+    /// That notifications wait for a sender that is not running, shown
+    /// while the status line is empty.
+    pub notice: Option<String>,
     /// Set while a slow operation runs, so the screen can say so.
     pub working: Option<String>,
     pub list: ListState,
@@ -1151,6 +1154,7 @@ impl TasksUi {
             selected: 0,
             panel: None,
             status_line: String::new(),
+            notice: None,
             working: None,
             list: ListState::default(),
             list_area: Rect::default(),
@@ -4013,6 +4017,7 @@ impl Screen<'_> {
                 .and_then(|inner| inner),
             false => load_rows(app).map(|loaded| (loaded, None)),
         };
+        self.ui.notice = crate::notify::notice(&app.home, &app.config.notify);
         match loaded {
             Ok((loaded, warning)) => {
                 self.read_projects(false);

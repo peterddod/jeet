@@ -1635,7 +1635,7 @@ pub fn run_job(id: &str) -> Result<()> {
 /// [`run_job`] as the runner with pid `me`.
 fn run(app: &App, id: &str, me: u32) -> Result<()> {
     crate::permissions::check_review_job(&app.db, id, me)?;
-    let Some(job) = app.db.get_review(id)?.and_then(|r| r.job) else {
+    let Some((slug, job)) = app.db.get_review(id)?.and_then(|r| Some((r.slug, r.job?))) else {
         bail!("review {id} has no job");
     };
     // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
@@ -1686,12 +1686,22 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
             .iter()
             .find(|(key, _)| key == "JEET_PR_URL")
             .map(|(_, url)| url.as_str());
-        crate::notify::notify(&crate::notify::Notification {
-            title: "jeet",
-            subtitle: Some(&job.title),
-            body: &message,
-            url,
-        });
+        crate::notify::event(
+            app,
+            crate::notify::Event {
+                why: crate::notify::Why::Finished,
+                kind: "review".into(),
+                level: Some(crate::config::NotifyLevel::Review),
+                task: Some(slug),
+                // Each run of the review is told once.
+                reference: Some(format!("{id}@{}", job.started_at)),
+                title: "jeet".into(),
+                subtitle: Some(job.title.clone()),
+                body: message,
+                link: url.map(str::to_string),
+                only: Vec::new(),
+            },
+        );
     }
     Ok(())
 }

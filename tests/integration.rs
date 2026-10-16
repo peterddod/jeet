@@ -6683,6 +6683,117 @@ fn notify_reports_through_the_notifier() {
     assert_eq!(notes(&notifier).len(), 1);
 }
 
+/// `[notify]`: rules, `via` and `max_per_hour` decide what is sent, and
+/// the outbox is left empty once sent.
+#[cfg(unix)]
+#[test]
+fn notify_config_decides_what_is_sent() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let notifier = stub_notifier(scratch.path());
+    let notifier_env = notifier.to_string_lossy().to_string();
+    let env = [("JEET_NOTIFY_CMD", notifier_env.as_str())];
+    let config = lab.home().join("config.toml");
+    let outbox = lab.home().join("run/notify/outbox.jsonl");
+
+    // Over the hour's limit, held back to fold into one "N more".
+    std::fs::write(&config, "scan_roots = []\n[notify]\nmax_per_hour = 2\n").unwrap();
+    for title in ["a", "b", "c"] {
+        succeeded(&lab.jeet_at(&["notify", title], &lab.home(), &env));
+    }
+    assert_eq!(notes_once(&notifier, |n| n.len() >= 2), ["a||", "b||"]);
+    assert_eq!(std::fs::read_to_string(&outbox).unwrap(), "");
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(lab.home().join("run/notify/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["folded"], serde_json::json!(["c"]));
+
+    // A rule that ignores it; with the limit lifted, what was folded goes
+    // as one.
+    std::fs::write(
+        &config,
+        "scan_roots = []\n[notify]\nmax_per_hour = 0\n\
+         [[notify.rules]]\nkind = [\"message\"]\naction = \"ignore\"\n",
+    )
+    .unwrap();
+    succeeded(&lab.jeet_at(&["notify", "d"], &lab.home(), &env));
+    // No backend.
+    std::fs::write(&config, "scan_roots = []\n[notify]\nvia = []\n").unwrap();
+    succeeded(&lab.jeet_at(&["notify", "e"], &lab.home(), &env));
+    assert_eq!(
+        notes_once(&notifier, |n| n.len() >= 3),
+        ["a||", "b||", "jeet: 1 more notification|c|"]
+    );
+
+    // The `command` backend, beside `desktop` (here the stub too).
+    let other = TempDir::new().unwrap();
+    let command = stub_notifier(other.path());
+    std::fs::write(
+        &config,
+        format!(
+            "scan_roots = []\n[notify]\nvia = [\"desktop\", \"command\"]\ncommand = \"{}\"\n",
+            command.display()
+        ),
+    )
+    .unwrap();
+    succeeded(&lab.jeet_at(&["notify", "f"], &lab.home(), &env));
+    assert_eq!(notes_once(&command, |n| !n.is_empty()), ["f||"]);
+    assert_eq!(notes_once(&notifier, |n| n.len() >= 4).len(), 4);
+
+    let output = lab.jeet_at(&["notify"], &lab.home(), &env);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("title"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+/// With `jeet notify serve` running, a caller only queues; the sender sends,
+/// with its own notifier, at once. A second sender refuses to start.
+#[cfg(unix)]
+#[test]
+fn a_running_sender_sends_what_callers_queue() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let sends = stub_notifier(scratch.path());
+    let other = TempDir::new().unwrap();
+    let caller = stub_notifier(other.path());
+    let caller_env = caller.to_string_lossy().to_string();
+
+    let mut cmd = jeet_bin();
+    lab.wire(&mut cmd)
+        .args(["notify", "serve"])
+        .current_dir(lab.home())
+        .env("JEET_NOTIFY_CMD", &sends)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _sender = Background(cmd.spawn().unwrap().id());
+    let lock = lab.home().join("run/notify/sender.lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !lock_held(&lock) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sender never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let again = lab.jeet_at(&["notify", "serve"], &lab.home(), &[]);
+    assert!(!again.status.success());
+    assert!(
+        stderr_of(&again).contains("runs already"),
+        "{}",
+        stderr_of(&again)
+    );
+
+    let env = [("JEET_NOTIFY_CMD", caller_env.as_str())];
+    succeeded(&lab.jeet_at(&["notify", "hello", "--body", "there"], &lab.home(), &env));
+    assert_eq!(notes_once(&sends, |n| !n.is_empty()), ["hello|there|"]);
+    assert!(notes(&caller).is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_notifier_that_never_finishes_does_not_hold_jeet_up() {
