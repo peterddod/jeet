@@ -2255,8 +2255,8 @@ item, never from who sent it. A one-line header comes first
 
 - **full**: `question` and `blocked` reports, answers, and anything jeet has
   no kind for (your own words) in their whole fenced text;
-- **line**: a `done` report, an agent's `jeet task send` and a `jeet watch`
-  batch, one line each with the start of its text and a reference;
+- **line**: a `done` report, an agent's `jeet task send` to the assistant and
+  a `jeet watch` batch, one line each with the start of its text and a reference;
 - **digest**: `progress` and `status` reports, and a note that jeet resumed a
   session to repair its wake channel, one line per task. A queue of nothing
   else is held for `digest_mins`; a full or line item sends it with it.

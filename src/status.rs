@@ -2042,7 +2042,8 @@ mod tests {
             .unwrap();
         let (taken, _) = take_at_stop(&inbox, &dir, "s", &app, quiet, 1_001).unwrap();
         assert!(taken.is_empty());
-        // A manager set full, and a work task, are handed the queue as ever.
+        // A manager set full, and a work task, are not quiet: their Stop
+        // takes the queue as ever (posting is tested in the waiter).
         let mut full = app_at(&app.home);
         full.config = toml::from_str("[messages]\nrender = { managers = \"full\" }\n").unwrap();
         assert!(!full.config.quiet_for(TaskKind::Manager));
