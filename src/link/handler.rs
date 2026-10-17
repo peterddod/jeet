@@ -105,8 +105,12 @@ fn install_macos(home: &Path, exe: &Path, path: &str) -> Result<()> {
     fs::create_dir_all(home.join("tui"))?;
 
     // Build beside the old one, so that a build that fails leaves it be,
-    // then swap, forgetting the old so the system does not keep two.
-    let fresh = dir.join("JeetLink.app.new");
+    // then swap, forgetting the old so the system does not keep two. The
+    // new one's name ends in `.app` too: osacompile picks what it writes
+    // by the extension, and `JeetLink.app.new` comes out a script file.
+    let staging = dir.join("staging");
+    let fresh = staging.join("JeetLink.app");
+    fs::create_dir_all(&staging).with_context(|| format!("create {}", staging.display()))?;
     let source = dir.join(".JeetLink.applescript");
     let _ = fs::remove_dir_all(&fresh);
     fs::write(&source, script).with_context(|| format!("write {}", source.display()))?;
@@ -121,6 +125,7 @@ fn install_macos(home: &Path, exe: &Path, path: &str) -> Result<()> {
         fs::remove_dir_all(&bundle).with_context(|| format!("remove {}", bundle.display()))?;
     }
     fs::rename(&fresh, &bundle).with_context(|| format!("move into {}", bundle.display()))?;
+    let _ = fs::remove_dir(&staging);
     run(LSREGISTER, &["-f", &bundle.to_string_lossy()])?;
 
     println!("installed the jeet:// link handler at {}", bundle.display());
