@@ -1318,6 +1318,8 @@ pub fn start_agent(
              it starts when a review ends",
             pr.number
         ),
+        // Only the assistant's are stored.
+        Delivered::Stored => format!("the review of #{} is queued", pr.number),
     })
 }
 

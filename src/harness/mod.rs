@@ -210,6 +210,13 @@ pub trait Harness: Sync {
         None
     }
 
+    /// What the hook for `event` prints to add `context`, unseen by the
+    /// user, to the turn the user's prompt starts: None for any other
+    /// event, or a harness that cannot.
+    fn prompt_context_output(&self, _event: &str, _context: &str) -> Option<String> {
+        None
+    }
+
     /// Whether it has a record of session `id` started in `dir`, i.e.
     /// whether resuming it there would find anything.
     fn has_session(&self, _dir: &Path, _id: &str) -> bool {

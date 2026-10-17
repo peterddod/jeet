@@ -1031,9 +1031,11 @@ it, and that is its only way up: tasks never message each other sideways. A
 report is kept in the index and reaches the assistant fenced as the task's
 claim, `<jeet-report … untrusted="true">`; the assistant's session context
 lists each such task with its last report. Reports hold at most 2,000 bytes:
-put detail in the pull request or a file and say where. `done`, `blocked` and
-`question` start an assistant session when none is running; `progress`
-waits for the next one. A task under a manager reports to that manager the
+put detail in the pull request or a file and say where. By default a
+report to the assistant is kept for it, not pushed (see [The assistant
+off the push path](#the-assistant-off-the-push-path)); with `[assistant]
+push = true`, `done`, `blocked` and `question` start an assistant session
+when none is running, and `progress` waits for the next one. A task under a manager reports to that manager the
 same way, fenced with its path in the tree (`path="assistant/backend/fix-x"`):
 handed to the manager now through its wake channel (or, without one, typed
 into its pane when it sits idle and queued while it is busy), and held in
@@ -2397,6 +2399,43 @@ below it. A line in a task's inbox that cannot be read is moved to
 `.jeet/inbox.rejected.jsonl` rather than dropped, and the task's parent gets
 a `status` report about it (the assistant's log says so).
 
+### The assistant off the push path
+
+```toml
+[assistant]
+push = false   # the default; true pushes into its sessions, as before
+```
+
+Nothing jeet's agents or events address to the assistant is pushed into its
+sessions: not reports of any kind, not an agent's `jeet task send
+assistant`, not `jeet watch` events a rule hands to it, not answers or asks
+passed up to it. Each is kept in the assistant's `.jeet/delivered.jsonl`
+under an `m` reference (a report keeps its `r` one too), and no session is
+started for it. What you type into its chat, and your own `jeet task send
+assistant` at your terminal, reach it as ever.
+
+When you next prompt the assistant, its UserPromptSubmit hook adds one line
+the model sees and your screen does not, only when something is new:
+`jeet: 3 new reports (1 question, 2 done), 1 message, 2 watch events since
+your last `jeet brief`; run `jeet brief` for details`. It never starts a
+turn. `jeet brief` prints what came since your last one (kind, sender, the
+start of its text and its reference, for `jeet show`), then the open asks
+you hold, and moves your cursor past what it printed; `jeet brief --all`
+prints everything kept, the last 30 days, and moves nothing. Each assistant
+session has its own cursor (a new one starts from the furthest any other has
+read), and you have one at your terminal. Only the assistant and you may run
+it.
+
+What needs you still reaches you, by notification ([`[notify]
+events`](#notifications)): a question or a block from a task directly under
+the assistant, or one you started, the moment it is asked; an ask passed up
+to the assistant, or moved onto it by `jeet task delete --reparent`;
+anything stuck; and every ask still open after `escalate_mins`. Off the push
+path, a task directly under the assistant that waits on a prompt only you
+can answer tells you too (kind `waiting`, held back by the quiet flag as an
+ask is), and so does a `jeet watch` event a rule hands to the assistant, as
+one did before when no session of the assistant's could take it.
+
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
@@ -2584,13 +2623,14 @@ Linux the first of those it finds.
 jeet commands run by the assistant's agent may only do what `[assistant]
 allow` lists; anything else fails with a message saying
 what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet task last`, `jeet prs`, …),
-`jeet notify` and `jeet todo` are always allowed; screens and shells (`jeet`,
+`jeet notify`, `jeet todo` and `jeet brief` are always allowed; screens and shells (`jeet`,
 `jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
 
 ```toml
 [assistant]
 allow = ["task.create", "task.send", "task.archive", "review.start", "worktree.add", "project.read"]
 notify = true   # a notification for each action it takes
+push = false    # keep what is sent to it for `jeet brief` (the default)
 ```
 
 The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
