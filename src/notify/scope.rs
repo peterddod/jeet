@@ -61,6 +61,8 @@ pub struct Origin {
     /// Started by the user (a review: asked for by the user).
     pub user_started: bool,
     pub quiet: bool,
+    /// The web address of its PR, where known: the open one last updated.
+    pub pr: Option<String>,
 }
 
 impl Origin {
@@ -72,6 +74,7 @@ impl Origin {
             top_level: under_assistant(app, task.parent_id.as_deref())?,
             user_started: flags.user_started(),
             quiet: flags.quiet,
+            pr: task_pr(app, &task.id)?,
         })
     }
 
@@ -82,6 +85,7 @@ impl Origin {
             top_level: under_assistant(app, review.requested_by.as_deref())?,
             user_started: review.requested_by.is_none(),
             quiet: false,
+            pr: None,
         })
     }
 
@@ -93,8 +97,21 @@ impl Origin {
             top_level: false,
             user_started: false,
             quiet: false,
+            pr: None,
         }
     }
+}
+
+/// The PR of task `id` a notification links to: its open one updated
+/// last, as jeet last saw them.
+fn task_pr(app: &App, id: &str) -> Result<Option<String>> {
+    Ok(app
+        .db
+        .list_task_prs(id)?
+        .into_iter()
+        .filter(|pr| pr.state == "OPEN")
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .map(|pr| pr.url))
 }
 
 /// Whether `parent` is the assistant.
@@ -157,7 +174,8 @@ pub fn event_for(app: &App, origin: &Origin, raise: Raise) -> Option<Event> {
         subtitle: raise.subtitle,
         body: raise.body,
         link: raise.link.as_ref().map(link::link_for),
-        only: Vec::new(),
+        pr: origin.pr.clone(),
+        ..Event::default()
     })
 }
 
@@ -179,6 +197,7 @@ mod tests {
             top_level,
             user_started,
             quiet,
+            pr: None,
         }
     }
 

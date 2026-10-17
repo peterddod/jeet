@@ -1704,7 +1704,8 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
                 subtitle: Some(job.title.clone()),
                 body: message,
                 link: url.map(str::to_string),
-                only: Vec::new(),
+                pr: url.map(str::to_string),
+                ..crate::notify::Event::default()
             },
         );
     }

@@ -102,6 +102,7 @@ jeet manager pause fix-x                 # interrupt it and hand it nothing; res
 jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
 jeet watch install                       # poll GitHub in the background (launchd)
 jeet notify install                      # send notifications from a background sender
+jeet notify setup slack                  # notifications in Slack too (see Notifications)
 
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
@@ -2450,8 +2451,13 @@ unit, `jeet-notify.service`, elsewhere) and `jeet notify uninstall` removes it.
 Nothing installs it but that command. Without it, the process that queued a
 notification sends it itself through every backend that needs no token, so
 `desktop` and `command` work as they always have; a backend that needs a
-token (none yet) waits for the sender, and `jeet task ls` and the tasks
-screen say so.
+token (`slack`) waits for the sender, and `jeet task ls` and the tasks
+screen say so. A send through such a backend that fails (Slack refuses it,
+or cannot be reached) stays in the outbox and is tried again after 30
+seconds, then twice as long after each failure, up to an hour, and is
+dropped after 30 tries (about a day); the sender logs why. When Slack cannot
+be reached, or refuses the token or the user, what else waits for it in
+that round waits as long, untried, rather than each failing in turn.
 
 ```toml
 [notify]
@@ -2473,6 +2479,51 @@ action = "ignore"   # or "notify"
   `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and
   `JEET_NOTIFY_URL`. `JEET_NOTIFY_CMD`, in the environment of the process that
   sends, runs a command the same way in place of `desktop`.
+- `slack`: a direct message from your own Slack app (below).
+
+#### Slack
+
+Notifications come as a direct message from a Slack app of your own: a
+header ("Question #41 from task x"), the text, the task, kind, CI status
+(as `jeet watch` last saw it) and age, buttons for the PR and its checks,
+and the command that acts on it (`jeet report answer 41 "…"`). Only the
+sender sends them, with a bot token it reads from the OS keyring (the
+Keychain on macOS, the Secret Service elsewhere); agents only queue, and
+jeet reads no token in a process it takes for an agent's.
+
+1. `jeet notify slack-manifest` prints the app's manifest: a bot with the
+   `chat:write` and `im:write` scopes, no events, no Socket Mode. At
+   <https://api.slack.com/apps>, choose **Create New App**, **From a
+   manifest**, pick your workspace and paste it.
+2. **Install to Workspace**, then copy the **Bot User OAuth Token**
+   (`xoxb-…`) from **OAuth & Permissions**.
+3. In Slack, open your profile, then **⋮**, **Copy member ID** (`U…`).
+4. At your own terminal (not a jeet pane), `jeet notify setup slack`: paste
+   the token (it is not echoed, and goes into the keyring, not a file), then
+   your member id, which it writes as `[notify.slack] user` in config.toml
+   unless that table is there already.
+5. Add `"slack"` to `[notify] via`, e.g. `via = ["desktop", "slack"]`.
+6. `jeet notify install`, so a sender runs (or restart it, if it does).
+7. `jeet notify test` queues a test notification and says whether the
+   sender took it.
+
+```toml
+[notify]
+via = ["desktop", "slack"]
+
+[notify.slack]
+user = "U012AB3CD"   # your Slack member id
+```
+
+A message also carries its `jeet://` link, as a button, as a link and as a
+`jeet open jeet://…` line; with `jeet notify install-link`, a click opens
+it. Whether Slack takes a `jeet://` link is not known: if it refuses the
+message for it, jeet sends it again without the button and the link (the
+`jeet open` line stays) and leaves them out from then on. Check with
+`jeet notify test` after setup. A token Slack refuses, or none stored, is
+logged once until a send goes through; run `jeet notify setup slack` again.
+Each message's channel and timestamp are kept in
+`$JEET_HOME/run/notify/slack-sent.jsonl`.
 
 A notification about the same thing for the same reason (a question's
 `r41`, one run of a review) is sent once.

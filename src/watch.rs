@@ -1084,6 +1084,7 @@ fn tell_stuck_ci(app: &App, events: &[Event], state: &WatchState) {
             Ok(origin) => {
                 if let Some(mut e) = scope::event_for(app, &origin, raise) {
                     e.link = Some(event.url.clone()).filter(|u| notify::openable_url(u));
+                    e.pr = e.link.clone();
                     notify::event(app, e);
                 }
             }
