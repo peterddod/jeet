@@ -13,6 +13,10 @@ fn jeet_bin() -> Command {
     // A background store sync would outlive the test and race its temp dirs;
     // the tests that want one turn it back on.
     cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
+    // Nor may one reach the developer's real ~/.jeet: a test that needs a
+    // home sets its own, which wins over this. Under /dev/null, so not even
+    // root can create it.
+    cmd.env("JEET_HOME", "/dev/null/jeet-test-home");
     // Running the suite from inside a task's agent session must not point
     // `jeet worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
@@ -313,6 +317,51 @@ fn hermetic_git(cmd: &mut Command) -> &mut Command {
         .env("GIT_AUTHOR_EMAIL", "test@test.com")
         .env("GIT_COMMITTER_NAME", "test")
         .env("GIT_COMMITTER_EMAIL", "test@test.com")
+}
+
+/// The test binary is a development build: it will not migrate the index at
+/// the default home, here a fake `$HOME/.jeet`, unless told to on purpose.
+#[test]
+fn a_dev_build_does_not_migrate_the_default_index() {
+    let home = TempDir::new().unwrap();
+    let ls = |allow: bool| {
+        let mut cmd = jeet_bin();
+        cmd.arg("ls")
+            .env("HOME", home.path())
+            .env_remove("JEET_HOME")
+            .env_remove("JEET_ALLOW_DEV_MIGRATE");
+        if allow {
+            cmd.env("JEET_ALLOW_DEV_MIGRATE", "1");
+        }
+        cmd.output().unwrap()
+    };
+    let output = ls(false);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    assert!(stderr.contains("JEET_HOME"), "{stderr}");
+    // Nor when JEET_HOME names it outright.
+    let explicit = format!("{}/.jeet/", home.path().display());
+    let output = jeet_bin()
+        .arg("ls")
+        .env("HOME", home.path())
+        .env("JEET_HOME", &explicit)
+        .env_remove("JEET_ALLOW_DEV_MIGRATE")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", stdout_of(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    // A scratch home is migrated as ever.
+    let scratch = TempDir::new().unwrap();
+    succeeded(
+        &jeet_bin()
+            .arg("ls")
+            .env("JEET_HOME", scratch.path())
+            .output()
+            .unwrap(),
+    );
+    succeeded(&ls(true));
 }
 
 #[test]

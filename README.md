@@ -2705,6 +2705,12 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
+A development build (a debug build, or one run from a cargo `target/`
+directory) refuses to migrate the index at the default home, `~/.jeet`: it
+would leave it at a schema the installed release cannot open. Run it with
+`JEET_HOME=$(mktemp -d)`, or set `JEET_ALLOW_DEV_MIGRATE=1` to migrate the
+default index on purpose.
+
 [docs/harnesses.md](docs/harnesses.md) says how to add support for another
 coding agent.
 
