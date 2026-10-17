@@ -2354,6 +2354,8 @@ opened.
 [messages]
 render = { assistant = "quiet", managers = "quiet" }   # each "quiet" or "full"; default "quiet"
 digest_mins = 15                                      # default: 15
+reask_mins = 15                                       # default: 15; 0 never
+escalate_mins = 60                                    # default: 60; 0 never
 ```
 
 What is queued for the assistant, and for every manager, is posted by class, from the kind of each
@@ -2373,6 +2375,16 @@ Work tasks always get the full text, as does the assistant with
 `assistant = "full"` and every manager with `managers = "full"` (one key for
 all managers). What a manager's parent or you send it stays whole. Typing into
 an idle pane stays full text.
+
+No question is lost: `jeet watch` looks at each open ask (a `question` or
+`blocked` report not answered, and its task's latest) on every poll. After
+`reask_mins` it posts the ask again, whole, to the manager holding it, once
+(one the assistant holds, or has passed to you, is not: you were told when
+it reached the assistant). After `escalate_mins` it notifies you, once,
+whoever holds it, with the ask's id. The quiet flag does not hold that back,
+nor does `[notify] events`; `[[notify.rules]]` filter it by the ask's kind
+(`question` or `blocked`) as any other. Asks from before an upgrade to this
+count as done both ways.
 
 `jeet show r123` prints report 123 and `jeet show m45` a message, whole;
 `m` messages are kept 30 days in the task's `.jeet/delivered.jsonl`. It only

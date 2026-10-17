@@ -1047,6 +1047,32 @@ impl Database {
         Ok(changed == 1)
     }
 
+    /// Claim open ask `id` to be re-posted to its holder: true only the
+    /// first time, and only while it is open.
+    pub fn claim_reask(&self, id: i64) -> Result<bool> {
+        let changed = self.conn().execute(
+            &format!(
+                "UPDATE task_reports AS r SET reasked = 1 WHERE r.id = ?1 AND r.reasked = 0 \
+                 AND {OPEN_ASK}"
+            ),
+            params![id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Claim open ask `id` to tell the user it is unanswered: true only the
+    /// first time, and only while it is open.
+    pub fn claim_unanswered(&self, id: i64) -> Result<bool> {
+        let changed = self.conn().execute(
+            &format!(
+                "UPDATE task_reports AS r SET unanswered_told = 1 \
+                 WHERE r.id = ?1 AND r.unanswered_told = 0 AND {OPEN_ASK}"
+            ),
+            params![id],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {
         self.conn().execute(
             "UPDATE tasks SET state = ?2 WHERE id = ?1",
