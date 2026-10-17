@@ -1032,7 +1032,10 @@ const HELP: [(&str, &str); 27] = [
     ("", ""),
     ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
     ("→", "expand: enter the highlighted folder"),
-    ("←", "back: leave the folder (stops at the root)"),
+    (
+        "← / ⌫",
+        "back: leave the folder (⌫ once the filter is empty)",
+    ),
     ("⏎", "folder: enter · file: open in your editor"),
     ("click", "a row to enter or select it, a path crumb to jump"),
     ("shift-drag", "select text — jeet has the mouse otherwise"),

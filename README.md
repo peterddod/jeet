@@ -153,7 +153,7 @@ merely contain it.
 | `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
 | `/` or `\` | step into the highlighted folder, and start a fresh filter |
 | | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
-| `⌫` | delete a character |
+| `⌫` | delete a character — or, with nothing typed, leave the folder, as `←` |
 | `ctrl-u` | clear the filter |
 | `esc` | clear the filter — or, with nothing typed, quit |
 
@@ -306,7 +306,7 @@ syntax-highlighted in the same theme, over the added and removed backgrounds;
 a file shows plain for the moment it takes to work its colours out. `←`/`→`
 turn the page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
 or request changes — submitting your pending review if you have one — and
-`Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
+`Esc` or `q` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
 
 On a line of code, `c` writes an inline comment, which joins your pending
 review (starting one if need be) until a verdict submits it. On a comment, `R`
@@ -660,23 +660,23 @@ index every two seconds while the tab is shown.
 | Key | |
 |---|---|
 | `⏎` | attach to the node's agent, as in the active tab; on the assistant, pick one of its sessions |
-| `→` / `←` | open / close a manager (everything starts open); else to the first task under it / to its parent |
+| `→` / `←` / `⌫` | open / close a manager (everything starts open); else to the first task under it / to its parent |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
-| `i` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
+| `I` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
 | `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
-| `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
+| `z` / `Z` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
 | `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
 | `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
-| `a` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
-| `c` `C` `t` | the assistant, as in the active tab |
+| `y` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
+| `c` `C` `t` `i` | the assistant, as in the active tab: `i` is its inbox, not the node's reports (`I`) |
 
 What each node made of a pause, resume or stop is shown when it is done. A
 manager made with `n` starts at once, with its brief, and the status line
 says whether it started, was queued on `max_live` or is held by a paused
 manager above it; a task made with `n` is not started (`⏎` starts it), as
 in the active tab. What jeet refuses (a manager with no goal, a capability
-the parent does not hold) is shown on the form. `l`, `i` and `b` show what
-agents wrote, unfenced, and `p`, `P`, `x`, `n` and `a` act as you, so they
+the parent does not hold) is shown on the form. `l`, `I` and `b` show what
+agents wrote, unfenced, and `z`, `Z`, `x`, `n` and `y` act as you, so they
 work only when you run jeet from your own terminal: not inside an agent's or
 a top-level task's pane, nor any window of jeet's tmux sessions. An answer
 goes to the task that asked, with a copy to each manager it passed through;
