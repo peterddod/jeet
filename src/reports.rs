@@ -977,8 +977,8 @@ const REASK_VIA: &str = "jeet (unanswered)";
 /// One the assistant holds, or has passed to the user, is not re-posted:
 /// the user was told when it reached the assistant. The user's reminder is
 /// for every ask, whoever holds it, under its own `(why, ref)`; the quiet
-/// flag does not hold it back, nor does `[notify] events` (its own key
-/// turns it off), but `[[notify.rules]]` filter it. Runs from `jeet
+/// flag does not hold it back; `[notify] events = false` does, as for
+/// jeet's other events, and `[[notify.rules]]` filter it. Runs from `jeet
 /// watch`, as nothing else happens when an ask just waits.
 pub fn sweep_asks(app: &App, now: i64) -> Result<()> {
     sweep_asks_with(
@@ -997,7 +997,11 @@ fn sweep_asks_with(
     notifier: &dyn Fn(Event),
 ) -> Result<()> {
     let reask = app.config.reask_secs();
-    let escalate = app.config.escalate_secs();
+    // The user's decision: `[notify] events` mutes the reminder too.
+    let escalate = app
+        .config
+        .escalate_secs()
+        .filter(|_| app.config.notify.events());
     if reask.is_none() && escalate.is_none() {
         return Ok(());
     }
@@ -2242,6 +2246,19 @@ mod tests {
         let (sent, notified) = swept(&app, at + 120 * 60);
         assert_eq!(sent.len(), 1);
         assert!(notified.is_empty());
+    }
+
+    #[test]
+    fn notify_events_off_mutes_the_reminder_but_not_the_repost() {
+        let (_dir, mut app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        app.config.notify.events = Some(false);
+        let (sent, notified) = swept(&app, at + 120 * 60);
+        assert_eq!(sent.len(), 1);
+        assert!(notified.is_empty());
+        assert_eq!(swept(&app, at + 121 * 60), (vec![], vec![]));
     }
 
     #[test]

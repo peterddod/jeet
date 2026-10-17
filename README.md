@@ -2382,8 +2382,8 @@ No question is lost: `jeet watch` looks at each open ask (a `question` or
 manager holding it then, once
 (one the assistant holds, or has passed to you, is not: you were told when
 it reached the assistant). After `escalate_mins` it notifies you, once,
-whoever holds it, with the ask's id. The quiet flag does not hold that back,
-nor does `[notify] events`; `[[notify.rules]]` filter it by the ask's kind
+whoever holds it, with the ask's id. The quiet flag does not hold that back;
+`[notify] events = false` does, and `[[notify.rules]]` filter it by the ask's kind
 (`question` or `blocked`) as any other. Asks from before an upgrade to this
 count as done both ways.
 
