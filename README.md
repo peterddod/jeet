@@ -76,6 +76,7 @@ jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
 jeet task ls [--archived]                # with what each task's agent is doing
 jeet task open fix-login                 # the task's agent, in tmux (started if need be)
 jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
+jeet task new fix-y --pr ask             # its PR policy: auto, draft or ask (see [tasks] pr)
 jeet task send fix-login "add tests too" # message the task's agent
 jeet task interrupt fix-login            # end the agent's current turn, keeping its session
 jeet task restart fix-login [--force]    # end the agent and resume its conversation in a new one
@@ -153,7 +154,7 @@ merely contain it.
 | `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
 | `/` or `\` | step into the highlighted folder, and start a fresh filter |
 | | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
-| `⌫` | delete a character |
+| `⌫` | delete a character — or, with nothing typed, leave the folder, as `←` |
 | `ctrl-u` | clear the filter |
 | `esc` | clear the filter — or, with nothing typed, quit |
 
@@ -306,7 +307,7 @@ syntax-highlighted in the same theme, over the added and removed backgrounds;
 a file shows plain for the moment it takes to work its colours out. `←`/`→`
 turn the page, `↑`/`↓` or the wheel move the cursor, `A`, `C` and `X` approve, comment
 or request changes — submitting your pending review if you have one — and
-`Esc` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
+`Esc` or `q` goes back. `d` in the explorer's `ctrl-p` panel opens it too.
 
 On a line of code, `c` writes an inline comment, which joins your pending
 review (starting one if need be) until a verdict submits it. On a comment, `R`
@@ -659,23 +660,23 @@ index every two seconds while the tab is shown.
 | Key | |
 |---|---|
 | `⏎` | attach to the node's agent, as in the active tab; on the assistant, pick one of its sessions |
-| `→` / `←` | open / close a manager (everything starts open); else to the first task under it / to its parent |
+| `→` / `←` / `⌫` | open / close a manager (everything starts open); else to the first task under it / to its parent |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
-| `i` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
+| `I` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
 | `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
-| `p` / `P` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
+| `z` / `Z` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
 | `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
 | `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
-| `a` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
-| `c` `C` `t` | the assistant, as in the active tab |
+| `y` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
+| `c` `C` `t` `i` | the assistant, as in the active tab: `i` is its inbox, not the node's reports (`I`) |
 
 What each node made of a pause, resume or stop is shown when it is done. A
 manager made with `n` starts at once, with its brief, and the status line
 says whether it started, was queued on `max_live` or is held by a paused
 manager above it; a task made with `n` is not started (`⏎` starts it), as
 in the active tab. What jeet refuses (a manager with no goal, a capability
-the parent does not hold) is shown on the form. `l`, `i` and `b` show what
-agents wrote, unfenced, and `p`, `P`, `x`, `n` and `a` act as you, so they
+the parent does not hold) is shown on the form. `l`, `I` and `b` show what
+agents wrote, unfenced, and `z`, `Z`, `x`, `n` and `y` act as you, so they
 work only when you run jeet from your own terminal: not inside an agent's or
 a top-level task's pane, nor any window of jeet's tmux sessions. An answer
 goes to the task that asked, with a copy to each manager it passed through;
@@ -1399,6 +1400,46 @@ made, yours included. While no tmux server is running, an event for an agent
 waits in its inbox until the agent next runs, and is notified now. With a
 `[watch]` section, the tasks list also polls while it is open. Installing or removing the watcher takes the
 assistant the `watch.install` capability; polling takes none.
+
+## Setup
+
+```bash
+jeet setup status                  # what is staged, each target's hash, the last applied run
+jeet setup apply                   # one diff and one y/N/q per staged file
+jeet setup discard                 # drop everything staged
+```
+
+Changes to jeet's own files are staged in `~/.jeet/setup/proposed/`, each at
+its target id (`config.toml`, `assistant/AGENTS.md`,
+`assistant/.claude/skills/<name>/SKILL.md`, Markdown files under
+`templates/{root,manager,worker}/`),
+with a `manifest.toml` beside them:
+
+```toml
+["assistant/AGENTS.md"]
+path = "~/.jeet/assistant/AGENTS.md"   # optional; must be where the id points
+reason = "shorter role section"
+hash = "af63dc4c8601ec8c"              # the target's hash when staged; omit for a new file
+```
+
+`jeet setup apply` writes only those targets and refuses anything else in the
+manifest, a staged file reached through a symlink, and a target that is one.
+For each file it prints a coloured unified diff (or "new file") and
+asks `Apply this change? [y/N/q]`. A staged `config.toml` is first loaded as
+jeet would load it, with the `[managers]` and `[review]` policies and the
+`[assistant] allow` capabilities checked, and refused if any fails. The diff
+shows exactly the bytes that would be written. A file
+whose target changed since it was staged (its hash no longer matches, as
+`jeet setup status` shows) is refused too: stage it again. On `y`, the old
+file is copied to `~/.jeet/backups/setup-<UTC stamp>/<target id>`, the new
+one is written through a temp file and a rename, it leaves `proposed/`, and a
+line goes to `~/.jeet/setup/applied.log`. At the end apply prints the backup
+directory and the command that restores it, and lists the running agents
+that keep their old settings until `jeet task restart <slug>`; it restarts
+none itself.
+
+Apply runs only at your own terminal: it refuses with no terminal on stdin,
+and under any agent jeet started (`JEET_TASK_ID` set).
 
 ## Importing
 
@@ -2245,6 +2286,44 @@ next start (`jeet task restart` one that is running), and messages are
 queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
+
+### Models
+
+```toml
+[models]
+assistant = "opus"
+manager = "sonnet"
+task = "sonnet"
+review = "sonnet"
+```
+
+Each is passed to that kind of agent as `--model <name>` at launch, after
+the command and any project `[agent] args`, unless those already name a
+model (`--model x` or `--model=x`), which wins. Unset, the agent's own
+default applies. A running agent gets a new model when it restarts.
+
+### Pull requests from tasks
+
+```toml
+[tasks]
+pr = "draft"    # "auto" | "draft" | "ask" (default "draft")
+```
+
+What a work task does once its work is pushed:
+
+- **`auto`**: opens a ready pull request once its checks pass locally.
+- **`draft`**: opens it as a draft (`gh pr create --draft`), and marks it
+  ready only when its parent or you ask.
+- **`ask`**: opens none. A task with a parent asks it with `jeet report
+  question`; a top-level task asks you at its pane.
+
+The most specific setting wins: `jeet task new --pr <mode>`, then the
+project's `[tasks] pr` in its `project.toml`, then the global one. The
+task is told the mode in one line as each session starts. On Claude Code
+its settings also allow `gh pr create` under `auto` and `draft`, deny `gh
+pr ready` under `draft`, and deny `gh pr create` under `ask`. A manager
+passes `--pr` on to its workers when its brief says how PRs should be
+opened.
 
 ### Quiet messages for the assistant and managers
 

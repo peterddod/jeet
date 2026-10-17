@@ -49,6 +49,20 @@ impl AgentSpec {
         })
     }
 
+    /// With `--model <model>` added, from `[models]`, unless the command
+    /// line names a model already (`--model x` or `--model=x`), which wins.
+    pub fn with_model(mut self, model: Option<&str>) -> Self {
+        let named = self
+            .argv
+            .iter()
+            .any(|a| a == "--model" || a.starts_with("--model="));
+        if let (Some(model), false) = (model, named) {
+            self.argv.push("--model".into());
+            self.argv.push(model.into());
+        }
+        self
+    }
+
     /// `command`, with the harness its program runs.
     pub fn from_command(command: &str) -> Result<Self> {
         let argv = split_command(command);
@@ -144,6 +158,21 @@ mod tests {
         assert_eq!(spec.argv, vec!["claude", "--verbose"]);
         assert!(spec.supports_sessions());
         assert!(spec.has_hooks());
+    }
+
+    #[test]
+    fn a_model_is_added_unless_the_command_names_one() {
+        let spec = AgentSpec::from_command("claude --verbose").unwrap();
+        assert_eq!(
+            spec.clone().with_model(Some("opus")).argv,
+            ["claude", "--verbose", "--model", "opus"]
+        );
+        assert_eq!(spec.clone().with_model(None).argv, ["claude", "--verbose"]);
+        for command in ["claude --model sonnet", "claude --model=sonnet"] {
+            let spec = AgentSpec::from_command(command).unwrap();
+            let argv = spec.clone().with_model(Some("opus")).argv;
+            assert_eq!(argv, spec.argv, "{command}");
+        }
     }
 
     #[test]

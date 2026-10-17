@@ -11,6 +11,7 @@ use crate::agent::{self, AgentSpec};
 use crate::assistant;
 use crate::cd;
 use crate::cli::Delegation;
+use crate::config::PrMode;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
@@ -33,6 +34,8 @@ pub struct NewTaskArgs<'a> {
     pub repos: &'a [String],
     pub branch: Option<&'a str>,
     pub prompt: Option<&'a str>,
+    /// `--pr`: the task's own PR policy.
+    pub pr: Option<PrMode>,
     pub delegation: &'a Delegation,
 }
 
@@ -90,6 +93,10 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         },
     )?;
     warn_all(&created.warnings);
+    // Before its agent can start, which reads it.
+    if args.pr.is_some() {
+        app.db.set_task_pr(&created.task.id, args.pr)?;
+    }
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("jeet: task {} -> {}", created.task.name, dir.display());
     if let Some(parent) = &parent {

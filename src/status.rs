@@ -413,27 +413,51 @@ fn handle_hook(
                     }
                     Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
                 }
-            } else if task.parent_id.is_some()
-                && harness.session_context_output("").is_some()
-                && attributed(launched_for, &task.id, app)
-            {
+            } else if harness.session_context_output("").is_some() {
+                let parented = task.parent_id.is_some() && attributed(launched_for, &task.id, app);
                 // What its parent asked of it, each time a session starts,
                 // /clear included; for a manager, with the state of its area.
-                let context = match task.kind {
-                    TaskKind::Manager => {
+                let brief = match (parented, task.kind) {
+                    (false, _) => Ok(None),
+                    (true, TaskKind::Manager) => {
                         // Written again as each session starts, so what
                         // changed while it was archived, or in config, is
                         // in it before it is read.
                         if let Err(e) = manager::write_brief(app, task) {
                             eprintln!("jeet task-hook {event}: {e:#}");
                         }
-                        manager::context::session_context(app, task, session_id, now)
+                        manager::context::session_context(app, task, session_id, now).map(Some)
                     }
-                    TaskKind::Work | TaskKind::Assistant => reports::brief_context(app, task),
+                    (true, TaskKind::Work | TaskKind::Assistant) => {
+                        reports::brief_context(app, task).map(Some)
+                    }
                 };
+                // A work task's PR policy, top-level or not, after its brief.
+                let policy = match task.kind {
+                    // As the brief: a task with a parent only from its own
+                    // pane, a top-level one from any launch of its own.
+                    TaskKind::Work
+                        if parented
+                            || (task.parent_id.is_none() && names_task(launched_for, &task.id)) =>
+                    {
+                        match tasks::pr_mode(app, task) {
+                            Ok(mode) => Some(tasks::pr_policy_line(mode)),
+                            Err(e) => {
+                                eprintln!("jeet task-hook {event}: {e:#}");
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let context = brief.map(|brief| {
+                    let parts: Vec<String> = brief.into_iter().chain(policy).collect();
+                    parts.join("\n\n")
+                });
                 match context {
-                    Ok(brief) => {
-                        if let Some(output) = harness.session_context_output(&brief) {
+                    Ok(context) if context.is_empty() => {}
+                    Ok(context) => {
+                        if let Some(output) = harness.session_context_output(&context) {
                             println!("{output}");
                         }
                     }

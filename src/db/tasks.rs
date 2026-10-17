@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::Database;
+use crate::config::PrMode;
 use crate::placement::Placement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -937,6 +938,26 @@ impl Database {
                 task_from_row,
             )
             .optional()?)
+    }
+
+    /// Set a task's own PR policy (`jeet task new --pr`).
+    pub fn set_task_pr(&self, id: &str, pr: Option<PrMode>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE tasks SET pr = ?2 WHERE id = ?1",
+            params![id, pr.map(PrMode::as_str)],
+        )?;
+        Ok(())
+    }
+
+    /// A task's own PR policy, if it was given one.
+    pub fn task_pr(&self, id: &str) -> Result<Option<PrMode>> {
+        let pr: Option<Option<String>> = self
+            .conn()
+            .query_row("SELECT pr FROM tasks WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(pr.flatten().as_deref().and_then(PrMode::parse))
     }
 
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {

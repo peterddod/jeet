@@ -490,6 +490,12 @@ const MIGRATIONS: &[&str] = &[
         at INTEGER NOT NULL
     );
     ",
+    // v10: a work task's own PR policy (`jeet task new --pr`), over its
+    // project's and the global `[tasks] pr`; NULL when it names none.
+    // Additive only.
+    "
+    ALTER TABLE tasks ADD COLUMN pr TEXT CHECK (pr IS NULL OR pr IN ('auto', 'draft', 'ask'));
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one

@@ -30,7 +30,10 @@ says everything else on stderr.
 ## Starting and steering work
 
 - `jeet task new <name> [--project <p>] [--repo <r>]… [--branch <b>]
-  [--prompt "<brief>"] [--goal "<goal>" [--done "<when>"]]` makes a task.
+  [--prompt "<brief>"] [--goal "<goal>" [--done "<when>"]] [--pr
+  auto|draft|ask]` makes a task. `--pr` sets its PR policy when it matters
+  (a ready PR, a draft, or none until it asks); without it the project's or
+  the config's applies (`draft` by default).
   With `--prompt` its agent starts straight away with the brief as its first
   prompt. A task you make reports back to you (see "Your tasks"); `--goal`
   and `--done` give it a definition of done, shown to its agent each time a

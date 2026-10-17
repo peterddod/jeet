@@ -353,6 +353,8 @@ fn handle_browse_key(
             report_step(explorer, step);
         }
         KeyCode::Left if explorer.ascend()? => explorer.set_status(""),
+        // With the filter empty (so not in a command line), ⌫ backs out like ←.
+        KeyCode::Backspace if explorer.ascend()? => explorer.set_status(""),
         KeyCode::Enter if explorer.in_command_mode() => run_command(app, terminal, explorer)?,
         KeyCode::Enter => enter_selected(app, terminal, explorer)?,
 

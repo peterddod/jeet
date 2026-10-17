@@ -51,6 +51,9 @@ pub struct ProjectConfig {
     pub repos: Vec<String>,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// `[tasks] pr`, over the global one for the project's tasks.
+    #[serde(default)]
+    pub tasks: crate::config::TasksConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -250,7 +253,11 @@ fn template(repos: &[String]) -> String {
          \n\
          # Extra arguments for the coding agent in this project's tasks.\n\
          # [agent]\n\
-         # args = [\"--model\", \"opus\"]\n",
+         # args = [\"--model\", \"opus\"]\n\
+         \n\
+         # What this project's tasks do about pull requests: auto, draft or ask.\n\
+         # [tasks]\n\
+         # pr = \"draft\"\n",
         list.join(", ")
     )
 }
@@ -629,7 +636,7 @@ fn write_manifest(task_dir: &Path, entries: &BTreeMap<String, u64>) -> Result<()
 
 /// 64-bit FNV-1a: stable across Rust releases, unlike `DefaultHasher`, and
 /// plenty to notice that a file was edited.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         hash ^= u64::from(*b);

@@ -29,6 +29,11 @@ path print only that on stdout; jeet says everything else on stderr.
   (comma-separated capabilities) and `--budget` (`2h`, `30m`, `20turns`,
   comma-separated) must fit within what you have; without them it gets
   jeet's defaults, cut to what you have.
+- `--pr auto|draft|ask` sets the worker's PR policy: a ready PR, a draft,
+  or none until it asks. Without it the worker gets its project's or the
+  config's (`draft` by default). Pass it on from your own brief when the
+  brief says how PRs should be opened, or pick a stricter one when it
+  matters.
 - `jeet manager new <name> --goal "<goal>" [--done "<when>"] [--allow
   <caps>] [--budget <parts>]`, when you may make managers, makes one under
   you for a part of your area and starts it.

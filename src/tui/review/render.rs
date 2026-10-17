@@ -158,7 +158,7 @@ fn keys(viewer: &Viewer) -> Vec<(&'static str, &'static str)> {
         }
         _ => {}
     }
-    keys.extend([("r", "refresh"), ("Esc", "back")]);
+    keys.extend([("r", "refresh"), ("Esc/q", "back")]);
     keys
 }
 
@@ -406,7 +406,7 @@ fn draw_body(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
                 &clean(why),
                 (area.width as usize).saturating_sub(4).max(10),
             ));
-            lines.extend([String::new(), "esc to go back".into()]);
+            lines.extend([String::new(), "esc or q to go back".into()]);
             message(lines)
         }
         Load::Ready(review) => match review.files.get(viewer.page) {
@@ -1052,7 +1052,7 @@ mod tests {
             screen.contains("A approve · C comment · X request changes"),
             "{screen}"
         );
-        assert!(screen.contains("Esc back"), "{screen}");
+        assert!(screen.contains("Esc/q back"), "{screen}");
 
         // GitHub's colours: the page background, a comment box, an added line.
         assert_eq!(buffer[(50, 0)].bg, Color::Rgb(0x0d, 0x11, 0x17));
@@ -1286,7 +1286,7 @@ mod tests {
             bar.contains("A approve · C comment · X request changes · c inline comment"),
             "{bar}"
         );
-        assert!(bar.contains("r refresh · Esc back"), "{bar}");
+        assert!(bar.contains("r refresh · Esc/q back"), "{bar}");
         assert!(!bar.contains("reply"), "{bar}");
 
         // Someone else's comment: reply and react, but no edit or delete.
@@ -1322,7 +1322,7 @@ mod tests {
         let bar = screen.lines().last().unwrap();
         assert!(!bar.contains("←→"), "{bar}");
         assert!(bar.contains("e edit · d delete"), "{bar}");
-        assert!(bar.contains("Esc back"), "{bar}");
+        assert!(bar.contains("Esc/q back"), "{bar}");
     }
 
     #[test]
