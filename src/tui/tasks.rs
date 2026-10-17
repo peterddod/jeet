@@ -650,7 +650,7 @@ pub enum ProjectField {
     Repos,
 }
 
-/// `n` in the projects panel: a name, and the repositories every task made
+/// `N` on a project row: a name, and the repositories every task made
 /// from the project starts with.
 #[derive(Debug, Clone)]
 pub struct NewProjectForm {
@@ -4679,7 +4679,7 @@ impl Screen<'_> {
                         let back = self.ui.panel.take();
                         self.ui.message(
                             "project.toml is not valid",
-                            vec![format!("{e:#}"), String::new(), "e edits it again".into()],
+                            vec![format!("{e:#}"), String::new(), "E edits it again".into()],
                             back,
                         );
                     }

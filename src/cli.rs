@@ -135,7 +135,7 @@ pub enum Commands {
     },
 
     /// Projects: repositories, AGENTS.md and skills a task can start from
-    /// (with no subcommand: the projects panel on a terminal, else the list)
+    /// (with no subcommand: the projects tab on a terminal, else the list)
     Projects {
         #[command(subcommand)]
         command: Option<ProjectCommands>,

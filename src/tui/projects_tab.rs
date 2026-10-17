@@ -1,6 +1,6 @@
 //! The projects view of the tasks list: the active tasks and managers
 //! grouped by the jeet project they were started from (`jeet task new
-//! --project`, `TaskRecord.project`) — the projects `P` manages — or,
+//! --project`, `TaskRecord.project`) — the projects this tab manages — or,
 //! toggled, the projects with no active work. Pure, so the grouping is unit
 //! tested.
 //!
