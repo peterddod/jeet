@@ -19,7 +19,7 @@ use crate::link;
 use crate::watch;
 use crate::worktrees::now_secs;
 
-use super::{dir, open_owned, openable_url, Event, Notifier, Said, Tokens};
+use super::{dir, open_owned, openable_url, Down, Event, Notifier, Said, Tokens};
 
 /// Its name in `[notify] via`, and the keyring account's prefix.
 pub const NAME: &str = "slack";
@@ -138,7 +138,8 @@ impl Slack {
                 ),
             ),
             Failed::Slack(e) => anyhow!("Slack's {method}: {e}"),
-            Failed::Other(e) => e,
+            // Not reached, or not answered: nor will the next one be.
+            Failed::Other(e) => anyhow!(Down(e)),
         }
     }
 }
@@ -154,7 +155,7 @@ fn bad_token(home: &Path, message: &str) -> anyhow::Error {
     if let Err(e) = save(home, &state) {
         eprintln!("jeet: could not save that the Slack token was refused: {e:#}");
     }
-    anyhow!("{message}")
+    anyhow!(Down(anyhow!("{message}")))
 }
 
 impl Notifier for Slack {
@@ -168,7 +169,9 @@ impl Notifier for Slack {
 
     fn send(&self, event: &Event, tokens: &dyn Tokens) -> Result<()> {
         let Some(user) = &self.user else {
-            bail!("[notify.slack] user is not set: give it your Slack member id");
+            return Err(anyhow!(Down(anyhow!(
+                "[notify.slack] user is not set: give it your Slack member id"
+            ))));
         };
         let Some(token) = tokens.token(NAME)? else {
             return Err(bad_token(
@@ -178,7 +181,11 @@ impl Notifier for Slack {
         };
         let opened = self
             .call("conversations.open", &token, &json!({ "users": user }))
-            .map_err(|f| self.failed("conversations.open", f))?;
+            // The user, or the app, is wrong: so for every message.
+            .map_err(|f| match self.failed("conversations.open", f) {
+                e if e.is::<Said>() || e.is::<Down>() => e,
+                e => anyhow!(Down(e)),
+            })?;
         let Some(channel) = opened["channel"]["id"].as_str() else {
             bail!("Slack's conversations.open gave no channel");
         };
@@ -760,11 +767,23 @@ mod tests {
         });
         let e = slack.send(&question(), &tokens(home.path())).unwrap_err();
         assert!(format!("{e:#}").contains("user_not_found"), "{e:#}");
+        // The user is wrong for every message: the backend is down.
+        assert!(e.is::<Down>());
 
         let (slack, calls) = slack_with_http_error(home.path());
         let e = slack.send(&question(), &tokens(home.path())).unwrap_err();
         assert!(format!("{e:#}").contains("HTTP 503"), "{e:#}");
+        assert!(e.is::<Down>());
         assert_eq!(calls.borrow().len(), 1);
+
+        // What Slack says of one message is that message's alone.
+        let (slack, _) = super::tests::slack(home.path(), |method, body| match method {
+            "chat.postMessage" => Ok(json!({ "ok": false, "error": "msg_too_long" })),
+            _ => ok(method, body),
+        });
+        let e = slack.send(&question(), &tokens(home.path())).unwrap_err();
+        assert!(format!("{e:#}").contains("msg_too_long"), "{e:#}");
+        assert!(!e.is::<Down>());
 
         // Without a token, nothing is called.
         let (slack, calls) = super::tests::slack(home.path(), ok);

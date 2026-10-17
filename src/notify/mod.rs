@@ -56,9 +56,9 @@ const NOTIFIER_KILL: Duration = Duration::from_secs(120);
 const RETRY_FIRST_SECS: i64 = 30;
 const RETRY_MAX_SECS: i64 = 3600;
 
-/// How old a notification that still fails to send may get before it is
-/// dropped, with a word in the log: by then it is news to nobody.
-const GIVE_UP_SECS: i64 = 24 * 3600;
+/// Failed sends after which a notification is dropped, with a word in the
+/// log: with the waits above, about a day, when it is news to nobody.
+const GIVE_UP_TRIES: u32 = 30;
 
 /// Why the user is told.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +146,20 @@ impl std::fmt::Display for Said {
 }
 
 impl std::error::Error for Said {}
+
+/// A backend's error that is not this notification's but the backend's
+/// (unreachable, no token, refused): the rest of what it has to send in
+/// the round waits too.
+#[derive(Debug)]
+pub struct Down(pub anyhow::Error);
+
+impl std::fmt::Display for Down {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for Down {}
 
 /// The level of a task of `kind`.
 pub fn level(kind: TaskKind) -> NotifyLevel {
@@ -513,32 +527,42 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
     let mut failed = Vec::new();
     // A token backend that failed once in this drain is not tried again in
     // it: Slack down or rate limiting would otherwise cost a timeout each.
-    let mut down = vec![false; backends.len()];
+    // When each backend found down in this round is to be tried again.
+    let mut down: Vec<Option<i64>> = vec![None; backends.len()];
     for (event, via) in sends {
         for i in via {
             let backend = &backends[i];
-            let sent = match down[i] {
-                true => Err(anyhow::anyhow!(Said)),
-                false => backend.send(&event, tokens),
-            };
-            let Err(e) = sent else {
+            // Not tried: put back to wait as long as the one that failed,
+            // its own tries as they were.
+            if let Some(at) = down[i] {
+                failed.push(Event {
+                    only: vec![backend.name().to_string()],
+                    retry_at: Some(at),
+                    ..event.clone()
+                });
+                continue;
+            }
+            let Err(e) = backend.send(&event, tokens) else {
                 continue;
             };
-            if e.downcast_ref::<Said>().is_none() {
+            if !e.is::<Said>() {
                 eprintln!("jeet: notify via {}: {e:#}", backend.name());
             }
             if !backend.needs_token() {
                 continue;
             }
-            down[i] = true;
-            let now = now_secs();
-            match now - event.at.unwrap_or(now) > GIVE_UP_SECS {
+            let again = retry(&event, backend.name(), now_secs());
+            if e.is::<Down>() || e.is::<Said>() {
+                down[i] = again.retry_at;
+            }
+            match again.tries >= GIVE_UP_TRIES {
                 true => eprintln!(
-                    "jeet: gave up sending {:?} via {} after a day of failures",
+                    "jeet: gave up sending {:?} via {} after {} tries",
                     event.title,
-                    backend.name()
+                    backend.name(),
+                    again.tries
                 ),
-                false => failed.push(retry(&event, backend.name(), now)),
+                false => failed.push(again),
             }
         }
     }
@@ -993,9 +1017,9 @@ mod tests {
         };
         assert_eq!(retry(&late, "slack", 0).retry_at, Some(RETRY_MAX_SECS));
 
-        // A day old and failing still: dropped.
+        // Failing still after its last try: dropped.
         let stale = Event {
-            at: Some(now_secs() - GIVE_UP_SECS - 60),
+            tries: GIVE_UP_TRIES - 1,
             ..due
         };
         std::fs::write(
@@ -1006,5 +1030,30 @@ mod tests {
         let drained = drain(home.path(), &NoTokens, true).unwrap();
         assert!(queued(home.path()).is_empty());
         assert_eq!(drained, Drained::default());
+    }
+
+    #[test]
+    fn a_backend_found_down_defers_the_rest_of_the_round_untried() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config::config_path(home.path()),
+            "[notify]\nvia = [\"slack\"]\n[notify.slack]\nuser = \"U012AB3CD\"\n",
+        )
+        .unwrap();
+        for title in ["a", "b"] {
+            let event = Event {
+                title: title.into(),
+                ..Event::default()
+            };
+            enqueue(home.path(), &event).unwrap();
+        }
+        // No token: the first fails, and the backend is down for the round.
+        drain(home.path(), &NoTokens, true).unwrap();
+        let queued = queued(home.path());
+        assert_eq!(queued.len(), 2);
+        assert_eq!((queued[0].title.as_str(), queued[0].tries), ("a", 1));
+        assert_eq!((queued[1].title.as_str(), queued[1].tries), ("b", 0));
+        assert_eq!(queued[1].only, ["slack"]);
+        assert_eq!(queued[1].retry_at, queued[0].retry_at);
     }
 }

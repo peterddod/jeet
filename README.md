@@ -2416,8 +2416,9 @@ token (`slack`) waits for the sender, and `jeet task ls` and the tasks
 screen say so. A send through such a backend that fails (Slack refuses it,
 or cannot be reached) stays in the outbox and is tried again after 30
 seconds, then twice as long after each failure, up to an hour, and is
-dropped once a day old; the sender logs why. Once a send through a backend
-fails, the rest of that round waits too, rather than each waiting on Slack.
+dropped after 30 tries (about a day); the sender logs why. When Slack cannot
+be reached, or refuses the token or the user, what else waits for it in
+that round waits as long, untried, rather than each failing in turn.
 
 ```toml
 [notify]
