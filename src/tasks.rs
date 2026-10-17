@@ -50,13 +50,16 @@ use crate::worktrees::{self, now_secs};
 /// The PR policy of `task`'s agent, most specific first: its own (`jeet
 /// task new --pr`), its project's `[tasks] pr`, the global `[tasks] pr`, or
 /// [`DEFAULT_PR_MODE`]. Read at each start, so a change to the config
-/// reaches the task's next session.
+/// reaches the task's next session. A project since deleted or broken is
+/// passed over, as its agent arguments are at launch.
 pub fn pr_mode(app: &App, task: &TaskRecord) -> Result<PrMode> {
     if let Some(mode) = app.db.task_pr(&task.id)? {
         return Ok(mode);
     }
     let project = match &task.project {
-        Some(name) => projects::load(app, name)?.config.tasks.pr,
+        Some(name) => projects::load(app, name)
+            .ok()
+            .and_then(|p| p.config.tasks.pr),
         None => None,
     };
     Ok(project.or(app.config.tasks.pr).unwrap_or(DEFAULT_PR_MODE))
@@ -4000,6 +4003,11 @@ mod tests {
         assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Draft);
         app.db.set_task_pr(&w.id, None).unwrap();
         assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Ask);
+        // A broken project, or one since deleted, falls back to the config.
+        std::fs::write(&toml, "[tasks]\npr = \"sometimes\"\n").unwrap();
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Auto);
+        projects::remove(&app, "launch").unwrap();
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Auto);
         // One line each, naming the mode.
         for mode in [PrMode::Auto, PrMode::Draft, PrMode::Ask] {
             let line = pr_policy_line(mode);
