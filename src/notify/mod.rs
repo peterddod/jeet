@@ -393,9 +393,10 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<()> {
         // Emptied only once all of it is routed, then what waits for the
         // sender written back, under the one lock.
         outbox.set_len(0).context("empty the outbox")?;
-        outbox
-            .write_all(lines.as_bytes())
-            .context("write the outbox")?;
+        // What is routed is sent whatever happens here.
+        if let Err(e) = outbox.write_all(lines.as_bytes()) {
+            eprintln!("jeet: could not keep notifications for the sender: {e}");
+        }
         if let Err(e) = save_state(home, &state) {
             eprintln!("jeet: could not save what notifications were sent: {e:#}");
         }
