@@ -100,8 +100,9 @@ pub fn current_hash(path: &Path) -> Result<Option<String>> {
 }
 
 /// The real path of target `id`, for the targets apply may write: the
-/// config, the assistant's `AGENTS.md` and skills, and template overrides
-/// under `templates/{root,manager,worker}/`. Anything else is refused.
+/// config, the assistant's `AGENTS.md` and skills, and the Markdown
+/// template overrides under `templates/{root,manager,worker}/`. Anything
+/// else is refused.
 pub fn target_path(home: &Path, id: &str) -> Result<PathBuf> {
     let parts: Vec<&str> = id.split('/').collect();
     let plain = |p: &&str| {
@@ -114,13 +115,16 @@ pub fn target_path(home: &Path, id: &str) -> Result<PathBuf> {
         ["config.toml"] => true,
         ["assistant", "AGENTS.md"] => true,
         ["assistant", ".claude", "skills", _, "SKILL.md"] => true,
-        ["templates", "root" | "manager" | "worker", rest @ ..] => !rest.is_empty(),
+        // Instructions only: no settings, hooks or scripts for new homes.
+        ["templates", "root" | "manager" | "worker", rest @ ..] => {
+            rest.last().is_some_and(|f| f.ends_with(".md"))
+        }
         _ => false,
     };
     if !allowed {
         bail!(
             "{id:?} is not a target {PRODUCT} setup applies: config.toml, assistant/AGENTS.md, \
-             assistant/.claude/skills/<name>/SKILL.md, templates/{{root,manager,worker}}/…"
+             assistant/.claude/skills/<name>/SKILL.md, templates/{{root,manager,worker}}/…/*.md"
         );
     }
     Ok(home.join(id))
@@ -155,14 +159,35 @@ fn same_path(written: &str, target: &Path) -> bool {
     matches!((resolved(&written), resolved(target)), (Some(a), Some(b)) if a == b)
 }
 
-/// Write `path` whole or not at all: a temp file beside it, then a rename.
+/// Write `path` whole or not at all: a new temp file beside it, with the
+/// old file's mode when there is one, then a rename.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
     let dir = path.parent().context("a path with no directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let name = path.file_name().context("a path with no file name")?;
-    let tmp = dir.join(format!(".{}.setup-tmp", name.to_string_lossy()));
-    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            if let Ok(meta) = std::fs::metadata(path) {
+                file.set_permissions(meta.permissions())?;
+            }
+            Ok(())
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("write {}", path.display()))
 }
 
 #[cfg(test)]
@@ -194,6 +219,8 @@ mod tests {
             "assistant/.claude/skills/x/run.sh",
             "templates/root",
             "templates/other/AGENTS.md",
+            "templates/worker/.claude/settings.json",
+            "templates/root/hook.sh",
             "tasks/x/AGENTS.md",
             "manifest.toml",
             "setup/AGENTS.md",

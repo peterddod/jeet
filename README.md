@@ -1406,7 +1406,8 @@ jeet setup discard                 # drop everything staged
 
 Changes to jeet's own files are staged in `~/.jeet/setup/proposed/`, each at
 its target id (`config.toml`, `assistant/AGENTS.md`,
-`assistant/.claude/skills/<name>/SKILL.md`, `templates/{root,manager,worker}/…`),
+`assistant/.claude/skills/<name>/SKILL.md`, Markdown files under
+`templates/{root,manager,worker}/`),
 with a `manifest.toml` beside them:
 
 ```toml
@@ -1417,10 +1418,12 @@ hash = "af63dc4c8601ec8c"              # the target's hash when staged; omit for
 ```
 
 `jeet setup apply` writes only those targets and refuses anything else in the
-manifest. For each file it prints a coloured unified diff (or "new file") and
+manifest, a staged file reached through a symlink, and a target that is one.
+For each file it prints a coloured unified diff (or "new file") and
 asks `Apply this change? [y/N/q]`. A staged `config.toml` is first loaded as
 jeet would load it, with the `[managers]` and `[review]` policies and the
-`[assistant] allow` capabilities checked, and refused if any fails. A file
+`[assistant] allow` capabilities checked, and refused if any fails. The diff
+shows exactly the bytes that would be written. A file
 whose target changed since it was staged (its hash no longer matches, as
 `jeet setup status` shows) is refused too: stage it again. On `y`, the old
 file is copied to `~/.jeet/backups/setup-<UTC stamp>/<target id>`, the new

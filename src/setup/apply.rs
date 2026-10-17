@@ -41,14 +41,9 @@ pub struct Applied {
 /// the user, at a terminal: refused under any agent jeet started, and with
 /// no terminal to answer from.
 pub fn apply(app: &App) -> Result<()> {
-    if std::env::var(TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
-        bail!(
-            "`{PRODUCT} setup apply` runs only at your own terminal, not from an agent's \
-             session (${TASK_ID_ENV} is set)"
-        );
-    }
-    if !std::io::stdin().is_terminal() {
-        bail!("`{PRODUCT} setup apply` asks about each file, so it needs a terminal on stdin");
+    let task_env = std::env::var(TASK_ID_ENV).ok();
+    if let Some(why) = refusal(task_env.as_deref(), std::io::stdin().is_terminal()) {
+        bail!(why);
     }
     let color = std::io::stdout().is_terminal();
     let stamp = utc_stamp(now_secs());
@@ -63,13 +58,13 @@ pub fn apply(app: &App) -> Result<()> {
         }
         Ok(parse_answer(&line))
     };
-    let applied = apply_in(&app.home, &stamp, color, &mut ask, &mut std::io::stdout())?;
-    if applied.is_empty() {
+    let run = apply_in(&app.home, &stamp, color, &mut ask, &mut std::io::stdout())?;
+    if run.applied.is_empty() {
         println!("Nothing applied.");
-        return Ok(());
+        return run.error.map_or(Ok(()), Err);
     }
-    print!("{}", restore_advice(&app.home, &stamp, &applied));
-    let restart = to_restart(app, &applied)?;
+    print!("{}", restore_advice(&app.home, &run.applied));
+    let restart = to_restart(app, &run.applied)?;
     if !restart.is_empty() {
         println!(
             "\nThese running agents keep their old settings and instructions until they \
@@ -79,7 +74,24 @@ pub fn apply(app: &App) -> Result<()> {
             println!("  {PRODUCT} task restart {slug}");
         }
     }
-    Ok(())
+    run.error.map_or(Ok(()), Err)
+}
+
+/// Why apply may not run here: under an agent jeet started (`task_env`,
+/// `$JEET_TASK_ID`, set), or with no terminal on stdin to answer from.
+fn refusal(task_env: Option<&str>, stdin_terminal: bool) -> Option<String> {
+    if task_env.is_some_and(|v| !v.trim().is_empty()) {
+        return Some(format!(
+            "`{PRODUCT} setup apply` runs only at your own terminal, not from an agent's \
+             session (${TASK_ID_ENV} is set)"
+        ));
+    }
+    if !stdin_terminal {
+        return Some(format!(
+            "`{PRODUCT} setup apply` asks about each file, so it needs a terminal on stdin"
+        ));
+    }
+    None
 }
 
 fn parse_answer(line: &str) -> Answer {
@@ -90,35 +102,47 @@ fn parse_answer(line: &str) -> Answer {
     }
 }
 
+/// What a run of [`apply_in`] did: the files it wrote, and the error that
+/// stopped it, if one did, after them.
+pub struct Run {
+    pub applied: Vec<Applied>,
+    pub error: Option<anyhow::Error>,
+}
+
 /// [`apply`] in `home`, asking with `ask` and printing to `out`. Each file
 /// it refuses (not a target, changed since staged, an invalid config) is
 /// said and skipped; each one the user takes is backed up to
-/// `backups/setup-<stamp>/`, written, unstaged and logged.
+/// `backups/setup-<stamp>/`, written, logged and unstaged. A file that
+/// fails to write stops the run, keeping what was written before it.
 pub fn apply_in(
     home: &Path,
     stamp: &str,
     color: bool,
     ask: &mut dyn FnMut() -> Result<Answer>,
     out: &mut dyn Write,
-) -> Result<Vec<Applied>> {
+) -> Result<Run> {
     let mut manifest = read_manifest(home)?;
+    let mut run = Run {
+        applied: Vec::new(),
+        error: None,
+    };
     if manifest.is_empty() {
         writeln!(
             out,
             "Nothing is staged in {}.",
             proposed_dir(home).display()
         )?;
-        return Ok(Vec::new());
+        return Ok(run);
     }
-    let backup_dir = backups_root(home).join(format!("setup-{stamp}"));
-    let mut applied = Vec::new();
+    let backup_dir = free_backup_dir(home, stamp);
     let ids: Vec<String> = manifest.keys().cloned().collect();
     for id in ids {
         let entry = manifest[&id].clone();
         let (target, bytes) = match ready(home, &id, &entry) {
             Ready::Go { target, bytes } => (target, bytes),
             Ready::Same => {
-                writeln!(out, "\n{id}: already as staged; nothing to do.")?;
+                writeln!(out, "\n{id}: already as staged; unstaged.")?;
+                unstage(home, &mut manifest, &id, out)?;
                 continue;
             }
             Ready::Refused(why) => {
@@ -134,47 +158,97 @@ pub fn apply_in(
         if old.is_none() {
             writeln!(out, "   (new file)")?;
         }
-        out.write_all(&diff(old, &proposed_dir(home).join(&id), color)?)?;
-        if id == "config.toml" {
-            let checked = std::str::from_utf8(&bytes)
-                .context("not UTF-8")
-                .and_then(check_config);
-            if let Err(e) = checked {
-                writeln!(out, "{id}: refused, the config would not load: {e:#}")?;
-                continue;
-            }
-        }
+        // What is shown is what was read, and what would be written.
+        out.write_all(&diff(old, &bytes, color)?)?;
         match ask()? {
             Answer::Yes => {}
             Answer::No => continue,
             Answer::Quit => break,
         }
-        let backup = match old {
-            Some(old) => {
-                let to = backup_dir.join(&id);
-                let dir = to.parent().unwrap_or(&backup_dir);
-                std::fs::create_dir_all(dir)
-                    .with_context(|| format!("create {}", dir.display()))?;
-                std::fs::copy(old, &to)
-                    .with_context(|| format!("back {} up to {}", old.display(), to.display()))?;
-                Some(to)
+        // The prompt may have waited a while.
+        if current_hash(&target).ok() != Some(entry.hash.clone()) {
+            writeln!(
+                out,
+                "{id}: refused: the file changed while you looked; ask the setup agent to \
+                 stage it again"
+            )?;
+            continue;
+        }
+        match write_one(home, &backup_dir, stamp, &id, &entry, &target, &bytes) {
+            Ok(applied) => {
+                writeln!(out, "{id}: applied.")?;
+                run.applied.push(applied);
             }
-            None => None,
-        };
-        write_atomic(&target, &bytes)?;
-        let staged = proposed_dir(home).join(&id);
-        std::fs::remove_file(&staged).with_context(|| format!("remove {}", staged.display()))?;
-        manifest.remove(&id);
-        write_manifest(home, &manifest)?;
-        log_applied(home, stamp, &id, backup.as_deref(), &entry.reason)?;
-        writeln!(out, "{id}: applied.")?;
-        applied.push(Applied {
-            id,
-            path: target,
-            backup,
-        });
+            Err(e) => {
+                run.error = Some(e.context(format!("apply {id}")));
+                break;
+            }
+        }
+        unstage(home, &mut manifest, &id, out)?;
     }
-    Ok(applied)
+    Ok(run)
+}
+
+/// `backups/setup-<stamp>`, or with `-2`, `-3`, … when a run in the same
+/// second took it.
+fn free_backup_dir(home: &Path, stamp: &str) -> PathBuf {
+    let root = backups_root(home);
+    let mut dir = root.join(format!("setup-{stamp}"));
+    let mut n = 2;
+    while std::fs::symlink_metadata(&dir).is_ok() {
+        dir = root.join(format!("setup-{stamp}-{n}"));
+        n += 1;
+    }
+    dir
+}
+
+/// Back `target` up (when it exists), write `bytes` there and log it.
+fn write_one(
+    home: &Path,
+    backup_dir: &Path,
+    stamp: &str,
+    id: &str,
+    entry: &Entry,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<Applied> {
+    let backup = match target.exists() {
+        true => {
+            let to = backup_dir.join(id);
+            let dir = to.parent().unwrap_or(backup_dir);
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            std::fs::copy(target, &to)
+                .with_context(|| format!("back {} up to {}", target.display(), to.display()))?;
+            Some(to)
+        }
+        false => None,
+    };
+    write_atomic(target, bytes)?;
+    log_applied(home, stamp, id, backup.as_deref(), &entry.reason)?;
+    Ok(Applied {
+        id: id.to_string(),
+        path: target.to_path_buf(),
+        backup,
+    })
+}
+
+/// Drop `id`'s staged file and its manifest entry. What fails is said, not
+/// raised: the target is written by then, and a re-run finds it as staged.
+fn unstage(
+    home: &Path,
+    manifest: &mut super::Manifest,
+    id: &str,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let staged = proposed_dir(home).join(id);
+    if let Err(e) = std::fs::remove_file(&staged) {
+        writeln!(out, "{id}: could not remove {}: {e}", staged.display())?;
+    }
+    manifest.remove(id);
+    if let Err(e) = write_manifest(home, manifest) {
+        writeln!(out, "{id}: could not update the manifest: {e:#}")?;
+    }
+    Ok(())
 }
 
 /// Whether a staged entry can be shown and applied.
@@ -201,15 +275,15 @@ fn ready(home: &Path, id: &str, entry: &Entry) -> Ready {
             ));
         }
     }
-    let staged = proposed_dir(home).join(id);
-    match std::fs::symlink_metadata(&staged) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Ready::Refused(format!("{} is not a plain file", staged.display())),
-        Err(_) => return Ready::Refused(format!("nothing is staged at {}", staged.display())),
+    if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ready::Refused(format!(
+            "{} is a symlink; change the file it points to yourself",
+            target.display()
+        ));
     }
-    let bytes = match std::fs::read(&staged) {
+    let bytes = match read_staged(home, id) {
         Ok(bytes) => bytes,
-        Err(e) => return Ready::Refused(format!("read {}: {e}", staged.display())),
+        Err(e) => return Ready::Refused(format!("{e:#}")),
     };
     let now = match current_hash(&target) {
         Ok(now) => now,
@@ -226,14 +300,46 @@ fn ready(home: &Path, id: &str, entry: &Entry) -> Ready {
         };
         return Ready::Refused(format!("{why}; ask the setup agent to stage it again"));
     }
+    if id == "config.toml" {
+        let checked = std::str::from_utf8(&bytes)
+            .context("not UTF-8")
+            .and_then(check_config);
+        if let Err(e) = checked {
+            return Ready::Refused(format!("the config would not load: {e:#}"));
+        }
+    }
     Ready::Go { target, bytes }
+}
+
+/// What is staged for `id`: a plain file inside `proposed/`, reached
+/// through no symlink.
+fn read_staged(home: &Path, id: &str) -> Result<Vec<u8>> {
+    let staged = proposed_dir(home).join(id);
+    let meta = std::fs::symlink_metadata(&staged)
+        .with_context(|| format!("nothing is staged at {}", staged.display()))?;
+    if !meta.is_file() {
+        bail!("{} is not a plain file", staged.display());
+    }
+    let root = proposed_dir(home)
+        .canonicalize()
+        .with_context(|| format!("resolve {}", proposed_dir(home).display()))?;
+    let real = staged
+        .canonicalize()
+        .with_context(|| format!("resolve {}", staged.display()))?;
+    if real != root.join(id) {
+        bail!(
+            "{} is reached through a symlink; stage a plain file",
+            staged.display()
+        );
+    }
+    std::fs::read(&real).with_context(|| format!("read {}", staged.display()))
 }
 
 /// A unified diff of `old` (none: a new file) against `new`, by git, which
 /// jeet needs anyway.
-fn diff(old: Option<&Path>, new: &Path, color: bool) -> Result<Vec<u8>> {
+fn diff(old: Option<&Path>, new: &[u8], color: bool) -> Result<Vec<u8>> {
     let old = old.unwrap_or(Path::new("/dev/null"));
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(["--no-pager", "diff", "--no-index", "--no-ext-diff"])
         .arg(if color {
             "--color=always"
@@ -242,10 +348,18 @@ fn diff(old: Option<&Path>, new: &Path, color: bool) -> Result<Vec<u8>> {
         })
         .arg("--")
         .arg(old)
-        .arg(new)
-        .stdin(Stdio::null())
-        .output()
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("run git diff")?;
+    // Written from a thread so a large diff cannot fill stdout first.
+    let mut stdin = child.stdin.take().context("git diff's stdin")?;
+    let new = new.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&new));
+    let output = child.wait_with_output().context("run git diff")?;
+    let _ = writer.join();
     // 1 says they differ, which is the point.
     match output.status.code() {
         Some(0 | 1) => Ok(output.stdout),
@@ -279,10 +393,14 @@ fn log_applied(
 }
 
 /// Where the old files went and the commands that put them back.
-fn restore_advice(home: &Path, stamp: &str, applied: &[Applied]) -> String {
+fn restore_advice(home: &Path, applied: &[Applied]) -> String {
     let mut text = String::new();
-    let dir = backups_root(home).join(format!("setup-{stamp}"));
-    if applied.iter().any(|a| a.backup.is_some()) {
+    let backup = applied.iter().find_map(|a| {
+        let backup = a.backup.as_ref()?;
+        let depth = a.id.split('/').count();
+        backup.ancestors().nth(depth).map(Path::to_path_buf)
+    });
+    if let Some(dir) = backup {
         text.push_str(&format!(
             "\nBackups: {}\nTo restore them: cp -R {} {}\n",
             dir.display(),
@@ -356,10 +474,11 @@ fn status_text(home: &Path) -> Result<String> {
             text.push_str(&format!("    {}\n", entry.reason));
         }
         if let Ok(target) = target_path(home, id) {
-            let now = current_hash(&target)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "none (no such file)".into());
+            let now = match current_hash(&target) {
+                Ok(Some(hash)) => hash,
+                Ok(None) => "none (no such file)".into(),
+                Err(e) => format!("unreadable ({e:#})"),
+            };
             text.push_str(&format!("    {} hash now: {now}\n", target.display()));
         }
     }
@@ -444,8 +563,9 @@ mod tests {
         let mut answers = answers.iter().copied();
         let mut ask = || Ok(answers.next().unwrap_or(Answer::Quit));
         let mut out = Vec::new();
-        let applied = apply_in(home, "20261017T000000Z", false, &mut ask, &mut out).unwrap();
-        (applied, String::from_utf8(out).unwrap())
+        let run = apply_in(home, "20261017T000000Z", false, &mut ask, &mut out).unwrap();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        (run.applied, String::from_utf8(out).unwrap())
     }
 
     #[test]
@@ -492,8 +612,11 @@ mod tests {
         assert!(log.contains("\tassistant/AGENTS.md\t"), "{log}");
         assert!(log.contains("\ttemplates/worker/SKILL.md\tnew\t"), "{log}");
 
-        let advice = restore_advice(home, "20261017T000000Z", &applied);
-        assert!(advice.contains("cp -R"), "{advice}");
+        let advice = restore_advice(home, &applied);
+        assert!(
+            advice.contains("cp -R '") && advice.contains("setup-20261017T000000Z/.'"),
+            "{advice}"
+        );
         assert!(advice.contains("rm "), "{advice}");
     }
 
@@ -527,7 +650,9 @@ mod tests {
             Ok(Answer::Yes)
         };
         let mut out = Vec::new();
-        let applied = apply_in(home, "s", false, &mut ask, &mut out).unwrap();
+        let applied = apply_in(home, "s", false, &mut ask, &mut out)
+            .unwrap()
+            .applied;
         let out = String::from_utf8(out).unwrap();
         assert!(applied.is_empty(), "{out}");
         assert_eq!(asked, 0);
@@ -551,7 +676,7 @@ mod tests {
         );
         let (applied, out) = run(home, &[Answer::Yes]);
         assert!(applied.is_empty(), "{out}");
-        assert!(out.contains("refused, the config would not load"), "{out}");
+        assert!(out.contains("refused: the config would not load"), "{out}");
         assert_eq!(read(&home.join("config.toml")), "scan_roots = []\n");
 
         stage(home, "config.toml", "scan_roots = [\"~/src\"]\n");
@@ -611,5 +736,85 @@ mod tests {
         assert!(text.contains("Nothing is staged"), "{text}");
         assert!(text.contains("Last applied (20261017T000000Z)"), "{text}");
         assert!(!proposed_dir(home).join(MANIFEST).exists());
+    }
+
+    #[test]
+    fn refuses_agents_and_no_terminal() {
+        assert!(refusal(Some("abc"), true).unwrap().contains("JEET_TASK_ID"));
+        assert!(refusal(None, false).unwrap().contains("terminal"));
+        assert_eq!(refusal(None, true), None);
+        assert_eq!(refusal(Some(" "), true), None);
+    }
+
+    #[test]
+    fn a_proposal_already_in_place_is_unstaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        write(&home.join("assistant/AGENTS.md"), "same\n");
+        stage(home, "assistant/AGENTS.md", "same\n");
+        let mut ask = || -> Result<Answer> { panic!("asked about an unchanged file") };
+        let mut out = Vec::new();
+        let run = apply_in(home, "s", false, &mut ask, &mut out).unwrap();
+        assert!(run.applied.is_empty());
+        assert!(read_manifest(home).unwrap().is_empty());
+        assert!(!proposed_dir(home).join("assistant/AGENTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_file_through_a_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let outside = dir.path().join("secret");
+        write(&outside.join("AGENTS.md"), "secret\n");
+        std::fs::create_dir_all(proposed_dir(home)).unwrap();
+        std::os::unix::fs::symlink(&outside, proposed_dir(home).join("assistant")).unwrap();
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "assistant/AGENTS.md".into(),
+            Entry {
+                path: None,
+                reason: String::new(),
+                hash: None,
+            },
+        );
+        write_manifest(home, &manifest).unwrap();
+        let (applied, out) = run(home, &[Answer::Yes]);
+        assert!(applied.is_empty(), "{out}");
+        assert!(out.contains("through a symlink"), "{out}");
+        assert!(!out.contains("+secret"), "{out}");
+        assert_eq!(read(&outside.join("AGENTS.md")), "secret\n");
+    }
+
+    #[test]
+    fn a_second_run_in_the_same_second_keeps_the_first_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        write(&home.join("assistant/AGENTS.md"), "one\n");
+        stage(home, "assistant/AGENTS.md", "two\n");
+        run(home, &[Answer::Yes]);
+        stage(home, "assistant/AGENTS.md", "three\n");
+        let (applied, _) = run(home, &[Answer::Yes]);
+        let first = home.join("backups/setup-20261017T000000Z/assistant/AGENTS.md");
+        let second = home.join("backups/setup-20261017T000000Z-2/assistant/AGENTS.md");
+        assert_eq!(read(&first), "one\n");
+        assert_eq!(read(&second), "two\n");
+        assert_eq!(applied[0].backup.as_deref(), Some(second.as_path()));
+        assert!(restore_advice(home, &applied).contains("setup-20261017T000000Z-2/."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_keeps_the_old_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config = home.join("config.toml");
+        write(&config, "scan_roots = []\n");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        stage(home, "config.toml", "scan_roots = [\"~/a\"]\n");
+        run(home, &[Answer::Yes]);
+        let mode = std::fs::metadata(&config).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }
