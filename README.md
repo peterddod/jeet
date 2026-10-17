@@ -595,10 +595,10 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `→` | on a manager, go into it: the managers and tasks under it |
+| `→` | on a manager, or a task with tasks under it, go into it: the managers and tasks under it |
 | `←` / `⌫` | back up a level; with a filter, drop it, the cursor on the match, on its level |
 | `ctrl-a` | attach to the agent of the manager or task under the cursor, as `⏎` |
-| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. On a task with tasks under it, `⏎` goes into it, as `→` |
+| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
