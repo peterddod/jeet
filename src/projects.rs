@@ -479,7 +479,7 @@ pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
     if manager {
         tasks::link_project_instructions(&dir, &project.name)?;
     } else {
-        tasks::install_skill(&dir)?;
+        tasks::install_skill(&dir, &crate::config::templates_dir(&app.home))?;
     }
     Ok(sync)
 }

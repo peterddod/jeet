@@ -75,10 +75,13 @@ pub fn home_dir(home: &Path) -> PathBuf {
     config::assistant_dir(home)
 }
 
-/// Write each of the root's templates that is not in `dir` yet, returning
-/// those written ([`crate::manager::ensure_files`]).
+/// Write each of the root's templates that is not in `dir`, the
+/// assistant's home (`<jeet home>/assistant`), yet, returning those
+/// written ([`crate::manager::ensure_files`]), with the overrides in the
+/// jeet home's `templates/root/`.
 pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
-    crate::manager::ensure_files(dir, Role::Root)
+    let home = dir.parent().unwrap_or(dir);
+    crate::manager::ensure_files(dir, Role::Root, &config::templates_dir(home))
 }
 
 /// The assistant's task, made the first time, with its home set up: the
@@ -1477,5 +1480,19 @@ also look at #7
         // Nothing cached: nothing to add.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(super::watched(empty.path(), &mut [], 0), Watched::default());
+    }
+
+    #[test]
+    fn the_assistants_home_takes_the_overrides_beside_it() {
+        let home = tempfile::tempdir().unwrap();
+        let root = config::templates_dir(home.path()).join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "mine\n").unwrap();
+        let dir = home_dir(home.path());
+        ensure_files(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            "mine\n"
+        );
     }
 }

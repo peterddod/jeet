@@ -1072,6 +1072,13 @@ pub fn assistant_dir(home: &Path) -> PathBuf {
     home.join("assistant")
 }
 
+/// The user's overrides of the templates jeet writes into new homes:
+/// `root/` and `manager/` laid out as the assistant's and a manager's home
+/// are, and `worker/SKILL.md` for the skill every task gets.
+pub fn templates_dir(home: &Path) -> PathBuf {
+    home.join("templates")
+}
+
 /// What `jeet watch` remembers between polls.
 pub fn watch_state_path(home: &Path) -> PathBuf {
     home.join("watch.json")

@@ -407,7 +407,8 @@ fn write_task(
     let dir = task_dir(app, task);
     std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-    match scaffold(&dir, task, project).and_then(|notes| insert().map(|_| notes)) {
+    let templates = crate::config::templates_dir(&app.home);
+    match scaffold(&dir, task, project, &templates).and_then(|notes| insert().map(|_| notes)) {
         Ok(notes) => Ok(notes),
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);
@@ -745,7 +746,12 @@ fn record_child_held(
 /// its role's files ([`manager::ensure_files`]) in the skill's place: the
 /// worker's skill would tell it what a worker may do. Returns notes on
 /// project files that were not copied.
-fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<Vec<String>> {
+fn scaffold(
+    dir: &Path,
+    task: &TaskRecord,
+    project: Option<&Project>,
+    templates: &Path,
+) -> Result<Vec<String>> {
     write_marker(dir, &task.id)?;
     let is_manager = task.kind == TaskKind::Manager;
     let notes = match project {
@@ -759,12 +765,12 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
     // Last, so nothing of the project's can shadow it.
     match task.kind {
         TaskKind::Manager => {
-            manager::ensure_files(dir, manager::Role::Manager)?;
+            manager::ensure_files(dir, manager::Role::Manager, templates)?;
             if let Some(project) = project {
                 link_project_instructions(dir, &project.name)?;
             }
         }
-        TaskKind::Work | TaskKind::Assistant => install_skill(dir)?,
+        TaskKind::Work | TaskKind::Assistant => install_skill(dir, templates)?,
     }
     Ok(notes)
 }
@@ -814,11 +820,15 @@ pub fn write_marker(dir: &Path, id: &str) -> Result<()> {
     std::fs::write(marker.join(MARKER_FILE), format!("{id}\n")).context("write the task marker")
 }
 
-/// Write the built-in jeet skill into a task directory.
-pub fn install_skill(task_dir: &Path) -> Result<()> {
+/// Write the jeet skill into a task directory: the user's override at
+/// `worker/SKILL.md` in `templates` ([`crate::config::templates_dir`]) when
+/// there is one, else the built-in one.
+pub fn install_skill(task_dir: &Path, templates: &Path) -> Result<()> {
+    let text = manager::template_override(templates, "worker", "SKILL.md")?;
     let dir = task_dir.join(".claude").join("skills").join("jeet");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(dir.join("SKILL.md"), SKILL).context("write the jeet skill")
+    std::fs::write(dir.join("SKILL.md"), text.as_deref().unwrap_or(SKILL))
+        .context("write the jeet skill")
 }
 
 /// The task a user means by `key`: its slug, its id, its name (any case), or
@@ -4019,9 +4029,25 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_skill_override_replaces_the_built_in_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("templates");
+        std::fs::create_dir_all(templates.join("worker")).unwrap();
+        std::fs::write(templates.join("worker/SKILL.md"), "mine\n").unwrap();
+        let task = dir.path().join("t");
+        install_skill(&task, &templates).unwrap();
+        let skill = std::fs::read_to_string(task.join(".claude/skills/jeet/SKILL.md")).unwrap();
+        assert_eq!(skill, "mine\n");
+        std::fs::remove_file(templates.join("worker/SKILL.md")).unwrap();
+        install_skill(&task, &templates).unwrap();
+        let skill = std::fs::read_to_string(task.join(".claude/skills/jeet/SKILL.md")).unwrap();
+        assert_eq!(skill, SKILL);
+    }
+
+    #[test]
     fn the_skill_tells_the_agent_how_to_get_code() {
         let dir = tempfile::tempdir().unwrap();
-        install_skill(dir.path()).unwrap();
+        install_skill(dir.path(), Path::new("/nonexistent")).unwrap();
         let skill =
             std::fs::read_to_string(dir.path().join(".claude/skills/jeet/SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: jeet\n"), "{skill}");
