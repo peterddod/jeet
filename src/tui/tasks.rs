@@ -135,22 +135,8 @@ const NOT_USER: &str = "the agents pane acts as you; open jeet from your own ter
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
-/// Said for `w` and `p` on a review.
-const ONE_WORKTREE: &str =
-    "a review has one worktree and one pull request: e explores it, v shows the diff";
 /// Said when a key of the reviews view has no review under the cursor.
 const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
-
-/// The review menu's lines, in order: what each opens.
-pub const REVIEW_MENU: &[(&str, &str)] = &[
-    ("v", "view the diff: the PR in the review viewer"),
-    (
-        "s",
-        "open the review's session: attach to its agent, or resume it",
-    ),
-];
-const REVIEW_DIFF: usize = 0;
-const REVIEW_SESSION: usize = 1;
 
 /// Said for ⏎ on an empty answer.
 const TYPE_AN_ANSWER: &str = "type an answer";
@@ -664,7 +650,7 @@ pub enum ProjectField {
     Repos,
 }
 
-/// `n` in the projects panel: a name, and the repositories every task made
+/// `N` on a project row: a name, and the repositories every task made
 /// from the project starts with.
 #[derive(Debug, Clone)]
 pub struct NewProjectForm {
@@ -718,16 +704,6 @@ pub struct WorktreeLine {
     /// The branch it is on now, or `detached @ sha`.
     pub head: String,
     pub status: WorktreeStatus,
-}
-
-/// One project in the projects panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectLine {
-    pub name: String,
-    pub tasks: usize,
-    /// `AGENTS.md, 2 skills`, or why the project cannot be read.
-    pub contents: String,
-    pub repos: String,
 }
 
 /// What a confirm overlay is asking about.
@@ -799,10 +775,6 @@ pub enum Panel {
         field: AddField,
     },
     NewTask(Box<NewTaskForm>),
-    Projects {
-        lines: Vec<ProjectLine>,
-        selected: usize,
-    },
     NewProject(NewProjectForm),
     Prs {
         task_id: String,
@@ -836,14 +808,6 @@ pub enum Panel {
         input: String,
         /// Why the last ⏎ was refused.
         error: Option<String>,
-    },
-    /// ⏎ in the reviews view: what to open of a review.
-    ReviewMenu {
-        task_id: String,
-        pr: PrKey,
-        /// `review jeet#55`.
-        label: String,
-        selected: usize,
     },
     /// `l`, `i` and `b` in the agents view: text to read, scrolled.
     Text {
@@ -913,11 +877,15 @@ pub enum Action {
     ReviewViewer {
         task_id: String,
     },
-    /// `v` in the reviews view, or its menu: the review's PR in the review
-    /// viewer, from the task's checkout when it has one.
+    /// `v` in the reviews view: the review's PR in the review viewer, from
+    /// the task's checkout when it has one.
     ReviewDiff {
         task_id: String,
         pr: PrKey,
+    },
+    /// `R` in the reviews view: ask the review's agent to review again.
+    ReviewRerun {
+        task_id: String,
     },
     /// `v` in the PRs panel: that PR in the review viewer.
     ViewPr {
@@ -955,7 +923,6 @@ pub enum Action {
         task_id: String,
         recursive: bool,
     },
-    Projects,
     NewProjectForm,
     CreateProject {
         name: String,
@@ -1685,6 +1652,24 @@ impl TasksUi {
         }
     }
 
+    /// Show the projects list with the cursor on project `name`, in
+    /// whichever list (active, or the other projects) holds it.
+    fn show_project(&mut self, name: Option<&str>) {
+        self.view = View::Projects;
+        self.project = None;
+        self.project_path.clear();
+        self.filter.clear();
+        if let Some(name) = name {
+            if self.groups.members(self.archived_projects, name).is_none() {
+                self.archived_projects = !self.archived_projects;
+            }
+        }
+        self.refresh_visible(None);
+        self.selected = name
+            .and_then(|name| self.projects.iter().position(|line| line.name == name))
+            .unwrap_or(0);
+    }
+
     /// → or ⏎ on a project: list who is in it.
     fn enter_project(&mut self) {
         let Some(line) = self.projects.get(self.selected) else {
@@ -2043,10 +2028,21 @@ impl TasksUi {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let id = self.selected_id().map(str::to_string);
+        let on_project_row = self.view == View::Projects && self.project.is_none();
         let needs_task = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match &id {
             Some(id) => Some(make(id.clone())),
             None => {
                 ui.set_status(NO_TASK);
+                None
+            }
+        };
+        let needs_review = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match ui
+            .selected_review_row()
+            .map(|row| row.id().to_string())
+        {
+            Some(id) => Some(make(id)),
+            None => {
+                ui.set_status(NO_REVIEW);
                 None
             }
         };
@@ -2118,6 +2114,9 @@ impl TasksUi {
                 self.panel = Some(Panel::Inbox { selected: 0 });
                 None
             }
+            // A review has one worktree and one pull request, and no project
+            // or priority: the other task keys have nothing to do.
+            KeyCode::Char('w' | 'p' | 'S' | 'n' | 'o') if self.view == View::Reviews => None,
             KeyCode::Char('o') => {
                 self.by_priority = !self.by_priority;
                 self.resort(id.as_deref());
@@ -2127,20 +2126,42 @@ impl TasksUi {
                 });
                 None
             }
-            KeyCode::Char('n') => Some(Action::NewTaskForm { project: None }),
-            KeyCode::Char('P') => Some(Action::Projects),
+            // On a project's row: a task already in that project, and the
+            // project's own keys. Inside one, the task keys apply.
+            KeyCode::Char('n') if on_project_row => Some(Action::NewTaskForm {
+                project: self.projects.get(self.selected).map(|p| p.name.clone()),
+            }),
+            KeyCode::Char('n') => Some(Action::NewTaskForm {
+                project: match self.view {
+                    View::Projects => self.project.clone(),
+                    _ => None,
+                },
+            }),
+            KeyCode::Char('N') if on_project_row => Some(Action::NewProjectForm),
+            KeyCode::Char('E') if on_project_row => {
+                self.projects
+                    .get(self.selected)
+                    .map(|p| Action::EditProject {
+                        name: p.name.clone(),
+                    })
+            }
+            KeyCode::Char('D') if on_project_row => {
+                self.projects
+                    .get(self.selected)
+                    .map(|p| Action::AskDeleteProject {
+                        name: p.name.clone(),
+                    })
+            }
             KeyCode::Enter if self.view == View::Reviews => {
-                self.review_menu();
-                None
+                needs_review(self, &|task_id| Action::Open {
+                    task_id,
+                    session: None,
+                })
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
-            // A review has one worktree and one pull request: `e` and `v`
-            // reach them, and the rest of the task keys have nothing to do.
-            KeyCode::Char('w' | 'p') if self.view == View::Reviews => {
-                self.set_status(ONE_WORKTREE);
-                None
+            KeyCode::Char('R') if self.view == View::Reviews => {
+                needs_review(self, &|task_id| Action::ReviewRerun { task_id })
             }
-            KeyCode::Char('S') if self.view == View::Reviews => None,
             KeyCode::Char('A') if self.view == View::Active => {
                 self.archived_tasks = !self.archived_tasks;
                 self.selected = 0;
@@ -2260,21 +2281,6 @@ impl TasksUi {
             }),
             _ => None,
         }
-    }
-
-    /// ⏎ in the reviews view: the menu of what to open of the review.
-    fn review_menu(&mut self) {
-        let Some(line) = self.selected_review().cloned() else {
-            self.set_status(NO_REVIEW);
-            return;
-        };
-        let review = &self.review_rows[line.row].review;
-        self.panel = Some(Panel::ReviewMenu {
-            task_id: review.id.clone(),
-            label: format!("review {}", review.label()),
-            pr: line.pr,
-            selected: 0,
-        });
     }
 
     /// `v` in the reviews view: the review's PR in the review viewer.
@@ -2510,7 +2516,6 @@ impl TasksUi {
                     (Pending::DeleteProject { name }, true, _, _) => {
                         Some(Action::DeleteProject { name: name.clone() })
                     }
-                    (Pending::DeleteProject { .. }, _, _, true) => Some(Action::Projects),
                     (Pending::ForceResync { task_id }, _, true, _) => Some(Action::Resync {
                         task_id: task_id.clone(),
                         force: true,
@@ -2552,40 +2557,6 @@ impl TasksUi {
                     None
                 }
             },
-            Panel::ReviewMenu {
-                task_id,
-                pr,
-                label,
-                mut selected,
-            } => {
-                let choice = match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return None,
-                    KeyCode::Char('v' | 'd') => Some(REVIEW_DIFF),
-                    KeyCode::Char('s') => Some(REVIEW_SESSION),
-                    KeyCode::Enter => Some(selected),
-                    code => {
-                        selected = list_move(code, selected, REVIEW_MENU.len());
-                        None
-                    }
-                };
-                let Some(choice) = choice else {
-                    self.panel = Some(Panel::ReviewMenu {
-                        task_id,
-                        pr,
-                        label,
-                        selected,
-                    });
-                    return None;
-                };
-                match choice {
-                    REVIEW_DIFF => Some(Action::ReviewDiff { task_id, pr }),
-                    REVIEW_SESSION => Some(Action::Open {
-                        task_id,
-                        session: None,
-                    }),
-                    _ => None,
-                }
-            }
             Panel::Places {
                 task_id,
                 places,
@@ -2772,33 +2743,9 @@ impl TasksUi {
                 self.panel = Some(Panel::NewTask(form));
                 None
             }
-            Panel::Projects {
-                lines,
-                mut selected,
-            } => {
-                let name = lines.get(selected).map(|l| l.name.clone());
-                let action = match (key.code, name) {
-                    (KeyCode::Esc | KeyCode::Char('q' | 'P'), _) => return None,
-                    (KeyCode::Char('r'), _) => return Some(Action::Projects),
-                    (KeyCode::Char('n'), _) => return Some(Action::NewProjectForm),
-                    (KeyCode::Char('e'), Some(name)) => Some(Action::EditProject { name }),
-                    (KeyCode::Char('D'), Some(name)) => Some(Action::AskDeleteProject { name }),
-                    (KeyCode::Enter, Some(name)) => Some(Action::NewTaskForm {
-                        project: Some(name),
-                    }),
-                    (code, _) => {
-                        selected = list_move(code, selected, lines.len());
-                        None
-                    }
-                };
-                if action.is_none() {
-                    self.panel = Some(Panel::Projects { lines, selected });
-                }
-                action
-            }
             Panel::NewProject(mut form) => {
                 match (key.code, form.field) {
-                    (KeyCode::Esc, _) => return Some(Action::Projects),
+                    (KeyCode::Esc, _) => return None,
                     (KeyCode::Enter, _) => {
                         let name = form.name.trim().to_string();
                         if !name.is_empty() {
@@ -3734,7 +3681,7 @@ pub fn dir_size(dir: &Path) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Start {
     List,
-    /// `jeet projects` on a terminal: the projects panel, over the list.
+    /// `jeet projects` on a terminal: the projects view.
     Projects,
 }
 
@@ -3792,7 +3739,9 @@ impl Screen<'_> {
             .set_status("? for keys · ⏎ opens a task's agent · n starts a task");
         self.refresh(true);
         if start == Start::Projects {
-            self.perform(Action::Projects);
+            self.ui.view = View::Projects;
+            self.ui.selected = 0;
+            self.ui.refresh_visible(None);
         }
         let mut last_read = Instant::now();
         let mut last_watch = Instant::now();
@@ -4491,6 +4440,7 @@ impl Screen<'_> {
                 number,
             } => self.view_pr(&task_id, &repo_id, number)?,
             Action::ReviewDiff { task_id, pr } => self.view_pr(&task_id, &pr.repo_id, pr.number)?,
+            Action::ReviewRerun { task_id } => self.rerun_review(&task_id)?,
             Action::NewTaskForm { project } => {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
@@ -4698,10 +4648,6 @@ impl Screen<'_> {
                     ),
                 }
             }
-            Action::Projects => {
-                let lines = project_lines(app)?;
-                self.ui.panel = Some(Panel::Projects { lines, selected: 0 });
-            }
             Action::NewProjectForm => {
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
                 self.ui.panel = Some(Panel::NewProject(NewProjectForm::new(repos)));
@@ -4710,7 +4656,7 @@ impl Screen<'_> {
                 Ok(_) => {
                     self.show_projects(Some(&name))?;
                     self.ui.set_status(format!(
-                        "created project {name} — e edits it, ⏎ starts a task"
+                        "created project {name} — E edits it, n starts a task"
                     ));
                 }
                 Err(e) => {
@@ -4738,7 +4684,7 @@ impl Screen<'_> {
                         let back = self.ui.panel.take();
                         self.ui.message(
                             "project.toml is not valid",
-                            vec![format!("{e:#}"), String::new(), "e edits it again".into()],
+                            vec![format!("{e:#}"), String::new(), "E edits it again".into()],
                             back,
                         );
                     }
@@ -5510,6 +5456,31 @@ impl Screen<'_> {
         self.view_pr_at(&path, number)
     }
 
+    /// `R` on a review: `jeet review <pr> --rerun`, without the viewer.
+    fn rerun_review(&mut self, task_id: &str) -> Result<()> {
+        let Some(review) = self.review(task_id) else {
+            return Ok(());
+        };
+        if review.state == TaskState::Archived {
+            self.ui
+                .set_status(format!("{} is archived — a brings it back", review.slug));
+            return Ok(());
+        }
+        let app = self.app;
+        let label = format!("asking for a review of #{}", review.pr_number);
+        let outcome = self
+            .progress(&label, || commands::review::rerun(app, &review))
+            .and_then(|inner| inner);
+        match outcome {
+            Ok(line) => self.ui.set_status(line),
+            Err(e) => self
+                .ui
+                .set_status(format!("could not rerun the review: {e:#}")),
+        }
+        self.refresh(false);
+        Ok(())
+    }
+
     fn view_pr_at(&mut self, path: &Path, number: u64) -> Result<()> {
         let pr = self
             .progress(&format!("reading #{number}"), || {
@@ -5697,12 +5668,9 @@ impl Screen<'_> {
     }
 
     fn show_projects(&mut self, select: Option<&str>) -> Result<()> {
-        let lines = project_lines(self.app)?;
         self.read_projects(true);
-        let selected = select
-            .and_then(|name| lines.iter().position(|l| l.name == name))
-            .unwrap_or(0);
-        self.ui.panel = Some(Panel::Projects { lines, selected });
+        self.ui.panel = None;
+        self.ui.show_project(select);
         Ok(())
     }
 
@@ -5893,30 +5861,6 @@ fn worktree_lines(app: &App, row: &TaskRow) -> Result<Vec<WorktreeLine>> {
             present,
             head,
             status,
-        });
-    }
-    Ok(lines)
-}
-
-fn project_lines(app: &App) -> Result<Vec<ProjectLine>> {
-    let mut lines = Vec::new();
-    for name in projects::list(app)? {
-        let tasks = projects::tasks_using(app, &name)?.len();
-        let (contents, repos) = match projects::load(app, &name) {
-            Ok(project) => (
-                project.contents_summary(),
-                match project.config.repos.as_slice() {
-                    [] => "-".to_string(),
-                    repos => repos.join(", "),
-                },
-            ),
-            Err(e) => (format!("broken: {e:#}"), "-".to_string()),
-        };
-        lines.push(ProjectLine {
-            name,
-            tasks,
-            contents,
-            repos,
         });
     }
     Ok(lines)
@@ -7089,15 +7033,17 @@ mod tests {
     }
 
     #[test]
-    fn w_and_p_say_a_review_has_one_worktree_and_one_pr() {
+    fn the_task_keys_a_review_has_no_use_for_do_nothing() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
-        for key in ['w', 'p'] {
+        for key in ['w', 'p', 'S', 'n', 'o'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(key)), None);
-            assert_eq!(ui.status_line, ONE_WORKTREE);
+            assert_eq!(ui.status_line, "");
+            assert!(ui.panel.is_none());
         }
+        assert!(!ui.by_priority);
     }
 
     #[test]
@@ -7146,10 +7092,18 @@ mod tests {
     }
 
     #[test]
-    fn the_review_menu_opens_the_diff_or_the_session() {
+    fn enter_opens_the_reviews_session_and_the_letters_the_rest() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "r2".into(),
+                session: None,
+            })
+        );
+        assert!(ui.panel.is_none());
         assert_eq!(
             press(&mut ui, KeyCode::Char('v')),
             Some(Action::ReviewDiff {
@@ -7157,31 +7111,12 @@ mod tests {
                 pr: pr_key(2),
             })
         );
-        assert_eq!(press(&mut ui, KeyCode::Enter), None);
-        assert!(matches!(ui.panel, Some(Panel::ReviewMenu { .. })));
-        // ⏎ on the first line: the diff.
         assert_eq!(
-            press(&mut ui, KeyCode::Enter),
-            Some(Action::ReviewDiff {
-                task_id: "r2".into(),
-                pr: pr_key(2),
+            press(&mut ui, KeyCode::Char('R')),
+            Some(Action::ReviewRerun {
+                task_id: "r2".into()
             })
         );
-        assert!(ui.panel.is_none());
-        // ↓ ⏎, or s: the session, through the review's own open.
-        press(&mut ui, KeyCode::Enter);
-        press(&mut ui, KeyCode::Down);
-        let open = Some(Action::Open {
-            task_id: "r2".into(),
-            session: None,
-        });
-        assert_eq!(press(&mut ui, KeyCode::Enter), open);
-        press(&mut ui, KeyCode::Enter);
-        assert_eq!(press(&mut ui, KeyCode::Char('s')), open);
-        press(&mut ui, KeyCode::Enter);
-        assert_eq!(press(&mut ui, KeyCode::Esc), None);
-        assert!(ui.panel.is_none());
-        // The explorer and archive keys act on the review.
         assert_eq!(
             press(&mut ui, KeyCode::Char('e')),
             Some(Action::Explore {
@@ -7192,6 +7127,32 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive { task_id, .. }) if task_id == "r2"
         ));
+    }
+
+    #[test]
+    fn r_in_the_archived_reviews_still_emits_the_rerun_which_try_perform_refuses() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Char('A'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('R')),
+            Some(Action::ReviewRerun {
+                task_id: "old".into()
+            })
+        );
+    }
+
+    #[test]
+    fn r_and_enter_with_no_review_say_so() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_reviews(Vec::new());
+        for code in [KeyCode::Char('R'), KeyCode::Enter] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, code), None);
+            assert_eq!(ui.status_line, NO_REVIEW);
+        }
     }
 
     #[test]
@@ -7335,7 +7296,7 @@ mod tests {
             press(&mut ui, KeyCode::Char('n')),
             Some(Action::NewTaskForm { project: None })
         );
-        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
+        assert_eq!(press(&mut ui, KeyCode::Char('P')), None);
         assert_eq!(press(&mut ui, KeyCode::Char('r')), Some(Action::Refresh));
         // Lowercase d is not delete.
         assert_eq!(press(&mut ui, KeyCode::Char('d')), None);
@@ -7588,33 +7549,62 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_panel_starts_a_task_from_a_project() {
-        let mut ui = sample();
-        ui.panel = Some(Panel::Projects {
-            lines: vec![ProjectLine {
-                name: "web".into(),
-                tasks: 0,
-                contents: "-".into(),
-                repos: "-".into(),
-            }],
-            selected: 0,
-        });
-        assert_eq!(
-            press(&mut ui, KeyCode::Enter),
-            Some(Action::NewTaskForm {
-                project: Some("web".into())
-            })
-        );
-        ui.panel = Some(Panel::Projects {
-            lines: Vec::new(),
-            selected: 0,
-        });
-        // Nothing to edit or delete in an empty panel; `n` still works.
-        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+    fn a_project_row_has_the_project_keys_and_inside_n_starts_a_task_in_it() {
+        let mut ui = by_project();
+        let name = ui.projects[ui.selected].name.clone();
         assert_eq!(
             press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewTaskForm {
+                project: Some(name.clone())
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('N')),
             Some(Action::NewProjectForm)
         );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('E')),
+            Some(Action::EditProject { name: name.clone() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDeleteProject { name: name.clone() })
+        );
+        // The task keys have no task to act on.
+        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+        assert_eq!(ui.status_line, NO_TASK);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.project.as_deref(), Some(name.as_str()));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewTaskForm {
+                project: Some(name)
+            })
+        );
+        // `D` is the task's here, and `N` and `E` are not keys.
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDelete { .. })
+        ));
+        assert_eq!(press(&mut ui, KeyCode::Char('N')), None);
+        assert_eq!(press(&mut ui, KeyCode::Char('E')), None);
+    }
+
+    #[test]
+    fn a_new_project_with_no_tasks_is_shown_in_the_other_projects() {
+        let mut ui = by_project();
+        ui.set_known_projects(
+            ["api", "fresh", "gone", "idle", "web"]
+                .map(String::from)
+                .to_vec(),
+        );
+        ui.show_project(Some("fresh"));
+        assert!(ui.archived_projects);
+        assert_eq!(ui.projects[ui.selected].name, "fresh");
+        // One with work is found in the active list.
+        ui.show_project(Some("web"));
+        assert!(!ui.archived_projects);
+        assert_eq!(ui.projects[ui.selected].name, "web");
     }
 
     #[test]
@@ -7639,7 +7629,8 @@ mod tests {
         );
         // Left up, so a failure can come back to it.
         assert!(matches!(ui.panel, Some(Panel::NewProject(_))));
-        assert_eq!(press(&mut ui, KeyCode::Esc), Some(Action::Projects));
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
     }
 
     #[test]
@@ -8257,13 +8248,12 @@ mod tests {
                 task_id: "root".into()
             })
         );
-        // `p` and `P` are still PRs and projects in the active view.
+        // `p` is still PRs in the active view.
         press(&mut ui, KeyCode::BackTab);
         assert!(matches!(
             press(&mut ui, KeyCode::Char('p')),
             Some(Action::Prs { .. })
         ));
-        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
         // No tree, no node.
         let mut bare = sample();
         bare.user = true;

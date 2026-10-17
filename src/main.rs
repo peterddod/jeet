@@ -27,6 +27,7 @@ mod reports;
 mod resolve;
 mod review;
 mod runtime;
+mod setup;
 mod startup;
 mod status;
 mod store;
@@ -45,7 +46,7 @@ use clap_complete::CompleteEnv;
 
 use cli::{
     Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands,
-    TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    SetupCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -203,6 +204,14 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Chat { new, pick } => {
             let app = context::App::open()?;
             commands::chat::run(&app, new, pick)?;
+        }
+        Commands::Setup { command } => {
+            let app = context::App::open()?;
+            match command {
+                SetupCommands::Apply => setup::apply::apply(&app)?,
+                SetupCommands::Status => setup::apply::status(&app)?,
+                SetupCommands::Discard => setup::apply::discard(&app)?,
+            }
         }
         Commands::Todo { command } => {
             let app = context::App::open()?;

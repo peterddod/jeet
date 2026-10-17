@@ -15,7 +15,7 @@ pub fn run(app: &App) -> Result<()> {
     open(app, Start::List)
 }
 
-/// `jeet projects` on a terminal: the tasks list with its projects panel up.
+/// `jeet projects` on a terminal: the tasks list on the projects tab.
 pub fn run_projects(app: &App) -> Result<()> {
     open(app, Start::Projects)
 }

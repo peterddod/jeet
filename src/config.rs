@@ -60,6 +60,10 @@ pub struct Config {
     /// Where notifications go and which are sent (`[notify]`).
     #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
     pub notify: NotifyConfig,
+    /// The harness rules jeet writes for each agent it starts
+    /// (`[permissions]`).
+    #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
+    pub permissions: PermissionsConfig,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -582,6 +586,73 @@ impl MessagesConfig {
     }
 }
 
+/// `[permissions]` in config.toml: rules added to the settings jeet
+/// generates for each launch. They add to jeet's own and never remove one:
+/// a rule jeet denies stays denied, as the harness's deny wins over any
+/// allow.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsConfig {
+    /// Whether work tasks push without asking (default: `ask`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushPolicy>,
+    /// Tell the harness's auto-mode classifier what a jeet agent's routine
+    /// work is (default: off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_context: Option<bool>,
+    /// Extra rules for work tasks (`[permissions.task]`).
+    #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
+    pub task: RoleRules,
+    /// Extra rules for managers (`[permissions.manager]`).
+    #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
+    pub manager: RoleRules,
+    /// Extra rules for the assistant (`[permissions.assistant]`).
+    #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
+    pub assistant: RoleRules,
+}
+
+impl PermissionsConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn push(&self) -> PushPolicy {
+        self.push.unwrap_or(PushPolicy::Ask)
+    }
+
+    pub fn classifier_context(&self) -> bool {
+        self.classifier_context.unwrap_or(false)
+    }
+}
+
+/// `[permissions] push`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PushPolicy {
+    /// Work tasks push to `origin` without asking, plain or
+    /// `--force-with-lease`; default branches and plain force stay denied.
+    Branches,
+    /// Pushes are left to the harness, which asks.
+    Ask,
+}
+
+/// `[permissions.<role>]`: the harness's own rules, added as written, e.g.
+/// `Bash(gh pr view:*)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleRules {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+impl RoleRules {
+    fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.deny.is_empty()
+    }
+}
+
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 6;
@@ -631,6 +702,7 @@ impl Default for Config {
             managers: None,
             messages: MessagesConfig::default(),
             notify: NotifyConfig::default(),
+            permissions: PermissionsConfig::default(),
         }
     }
 }
@@ -1207,6 +1279,34 @@ mod tests {
         assert!(config.managers.is_some());
         let out = toml::to_string_pretty(&config).unwrap();
         assert!(!out.contains("managers"), "{out}");
+    }
+
+    #[test]
+    fn permissions_default_to_asking_and_refuse_what_they_do_not_know() {
+        let config = Config::default();
+        assert_eq!(config.permissions.push(), PushPolicy::Ask);
+        assert!(!config.permissions.classifier_context());
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("permissions"), "{out}");
+        let config: Config = toml::from_str(
+            "[permissions]\npush = \"branches\"\nclassifier_context = true\n\
+             [permissions.task]\nallow = [\"Bash(gh pr view:*)\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.permissions.push(), PushPolicy::Branches);
+        assert!(config.permissions.classifier_context());
+        assert_eq!(config.permissions.task.allow, ["Bash(gh pr view:*)"]);
+        assert!(config.permissions.manager.allow.is_empty());
+        let back: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(back.permissions, config.permissions);
+        for bad in [
+            "[permissions]\npush = \"always\"\n",
+            "[permissions]\nforce = true\n",
+            "[permissions.review]\nallow = []\n",
+            "[permissions.task]\nalow = []\n",
+        ] {
+            assert!(toml::from_str::<Config>(bad).is_err(), "{bad}");
+        }
     }
 
     fn policy_of(text: &str) -> Result<ManagerPolicy> {

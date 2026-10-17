@@ -3242,11 +3242,32 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         serde_json::json!([
             "Bash(jeet worktree:*)",
             "Bash(jeet ls:*)",
-            "Bash(jeet report:*)"
+            "Bash(jeet report:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr checks:*)",
+            "Bash(gh pr diff:*)",
+            "Bash(gh run view:*)",
+            "Bash(gh run list:*)"
         ])
     );
-    // A top-level task is not gated, so nothing is denied it.
-    assert!(settings["permissions"].get("deny").is_none(), "{settings}");
+    // A top-level task is not gated, but is denied force-pushes, merges
+    // and pushes to a default branch as every other task is; a lease push
+    // is not caught.
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    for rule in [
+        "Bash(git push --force *)",
+        "Bash(gh pr merge *)",
+        "Bash(git push * main *)",
+    ] {
+        assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
+    }
+    assert!(
+        !deny
+            .iter()
+            .any(|d| d.as_str().unwrap().starts_with("Bash(git push --force*")),
+        "{deny:?}"
+    );
+    assert!(!deny.contains(&"Bash(gh pr comment *)".into()), "{deny:?}");
     // Known before the agent ever ran.
     assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
     let hint = calls_of(&tmux, "set-option");
@@ -4224,20 +4245,24 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
     screen.esc();
     // Back on the list, which carries on: `q` there quits.
 
-    // A project, from the projects panel.
-    screen.type_keys(b"P");
+    // A project, from the projects tab, then back to the list.
+    screen.type_keys(b"\t\t\t");
     screen.wait_for_text("no projects yet");
-    screen.type_keys(b"n");
+    screen.type_keys(b"N");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"webproj\r");
     wait_until("the project", || {
         stdout_of(&lab.jeet(&["projects", "ls"])).contains("webproj")
     });
-    screen.esc();
+    screen.type_keys(b"\t");
 
-    // The new task is selected; archiving it frees its worktree.
+    // Archiving the new task frees its worktree.
+    screen.wait_for_text("Widget work");
+    screen.type_keys(b"/widget\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"a");
     wait_until("the archive", || listed(true).contains("widget-work"));
+    screen.esc();
     assert!(!task.join("widget").exists());
 
     // Over in the archived tasks (`A`), delete it, confirming.
@@ -7357,7 +7382,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     let deny = settings["permissions"]["deny"].as_array().unwrap();
     for rule in [
         "Bash(gh pr merge *)",
-        "Bash(git push --force*)",
+        "Bash(git push --force *)",
         "Bash(git push * main *)",
         "Bash(git push * develop *)",
     ] {
@@ -11551,13 +11576,18 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         assert!(!w_deny.contains(&rule.into()), "{rule}: {w_deny:?}");
     }
     // What it holds is pre-approved, and only that (M37): the reads every
-    // task has, then the commands of each capability it holds, and never
+    // task has (jeet's and `gh`'s), then the commands of each capability it holds, and never
     // `jeet todo` nor what it does not hold (`jeet review`).
     let allow = api_settings["permissions"]["allow"].as_array().unwrap();
     let want: Vec<serde_json::Value> = [
         "jeet worktree",
         "jeet ls",
         "jeet report",
+        "gh pr view",
+        "gh pr checks",
+        "gh pr diff",
+        "gh run view",
+        "gh run list",
         "jeet prs",
         "jeet path",
         "jeet task ls",
@@ -13802,7 +13832,12 @@ fn a_node_launch_carries_deny_rules() {
         serde_json::json!([
             "Bash(jeet worktree:*)",
             "Bash(jeet ls:*)",
-            "Bash(jeet report:*)"
+            "Bash(jeet report:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr checks:*)",
+            "Bash(gh pr diff:*)",
+            "Bash(gh run view:*)",
+            "Bash(gh run list:*)"
         ])
     );
     // Its settings go with it, archived or deleted.

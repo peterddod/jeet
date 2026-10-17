@@ -629,7 +629,7 @@ fn write_manifest(task_dir: &Path, entries: &BTreeMap<String, u64>) -> Result<()
 
 /// 64-bit FNV-1a: stable across Rust releases, unlike `DefaultHasher`, and
 /// plenty to notice that a file was edited.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         hash ^= u64::from(*b);
