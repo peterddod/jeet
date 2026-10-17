@@ -27,8 +27,8 @@
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
 //! `→`/`←`/`⌫` open and close managers, `l`, `I` and `b` read a node's
 //! worklog, inbox and reports, and brief, `z`, `Z` and `x` pause, resume
-//! and stop its subtree, `y` answers its open question, and `n` makes a task or manager under it, through
-//! the CLI's own checks, as the user.
+//! and stop its subtree, `y` answers its open question, and `n` makes a
+//! task or manager under it, through the CLI's own checks, as the user.
 //! Its index facts come from a tree thread of its own, running only while
 //! the view is shown.
 //! The reviews view lists every review, with where its PR and its review
@@ -2265,7 +2265,7 @@ impl TasksUi {
 
     /// The keys the agents view has of its own (Q22), or `None` for one it
     /// shares with the other views: moving, `/`, `?`, `r`, `q`, `⇥`, `c`,
-    /// `C` and `t`.
+    /// `C`, `t` and `i`.
     fn agents_key(&mut self, key: KeyEvent) -> Option<Option<Action>> {
         let line = self.tree.get(self.selected).cloned();
         let id = self.selected_id().map(str::to_string);
@@ -8172,6 +8172,10 @@ mod tests {
         );
         press(&mut ui, KeyCode::Char('t'));
         assert!(matches!(ui.panel, Some(Panel::Todo { .. })));
+        press(&mut ui, KeyCode::Esc);
+        // `i` is the assistant's inbox here too; `I` is the node's reports.
+        press(&mut ui, KeyCode::Char('i'));
+        assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
         press(&mut ui, KeyCode::Esc);
         press(&mut ui, KeyCode::Char('?'));
         assert!(matches!(ui.panel, Some(Panel::Help { .. })));
