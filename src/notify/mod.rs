@@ -111,7 +111,8 @@ pub struct Event {
     /// The PR it is about, as a web address, where known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
-    /// When it was queued, in unix seconds: set by [`enqueue`].
+    /// When what it tells of happened, in unix seconds; unset, [`enqueue`]
+    /// sets when it was queued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<i64>,
     /// Set on one already routed and put back for the sender: the backends

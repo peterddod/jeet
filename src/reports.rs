@@ -1050,7 +1050,10 @@ fn sweep_asks_with(
                 subtitle: Some(path.clone()),
                 body: row.body.clone(),
                 link: Some(crate::link::link_for(&Link::Report(row.id))),
-                only: Vec::new(),
+                pr: asker.origin(app).ok().and_then(|o| o.pr),
+                // Its age is the ask's.
+                at: Some(row.at),
+                ..Event::default()
             });
         }
     }
