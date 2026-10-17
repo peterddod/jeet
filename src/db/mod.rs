@@ -500,11 +500,14 @@ const MIGRATIONS: &[&str] = &[
     // started a task (`started_by`: 'user' for the user, at the terminal or
     // through the assistant's `--for-user`, else the id of the task that
     // made it; NULL for one made before), whether it is quiet, and whether
-    // a blocked report has been told of as stuck. Additive only.
+    // a blocked report has been told of as stuck (every one from before
+    // counts as told). Additive only.
     "
     ALTER TABLE tasks ADD COLUMN started_by TEXT;
     ALTER TABLE tasks ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0 CHECK (quiet IN (0, 1));
     ALTER TABLE task_reports ADD COLUMN stuck_told INTEGER NOT NULL DEFAULT 0;
+    -- Blocks from before are not told of all at once on the first poll.
+    UPDATE task_reports SET stuck_told = 1;
     ",
 ];
 

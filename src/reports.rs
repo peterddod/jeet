@@ -933,12 +933,23 @@ pub fn sweep_stuck(app: &App, now: i64) -> Result<()> {
         let Some(asker) = Asker::find(app, &row.task_id)? else {
             continue;
         };
-        if asker.archived() || !app.db.claim_stuck(row.id)? {
+        if asker.archived() {
+            continue;
+        }
+        // Claimed last: one that cannot be told now is tried again.
+        let (path, origin) = match (asker.path(app), asker.origin(app)) {
+            (Ok(path), Ok(origin)) => (path, origin),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("jeet: could not tell the user #{} is stuck: {e:#}", row.id);
+                continue;
+            }
+        };
+        if !app.db.claim_stuck(row.id)? {
             continue;
         }
         let what = format!("blocked for {}m", (now - row.at) / 60);
-        let raise = stuck_raise(row.id, &asker.label(), &asker.path(app)?, &what, &row.body);
-        scope::raise(app, &asker.origin(app)?, raise);
+        let raise = stuck_raise(row.id, &asker.label(), &path, &what, &row.body);
+        scope::raise(app, &origin, raise);
     }
     Ok(())
 }

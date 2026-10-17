@@ -572,6 +572,8 @@ pub fn diff_checks(
             .and_then(|b| b.get(&key))
             .map_or(0, |was| was.failures);
         current.failures = match (kind, changed) {
+            // Failing when first looked at counts, though it is not told.
+            (Some(EventKind::CiFailed), false) if before.is_none() => 1,
             (Some(EventKind::CiFailed), true) => failures.saturating_add(1),
             (Some(EventKind::CiPassed), _) => 0,
             _ => failures,
@@ -1898,6 +1900,11 @@ mod tests {
 
     #[test]
     fn failures_in_a_row_are_counted_until_checks_pass() {
+        let first = diff_checks(None, &[pr("acme/api", 1, "z", Some("FAILURE"))], 0).checks;
+        assert_eq!(
+            first["acme/api#1"].failures, 1,
+            "failing when first seen counts"
+        );
         let mut state = diff_checks(None, &[pr("acme/api", 1, "a", Some("PENDING"))], 0).checks;
         let mut step = |sha: &str, checks: &str| {
             state = diff_checks(Some(&state), &[pr("acme/api", 1, sha, Some(checks))], 0).checks;
