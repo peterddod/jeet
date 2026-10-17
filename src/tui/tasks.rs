@@ -472,6 +472,7 @@ impl ChildSpec {
             done_when: self.done.clone(),
             allow: self.allow.clone(),
             budget: self.budget.clone(),
+            ..Delegation::default()
         }
     }
 }
@@ -4602,6 +4603,7 @@ impl Screen<'_> {
                     .and_then(|inner| inner);
                 match made {
                     Ok(created) => {
+                        self.started_by_user(&created.task.id);
                         self.ui.panel = None;
                         self.refresh(false);
                         self.ui.select(&created.task.id);
@@ -4998,6 +5000,20 @@ impl Screen<'_> {
     /// user: `plan_child`, then `create`, then, for a manager, its start
     /// (Q17). A worker is not started, as `n` in the active view does not
     /// start one. What `plan_child` refuses stays on the form.
+    /// Record task `id`, just made here, as the user's, when this screen
+    /// is the user's at their own terminal (`[notify] events`).
+    fn started_by_user(&self, id: &str) {
+        if !self.ui.user {
+            return;
+        }
+        // Best effort, and nothing printed over the screen: it costs only
+        // notifications from deep down.
+        let _ = self
+            .app
+            .db
+            .set_task_started_by(id, crate::db::tasks::STARTED_BY_USER);
+    }
+
     fn create_child(&mut self, spec: ChildSpec) {
         let app = self.app;
         let user = Caller::User;
@@ -5042,6 +5058,7 @@ impl Screen<'_> {
                 return;
             }
         };
+        self.started_by_user(&created.task.id);
         self.ui.panel = None;
         let task = created.task;
         let under = match self.ui.node(spec.parent.as_str()) {

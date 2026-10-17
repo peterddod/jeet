@@ -368,6 +368,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                 }
                 TaskCommands::Adopt { name } => commands::task::adopt(&app, &name)?,
                 TaskCommands::Ls { archived } => commands::task::ls(&app, archived)?,
+                TaskCommands::Quiet { name, off } => commands::task::quiet(&app, &name, !off)?,
                 TaskCommands::Open { name, session } => {
                     commands::task::open(&app, &name, session.as_deref())?
                 }

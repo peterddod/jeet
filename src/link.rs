@@ -60,7 +60,6 @@ impl fmt::Display for Link {
 
 /// The URL for `link`: what a notification's `Event.link` holds, so that
 /// clicking it runs `jeet open` on it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn link_for(link: &Link) -> String {
     link.to_string()
 }
