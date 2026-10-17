@@ -5372,10 +5372,13 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.wait_for_text("Widen the store");
     screen.type_keys(b"\r");
     // The status line is not waited for: the terminal only redraws the
-    // cells that changed, so a letter the line under it had in the same
-    // column (the temporary home's random name) never arrives. Recording
-    // the PR on the task is the checkout's last step, and keys typed before
-    // it ends are thrown away. The checks after exit show where it went.
+    // cells that changed, and it overwrites the store's path, whose
+    // temporary directory has random letters (`/tmp/.tmpogJu7h`, and more
+    // of them under macOS's `/var/folders`); a cell that happens to hold the
+    // same letter is not drawn again, so any part of the line can go
+    // missing. Recording the PR on the task is the checkout's last step,
+    // and keys typed before it ends are thrown away. The checks after exit
+    // show where it went.
     wait_until("the PR on the task", || {
         lab.index()
             .query_row("SELECT COUNT(*) FROM task_prs WHERE number = 7", [], |r| {

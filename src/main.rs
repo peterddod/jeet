@@ -13,6 +13,7 @@ mod github;
 mod harness;
 mod identity;
 mod instructions;
+mod link;
 mod manager;
 mod messages;
 mod notify;
@@ -149,6 +150,10 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             Some(command) => commands::notify::run_command(command)?,
             None => commands::notify::run(title.as_deref(), body.as_deref(), url.as_deref())?,
         },
+        Commands::Open { url } => {
+            let app = context::App::open()?;
+            commands::open::run(&app, &url)?
+        }
         Commands::Report { what } => {
             let app = context::App::open()?;
             commands::report::run(&app, what)?

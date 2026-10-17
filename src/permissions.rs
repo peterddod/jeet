@@ -663,6 +663,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { command: None, .. }
+        // Acts on the user's screen, so it asks `at_terminal` itself.
+        | Commands::Open { .. }
         // Only ever to the caller's own parent; the command checks who that is.
         | Commands::Report { .. }
         // Its own todo list.
@@ -2988,6 +2990,9 @@ mod tests {
             (&["setup", "apply"], false),
             (&["setup", "discard"], false),
             (&["notify", "t"], true),
+            (&["notify", "install-link"], false),
+            (&["notify", "uninstall-link"], false),
+            (&["open", "jeet://task/x"], false),
             (&["notify", "serve"], false),
             (&["notify", "install"], false),
             (&["notify", "uninstall"], false),
