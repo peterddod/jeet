@@ -461,7 +461,9 @@ fn asks_the_user(input: &HookInput) -> bool {
 /// task, with `wake` a second at session start running `jeet inbox watch`
 /// in the background (`async`, so the session does not wait on it),
 /// permission to run the commands `allow` names, as `Bash(…)` rules, and,
-/// when there are any, `Bash(…)` rules denying those `deny` names.
+/// when there are any, `Bash(…)` rules denying those `deny` names, each
+/// followed by the `extra_allow` and `extra_deny` rules as written; with
+/// `environment`, the auto-mode classifier's `autoMode.environment` too.
 /// `jeet` runs outside Claude's sandbox, should the user turn it on: jeet
 /// knows its caller by the processes above it, which a sandbox with its own
 /// process ids (bubblewrap's, on Linux) hides, and on every platform it
@@ -495,18 +497,28 @@ fn settings_json(hooks: &HookSetup) -> String {
         .allow
         .iter()
         .map(|command| format!("Bash({command}:*)"))
+        .chain(hooks.extra_allow.iter().cloned())
         .collect();
     let mut permissions = serde_json::json!({ "allow": allow });
-    if !hooks.deny.is_empty() {
-        let deny: Vec<String> = hooks.deny.iter().flat_map(|p| deny_rules(p)).collect();
+    let deny: Vec<String> = hooks
+        .deny
+        .iter()
+        .flat_map(|p| deny_rules(p))
+        .chain(hooks.extra_deny.iter().cloned())
+        .collect();
+    if !deny.is_empty() {
         permissions["deny"] = serde_json::json!(deny);
     }
-    serde_json::json!({
+    let mut settings = serde_json::json!({
         "hooks": groups,
         "permissions": permissions,
         "sandbox": { "excludedCommands": ["jeet"] },
-    })
-    .to_string()
+    });
+    if let Some(environment) = &hooks.environment {
+        // `$defaults` keeps Claude's own entries ahead of ours.
+        settings["autoMode"] = serde_json::json!({ "environment": ["$defaults", environment] });
+    }
+    settings.to_string()
 }
 
 /// The `Bash(…)` rules for a deny pattern (see [`HookSetup::deny`]). A
@@ -1127,10 +1139,10 @@ mod tests {
             allow: vec!["jeet ls".into()],
             deny: vec![
                 "gh pr merge".into(),
-                "git push --force*".into(),
+                "git push --force".into(),
                 "git push * main".into(),
             ],
-            wake: false,
+            ..Default::default()
         };
         assert_eq!(ClaudeCode.enforcement(), Enforcement::Rules);
         let args = ClaudeCode.hook_args(&hooks).unwrap();
@@ -1139,7 +1151,8 @@ mod tests {
             value["permissions"]["deny"],
             serde_json::json!([
                 "Bash(gh pr merge *)",
-                "Bash(git push --force*)",
+                // A word: `--force-with-lease` is not caught.
+                "Bash(git push --force *)",
                 // Claude's trailing ` *` matches nothing only when it is the
                 // rule's one `*`: `git push origin main` needs the first.
                 "Bash(git push * main)",
@@ -1149,6 +1162,50 @@ mod tests {
         assert_eq!(
             value["permissions"]["allow"],
             serde_json::json!(["Bash(jeet ls:*)"])
+        );
+    }
+
+    #[test]
+    fn settings_add_config_rules_after_jeets_and_the_classifier_context() {
+        let hooks = HookSetup {
+            exe: "/bin/jeet".into(),
+            task_id: "t".into(),
+            allow: vec!["jeet ls".into()],
+            deny: vec!["gh pr merge".into()],
+            extra_allow: vec!["Read(~/notes/**)".into()],
+            extra_deny: vec!["Bash(rm -rf:*)".into()],
+            ..Default::default()
+        };
+        let args = ClaudeCode.hook_args(&hooks).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!(["Bash(jeet ls:*)", "Read(~/notes/**)"])
+        );
+        assert_eq!(
+            value["permissions"]["deny"],
+            serde_json::json!(["Bash(gh pr merge *)", "Bash(rm -rf:*)"])
+        );
+        assert!(value.get("autoMode").is_none());
+        // Extra denies alone still make a deny list.
+        let hooks = HookSetup {
+            extra_deny: vec!["Bash(rm -rf:*)".into()],
+            environment: Some("routine work".into()),
+            ..hooks
+        };
+        let hooks = HookSetup {
+            deny: Vec::new(),
+            ..hooks
+        };
+        let args = ClaudeCode.hook_args(&hooks).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(
+            value["permissions"]["deny"],
+            serde_json::json!(["Bash(rm -rf:*)"])
+        );
+        assert_eq!(
+            value["autoMode"]["environment"],
+            serde_json::json!(["$defaults", "routine work"])
         );
     }
 

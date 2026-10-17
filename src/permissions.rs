@@ -181,10 +181,15 @@ const fn ext(
 /// `git -C . push -f`, `sh -c '…'` and aliases get past them: a lint
 /// against mistakes, with branch protection as the real control.
 ///
+/// `--force` is denied as a whole word, so `--force-with-lease` and
+/// `--force-if-includes`, which refuse to drop commits the agent has not
+/// seen, still run. Repository settings are out of reach too: `gh repo
+/// edit`, `gh secret`, and deleting through the API.
+///
 /// [`HookSetup::deny`]: crate::harness::HookSetup::deny
 const ALWAYS_DENY: &[&str] = &[
-    "git push --force*",
-    "git push * --force*",
+    "git push --force",
+    "git push * --force",
     "git push -f",
     "git push * -f",
     "git push * +*",
@@ -210,7 +215,44 @@ const ALWAYS_DENY: &[&str] = &[
     "curl *enablePullRequestAutoMerge*",
     "curl *mergeBranch*",
     "curl *enqueuePullRequest*",
+    "gh repo edit",
+    "gh secret",
+    "gh api -X DELETE",
+    "gh api * -X DELETE",
+    "gh api -XDELETE",
+    "gh api * -XDELETE",
+    "gh api --method DELETE",
+    "gh api * --method DELETE",
+    "gh api --method=DELETE",
+    "gh api * --method=DELETE",
 ];
+
+/// `gh` commands that only read, pre-approved for tasks, managers and the
+/// assistant.
+pub const GH_READ_ONLY: &[&str] = &[
+    "gh pr view",
+    "gh pr checks",
+    "gh pr diff",
+    "gh run view",
+    "gh run list",
+];
+
+/// The pushes a work task makes without asking under `[permissions] push =
+/// "branches"`: to `origin`, plain or with a lease. What [`ALWAYS_DENY`] and
+/// the default branches deny stays denied, as a deny wins.
+pub const PUSH_ALLOW: &[&str] = &[
+    "git push origin",
+    "git push -u origin",
+    "git push --set-upstream origin",
+    "git push --force-with-lease",
+];
+
+/// What the harness's auto-mode classifier is told an agent's routine work
+/// is, under `[permissions] classifier_context`.
+pub const CLASSIFIER_CONTEXT: &str = "This agent runs as a task of a local coding-agent \
+manager: it works in git worktrees of its own under the task's directory. Pushing the task's own \
+non-default branch, opening pull requests as its PR policy says, and running the manager's CLI \
+to report or add worktrees are routine.";
 
 /// What a manager is denied besides: making commits and branches to push,
 /// as its worktrees are read-only (`tasks::add_worktree`). Not `git branch`:
@@ -999,16 +1041,17 @@ fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str
         .flat_map(|c| c.external.iter().copied())
 }
 
-/// What `task`'s agent is denied: nothing for a top-level task, which jeet
-/// does not gate; for one with a parent, [`denied_commands`] and the
+/// What `task`'s agent is denied: [`denied_commands`] for a top-level task,
+/// which jeet does not otherwise gate; for one with a parent, those and the
 /// commands outside jeet of every capability it does not hold, and for a
 /// manager [`MANAGER_DENY`] too.
 pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
+    let branches = default_branches(app)?;
     if task.parent_id.is_none() {
-        return Ok(Vec::new());
+        return Ok(denied_commands(&branches));
     }
     let held = effective(app, task)?;
-    let mut deny = node_deny(&held, &default_branches(app)?);
+    let mut deny = node_deny(&held, &branches);
     match task.kind {
         TaskKind::Manager => {
             for command in MANAGER_DENY {
@@ -3053,12 +3096,22 @@ mod tests {
     #[test]
     fn no_command_is_both_allowed_and_denied() {
         let every: Vec<String> = CAPABILITIES.iter().map(|c| c.name.to_string()).collect();
-        let allowed = allowed_commands(&every);
+        let mut allowed = allowed_commands(&every);
+        allowed.extend(GH_READ_ONLY.iter().map(|c| c.to_string()));
         let mut denied = denied_commands(&main_master());
         // A manager's too: it is pre-approved what it holds (M37).
         denied.extend(MANAGER_DENY.iter().map(|d| d.to_string()));
         for a in &allowed {
             assert!(!denied.contains(a), "{a}");
+            assert!(
+                !denied.iter().any(|d| claude_match(d, a)),
+                "{a} is pre-approved and denied"
+            );
+        }
+        // A worker's pushes under `push = "branches"`, bare, against what
+        // every task is denied; a manager is never given them.
+        let denied = denied_commands(&main_master());
+        for a in PUSH_ALLOW {
             assert!(
                 !denied.iter().any(|d| claude_match(d, a)),
                 "{a} is pre-approved and denied"
@@ -3109,7 +3162,7 @@ mod tests {
     }
 
     #[test]
-    fn a_top_level_task_gets_no_deny_and_a_node_gets_the_list() {
+    fn a_top_level_task_gets_the_shared_deny_and_a_node_the_whole_list() {
         let (_dir, mut app, w) = tree();
         app.db
             .upsert_repo(&crate::db::RepoRecord {
@@ -3122,7 +3175,14 @@ mod tests {
         // What the root holds is not handed down beyond the node's grant.
         app.config.assistant.allow = CAPABILITIES.iter().map(|c| c.name.into()).collect();
         let top = app.db.get_task("top-id").unwrap().unwrap();
-        assert!(task_deny(&app, &top).unwrap().is_empty());
+        // Force-pushes, merges and default branches, but no capability is
+        // withheld from what jeet does not gate.
+        let top_deny = task_deny(&app, &top).unwrap();
+        assert_eq!(top_deny, denied_commands(&default_branches(&app).unwrap()));
+        for denied in ["git push --force", "gh pr merge", "git push * develop"] {
+            assert!(top_deny.contains(&denied.to_string()), "{denied}");
+        }
+        assert!(!top_deny.contains(&"gh pr comment".to_string()));
         let deny = task_deny(&app, &w).unwrap();
         for denied in [
             "gh pr merge",
@@ -3238,7 +3298,11 @@ mod tests {
         let denied = |command: &str| deny.iter().any(|d| claude_match(d, command));
         for command in [
             "git push --force",
-            "git push origin x --force-with-lease",
+            "git push --force origin x",
+            "git push origin x --force",
+            "git push origin --force x",
+            "git push --force-with-lease origin x --force",
+            "git push --force-with-lease origin main",
             "git push -f",
             "git push origin x -f",
             "git push origin +x",
@@ -3279,6 +3343,14 @@ mod tests {
             "curl https://api.github.com/graphql -d 'mutation{enqueuePullRequest(input:{})}'",
             "gh pr comment 3 -b hi",
             "gh pr review 3 --approve",
+            "gh repo edit --default-branch x",
+            "gh secret set TOKEN",
+            "gh secret list",
+            "gh api -X DELETE repos/o/r",
+            "gh api repos/o/r -X DELETE",
+            "gh api repos/o/r/git/refs/heads/x -XDELETE",
+            "gh api --method DELETE repos/o/r",
+            "gh api repos/o/r --method=DELETE",
         ] {
             assert!(denied(command), "not denied: {command}");
         }
@@ -3289,6 +3361,15 @@ mod tests {
             "git push origin refs/heads/main:refs/heads/task-x",
             "git push origin heads/main-fix",
             "git push --follow-tags",
+            "git push --force-with-lease",
+            "git push --force-with-lease origin task-x",
+            "git push origin task-x --force-with-lease",
+            "git push --force-with-lease=task-x:abc123 origin task-x",
+            "git push --force-if-includes --force-with-lease origin task-x",
+            "git push origin task-x --force-if-includes",
+            "git push -u origin task-x --force-with-lease",
+            "gh api repos/o/r -X GET",
+            "gh secrets-tool",
             "gh pr create",
             "gh pr view 3",
             "gh pr checks 3",
@@ -3436,7 +3517,7 @@ mod tests {
         let deny = review_deny(&app).unwrap();
         for pattern in [
             "git push",
-            "git push --force*",
+            "git push --force",
             "gh pr merge",
             "gh pr review",
             "gh pr comment",

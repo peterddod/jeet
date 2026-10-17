@@ -1138,6 +1138,9 @@ fn review_hooks(
         task_id: review.id.clone(),
         allow: allowed(review),
         deny: crate::permissions::review_deny(app)?,
+        extra_allow: Vec::new(),
+        extra_deny: Vec::new(),
+        environment: None,
         wake: false,
     })
 }
