@@ -56,6 +56,14 @@ pub struct Config {
     /// How what is queued for an agent is rendered (`[messages]`).
     #[serde(default, skip_serializing_if = "MessagesConfig::is_empty")]
     pub messages: MessagesConfig,
+
+    /// What work tasks do about pull requests (`[tasks]`).
+    #[serde(default, skip_serializing_if = "TasksConfig::is_empty")]
+    pub tasks: TasksConfig,
+
+    /// The model each kind of agent runs (`[models]`).
+    #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
+    pub models: ModelsConfig,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -493,6 +501,95 @@ impl MessagesConfig {
     }
 }
 
+/// `[tasks]` in config.toml, and in a project's `project.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TasksConfig {
+    /// What a work task does once its work is pushed (default: `draft`).
+    /// A project's, then `jeet task new --pr`, override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrMode>,
+}
+
+impl TasksConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A work task's PR policy: `[tasks] pr`, or `jeet task new --pr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum PrMode {
+    /// Open a ready pull request once the work is pushed and checks pass.
+    Auto,
+    /// Open it as a draft; mark it ready only when asked.
+    Draft,
+    /// Open none; ask the parent, or the user, first.
+    Ask,
+}
+
+/// The PR policy of a task that none of the config or the task names.
+pub const DEFAULT_PR_MODE: PrMode = PrMode::Draft;
+
+impl PrMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrMode::Auto => "auto",
+            PrMode::Draft => "draft",
+            PrMode::Ask => "ask",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PrMode> {
+        match s {
+            "auto" => Some(PrMode::Auto),
+            "draft" => Some(PrMode::Draft),
+            "ask" => Some(PrMode::Ask),
+            _ => None,
+        }
+    }
+}
+
+/// `[models]` in config.toml: the model each kind of agent is launched
+/// with, as `--model`, unless its command line already names one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+}
+
+impl ModelsConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The model for an agent of `kind`, if one is set.
+    pub fn for_kind(&self, kind: TaskKind) -> Option<&str> {
+        let model = match kind {
+            TaskKind::Work => &self.task,
+            TaskKind::Manager => &self.manager,
+            TaskKind::Assistant => &self.assistant,
+        };
+        model.as_deref().map(str::trim).filter(|m| !m.is_empty())
+    }
+
+    /// The model for a review's agent, if one is set.
+    pub fn review(&self) -> Option<&str> {
+        self.review
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+    }
+}
+
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 6;
@@ -541,6 +638,8 @@ impl Default for Config {
             watch: None,
             managers: None,
             messages: MessagesConfig::default(),
+            tasks: TasksConfig::default(),
+            models: ModelsConfig::default(),
         }
     }
 }
@@ -1117,6 +1216,41 @@ mod tests {
         assert!(config.managers.is_some());
         let out = toml::to_string_pretty(&config).unwrap();
         assert!(!out.contains("managers"), "{out}");
+    }
+
+    #[test]
+    fn tasks_pr_and_models_parse_and_refuse_what_they_do_not_know() {
+        let config = Config::default();
+        assert_eq!(config.tasks.pr, None);
+        assert_eq!(config.models.for_kind(TaskKind::Work), None);
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            !out.contains("[tasks]") && !out.contains("[models]"),
+            "{out}"
+        );
+        let config: Config = toml::from_str(
+            "[tasks]\npr = \"ask\"\n\
+             [models]\nassistant = \"opus\"\nmanager = \"sonnet\"\ntask = \" haiku \"\nreview = \"\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.tasks.pr, Some(PrMode::Ask));
+        assert_eq!(config.models.for_kind(TaskKind::Assistant), Some("opus"));
+        assert_eq!(config.models.for_kind(TaskKind::Manager), Some("sonnet"));
+        assert_eq!(config.models.for_kind(TaskKind::Work), Some("haiku"));
+        // Blank is unset.
+        assert_eq!(config.models.review(), None);
+        let back: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!((back.tasks, back.models), (config.tasks, config.models));
+        for bad in [
+            "[tasks]\npr = \"ready\"\n",
+            "[tasks]\nprs = \"auto\"\n",
+            "[models]\nworker = \"opus\"\n",
+        ] {
+            assert!(toml::from_str::<Config>(bad).is_err(), "{bad}");
+        }
+        for mode in [PrMode::Auto, PrMode::Draft, PrMode::Ask] {
+            assert_eq!(PrMode::parse(mode.as_str()), Some(mode));
+        }
     }
 
     fn policy_of(text: &str) -> Result<ManagerPolicy> {

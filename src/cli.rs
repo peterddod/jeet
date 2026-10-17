@@ -317,6 +317,10 @@ pub enum TaskCommands {
         /// Start the task's agent straight away, with this as its first prompt
         #[arg(long, allow_hyphen_values = true)]
         prompt: Option<String>,
+        /// The task's PR policy, over its project's and the global
+        /// `[tasks] pr`: auto (a ready PR), draft, or ask first
+        #[arg(long, value_enum)]
+        pr: Option<crate::config::PrMode>,
         #[command(flatten)]
         delegation: Delegation,
     },

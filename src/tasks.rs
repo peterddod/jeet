@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentSpec;
 use crate::cli::Delegation;
+use crate::config::{PrMode, DEFAULT_PR_MODE};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{
@@ -45,6 +46,41 @@ use crate::resolve;
 use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
+
+/// The PR policy of `task`'s agent, most specific first: its own (`jeet
+/// task new --pr`), its project's `[tasks] pr`, the global `[tasks] pr`, or
+/// [`DEFAULT_PR_MODE`]. Read at each start, so a change to the config
+/// reaches the task's next session.
+pub fn pr_mode(app: &App, task: &TaskRecord) -> Result<PrMode> {
+    if let Some(mode) = app.db.task_pr(&task.id)? {
+        return Ok(mode);
+    }
+    let project = match &task.project {
+        Some(name) => projects::load(app, name)?.config.tasks.pr,
+        None => None,
+    };
+    Ok(project.or(app.config.tasks.pr).unwrap_or(DEFAULT_PR_MODE))
+}
+
+/// The one line a work task's session starts with about pull requests,
+/// which the worker skill points to.
+pub fn pr_policy_line(mode: PrMode) -> String {
+    let what = match mode {
+        PrMode::Auto => {
+            "open a ready PR with `gh pr create` once the work is pushed and its checks pass \
+             locally; don't ask"
+        }
+        PrMode::Draft => {
+            "open PRs with `gh pr create --draft`; don't ask. Mark one ready (`gh pr ready`) \
+             only when your parent or the user asks"
+        }
+        PrMode::Ask => {
+            "open no PR yourself; ask first (`jeet report question \"open a PR for <branch>?\"`, \
+             or the user at the pane in a top-level task)"
+        }
+    };
+    format!("PR policy: {} — {what}.", mode.as_str())
+}
 
 /// Set in the agent's environment so `jeet worktree` knows its task without
 /// having to be run from inside the task directory.
@@ -84,7 +120,14 @@ worktrees inside this directory.
 - List this task's worktrees: `jeet worktree ls`.
 - Remove one you are done with: `jeet worktree rm <name>`. It refuses while the
   worktree holds uncommitted or unpushed work.
-- Open pull requests from inside a worktree with `gh pr create`.
+- Open pull requests from inside a worktree with `gh pr create`, as the
+  task's PR policy says. The context shown as each session starts has a
+  `PR policy:` line: `auto` opens a ready PR once the work is pushed and
+  its checks pass locally; `draft` opens it with `gh pr create --draft` and
+  marks it ready only when your parent or the user asks; `ask` opens none
+  and asks instead (`jeet report question "open a PR for <branch>?"`, or the
+  user at the pane in a top-level task). Don't ask about what the policy
+  already says.
 - Never touch `$JEET_HOME/store` (the canonical clones) directly. Prefer
   `jeet worktree add` over running `git worktree add` yourself.
 
@@ -3938,6 +3981,33 @@ mod tests {
         assert!(err.contains("old"), "{err}");
         let row = app.db.get_task("old-id").unwrap().unwrap();
         assert_eq!(row.state, TaskState::Archived, "{err}");
+    }
+
+    #[test]
+    fn the_pr_policy_is_the_tasks_then_the_projects_then_the_configs() {
+        let (_dir, mut app, _trunk) = manager_lab();
+        let mut w = app.db.get_task("w-id").unwrap().unwrap();
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Draft);
+        app.config.tasks.pr = Some(PrMode::Auto);
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Auto);
+        projects::create(&app, "launch", &[]).unwrap();
+        let toml = projects::config_path(&app, "launch").unwrap();
+        std::fs::write(&toml, "[tasks]\npr = \"ask\"\n").unwrap();
+        w.project = Some("launch".into());
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Ask);
+        app.db.set_task_pr(&w.id, Some(PrMode::Draft)).unwrap();
+        assert_eq!(app.db.task_pr(&w.id).unwrap(), Some(PrMode::Draft));
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Draft);
+        app.db.set_task_pr(&w.id, None).unwrap();
+        assert_eq!(pr_mode(&app, &w).unwrap(), PrMode::Ask);
+        // One line each, naming the mode.
+        for mode in [PrMode::Auto, PrMode::Draft, PrMode::Ask] {
+            let line = pr_policy_line(mode);
+            assert!(line.starts_with(&format!("PR policy: {} — ", mode.as_str())));
+            assert!(!line.contains('\n'), "{line}");
+        }
+        assert!(pr_policy_line(PrMode::Draft).contains("gh pr create --draft"));
+        assert!(pr_policy_line(PrMode::Ask).contains("jeet report question"));
     }
 
     #[test]

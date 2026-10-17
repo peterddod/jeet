@@ -76,6 +76,7 @@ jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
 jeet task ls [--archived]                # with what each task's agent is doing
 jeet task open fix-login                 # the task's agent, in tmux (started if need be)
 jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
+jeet task new fix-y --pr ask             # its PR policy: auto, draft or ask (see [tasks] pr)
 jeet task send fix-login "add tests too" # message the task's agent
 jeet task interrupt fix-login            # end the agent's current turn, keeping its session
 jeet task restart fix-login [--force]    # end the agent and resume its conversation in a new one
@@ -2240,6 +2241,44 @@ next start (`jeet task restart` one that is running), and messages are
 queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
+
+### Models
+
+```toml
+[models]
+assistant = "opus"
+manager = "sonnet"
+task = "sonnet"
+review = "sonnet"
+```
+
+Each is passed to that kind of agent as `--model <name>` at launch, after
+the command and any project `[agent] args`, unless those already name a
+model (`--model x` or `--model=x`), which wins. Unset, the agent's own
+default applies. A running agent gets a new model when it restarts.
+
+### Pull requests from tasks
+
+```toml
+[tasks]
+pr = "draft"    # "auto" | "draft" | "ask" (default "draft")
+```
+
+What a work task does once its work is pushed:
+
+- **`auto`**: opens a ready pull request once its checks pass locally.
+- **`draft`**: opens it as a draft (`gh pr create --draft`), and marks it
+  ready only when its parent or you ask.
+- **`ask`**: opens none. A task with a parent asks it with `jeet report
+  question`; a top-level task asks you at its pane.
+
+The most specific setting wins: `jeet task new --pr <mode>`, then the
+project's `[tasks] pr` in its `project.toml`, then the global one. The
+task is told the mode in one line as each session starts. On Claude Code
+its settings also allow `gh pr create` under `auto` and `draft`, deny `gh
+pr ready` under `draft`, and deny `gh pr create` under `ask`. A manager
+passes `--pr` on to its workers when its brief says how PRs should be
+opened.
 
 ### Quiet messages for the assistant and managers
 

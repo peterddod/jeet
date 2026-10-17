@@ -51,6 +51,9 @@ pub struct ProjectConfig {
     pub repos: Vec<String>,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// `[tasks] pr`, over the global one for the project's tasks.
+    #[serde(default)]
+    pub tasks: crate::config::TasksConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -250,7 +253,11 @@ fn template(repos: &[String]) -> String {
          \n\
          # Extra arguments for the coding agent in this project's tasks.\n\
          # [agent]\n\
-         # args = [\"--model\", \"opus\"]\n",
+         # args = [\"--model\", \"opus\"]\n\
+         \n\
+         # What this project's tasks do about pull requests: auto, draft or ask.\n\
+         # [tasks]\n\
+         # pr = \"draft\"\n",
         list.join(", ")
     )
 }

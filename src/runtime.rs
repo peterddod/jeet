@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentSpec;
 use crate::cd;
-use crate::config::AssistantConfig;
+use crate::config::{AssistantConfig, PrMode};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
@@ -247,6 +247,8 @@ fn start_tmux(
         Ok(args) => spec.argv.extend(args),
         Err(e) => warnings.push(format!("no agent arguments from the task's project: {e:#}")),
     }
+    // After the project's arguments, so a `--model` there wins too.
+    let spec = spec.with_model(app.config.models.for_kind(task.kind));
     let dir = tasks::task_dir(app, task);
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
@@ -556,7 +558,8 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 }
 
 /// jeet's hooks for a task's agent run by `harness`, with what it is denied
-/// (nothing for a top-level task) and its wake channel ([`wake`]). A
+/// (nothing for a top-level task, but what its PR policy denies a work
+/// task: [`pr_rules`]) and its wake channel ([`wake`]). A
 /// manager, started with nobody at its pane, also has the commands of what
 /// it holds pre-approved, read at each start, as the assistant has those of
 /// `[assistant] allow`.
@@ -583,13 +586,34 @@ fn task_hooks(
         }
         TaskKind::Work | TaskKind::Assistant => {}
     }
+    let mut deny = permissions::task_deny(app, task)?;
+    if task.kind == TaskKind::Work {
+        let (allows, denies) = pr_rules(tasks::pr_mode(app, task)?);
+        allow.extend(allows.iter().map(|c| c.to_string()));
+        for command in denies {
+            if !deny.iter().any(|d| d == command) {
+                deny.push(command.to_string());
+            }
+        }
+    }
     Ok(HookSetup {
         exe,
         task_id: task.id.clone(),
         allow,
-        deny: permissions::task_deny(app, task)?,
+        deny,
         wake: wake(app, harness),
     })
+}
+
+/// What a work task under PR policy `mode` is let run, and denied: `auto`
+/// and `draft` open PRs without asking, `draft` only as drafts it may not
+/// mark ready, and `ask` opens none, so it reports a question instead.
+fn pr_rules(mode: PrMode) -> (&'static [&'static str], &'static [&'static str]) {
+    match mode {
+        PrMode::Auto => (&["gh pr create"], &[]),
+        PrMode::Draft => (&["gh pr create"], &["gh pr ready"]),
+        PrMode::Ask => (&[], &["gh pr create"]),
+    }
 }
 
 /// jeet's hooks for the assistant, pre-approving the read-only jeet
@@ -1081,10 +1105,33 @@ mod tests {
         }
         assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
         assert!(!hooks.allow.contains(&"jeet todo".to_string()));
-        // A worker asks at the prompt, as before.
+        // A worker asks at the prompt, as before, but opens draft PRs it may
+        // not mark ready (the default PR policy).
         let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
-        assert_eq!(hooks.allow, ALLOWED.map(str::to_string));
+        let mut want = ALLOWED.map(str::to_string).to_vec();
+        want.push("gh pr create".into());
+        assert_eq!(hooks.allow, want);
+        assert!(hooks.deny.contains(&"gh pr ready".to_string()));
         assert!(hooks.wake);
+        // A manager is given neither.
+        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        assert!(!hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(!hooks.deny.contains(&"gh pr ready".to_string()));
+        // `auto` from the config: no deny on `gh pr ready`.
+        app.config.tasks.pr = Some(PrMode::Auto);
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        assert!(hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(!hooks
+            .deny
+            .iter()
+            .any(|d| d.starts_with("gh pr") && (d.contains("ready") || d.contains("create"))));
+        // The task's own `ask` wins: it may not open one.
+        app.db.set_task_pr(&worker.id, Some(PrMode::Ask)).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        assert!(!hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(hooks.deny.contains(&"gh pr create".to_string()));
+        app.db.set_task_pr(&worker.id, None).unwrap();
+        app.config.tasks.pr = None;
         // No wake channel for a harness without one, nor with
         // `[harness] wake = false`.
         let generic = &harness::Generic;
