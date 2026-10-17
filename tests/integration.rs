@@ -5371,10 +5371,19 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\x0f");
     screen.wait_for_text("Widen the store");
     screen.type_keys(b"\r");
-    // The task's name is not waited for: the terminal only redraws the
-    // cells that changed, so its tail can arrive split from the rest. The
-    // checks after exit show where the checkout went.
-    screen.wait_for_text("checked out #7 in task");
+    // The status line is not waited for: the terminal only redraws the
+    // cells that changed, so a letter the line under it had in the same
+    // column (the temporary home's random name) never arrives. Recording
+    // the PR on the task is the checkout's last step, and keys typed before
+    // it ends are thrown away. The checks after exit show where it went.
+    wait_until("the PR on the task", || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM task_prs WHERE number = 7", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+            > 0
+    });
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");
