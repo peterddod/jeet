@@ -823,19 +823,7 @@ pub enum Panel {
         /// Why the last ⏎ was refused.
         error: Option<String>,
     },
-<<<<<<< HEAD
-    /// `l`, `i` and `b` in the agents view: text to read, scrolled.
-=======
-    /// ⏎ in the reviews view: what to open of a review.
-    ReviewMenu {
-        task_id: String,
-        pr: PrKey,
-        /// `review jeet#55`.
-        label: String,
-        selected: usize,
-    },
     /// `l`, `I` and `b` in the agents view: text to read, scrolled.
->>>>>>> 4ce9db2 (feat(tui): agents pane shares the other panes' keys)
     Text {
         title: String,
         lines: Vec<String>,

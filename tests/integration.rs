@@ -14366,7 +14366,7 @@ fn agents_tab_shows_the_tree() {
     assert!(screen.wait_for_exit().success());
 }
 
-/// `p` and `P` on a manager pause and resume its subtree as `jeet manager
+/// `z` and `Z` on a manager pause and resume its subtree as `jeet manager
 /// pause` and `resume` do, as the user.
 #[cfg(unix)]
 #[test]
@@ -14406,7 +14406,7 @@ fn agents_tab_pauses_and_resumes() {
     screen.wait_for_text("└─ ▾ api");
     screen.type_keys(b"j");
     std::thread::sleep(std::time::Duration::from_millis(300));
-    screen.type_keys(b"p");
+    screen.type_keys(b"z");
     screen.wait_for_text("paused manager api");
     assert!(screen.shows("w: interrupted"), "{}", screen.plain());
     assert!(screen.shows("api: interrupted"), "{}", screen.plain());
@@ -14423,7 +14423,7 @@ fn agents_tab_pauses_and_resumes() {
     assert_eq!(escapes.len(), 2, "{escapes:?}");
 
     screen.esc();
-    screen.type_keys(b"P");
+    screen.type_keys(b"Z");
     screen.wait_for_text("resumed manager api");
     assert!(screen.shows("api: resumed"), "{}", screen.plain());
     assert_eq!(lab.run_state_of(&api), ("run".into(), None));
@@ -14509,7 +14509,7 @@ fn agents_tab_stops_after_a_confirm() {
     screen.esc();
     screen.type_keys(b"k");
     std::thread::sleep(std::time::Duration::from_millis(300));
-    screen.type_keys(b"p");
+    screen.type_keys(b"z");
     screen.wait_for_text("kept manager api stopped");
     assert_eq!(
         lab.run_state_of(&api),
@@ -14534,7 +14534,7 @@ fn agents_tab_stops_after_a_confirm() {
     assert!(screen.wait_for_exit().success());
 }
 
-/// On the assistant, `p` gets `in_scope`'s refusal, as `jeet manager pause
+/// On the assistant, `z` gets `in_scope`'s refusal, as `jeet manager pause
 /// assistant` does, and `x` asks to stop every task under it.
 #[cfg(unix)]
 #[test]
@@ -14550,7 +14550,7 @@ fn agents_tab_refuses_the_assistant_for_pause() {
     screen.wait_for_text("jeet · tasks");
     screen.type_keys(b"\t");
     screen.wait_for_text("└─ w");
-    screen.type_keys(b"p");
+    screen.type_keys(b"z");
     screen.wait_for_words("`jeet manager pause` is for a task under the assistant");
     assert_eq!(lab.run_state_of(&w), ("run".into(), None));
 
@@ -14749,7 +14749,7 @@ fn agents_tab_reads_worklog_and_reports() {
     screen.esc();
     screen.type_keys(b"j");
     std::thread::sleep(std::time::Duration::from_millis(300));
-    screen.type_keys(b"i");
+    screen.type_keys(b"I");
     let asked: i64 = lab
         .index()
         .query_row("SELECT MAX(id) FROM task_reports", [], |r| r.get(0))
@@ -16119,7 +16119,7 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
 }
 
 /// The agents tab answers, as the user, the question that climbed to
-/// them: `a` on the root opens it, the answer goes to the asker with a copy
+/// them: `y` on the root opens it, the answer goes to the asker with a copy
 /// to each node on its way, and once the tree is read again nothing is
 /// open. From a top-level task's pane, the tab will not answer.
 #[cfg(unix)]
@@ -16168,7 +16168,7 @@ fn agents_tab_answers_a_question_that_reached_you() {
     assert!(screen.shows("needs you 1"), "{plain}");
 
     // On the root, the question with the user.
-    screen.type_keys(b"a");
+    screen.type_keys(b"y");
     screen.wait_for_words(&format!(
         "#{id} question from task assistant/api/w · with you"
     ));
@@ -16191,7 +16191,7 @@ fn agents_tab_answers_a_question_that_reached_you() {
     // Once the tree is read again, nothing is open below the root.
     screen.esc();
     wait_until("the answered question to close in the tree", || {
-        screen.type_keys(b"a");
+        screen.type_keys(b"y");
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Drawn over the last status line, so matched by its start.
         screen.shows("no open question")
@@ -16215,7 +16215,7 @@ fn agents_tab_answers_a_question_that_reached_you() {
     screen.wait_for_text("jeet · tasks");
     screen.type_keys(b"\t");
     screen.wait_for_text("└─ ▾ api");
-    screen.type_keys(b"a");
+    screen.type_keys(b"y");
     screen.wait_for_words("the agents pane acts as you");
     screen.type_keys(b"q");
     assert!(screen.wait_for_exit().success());
@@ -16254,7 +16254,7 @@ fn agents_tab_refuses_an_answer_to_a_question_answered_meanwhile() {
     let mut screen = tasks_screen(&lab, &tmux);
     screen.type_keys(b"\t");
     screen.wait_for_words("needs you – question");
-    screen.type_keys(b"a");
+    screen.type_keys(b"y");
     screen.wait_for_words(&format!(
         "#{id} question from task assistant/api/w · with you"
     ));
