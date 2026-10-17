@@ -13,6 +13,7 @@
 mod command;
 mod desktop;
 mod route;
+pub mod scope;
 pub mod sender;
 
 use std::fs::{File, OpenOptions};
@@ -111,7 +112,7 @@ pub fn level(kind: TaskKind) -> NotifyLevel {
     match kind {
         TaskKind::Assistant => NotifyLevel::Assistant,
         TaskKind::Manager => NotifyLevel::Manager,
-        TaskKind::Work => NotifyLevel::Task,
+        TaskKind::Work | TaskKind::Setup => NotifyLevel::Task,
     }
 }
 
@@ -170,6 +171,29 @@ fn backend(name: &str, config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
     }
 }
 
+/// The backend names `via` may list.
+pub const BACKENDS: &[&str] = &["desktop", "command"];
+
+/// What in `[notify]` would send nothing where it was meant to: a `via`
+/// name jeet has no backend for, or `command` listed with no `[notify]
+/// command` to run. Sending skips either, with a warning, so this is for
+/// checking a config before it is used.
+pub fn check(config: &NotifyConfig) -> Result<()> {
+    for name in config.via() {
+        if !BACKENDS.contains(&name.as_str()) {
+            bail!(
+                "[notify] via: no backend `{name}`; {} has {}",
+                crate::setup::PRODUCT,
+                BACKENDS.join(", ")
+            );
+        }
+        if name == "command" && config.command().is_none() {
+            bail!("[notify] via lists `command`, but `[notify] command` is not set");
+        }
+    }
+    Ok(())
+}
+
 fn backends(config: &NotifyConfig) -> Vec<Box<dyn Notifier>> {
     config
         .via()
@@ -202,8 +226,19 @@ pub fn event_in(home: &Path, event: Event) {
         eprintln!("jeet: could not queue a notification: {e:#}");
         return;
     }
-    if !sender_running(home) {
+    // The test binary sends nothing: what it queues stays in the outbox,
+    // for its tests to read.
+    if !sender_running(home) && !cfg!(test) {
         when_no_sender(home);
+    }
+}
+
+/// What the outbox holds, for tests.
+#[cfg(test)]
+pub fn queued(home: &Path) -> Vec<Event> {
+    match lock_outbox(home) {
+        Ok(mut outbox) => read_all(&mut outbox).unwrap(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -580,6 +615,23 @@ fn one_line(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn every_backend_check_allows_is_one_jeet_sends_through() {
+        let config = NotifyConfig {
+            command: Some("page-me".into()),
+            ..NotifyConfig::default()
+        };
+        for name in BACKENDS {
+            assert!(backend(name, &config).is_some(), "{name}");
+        }
+        assert!(backend("slack", &config).is_none());
+        let unset = NotifyConfig {
+            via: Some(vec!["Desktop".into()]),
+            ..NotifyConfig::default()
+        };
+        assert!(check(&unset).is_err());
+    }
 
     #[test]
     fn text_is_flattened_and_cut() {

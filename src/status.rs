@@ -428,7 +428,7 @@ fn handle_hook(
                         }
                         manager::context::session_context(app, task, session_id, now).map(Some)
                     }
-                    (true, TaskKind::Work | TaskKind::Assistant) => {
+                    (true, TaskKind::Work | TaskKind::Assistant | TaskKind::Setup) => {
                         reports::brief_context(app, task).map(Some)
                     }
                 };
@@ -1188,7 +1188,9 @@ pub(crate) fn idle_agent<'a>(
         TaskKind::Assistant => {
             Box::new(assistant::SessionAgent::for_session(app, task, session_id))
         }
-        TaskKind::Work | TaskKind::Manager => Box::new(messages::TmuxAgent::new(app, task)),
+        TaskKind::Work | TaskKind::Manager | TaskKind::Setup => {
+            Box::new(messages::TmuxAgent::new(app, task))
+        }
     }
 }
 

@@ -39,6 +39,12 @@ says everything else on stderr.
   and `--done` give it a definition of done, shown to its agent each time a
   session starts. A `--repo` jeet does
   not have yet is cloned only if `repo.clone` is in `[assistant] allow`.
+- When the user asks you for a task, add `--for-user`: like one they make
+  themselves, its done and questions notify them at any depth. When they
+  ask you to keep a task quiet, `--quiet`, or `jeet task quiet <task>
+  [--off]` later: its done and questions then notify nobody, while what is
+  escalated or stuck still does. Both only on the user's word; both work on
+  `jeet manager new` too.
 - `jeet task send <task> "<message>"` gets a message to a task's agent:
   typed in when it is idle, queued until it stops when it is busy, its first
   prompt when it is not running.

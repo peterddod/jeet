@@ -11,9 +11,11 @@ use crate::config::NotifyLevel;
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{ReportKind, TaskKind, TaskRecord, TaskReportRecord, TaskState};
+use crate::link::Link;
 use crate::manager;
 use crate::manager::budget::{self, Limits, Threshold};
 use crate::messages::{self, Agent, Delivered, Sender, TmuxAgent};
+use crate::notify::scope::{self, Origin, Raise, Raised};
 use crate::notify::{self, Event, Why};
 use crate::permissions::{self, Caller};
 use crate::render::{self, Meta};
@@ -76,6 +78,8 @@ pub struct Source {
     to: Option<String>,
     /// Why it has nowhere to report to, when `to` is `None`.
     nowhere: String,
+    /// What decides whether the user is told of its reports.
+    origin: Origin,
 }
 
 impl Source {
@@ -86,11 +90,12 @@ impl Source {
             path: manager::tree_path(app, task)?,
             to: task.parent_id.clone(),
             nowhere: format!("{} has no parent to report to", manager::label(task)),
+            origin: Origin::task(app, task)?,
         })
     }
 
-    fn review(review: &ReviewRecord) -> Self {
-        Self {
+    fn review(app: &App, review: &ReviewRecord) -> Result<Self> {
+        Ok(Self {
             id: review.id.clone(),
             label: format!("review {}", review.label()),
             path: review.slug.clone(),
@@ -99,7 +104,8 @@ impl Source {
                 "review {} was not asked for by a task, so there is no one to report to",
                 review.label()
             ),
-        }
+            origin: Origin::review(app, review)?,
+        })
     }
 }
 
@@ -127,7 +133,7 @@ pub fn send_review(
     body: &str,
     may_start: bool,
 ) -> Result<(i64, Result<Delivered>)> {
-    send_from(app, &Source::review(review), kind, body, may_start)
+    send_from(app, &Source::review(app, review)?, kind, body, may_start)
 }
 
 fn send_from(
@@ -141,7 +147,44 @@ fn send_from(
     let id = app
         .db
         .insert_report(&src.id, &parent.id, kind, &body, now_secs())?;
+    if let Some(raise) = report_raise(src, id, kind, &body) {
+        scope::raise(app, &src.origin, raise);
+    }
     Ok((id, deliver(app, src, &parent, id, kind, &body, may_start)))
+}
+
+/// What the user may be told of report `id` from `src`: its asks and its
+/// done, as [`scope`] decides.
+fn report_raise(src: &Source, id: i64, kind: ReportKind, body: &str) -> Option<Raise> {
+    let (raised, what) = match kind {
+        ReportKind::Question => (Raised::Asked, "has a question"),
+        ReportKind::Blocked => (Raised::Asked, "is blocked"),
+        ReportKind::Done => (Raised::Done, "is done"),
+        ReportKind::Progress | ReportKind::Status => return None,
+    };
+    Some(Raise {
+        raised,
+        kind: kind.as_str(),
+        reference: Some(format!("r{id}")),
+        title: format!("jeet: {} {what} (#{id})", src.label),
+        subtitle: Some(src.path.clone()),
+        body: body.to_string(),
+        link: Some(Link::Report(id)),
+    })
+}
+
+/// What the user is told of report `id`, about `label` at `path`, being
+/// stuck.
+fn stuck_raise(id: i64, label: &str, path: &str, what: &str, body: &str) -> Raise {
+    Raise {
+        raised: Raised::Stuck,
+        kind: "stuck",
+        reference: Some(format!("r{id}")),
+        title: format!("jeet: {label} is stuck: {what}"),
+        subtitle: Some(path.to_string()),
+        body: body.to_string(),
+        link: Some(Link::Report(id)),
+    }
 }
 
 /// Whether a report of `kind` may start a session of the parent's: not
@@ -163,7 +206,7 @@ fn checked(app: &App, src: &Source, body: &str) -> Result<(TaskRecord, String)> 
     };
     match parent.kind {
         TaskKind::Assistant | TaskKind::Manager => {}
-        TaskKind::Work => {
+        TaskKind::Work | TaskKind::Setup => {
             bail!("only the assistant and managers take reports")
         }
     }
@@ -256,7 +299,7 @@ fn deliver_to_with<'a>(
         TaskKind::Assistant => assistant::deliver(app, text, may_start, meta).map(|(d, _)| d),
         // Typed into its idle pane, queued while it is busy, and started
         // only with `may_start`; otherwise held in its inbox.
-        TaskKind::Manager | TaskKind::Work => messages::deliver(
+        TaskKind::Manager | TaskKind::Work | TaskKind::Setup => messages::deliver(
             &tasks::task_dir(app, to),
             agent(may_start).as_ref(),
             text,
@@ -314,7 +357,7 @@ fn escalate_with(
     refuse_unless_held(app, &row, &holder)?;
     let to = match holder.kind {
         TaskKind::Assistant => None,
-        TaskKind::Manager | TaskKind::Work => {
+        TaskKind::Manager | TaskKind::Work | TaskKind::Setup => {
             let parent = holder
                 .parent_id
                 .as_deref()
@@ -334,18 +377,27 @@ fn escalate_with(
         .escalate_report(id, &holder.id, to_id, to.is_none())?;
     let Some(to) = to else {
         let (title, subtitle, body) = notification_for(&row, &asker.label(), &path);
-        notifier(Event {
-            why: Why::NeedsUser,
-            kind: row.kind.as_str().into(),
-            level: Some(asker.level()),
-            task: Some(asker.slug().to_string()),
-            reference: Some(format!("r{}", row.id)),
-            title,
-            subtitle: Some(subtitle),
-            body,
-            link: None,
-            only: Vec::new(),
-        });
+        // Whatever `[notify] events` says, as before it; only the quiet
+        // switch is asked, which lets an escalation through.
+        let wanted = asker
+            .origin(app)
+            .map_or(true, |o| scope::wanted(&o, Raised::Escalated));
+        if wanted {
+            notifier(Event {
+                why: Why::NeedsUser,
+                kind: row.kind.as_str().into(),
+                level: Some(asker.level()),
+                task: Some(asker.slug().to_string()),
+                // Not `r<id>`, which its reaching the assistant may have
+                // been told under: that one would swallow this.
+                reference: Some(format!("r{}/user", row.id)),
+                title,
+                subtitle: Some(subtitle),
+                body,
+                link: Some(crate::link::link_for(&Link::Report(row.id))),
+                only: Vec::new(),
+            });
+        }
         return Ok(Escalated {
             row,
             to: None,
@@ -361,6 +413,36 @@ fn escalate_with(
         &manager::label(&holder),
     );
     let delivered = deliver(&to, &text, wakes(row.kind));
+    // Reaching the assistant tells the user, as an ask from directly under
+    // it does, under the same `(why, r<id>)`; a step between managers
+    // does not.
+    if to.kind == TaskKind::Assistant {
+        let raise = Raise {
+            raised: Raised::Escalated,
+            kind: row.kind.as_str(),
+            reference: Some(format!("r{}", row.id)),
+            title: format!(
+                "jeet: {} {} (#{}), passed up to the assistant",
+                asker.label(),
+                match row.kind {
+                    ReportKind::Blocked => "is blocked",
+                    _ => "has a question",
+                },
+                row.id
+            ),
+            subtitle: Some(path.clone()),
+            body: row.body.clone(),
+            link: Some(Link::Report(row.id)),
+        };
+        match asker.origin(app) {
+            Ok(origin) => {
+                if let Some(event) = scope::event_for(app, &origin, raise) {
+                    notifier(event);
+                }
+            }
+            Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
+        }
+    }
     Ok(Escalated {
         row,
         to: Some(to),
@@ -572,7 +654,9 @@ pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
         Caller::Root => app.db.open_asks(Some(&manager::root(app)?.id)),
         Caller::Node(task) => match task.kind {
             TaskKind::Assistant | TaskKind::Manager => app.db.open_asks(Some(&task.id)),
-            TaskKind::Work => Ok(manager::open_ask(app, task)?.into_iter().collect()),
+            TaskKind::Work | TaskKind::Setup => {
+                Ok(manager::open_ask(app, task)?.into_iter().collect())
+            }
         },
         Caller::Review(review) => Ok(app
             .db
@@ -624,6 +708,13 @@ impl Asker {
         match self {
             Asker::Task(task) => &task.slug,
             Asker::Review(review) => &review.slug,
+        }
+    }
+
+    fn origin(&self, app: &App) -> Result<Origin> {
+        match self {
+            Asker::Task(task) => Origin::task(app, task),
+            Asker::Review(review) => Origin::review(app, review),
         }
     }
 
@@ -791,7 +882,14 @@ pub fn auto_status_review(
     if review.requested_by.is_none() || review.state == TaskState::Archived {
         return Ok(None);
     }
-    auto_status_from(app, &Source::review(review), event, body, since, done_since)
+    auto_status_from(
+        app,
+        &Source::review(app, review)?,
+        event,
+        body,
+        since,
+        done_since,
+    )
 }
 
 fn auto_status_from(
@@ -822,11 +920,51 @@ fn auto_status_from(
     else {
         return Ok(None);
     };
+    if event == StatusEvent::Ended {
+        let raise = stuck_raise(id, &src.label, &src.path, "ended without done", &body);
+        scope::raise(app, &src.origin, raise);
+    }
     let delivered = deliver(app, src, &parent, id, ReportKind::Status, &body, false);
     if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
     }
     Ok(Some((id, delivered)))
+}
+
+/// Tell the user of each blocked report still open after `[notify]
+/// stuck_blocked_mins`, once. Runs from `jeet watch`, as nothing else
+/// happens when a block just stays.
+pub fn sweep_stuck(app: &App, now: i64) -> Result<()> {
+    if !app.config.notify.events() {
+        return Ok(());
+    }
+    let after = app.config.notify.stuck_blocked_mins() as i64 * 60;
+    for row in app.db.open_asks(None)? {
+        if row.kind != ReportKind::Blocked || now - row.at < after {
+            continue;
+        }
+        let Some(asker) = Asker::find(app, &row.task_id)? else {
+            continue;
+        };
+        if asker.archived() {
+            continue;
+        }
+        // Claimed last: one that cannot be told now is tried again.
+        let (path, origin) = match (asker.path(app), asker.origin(app)) {
+            (Ok(path), Ok(origin)) => (path, origin),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("jeet: could not tell the user #{} is stuck: {e:#}", row.id);
+                continue;
+            }
+        };
+        if !app.db.claim_stuck(row.id)? {
+            continue;
+        }
+        let what = format!("blocked for {}m", (now - row.at) / 60);
+        let raise = stuck_raise(row.id, &asker.label(), &path, &what, &row.body);
+        scope::raise(app, &origin, raise);
+    }
+    Ok(())
 }
 
 /// Tell the parents of tasks idle longer than `[managers] idle_report_mins`,
@@ -989,7 +1127,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     let to = manager::label(&parent);
     let own = match task.kind {
         TaskKind::Manager => "the tasks below you",
-        TaskKind::Work | TaskKind::Assistant => "this task",
+        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => "this task",
     };
     lines.push(format!(
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
@@ -1689,6 +1827,170 @@ mod tests {
         answered.copies.iter().map(|(to, _)| to.as_str()).collect()
     }
 
+    /// What jeet itself has queued for the user: (why, kind, title).
+    fn told(app: &App) -> Vec<(Why, String, String)> {
+        notify::queued(&app.home)
+            .into_iter()
+            .map(|e| (e.why, e.kind, e.title))
+            .collect()
+    }
+
+    fn clear_told(app: &App) {
+        std::fs::write(notify::outbox_path(&app.home), "").unwrap();
+    }
+
+    #[test]
+    fn a_task_under_the_assistant_tells_the_user_its_asks_and_done() {
+        let (_dir, app, w) = lab();
+        let _ = send(&app, &w, ReportKind::Progress, "half way", false).unwrap();
+        assert!(told(&app).is_empty(), "progress tells nobody");
+        let (q, _) = send(&app, &w, ReportKind::Question, "which DB?", false).unwrap();
+        let (b, _) = send(&app, &w, ReportKind::Blocked, "no key", false).unwrap();
+        let (d, _) = send(&app, &w, ReportKind::Done, "PR #7", false).unwrap();
+        assert_eq!(
+            told(&app),
+            [
+                (
+                    Why::NeedsUser,
+                    "question".into(),
+                    format!("jeet: task w has a question (#{q})")
+                ),
+                (
+                    Why::NeedsUser,
+                    "blocked".into(),
+                    format!("jeet: task w is blocked (#{b})")
+                ),
+                (
+                    Why::Finished,
+                    "done".into(),
+                    format!("jeet: task w is done (#{d})")
+                ),
+            ]
+        );
+        let first = &notify::queued(&app.home)[0];
+        assert_eq!(first.reference, Some(format!("r{q}")));
+        assert_eq!(first.link, Some(format!("jeet://report/{q}")));
+        assert_eq!(first.level, Some(NotifyLevel::Task));
+        assert_eq!(first.task.as_deref(), Some("w"));
+        assert_eq!(first.body, "which DB?");
+
+        // Quiet, its done and asks tell nobody.
+        clear_told(&app);
+        app.db.set_task_quiet("w", true).unwrap();
+        let _ = send(&app, &w, ReportKind::Question, "again?", false).unwrap();
+        let _ = send(&app, &w, ReportKind::Done, "PR #8", false).unwrap();
+        assert!(told(&app).is_empty());
+    }
+
+    #[test]
+    fn deeper_down_only_what_the_user_started_tells() {
+        let (_dir, mut app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        assert!(told(&app).is_empty());
+
+        app.db
+            .set_task_started_by("ww", crate::db::tasks::STARTED_BY_USER)
+            .unwrap();
+        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        let kinds: Vec<String> = told(&app).into_iter().map(|t| t.1).collect();
+        assert_eq!(kinds, ["question", "done"]);
+
+        // A manager's own id as the starter is not the user.
+        clear_told(&app);
+        app.db.set_task_started_by("ww", "sub").unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        assert!(told(&app).is_empty());
+
+        // `[notify] events = false` tells nothing new.
+        let w = app.db.get_task("api").unwrap().unwrap();
+        app.config.notify.events = Some(false);
+        let _ = send(&app, &w, ReportKind::Done, "done", false).unwrap();
+        assert!(told(&app).is_empty());
+    }
+
+    #[test]
+    fn a_review_goes_by_who_asked_for_it() {
+        let (_dir, app) = ask_lab();
+        let root = assistant::ensure(&app).unwrap();
+        let review = |requested_by: Option<&str>| {
+            let mut r = ReviewRecord::new("rv".into(), "api-7".into(), "github.com/a/api", 7, 0);
+            r.requested_by = requested_by.map(str::to_string);
+            Origin::review(&app, &r).unwrap()
+        };
+        let by_root = review(Some(&root.id));
+        assert!(by_root.top_level && !by_root.user_started);
+        assert_eq!(by_root.level, Some(NotifyLevel::Review));
+        let by_user = review(None);
+        assert!(!by_user.top_level && by_user.user_started);
+        let by_manager = review(Some("sub"));
+        assert!(!by_manager.top_level && !by_manager.user_started);
+        assert!(!scope::wanted(&by_manager, Raised::Done));
+        assert!(scope::wanted(&by_manager, Raised::Stuck));
+    }
+
+    #[test]
+    fn an_end_without_done_is_stuck_at_any_depth_and_quiet_or_not() {
+        let (_dir, app) = ask_lab();
+        app.db.set_task_quiet("ww", true).unwrap();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = auto_status(
+            &app,
+            &ww,
+            StatusEvent::Ended,
+            "ended without reporting done",
+            5,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let queued = notify::queued(&app.home);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].why, Why::Stuck);
+        assert_eq!(queued[0].kind, "stuck");
+        assert_eq!(queued[0].reference, Some(format!("r{id}")));
+        assert_eq!(
+            queued[0].title,
+            "jeet: task ww is stuck: ended without done"
+        );
+        // Idle is not stuck.
+        clear_told(&app);
+        auto_status(&app, &ww, StatusEvent::Idle, "idle 40m", 6, 0).unwrap();
+        assert!(told(&app).is_empty());
+    }
+
+    #[test]
+    fn a_block_left_open_is_stuck_once() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        // A question is not a block.
+        let ask = TaskRecord {
+            kind: TaskKind::Work,
+            ..task("q", Some("api".into()))
+        };
+        app.db.insert_task(&ask).unwrap();
+        let _ = send(&app, &ask, ReportKind::Question, "why?", false).unwrap();
+        assert!(told(&app).is_empty());
+
+        sweep_stuck(&app, at + 29 * 60).unwrap();
+        assert!(told(&app).is_empty());
+        sweep_stuck(&app, at + 31 * 60).unwrap();
+        assert_eq!(
+            told(&app),
+            [(
+                Why::Stuck,
+                "stuck".into(),
+                "jeet: task ww is stuck: blocked for 31m".into()
+            )]
+        );
+        sweep_stuck(&app, at + 90 * 60).unwrap();
+        assert_eq!(told(&app).len(), 1, "told once");
+    }
+
     #[test]
     fn a_question_climbs_to_the_user_and_each_holder_gets_it_fenced() {
         let (_dir, app) = ask_lab();
@@ -1725,7 +2027,17 @@ mod tests {
         );
         assert_eq!(sent[1].0, "assistant");
         assert!(sent[1].1.contains("via=\"manager api\""), "{}", sent[1].1);
-        assert!(notified.borrow().is_empty(), "nothing has reached the user");
+        // Between managers nothing; reaching the assistant, once.
+        let passed: Vec<_> = notified.borrow_mut().drain(..).collect();
+        assert_eq!(
+            passed,
+            [(
+                format!("jeet: task ww has a question (#{id}), passed up to the assistant"),
+                Some("assistant/api/sub/ww".to_string()),
+                "keep v1?".to_string(),
+                true
+            )]
+        );
 
         // Passed up the root, the user is told, once, and holds it.
         let up = escalate_with(
@@ -1745,7 +2057,7 @@ mod tests {
                 format!("jeet: task ww asks you (#{id})"),
                 Some("assistant/api/sub/ww".to_string()),
                 "keep v1?".to_string(),
-                false
+                true
             )]
         );
         let refused = escalate_with(

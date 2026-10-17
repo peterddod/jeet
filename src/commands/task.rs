@@ -14,7 +14,7 @@ use crate::cli::Delegation;
 use crate::config::PrMode;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
-use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
+use crate::db::tasks::{NotifyFlags, TaskKind, TaskRecord, TaskState, STARTED_BY_USER};
 use crate::identity;
 use crate::manager::{self, run};
 use crate::messages::{self, Delivered, Inbox, Sender};
@@ -52,6 +52,7 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         Ok(prompt) => prompt,
         Err(e) => bail!("--prompt: {e:#}"),
     };
+    let flags = notify_flags(app, &caller, d)?;
     // The user's task is top-level unless given a parent; what the
     // assistant or a manager makes reports to it (M12).
     let plan = match (&caller, &d.parent) {
@@ -93,6 +94,7 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         },
     )?;
     warn_all(&created.warnings);
+    set_notify_flags(app, &created.task.id, &flags)?;
     // Before its agent can start, which reads it.
     if args.pr.is_some() {
         app.db.set_task_pr(&created.task.id, args.pr)?;
@@ -112,6 +114,75 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         Some(prompt) => start_new(app, &created.task, &prompt),
         None => Ok(()),
     }
+}
+
+/// Who starts the task `caller` makes, and whether it is quiet, as `d`
+/// asks: checked before it is made, so a refusal makes nothing. The user
+/// at their own terminal starts it, and so does the assistant with
+/// `--for-user`; anyone else is recorded by its task's id.
+pub(super) fn notify_flags(app: &App, caller: &Caller, d: &Delegation) -> Result<NotifyFlags> {
+    let user = *caller == Caller::User && permissions::at_terminal(app)?;
+    if (d.for_user || d.quiet) && !(user || *caller == Caller::Root) {
+        bail!("--for-user and --quiet are for the user, at their own terminal, and the assistant");
+    }
+    let started_by = match caller {
+        _ if user || d.for_user => Some(STARTED_BY_USER.to_string()),
+        Caller::Root => Some(manager::root(app)?.id),
+        Caller::Node(task) => Some(task.id.clone()),
+        // A top-level task's agent.
+        Caller::User | Caller::Review(_) => identity::identify(app)?.task.map(|t| t.id),
+    };
+    Ok(NotifyFlags {
+        started_by,
+        quiet: d.quiet,
+    })
+}
+
+/// Record [`notify_flags`] on task `id`, made a moment ago.
+pub(super) fn set_notify_flags(app: &App, id: &str, flags: &NotifyFlags) -> Result<()> {
+    if let Some(by) = &flags.started_by {
+        app.db.set_task_started_by(id, by)?;
+    }
+    if flags.quiet {
+        app.db.set_task_quiet(id, true)?;
+    }
+    Ok(())
+}
+
+/// `jeet task quiet`: keep task `name`'s done and questions from notifying
+/// the user, or (`on` false) let them again. Only the user, at their own
+/// terminal, or the assistant: a quiet task is the user's word.
+pub fn quiet(app: &App, name: &str, on: bool) -> Result<()> {
+    let caller = permissions::caller(app)?;
+    let allowed = match &caller {
+        Caller::Root => true,
+        Caller::User => permissions::at_terminal(app)?,
+        Caller::Node(_) | Caller::Review(_) => false,
+    };
+    if !allowed {
+        bail!("only the user, at their own terminal, or the assistant makes a task quiet");
+    }
+    let task = permissions::resolve(
+        app,
+        &caller,
+        &Target::Key {
+            key: name.to_string(),
+            exact: false,
+        },
+    )?;
+    if task.kind == TaskKind::Assistant {
+        bail!("the assistant is not quieted; its tasks are");
+    }
+    app.db.set_task_quiet(&task.id, on)?;
+    match on {
+        true => eprintln!(
+            "jeet: task {} is quiet: its done and questions do not notify you; what is \
+             escalated or stuck still does",
+            task.slug
+        ),
+        false => eprintln!("jeet: task {} notifies you again", task.slug),
+    }
+    Ok(())
 }
 
 /// How the start of a new task's agent went.
@@ -802,10 +873,14 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
             unanchored.push(task.slug.clone());
         }
         // A manager is said to be one (M29).
-        let kind = match task.kind {
+        let mut kind = match task.kind {
             TaskKind::Manager => " (manager)",
             _ => "",
-        };
+        }
+        .to_string();
+        if app.db.task_notify_flags(&task.id)?.quiet {
+            kind.push_str(" (quiet)");
+        }
         let name = name.unwrap_or("-");
         println!(
             "{:<28} {:<28} {:<10} {:<24} {name}{kind}",

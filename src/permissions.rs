@@ -287,7 +287,7 @@ const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 pub const MAX_DEFAULT_BRANCHES: usize = 8;
 
 /// Commands that only read, pre-approved whatever is allowed.
-const READ_ONLY: &[&str] = &[
+pub const READ_ONLY: &[&str] = &[
     "jeet ls",
     "jeet prs",
     "jeet path",
@@ -437,7 +437,7 @@ fn own_list(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
     Ok(match node.kind {
         TaskKind::Assistant => root_list(app),
         TaskKind::Manager => known(app.db.grants(&node.id)?.iter().map(String::as_str)),
-        TaskKind::Work => Vec::new(),
+        TaskKind::Work | TaskKind::Setup => Vec::new(),
     })
 }
 
@@ -511,6 +511,7 @@ pub fn default_grant(kind: TaskKind, policy: &ManagerPolicy) -> Result<Vec<&'sta
         TaskKind::Work => policy.worker_default.clone(),
         TaskKind::Manager => policy.manager_default.clone(),
         TaskKind::Assistant => bail!("the assistant is no task to grant anything to"),
+        TaskKind::Setup => bail!("the setup agent is no task to grant anything to"),
     })
 }
 
@@ -691,9 +692,10 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         // Lists what is staged. Applying is the user's at a terminal (the
         // command refuses any agent's session too); discarding drops what
         // the user has not seen yet.
-        Commands::Setup { command } => match command {
-            SetupCommands::Status => Gate::Free,
-            SetupCommands::Apply | SetupCommands::Discard => Gate::Interactive,
+        Commands::Setup { command, .. } => match command {
+            Some(SetupCommands::Status) => Gate::Free,
+            // The chat, in a tmux session for a person to attach to.
+            None | Some(SetupCommands::Apply | SetupCommands::Discard) => Gate::Interactive,
         },
         // A poll hands events on as the user's rules say; installing one
         // changes what runs on the user's machine.
@@ -839,6 +841,14 @@ fn task_gate(command: &TaskCommands) -> Gate {
         TaskCommands::Restart { name, .. } => needs("task.open", format!("restarted task {name}")),
         // The user's word, at a terminal: never an agent's.
         TaskCommands::Adopt { .. } => Gate::Interactive,
+        // As `task new --quiet` sets it.
+        TaskCommands::Quiet { name, off } => needs(
+            "task.create",
+            match off {
+                true => format!("let task {name} notify you again"),
+                false => format!("made task {name} quiet"),
+            },
+        ),
         TaskCommands::Archive {
             name, recursive, ..
         } => needs(
@@ -1085,7 +1095,7 @@ pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
                 }
             }
         }
-        TaskKind::Work | TaskKind::Assistant => {}
+        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => {}
     }
     Ok(deny)
 }
@@ -1556,9 +1566,9 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         Commands::Show { .. } => Some(Scope::Listed),
         // Setup is the user's: a task with a parent only reads what is
         // staged.
-        Commands::Setup { command } => match command {
-            SetupCommands::Status => Some(Scope::NoTarget),
-            SetupCommands::Apply | SetupCommands::Discard => None,
+        Commands::Setup { command, .. } => match command {
+            Some(SetupCommands::Status) => Some(Scope::NoTarget),
+            None | Some(SetupCommands::Apply | SetupCommands::Discard) => None,
         },
         Commands::Worktree(WorktreeArgs { command, task }) => {
             let current = Target::Current(task.clone());
@@ -1580,6 +1590,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             TaskCommands::Restart { name, .. } => verb(Verb::TaskOpen, key(name)),
             // Only the user vouches for an agent.
             TaskCommands::Adopt { .. } => None,
+            // Only the user or the assistant quiets a task.
+            TaskCommands::Quiet { .. } => None,
             TaskCommands::Archive {
                 name, recursive, ..
             } => verb(
@@ -2108,6 +2120,8 @@ mod tests {
             &["notify", "serve"],
             &["notify", "install"],
             &["notify", "uninstall"],
+            &["setup"],
+            &["setup", "--new"],
             &["setup", "apply"],
             &["setup", "discard"],
         ] {
@@ -2949,6 +2963,7 @@ mod tests {
             (&["task", "interrupt", "x"], true),
             (&["task", "restart", "x"], true),
             (&["task", "adopt", "x"], false),
+            (&["task", "quiet", "x"], false),
             (&["task", "archive", "x"], true),
             (&["task", "unarchive", "x"], true),
             (&["task", "delete", "x"], true),
@@ -2986,6 +3001,7 @@ mod tests {
             (&["watch", "uninstall"], false),
             (&["watch", "status"], true),
             (&["doctor", "wake"], false),
+            (&["setup"], false),
             (&["setup", "status"], true),
             (&["setup", "apply"], false),
             (&["setup", "discard"], false),

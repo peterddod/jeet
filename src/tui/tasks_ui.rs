@@ -1120,7 +1120,7 @@ pub const TAG: usize = 9;
 pub fn tag(kind: TaskKind) -> (String, Color) {
     let (word, color) = match kind {
         TaskKind::Manager => ("manager", Color::Indexed(208)),
-        TaskKind::Work | TaskKind::Assistant => ("task", Color::Indexed(147)),
+        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => ("task", Color::Indexed(147)),
     };
     let left = (TAG - word.width()) / 2;
     let right = TAG - word.width() - left;

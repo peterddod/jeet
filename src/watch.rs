@@ -47,7 +47,7 @@ use crate::db::tasks::{TaskKind, TaskRecord, TaskState};
 use crate::github::{self, MyPr, Notification, Notifications, PullState};
 use crate::manager::run;
 use crate::messages::{self, Delivered, Sender, TmuxAgent};
-use crate::notify;
+use crate::notify::{self, scope};
 use crate::render::{Class, Meta};
 use crate::reports;
 use crate::store;
@@ -296,6 +296,14 @@ pub struct PrCheck {
     pub sha: String,
     /// GitHub's checks rollup; empty without any checks.
     pub state: String,
+    /// Checks that came to fail in a row, with none passing between: the
+    /// PR is stuck at `[notify] stuck_ci_failures`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failures: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn pr_key(repo: &str, number: u64) -> String {
@@ -538,7 +546,7 @@ pub fn diff_checks(
     for pr in prs {
         let key = pr_key(&pr.repo, pr.number);
         let state = pr.checks.clone().unwrap_or_default();
-        let current = PrCheck {
+        let mut current = PrCheck {
             repo: pr.repo.clone(),
             number: pr.number,
             title: pr.title.clone(),
@@ -546,6 +554,7 @@ pub fn diff_checks(
             branch: pr.branch.clone(),
             sha: pr.sha.clone(),
             state: state.clone(),
+            failures: 0,
         };
         let kind = match state.as_str() {
             "SUCCESS" => Some(EventKind::CiPassed),
@@ -558,6 +567,16 @@ pub fn diff_checks(
             // A PR opened since.
             Some(None) => true,
             Some(Some(was)) => was.sha != current.sha || was.state != current.state,
+        };
+        let failures = before
+            .and_then(|b| b.get(&key))
+            .map_or(0, |was| was.failures);
+        current.failures = match (kind, changed) {
+            // Failing when first looked at counts, though it is not told.
+            (Some(EventKind::CiFailed), false) if before.is_none() => 1,
+            (Some(EventKind::CiFailed), true) => failures.saturating_add(1),
+            (Some(EventKind::CiPassed), _) => 0,
+            _ => failures,
         };
         if let (Some(kind), true) = (kind, changed) {
             let short: String = pr.sha.chars().take(7).collect();
@@ -1027,6 +1046,53 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     sent
 }
 
+/// Tell the user of each of the user's PRs whose checks just failed for
+/// the `[notify] stuck_ci_failures`th time in a row: stuck, at any depth.
+/// Once per run of failures, as only the failure that reaches it counts.
+fn tell_stuck_ci(app: &App, events: &[Event], state: &WatchState) {
+    let at = app.config.notify.stuck_ci_failures();
+    for event in events {
+        let (EventKind::CiFailed, Some(number)) = (event.kind, event.number) else {
+            continue;
+        };
+        let key = pr_key(&event.repo, number);
+        let Some(check) = state.checks.as_ref().and_then(|c| c.get(&key)) else {
+            continue;
+        };
+        if check.failures != at {
+            continue;
+        }
+        let place = event.place();
+        let raise = scope::Raise {
+            raised: scope::Raised::Stuck,
+            kind: "stuck",
+            reference: Some(format!("ci:{key}@{}", check.sha)),
+            title: format!("jeet: {place} is stuck: CI failed {at} times in a row"),
+            subtitle: Some(event.title.clone()).filter(|t| !t.is_empty()),
+            body: event.reason.clone(),
+            link: None,
+        };
+        match pr_origin(app, event) {
+            Ok(origin) => {
+                if let Some(mut e) = scope::event_for(app, &origin, raise) {
+                    e.link = Some(event.url.clone()).filter(|u| notify::openable_url(u));
+                    notify::event(app, e);
+                }
+            }
+            Err(e) => eprintln!("jeet: could not tell the user {place} is stuck: {e:#}"),
+        }
+    }
+}
+
+/// Who a PR is stuck for: the task that has it, else nobody in particular
+/// (stuck tells at any depth either way).
+fn pr_origin(app: &App, event: &Event) -> Result<scope::Origin> {
+    match owning_task(app, event)? {
+        Some(task) => scope::Origin::task(app, &task),
+        None => Ok(scope::Origin::nobody()),
+    }
+}
+
 /// Whether an event delivered as `delivered` is notified as well: only
 /// when its agent could not be started. Paused, or waiting on `max_live`,
 /// it is not lost: it gets it once resumed or started.
@@ -1215,11 +1281,16 @@ pub fn run_once(app: &App) -> Result<()> {
     let mut state = load_state(&path);
     let polled = poll(&Gh { dir: &app.home }, &watch, &mut state, now);
     let sent = dispatch(app, &app.config.assistant.rules, &polled.events);
+    tell_stuck_ci(app, &polled.events, &state);
     state.last_run = Some(now_secs());
     save_state(&path, &state)?;
     // No event fires when a task has sat idle too long; each poll looks.
     if let Err(e) = reports::sweep_idle(app, now_secs()) {
         eprintln!("jeet: warning: {e:#}");
+    }
+    // Nor when a block just stays.
+    if let Err(e) = reports::sweep_stuck(app, now_secs()) {
+        eprintln!("jeet: warning: could not look for stuck blocks: {e:#}");
     }
     // A reviewed PR merged or closed archives its review, once idle.
     match crate::review::sweep(app) {
@@ -1825,6 +1896,74 @@ mod tests {
         poll(&fake, &watch, &mut state, 1000);
         let polled = poll(&fake, &watch, &mut state, 2000);
         assert_eq!(kinds(&polled.events), [(EventKind::Mention, Some(7))]);
+    }
+
+    #[test]
+    fn failures_in_a_row_are_counted_until_checks_pass() {
+        let first = diff_checks(None, &[pr("acme/api", 1, "z", Some("FAILURE"))], 0).checks;
+        assert_eq!(
+            first["acme/api#1"].failures, 1,
+            "failing when first seen counts"
+        );
+        let mut state = diff_checks(None, &[pr("acme/api", 1, "a", Some("PENDING"))], 0).checks;
+        let mut step = |sha: &str, checks: &str| {
+            state = diff_checks(Some(&state), &[pr("acme/api", 1, sha, Some(checks))], 0).checks;
+            state["acme/api#1"].failures
+        };
+        assert_eq!(step("a", "FAILURE"), 1);
+        // The same verdict again is no new failure.
+        assert_eq!(step("a", "FAILURE"), 1);
+        assert_eq!(step("b", "PENDING"), 1);
+        assert_eq!(step("b", "FAILURE"), 2);
+        assert_eq!(step("c", "ERROR"), 3);
+        assert_eq!(step("c", "SUCCESS"), 0);
+        assert_eq!(step("d", "FAILURE"), 1);
+    }
+
+    #[test]
+    fn the_failure_that_reaches_stuck_ci_failures_tells_the_user_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = App {
+            config: crate::config::load_or_create(&home).unwrap(),
+            db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            home,
+        };
+        let mut state = WatchState::default();
+        let mut failures = |n: u32| {
+            let mut checks = BTreeMap::new();
+            let mut check = diff_checks(None, &[pr("acme/api", 1, "abc", Some("FAILURE"))], 0)
+                .checks
+                .remove("acme/api#1")
+                .unwrap();
+            check.failures = n;
+            checks.insert("acme/api#1".to_string(), check);
+            state.checks = Some(checks);
+            let failed = Event {
+                url: "https://github.com/acme/api/pull/1".into(),
+                reason: "checks failed on abc".into(),
+                number: Some(1),
+                ..event(EventKind::CiFailed, "acme/api")
+            };
+            tell_stuck_ci(&app, &[failed], &state);
+            notify::queued(&app.home)
+        };
+        assert!(failures(1).is_empty());
+        let told = failures(2);
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].why, notify::Why::Stuck);
+        assert_eq!(
+            told[0].title,
+            "jeet: acme/api #1 is stuck: CI failed 2 times in a row"
+        );
+        assert_eq!(told[0].reference.as_deref(), Some("ci:acme/api#1@abc"));
+        assert_eq!(
+            told[0].link.as_deref(),
+            Some("https://github.com/acme/api/pull/1")
+        );
+        assert_eq!(told[0].task, None);
+        // Past it, no more.
+        assert_eq!(failures(3).len(), 1);
     }
 
     #[test]

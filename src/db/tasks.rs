@@ -23,6 +23,9 @@ pub enum TaskKind {
     /// A node below the assistant that delegates rather than codes: it has
     /// children of its own and holds its worktrees read-only.
     Manager,
+    /// The setup agent (`jeet setup`): there is one, kept out of the tasks
+    /// list like the assistant; see [`crate::setup`].
+    Setup,
 }
 
 impl TaskKind {
@@ -31,6 +34,7 @@ impl TaskKind {
             TaskKind::Work => "work",
             TaskKind::Assistant => "assistant",
             TaskKind::Manager => "manager",
+            TaskKind::Setup => "setup",
         }
     }
 
@@ -39,6 +43,7 @@ impl TaskKind {
             "work" => Ok(TaskKind::Work),
             "assistant" => Ok(TaskKind::Assistant),
             "manager" => Ok(TaskKind::Manager),
+            "setup" => Ok(TaskKind::Setup),
             other => Err(bad_enum("kind", other)),
         }
     }
@@ -331,6 +336,25 @@ pub struct MoveRows {
     /// Each node held by a setter off the new chain: its id, that setter,
     /// and the one it gets.
     pub setters: Vec<(String, Setter, Setter)>,
+}
+
+/// `started_by` of a task the user started.
+pub const STARTED_BY_USER: &str = "user";
+
+/// What decides whether a task's own events tell the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotifyFlags {
+    /// [`STARTED_BY_USER`], the id of the task that made it, or `None` for
+    /// one made before jeet kept it.
+    pub started_by: Option<String>,
+    /// Its done and questions do not notify (`jeet task quiet`).
+    pub quiet: bool,
+}
+
+impl NotifyFlags {
+    pub fn user_started(&self) -> bool {
+        self.started_by.as_deref() == Some(STARTED_BY_USER)
+    }
 }
 
 const TASK_COLUMNS: &str = "id, slug, name, project, kind, state, created_at, last_activity, \
@@ -921,7 +945,7 @@ impl Database {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {TASK_COLUMNS} FROM tasks
-             WHERE (?1 IS NULL OR state = ?1) AND kind != 'assistant'
+             WHERE (?1 IS NULL OR state = ?1) AND kind NOT IN ('assistant', 'setup')
              ORDER BY last_activity DESC, created_at DESC, slug"
         ))?;
         let rows = stmt.query_map(params![state.map(TaskState::as_str)], task_from_row)?;
@@ -958,6 +982,69 @@ impl Database {
             })
             .optional()?;
         Ok(pr.flatten().as_deref().and_then(PrMode::parse))
+    }
+
+    /// The setup agent's row, once it has one.
+    pub fn get_setup_task(&self) -> Result<Option<TaskRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE kind = 'setup'"),
+                [],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Record who started a task: [`STARTED_BY_USER`], or the id of the
+    /// task that made it.
+    pub fn set_task_started_by(&self, id: &str, by: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE tasks SET started_by = ?2 WHERE id = ?1",
+            params![id, by],
+        )?;
+        Ok(())
+    }
+
+    /// Make a task quiet, or not (`jeet task quiet`).
+    pub fn set_task_quiet(&self, id: &str, quiet: bool) -> Result<()> {
+        let changed = self.conn().execute(
+            "UPDATE tasks SET quiet = ?2 WHERE id = ?1",
+            params![id, quiet],
+        )?;
+        if changed == 0 {
+            bail!("there is no task {id}");
+        }
+        Ok(())
+    }
+
+    /// Who started a task and whether it is quiet; the defaults for one
+    /// that is gone.
+    pub fn task_notify_flags(&self, id: &str) -> Result<NotifyFlags> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT started_by, quiet FROM tasks WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(NotifyFlags {
+                        started_by: row.get(0)?,
+                        quiet: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Claim blocked report `id` to be told of as stuck: true only the
+    /// first time, so of two sweeps at once one tells.
+    pub fn claim_stuck(&self, id: i64) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE task_reports SET stuck_told = 1 WHERE id = ?1 AND stuck_told = 0",
+            params![id],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {
@@ -2127,6 +2214,28 @@ mod tests {
         assert_eq!(db.get_task("a").unwrap(), Some(assistant));
         let mut second = task("b", "assistant-2", 1);
         second.kind = TaskKind::Assistant;
+        assert!(db.insert_task(&second).is_err());
+    }
+
+    #[test]
+    fn there_is_one_setup_agent_and_it_is_never_listed() {
+        let (_dir, db) = open();
+        assert!(db.get_setup_task().unwrap().is_none());
+        let mut setup = task("s", "setup", 50);
+        setup.kind = TaskKind::Setup;
+        db.insert_task(&setup).unwrap();
+        db.insert_task(&task("w", "work", 10)).unwrap();
+        assert_eq!(db.get_setup_task().unwrap(), Some(setup.clone()));
+        let listed: Vec<String> = db
+            .list_tasks(None)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(listed, ["work"]);
+        assert_eq!(db.get_task("s").unwrap(), Some(setup));
+        let mut second = task("b", "setup-2", 1);
+        second.kind = TaskKind::Setup;
         assert!(db.insert_task(&second).is_err());
     }
 

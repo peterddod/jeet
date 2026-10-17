@@ -637,6 +637,33 @@ fn parse_current_window(line: &str, name: &str) -> Option<(String, Option<String
     Some((id.to_string(), key))
 }
 
+/// Split the agent's pane of session `name` and run `argv` beside it, in
+/// `cwd`, with `env` set in it (an empty value blanks what the session
+/// has), leaving the agent's pane selected. `argv` is run directly, never
+/// through a shell.
+pub fn split_window(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]) -> Result<()> {
+    if argv.is_empty() {
+        bail!("nothing to run in tmux session {name}");
+    }
+    let recorded = recorded_agent_pane(name);
+    let pane = pane_or_first_window(name, recorded.trim());
+    let mut cmd = command();
+    cmd.args(["split-window", "-d", "-h", "-t", &pane, "-c"])
+        .arg(cwd);
+    for (key, value) in env {
+        cmd.arg("-e").arg(format!("{key}={value}"));
+    }
+    cmd.arg("--").args(argv).stdin(Stdio::null());
+    let output = cmd.bounded_output().context("run tmux")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not split a pane in session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Make window `id` the one its session shows.
 pub fn select_window(id: &str) -> Result<()> {
     let output = command()
