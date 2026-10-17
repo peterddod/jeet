@@ -13,6 +13,7 @@
 mod command;
 mod desktop;
 mod route;
+pub mod scope;
 pub mod sender;
 
 use std::fs::{File, OpenOptions};
@@ -202,8 +203,19 @@ pub fn event_in(home: &Path, event: Event) {
         eprintln!("jeet: could not queue a notification: {e:#}");
         return;
     }
-    if !sender_running(home) {
+    // The test binary sends nothing: what it queues stays in the outbox,
+    // for its tests to read.
+    if !sender_running(home) && !cfg!(test) {
         when_no_sender(home);
+    }
+}
+
+/// What the outbox holds, for tests.
+#[cfg(test)]
+pub fn queued(home: &Path) -> Vec<Event> {
+    match lock_outbox(home) {
+        Ok(mut outbox) => read_all(&mut outbox).unwrap(),
+        Err(_) => Vec::new(),
     }
 }
 

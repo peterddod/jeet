@@ -10,6 +10,8 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::link;
+
 use super::{
     one_line, openable_url, run, Event, Invocation, Notifier, Tokens, BODY_MAX, TITLE_MAX,
 };
@@ -22,6 +24,19 @@ impl Notifier for Desktop {
     }
 
     fn send(&self, event: &Event, _: &dyn Tokens) -> Result<()> {
+        // A jeet:// link opens nothing until its handler is installed.
+        let unhandled = event
+            .link
+            .as_deref()
+            .is_some_and(|u| link::parse(u).is_ok())
+            && !link::handler::installed();
+        let event = &match unhandled {
+            true => Event {
+                link: None,
+                ..event.clone()
+            },
+            false => event.clone(),
+        };
         let Some(run_it) = invocation(event, os(), on_path) else {
             bail!("no notifier found (terminal-notifier, osascript or notify-send)");
         };
@@ -49,7 +64,11 @@ fn invocation(event: &Event, os: Os, found: impl Fn(&str) -> bool) -> Option<Inv
     let title = one_line(&event.title, TITLE_MAX);
     let subtitle = event.subtitle.as_deref().map(|s| one_line(s, TITLE_MAX));
     let body = one_line(&event.body, BODY_MAX);
-    let url = event.link.as_deref().filter(|u| openable_url(u));
+    // A web page, or a jeet:// link `jeet open` takes, parsed strictly.
+    let url = event
+        .link
+        .as_deref()
+        .filter(|u| openable_url(u) || link::parse(u).is_ok());
 
     let argv = match os {
         Os::MacOs if found("terminal-notifier") => {
@@ -247,5 +266,23 @@ mod tests {
         assert_eq!(defuse("(a, b)"), "\u{200B}(a, b)");
         assert_eq!(defuse("-open"), "\u{200B}-open");
         assert_eq!(defuse(""), "");
+    }
+
+    #[test]
+    fn a_jeet_link_is_opened_on_click_and_nothing_like_one_is() {
+        let opens = |url: &str| {
+            let run = invocation(&note("t", "b", Some(url)), Os::MacOs, |_| true).unwrap();
+            run.argv.iter().any(|a| a == "-open")
+        };
+        assert!(opens("jeet://task/fix-login"));
+        assert!(opens("jeet://report/41"));
+        for bad in [
+            "jeet://task/a b",
+            "jeet://task/x?y",
+            "jeet://nope/x",
+            "myapp://task/x",
+        ] {
+            assert!(!opens(bad), "{bad}");
+        }
     }
 }

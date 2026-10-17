@@ -13,6 +13,10 @@ fn jeet_bin() -> Command {
     // A background store sync would outlive the test and race its temp dirs;
     // the tests that want one turn it back on.
     cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
+    // Nor may one reach the developer's real ~/.jeet: a test that needs a
+    // home sets its own, which wins over this. Under /dev/null, so not even
+    // root can create it.
+    cmd.env("JEET_HOME", "/dev/null/jeet-test-home");
     // Running the suite from inside a task's agent session must not point
     // `jeet worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
@@ -313,6 +317,51 @@ fn hermetic_git(cmd: &mut Command) -> &mut Command {
         .env("GIT_AUTHOR_EMAIL", "test@test.com")
         .env("GIT_COMMITTER_NAME", "test")
         .env("GIT_COMMITTER_EMAIL", "test@test.com")
+}
+
+/// The test binary is a development build: it will not migrate the index at
+/// the default home, here a fake `$HOME/.jeet`, unless told to on purpose.
+#[test]
+fn a_dev_build_does_not_migrate_the_default_index() {
+    let home = TempDir::new().unwrap();
+    let ls = |allow: bool| {
+        let mut cmd = jeet_bin();
+        cmd.arg("ls")
+            .env("HOME", home.path())
+            .env_remove("JEET_HOME")
+            .env_remove("JEET_ALLOW_DEV_MIGRATE");
+        if allow {
+            cmd.env("JEET_ALLOW_DEV_MIGRATE", "1");
+        }
+        cmd.output().unwrap()
+    };
+    let output = ls(false);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    assert!(stderr.contains("JEET_HOME"), "{stderr}");
+    // Nor when JEET_HOME names it outright.
+    let explicit = format!("{}/.jeet/", home.path().display());
+    let output = jeet_bin()
+        .arg("ls")
+        .env("HOME", home.path())
+        .env("JEET_HOME", &explicit)
+        .env_remove("JEET_ALLOW_DEV_MIGRATE")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", stdout_of(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    // A scratch home is migrated as ever.
+    let scratch = TempDir::new().unwrap();
+    succeeded(
+        &jeet_bin()
+            .arg("ls")
+            .env("JEET_HOME", scratch.path())
+            .output()
+            .unwrap(),
+    );
+    succeeded(&ls(true));
 }
 
 #[test]
@@ -5371,10 +5420,22 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\x0f");
     screen.wait_for_text("Widen the store");
     screen.type_keys(b"\r");
-    // The task's name is not waited for: the terminal only redraws the
-    // cells that changed, so its tail can arrive split from the rest. The
-    // checks after exit show where the checkout went.
-    screen.wait_for_text("checked out #7 in task");
+    // The status line is not waited for: the terminal only redraws the
+    // cells that changed, and it overwrites the store's path, whose
+    // temporary directory has random letters (`/tmp/.tmpogJu7h`, and more
+    // of them under macOS's `/var/folders`); a cell that happens to hold the
+    // same letter is not drawn again, so any part of the line can go
+    // missing. Recording the PR on the task is the checkout's last step,
+    // and keys typed before it ends are thrown away. The checks after exit
+    // show where it went.
+    wait_until("the PR on the task", || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM task_prs WHERE number = 7", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+            > 0
+    });
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");
@@ -9202,6 +9263,120 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
         assert!(stderr_of(&output).contains(says), "{}", stderr_of(&output));
         assert!(!lab.home().join("tasks/q").exists(), "{args:?}");
     }
+}
+
+/// Who started a task, and whether it is quiet: (started_by, quiet).
+#[cfg(unix)]
+fn notify_flags_of(lab: &StoreLab, task_id: &str) -> (Option<String>, bool) {
+    lab.index()
+        .query_row(
+            "SELECT started_by, quiet FROM tasks WHERE id = ?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A task is the user's when the user makes it at their own terminal, or
+/// the assistant makes it with `--for-user`; only those two quiet a task,
+/// which `task ls` and `manager show` say.
+#[cfg(unix)]
+#[test]
+fn the_user_and_the_assistant_start_and_quiet_tasks_for_the_user() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    let assistant = lab.assistant_id();
+    let output = root.jeet(
+        &["task", "new", "x", "--for-user", "--quiet"],
+        &lab.home(),
+        &[],
+    );
+    succeeded(&output);
+    let x = task_id(&path_from(&output));
+    assert_eq!(notify_flags_of(&lab, &x), (Some("user".into()), true));
+    let output = root.jeet(&["task", "new", "y"], &lab.home(), &[]);
+    succeeded(&output);
+    let y = task_id(&path_from(&output));
+    assert_eq!(notify_flags_of(&lab, &y), (Some(assistant), false));
+    // The user's, at their own terminal, at any depth.
+    let z = lab.new_task_with("z", &["--parent", "assistant", "--goal", "g"]);
+    assert_eq!(notify_flags_of(&lab, &z), (Some("user".into()), false));
+
+    let ls = lab.jeet_at(&["task", "ls"], &lab.home(), &[]);
+    succeeded(&ls);
+    let listed = String::from_utf8_lossy(&ls.stdout).to_string();
+    let line = |slug: &str| {
+        listed
+            .lines()
+            .find(|l| l.starts_with(&format!("{slug} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("x").ends_with("(quiet)"), "{listed}");
+    assert!(!line("y").contains("(quiet)"), "{listed}");
+    let show = lab.jeet_at(&["manager", "show", "x"], &lab.home(), &[]);
+    succeeded(&show);
+    assert!(
+        String::from_utf8_lossy(&show.stdout).starts_with("task assistant/x (work, active, quiet)"),
+        "{}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+
+    succeeded(&root.jeet(&["task", "quiet", "y"], &lab.home(), &[]));
+    succeeded(&root.jeet(&["task", "quiet", "x", "--off"], &lab.home(), &[]));
+    assert!(notify_flags_of(&lab, &y).1);
+    assert!(!notify_flags_of(&lab, &x).1);
+    succeeded(&lab.jeet_at(&["task", "quiet", "x"], &lab.home(), &[]));
+    assert!(notify_flags_of(&lab, &x).1);
+
+    // A top-level task's agent is no user at their terminal: it may not
+    // speak for them.
+    lab.new_task("top");
+    let mut top = lab.task_pane("top");
+    let top_dir = lab.home().join("tasks/top");
+    let output = top.jeet(&["task", "quiet", "y", "--off"], &top_dir, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("only the user, at their own terminal, or the assistant"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(notify_flags_of(&lab, &y).1);
+    let output = top.jeet(
+        &[
+            "task",
+            "new",
+            "k",
+            "--parent",
+            "assistant",
+            "--goal",
+            "g",
+            "--for-user",
+        ],
+        &top_dir,
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("--for-user and --quiet are for the user"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!lab.home().join("tasks/k").exists());
+    // And a task below the assistant not at all.
+    let mut x_pane = lab.task_pane("x");
+    let output = x_pane.jeet(
+        &["task", "quiet", "x", "--off"],
+        &lab.home().join("tasks/x"),
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(notify_flags_of(&lab, &x).1);
 }
 
 #[cfg(unix)]
@@ -16189,8 +16364,8 @@ impl StoreLab {
 }
 
 /// w's question goes up to api, which passes it to the assistant, which
-/// passes it to the user with one notification, though the assistant's
-/// own are muted; the user's answer, from a terminal of their own, comes
+/// passes it to the user: reaching the assistant and reaching the user
+/// each tell the user once, though the assistant's own are muted; the user's answer, from a terminal of their own, comes
 /// back to w, with a copy to each node it passed through.
 #[cfg(unix)]
 #[test]
@@ -16233,7 +16408,14 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
         )),
         "{to_root}"
     );
-    assert!(notes(&notifier).is_empty());
+    // Reaching the assistant tells the user.
+    let reached = notes_once(&notifier, |n| !n.is_empty());
+    assert_eq!(
+        reached,
+        [format!(
+            "jeet: task w has a question (#{id}), passed up to the assistant|keep v1?|"
+        )]
+    );
 
     let mut root = lab.assistant_pane();
     let output = root.jeet(&["report", "escalate", &id], &lab.home(), &env);
@@ -16244,8 +16426,12 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
         stderr_of(&output)
     );
     assert_eq!(lab.ask_of(&id), (root_id.clone(), true, None, None));
-    let told = notes_once(&notifier, |n| !n.is_empty());
-    assert_eq!(told, [format!("jeet: task w asks you (#{id})|keep v1?|")]);
+    // And reaching the user again, under a key of its own.
+    let told = notes_once(&notifier, |n| n.len() > 1);
+    assert_eq!(
+        told[1..],
+        [format!("jeet: task w asks you (#{id})|keep v1?|")]
+    );
 
     // The user, at a terminal of their own.
     let output = lab.jeet_at(&["report", "answer", &id, "drop it"], &lab.home(), &env);

@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 
 use crate::commands::explore;
 use crate::context::App;
+use crate::link::Link;
 use crate::store;
 use crate::tui::state::Exit;
 use crate::tui::tasks::{self, Start};
@@ -18,6 +19,11 @@ pub fn run(app: &App) -> Result<()> {
 /// `jeet projects` on a terminal: the tasks list on the projects tab.
 pub fn run_projects(app: &App) -> Result<()> {
     open(app, Start::Projects)
+}
+
+/// `jeet open` on a terminal with no screen open: the tasks list, at `link`.
+pub fn run_link(app: &App, link: Link) -> Result<()> {
+    open(app, Start::Link(link))
 }
 
 fn open(app: &App, start: Start) -> Result<()> {

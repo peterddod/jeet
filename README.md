@@ -595,10 +595,10 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `→` | on a manager, go into it: the managers and tasks under it |
+| `→` | on a manager, or a task with tasks under it, go into it: the managers and tasks under it |
 | `←` / `⌫` | back up a level; with a filter, drop it, the cursor on the match, on its level |
 | `ctrl-a` | attach to the agent of the manager or task under the cursor, as `⏎` |
-| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. On a task with tasks under it, `⏎` goes into it, as `→` |
+| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
@@ -2424,6 +2424,48 @@ action = "ignore"   # or "notify"
 A notification about the same thing for the same reason (a question's
 `r41`, one run of a review) is sent once.
 
+### Links
+
+`jeet open <url>` takes you to what a link names:
+
+```
+jeet://task/<slug>      a task
+jeet://review/<slug>    a review
+jeet://report/<id>      a report (r123 works too): its task's inbox & reports
+```
+
+It sends a jeet screen that is open there and brings it forward (switching
+tmux to its pane, or detaching a `tmux attach` it is suspended under, and
+raising the terminal on macOS); else switches the tmux client attached to
+jeet's sessions to the task's or review's session; else runs the screen in
+the terminal it was run from; else starts a terminal to run it in. It acts on
+your screen, so it is refused from an agent's pane. That check covers only
+running `jeet open` directly: once `install-link` has been run, anything that
+can open a URL (`open jeet://...`, a browser, a chat message) reaches
+`jeet open` through the handler. It only navigates: it never changes a task
+or answers anything.
+
+`jeet notify install-link` makes the system open `jeet://` links with it (a
+small signed-ad-hoc app in `~/Library/Application Support/jeet` on macOS, a
+`.desktop` file and an `xdg-mime` default on Linux), so a notification, a
+browser or Slack can open one; a browser asks once before the first. The handler holds the path of the jeet
+binary that ran `install-link`; run it again after moving or reinstalling
+jeet.
+`jeet notify uninstall-link` removes it. Nothing installs it by itself.
+
+```toml
+[notify]
+terminal = "ghostty"   # which terminal `jeet open` starts when no jeet screen is open
+```
+
+`terminal` is `none` (never start one: `jeet open` then only switches to a
+screen that is open), a name jeet knows, or a command that jeet's command
+line is appended to, such as `"wezterm start --"`. Names: on macOS `ghostty`
+and `terminal` (Terminal.app); on Linux `ghostty`, `x-terminal-emulator`,
+`gnome-terminal`, `konsole`, `kitty`, `alacritty`, `wezterm` and `xterm`.
+Unset, macOS uses Ghostty when it is installed and Terminal.app if not, and
+Linux the first of those it finds.
+
 ### The assistant's permissions
 
 jeet commands run by the assistant's agent may only do what `[assistant]
@@ -2608,6 +2650,30 @@ you set, a limit of 0, a `$` budget) refuses making tasks under the
 assistant, starting one, `jeet manager grant` and unarchiving a task under
 a manager, and nothing else.
 
+### Template overrides
+
+New homes start from the templates jeet ships: the assistant's `AGENTS.md`,
+skills, worklog and todo list, a manager's, and the `jeet` skill every task
+gets. A file of yours under `~/.jeet/templates/` is used in its place:
+
+```
+~/.jeet/templates/root/AGENTS.md                              # the assistant's home, laid out as it is
+~/.jeet/templates/root/.claude/skills/jeet-assistant/SKILL.md
+~/.jeet/templates/manager/AGENTS.md                           # each new manager's home
+~/.jeet/templates/manager/.claude/skills/jeet-manager/SKILL.md
+~/.jeet/templates/worker/SKILL.md                             # .claude/skills/jeet/SKILL.md in each task
+```
+
+An override applies only where jeet writes a template: a file missing from
+the assistant's or a new manager's home (existing files are never written
+over), and a task's `jeet` skill, which is written when the task is made
+and on `jeet projects resync`. `CLAUDE.md`, the import of `AGENTS.md`, is
+always jeet's, and so are reviews' homes. A path that is not a file is
+ignored; an override that cannot be read stops the home being made, with
+its path in the error. Overrides are used as written: no placeholder in
+them is filled in. `jeet setup` stages
+overrides for `jeet setup apply` like any other change.
+
 ### Keeping the store fetched
 
 Commands that go to the network anyway (`jeet clone`, `jeet prs`,
@@ -2683,6 +2749,12 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+A development build (a debug build, or one run from a cargo `target/`
+directory) refuses to migrate the index at the default home, `~/.jeet`: it
+would leave it at a schema the installed release cannot open. Run it with
+`JEET_HOME=$(mktemp -d)`, or set `JEET_ALLOW_DEV_MIGRATE=1` to migrate the
+default index on purpose.
 
 [docs/harnesses.md](docs/harnesses.md) says how to add support for another
 coding agent.

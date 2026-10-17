@@ -85,18 +85,44 @@ pub(crate) fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// The user's override of template `rel` for `role` (`root`, `manager` or
+/// `worker`) in `templates` ([`crate::config::templates_dir`]): a file at
+/// `<role>/<rel>` there, else `None` for the built-in one.
+pub fn template_override(templates: &Path, role: &str, rel: &str) -> Result<Option<String>> {
+    let path = templates.join(role).join(rel);
+    if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+        return Ok(None);
+    }
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .with_context(|| format!("read the template override {}", path.display()))
+}
+
 /// Write each of `role`'s templates that is not in `dir` yet, returning
-/// those written. Nothing there is ever replaced: a CLAUDE.md of the user's
-/// own, from before AGENTS.md, is moved to AGENTS.md rather than written
-/// over.
-pub fn ensure_files(dir: &Path, role: Role) -> Result<Vec<&'static str>> {
+/// those written: the user's override in `overrides` where there is one
+/// ([`template_override`]), else the built-in one. Each harness's import of
+/// AGENTS.md is always the built-in one. Nothing there is ever replaced: a
+/// CLAUDE.md of the user's own, from before AGENTS.md, is moved to
+/// AGENTS.md rather than written over.
+pub fn ensure_files(dir: &Path, role: Role, overrides: &Path) -> Result<Vec<&'static str>> {
     instructions::migrate(dir).context("move CLAUDE.md to AGENTS.md")?;
+    let role_dir = match role {
+        Role::Root => "root",
+        Role::Manager => "manager",
+    };
+    let imports = instructions::imports();
     let mut written = Vec::new();
-    for (rel, text) in templates(role) {
+    for (rel, builtin) in templates(role) {
         let path = dir.join(rel);
         if std::fs::symlink_metadata(&path).is_ok() {
             continue;
         }
+        let text = if imports.iter().any(|i| i.file == rel) {
+            None
+        } else {
+            template_override(overrides, role_dir, rel)?
+        };
+        let text = text.as_deref().unwrap_or(builtin);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
@@ -398,17 +424,23 @@ mod tests {
     use crate::instructions::CLAUDE_SHIM;
     use crate::todo;
 
+    /// No overrides: the built-in templates.
+    const NONE: &str = "/nonexistent/templates";
+
     #[test]
     fn templates_are_written_only_where_nothing_is() {
         let dir = tempfile::tempdir().unwrap();
-        let written = ensure_files(dir.path(), Role::Root).unwrap();
+        let written = ensure_files(dir.path(), Role::Root, Path::new(NONE)).unwrap();
         assert_eq!(written.len(), templates(Role::Root).len());
         for (rel, text) in templates(Role::Root) {
             assert_eq!(std::fs::read_to_string(dir.path().join(rel)).unwrap(), text);
         }
         std::fs::write(dir.path().join("todo.md"), "- [ ] mine\n").unwrap();
         std::fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
-        assert_eq!(ensure_files(dir.path(), Role::Root).unwrap(), ["CLAUDE.md"]);
+        assert_eq!(
+            ensure_files(dir.path(), Role::Root, Path::new(NONE)).unwrap(),
+            ["CLAUDE.md"]
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
             CLAUDE_SHIM
@@ -417,6 +449,43 @@ mod tests {
             std::fs::read_to_string(dir.path().join("todo.md")).unwrap(),
             "- [ ] mine\n"
         );
+    }
+
+    #[test]
+    fn an_override_takes_the_built_in_templates_place_but_not_the_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("templates");
+        let home = dir.path().join("home");
+        let put = |rel: &str, text: &str| {
+            let path = templates.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        put("root/AGENTS.md", "my root\n");
+        put("root/.claude/skills/jeet-assistant/SKILL.md", "my skill\n");
+        put("root/CLAUDE.md", "not an import\n");
+        put("manager/AGENTS.md", "my manager\n");
+        // A directory where a file would be is no override.
+        std::fs::create_dir_all(templates.join("root/todo.md")).unwrap();
+        ensure_files(&home, Role::Root, &templates).unwrap();
+        let read = |rel: &str| std::fs::read_to_string(home.join(rel)).unwrap();
+        assert_eq!(read("AGENTS.md"), "my root\n");
+        assert_eq!(read(".claude/skills/jeet-assistant/SKILL.md"), "my skill\n");
+        assert_eq!(
+            read(".claude/skills/jeet-managers/SKILL.md"),
+            MANAGERS_SKILL
+        );
+        assert_eq!(read("CLAUDE.md"), CLAUDE_SHIM);
+        assert_eq!(read("todo.md"), TODO);
+        // Only where nothing is: an existing file is kept.
+        std::fs::write(home.join("AGENTS.md"), "edited\n").unwrap();
+        ensure_files(&home, Role::Root, &templates).unwrap();
+        assert_eq!(read("AGENTS.md"), "edited\n");
+
+        let manager = dir.path().join("m");
+        ensure_files(&manager, Role::Manager, &templates).unwrap();
+        let agents = std::fs::read_to_string(manager.join("AGENTS.md")).unwrap();
+        assert_eq!(agents, "my manager\n");
     }
 
     #[test]
@@ -430,7 +499,7 @@ mod tests {
     #[test]
     fn a_manager_has_its_own_role_and_keeps_its_todo_by_hand() {
         let dir = tempfile::tempdir().unwrap();
-        let written = ensure_files(dir.path(), Role::Manager).unwrap();
+        let written = ensure_files(dir.path(), Role::Manager, Path::new(NONE)).unwrap();
         assert_eq!(written.len(), templates(Role::Manager).len());
         for rel in [
             "AGENTS.md",
@@ -733,7 +802,7 @@ mod tests {
     fn a_home_from_before_agents_md_keeps_the_users_claude_md_as_agents_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "my assistant\n").unwrap();
-        let written = ensure_files(dir.path(), Role::Root).unwrap();
+        let written = ensure_files(dir.path(), Role::Root, Path::new(NONE)).unwrap();
         assert!(!written.contains(&"AGENTS.md"), "{written:?}");
         assert!(!written.contains(&"CLAUDE.md"), "{written:?}");
         assert_eq!(

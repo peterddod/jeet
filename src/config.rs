@@ -60,6 +60,7 @@ pub struct Config {
     /// Where notifications go and which are sent (`[notify]`).
     #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
     pub notify: NotifyConfig,
+
     /// The harness rules jeet writes for each agent it starts
     /// (`[permissions]`).
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
@@ -309,10 +310,33 @@ pub struct NotifyConfig {
     /// that matches decides; none matching, it is sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<NotifyRule>,
+
+    /// Whether jeet itself tells the user of the questions, blocks, dones
+    /// and stuck work in the tree (default: on); `[[notify.rules]]` filter
+    /// them as any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<bool>,
+
+    /// Minutes a blocked report stays open before it is stuck (default: 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_blocked_mins: Option<u64>,
+
+    /// Failed CI runs in a row on one PR that make it stuck (default: 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_ci_failures: Option<u32>,
+
+    /// The terminal `jeet open` starts when no jeet screen is open: a name
+    /// jeet knows (`ghostty`, `terminal`, ...), a command that the jeet
+    /// command line is appended to, or `none` to never start one (default:
+    /// the platform's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 pub const DEFAULT_NOTIFY_VIA: &str = "desktop";
 pub const DEFAULT_NOTIFY_MAX_PER_HOUR: u32 = 6;
+pub const DEFAULT_NOTIFY_STUCK_BLOCKED_MINS: u64 = 30;
+pub const DEFAULT_NOTIFY_STUCK_CI_FAILURES: u32 = 2;
 
 impl NotifyConfig {
     fn is_empty(&self) -> bool {
@@ -320,6 +344,26 @@ impl NotifyConfig {
             && self.command.is_none()
             && self.max_per_hour.is_none()
             && self.rules.is_empty()
+            && self.terminal.is_none()
+            && self.events.is_none()
+            && self.stuck_blocked_mins.is_none()
+            && self.stuck_ci_failures.is_none()
+    }
+
+    pub fn events(&self) -> bool {
+        self.events.unwrap_or(true)
+    }
+
+    pub fn stuck_blocked_mins(&self) -> u64 {
+        self.stuck_blocked_mins
+            .unwrap_or(DEFAULT_NOTIFY_STUCK_BLOCKED_MINS)
+    }
+
+    /// At least one: zero would make every PR stuck.
+    pub fn stuck_ci_failures(&self) -> u32 {
+        self.stuck_ci_failures
+            .unwrap_or(DEFAULT_NOTIFY_STUCK_CI_FAILURES)
+            .max(1)
     }
 
     pub fn via(&self) -> Vec<String> {
@@ -1064,6 +1108,13 @@ pub fn assistant_dir(home: &Path) -> PathBuf {
     home.join("assistant")
 }
 
+/// The user's overrides of the templates jeet writes into new homes:
+/// `root/` and `manager/` laid out as the assistant's and a manager's home
+/// are, and `worker/SKILL.md` for the skill every task gets.
+pub fn templates_dir(home: &Path) -> PathBuf {
+    home.join("templates")
+}
+
 /// What `jeet watch` remembers between polls.
 pub fn watch_state_path(home: &Path) -> PathBuf {
     home.join("watch.json")
@@ -1287,6 +1338,31 @@ mod tests {
         assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
         let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
         assert_eq!(config.review.prompt(), "Review {pr}");
+    }
+
+    #[test]
+    fn reads_the_notify_section() {
+        let config: Config = toml::from_str("[notify]\nterminal = \"wezterm start --\"\n").unwrap();
+        assert_eq!(config.notify.terminal.as_deref(), Some("wezterm start --"));
+        assert_eq!(Config::default().notify.terminal, None);
+        // Unset, it is not written out.
+        let written = toml::to_string(&Config::default()).unwrap();
+        assert!(!written.contains("[notify]"), "{written}");
+    }
+
+    #[test]
+    fn reads_the_core_event_keys() {
+        let notify = Config::default().notify;
+        assert!(notify.events());
+        assert_eq!(notify.stuck_blocked_mins(), 30);
+        assert_eq!(notify.stuck_ci_failures(), 2);
+        let config: Config = toml::from_str(
+            "[notify]\nevents = false\nstuck_blocked_mins = 5\nstuck_ci_failures = 0\n",
+        )
+        .unwrap();
+        assert!(!config.notify.events());
+        assert_eq!(config.notify.stuck_blocked_mins(), 5);
+        assert_eq!(config.notify.stuck_ci_failures(), 1);
     }
 
     fn review_policy_of(text: &str) -> Result<ReviewPolicy> {

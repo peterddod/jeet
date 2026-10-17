@@ -229,6 +229,12 @@ pub enum Commands {
         url: Option<String>,
     },
 
+    /// Open a jeet:// link: switch to the jeet screen that is open, or start one
+    Open {
+        /// A link: jeet://task/<slug>, jeet://review/<slug> or jeet://report/<id>
+        url: String,
+    },
+
     /// Tell this task's parent how it is going (progress, done, blocked,
     /// question), or answer, pass on and list the questions that reach you
     Report {
@@ -339,7 +345,17 @@ pub enum TaskCommands {
         #[arg(long, value_enum)]
         pr: Option<crate::config::PrMode>,
         #[command(flatten)]
-        delegation: Delegation,
+        delegation: Box<Delegation>,
+    },
+
+    /// Keep a task's done and questions from notifying the user (what is
+    /// escalated or stuck still does); only the user or the assistant
+    Quiet {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Let them notify again
+        #[arg(long)]
+        off: bool,
     },
 
     /// List tasks, most recently active first
@@ -501,6 +517,15 @@ pub struct Delegation {
     /// comma-separated, within what is left above it
     #[arg(long, value_delimiter = ',', value_parser = crate::manager::budget::parse_part)]
     pub budget: Vec<BudgetPart>,
+    /// Started on the user's word: its done and questions notify the user
+    /// at any depth (`[notify] events`). For the assistant; what the user
+    /// makes at their own terminal is theirs already
+    #[arg(long)]
+    pub for_user: bool,
+    /// Its done and questions do not notify the user; what is escalated or
+    /// stuck still does. Only the user or the assistant sets it
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -719,6 +744,14 @@ pub enum NotifyCommands {
 
     /// Stop running the sender in the background
     Uninstall,
+
+    /// Register jeet as the handler of jeet:// links, so a notification, a
+    /// browser or Slack can open a task, review or report (asks for nothing
+    /// else; refused from an agent's pane)
+    InstallLink,
+
+    /// Remove the jeet:// link handler
+    UninstallLink,
 }
 
 #[derive(Subcommand)]

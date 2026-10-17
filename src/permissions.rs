@@ -664,6 +664,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { command: None, .. }
+        // Acts on the user's screen, so it asks `at_terminal` itself.
+        | Commands::Open { .. }
         // Only ever to the caller's own parent; the command checks who that is.
         | Commands::Report { .. }
         // Its own todo list.
@@ -839,6 +841,14 @@ fn task_gate(command: &TaskCommands) -> Gate {
         TaskCommands::Restart { name, .. } => needs("task.open", format!("restarted task {name}")),
         // The user's word, at a terminal: never an agent's.
         TaskCommands::Adopt { .. } => Gate::Interactive,
+        // As `task new --quiet` sets it.
+        TaskCommands::Quiet { name, off } => needs(
+            "task.create",
+            match off {
+                true => format!("let task {name} notify you again"),
+                false => format!("made task {name} quiet"),
+            },
+        ),
         TaskCommands::Archive {
             name, recursive, ..
         } => needs(
@@ -1580,6 +1590,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             TaskCommands::Restart { name, .. } => verb(Verb::TaskOpen, key(name)),
             // Only the user vouches for an agent.
             TaskCommands::Adopt { .. } => None,
+            // Only the user or the assistant quiets a task.
+            TaskCommands::Quiet { .. } => None,
             TaskCommands::Archive {
                 name, recursive, ..
             } => verb(
@@ -2951,6 +2963,7 @@ mod tests {
             (&["task", "interrupt", "x"], true),
             (&["task", "restart", "x"], true),
             (&["task", "adopt", "x"], false),
+            (&["task", "quiet", "x"], false),
             (&["task", "archive", "x"], true),
             (&["task", "unarchive", "x"], true),
             (&["task", "delete", "x"], true),
@@ -2993,6 +3006,9 @@ mod tests {
             (&["setup", "apply"], false),
             (&["setup", "discard"], false),
             (&["notify", "t"], true),
+            (&["notify", "install-link"], false),
+            (&["notify", "uninstall-link"], false),
+            (&["open", "jeet://task/x"], false),
             (&["notify", "serve"], false),
             (&["notify", "install"], false),
             (&["notify", "uninstall"], false),
