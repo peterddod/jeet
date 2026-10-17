@@ -224,6 +224,12 @@ pub enum Commands {
         url: Option<String>,
     },
 
+    /// Open a jeet:// link: switch to the jeet screen that is open, or start one
+    Open {
+        /// A link: jeet://task/<slug>, jeet://review/<slug> or jeet://report/<id>
+        url: String,
+    },
+
     /// Tell this task's parent how it is going (progress, done, blocked,
     /// question), or answer, pass on and list the questions that reach you
     Report {
@@ -714,6 +720,14 @@ pub enum NotifyCommands {
 
     /// Stop running the sender in the background
     Uninstall,
+
+    /// Register jeet as the handler of jeet:// links, so a notification, a
+    /// browser or Slack can open a task, review or report (asks for nothing
+    /// else; refused from an agent's pane)
+    InstallLink,
+
+    /// Remove the jeet:// link handler
+    UninstallLink,
 }
 
 #[derive(Subcommand)]
