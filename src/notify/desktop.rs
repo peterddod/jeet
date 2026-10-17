@@ -1,82 +1,33 @@
-//! Desktop notifications: Notification Center on macOS, `notify-send`
-//! elsewhere.
+//! The `desktop` backend: Notification Center on macOS (`terminal-notifier`,
+//! else `osascript`), `notify-send` elsewhere.
 //!
 //! What a notification says is often someone else's words — a PR title, a
 //! message the assistant was sent — so it only ever reaches the notifier as
 //! separate arguments: never through a shell, and never quoted into an
 //! AppleScript, where it would run as code.
-//!
-//! `$JEET_NOTIFY_CMD` replaces the notifier, for tests and for anyone who
-//! wants notifications somewhere else. It is run directly (split like
-//! `agent`), with the notification in `JEET_NOTIFY_TITLE`,
-//! `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
-use crate::config::split_command;
+use anyhow::{bail, Result};
 
-pub const COMMAND_ENV: &str = "JEET_NOTIFY_CMD";
+use super::{
+    one_line, openable_url, run, Event, Invocation, Notifier, Tokens, BODY_MAX, TITLE_MAX,
+};
 
-/// Longest title or subtitle shown; Notification Center cuts them shorter.
-const TITLE_MAX: usize = 120;
+pub struct Desktop;
 
-/// Longest body passed on.
-const BODY_MAX: usize = 500;
-
-/// How long a notifier is waited for before it is left running.
-const NOTIFIER_WAIT: Duration = Duration::from_secs(2);
-
-/// One notification. `url` is opened when it is clicked, where the notifier
-/// can do that.
-#[derive(Debug, Clone, Default)]
-pub struct Notification<'a> {
-    pub title: &'a str,
-    pub subtitle: Option<&'a str>,
-    pub body: &'a str,
-    pub url: Option<&'a str>,
-}
-
-/// Raise `n`, best effort: a notification that cannot be shown is not worth
-/// failing anything over. The notifier gets [`NOTIFIER_WAIT`] to finish and is
-/// then left to itself: `terminal-notifier` blocks until Notification Center
-/// grants it permission, which may be never, and the action being reported
-/// must not hang on that.
-pub fn notify(n: &Notification) {
-    let Some(run) = invocation(n, os(), override_command().as_deref(), on_path) else {
-        return;
-    };
-    let Some((program, args)) = run.argv.split_first() else {
-        return;
-    };
-    let child = Command::new(program)
-        .args(args)
-        .envs(run.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return;
-    };
-    let deadline = Instant::now() + NOTIFIER_WAIT;
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
-            _ => return,
-        }
+impl Notifier for Desktop {
+    fn name(&self) -> &str {
+        "desktop"
     }
-    // Still running: reap it whenever it does finish, if this process lasts.
-    thread::spawn(move || child.wait());
-}
 
-/// Whether `url` may be opened from a notification: a web page, nothing
-/// else — not a file, not an app's own scheme.
-pub fn openable_url(url: &str) -> bool {
-    (url.starts_with("https://") || url.starts_with("http://"))
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+    fn send(&self, event: &Event, _: &dyn Tokens) -> Result<()> {
+        let Some(run_it) = invocation(event, os(), on_path) else {
+            bail!("no notifier found (terminal-notifier, osascript or notify-send)");
+        };
+        run(&run_it);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,48 +43,13 @@ fn os() -> Os {
     }
 }
 
-fn override_command() -> Option<String> {
-    std::env::var(COMMAND_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-}
-
-/// A program to run: its argv, and what to add to its environment.
-#[derive(Debug, PartialEq, Eq)]
-struct Invocation {
-    argv: Vec<String>,
-    env: Vec<(String, String)>,
-}
-
-/// How to raise `n` on `os`, given the override command and which programs
-/// `found` says are installed; `None` when there is no way to.
-fn invocation(
-    n: &Notification,
-    os: Os,
-    command: Option<&str>,
-    found: impl Fn(&str) -> bool,
-) -> Option<Invocation> {
-    let title = one_line(n.title, TITLE_MAX);
-    let subtitle = n.subtitle.map(|s| one_line(s, TITLE_MAX));
-    let body = one_line(n.body, BODY_MAX);
-    let url = n.url.filter(|u| openable_url(u));
-
-    if let Some(command) = command {
-        let argv = split_command(command);
-        if argv.is_empty() {
-            return None;
-        }
-        let env = [
-            ("JEET_NOTIFY_TITLE", title),
-            ("JEET_NOTIFY_SUBTITLE", subtitle.unwrap_or_default()),
-            ("JEET_NOTIFY_BODY", body),
-            ("JEET_NOTIFY_URL", url.unwrap_or_default().to_string()),
-        ];
-        return Some(Invocation {
-            argv,
-            env: env.map(|(k, v)| (k.to_string(), v)).to_vec(),
-        });
-    }
+/// How to raise `event` on `os`, given which programs `found` says are
+/// installed; `None` when there is no way to.
+fn invocation(event: &Event, os: Os, found: impl Fn(&str) -> bool) -> Option<Invocation> {
+    let title = one_line(&event.title, TITLE_MAX);
+    let subtitle = event.subtitle.as_deref().map(|s| one_line(s, TITLE_MAX));
+    let body = one_line(&event.body, BODY_MAX);
+    let url = event.link.as_deref().filter(|u| openable_url(u));
 
     let argv = match os {
         Os::MacOs if found("terminal-notifier") => {
@@ -203,25 +119,6 @@ fn defuse(value: &str) -> String {
     }
 }
 
-/// `text` on one line: line breaks and tabs become spaces, other control
-/// characters are dropped, and it is cut to `max` characters.
-fn one_line(text: &str, max: usize) -> String {
-    let flat: String = text
-        .chars()
-        .filter_map(|c| match c {
-            '\n' | '\r' | '\t' => Some(' '),
-            c if c.is_control() => None,
-            c => Some(c),
-        })
-        .collect();
-    let flat = flat.trim();
-    if flat.chars().count() <= max {
-        return flat.to_string();
-    }
-    let cut: String = flat.chars().take(max - 1).collect();
-    format!("{}…", cut.trim_end())
-}
-
 /// Whether `program` is an executable file somewhere on `$PATH`.
 fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
@@ -246,12 +143,13 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn note<'a>(title: &'a str, body: &'a str, url: Option<&'a str>) -> Notification<'a> {
-        Notification {
-            title,
-            subtitle: Some("sub"),
-            body,
-            url,
+    fn note(title: &str, body: &str, url: Option<&str>) -> Event {
+        Event {
+            title: title.into(),
+            subtitle: Some("sub".into()),
+            body: body.into(),
+            link: url.map(str::to_string),
+            ..Event::default()
         }
     }
 
@@ -262,7 +160,7 @@ mod tests {
             "created task fix-login",
             Some("https://x.test/1"),
         );
-        let run = invocation(&n, Os::MacOs, None, |_| true).unwrap();
+        let run = invocation(&n, Os::MacOs, |_| true).unwrap();
         assert_eq!(
             run.argv,
             [
@@ -286,7 +184,7 @@ mod tests {
     fn osascript_takes_the_text_as_arguments_not_script() {
         let hostile = r#"" & (do shell script "touch /tmp/pwned") & ""#;
         let n = note(hostile, hostile, None);
-        let run = invocation(&n, Os::MacOs, None, |_| false).unwrap();
+        let run = invocation(&n, Os::MacOs, |_| false).unwrap();
         assert_eq!(run.argv[0], "osascript");
         // The script is fixed; the text only ever follows it.
         let script: Vec<&String> = run.argv[1..7].iter().collect();
@@ -302,7 +200,7 @@ mod tests {
     #[test]
     fn osascript_never_reads_the_text_as_options() {
         let n = note(OPTION_TITLE, "-e body", None);
-        let run = invocation(&n, Os::MacOs, None, |_| false).unwrap();
+        let run = invocation(&n, Os::MacOs, |_| false).unwrap();
         let end = run.argv.iter().position(|a| a == "--").unwrap();
         assert_eq!(end, 7, "{:?}", run.argv);
         assert_eq!(run.argv[8], OPTION_TITLE.trim_start());
@@ -317,9 +215,9 @@ mod tests {
     fn osascript_hands_the_title_over_as_text() {
         let dir = tempfile::tempdir().unwrap();
         let n = note(OPTION_TITLE, "body", None);
-        let mut argv = invocation(&n, Os::MacOs, None, |_| false).unwrap().argv;
+        let mut argv = invocation(&n, Os::MacOs, |_| false).unwrap().argv;
         argv[4] = "return (item 1 of argv) & \"|\" & (count of argv)".into();
-        let output = Command::new(&argv[0])
+        let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .current_dir(dir.path())
             .output()
@@ -335,30 +233,12 @@ mod tests {
     #[test]
     fn notify_send_elsewhere_and_nothing_without_it() {
         let n = note("-t 0", "body", Some("https://x.test/1"));
-        let run = invocation(&n, Os::Other, None, |p| p == "notify-send").unwrap();
+        let run = invocation(&n, Os::Other, |p| p == "notify-send").unwrap();
         assert_eq!(
             run.argv,
             ["notify-send", "--", "-t 0", "sub\nbody\nhttps://x.test/1"]
         );
-        assert!(invocation(&n, Os::Other, None, |_| false).is_none());
-    }
-
-    #[test]
-    fn the_override_gets_the_notification_in_its_environment() {
-        let n = note("t", "b\nmore", Some("file:///etc/passwd"));
-        let run = invocation(&n, Os::MacOs, Some("/bin/stub --flag"), |_| true).unwrap();
-        assert_eq!(run.argv, ["/bin/stub", "--flag"]);
-        let get = |k: &str| {
-            run.env
-                .iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| v.as_str())
-        };
-        assert_eq!(get("JEET_NOTIFY_TITLE"), Some("t"));
-        assert_eq!(get("JEET_NOTIFY_SUBTITLE"), Some("sub"));
-        assert_eq!(get("JEET_NOTIFY_BODY"), Some("b more"));
-        // Not a web page: never opened.
-        assert_eq!(get("JEET_NOTIFY_URL"), Some(""));
+        assert!(invocation(&n, Os::Other, |_| false).is_none());
     }
 
     #[test]
@@ -367,25 +247,5 @@ mod tests {
         assert_eq!(defuse("(a, b)"), "\u{200B}(a, b)");
         assert_eq!(defuse("-open"), "\u{200B}-open");
         assert_eq!(defuse(""), "");
-    }
-
-    #[test]
-    fn text_is_flattened_and_cut() {
-        assert_eq!(one_line(" a\nb\tc\u{1b}[2J ", 20), "a b c[2J");
-        assert_eq!(one_line("abcdef", 4), "abc…");
-    }
-
-    #[test]
-    fn only_web_pages_are_openable() {
-        assert!(openable_url("https://github.com/acme/widget/pull/7"));
-        assert!(openable_url("http://localhost:3000"));
-        for bad in [
-            "file:///etc/passwd",
-            "javascript:x",
-            "https://a b",
-            "ssh://x",
-        ] {
-            assert!(!openable_url(bad), "{bad}");
-        }
     }
 }

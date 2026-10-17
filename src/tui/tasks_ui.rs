@@ -508,7 +508,11 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
 
     // What was last done says more than a standing hint.
     let status = match ui.status_line.is_empty() {
-        true => unanchored_hint(ui.selected_row()).unwrap_or_default(),
+        true => ui
+            .notice
+            .clone()
+            .or_else(|| unanchored_hint(ui.selected_row()))
+            .unwrap_or_default(),
         false => ui.status_line.clone(),
     };
     frame.render_widget(

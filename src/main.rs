@@ -140,9 +140,15 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
-        Commands::Notify { title, body, url } => {
-            commands::notify::run(&title, body.as_deref(), url.as_deref())?
-        }
+        Commands::Notify {
+            command,
+            title,
+            body,
+            url,
+        } => match command {
+            Some(command) => commands::notify::run_command(command)?,
+            None => commands::notify::run(title.as_deref(), body.as_deref(), url.as_deref())?,
+        },
         Commands::Report { what } => {
             let app = context::App::open()?;
             commands::report::run(&app, what)?

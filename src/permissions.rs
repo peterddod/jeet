@@ -32,12 +32,13 @@ use crate::cli::{
     Commands, ManagerCommands, PrCommands, ProjectCommands, SetupCommands, TaskCommands,
     WatchCommands, WorktreeArgs, WorktreeCommands,
 };
+use crate::config::NotifyLevel;
 use crate::config::{self, ManagerPolicy};
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{TaskKind, TaskRecord};
 use crate::identity;
-use crate::notify::{self, Notification};
+use crate::notify::{self, Event};
 use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
@@ -581,7 +582,7 @@ pub fn check_grant(
 /// notify` says), or, for the user, in the assistant's log marked
 /// `by user`, without one.
 pub fn record_held(app: &App, by: &Caller, target: &TaskRecord, held: &[&str]) -> Result<()> {
-    record_held_with(app, by, target, held, &|n: &Notification| notify::notify(n))
+    record_held_with(app, by, target, held, &|e: Event| notify::event(app, e))
 }
 
 fn record_held_with(
@@ -589,14 +590,22 @@ fn record_held_with(
     by: &Caller,
     target: &TaskRecord,
     held: &[&str],
-    announce: &dyn Fn(&Notification),
+    announce: &dyn Fn(Event),
 ) -> Result<()> {
-    let (log, title, tag) = match by {
+    let (log, from, tag) = match by {
         Caller::User => (actions_log(&app.home), None, " by user"),
-        Caller::Root => (actions_log(&app.home), Some("Assistant".to_string()), ""),
+        Caller::Root => (
+            actions_log(&app.home),
+            Some(("Assistant".to_string(), NotifyLevel::Assistant, None)),
+            "",
+        ),
         Caller::Node(node) => (
             actions_log_for(app, node),
-            Some(format!("Manager {}", node.slug)),
+            Some((
+                format!("Manager {}", node.slug),
+                NotifyLevel::Manager,
+                Some(node.slug.clone()),
+            )),
             "",
         ),
         Caller::Review(_) => bail!("a review's agent grants nothing"),
@@ -604,12 +613,14 @@ fn record_held_with(
     for capability in held {
         let action = format!("granted held `{capability}` to task {}{tag}", target.slug);
         append(&log, capability, &action, Outcome::Done, None)?;
-        if let Some(title) = &title {
-            announce(&Notification {
-                title,
-                subtitle: None,
-                body: &action,
-                url: None,
+        if let Some((title, level, task)) = &from {
+            announce(Event {
+                kind: "grant".into(),
+                level: Some(*level),
+                task: task.clone(),
+                title: title.clone(),
+                body: action,
+                ..Event::default()
             });
         }
     }
@@ -651,7 +662,7 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Ls { .. }
         | Commands::Path { .. }
         | Commands::Prs { .. }
-        | Commands::Notify { .. }
+        | Commands::Notify { command: None, .. }
         // Only ever to the caller's own parent; the command checks who that is.
         | Commands::Report { .. }
         // Its own todo list.
@@ -669,6 +680,11 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         Commands::Tasks | Commands::Explore | Commands::Exec { .. } | Commands::Chat { .. } => {
             Gate::Interactive
         }
+        // The sender reads tokens no agent may, and installing it changes
+        // what runs on the user's machine: the user's, at a terminal.
+        Commands::Notify {
+            command: Some(_), ..
+        } => Gate::Interactive,
         Commands::InstallShell => needs("shell.install", "installed shell integration".into()),
         // Lists what is staged. Applying is the user's at a terminal (the
         // command refuses any agent's session too); discarding drops what
@@ -932,7 +948,7 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
                 capability: "repo.clone",
                 action,
                 log,
-                notify: app.config.assistant.notify(),
+                notify: app.config.assistant.notify().then(|| app.home.clone()),
             };
             (message, Some(authorized))
         }
@@ -949,7 +965,7 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
                     capability: "repo.clone",
                     action,
                     log: actions_log_for(app, &node),
-                    notify: false,
+                    notify: None,
                 };
                 (None, Some(authorized))
             }
@@ -1116,7 +1132,8 @@ pub struct Authorized {
     capability: &'static str,
     action: String,
     log: PathBuf,
-    notify: bool,
+    /// The jeet home to queue its announcement in, when it is announced.
+    notify: Option<PathBuf>,
 }
 
 /// Check that the caller may run `command`, before it does anything
@@ -1205,7 +1222,7 @@ pub fn authorize_as(
         capability,
         action,
         log,
-        notify: settings.notify(),
+        notify: settings.notify().then(|| app.home.clone()),
     }))
 }
 
@@ -1237,7 +1254,7 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
 /// reaching the user, and the assistant's own list.
 fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     match command? {
-        Commands::Notify { .. } => Some("notify the user"),
+        Commands::Notify { command: None, .. } => Some("notify the user"),
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         // Only `jeet review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
@@ -1310,7 +1327,7 @@ fn node(
         capability,
         action,
         log: actions_log_for(app, node),
-        notify: false,
+        notify: None,
     }))
 }
 
@@ -1512,7 +1529,7 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::Ls { .. }
         | Commands::Path { .. }
         | Commands::Prs { .. }
-        | Commands::Notify { .. }
+        | Commands::Notify { command: None, .. }
         | Commands::Report { .. }
         | Commands::Todo { .. }
         | Commands::ReviewJob { .. }
@@ -1745,13 +1762,17 @@ impl Authorized {
                 self.log.display()
             );
         }
-        if outcome == Outcome::Done && self.notify {
-            notify::notify(&Notification {
-                title: "Assistant",
-                subtitle: None,
-                body: &self.action,
-                url: None,
-            });
+        if let (Outcome::Done, Some(home)) = (outcome, &self.notify) {
+            notify::event_in(
+                home,
+                Event {
+                    kind: "action".into(),
+                    level: Some(NotifyLevel::Assistant),
+                    title: "Assistant".into(),
+                    body: self.action,
+                    ..Event::default()
+                },
+            );
         }
     }
 }
@@ -2082,6 +2103,9 @@ mod tests {
             &["chat"],
             &["chat", "--new", "plan"],
             &["task", "adopt", "api"],
+            &["notify", "serve"],
+            &["notify", "install"],
+            &["notify", "uninstall"],
             &["setup", "apply"],
             &["setup", "discard"],
         ] {
@@ -2432,7 +2456,7 @@ mod tests {
                 .collect()
         };
         let announced = std::cell::RefCell::new(Vec::new());
-        let announce = |n: &Notification| announced.borrow_mut().push(n.title.to_string());
+        let announce = |e: Event| announced.borrow_mut().push(e.title);
 
         record_held_with(&app, &Caller::Root, &w, &["pr.merge"], &announce).unwrap();
         let root_log = read(&actions_log(&app.home));
@@ -2744,7 +2768,7 @@ mod tests {
             done.log,
             crate::tasks::task_dir(&app, &m).join("actions.log")
         );
-        assert!(!done.notify);
+        assert!(done.notify.is_none());
         // Not in its grant: its parent sets that.
         let e = node_of(&app, &m, &["task", "delete", "kid"], false).unwrap_err();
         assert!(e.to_string().contains("not in its grant"), "{e}");
@@ -2964,6 +2988,9 @@ mod tests {
             (&["setup", "apply"], false),
             (&["setup", "discard"], false),
             (&["notify", "t"], true),
+            (&["notify", "serve"], false),
+            (&["notify", "install"], false),
+            (&["notify", "uninstall"], false),
             (&["report", "done", "x"], true),
             (&["report", "progress", "x"], true),
             (&["report", "blocked", "x"], true),

@@ -1023,7 +1023,7 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
         .filter(|(_, (s, held))| **s == Sent::Notified || **held)
         .map(|(e, _)| e)
         .collect();
-    notify_events(&notified);
+    notify_events(app, &notified);
     sent
 }
 
@@ -1036,19 +1036,21 @@ fn still_notified(delivered: Delivered) -> bool {
 
 /// A desktop notification for each of `events`, or one for them all when
 /// there are more than a few.
-fn notify_events(events: &[&Event]) {
+fn notify_events(app: &App, events: &[&Event]) {
     if events.len() <= NOTIFY_EACH {
         for event in events {
-            let title = format!("GitHub: {}", event.kind.label());
             let place = event.place();
-            notify::notify(&notify::Notification {
-                title: &title,
-                subtitle: Some(&place).filter(|p| !p.is_empty()).map(|p| p.as_str()),
-                body: &event.title,
-                url: Some(&event.url)
-                    .filter(|u| !u.is_empty())
-                    .map(|u| u.as_str()),
-            });
+            notify::event(
+                app,
+                notify::Event {
+                    kind: event.kind.name().into(),
+                    title: format!("GitHub: {}", event.kind.label()),
+                    subtitle: Some(place).filter(|p| !p.is_empty()),
+                    body: event.title.clone(),
+                    link: Some(event.url.clone()).filter(|u| !u.is_empty()),
+                    ..notify::Event::default()
+                },
+            );
         }
         return;
     }
@@ -1057,12 +1059,16 @@ fn notify_events(events: &[&Event]) {
         .iter()
         .map(|e| format!("{} {}", e.kind.label(), e.place()))
         .collect();
-    notify::notify(&notify::Notification {
-        title: &title,
-        subtitle: None,
-        body: &body.join("; "),
-        url: Some("https://github.com/notifications"),
-    });
+    notify::event(
+        app,
+        notify::Event {
+            kind: "github".into(),
+            title,
+            body: body.join("; "),
+            link: Some("https://github.com/notifications".into()),
+            ..notify::Event::default()
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,7 +1359,7 @@ fn once_command(home: &Path, exe: &Path) -> Command {
 // ---------------------------------------------------------------------------
 
 /// `text` safe inside an XML element.
-fn xml(text: &str) -> String {
+pub(crate) fn xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -1412,7 +1418,7 @@ pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
 }
 
 /// `text` as one systemd word: quoted, with `%` (a specifier) doubled.
-fn systemd_word(text: &str) -> String {
+pub(crate) fn systemd_word(text: &str) -> String {
     let escaped = text
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -1456,7 +1462,7 @@ fn plist_path() -> Result<PathBuf> {
 }
 
 /// `gui/<uid>`, the user's launchd domain.
-fn launchd_domain() -> Result<String> {
+pub(crate) fn launchd_domain() -> Result<String> {
     let output = Command::new("id")
         .arg("-u")
         .stdin(Stdio::null())
@@ -1469,7 +1475,7 @@ fn launchd_domain() -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
-fn launchctl(args: &[&str]) -> Result<std::process::Output> {
+pub(crate) fn launchctl(args: &[&str]) -> Result<std::process::Output> {
     Command::new("launchctl")
         .args(args)
         .stdin(Stdio::null())
@@ -1477,7 +1483,7 @@ fn launchctl(args: &[&str]) -> Result<std::process::Output> {
         .context("run launchctl")
 }
 
-fn first_line(bytes: &[u8]) -> String {
+pub(crate) fn first_line(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.lines()
         .map(str::trim)

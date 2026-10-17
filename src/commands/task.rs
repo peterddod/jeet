@@ -763,6 +763,11 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
     };
     // A task with a parent sees itself and the tasks below it.
     let caller = permissions::caller(app)?;
+    if matches!(caller, permissions::Caller::User) {
+        if let Some(notice) = crate::notify::notice(&app.home, &app.config.notify) {
+            eprintln!("jeet: {notice}");
+        }
+    }
     let mut list: Vec<(i64, TaskRecord)> = Vec::new();
     for task in app.db.list_tasks(Some(state))? {
         if permissions::lists(app, &caller, &task)? {
