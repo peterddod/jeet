@@ -965,14 +965,14 @@ fn auto_status_from(
         scope::raise(app, &src.origin, raise);
     }
     // Nothing pushes it to the assistant, which would have told the user:
-    // jeet does, whatever the quiet flag says, as the prompt is the user's.
+    // jeet does, as it tells of an ask.
     if event == StatusEvent::Waiting
         && parent.kind == TaskKind::Assistant
         && !app.config.assistant.push()
     {
         let raise = Raise {
-            // As an ask that reaches the assistant: quiet or not.
-            raised: Raised::Escalated,
+            // As an ask: the quiet flag holds it back.
+            raised: Raised::Asked,
             kind: "waiting",
             reference: Some(format!("r{id}")),
             title: format!("jeet: {} is waiting on you", src.label),
@@ -2231,7 +2231,6 @@ mod tests {
     #[test]
     fn a_wait_on_the_user_under_the_assistant_tells_them_off_the_push_path() {
         let (_dir, mut app) = ask_lab();
-        app.db.set_task_quiet("api", true).unwrap();
         let api = app.db.get_task("api").unwrap().unwrap();
         let body = "waiting on a prompt only the user can answer";
         let (id, delivered) = auto_status(&app, &api, StatusEvent::Waiting, body, 5, 0)
@@ -2239,13 +2238,17 @@ mod tests {
             .unwrap();
         assert_eq!(delivered.unwrap(), Delivered::Stored);
         let queued = notify::queued(&app.home);
-        assert_eq!(queued.len(), 1, "quiet or not");
+        assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].why, Why::NeedsUser);
         assert_eq!(queued[0].kind, "waiting");
         assert_eq!(queued[0].reference, Some(format!("r{id}")));
         assert_eq!(queued[0].title, "jeet: manager api is waiting on you");
-        // Under a manager, which is told, or pushed: nothing.
+        // Quiet, as an ask: held back. Under a manager, which is told, or
+        // pushed: nothing.
         clear_told(&app);
+        app.db.set_task_quiet("api", true).unwrap();
+        auto_status(&app, &api, StatusEvent::Waiting, body, 8, 0).unwrap();
+        app.db.set_task_quiet("api", false).unwrap();
         let sub = app.db.get_task("sub").unwrap().unwrap();
         auto_status(&app, &sub, StatusEvent::Waiting, body, 6, 0).unwrap();
         app.config.assistant.push = Some(true);

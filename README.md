@@ -2430,8 +2430,8 @@ the assistant, or one you started, the moment it is asked; an ask passed up
 to the assistant, or moved onto it by `jeet task delete --reparent`;
 anything stuck; and every ask still open after `escalate_mins`. Off the push
 path, a task directly under the assistant that waits on a prompt only you
-can answer tells you too (kind `waiting`, which the quiet flag does not hold
-back), and so does a `jeet watch` event a rule hands to the assistant, as
+can answer tells you too (kind `waiting`, held back by the quiet flag as an
+ask is), and so does a `jeet watch` event a rule hands to the assistant, as
 one did before when no session of the assistant's could take it.
 
 A `[review]` section sets the review agent's first prompt and its limits —
