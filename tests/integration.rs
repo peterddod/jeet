@@ -3247,7 +3247,8 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "Bash(gh pr checks:*)",
             "Bash(gh pr diff:*)",
             "Bash(gh run view:*)",
-            "Bash(gh run list:*)"
+            "Bash(gh run list:*)",
+            "Bash(gh pr create:*)"
         ])
     );
     // A top-level task is not gated, but is denied force-pushes, merges
@@ -3268,6 +3269,8 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
         "{deny:?}"
     );
     assert!(!deny.contains(&"Bash(gh pr comment *)".into()), "{deny:?}");
+    // And what its PR policy (draft, the default) denies.
+    assert!(deny.contains(&"Bash(gh pr ready *)".into()), "{deny:?}");
     // Known before the agent ever ran.
     assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
     let hint = calls_of(&tmux, "set-option");
@@ -13577,6 +13580,11 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     );
     assert!(context.contains("Goal: fix the login\n"), "{context}");
     assert!(context.contains("You may: report\n"), "{context}");
+    // Its PR policy, after the brief: the built-in default.
+    assert!(
+        context.ends_with("\n\nPR policy: draft — open PRs with `gh pr create --draft`; don't ask. Mark one ready (`gh pr ready`) only when your parent or the user asks."),
+        "{context}"
+    );
 
     // Reports sent a while ago, so only the session's own state can keep
     // a repeated wait from being told twice, not the same-second debounce.
@@ -13645,13 +13653,21 @@ fn hooks_tell_the_parent_when_its_task_waits_or_ends() {
     assert_eq!(lab.reports_of(&x).len(), 4);
     assert!(lab.reports_of(&sib).is_empty());
 
-    // A top-level task has nobody to tell, and no brief.
+    // A top-level task has nobody to tell, and no brief: only its PR
+    // policy.
     let as_y = [("JEET_TASK_ID", y.as_str())];
-    hook_ok(&lab.hook(
+    let output = lab.hook(
         "SessionStart",
         &hook_input("SessionStart", other, &y_dir),
         &as_y,
-    ));
+    );
+    succeeded(&output);
+    let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.starts_with("PR policy: draft — "), "{context}");
+    assert!(!context.contains("jeet-brief"), "{context}");
     hook_ok(&lab.hook(
         "Notification",
         &hook_input("Notification", other, &y_dir),
@@ -13726,7 +13742,8 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(gh pr checks:*)",
             "Bash(gh pr diff:*)",
             "Bash(gh run view:*)",
-            "Bash(gh run list:*)"
+            "Bash(gh run list:*)",
+            "Bash(gh pr create:*)"
         ])
     );
     // Its settings go with it, archived or deleted.
@@ -17119,4 +17136,41 @@ fn a_manager_from_a_skills_only_project_has_no_project_link() {
     assert!(!dir.join("PROJECT.md").exists());
     let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
     assert!(!agents.contains("PROJECT.md"), "{agents}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_task_is_told_its_pr_policy_the_most_specific_one_winning() {
+    let lab = StoreLab::new();
+    let config = lab.home().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap_or_default();
+    text.push_str("\n[tasks]\npr = \"auto\"\n");
+    std::fs::write(&config, text).unwrap();
+    let mine = lab.new_task_with("mine", &["--pr", "ask"]);
+    let plain = lab.new_task_with("plain", &[]);
+    let bad = lab.jeet(&["task", "new", "bad", "--pr", "sometimes"]);
+    assert!(!bad.status.success());
+    let session = "11111111-2222-4333-8444-555555555555";
+    let context_of = |id: &str, slug: &str| {
+        let dir = lab.home().join("tasks").join(slug);
+        let output = lab.hook(
+            "SessionStart",
+            &hook_input("SessionStart", session, &dir),
+            &[("JEET_TASK_ID", id), ("JEET_BACKGROUND", "1")],
+        );
+        succeeded(&output);
+        let value: serde_json::Value = serde_json::from_str(stdout_of(&output).trim()).unwrap();
+        value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // A top-level task gets the line alone: no brief.
+    let context = context_of(&mine, "mine");
+    assert!(
+        context.starts_with("PR policy: ask — open no PR yourself"),
+        "{context}"
+    );
+    let context = context_of(&plain, "plain");
+    assert!(context.starts_with("PR policy: auto — "), "{context}");
 }

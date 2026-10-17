@@ -233,7 +233,8 @@ pub struct Opened {
 /// it — resumed, when Claude has a transcript of it — if it is not.
 pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
     tmux::require()?;
-    let spec = AgentSpec::from_config(&app.config)?;
+    let spec = AgentSpec::from_config(&app.config)?
+        .with_model(app.config.models.for_kind(TaskKind::Assistant));
     if !(spec.supports_sessions() && spec.has_hooks()) {
         bail!(
             "the assistant runs in a harness whose sessions and hooks jeet keeps track of, \

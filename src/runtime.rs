@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentSpec;
 use crate::cd;
-use crate::config::{AssistantConfig, PermissionsConfig, PushPolicy};
+use crate::config::{AssistantConfig, PermissionsConfig, PrMode, PushPolicy};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
@@ -247,6 +247,8 @@ fn start_tmux(
         Ok(args) => spec.argv.extend(args),
         Err(e) => warnings.push(format!("no agent arguments from the task's project: {e:#}")),
     }
+    // After the project's arguments, so a `--model` there wins too.
+    let spec = spec.with_model(app.config.models.for_kind(task.kind));
     let dir = tasks::task_dir(app, task);
     if !dir.is_dir() {
         bail!("the task directory {} is missing", dir.display());
@@ -562,6 +564,7 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 /// has the commands of what it holds pre-approved, read at each start, as
 /// the assistant has those of `[assistant] allow`. A work task has
 /// [`permissions::PUSH_ALLOW`] too under `[permissions] push = "branches"`.
+/// A work task also has the rules of its PR policy ([`pr_rules`]).
 fn task_hooks(
     app: &App,
     task: &TaskRecord,
@@ -592,17 +595,38 @@ fn task_hooks(
         },
         TaskKind::Assistant => {}
     }
+    let mut deny = permissions::task_deny(app, task)?;
+    if task.kind == TaskKind::Work {
+        let (allows, denies) = pr_rules(tasks::pr_mode(app, task)?);
+        allow.extend(allows.iter().map(|c| c.to_string()));
+        for command in denies {
+            if !deny.iter().any(|d| d == command) {
+                deny.push(command.to_string());
+            }
+        }
+    }
     let hooks = HookSetup {
         exe,
         task_id: task.id.clone(),
         allow,
-        deny: permissions::task_deny(app, task)?,
+        deny,
         extra_allow: Vec::new(),
         extra_deny: Vec::new(),
         environment: None,
         wake: wake(app, harness),
     };
     Ok(with_config_rules(hooks, &app.config.permissions, task.kind))
+}
+
+/// What a work task under PR policy `mode` is let run, and denied: `auto`
+/// and `draft` open PRs without asking, `draft` only as drafts it may not
+/// mark ready, and `ask` opens none, so it reports a question instead.
+fn pr_rules(mode: PrMode) -> (&'static [&'static str], &'static [&'static str]) {
+    match mode {
+        PrMode::Auto => (&["gh pr create"], &[]),
+        PrMode::Draft => (&["gh pr create"], &["gh pr ready"]),
+        PrMode::Ask => (&[], &["gh pr create"]),
+    }
 }
 
 /// `hooks` with what `[permissions]` adds for an agent of `kind`: the rules
@@ -1122,12 +1146,15 @@ mod tests {
         assert!(!hooks.allow.contains(&"jeet todo".to_string()));
         // A worker asks at the prompt, as before, but for reading PRs and runs.
         let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
-        let reads: Vec<String> = ALLOWED
+        let mut reads: Vec<String> = ALLOWED
             .iter()
             .chain(permissions::GH_READ_ONLY)
             .map(|c| c.to_string())
             .collect();
+        // It opens draft PRs it may not mark ready (the default PR policy).
+        reads.push("gh pr create".into());
         assert_eq!(hooks.allow, reads);
+        assert!(hooks.deny.contains(&"gh pr ready".to_string()));
         assert!(hooks.wake);
         // `push = "branches"` lets a worker push to origin, but not a manager.
         app.config.permissions.push = Some(PushPolicy::Branches);
@@ -1139,6 +1166,25 @@ mod tests {
         assert!(!hooks.allow.iter().any(|a| a.starts_with("git push")));
         assert!(hooks.deny.contains(&"git push".to_string()));
         app.config.permissions.push = None;
+        // A manager is given neither.
+        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        assert!(!hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(!hooks.deny.contains(&"gh pr ready".to_string()));
+        // `auto` from the config: no deny on `gh pr ready`.
+        app.config.tasks.pr = Some(PrMode::Auto);
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        assert!(hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(!hooks
+            .deny
+            .iter()
+            .any(|d| d.starts_with("gh pr") && (d.contains("ready") || d.contains("create"))));
+        // The task's own `ask` wins: it may not open one.
+        app.db.set_task_pr(&worker.id, Some(PrMode::Ask)).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        assert!(!hooks.allow.contains(&"gh pr create".to_string()));
+        assert!(hooks.deny.contains(&"gh pr create".to_string()));
+        app.db.set_task_pr(&worker.id, None).unwrap();
+        app.config.tasks.pr = None;
         // No wake channel for a harness without one, nor with
         // `[harness] wake = false`.
         let generic = &harness::Generic;

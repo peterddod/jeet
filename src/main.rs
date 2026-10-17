@@ -334,6 +334,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                     repos,
                     branch,
                     prompt,
+                    pr,
                     delegation,
                 } => commands::task::new(
                     &app,
@@ -343,6 +344,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                         repos: &repos,
                         branch: branch.as_deref(),
                         prompt: prompt.as_deref(),
+                        pr,
                         delegation: &delegation,
                     },
                 )?,

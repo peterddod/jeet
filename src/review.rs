@@ -1060,7 +1060,7 @@ fn start_tmux(
     if runtime::live_session(&name)? {
         return Ok(already_running(&name, session));
     }
-    let spec = AgentSpec::from_config(&app.config)?;
+    let spec = AgentSpec::from_config(&app.config)?.with_model(app.config.models.review());
     let dir = dir(app, review);
     if !dir.is_dir() {
         bail!("the review directory {} is missing", dir.display());
