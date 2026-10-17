@@ -600,6 +600,16 @@ pub struct MessagesConfig {
     /// something else is queued (default: 15).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_mins: Option<u64>,
+
+    /// Minutes an ask may go unanswered before it is posted to its holder
+    /// again, once (default: 15; 0 never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reask_mins: Option<u64>,
+
+    /// Minutes an ask may go unanswered before the user is told, once
+    /// (default: 60; 0 never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_mins: Option<u64>,
 }
 
 /// `[messages] render`.
@@ -631,6 +641,13 @@ pub enum Render {
 }
 
 pub const DEFAULT_DIGEST_MINS: u64 = 15;
+pub const DEFAULT_REASK_MINS: u64 = 15;
+pub const DEFAULT_ESCALATE_MINS: u64 = 60;
+
+/// `mins` in seconds, or None for 0: off.
+fn mins_secs(mins: u64) -> Option<i64> {
+    (mins > 0).then(|| i64::try_from(mins.saturating_mul(60)).unwrap_or(i64::MAX))
+}
 
 impl MessagesConfig {
     fn is_empty(&self) -> bool {
@@ -928,6 +945,16 @@ impl Config {
     pub fn digest_secs(&self) -> i64 {
         let mins = self.messages.digest_mins.unwrap_or(DEFAULT_DIGEST_MINS);
         i64::try_from(mins.saturating_mul(60)).unwrap_or(i64::MAX)
+    }
+
+    /// `[messages] reask_mins`, in seconds; None when it is off.
+    pub fn reask_secs(&self) -> Option<i64> {
+        mins_secs(self.messages.reask_mins.unwrap_or(DEFAULT_REASK_MINS))
+    }
+
+    /// `[messages] escalate_mins`, in seconds; None when it is off.
+    pub fn escalate_secs(&self) -> Option<i64> {
+        mins_secs(self.messages.escalate_mins.unwrap_or(DEFAULT_ESCALATE_MINS))
     }
 
     /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
@@ -1317,6 +1344,18 @@ mod tests {
         assert_eq!(read("[messages]\ndigest_mins = 2\n"), 120);
         assert_eq!(read("[messages]\ndigest_mins = 0\n"), 0);
         assert!(toml::from_str::<Config>("[messages]\ndigest_mins = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn asks_are_reasked_at_fifteen_minutes_and_escalated_at_sixty_unless_off() {
+        let read = |text: &str| toml::from_str::<Config>(text).unwrap();
+        let default = Config::default();
+        assert_eq!(default.reask_secs(), Some(900));
+        assert_eq!(default.escalate_secs(), Some(3600));
+        let set = read("[messages]\nreask_mins = 5\nescalate_mins = 0\n");
+        assert_eq!(set.reask_secs(), Some(300));
+        assert_eq!(set.escalate_secs(), None);
+        assert_eq!(read("[messages]\nreask_mins = 0\n").reask_secs(), None);
     }
 
     #[test]

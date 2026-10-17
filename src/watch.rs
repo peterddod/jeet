@@ -1292,6 +1292,10 @@ pub fn run_once(app: &App) -> Result<()> {
     if let Err(e) = reports::sweep_stuck(app, now_secs()) {
         eprintln!("jeet: warning: could not look for stuck blocks: {e:#}");
     }
+    // Nor when an ask goes unanswered.
+    if let Err(e) = reports::sweep_asks(app, now_secs()) {
+        eprintln!("jeet: warning: could not look for unanswered asks: {e:#}");
+    }
     // A reviewed PR merged or closed archives its review, once idle.
     match crate::review::sweep(app) {
         Ok(lines) => lines.iter().for_each(|l| eprintln!("jeet: {l}")),
