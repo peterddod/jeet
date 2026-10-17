@@ -112,8 +112,8 @@ pub struct Run {
 /// [`apply`] in `home`, asking with `ask` and printing to `out`. Each file
 /// it refuses (not a target, changed since staged, an invalid config) is
 /// said and skipped; each one the user takes is backed up to
-/// `backups/setup-<stamp>/`, written, logged and unstaged. A file that
-/// fails to write stops the run, keeping what was written before it.
+/// `backups/setup-<stamp>/`, written, logged and unstaged. An error stops
+/// the run, keeping what was written before it in [`Run::applied`].
 pub fn apply_in(
     home: &Path,
     stamp: &str,
@@ -137,17 +137,61 @@ pub fn apply_in(
     let backup_dir = free_backup_dir(home, stamp);
     let ids: Vec<String> = manifest.keys().cloned().collect();
     for id in ids {
-        let entry = manifest[&id].clone();
-        let (target, bytes) = match ready(home, &id, &entry) {
+        let step = Step {
+            home,
+            stamp,
+            color,
+            backup_dir: &backup_dir,
+        };
+        match step.run(&id, &mut manifest, ask, out, &mut run.applied) {
+            Ok(Flow::Next) => {}
+            Ok(Flow::Quit) => break,
+            // What was written before it stays in `run`, for the advice.
+            Err(e) => {
+                run.error = Some(e.context(format!("apply {id}")));
+                break;
+            }
+        }
+    }
+    Ok(run)
+}
+
+/// Whether [`apply_in`] goes on to the next file.
+enum Flow {
+    Next,
+    Quit,
+}
+
+/// What every file of one run of [`apply_in`] shares.
+struct Step<'a> {
+    home: &'a Path,
+    stamp: &'a str,
+    color: bool,
+    backup_dir: &'a Path,
+}
+
+impl Step<'_> {
+    /// Show `id`, ask, and on a yes write it, adding it to `applied`.
+    fn run(
+        &self,
+        id: &str,
+        manifest: &mut super::Manifest,
+        ask: &mut dyn FnMut() -> Result<Answer>,
+        out: &mut dyn Write,
+        applied: &mut Vec<Applied>,
+    ) -> Result<Flow> {
+        let home = self.home;
+        let entry = manifest[id].clone();
+        let (target, bytes) = match ready(home, id, &entry) {
             Ready::Go { target, bytes } => (target, bytes),
             Ready::Same => {
                 writeln!(out, "\n{id}: already as staged; unstaged.")?;
-                unstage(home, &mut manifest, &id, out)?;
-                continue;
+                unstage(home, manifest, id, out)?;
+                return Ok(Flow::Next);
             }
             Ready::Refused(why) => {
                 writeln!(out, "\n{id}: refused: {why}")?;
-                continue;
+                return Ok(Flow::Next);
             }
         };
         writeln!(out, "\n── {id} → {}", target.display())?;
@@ -159,11 +203,11 @@ pub fn apply_in(
             writeln!(out, "   (new file)")?;
         }
         // What is shown is what was read, and what would be written.
-        out.write_all(&diff(old, &bytes, color)?)?;
+        out.write_all(&diff(old, &bytes, self.color)?)?;
         match ask()? {
             Answer::Yes => {}
-            Answer::No => continue,
-            Answer::Quit => break,
+            Answer::No => return Ok(Flow::Next),
+            Answer::Quit => return Ok(Flow::Quit),
         }
         // The prompt may have waited a while.
         if current_hash(&target).ok() != Some(entry.hash.clone()) {
@@ -172,21 +216,34 @@ pub fn apply_in(
                 "{id}: refused: the file changed while you looked; ask the setup agent to \
                  stage it again"
             )?;
-            continue;
+            return Ok(Flow::Next);
         }
-        match write_one(home, &backup_dir, stamp, &id, &entry, &target, &bytes) {
-            Ok(applied) => {
-                writeln!(out, "{id}: applied.")?;
-                run.applied.push(applied);
+        let backup = match old {
+            Some(old) => {
+                let to = self.backup_dir.join(id);
+                let dir = to.parent().unwrap_or(self.backup_dir);
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("create {}", dir.display()))?;
+                std::fs::copy(old, &to)
+                    .with_context(|| format!("back {} up to {}", old.display(), to.display()))?;
+                Some(to)
             }
-            Err(e) => {
-                run.error = Some(e.context(format!("apply {id}")));
-                break;
-            }
+            None => None,
+        };
+        write_atomic(&target, &bytes)?;
+        applied.push(Applied {
+            id: id.to_string(),
+            path: target,
+            backup: backup.clone(),
+        });
+        writeln!(out, "{id}: applied.")?;
+        // Written by now: what fails from here is said, not raised.
+        if let Err(e) = log_applied(home, self.stamp, id, backup.as_deref(), &entry.reason) {
+            writeln!(out, "{id}: could not log it: {e:#}")?;
         }
-        unstage(home, &mut manifest, &id, out)?;
+        unstage(home, manifest, id, out)?;
+        Ok(Flow::Next)
     }
-    Ok(run)
 }
 
 /// `backups/setup-<stamp>`, or with `-2`, `-3`, … when a run in the same
@@ -200,36 +257,6 @@ fn free_backup_dir(home: &Path, stamp: &str) -> PathBuf {
         n += 1;
     }
     dir
-}
-
-/// Back `target` up (when it exists), write `bytes` there and log it.
-fn write_one(
-    home: &Path,
-    backup_dir: &Path,
-    stamp: &str,
-    id: &str,
-    entry: &Entry,
-    target: &Path,
-    bytes: &[u8],
-) -> Result<Applied> {
-    let backup = match target.exists() {
-        true => {
-            let to = backup_dir.join(id);
-            let dir = to.parent().unwrap_or(backup_dir);
-            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-            std::fs::copy(target, &to)
-                .with_context(|| format!("back {} up to {}", target.display(), to.display()))?;
-            Some(to)
-        }
-        false => None,
-    };
-    write_atomic(target, bytes)?;
-    log_applied(home, stamp, id, backup.as_deref(), &entry.reason)?;
-    Ok(Applied {
-        id: id.to_string(),
-        path: target.to_path_buf(),
-        backup,
-    })
 }
 
 /// Drop `id`'s staged file and its manifest entry. What fails is said, not
@@ -816,5 +843,28 @@ mod tests {
         run(home, &[Answer::Yes]);
         let mode = std::fs::metadata(&config).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_error_mid_run_keeps_what_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        write(&home.join("templates/root/AGENTS.md"), "old\n");
+        stage(home, "templates/root/AGENTS.md", "a\n");
+        stage(home, "templates/worker/SKILL.md", "b\n");
+        let mut asked = 0;
+        let mut ask = || {
+            asked += 1;
+            match asked {
+                1 => Ok(Answer::Yes),
+                _ => Err(anyhow::anyhow!("terminal gone")),
+            }
+        };
+        let mut out = Vec::new();
+        let run = apply_in(home, "s", false, &mut ask, &mut out).unwrap();
+        assert_eq!(run.applied.len(), 1);
+        assert!(run.applied[0].backup.is_some());
+        assert!(format!("{:#}", run.error.unwrap()).contains("terminal gone"));
+        assert_eq!(read(&home.join("templates/root/AGENTS.md")), "a\n");
     }
 }
