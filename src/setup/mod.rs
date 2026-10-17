@@ -257,6 +257,7 @@ mod tests {
         }
         for (bad, says) in [
             ("[notify]\nvia = [\"slack\"]\n", "slack"),
+            ("[notify]\nvia = [\"ntfy\"]\n", "[notify.ntfy] topic"),
             ("[notify]\nvia = [\"command\"]\n", "[notify] command"),
             (
                 "[notify]\nvia = [\"command\"]\ncommand = \" \"\n",

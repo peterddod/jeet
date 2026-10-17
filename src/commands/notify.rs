@@ -13,7 +13,7 @@ use crate::config::{self, NotifyLevel};
 use crate::context::App;
 use crate::link::{self, Link};
 use crate::notify::secrets::{self, Keyring};
-use crate::notify::{self, sender, slack, Event, Why};
+use crate::notify::{self, ntfy, sender, slack, Event, Why};
 use crate::permissions;
 
 pub fn run(title: Option<&str>, body: Option<&str>, url: Option<&str>) -> Result<()> {
@@ -59,6 +59,9 @@ pub fn run_command(command: NotifyCommands) -> Result<()> {
         NotifyCommands::Setup {
             backend: NotifySetup::Slack,
         } => setup_slack(&App::open()?),
+        NotifyCommands::Setup {
+            backend: NotifySetup::Ntfy,
+        } => setup_ntfy(&App::open()?),
         NotifyCommands::Test => test(&App::open()?),
         NotifyCommands::SlackManifest => {
             println!("{}", slack::manifest());
@@ -155,6 +158,126 @@ fn with_slack_user(text: &str, user: &str) -> Result<Option<String>> {
         Err(_) => return Ok(None),
     };
     Ok((read.notify.slack_user() == Some(user)).then_some(text))
+}
+
+/// `jeet notify setup ntfy`: `[notify.ntfy]`'s server and topic, and an
+/// access token, if the user gives one, into the OS keyring. The user's
+/// alone, at their own terminal, as for Slack.
+fn setup_ntfy(app: &App) -> Result<()> {
+    if !permissions::at_terminal(app)? {
+        bail!("this asks for an ntfy token: run it from your own terminal, not a jeet pane");
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!("this asks for an ntfy token: run it at a terminal");
+    }
+    let path = config::config_path(&app.home);
+    let notify = &app.config.notify;
+    match notify.ntfy_topic() {
+        Some(topic) => eprintln!(
+            "jeet: [notify.ntfy] publishes to {topic} on {}",
+            notify.ntfy_server()
+        ),
+        None => {
+            let server = read_line(&format!(
+                "ntfy server (Enter for {}): ",
+                config::DEFAULT_NTFY_SERVER
+            ))?;
+            let server = server.trim().trim_end_matches('/');
+            let server = match server {
+                "" => config::DEFAULT_NTFY_SERVER,
+                server if notify::openable_url(server) => server,
+                server => bail!("{server:?} is not an http(s) address; nothing was changed"),
+            };
+            eprintln!(
+                "On a public server such as ntfy.sh, anyone who knows a topic can read what \
+                 is published to it: keep the topic unguessable, or protect it with an \
+                 access token."
+            );
+            let suggested = ntfy::random_topic();
+            let topic = read_line(&format!("Topic (Enter for {suggested}): "))?;
+            let topic = match topic.trim() {
+                "" => suggested.as_str(),
+                topic if ntfy::valid_topic(topic) => topic,
+                topic => bail!(
+                    "{topic:?} is not an ntfy topic (1 to 64 letters, digits, `-` or `_`); nothing was changed"
+                ),
+            };
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            match with_ntfy(&text, server, topic)? {
+                Some(text) => {
+                    std::fs::write(&path, text)
+                        .with_context(|| format!("write {}", path.display()))?;
+                    eprintln!("jeet: set [notify.ntfy] in {}", path.display());
+                }
+                None => eprintln!(
+                    "jeet: set `server = \"{server}\"` and `topic = \"{topic}\"` under \
+                     [notify.ntfy] in {}",
+                    path.display()
+                ),
+            }
+            eprintln!("jeet: subscribe to {server}/{topic} in the ntfy app");
+        }
+    }
+    eprintln!(
+        "An access token (tk_…) for a protected topic or your own server, or Enter for none \
+         (one stored before stays)."
+    );
+    let token = read_hidden("Access token: ")?;
+    match token.trim() {
+        "" => eprintln!("jeet: no new token stored"),
+        token if ntfy::plausible_token(token) => {
+            secrets::OsKeyring
+                .set(&secrets::account(ntfy::NAME, &app.home), token)
+                .context("store the token in the OS keyring")?;
+            eprintln!("jeet: the ntfy access token is in the OS keyring");
+        }
+        _ => bail!("that is not an access token; nothing was stored"),
+    }
+    if !notify.via().iter().any(|v| v == ntfy::NAME) {
+        eprintln!(
+            "jeet: add \"ntfy\" to [notify] via in {}, e.g. via = [\"desktop\", \"ntfy\"]",
+            path.display()
+        );
+    }
+    if !notify::sender_running(&app.home) {
+        eprintln!("jeet: only the sender sends to ntfy: `jeet notify install` keeps one running");
+    }
+    eprintln!("jeet: then `jeet notify test`");
+    Ok(())
+}
+
+/// `text`, a config.toml, with `[notify.ntfy]` added at its end (`server`
+/// only if not ntfy.sh); `None` if it has a `[notify.ntfy]` already, which
+/// is the user's to change, or would not read back.
+fn with_ntfy(text: &str, server: &str, topic: &str) -> Result<Option<String>> {
+    let config: config::Config = toml::from_str(text).context("parse config")?;
+    if config.notify.ntfy.is_some() {
+        return Ok(None);
+    }
+    let mut text = text.to_string();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("\n[notify.ntfy]\n");
+    if server != config::DEFAULT_NTFY_SERVER {
+        text.push_str(&format!("server = {}\n", toml::Value::from(server)));
+    }
+    text.push_str(&format!("topic = {}\n", toml::Value::from(topic)));
+    let read: config::Config = match toml::from_str(&text) {
+        Ok(read) => read,
+        Err(_) => return Ok(None),
+    };
+    let notify = &read.notify;
+    Ok((notify.ntfy_topic() == Some(topic) && notify.ntfy_server() == server).then_some(text))
+}
+
+/// A line read from the terminal.
+fn read_line(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line)
 }
 
 /// A line read from the terminal without echoing it.
@@ -266,5 +389,34 @@ mod tests {
         let inline = "[notify]\nslack = { user = \"U9\" }\n";
         assert_eq!(with_slack_user(inline, "U012AB3CD").unwrap(), None);
         assert!(with_slack_user("[notify\n", "U012AB3CD").is_err());
+    }
+
+    #[test]
+    fn setup_adds_ntfy_only_where_none_is() {
+        let text = "scan_roots = []\n[notify]\nvia = [\"ntfy\"]";
+        let added = with_ntfy(text, "https://ntfy.sh", "jeet-abc")
+            .unwrap()
+            .unwrap();
+        assert!(added.starts_with(text), "{added}");
+        assert!(!added.contains("server"), "{added}");
+        let config: config::Config = toml::from_str(&added).unwrap();
+        assert_eq!(config.notify.ntfy_topic(), Some("jeet-abc"));
+        assert!(notify::check(&config.notify).is_ok());
+
+        let own = with_ntfy("", "https://ntfy.example.com/x", "t")
+            .unwrap()
+            .unwrap();
+        let config: config::Config = toml::from_str(&own).unwrap();
+        assert_eq!(config.notify.ntfy_server(), "https://ntfy.example.com/x");
+        // Quoted as TOML, whatever it holds.
+        let odd = with_ntfy("", "https://a\"b", "t").unwrap().unwrap();
+        let config: config::Config = toml::from_str(&odd).unwrap();
+        assert_eq!(config.notify.ntfy_server(), "https://a\"b");
+
+        assert_eq!(
+            with_ntfy("[notify.ntfy]\n", "https://ntfy.sh", "t").unwrap(),
+            None
+        );
+        assert!(with_ntfy("[notify\n", "https://ntfy.sh", "t").is_err());
     }
 }

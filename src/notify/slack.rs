@@ -6,11 +6,10 @@
 //! and whether Slack takes `jeet://` links are kept beside the outbox.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -19,6 +18,7 @@ use crate::link;
 use crate::watch;
 use crate::worktrees::now_secs;
 
+use super::web::{self, bad_token, Http, Ureq};
 use super::{dir, open_owned, openable_url, Down, Event, Notifier, Said, Tokens};
 
 /// Its name in `[notify] via`, and the keyring account's prefix.
@@ -26,9 +26,6 @@ pub const NAME: &str = "slack";
 
 #[cfg_attr(test, allow(dead_code))]
 pub const API: &str = "https://slack.com/api/";
-
-/// How long one call to Slack is given.
-const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Slack's limits: a header's text, a section's, a field's.
 const HEADER_MAX: usize = 150;
@@ -47,56 +44,12 @@ const BAD_TOKEN: &[&str] = &[
     "not_allowed_token_type",
 ];
 
-/// One call to Slack's Web API: `method` with the JSON `body`, answered by
-/// Slack's JSON, whatever its `ok`.
-pub trait Http {
-    fn call(&self, method: &str, token: &str, body: &Value) -> Result<Value>;
-}
-
-/// Slack itself, through `ureq`, at `base` ([`API`]).
-pub struct Ureq {
-    pub base: String,
-}
-
-impl Http for Ureq {
-    fn call(&self, method: &str, token: &str, body: &Value) -> Result<Value> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .http_status_as_error(false)
-            .build()
-            .into();
-        let mut response = agent
-            .post(format!("{}{method}", self.base))
-            .header("Authorization", format!("Bearer {token}"))
-            .send_json(body)
-            .with_context(|| format!("call Slack's {method}"))?;
-        let status = response.status();
-        if status.as_u16() == 429 {
-            let after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("?");
-            bail!("Slack's {method}: rate limited (retry after {after}s)");
-        }
-        if !status.is_success() {
-            bail!("Slack's {method}: HTTP {status}");
-        }
-        response
-            .body_mut()
-            .read_json()
-            .with_context(|| format!("read Slack's answer to {method}"))
-    }
-}
-
-/// No network: what the test binary has in place of [`Ureq`].
-#[cfg(test)]
-pub struct Offline;
-
-#[cfg(test)]
-impl Http for Offline {
-    fn call(&self, method: &str, _: &str, _: &Value) -> Result<Value> {
-        bail!("the tests call no Slack ({method})")
+/// Slack itself, at [`API`].
+#[cfg_attr(test, allow(dead_code))]
+pub fn http() -> Ureq {
+    Ureq {
+        base: API.to_string(),
+        service: "Slack",
     }
 }
 
@@ -117,7 +70,10 @@ enum Failed {
 
 impl Slack {
     fn call(&self, method: &str, token: &str, body: &Value) -> Result<Value, Failed> {
-        let answer = self.http.call(method, token, body).map_err(Failed::Other)?;
+        let answer = self
+            .http
+            .call(method, Some(token), body)
+            .map_err(Failed::Other)?;
         match answer["ok"].as_bool() {
             Some(true) => Ok(answer),
             _ => Err(Failed::Slack(
@@ -133,6 +89,7 @@ impl Slack {
         match failed {
             Failed::Slack(e) if BAD_TOKEN.contains(&e.as_str()) => bad_token(
                 &self.home,
+                NAME,
                 &format!(
                     "Slack refused the bot token ({e}): store a new one with `jeet notify setup slack`"
                 ),
@@ -142,20 +99,6 @@ impl Slack {
             Failed::Other(e) => anyhow!(Down(e)),
         }
     }
-}
-
-/// The error for a token that is missing or refused: logged the first
-/// time, then [`Said`], which is not, until a send goes through.
-fn bad_token(home: &Path, message: &str) -> anyhow::Error {
-    let mut state = load(home);
-    if state.bad_token_said {
-        return anyhow!(Said);
-    }
-    state.bad_token_said = true;
-    if let Err(e) = save(home, &state) {
-        eprintln!("jeet: could not save that the Slack token was refused: {e:#}");
-    }
-    anyhow!(Down(anyhow!("{message}")))
 }
 
 impl Notifier for Slack {
@@ -176,6 +119,7 @@ impl Notifier for Slack {
         let Some(token) = tokens.token(NAME)? else {
             return Err(bad_token(
                 &self.home,
+                NAME,
                 "no Slack token is stored: run `jeet notify setup slack` at your terminal",
             ));
         };
@@ -191,7 +135,7 @@ impl Notifier for Slack {
         };
         let ci = ci_status(&self.home, event.pr.as_deref());
         let now = now_secs();
-        let mut links = load(&self.home).jeet_links.unwrap_or(true);
+        let mut links = web::load(&self.home, NAME).jeet_links.unwrap_or(true);
         let post = |links: bool| {
             let mut message = message(event, ci.as_deref(), now, links);
             message["channel"] = json!(channel);
@@ -207,24 +151,14 @@ impl Notifier for Slack {
                     eprintln!(
                         "jeet: Slack refused a jeet:// link ({e}); messages go without one from now on"
                     );
-                    let mut state = load(&self.home);
-                    state.jeet_links = Some(false);
-                    if let Err(e) = save(&self.home, &state) {
-                        eprintln!("jeet: could not save that: {e:#}");
-                    }
+                    web::refuse_jeet_links(&self.home, NAME);
                 }
                 posted
             }
             posted => posted,
         }
         .map_err(|f| self.failed("chat.postMessage", f))?;
-        let mut state = load(&self.home);
-        if state.bad_token_said {
-            state.bad_token_said = false;
-            if let Err(e) = save(&self.home, &state) {
-                eprintln!("jeet: could not save that the Slack token works: {e:#}");
-            }
-        }
+        web::token_works(&self.home, NAME);
         let sent = Sent {
             at: now,
             why: event.why.name().to_string(),
@@ -357,7 +291,7 @@ fn report_id(event: &Event) -> Option<i64> {
 }
 
 /// "Question #41 from task x", or the title.
-fn header(event: &Event) -> String {
+pub(super) fn header(event: &Event) -> String {
     let from = event.task.as_deref().map(|slug| {
         let what = match event.level {
             Some(config::NotifyLevel::Manager) => "manager",
@@ -382,7 +316,7 @@ fn header(event: &Event) -> String {
 }
 
 /// The command that acts on `event`, where there is one.
-fn act(event: &Event) -> Option<String> {
+pub(super) fn act(event: &Event) -> Option<String> {
     let id = report_id(event)?;
     Some(match event.kind.as_str() {
         "question" | "blocked" => format!("jeet report answer {id} \"…\""),
@@ -391,7 +325,7 @@ fn act(event: &Event) -> Option<String> {
 }
 
 /// The event's `jeet://` link, as jeet writes it, if it has a good one.
-fn jeet_link(event: &Event) -> Option<String> {
+pub(super) fn jeet_link(event: &Event) -> Option<String> {
     let parsed = link::parse(event.link.as_deref()?).ok()?;
     let url = link::link_for(&parsed);
     // Kept out of mrkdwn's `<url|text>` and a code span whatever a slug holds.
@@ -401,7 +335,7 @@ fn jeet_link(event: &Event) -> Option<String> {
     plain.then_some(url)
 }
 
-fn has_jeet_link(event: &Event) -> bool {
+pub(super) fn has_jeet_link(event: &Event) -> bool {
     jeet_link(event).is_some()
 }
 
@@ -418,7 +352,7 @@ fn checks_url(pr: &str) -> Option<String> {
 }
 
 /// `secs` as "3 min", "2 h"...
-fn age(secs: i64) -> String {
+pub(super) fn age(secs: i64) -> String {
     match secs.max(0) {
         s if s < 60 => "just now".to_string(),
         s if s < 3600 => format!("{} min", s / 60),
@@ -428,7 +362,7 @@ fn age(secs: i64) -> String {
 }
 
 /// What `jeet watch` last saw of `pr`'s checks, if it watches it.
-fn ci_status(home: &Path, pr: Option<&str>) -> Option<String> {
+pub(super) fn ci_status(home: &Path, pr: Option<&str>) -> Option<String> {
     let pr = pr?;
     let path = config::watch_state_path(home);
     if !path.exists() {
@@ -456,7 +390,7 @@ fn escape(text: &str) -> String {
 }
 
 /// `text` cut to `max` characters.
-fn cut(text: &str, max: usize) -> String {
+pub(super) fn cut(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((at, _)) => {
             let kept: String = text[..at].chars().take(max - 1).collect();
@@ -492,11 +426,6 @@ pub fn sent_path(home: &Path) -> PathBuf {
     dir(home).join("slack-sent.jsonl")
 }
 
-/// `$JEET_HOME/run/notify/slack.json`: what the sender has learnt of Slack.
-fn state_path(home: &Path) -> PathBuf {
-    dir(home).join("slack.json")
-}
-
 fn record(home: &Path, sent: &Sent) -> Result<()> {
     let mut line = serde_json::to_string(sent)?;
     line.push('\n');
@@ -516,38 +445,6 @@ pub fn sent(home: &Path) -> Vec<Sent> {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct State {
-    /// `false` once Slack refused a message for its `jeet://` link: until
-    /// then messages go with one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    jeet_links: Option<bool>,
-    /// A missing or refused token has been logged, and is not again until
-    /// a send goes through.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    bad_token_said: bool,
-}
-
-fn load(home: &Path) -> State {
-    let Ok(mut file) = open_owned(&state_path(home), OpenOptions::new().read(true)) else {
-        return State::default();
-    };
-    let mut text = String::new();
-    if file.read_to_string(&mut text).is_err() {
-        return State::default();
-    }
-    serde_json::from_str(&text).unwrap_or_default()
-}
-
-fn save(home: &Path, state: &State) -> Result<()> {
-    let tmp = dir(home).join("slack.json.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = open_owned(&tmp, OpenOptions::new().create_new(true).write(true))?;
-    file.write_all(serde_json::to_string(&state)?.as_bytes())?;
-    let path = state_path(home);
-    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -612,10 +509,12 @@ mod tests {
     }
 
     impl Http for Fake {
-        fn call(&self, method: &str, token: &str, body: &Value) -> Result<Value> {
-            self.calls
-                .borrow_mut()
-                .push((method.into(), token.into(), body.clone()));
+        fn call(&self, method: &str, token: Option<&str>, body: &Value) -> Result<Value> {
+            self.calls.borrow_mut().push((
+                method.into(),
+                token.unwrap_or_default().into(),
+                body.clone(),
+            ));
             (self.answer)(method, body)
         }
     }
@@ -746,7 +645,7 @@ mod tests {
             assert!(!resent.contains("\"url\":\"jeet://"), "{resent}");
             assert!(resent.contains("`jeet open jeet://report/41`"), "{resent}");
         }
-        assert_eq!(load(home.path()).jeet_links, Some(false));
+        assert_eq!(web::load(home.path(), NAME).jeet_links, Some(false));
         assert!(!sent(home.path())[0].jeet_link);
 
         calls.borrow_mut().clear();
@@ -887,82 +786,5 @@ mod tests {
             ci_status(home.path(), Some("https://github.com/x/y/pull/1")),
             None
         );
-    }
-
-    /// One HTTP exchange on a local port: what was asked, and `answer`.
-    fn serve_once(answer: &'static str) -> (String, std::thread::JoinHandle<String>) {
-        use std::io::BufRead;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/api/", listener.local_addr().unwrap());
-        let handle = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-            let mut head = String::new();
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = n.trim().parse().unwrap();
-                }
-                head.push_str(&line);
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let mut stream = stream;
-            stream.write_all(answer.as_bytes()).unwrap();
-            head + &String::from_utf8(body).unwrap()
-        });
-        (base, handle)
-    }
-
-    #[test]
-    fn ureq_posts_json_with_the_bearer_token() {
-        let (base, asked) = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
-        );
-        let answer = Ureq { base }
-            .call("chat.postMessage", "xoxb-9", &json!({ "channel": "D1" }))
-            .unwrap();
-        assert_eq!(answer, json!({ "ok": true }));
-        let asked = asked.join().unwrap();
-        assert!(asked.starts_with("POST /api/chat.postMessage "), "{asked}");
-        let lower = asked.to_ascii_lowercase();
-        assert!(
-            lower.contains("authorization: bearer xoxb-9\r\n"),
-            "{asked}"
-        );
-        assert!(lower.contains("content-type: application/json"), "{asked}");
-        let body = &asked[asked.find("\r\n\r\n").unwrap() + 4..];
-        assert_eq!(
-            serde_json::from_str::<Value>(body).unwrap(),
-            json!({ "channel": "D1" })
-        );
-    }
-
-    #[test]
-    fn ureq_fails_on_rate_limits_and_http_errors() {
-        let (base, asked) = serve_once(
-            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
-        let e = Ureq { base }
-            .call("conversations.open", "t", &json!({}))
-            .unwrap_err();
-        assert!(
-            format!("{e:#}").contains("rate limited (retry after 30s)"),
-            "{e:#}"
-        );
-        asked.join().unwrap();
-        let (base, asked) = serve_once(
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
-        let e = Ureq { base }
-            .call("conversations.open", "t", &json!({}))
-            .unwrap_err();
-        assert!(format!("{e:#}").contains("HTTP 503"), "{e:#}");
-        asked.join().unwrap();
     }
 }

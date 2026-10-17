@@ -157,6 +157,14 @@ and how often they want to be interrupted.
     workspace, then run `{name} notify setup slack`, which asks for the
     token and the member id, and `{name} notify test`. Never ask for or
     handle the token yourself.
+  - `ntfy`: a push to an ntfy topic (the ntfy app on their phone or
+    desktop), sent only by the sender, token or not. It needs `[notify.ntfy]
+    topic`, and takes `server` (default `https://ntfy.sh`). On ntfy.sh
+    anyone who knows a topic can read it: it must be unguessable, or
+    protected with an access token. The user runs `{name} notify setup ntfy`
+    at their own terminal, which sets both and stores any token in the OS
+    keyring, then `{name} notify test`. Never ask for or handle the token
+    yourself.
 - `command`: needed when `via` lists `command`.
 - `max_per_hour`: how many are sent in an hour before the rest fold into one
   "N more" (default 6; 0 never folds).
@@ -187,8 +195,8 @@ and how often they want to be interrupted.
 
 Stage the result in `config.toml` as a `[notify]` table, with any
 `[[notify.rules]]` after it. Apply refuses a `via` name {name} has no backend
-for, `command` listed without `[notify] command`, and `slack` without
-`[notify.slack] user`.
+for, `command` listed without `[notify] command`, `slack` without
+`[notify.slack] user`, and `ntfy` without a valid `[notify.ntfy] topic`.
 
 ### 10. Instructions
 

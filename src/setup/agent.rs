@@ -491,6 +491,8 @@ mod tests {
             "notify install",
             "`[notify.slack] user`",
             "notify setup slack",
+            "`[notify.ntfy]",
+            "notify setup ntfy",
         ] {
             assert!(section.contains(needle), "{needle}");
         }

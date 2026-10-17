@@ -755,7 +755,8 @@ pub enum NotifyCommands {
 
     /// Set a backend up at your own terminal: for slack, store the bot
     /// token in the OS keyring (read without echo) and set `[notify.slack]
-    /// user` (refused from an agent's pane)
+    /// user`; for ntfy, set `[notify.ntfy]` and store any access token
+    /// (refused from an agent's pane)
     Setup {
         #[command(subcommand)]
         backend: NotifySetup,
@@ -772,6 +773,8 @@ pub enum NotifyCommands {
 pub enum NotifySetup {
     /// A Slack app's bot: notifications as direct messages to you
     Slack,
+    /// An ntfy topic: notifications on your phone or desktop
+    Ntfy,
 }
 
 #[derive(Subcommand)]
