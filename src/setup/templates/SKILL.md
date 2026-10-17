@@ -149,6 +149,14 @@ and how often they want to be interrupted.
     notification in `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`,
     `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`, e.g. a script that posts to
     their phone or chat. `via` may list both.
+  - `slack`: a direct message from the user's own Slack app, sent only by
+    the sender (`{name} notify install`), with the bot token in the OS
+    keyring. It needs `[notify.slack] user`, the user's Slack member id
+    (`U…`). The user sets it up themselves, at their own terminal: they
+    make the app from `{name} notify slack-manifest`, install it to their
+    workspace, then run `{name} notify setup slack`, which asks for the
+    token and the member id, and `{name} notify test`. Never ask for or
+    handle the token yourself.
 - `command`: needed when `via` lists `command`.
 - `max_per_hour`: how many are sent in an hour before the rest fold into one
   "N more" (default 6; 0 never folds).
@@ -179,7 +187,8 @@ and how often they want to be interrupted.
 
 Stage the result in `config.toml` as a `[notify]` table, with any
 `[[notify.rules]]` after it. Apply refuses a `via` name {name} has no backend
-for, and `command` listed without `[notify] command`.
+for, `command` listed without `[notify] command`, and `slack` without
+`[notify.slack] user`.
 
 ### 10. Instructions
 
