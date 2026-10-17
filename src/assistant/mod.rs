@@ -75,10 +75,13 @@ pub fn home_dir(home: &Path) -> PathBuf {
     config::assistant_dir(home)
 }
 
-/// Write each of the root's templates that is not in `dir` yet, returning
-/// those written ([`crate::manager::ensure_files`]).
+/// Write each of the root's templates that is not in `dir`, the
+/// assistant's home (`<jeet home>/assistant`), yet, returning those
+/// written ([`crate::manager::ensure_files`]), with the overrides in the
+/// jeet home's `templates/root/`.
 pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
-    crate::manager::ensure_files(dir, Role::Root)
+    let home = dir.parent().unwrap_or(dir);
+    crate::manager::ensure_files(dir, Role::Root, &config::templates_dir(home))
 }
 
 /// The assistant's task, made the first time, with its home set up: the

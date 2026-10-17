@@ -2555,6 +2555,27 @@ you set, a limit of 0, a `$` budget) refuses making tasks under the
 assistant, starting one, `jeet manager grant` and unarchiving a task under
 a manager, and nothing else.
 
+### Template overrides
+
+New homes start from the templates jeet ships: the assistant's `AGENTS.md`,
+skills, worklog and todo list, a manager's, and the `jeet` skill every task
+gets. A file of yours under `~/.jeet/templates/` is used in its place:
+
+```
+~/.jeet/templates/root/AGENTS.md                              # the assistant's home, laid out as it is
+~/.jeet/templates/root/.claude/skills/jeet-assistant/SKILL.md
+~/.jeet/templates/manager/AGENTS.md                           # each new manager's home
+~/.jeet/templates/manager/.claude/skills/jeet-manager/SKILL.md
+~/.jeet/templates/worker/SKILL.md                             # .claude/skills/jeet/SKILL.md in each task
+```
+
+An override applies only where jeet writes a template: a file missing from
+the assistant's or a new manager's home (existing files are never written
+over), and a task's `jeet` skill, which is written when the task is made
+and on `jeet projects resync`. `CLAUDE.md`, the import of `AGENTS.md`, is
+always jeet's. A path that is not a file is ignored. `jeet setup` stages
+overrides for `jeet setup apply` like any other change.
+
 ### Keeping the store fetched
 
 Commands that go to the network anyway (`jeet clone`, `jeet prs`,
