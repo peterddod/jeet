@@ -13,6 +13,7 @@ mod github;
 mod harness;
 mod identity;
 mod instructions;
+mod link;
 mod manager;
 mod messages;
 mod notify;
@@ -39,13 +40,13 @@ mod wake;
 mod watch;
 mod worktrees;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands,
-    TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, NotifyCommands, PrCommands,
+    ProjectCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -139,8 +140,28 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
-        Commands::Notify { title, body, url } => {
-            commands::notify::run(&title, body.as_deref(), url.as_deref())?
+        Commands::Notify {
+            title,
+            command,
+            body,
+            url,
+        } => match command {
+            Some(NotifyCommands::InstallLink) => {
+                let app = context::App::open()?;
+                commands::notify::install_link(&app)?
+            }
+            Some(NotifyCommands::UninstallLink) => {
+                let app = context::App::open()?;
+                commands::notify::uninstall_link(&app)?
+            }
+            None => {
+                let title = title.context("a title is required")?;
+                commands::notify::run(&title, body.as_deref(), url.as_deref())?
+            }
+        },
+        Commands::Open { url } => {
+            let app = context::App::open()?;
+            commands::open::run(&app, &url)?
         }
         Commands::Report { what } => {
             let app = context::App::open()?;

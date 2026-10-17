@@ -82,6 +82,8 @@ use crate::db::tasks::{
 use crate::db::Database;
 use crate::git;
 use crate::github;
+use crate::link::registry;
+use crate::link::{self, Link};
 use crate::manager::budget::{self, BudgetPart};
 use crate::manager::{self, run};
 use crate::messages;
@@ -1713,6 +1715,29 @@ impl TasksUi {
             self.filter.clear();
             self.refresh_visible(Some(id));
         }
+    }
+
+    /// Put the cursor on what `link` names, giving its name; `None` and
+    /// nothing moved when it is not here. A report is shown by its task:
+    /// `report_task` is the id of the task it is about.
+    pub fn show(&mut self, link: &Link, report_task: Option<&str>) -> Option<String> {
+        let (id, name) = match link {
+            Link::Task(slug) => self
+                .rows
+                .iter()
+                .find(|row| row.task.slug == *slug)
+                .map(|row| (row.task.id.clone(), row.task.name.clone()))?,
+            Link::Review(slug) => self
+                .review_rows
+                .iter()
+                .find(|row| row.review.slug == *slug)
+                .map(|row| (row.id().to_string(), row.review.label()))?,
+            Link::Report(_) => self
+                .row(report_task?)
+                .map(|row| (row.task.id.clone(), row.task.name.clone()))?,
+        };
+        self.select(&id);
+        Some(name)
     }
 
     /// How many tasks `view` has; for the agents view, the tree's nodes,
@@ -3674,11 +3699,13 @@ pub fn dir_size(dir: &Path) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Where the tasks screen opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
     List,
     /// `jeet projects` on a terminal: the projects view.
     Projects,
+    /// `jeet open` with no screen open: the list, at what a link names.
+    Link(Link),
 }
 
 /// Whether the caller is known to be the user at their own terminal
@@ -3699,6 +3726,11 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         user: is_user(permissions::caller(app), permissions::at_terminal(app)),
         ..TasksUi::default()
     };
+    // A screen the user is at is findable by `jeet open` while it lasts.
+    let _registered = ui
+        .user
+        .then(|| registry::register(&app.home, &registry::Screen::here()))
+        .and_then(Result::ok);
     let mut terminal = term::init_terminal()?;
     let mut screen = Screen {
         app,
@@ -3734,10 +3766,14 @@ impl Screen<'_> {
         self.ui
             .set_status("? for keys · ⏎ opens a task's agent · n starts a task");
         self.refresh(true);
-        if start == Start::Projects {
-            self.ui.view = View::Projects;
-            self.ui.selected = 0;
-            self.ui.refresh_visible(None);
+        match start {
+            Start::List => {}
+            Start::Projects => {
+                self.ui.view = View::Projects;
+                self.ui.selected = 0;
+                self.ui.refresh_visible(None);
+            }
+            Start::Link(link) => self.goto(&link),
         }
         let mut last_read = Instant::now();
         let mut last_watch = Instant::now();
@@ -3769,6 +3805,16 @@ impl Screen<'_> {
             if self.ui.view == View::Reviews && stale {
                 self.look_at_reviews();
             }
+            // `jeet open` asks a screen that is open to go to a link by
+            // leaving it in a file.
+            if self.ui.user {
+                if let Some(text) = registry::take_request(&self.app.home, std::process::id()) {
+                    match link::parse(&text) {
+                        Ok(link) => self.goto(&link),
+                        Err(e) => self.ui.set_status(format!("could not open link: {e:#}")),
+                    }
+                }
+            }
             let frame = self
                 .terminal
                 .draw(|frame| tasks_ui::draw(frame, &mut self.ui))?;
@@ -3795,6 +3841,59 @@ impl Screen<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Go to what `link` names: close any panel, put the cursor on it, and
+    /// for a report open its task's inbox & reports.
+    fn goto(&mut self, link: &Link) {
+        let was = self.ui.view;
+        self.ui.panel = None;
+        let report = match link {
+            Link::Report(id) => match self.app.db.get_report(*id) {
+                Ok(Some(report)) => Some(report),
+                Ok(None) => {
+                    self.ui.set_status(format!("no report r{id}"));
+                    return;
+                }
+                Err(e) => {
+                    self.ui
+                        .set_status(format!("could not read report r{id}: {e:#}"));
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let task_id = report.as_ref().map(|r| r.task_id.as_str());
+        let mut found = self.ui.show(link, task_id);
+        if found.is_none() {
+            // Made since the rows were read.
+            if let Err(e) = self.reread() {
+                self.ui.set_status(format!("could not read tasks: {e:#}"));
+                return;
+            }
+            found = self.ui.show(link, task_id);
+        }
+        self.viewed(was);
+        let Some(name) = found else {
+            self.ui.set_status(match link {
+                Link::Task(slug) => format!("no task {slug}"),
+                Link::Review(slug) => format!("no review {slug}"),
+                Link::Report(id) => format!("report r{id} is of a task that is gone"),
+            });
+            return;
+        };
+        match (report, self.ui.user) {
+            (Some(report), true) => self.perform(Action::Reports {
+                task_id: report.task_id,
+            }),
+            _ => self.ui.set_status(format!(
+                "{name}, from a link · ⏎ opens its {}",
+                match link {
+                    Link::Review(_) => "review",
+                    _ => "agent",
+                }
+            )),
+        }
     }
 
     /// Take in what a background thread found out. PRs are written to the
@@ -6524,6 +6623,33 @@ mod tests {
                 task_id: "c".into()
             })
         );
+    }
+
+    #[test]
+    fn a_link_puts_the_cursor_on_what_it_names() {
+        let mut ui = sample();
+        assert_eq!(
+            ui.show(&Link::task("old-spike"), None).as_deref(),
+            Some("old spike")
+        );
+        assert_eq!(ui.selected_id(), Some("c"));
+        assert!(ui.archived_tasks);
+        assert_eq!(
+            ui.show(&Link::task("api-cleanup"), None).as_deref(),
+            Some("api cleanup")
+        );
+        assert_eq!(ui.selected_id(), Some("b"));
+        assert!(!ui.archived_tasks);
+        // A report is shown by its task; one of a task not here is not.
+        assert_eq!(
+            ui.show(&Link::Report(4), Some("d")).as_deref(),
+            Some("docs")
+        );
+        assert_eq!(ui.selected_id(), Some("d"));
+        assert_eq!(ui.show(&Link::Report(4), Some("zz")), None);
+        assert_eq!(ui.show(&Link::task("nope"), None), None);
+        assert_eq!(ui.show(&Link::review("nope"), None), None);
+        assert_eq!(ui.selected_id(), Some("d"));
     }
 
     #[test]

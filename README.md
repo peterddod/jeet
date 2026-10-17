@@ -2292,6 +2292,42 @@ elsewhere. Review jobs use it to say they are done. `JEET_NOTIFY_CMD` runs a
 command of your own instead, with the notification in `JEET_NOTIFY_TITLE`,
 `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
 
+### Links
+
+`jeet open <url>` takes you to what a link names:
+
+```
+jeet://task/<slug>      a task
+jeet://review/<slug>    a review
+jeet://report/<id>      a report (r123 works too): its task's inbox & reports
+```
+
+It sends a jeet screen that is open there and brings it forward (switching
+tmux to its pane, or detaching a `tmux attach` it is suspended under, and
+raising the terminal on macOS); else switches the tmux client attached to
+jeet's sessions to the task's or review's session; else runs the screen in
+the terminal it was run from; else starts a terminal to run it in. It acts on
+your screen, so it is refused from an agent's pane.
+
+`jeet notify install-link` makes the system open `jeet://` links with it (a
+small signed-ad-hoc app in `~/Library/Application Support/jeet` on macOS, a
+`.desktop` file and an `xdg-mime` default on Linux), so a notification, a
+browser or Slack can open one; a browser asks once before the first.
+`jeet notify uninstall-link` removes it. Nothing installs it by itself.
+
+```toml
+[notify]
+terminal = "ghostty"   # which terminal `jeet open` starts when no jeet screen is open
+```
+
+`terminal` is `none` (never start one: `jeet open` then only switches to a
+screen that is open), a name jeet knows, or a command that jeet's command
+line is appended to, such as `"wezterm start --"`. Names: on macOS `ghostty`
+and `terminal` (Terminal.app); on Linux `ghostty`, `x-terminal-emulator`,
+`gnome-terminal`, `konsole`, `kitty`, `alacritty`, `wezterm` and `xterm`.
+Unset, macOS uses Ghostty when it is installed and Terminal.app if not, and
+Linux the first of those it finds.
+
 ### The assistant's permissions
 
 jeet commands run by the assistant's agent may only do what `[assistant]

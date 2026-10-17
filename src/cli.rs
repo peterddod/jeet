@@ -201,8 +201,12 @@ pub enum Commands {
     },
 
     /// Raise a desktop notification (Notification Center on macOS)
+    #[command(args_conflicts_with_subcommands = true)]
     Notify {
-        title: String,
+        /// What the notification says; required without a subcommand
+        title: Option<String>,
+        #[command(subcommand)]
+        command: Option<NotifyCommands>,
         /// The notification's text
         #[arg(long)]
         body: Option<String>,
@@ -210,6 +214,12 @@ pub enum Commands {
         /// notifier can (terminal-notifier on macOS)
         #[arg(long)]
         url: Option<String>,
+    },
+
+    /// Open a jeet:// link: switch to the jeet screen that is open, or start one
+    Open {
+        /// A link: jeet://task/<slug>, jeet://review/<slug> or jeet://report/<id>
+        url: String,
     },
 
     /// Tell this task's parent how it is going (progress, done, blocked,
@@ -657,6 +667,17 @@ pub enum TodoCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum NotifyCommands {
+    /// Register jeet as the handler of jeet:// links, so a notification, a
+    /// browser or Slack can open a task, review or report (asks for nothing
+    /// else; refused from an agent's pane)
+    InstallLink,
+
+    /// Remove the jeet:// link handler
+    UninstallLink,
 }
 
 #[derive(Subcommand)]

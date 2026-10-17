@@ -652,6 +652,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { .. }
+        // Acts on the user's screen, so it asks `at_terminal` itself.
+        | Commands::Open { .. }
         // Only ever to the caller's own parent; the command checks who that is.
         | Commands::Report { .. }
         // Its own todo list.
@@ -1230,7 +1232,7 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
 /// reaching the user, and the assistant's own list.
 fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     match command? {
-        Commands::Notify { .. } => Some("notify the user"),
+        Commands::Notify { command: None, .. } => Some("notify the user"),
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         // Only `jeet review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
@@ -1505,7 +1507,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::Ls { .. }
         | Commands::Path { .. }
         | Commands::Prs { .. }
-        | Commands::Notify { .. }
+        // The notification; the link handler is the user's to install.
+        | Commands::Notify { command: None, .. }
         | Commands::Report { .. }
         | Commands::Todo { .. }
         | Commands::ReviewJob { .. }
@@ -2945,6 +2948,9 @@ mod tests {
             (&["watch", "status"], true),
             (&["doctor", "wake"], false),
             (&["notify", "t"], true),
+            (&["notify", "install-link"], false),
+            (&["notify", "uninstall-link"], false),
+            (&["open", "jeet://task/x"], false),
             (&["report", "done", "x"], true),
             (&["report", "progress", "x"], true),
             (&["report", "blocked", "x"], true),

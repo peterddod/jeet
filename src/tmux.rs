@@ -783,6 +783,92 @@ fn parse_client_activity(listing: &str, name: &str, window: Option<&str>) -> Vec
         .collect()
 }
 
+/// A tmux client: a terminal attached to a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Client {
+    pub name: String,
+    /// The terminal device it draws on.
+    pub tty: String,
+    pub session: String,
+    /// When it last had input, in seconds since the epoch.
+    pub activity: i64,
+}
+
+/// Every attached client; none when tmux cannot say.
+pub fn clients() -> Vec<Client> {
+    let output = command()
+        .args([
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{client_tty}\t#{session_name}\t#{client_activity}",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .bounded_output()
+        .ok()
+        .filter(|o| o.status.success());
+    match output {
+        Some(output) => parse_clients(&String::from_utf8_lossy(&output.stdout)),
+        None => Vec::new(),
+    }
+}
+
+fn parse_clients(listing: &str) -> Vec<Client> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (name, tty, session, at) = (
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+            );
+            Some(Client {
+                name: name.to_string(),
+                tty: tty.to_string(),
+                session: session.to_string(),
+                activity: at.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// The client that had input last: the one the user is at.
+pub fn most_recent(clients: &[Client]) -> Option<&Client> {
+    clients.iter().max_by_key(|c| c.activity)
+}
+
+/// Point `client` at `target`: a session (`=jeet-api`), or a pane (`%3`),
+/// which also changes its session and window.
+pub fn switch_client(client: &str, target: &str) -> Result<()> {
+    let status = quiet()
+        .args(["switch-client", "-c", client, "-t", target])
+        .bounded_status()
+        .context("run tmux")?;
+    if !status.success() {
+        bail!("tmux could not switch {client} to {target}");
+    }
+    Ok(())
+}
+
+/// Detach `client`, ending the `tmux attach` it was.
+pub fn detach_client(client: &str) -> Result<()> {
+    let status = quiet()
+        .args(["detach-client", "-t", client])
+        .bounded_status()
+        .context("run tmux")?;
+    if !status.success() {
+        bail!("tmux could not detach {client}");
+    }
+    Ok(())
+}
+
+/// The exact-match target of session `name`, for [`switch_client`].
+pub fn session_target(name: &str) -> String {
+    target(name)
+}
+
 fn send_keys(args: &[&str]) -> Result<()> {
     let output = command()
         .arg("send-keys")
@@ -1356,6 +1442,19 @@ mod tests {
         for garbage in ["", "@3", "%7\t99", "@3\t%7", "@3\t%7\tx", "x\t%7\t9"] {
             assert_eq!(parse_window(garbage), None, "{garbage:?}");
         }
+    }
+
+    #[test]
+    fn clients_are_read_with_their_activity() {
+        let listing = "/dev/ttys001\t/dev/ttys001\tjeet-a\t100\n\
+                       /dev/ttys002\t/dev/ttys002\twork\t300\n\
+                       broken\n\
+                       x\ty\tz\tsoon\n";
+        let clients = parse_clients(listing);
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].session, "jeet-a");
+        assert_eq!(most_recent(&clients).unwrap().name, "/dev/ttys002");
+        assert_eq!(most_recent(&[]), None);
     }
 
     #[test]

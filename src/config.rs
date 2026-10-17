@@ -61,6 +61,9 @@ pub struct Config {
     /// (`[permissions]`).
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
     pub permissions: PermissionsConfig,
+    /// Where `jeet open` starts a jeet screen when none is open (`[notify]`).
+    #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
+    pub notify: NotifyConfig,
 }
 
 /// `harness` in config.toml: a name, or a table.
@@ -563,6 +566,22 @@ impl RoleRules {
     fn is_empty(&self) -> bool {
         self.allow.is_empty() && self.deny.is_empty()
     }
+/// `[notify]` in config.toml.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyConfig {
+    /// The terminal `jeet open` starts when no jeet screen is open: a name
+    /// jeet knows (`ghostty`, `terminal`, ...), a command that the jeet
+    /// command line is appended to, or `none` to never start one (default:
+    /// the platform's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+}
+
+impl NotifyConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
@@ -614,6 +633,7 @@ impl Default for Config {
             managers: None,
             messages: MessagesConfig::default(),
             permissions: PermissionsConfig::default(),
+            notify: NotifyConfig::default(),
         }
     }
 }
@@ -1098,6 +1118,17 @@ mod tests {
         assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
         let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
         assert_eq!(config.review.prompt(), "Review {pr}");
+    }
+
+    #[test]
+    fn reads_the_notify_section() {
+        let config: Config = toml::from_str("[notify]\nterminal = \"wezterm start --\"\n").unwrap();
+        assert_eq!(config.notify.terminal.as_deref(), Some("wezterm start --"));
+        assert_eq!(Config::default().notify.terminal, None);
+        assert!(toml::from_str::<Config>("[notify]\nterminl = \"x\"\n").is_err());
+        // Unset, it is not written out.
+        let written = toml::to_string(&Config::default()).unwrap();
+        assert!(!written.contains("[notify]"), "{written}");
     }
 
     fn review_policy_of(text: &str) -> Result<ReviewPolicy> {
