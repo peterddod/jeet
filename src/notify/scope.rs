@@ -10,7 +10,8 @@
 //! - A review goes by who asked for it: the assistant, as a task directly
 //!   under it; the user, as a task the user started; any other task, as a
 //!   task deeper down.
-//! - An escalated ask, and anything stuck, tells at any depth.
+//! - An ask escalated to the assistant or to the user, and anything stuck,
+//!   tells at any depth; a step between managers does not.
 //! - A quiet task holds back what [`quiet_holds`] says.
 //!
 //! `[[notify.rules]]` then filter what is raised, as any notification.
@@ -32,7 +33,7 @@ pub enum Raised {
     Asked,
     /// A done report.
     Done,
-    /// An ask passed up by the one holding it.
+    /// An ask passed up to the assistant, or to the user.
     Escalated,
     /// Blocked too long, CI failing again, a budget used up, an end
     /// without done.

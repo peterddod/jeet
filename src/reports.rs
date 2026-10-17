@@ -377,18 +377,27 @@ fn escalate_with(
         .escalate_report(id, &holder.id, to_id, to.is_none())?;
     let Some(to) = to else {
         let (title, subtitle, body) = notification_for(&row, &asker.label(), &path);
-        notifier(Event {
-            why: Why::NeedsUser,
-            kind: row.kind.as_str().into(),
-            level: Some(asker.level()),
-            task: Some(asker.slug().to_string()),
-            reference: Some(format!("r{}", row.id)),
-            title,
-            subtitle: Some(subtitle),
-            body,
-            link: Some(crate::link::link_for(&Link::Report(row.id))),
-            only: Vec::new(),
-        });
+        // Whatever `[notify] events` says, as before it; only the quiet
+        // switch is asked, which lets an escalation through.
+        let wanted = asker
+            .origin(app)
+            .map_or(true, |o| scope::wanted(&o, Raised::Escalated));
+        if wanted {
+            notifier(Event {
+                why: Why::NeedsUser,
+                kind: row.kind.as_str().into(),
+                level: Some(asker.level()),
+                task: Some(asker.slug().to_string()),
+                // Not `r<id>`, which its reaching the assistant may have
+                // been told under: that one would swallow this.
+                reference: Some(format!("r{}/user", row.id)),
+                title,
+                subtitle: Some(subtitle),
+                body,
+                link: Some(crate::link::link_for(&Link::Report(row.id))),
+                only: Vec::new(),
+            });
+        }
         return Ok(Escalated {
             row,
             to: None,
@@ -404,33 +413,35 @@ fn escalate_with(
         &manager::label(&holder),
     );
     let delivered = deliver(&to, &text, wakes(row.kind));
-    // Passed up between managers: the user hears of it at any depth, once
-    // per ask, as when it reaches them.
-    let raise = Raise {
-        raised: Raised::Escalated,
-        kind: row.kind.as_str(),
-        reference: Some(format!("r{}", row.id)),
-        title: format!(
-            "jeet: {} {} (#{}), passed up to {}",
-            asker.label(),
-            match row.kind {
-                ReportKind::Blocked => "is blocked",
-                _ => "has a question",
-            },
-            row.id,
-            manager::label(&to)
-        ),
-        subtitle: Some(path.clone()),
-        body: row.body.clone(),
-        link: Some(Link::Report(row.id)),
-    };
-    match asker.origin(app) {
-        Ok(origin) => {
-            if let Some(event) = scope::event_for(app, &origin, raise) {
-                notifier(event);
+    // Reaching the assistant tells the user, as an ask from directly under
+    // it does, under the same `(why, r<id>)`; a step between managers
+    // does not.
+    if to.kind == TaskKind::Assistant {
+        let raise = Raise {
+            raised: Raised::Escalated,
+            kind: row.kind.as_str(),
+            reference: Some(format!("r{}", row.id)),
+            title: format!(
+                "jeet: {} {} (#{}), passed up to the assistant",
+                asker.label(),
+                match row.kind {
+                    ReportKind::Blocked => "is blocked",
+                    _ => "has a question",
+                },
+                row.id
+            ),
+            subtitle: Some(path.clone()),
+            body: row.body.clone(),
+            link: Some(Link::Report(row.id)),
+        };
+        match asker.origin(app) {
+            Ok(origin) => {
+                if let Some(event) = scope::event_for(app, &origin, raise) {
+                    notifier(event);
+                }
             }
+            Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
         }
-        Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
     }
     Ok(Escalated {
         row,
@@ -2014,15 +2025,16 @@ mod tests {
         );
         assert_eq!(sent[1].0, "assistant");
         assert!(sent[1].1.contains("via=\"manager api\""), "{}", sent[1].1);
-        // Each step up tells the user, under the one `(why, ref)` the
-        // sender sends once.
-        let passed: Vec<String> = notified.borrow_mut().drain(..).map(|n| n.0).collect();
+        // Between managers nothing; reaching the assistant, once.
+        let passed: Vec<_> = notified.borrow_mut().drain(..).collect();
         assert_eq!(
             passed,
-            [
-                format!("jeet: task ww has a question (#{id}), passed up to manager api"),
+            [(
                 format!("jeet: task ww has a question (#{id}), passed up to the assistant"),
-            ]
+                Some("assistant/api/sub/ww".to_string()),
+                "keep v1?".to_string(),
+                true
+            )]
         );
 
         // Passed up the root, the user is told, once, and holds it.

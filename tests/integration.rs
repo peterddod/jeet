@@ -16307,8 +16307,8 @@ impl StoreLab {
 }
 
 /// w's question goes up to api, which passes it to the assistant, which
-/// passes it to the user with one notification, though the assistant's
-/// own are muted; the user's answer, from a terminal of their own, comes
+/// passes it to the user: reaching the assistant and reaching the user
+/// each tell the user once, though the assistant's own are muted; the user's answer, from a terminal of their own, comes
 /// back to w, with a copy to each node it passed through.
 #[cfg(unix)]
 #[test]
@@ -16351,7 +16351,14 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
         )),
         "{to_root}"
     );
-    assert!(notes(&notifier).is_empty());
+    // Reaching the assistant tells the user.
+    let reached = notes_once(&notifier, |n| !n.is_empty());
+    assert_eq!(
+        reached,
+        [format!(
+            "jeet: task w has a question (#{id}), passed up to the assistant|keep v1?|"
+        )]
+    );
 
     let mut root = lab.assistant_pane();
     let output = root.jeet(&["report", "escalate", &id], &lab.home(), &env);
@@ -16362,8 +16369,12 @@ fn a_question_climbs_to_the_user_and_the_answer_comes_back() {
         stderr_of(&output)
     );
     assert_eq!(lab.ask_of(&id), (root_id.clone(), true, None, None));
-    let told = notes_once(&notifier, |n| !n.is_empty());
-    assert_eq!(told, [format!("jeet: task w asks you (#{id})|keep v1?|")]);
+    // And reaching the user again, under a key of its own.
+    let told = notes_once(&notifier, |n| n.len() > 1);
+    assert_eq!(
+        told[1..],
+        [format!("jeet: task w asks you (#{id})|keep v1?|")]
+    );
 
     // The user, at a terminal of their own.
     let output = lab.jeet_at(&["report", "answer", &id, "drop it"], &lab.home(), &env);
