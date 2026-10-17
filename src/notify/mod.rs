@@ -111,7 +111,7 @@ pub fn level(kind: TaskKind) -> NotifyLevel {
     match kind {
         TaskKind::Assistant => NotifyLevel::Assistant,
         TaskKind::Manager => NotifyLevel::Manager,
-        TaskKind::Work => NotifyLevel::Task,
+        TaskKind::Work | TaskKind::Setup => NotifyLevel::Task,
     }
 }
 

@@ -159,6 +159,10 @@ report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
 are refused. Ask your parent instead.
 "#;
 
+/// Why the setup agent's home is no task to act on.
+const SETUP_NO_TASK: &str = "the setup agent's home is no task to work in; `jeet setup` \
+     opens it, and --task <name> picks a task (`jeet task ls` lists them)";
+
 /// A task's directory; the assistant's and the setup agent's are their
 /// homes, outside `tasks/`.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
@@ -860,7 +864,7 @@ pub fn find_in(tasks: &[TaskRecord], key: &str, by_prefix: bool) -> Result<TaskR
     // The assistant is no task to open, archive or delete by name.
     let tasks: Vec<&TaskRecord> = tasks
         .iter()
-        .filter(|t| t.kind != TaskKind::Assistant)
+        .filter(|t| !matches!(t.kind, TaskKind::Assistant | TaskKind::Setup))
         .collect();
     let by = |same: &dyn Fn(&TaskRecord) -> bool| tasks.iter().find(|t| same(t)).copied();
     if let Some(task) = by(&|t| t.slug == key).or_else(|| by(&|t| t.id == key)) {
@@ -919,6 +923,7 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
                 "the assistant's home is no task to work in; pick one with --task <name> \
                  (`jeet task ls` lists them)"
             ),
+            Some(task) if task.kind == TaskKind::Setup => bail!(SETUP_NO_TASK),
             Some(task) => Ok(task),
             None => bail!("${TASK_ID_ENV} is {id}, which is no task jeet knows; was it deleted?"),
         };
@@ -929,6 +934,7 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
             "the assistant's home is no task to work in; pick one with --task <name> \
              (`jeet task ls` lists them)"
         ),
+        Some(task) if task.kind == TaskKind::Setup => bail!(SETUP_NO_TASK),
         Some(task) => Ok(task),
         None => bail!(
             "not inside a task: run this from a task's directory, or pick one with --task <name> \
@@ -1691,8 +1697,10 @@ fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
 /// their agents have ended. The caller has then confirmed what
 /// [`subtree_unkept`] lists.
 pub fn archive(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
-    if task.kind == TaskKind::Assistant {
-        bail!("the assistant cannot be archived");
+    match task.kind {
+        TaskKind::Assistant => bail!("the assistant cannot be archived"),
+        TaskKind::Setup => bail!("the setup agent cannot be archived"),
+        TaskKind::Work | TaskKind::Manager => {}
     }
     if !recursive {
         return archive_one(app, task);
@@ -2326,8 +2334,10 @@ pub(crate) fn losses_of(
 /// lists.
 pub fn delete(app: &App, task: &TaskRecord, recursive: bool) -> Result<Vec<String>> {
     // Its directory is the assistant's home: its notes, its todo list.
-    if task.kind == TaskKind::Assistant {
-        bail!("the assistant cannot be deleted");
+    match task.kind {
+        TaskKind::Assistant => bail!("the assistant cannot be deleted"),
+        TaskKind::Setup => bail!("the setup agent cannot be deleted"),
+        TaskKind::Work | TaskKind::Manager => {}
     }
     let nodes = match recursive {
         true => subtree_leaves_first(app, task)?,
@@ -2642,8 +2652,10 @@ pub fn plan_move(
 /// assistant, and for a task with nothing under it, which a plain delete
 /// takes.
 pub fn plan_reparent(app: &App, caller: &Caller, task: &TaskRecord) -> Result<MovePlan> {
-    if task.kind == TaskKind::Assistant {
-        bail!("the assistant cannot be deleted");
+    match task.kind {
+        TaskKind::Assistant => bail!("the assistant cannot be deleted"),
+        TaskKind::Setup => bail!("the setup agent cannot be deleted"),
+        TaskKind::Work | TaskKind::Manager => {}
     }
     let children = app.db.children(&task.id)?;
     if children.is_empty() {

@@ -736,7 +736,8 @@ impl ModelsConfig {
         let model = match kind {
             TaskKind::Work => &self.task,
             TaskKind::Manager => &self.manager,
-            TaskKind::Assistant => &self.assistant,
+            // A chat with the user, as the assistant's are.
+            TaskKind::Assistant | TaskKind::Setup => &self.assistant,
         };
         model.as_deref().map(str::trim).filter(|m| !m.is_empty())
     }

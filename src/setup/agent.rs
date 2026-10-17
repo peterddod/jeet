@@ -5,6 +5,10 @@
 //! assistant is, and launched as a task's agent is
 //! ([`runtime::launch_tmux`]), with settings of its own ([`hooks`]): it
 //! reads, and writes only its home.
+//!
+//! Having no parent, its jeet commands run as the user's, as a top-level
+//! task's do: what keeps it from applying is its settings, and that
+//! `jeet setup apply` refuses any agent's session.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -136,13 +140,11 @@ fn write_builtin(dir: &Path) -> Result<()> {
 }
 
 /// The setup agent's task, made the first time, with its home set up: the
-/// templates that are missing, the built-in copies and the marker that lets
-/// its hooks find it.
+/// templates that are missing and the marker that lets its hooks find it.
 pub fn ensure(app: &App) -> Result<TaskRecord> {
     let dir = setup_dir(&app.home);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     ensure_files(&dir)?;
-    write_builtin(&dir)?;
     let task = match app.db.get_setup_task()? {
         Some(task) => task,
         None => create_record(app)?,
@@ -189,7 +191,8 @@ fn create_record(app: &App) -> Result<TaskRecord> {
 
 /// The setup agent's settings: it may read anything under the jeet home
 /// and `~/.claude`, write only in its own home (`home_entries` are the
-/// jeet home's other entries, each denied), and run jeet's read-only
+/// jeet home's other entries at launch, each denied; one made later is
+/// not allowed either, so it prompts), and run jeet's read-only
 /// commands and `jeet setup status` without asking. It may not run
 /// `jeet setup apply`, push or use `gh`, nor edit the user's global
 /// harness, git and shell files. Like all of jeet's rules, a lint: the
@@ -207,7 +210,6 @@ pub fn hooks(
         .map(|c| c.to_string())
         .collect();
     allow.push(format!("{PRODUCT} setup status"));
-    allow.push(format!("{PRODUCT} show"));
     let mut deny = permissions::denied_commands(branches);
     for command in [
         format!("{PRODUCT} setup apply"),
@@ -294,17 +296,24 @@ fn home_entries(home: &Path) -> Vec<String> {
 /// beside it.
 pub fn run(app: &App, new: bool) -> Result<()> {
     tmux::require()?;
-    let spec = AgentSpec::from_config(&app.config)?;
-    if !(spec.supports_sessions() && spec.has_hooks()) {
+    let spec = AgentSpec::from_config(&app.config)?
+        .with_model(app.config.models.for_kind(TaskKind::Setup));
+    if !(spec.supports_sessions() && spec.has_hooks() && spec.harness.prompt_args("").is_some()) {
         bail!(
-            "the setup agent runs in a harness whose sessions and hooks {PRODUCT} keeps track \
-             of, such as Claude Code; `{}` has neither (set `harness` in config.toml)",
+            "the setup agent runs in a harness whose sessions, hooks and first prompt \
+             {PRODUCT} keeps track of, such as Claude Code; `{}` lacks them (set `harness` in \
+             config.toml)",
             spec.display()
         );
     }
     let task = ensure(app)?;
     let name = runtime::session_name(&task);
     let running = runtime::live_session(&name)? && tmux::agent_alive(&name);
+    // Its agent gone, the apply pane keeps the session up: it goes too, so
+    // a start can make it again.
+    if !running && tmux::has_session(&name) {
+        tmux::kill(&name)?;
+    }
     if running && new {
         bail!(
             "the setup agent is running in tmux session {name}; end it there (`/exit`) to \
@@ -339,6 +348,8 @@ const FIRST_PROMPT: &str = "Start the setup conversation with section 0 of the s
 /// [`hooks`], then the apply pane beside it.
 fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<runtime::Running> {
     let dir = setup_dir(&app.home);
+    // Only as it starts, not under a running agent reading them.
+    write_builtin(&dir)?;
     let mut known = app.db.list_task_sessions(&task.id)?;
     let now = now_secs();
     let record = |id: &str| -> TaskSessionRecord {

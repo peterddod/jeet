@@ -11,9 +11,10 @@ description: How to run {name}'s setup conversation - the sections to go through
 2. Show the current setting: read `$JEET_HOME/config.toml` and the files
    involved, and quote what is set (or say it is the default).
 3. Ask the section's questions. Wait for the answers.
-4. If something should change, stage it (below) and tell the user to type
-   `y` for it in the apply pane beside this one (or to run
-   `{name} setup apply` in a terminal of their own).
+4. If something should change, stage it (below) and tell the user to press
+   Enter in the apply pane beside this one, then answer `y` or `n` for each
+   file it shows (or to run `{name} setup apply` in a terminal of their
+   own).
 5. Write what they chose, and why, under the section's heading in
    `answers.md`.
 
@@ -27,10 +28,12 @@ entry for it in `$JEET_HOME/setup/proposed/manifest.toml`:
 
 ```toml
 ["config.toml"]
-path = "~/.jeet/config.toml"
 reason = "one line on why"
 hash = "<the target's hash now>"   # leave out for a file that does not exist yet
 ```
+
+Leave `path` out: apply writes where the target id says, and refuses an
+entry whose `path` names anywhere else.
 
 The target ids apply accepts, and nothing else:
 
@@ -44,8 +47,10 @@ The target ids apply accepts, and nothing else:
 
 - Get the hash from `{name} setup status`: stage the file and an entry
   without `hash`, run `{name} setup status`, and copy the "hash now" it shows
-  for the target into the entry. Apply refuses an entry whose hash no longer
-  matches the target, so stage again after the user edits a file by hand.
+  for the target into the entry. Until it is in, status shows the entry as
+  refused ("staged as a new file, but the file exists now"); that is
+  expected. Apply refuses an entry whose hash no longer matches the target,
+  so stage again after the user edits a file by hand.
 - Stage `config.toml` whole: start from the current file and change only what
   the user asked for, keeping their comments, order and formatting. Apply
   checks it loads before it offers it.

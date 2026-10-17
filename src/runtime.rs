@@ -96,8 +96,10 @@ pub fn ensure_running(
     prompt: Option<&str>,
     admission: Admission,
 ) -> Result<Running> {
-    if task.kind == TaskKind::Assistant {
-        bail!("the assistant's sessions are opened with `jeet chat`");
+    match task.kind {
+        TaskKind::Assistant => bail!("the assistant's sessions are opened with `jeet chat`"),
+        TaskKind::Setup => bail!("the setup agent is started with `jeet setup`"),
+        TaskKind::Work | TaskKind::Manager => {}
     }
     // Running already: nothing starts, so there is nothing to admit, and a
     // held task's live pane is still there to attach to (M16). Attached to
@@ -160,8 +162,10 @@ pub fn ensure_running_admitted(
     prompt: Option<&str>,
     _guard: &StartGuard,
 ) -> Result<Running> {
-    if task.kind == TaskKind::Assistant {
-        bail!("the assistant's sessions are opened with `jeet chat`");
+    match task.kind {
+        TaskKind::Assistant => bail!("the assistant's sessions are opened with `jeet chat`"),
+        TaskKind::Setup => bail!("the setup agent is started with `jeet setup`"),
+        TaskKind::Work | TaskKind::Manager => {}
     }
     let running = placement::runtime_for(task)?.start(app, task, session, prompt)?;
     // Started, however it was admitted: no longer waits on `max_live` or a
