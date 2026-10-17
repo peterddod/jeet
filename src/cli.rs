@@ -206,13 +206,15 @@ pub enum Commands {
         command: Option<WatchCommands>,
     },
 
-    /// Raise a desktop notification (Notification Center on macOS)
+    /// Notify the user, through the backends `[notify] via` names (by
+    /// default, Notification Center on macOS); or run the sender that sends
+    /// what is queued
     #[command(args_conflicts_with_subcommands = true)]
     Notify {
-        /// What the notification says; required without a subcommand
-        title: Option<String>,
         #[command(subcommand)]
         command: Option<NotifyCommands>,
+        /// The notification's title
+        title: Option<String>,
         /// The notification's text
         #[arg(long)]
         body: Option<String>,
@@ -680,17 +682,6 @@ pub enum TodoCommands {
 }
 
 #[derive(Subcommand)]
-pub enum NotifyCommands {
-    /// Register jeet as the handler of jeet:// links, so a notification, a
-    /// browser or Slack can open a task, review or report (asks for nothing
-    /// else; refused from an agent's pane)
-    InstallLink,
-
-    /// Remove the jeet:// link handler
-    UninstallLink,
-}
-
-#[derive(Subcommand)]
 pub enum SetupCommands {
     /// Review each staged change as a diff and apply it with a yes, after a
     /// backup (only at your own terminal)
@@ -715,6 +706,28 @@ pub enum WatchCommands {
     /// Say whether the watcher is installed, when it last polled and what
     /// it follows
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum NotifyCommands {
+    /// Send what is queued for the user as it comes, until killed: what
+    /// `jeet notify install` keeps running
+    Serve,
+
+    /// Keep the sender running in the background: a launchd agent on
+    /// macOS, a systemd user unit elsewhere
+    Install,
+
+    /// Stop running the sender in the background
+    Uninstall,
+
+    /// Register jeet as the handler of jeet:// links, so a notification, a
+    /// browser or Slack can open a task, review or report (asks for nothing
+    /// else; refused from an agent's pane)
+    InstallLink,
+
+    /// Remove the jeet:// link handler
+    UninstallLink,
 }
 
 #[derive(Subcommand)]

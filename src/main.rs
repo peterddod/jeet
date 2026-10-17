@@ -41,14 +41,13 @@ mod wake;
 mod watch;
 mod worktrees;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
-    Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, NotifyCommands, PrCommands,
-    ProjectCommands, SetupCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs,
-    WorktreeCommands,
+    Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands,
+    SetupCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -143,23 +142,13 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Complete { what } => commands::completions::run_complete(&what, None)?,
         Commands::InitShell => commands::shell::run_init_shell()?,
         Commands::Notify {
-            title,
             command,
+            title,
             body,
             url,
         } => match command {
-            Some(NotifyCommands::InstallLink) => {
-                let app = context::App::open()?;
-                commands::notify::install_link(&app)?
-            }
-            Some(NotifyCommands::UninstallLink) => {
-                let app = context::App::open()?;
-                commands::notify::uninstall_link(&app)?
-            }
-            None => {
-                let title = title.context("a title is required")?;
-                commands::notify::run(&title, body.as_deref(), url.as_deref())?
-            }
+            Some(command) => commands::notify::run_command(command)?,
+            None => commands::notify::run(title.as_deref(), body.as_deref(), url.as_deref())?,
         },
         Commands::Open { url } => {
             let app = context::App::open()?;
