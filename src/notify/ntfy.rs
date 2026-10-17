@@ -25,8 +25,8 @@ const TITLE_MAX: usize = 150;
 /// ntfy's message limit, in bytes: a longer one arrives as an attachment.
 const MESSAGE_MAX: usize = 4096;
 
-/// The summary's share of it, in characters.
-const SUMMARY_MAX: usize = 3000;
+/// The longest field value (`Where`, `Task`…), in characters.
+const FIELD_MAX: usize = 200;
 
 /// ntfy's priorities.
 const HIGH: u8 = 4;
@@ -107,10 +107,12 @@ impl Notifier for Ntfy {
                         ),
                     },
                 ),
+                // Not there, not in time, rate limited or failing, or not
+                // reached at all: so for the next one.
+                None | Some(404 | 405 | 408 | 429) => anyhow!(Down(e)),
+                Some(code) if code >= 500 => anyhow!(Down(e)),
                 // Of this message alone.
-                Some(code) if code != 429 && code < 500 => e,
-                // Not reached, rate limited, or failing: so for the next one.
-                _ => anyhow!(Down(e)),
+                Some(_) => e,
             });
         }
         web::token_works(&self.home, NAME);
@@ -132,13 +134,13 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
     };
     let mut fields = Vec::new();
     if let Some(task) = &event.task {
-        fields.push(format!("Task: {task}"));
+        fields.push(format!("Task: {}", cut(task, FIELD_MAX)));
     }
     if let Some(at) = event.subtitle.as_deref().filter(|s| !s.trim().is_empty()) {
-        fields.push(format!("Where: {}", at.trim()));
+        fields.push(format!("Where: {}", cut(at.trim(), FIELD_MAX)));
     }
     if !event.kind.is_empty() {
-        fields.push(format!("Kind: {}", event.kind));
+        fields.push(format!("Kind: {}", cut(&event.kind, FIELD_MAX)));
     }
     if let Some(ci) = ci {
         fields.push(format!("CI: {ci}"));
@@ -147,7 +149,6 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
         fields.push(format!("Age: {}", age(now - at)));
     }
     let jeet = jeet_link(event);
-    let mut text = cut(summary, SUMMARY_MAX);
     let mut tail = Vec::new();
     if !fields.is_empty() {
         tail.push(fields.join(" · "));
@@ -158,11 +159,15 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
     if let Some(jeet) = &jeet {
         tail.push(format!("jeet open {jeet}"));
     }
+    let tail = tail.join("\n");
+    // The summary gives way, so the command and the link are kept.
+    let room = MESSAGE_MAX.saturating_sub(tail.len() + 2);
+    let mut text = cut_bytes(summary, room);
     if !tail.is_empty() {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str(&tail.join("\n"));
+        text.push_str(&tail);
     }
     if text.is_empty() {
         text = "jeet".to_string();
@@ -236,6 +241,9 @@ fn cut_bytes(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let ellipsis = "…";
+    if max < ellipsis.len() {
+        return String::new();
+    }
     let mut end = max - ellipsis.len();
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -424,10 +432,15 @@ mod tests {
         let m = message("t", &event, None, 0, true);
         let text = m["message"].as_str().unwrap();
         assert!(text.len() <= MESSAGE_MAX, "{}", text.len());
-        assert!(text.ends_with('…'));
+        // The summary gives way; the command and the link stay.
+        assert!(text.starts_with("éé"), "{text}");
+        assert!(text.contains("é…\n\nTask: x · Where: üü"), "{text}");
+        assert!(text.contains("\njeet report answer 41 \"…\"\n"), "{text}");
+        assert!(text.ends_with("\njeet open jeet://report/41"), "{text}");
         assert_eq!(cut_bytes("abc", 3), "abc");
         assert_eq!(cut_bytes("ab€d", 5), "ab…");
         assert_eq!(cut_bytes("ab€d", 4), "a…");
+        assert_eq!(cut_bytes("ab€d", 2), "");
     }
 
     #[test]
@@ -459,7 +472,7 @@ mod tests {
         assert!(!e.is::<Down>(), "{e:#}");
         assert!(format!("{e:#}").contains("HTTP 413"), "{e:#}");
         // Rate limited, failing, or not reached: down for the round.
-        for code in [429, 502] {
+        for code in [404, 405, 408, 429, 502] {
             let (down, _) = ntfy(home.path(), move |_| Err(refused(code)));
             assert!(down.send(&question(), &tokens).unwrap_err().is::<Down>());
         }

@@ -177,6 +177,13 @@ fn setup_ntfy(app: &App) -> Result<()> {
             "jeet: [notify.ntfy] publishes to {topic} on {}",
             notify.ntfy_server()
         ),
+        // Written by the user, so theirs to finish.
+        None if notify.ntfy.is_some() => bail!(
+            "[notify.ntfy] in {} has no topic: set `topic = \"{}\"` (or another hard to \
+             guess) there, then run this again",
+            path.display(),
+            ntfy::random_topic()
+        ),
         None => {
             let server = read_line(&format!(
                 "ntfy server (Enter for {}): ",
@@ -276,7 +283,9 @@ fn read_line(prompt: &str) -> Result<String> {
     eprint!("{prompt}");
     std::io::stderr().flush()?;
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    if std::io::stdin().lock().read_line(&mut line)? == 0 {
+        bail!("no answer (end of input); nothing was changed");
+    }
     Ok(line)
 }
 
