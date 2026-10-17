@@ -494,6 +494,8 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// Get `message`, sent by `from` (`task fix-login`, say), to the assistant,
 /// by the same rules as `jeet task send`, in the session [`target`] picks;
 /// with none running, a new session called `events <date>` starts with it.
+/// Off the push path, an agent's is kept instead (see [`deliver`]); the
+/// user's still goes this way.
 ///
 /// It is not the user typing to the assistant, whatever it says, so it goes
 /// fenced as untrusted, with who sent it: see [`fence_message`].

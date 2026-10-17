@@ -331,8 +331,10 @@ pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) ->
 /// `jeet task-hook [--task <id>] <event>`: record what the hook on stdin
 /// says, as the harness called `harness` reports it, for `task`, the one
 /// jeet launched the agent for (none from hooks older than `--task`).
-/// Never fails, never prints to stdout; what goes wrong is noted on stderr,
-/// which the agent keeps out of the conversation.
+/// Never fails, and prints to stdout only what the harness takes from a
+/// hook (a session's context, a prompt's hidden line, a Stop's handover);
+/// what goes wrong is noted on stderr, which the agent keeps out of the
+/// conversation.
 pub fn run_hook(harness: &str, event: &str, task: Option<&str>) {
     let Some(found) = harness::by_id(harness) else {
         eprintln!("jeet task-hook {event}: no harness {harness:?}");

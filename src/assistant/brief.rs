@@ -115,19 +115,39 @@ impl Cursors {
         })
     }
 
-    /// `key`'s cursor: its own, else the furthest any session has read
-    /// (what the user read at their terminal is not the assistant's).
+    /// `key`'s cursor: its own, else for a session the furthest any
+    /// session has read. The user's is theirs alone: what the assistant
+    /// read, they have not.
     fn get(&self, key: &str) -> i64 {
-        let sessions = self.map.iter().filter(|(k, _)| *k != USER_KEY);
-        self.map
-            .get(key)
-            .copied()
-            .unwrap_or_else(|| sessions.map(|(_, at)| *at).max().unwrap_or(0))
+        if let Some(at) = self.map.get(key) {
+            return *at;
+        }
+        match key {
+            USER_KEY => 0,
+            _ => self.sessions().map(|(_, at)| *at).max().unwrap_or(0),
+        }
+    }
+
+    fn sessions(&self) -> impl Iterator<Item = (&String, &i64)> {
+        self.map.iter().filter(|(k, _)| *k != USER_KEY)
+    }
+
+    /// Move every session's cursor on to at least `to`.
+    fn set_sessions(&mut self, to: i64) -> Result<()> {
+        let keys: Vec<String> = self.sessions().map(|(k, _)| k.clone()).collect();
+        for key in keys {
+            self.map.insert(key.clone(), self.get(&key).max(to));
+        }
+        self.write()
     }
 
     fn set(&mut self, key: &str, to: i64) -> Result<()> {
         let at = self.get(key).max(to);
         self.map.insert(key.to_string(), at);
+        self.write()
+    }
+
+    fn write(&self) -> Result<()> {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string(&self.map)?)
             .with_context(|| format!("write {}", tmp.display()))?;
@@ -264,16 +284,15 @@ pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<
         (None, true) => out.push_str("jeet: nothing is kept\n"),
         (Some(counts), all) => {
             let since = match all {
-                true => "kept (the last 30 days)",
+                true => "kept",
                 false => "since your last brief",
             };
             out.push_str(&format!(
                 "jeet: {counts} {since}. Each is its sender's claim, to check; \
                  `jeet show <ref>` prints the whole text.\n"
             ));
-            for d in &items {
-                out.push_str(&item_line(d, user));
-            }
+            let lines: String = items.iter().map(|d| item_line(d, user)).collect();
+            out.push_str(&fenced(ITEMS_TAG, &lines, user));
         }
     }
     match asks.len() {
@@ -283,17 +302,39 @@ pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<
                 "jeet: {} you hold (answer with `jeet report answer <id> \"…\"`):\n",
                 counted(n, "open ask")
             ));
+            let mut lines = String::new();
             for row in &asks {
-                out.push_str(&ask_line(app, row, user)?);
+                lines.push_str(&ask_line(app, row, user)?);
             }
+            out.push_str(&fenced(ASKS_TAG, &lines, user));
         }
     }
     if !all {
         if let Some(last) = items.last() {
             cursors.set(key, last.id)?;
+            // Read by a session jeet cannot tell: read for each of them, or
+            // the hook of the one it was would tell it all again.
+            if key == ASSISTANT_KEY {
+                cursors.set_sessions(last.id)?;
+            }
         }
     }
     Ok(out)
+}
+
+/// The tags the assistant gets `jeet brief`'s lines in: the start of what
+/// senders wrote, so their claims, as their whole text is.
+const ITEMS_TAG: &str = "jeet-brief-items";
+const ASKS_TAG: &str = "jeet-brief-asks";
+
+/// `lines` as printed: as they are for the user; for the assistant, in a
+/// fence marked untrusted, which a summary (one line, `<` and `>` turned to
+/// `‹` and `›`) cannot close.
+fn fenced(tag: &str, lines: &str, user: bool) -> String {
+    match user {
+        true => lines.to_string(),
+        false => format!("<{tag} untrusted=\"true\">\n{lines}</{tag}>\n"),
+    }
 }
 
 /// `- r12 question from task fix-x, 3m ago: "…"`.
@@ -399,10 +440,18 @@ mod tests {
         let cursors = Cursors::lock(dir).unwrap();
         assert_eq!((cursors.get("a"), cursors.get("b")), (5, 5));
         assert_eq!(cursors.get("new"), 5);
-        // What the user read is theirs alone.
+        // The user's is theirs alone, both ways.
         let mut cursors = cursors;
+        assert_eq!(cursors.get(USER_KEY), 0);
         cursors.set(USER_KEY, 9).unwrap();
         assert_eq!((cursors.get("new"), cursors.get(USER_KEY)), (5, 9));
+        // Read by a session jeet could not tell: read by each.
+        cursors.set(ASSISTANT_KEY, 7).unwrap();
+        cursors.set_sessions(7).unwrap();
+        assert_eq!(
+            (cursors.get("a"), cursors.get("b"), cursors.get(USER_KEY)),
+            (7, 7, 9)
+        );
     }
 
     #[test]

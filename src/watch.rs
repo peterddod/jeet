@@ -2215,6 +2215,7 @@ mod tests {
             (Delivered::Paused, false),
             (Delivered::StartQueued { live: 1, max: 1 }, false),
             (Delivered::Wake, false),
+            (Delivered::Stored, true),
         ] {
             assert_eq!(still_notified(delivered), notified, "{delivered:?}");
         }

@@ -1409,18 +1409,22 @@ mod tests {
              its sender's claim, to check; `jeet show <ref>` prints the whole text."
         );
         assert_eq!(
-            &lines[1..4],
+            &lines[1..6],
             [
+                "<jeet-brief-items untrusted=\"true\">".to_string(),
                 format!("- r{done} done from task w, just now: \"PR #4 merged\""),
                 format!("- r{ask} question from task w, just now: \"which db?\""),
                 format!("- m{m} message from task w, just now: \"look at ‹this›\""),
+                "</jeet-brief-items>".to_string(),
             ]
         );
         assert_eq!(
-            &lines[4..],
+            &lines[6..],
             [
                 "jeet: 1 open ask you hold (answer with `jeet report answer <id> \"…\"`):".to_string(),
+                "<jeet-brief-asks untrusted=\"true\">".to_string(),
                 format!("- #{ask} question from task assistant/w, just now: \"which db?\" (jeet show r{ask})"),
+                "</jeet-brief-asks>".to_string(),
             ]
         );
         // Read: not told again, to this session or a new one.
