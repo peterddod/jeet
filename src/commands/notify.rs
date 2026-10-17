@@ -210,7 +210,8 @@ fn test(app: &App) -> Result<()> {
             sender::log_hint(&app.home)
         ),
         false => eprintln!(
-            "jeet: the sender took it; {} has any error",
+            "jeet: the sender took it from the outbox (unless a [[notify.rules]] entry or \
+             max_per_hour held it back); {} has any error",
             sender::log_hint(&app.home)
         ),
     }

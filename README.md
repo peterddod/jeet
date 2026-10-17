@@ -2415,8 +2415,9 @@ notification sends it itself through every backend that needs no token, so
 token (`slack`) waits for the sender, and `jeet task ls` and the tasks
 screen say so. A send through such a backend that fails (Slack refuses it,
 or cannot be reached) stays in the outbox and is tried again after 30
-seconds, then twice as long after each failure, up to an hour; the sender
-logs why.
+seconds, then twice as long after each failure, up to an hour, and is
+dropped once a day old; the sender logs why. Once a send through a backend
+fails, the rest of that round waits too, rather than each waiting on Slack.
 
 ```toml
 [notify]

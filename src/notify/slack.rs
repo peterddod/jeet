@@ -34,6 +34,8 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const HEADER_MAX: usize = 150;
 const SECTION_MAX: usize = 3000;
 const FIELD_MAX: usize = 2000;
+/// A button's url.
+const URL_MAX: usize = 3000;
 
 /// Slack's errors that mean the token is no good.
 const BAD_TOKEN: &[&str] = &[
@@ -282,6 +284,9 @@ pub fn message(event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value 
     let jeet = jeet_link(event);
     let mut buttons = Vec::new();
     let mut button = |id: &str, text: &str, url: &str| {
+        if url.len() > URL_MAX {
+            return;
+        }
         buttons.push(json!({
             "type": "button",
             "action_id": id,
@@ -329,12 +334,12 @@ pub fn message(event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value 
                 .collect::<Vec<_>>(),
         }));
     }
-    json!({ "text": cut(event.title.trim(), SECTION_MAX), "blocks": blocks })
+    json!({ "text": cut(&escape(event.title.trim()), SECTION_MAX), "blocks": blocks })
 }
 
 /// Whether Slack's `error` says it would not take the blocks as they were.
 fn refused_blocks(error: &str) -> bool {
-    error.starts_with("invalid_blocks") || error == "invalid_arguments"
+    error.starts_with("invalid_blocks")
 }
 
 /// The report id of `event`, if it is about one (`ref` = `r41`).

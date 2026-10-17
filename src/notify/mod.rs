@@ -56,6 +56,10 @@ const NOTIFIER_KILL: Duration = Duration::from_secs(120);
 const RETRY_FIRST_SECS: i64 = 30;
 const RETRY_MAX_SECS: i64 = 3600;
 
+/// How old a notification that still fails to send may get before it is
+/// dropped, with a word in the log: by then it is news to nobody.
+const GIVE_UP_SECS: i64 = 24 * 3600;
+
 /// Why the user is told.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -464,7 +468,7 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
         .notify;
     let backends = backends(&config, home);
     let now = now_secs();
-    let (sends, mut kept) = {
+    let (sends, mut kept, written) = {
         let mut outbox = lock_outbox(home)?;
         let events = read_all(&mut outbox)?;
         let mut state = load_state(home);
@@ -504,33 +508,54 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
         if let Err(e) = save_state(home, &state) {
             eprintln!("jeet: could not save what notifications were sent: {e:#}");
         }
-        (sends, kept)
+        (sends, kept, lines.len() as u64)
     };
     let mut failed = Vec::new();
+    // A token backend that failed once in this drain is not tried again in
+    // it: Slack down or rate limiting would otherwise cost a timeout each.
+    let mut down = vec![false; backends.len()];
     for (event, via) in sends {
         for i in via {
             let backend = &backends[i];
-            if let Err(e) = backend.send(&event, tokens) {
-                if e.downcast_ref::<Said>().is_none() {
-                    eprintln!("jeet: notify via {}: {e:#}", backend.name());
-                }
-                if backend.needs_token() {
-                    failed.push(retry(&event, backend.name(), now));
-                }
+            let sent = match down[i] {
+                true => Err(anyhow::anyhow!(Said)),
+                false => backend.send(&event, tokens),
+            };
+            let Err(e) = sent else {
+                continue;
+            };
+            if e.downcast_ref::<Said>().is_none() {
+                eprintln!("jeet: notify via {}: {e:#}", backend.name());
+            }
+            if !backend.needs_token() {
+                continue;
+            }
+            down[i] = true;
+            let now = now_secs();
+            match now - event.at.unwrap_or(now) > GIVE_UP_SECS {
+                true => eprintln!(
+                    "jeet: gave up sending {:?} via {} after a day of failures",
+                    event.title,
+                    backend.name()
+                ),
+                false => failed.push(retry(&event, backend.name(), now)),
             }
         }
     }
     let mut outbox = lock_outbox(home)?;
+    // What was queued while it sent makes the outbox longer than this.
+    let mut left = written;
     for event in &failed {
         let mut line = serde_json::to_string(event)?;
         line.push('\n');
         outbox
             .write_all(line.as_bytes())
             .context("put a notification back in the outbox")?;
+        left += line.len() as u64;
     }
     kept.extend(failed);
     Ok(Drained {
-        left: outbox.metadata()?.len(),
+        left,
         retry_at: kept.iter().filter_map(|e| e.retry_at).min(),
     })
 }
@@ -967,5 +992,19 @@ mod tests {
             ..Event::default()
         };
         assert_eq!(retry(&late, "slack", 0).retry_at, Some(RETRY_MAX_SECS));
+
+        // A day old and failing still: dropped.
+        let stale = Event {
+            at: Some(now_secs() - GIVE_UP_SECS - 60),
+            ..due
+        };
+        std::fs::write(
+            outbox_path(home.path()),
+            serde_json::to_string(&stale).unwrap() + "\n",
+        )
+        .unwrap();
+        let drained = drain(home.path(), &NoTokens, true).unwrap();
+        assert!(queued(home.path()).is_empty());
+        assert_eq!(drained, Drained::default());
     }
 }
