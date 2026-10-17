@@ -29,8 +29,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    Commands, ManagerCommands, PrCommands, ProjectCommands, TaskCommands, WatchCommands,
-    WorktreeArgs, WorktreeCommands,
+    Commands, ManagerCommands, PrCommands, ProjectCommands, SetupCommands, TaskCommands,
+    WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::{self, ManagerPolicy};
 use crate::context::App;
@@ -670,6 +670,13 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
             Gate::Interactive
         }
         Commands::InstallShell => needs("shell.install", "installed shell integration".into()),
+        // Lists what is staged. Applying is the user's at a terminal (the
+        // command refuses any agent's session too); discarding drops what
+        // the user has not seen yet.
+        Commands::Setup { command } => match command {
+            SetupCommands::Status => Gate::Free,
+            SetupCommands::Apply | SetupCommands::Discard => Gate::Interactive,
+        },
         // A poll hands events on as the user's rules say; installing one
         // changes what runs on the user's machine.
         Commands::Watch { command, .. } => match command {
@@ -1528,6 +1535,12 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         // Cuts itself to the reports and messages of the caller and the
         // tasks below it.
         Commands::Show { .. } => Some(Scope::Listed),
+        // Setup is the user's: a task with a parent only reads what is
+        // staged.
+        Commands::Setup { command } => match command {
+            SetupCommands::Status => Some(Scope::NoTarget),
+            SetupCommands::Apply | SetupCommands::Discard => None,
+        },
         Commands::Worktree(WorktreeArgs { command, task }) => {
             let current = Target::Current(task.clone());
             match command {
@@ -2057,6 +2070,7 @@ mod tests {
             &["manager", "ls"],
             &["manager", "ls", "--json"],
             &["manager", "show", "x"],
+            &["setup", "status"],
         ] {
             assert_eq!(gate_of(args), Gate::Free, "{args:?}");
         }
@@ -2068,6 +2082,8 @@ mod tests {
             &["chat"],
             &["chat", "--new", "plan"],
             &["task", "adopt", "api"],
+            &["setup", "apply"],
+            &["setup", "discard"],
         ] {
             assert_eq!(gate_of(args), Gate::Interactive, "{args:?}");
         }
@@ -2944,6 +2960,9 @@ mod tests {
             (&["watch", "uninstall"], false),
             (&["watch", "status"], true),
             (&["doctor", "wake"], false),
+            (&["setup", "status"], true),
+            (&["setup", "apply"], false),
+            (&["setup", "discard"], false),
             (&["notify", "t"], true),
             (&["report", "done", "x"], true),
             (&["report", "progress", "x"], true),
