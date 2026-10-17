@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.13.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.14.0
 ```
 
 ## Quick start
@@ -1576,6 +1576,200 @@ into tasks.
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
 
+## What's new in v0.14
+
+Quieter messaging, notifications that reach you wherever you are, and a
+setup chat that walks you through jeet's config.
+
+### Messaging
+
+- **Wake repair.** An agent whose wake channel is gone (started before the
+  channel existed, its watcher died, or Claude Code refused it three times)
+  is repaired by the next `jeet watch --once` poll: once it is idle, has no
+  unsent text and nobody has typed in its window for two minutes, jeet ends
+  it and resumes the same session in place. At most once per session per
+  day, logged in the assistant's `actions.log`; `jeet doctor wake` shows
+  each session's channel. A Stop now leaves the queue to a live watcher, and
+  a refused channel backs off (10 minutes, then an hour) before it is tried
+  again. `[harness] wake_repair = "off"` turns all of that off
+  ([Messaging an agent](#messaging-an-agent)).
+- **Quiet rendering.** What is queued for the assistant and managers is
+  posted by class: questions, blocks and answers whole; a `done`, a `jeet
+  task send` and a `jeet watch` batch as one line each; `progress` and
+  `status` folded into a digest that waits up to `digest_mins`. `jeet show
+  r123` / `jeet show m45` print any of them whole. Work tasks still get
+  everything in full ([Quiet messages](#quiet-messages-for-the-assistant-and-managers)).
+- **No question is lost.** An ask left unanswered for `reask_mins` is posted
+  again, whole, to whoever holds it; after `escalate_mins` you are notified.
+- **The assistant is off the push path.** Reports, sends, watch events and
+  asks addressed to the assistant are kept, not pushed into its sessions.
+  When you next prompt it, its hook adds one line, unseen by you, saying
+  what is new; `jeet brief` prints it (`--all` for the last 30 days).
+  `[assistant] push = true` brings back the old behaviour
+  ([The assistant off the push path](#the-assistant-off-the-push-path)).
+
+### Notifications
+
+- **The notifier.** Every notification is queued in
+  `$JEET_HOME/run/notify/outbox.jsonl` and sent by `jeet notify serve`,
+  which `jeet notify install` keeps running (launchd `dev.jeet.notify` on
+  macOS, systemd `jeet-notify.service` elsewhere). Backends: `desktop`
+  (the default), `command`, `slack` and `ntfy`. `[[notify.rules]]` pick
+  what is sent by kind, level and task; past `max_per_hour` (6) the rest of
+  the hour folds into one "N more"; the same thing for the same reason is
+  sent once ([Notifications](#notifications)).
+- **Core events.** jeet itself tells you of a question, block or done from
+  a task directly under the assistant, or one started for you (`jeet task
+  new --for-user`), anything stuck (a
+  block open past `stuck_blocked_mins`, CI failing `stuck_ci_failures` times
+  in a row, a budget used up, an agent that ended without `done`, an agent
+  that failed to start) and every ask still open after `escalate_mins`.
+  `jeet task new --quiet` holds back a task's questions and done (stuck
+  and escalated asks still notify); `[notify] events = false` turns them
+  all off.
+- **Deep links.** `jeet open jeet://task/<slug>` (also `review/<slug>`,
+  `report/<id>`) brings up the tasks screen on it, switching tmux or
+  starting a terminal (`[notify] terminal`). `jeet notify install-link`
+  makes the system open `jeet://` links, so a click in a notification,
+  browser or Slack works ([Links](#links)).
+- **Slack**: a direct message from your own Slack app, with buttons for the
+  PR and its checks and the command that answers it. `jeet notify
+  slack-manifest`, then `jeet notify setup slack`; the bot token lives in
+  the OS keyring ([Slack](#slack)).
+- **ntfy**: a push to an ntfy topic for your phone, questions and stuck work
+  at high priority. `jeet notify setup ntfy` suggests a random topic: on
+  ntfy.sh a topic is public to whoever knows its name, so keep it
+  unguessable or use an access token ([ntfy](#ntfy)).
+
+### `jeet setup`
+
+- **The setup chat.** `jeet setup` opens a setup agent (tmux session
+  `jeet-setup`) that goes through jeet a topic at a time (repos, harness,
+  permissions, PR policy, the assistant, managers, reviews, watching,
+  notifications, instructions) and stages changes. `jeet setup apply` shows
+  each one as a diff and asks y/N/q, backing up what it replaces under
+  `~/.jeet/backups/setup-<stamp>/`; `jeet setup status` and `discard` too
+  ([Setup](#setup)).
+- **Permissions.** `[permissions] push = "branches"` lets work tasks push
+  their branches (`git push origin …`, `-u`, `--force-with-lease`) without
+  a prompt; default branches and plain force stay denied. The force-push
+  deny no longer catches `--force-with-lease`. New built-in denies for
+  every gated agent: `gh repo edit`, `gh secret`, `gh api` DELETE. Read-only
+  `gh pr view/checks/diff` and `gh run view/list` are allowed.
+  `[permissions.task|manager|assistant]` add your own Claude Code rules
+  ([Permission rules for agents](#permission-rules-for-agents)).
+- **PR policy.** `[tasks] pr = "auto" | "draft" | "ask"` (default `draft`),
+  per project in `project.toml`, or per task with `jeet task new --pr`
+  ([Pull requests from tasks](#pull-requests-from-tasks)).
+- **`[models]`** sets the model for the assistant, managers, tasks and
+  reviews ([Models](#models)).
+- **Template overrides.** A file under `~/.jeet/templates/{root,manager,worker}/`
+  replaces the template jeet ships for new homes and task skills
+  ([Template overrides](#template-overrides)).
+
+### TUI keys
+
+- Reviews: `⏎` opens the review's session, `R` reruns it; the review menu
+  is gone.
+- Projects: on a project row `n` starts a task in it, `N` makes a project,
+  `E` edits, `D` deletes; the `P` panel is gone, and `jeet projects` opens
+  the projects tab.
+- Agents: `y` answers the open question, `I` reads the node's reports,
+  `z`/`Z` pause and resume, `i` is the assistant's inbox as elsewhere, `⌫`
+  backs out.
+- Explorer: `⌫` on an empty filter leaves the folder. Diff viewer: `q` goes
+  back.
+- The hint bar shows only the keys the row under the cursor takes.
+
+### Fixes
+
+- **Index migrate guard.** A development build (a debug build, or one run
+  from a cargo `target/` directory) refuses to migrate the default
+  `~/.jeet` index, which the installed jeet could then no longer open. Use
+  `JEET_HOME=$(mktemp -d)`, or `JEET_ALLOW_DEV_MIGRATE=1`.
+- **Startup trust race.** With `[harness] auto_trust`, Claude Code redrew
+  the trust prompt back to "No" just after jeet pressed Down, and the Enter
+  was lost. jeet now waits for a steady "Yes" before Enter, retries once,
+  and otherwise files a `start failed` report to the parent and leaves the
+  prompt to you. Accepting takes about 0.6s longer.
+- Flaky tests: the waiter, notify and status lock tests, the explorer's PR
+  list test and the review upgrade post-step tests.
+
+v0.14.0: #105, #107–#129.
+
+### New config keys
+
+| Key | Default | |
+|-----|---------|---|
+| `[messages] render = { assistant, managers }` | `"quiet"` each | or `"full"` |
+| `[messages] digest_mins` | 15 | how long a digest waits |
+| `[messages] reask_mins` | 15 | re-post an open ask; 0 never |
+| `[messages] escalate_mins` | 60 | notify you of an open ask; 0 never |
+| `[notify] via` | `["desktop"]` | `desktop`, `command`, `slack`, `ntfy`; `[]` none |
+| `[notify] command` | | for `via = ["command"]` |
+| `[[notify.rules]]` kind, level, task, action | | first match decides |
+| `[notify] max_per_hour` | 6 | 0 never folds |
+| `[notify] events` | `true` | jeet's own question/block/stuck notifications |
+| `[notify] stuck_blocked_mins` | 30 | a block open this long is stuck |
+| `[notify] stuck_ci_failures` | 2 | failed CI runs in a row that are stuck |
+| `[notify] terminal` | platform's | for `jeet open`; `none` never starts one |
+| `[notify.slack] user` | | your Slack member id |
+| `[notify.ntfy] server`, `topic` | `https://ntfy.sh`; no topic | |
+| `[harness] wake_repair` | `"auto"` | `"off"` for no repairs |
+| `[permissions] push` | `"ask"` | `"branches"` |
+| `[permissions] classifier_context` | `false` | |
+| `[permissions.task\|manager\|assistant] allow`, `deny` | `[]` | Claude Code rules |
+| `[tasks] pr` | `"draft"` | `"auto"`, `"ask"`; also per project |
+| `[models] assistant`, `manager`, `task`, `review` | the agent's own | |
+| `[assistant] push` | `false` | `true` pushes as before |
+
+**Upgrading to v0.14.0:** the index moves from **schema v9 to v13** the first
+time any v0.14 command opens it, in four additive steps: **v10** a task's own
+PR policy (`jeet task new --pr`), **v11** who started a task, its quiet flag
+and whether a block was told of as stuck (for `[notify] events`), **v12** the
+`setup` kind for the setup agent, and **v13** what the ask sweep has done
+with each open ask (every ask from before counts as done both ways, so an
+upgrade sends nothing at once). Before anything changes the index is copied
+to `$JEET_HOME/backups/index-v9-<unix time>.db`, and the migration is refused
+if the copy cannot be made. **v0.13 and older refuse the index afterwards**,
+so upgrade every jeet you run at once, the one `jeet watch` runs included.
+
+What changes by default:
+
+- The assistant's sessions are no longer pushed to (`[assistant] push =
+  false`); the hidden line and `jeet brief` replace it. The assistant's
+  existing `AGENTS.md` is not rewritten: add a line about `jeet brief` by
+  hand if you want one.
+- The assistant and managers get quiet rendering.
+- **Wake repair resumes unwatched sessions once after upgrading.** Agents
+  started by an older jeet, the assistant's included, are resumed in place
+  by `jeet watch` once each is idle and you have been away from its window
+  two minutes. The conversation is kept; background shells and subagents
+  it left running end.
+- Past 6 notifications an hour, the rest fold into one.
+- `[assistant] allow` needs nothing new.
+
+After upgrading:
+
+1. **`brew upgrade jeet`** (on macOS; it updates the binary `jeet watch`
+   runs). Every jeet at once.
+2. **`jeet notify install`**, so the sender runs. Desktop and `command`
+   work without it; Slack and ntfy need it.
+3. Optionally **`jeet notify setup slack`** (after creating the app from
+   `jeet notify slack-manifest`) or **`jeet notify setup ntfy`**, add it to
+   `[notify] via`, then **`jeet notify test`**.
+4. **`jeet setup`**, to turn on `[permissions] push = "branches"`, which is
+   off by default, and anything else you want; `jeet setup apply` writes it.
+5. **Restart agents** with `jeet task restart <slug>`, the assistant
+   included, so they get the new settings, rules and hooks.
+6. Optionally **`jeet notify install-link`**, for clickable `jeet://`
+   links. Run it again if the jeet binary moves.
+
+Not yet verified: whether desktop notifications sent from the launchd sender
+show on macOS (check with `jeet notify test` after step 2), and whether
+Slack lets a `jeet://` link be clicked (if it refuses the message, jeet
+sends it again without the link, keeping the `jeet open` line).
+
 ## What's new in v0.13
 
 Reviews stop being tasks: a review is its own thing, with its own table in
@@ -2466,6 +2660,9 @@ that round waits as long, untried, rather than each failing in turn.
 via = ["desktop"]   # the default; [] sends nothing
 command = "/usr/local/bin/page-me"   # for via = ["command"]
 max_per_hour = 6    # the default; the rest of the hour folds into one "N more"; 0 never folds
+events = true       # the default; jeet's own question, blocked, done and stuck notifications
+stuck_blocked_mins = 30   # the default; a block open this long is stuck
+stuck_ci_failures = 2     # the default; failed CI runs in a row on a PR that are stuck
 
 [[notify.rules]]    # the first that matches decides; none matching, it is sent
 kind = ["review"]   # question, blocked, review, startup-prompt, action, grant, message, a GitHub event's kind…
