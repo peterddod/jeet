@@ -59,9 +59,9 @@ pub fn run(app: &App, url: &str) -> Result<()> {
                 });
                 activate(screen.app.as_deref(), setting);
                 if !taken(&app.home, screen.pid) {
-                    // Not answering: a record a killed process left, or a
-                    // screen that is stuck. Go on without it.
-                    registry::forget(&app.home, screen.pid);
+                    // Running but busy elsewhere (the explorer, a slow
+                    // job): go on without it this time.
+                    registry::withdraw(&app.home, screen.pid);
                     screens.retain(|s| s.pid != screen.pid);
                     continue;
                 }

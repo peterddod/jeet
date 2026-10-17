@@ -168,11 +168,12 @@ pub fn requested(home: &Path, pid: u32) -> bool {
     goto_path(home, pid).exists()
 }
 
-/// Withdraw a request that was not taken, and the record of the screen that
-/// did not take it: it is not answering.
-pub fn forget(home: &Path, pid: u32) {
+/// Withdraw a request that was not taken. The screen's record stays: it
+/// runs ([`live`] checked its start time) but is busy elsewhere — in the
+/// explorer, the review viewer, a slow job — and takes the next link once
+/// it is back.
+pub fn withdraw(home: &Path, pid: u32) {
     let _ = fs::remove_file(goto_path(home, pid));
-    let _ = fs::remove_file(record_path(home, pid));
 }
 
 /// What the screen of `pid` was asked to go to, taking the request: the
@@ -274,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn an_untaken_request_is_withdrawn_with_its_record() {
+    fn an_untaken_request_is_withdrawn_and_its_record_kept() {
         let home = tempfile::tempdir().unwrap();
         let _reg = register(home.path(), &screen(8, 1)).unwrap();
         request(home.path(), 8, &Link::task("x")).unwrap();
         assert!(requested(home.path(), 8));
-        forget(home.path(), 8);
+        withdraw(home.path(), 8);
         assert!(!requested(home.path(), 8));
-        assert!(live_with(home.path(), |_, _| true).is_empty());
+        assert_eq!(live_with(home.path(), |_, _| true).len(), 1);
     }
 
     #[test]
