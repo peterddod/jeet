@@ -171,6 +171,29 @@ fn backend(name: &str, config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
     }
 }
 
+/// The backend names `via` may list.
+pub const BACKENDS: &[&str] = &["desktop", "command"];
+
+/// What in `[notify]` would send nothing where it was meant to: a `via`
+/// name jeet has no backend for, or `command` listed with no `[notify]
+/// command` to run. Sending skips either, with a warning, so this is for
+/// checking a config before it is used.
+pub fn check(config: &NotifyConfig) -> Result<()> {
+    for name in config.via() {
+        if !BACKENDS.contains(&name.as_str()) {
+            bail!(
+                "[notify] via: no backend `{name}`; {} has {}",
+                crate::setup::PRODUCT,
+                BACKENDS.join(", ")
+            );
+        }
+        if name == "command" && config.command().is_none() {
+            bail!("[notify] via lists `command`, but `[notify] command` is not set");
+        }
+    }
+    Ok(())
+}
+
 fn backends(config: &NotifyConfig) -> Vec<Box<dyn Notifier>> {
     config
         .via()
@@ -586,6 +609,23 @@ fn one_line(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn every_backend_check_allows_is_one_jeet_sends_through() {
+        let config = NotifyConfig {
+            command: Some("page-me".into()),
+            ..NotifyConfig::default()
+        };
+        for name in BACKENDS {
+            assert!(backend(name, &config).is_some(), "{name}");
+        }
+        assert!(backend("slack", &config).is_none());
+        let unset = NotifyConfig {
+            via: Some(vec!["Desktop".into()]),
+            ..NotifyConfig::default()
+        };
+        assert!(check(&unset).is_err());
+    }
 
     #[test]
     fn text_is_flattened_and_cut() {

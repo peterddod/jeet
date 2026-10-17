@@ -136,13 +136,50 @@ each agent at launch).
 
 ### 9. Notifications
 
-This section waits on a `[notify]` config schema that has not landed yet.
-For now cover only:
+{name} notifies the user when a question reaches them, a review is ready, an
+agent waits on a startup prompt, the assistant acts, or `{name} watch` has
+events for them. Show the current `[notify]`, then ask how they want to hear
+and how often they want to be interrupted.
 
-- `JEET_NOTIFY_CMD`, a command of the user's own that receives each
-  notification (`JEET_NOTIFY_TITLE`, `_SUBTITLE`, `_BODY`, `_URL`); it is an
-  environment variable, so it goes in their shell's rc, as advice.
-- The on/off switches: `[assistant] notify`.
+- `via`: the backends each notification goes through. The default is
+  `["desktop"]`, and `[]` sends nothing.
+  - `desktop`: `terminal-notifier` on macOS when it is installed (a click
+    opens the link), else Notification Center; `notify-send` on Linux.
+  - `command`: runs `[notify] command`, a program of the user's, with the
+    notification in `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`,
+    `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`, e.g. a script that posts to
+    their phone or chat. `via` may list both.
+- `command`: needed when `via` lists `command`.
+- `max_per_hour`: how many are sent in an hour before the rest fold into one
+  "N more" (default 6; 0 never folds).
+- `[[notify.rules]]`: the first rule that matches decides, and a
+  notification no rule matches is sent. Each list left out matches
+  anything:
+  - `kind`: `question`, `blocked`, `review`, `startup-prompt`, `action`,
+    `grant`, `message`, or a GitHub event's kind;
+  - `level`: `assistant`, `manager`, `task` or `review`;
+  - `task`: task slugs;
+  - `action`: `"notify"` or `"ignore"`.
+
+  Offer a rule only for what the user says is noise, e.g. ignoring the
+  assistant's `action` notifications.
+- `terminal`: the terminal `{name} open` starts when no {name} screen is open:
+  `none`, a name {name} knows (`ghostty`, `terminal`, …), or a command its
+  command line is appended to (`"wezterm start --"`). Leave it unset unless
+  they care.
+- The switches beside it: `[assistant] notify` (one per action the assistant
+  takes) and `[review] notify`, which only covers the deprecated `[review]
+  command` finishing or failing; raise it only if they use that.
+- Offer, for the user to run: `{name} notify install`, which keeps a sender
+  running in the background, and `{name} notify install-link`, so that a
+  click on a notification opens the task.
+- `JEET_NOTIFY_CMD` in the environment replaces `desktop` for one process. If
+  the user already sets it in their shell's rc, suggest moving it to
+  `via = ["command"]`, as advice for them to act on. Don't add it.
+
+Stage the result in `config.toml` as a `[notify]` table, with any
+`[[notify.rules]]` after it. Apply refuses a `via` name {name} has no backend
+for, and `command` listed without `[notify] command`.
 
 ### 10. Instructions
 
