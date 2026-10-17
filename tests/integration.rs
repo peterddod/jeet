@@ -350,6 +350,8 @@ fn a_dev_build_does_not_migrate_the_default_index() {
         .output()
         .unwrap();
     assert!(!output.status.success(), "{}", stdout_of(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
     // A scratch home is migrated as ever.
     let scratch = TempDir::new().unwrap();
     succeeded(
