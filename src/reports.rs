@@ -383,9 +383,10 @@ fn escalate_with(
         let (title, subtitle, body) = notification_for(&row, &asker.label(), &path);
         // Whatever `[notify] events` says, as before it; only the quiet
         // switch is asked, which lets an escalation through.
-        let wanted = asker
-            .origin(app)
-            .map_or(true, |o| scope::wanted(&o, Raised::Escalated));
+        let origin = asker.origin(app);
+        let wanted = origin
+            .as_ref()
+            .map_or(true, |o| scope::wanted(o, Raised::Escalated));
         if wanted {
             notifier(Event {
                 why: Why::NeedsUser,
@@ -399,7 +400,8 @@ fn escalate_with(
                 subtitle: Some(subtitle),
                 body,
                 link: Some(crate::link::link_for(&Link::Report(row.id))),
-                only: Vec::new(),
+                pr: origin.ok().and_then(|o| o.pr),
+                ..Event::default()
             });
         }
         return Ok(Escalated {
@@ -1048,7 +1050,10 @@ fn sweep_asks_with(
                 subtitle: Some(path.clone()),
                 body: row.body.clone(),
                 link: Some(crate::link::link_for(&Link::Report(row.id))),
-                only: Vec::new(),
+                pr: asker.origin(app).ok().and_then(|o| o.pr),
+                // Its age is the ask's.
+                at: Some(row.at),
+                ..Event::default()
             });
         }
     }

@@ -5305,7 +5305,10 @@ fn a_stub_tmux_gives_up_once_its_directory_has_gone() {
     let mut call = Command::new(&tmux).args(["-u", "-V"]).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(call.try_wait().unwrap().is_none(), "it did not wait");
-    std::fs::remove_dir_all(&stub).unwrap();
+    // Gone at once, as a rename makes it: removed file by file, the stub's
+    // next `mkdir lock` could win once `lock` is removed, and its directory
+    // then not be empty to remove.
+    std::fs::rename(&stub, scratch.path().join("gone")).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let status = loop {
         if let Some(status) = call.try_wait().unwrap() {

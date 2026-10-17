@@ -331,6 +331,19 @@ pub struct NotifyConfig {
     /// the platform's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<String>,
+
+    /// The `slack` backend (`[notify.slack]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackConfig>,
+}
+
+/// `[notify.slack]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlackConfig {
+    /// The user's Slack member id (`U…`): notifications come to them as
+    /// a direct message from the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 pub const DEFAULT_NOTIFY_VIA: &str = "desktop";
@@ -348,6 +361,7 @@ impl NotifyConfig {
             && self.events.is_none()
             && self.stuck_blocked_mins.is_none()
             && self.stuck_ci_failures.is_none()
+            && self.slack.is_none()
     }
 
     pub fn events(&self) -> bool {
@@ -379,6 +393,16 @@ impl NotifyConfig {
 
     pub fn max_per_hour(&self) -> u32 {
         self.max_per_hour.unwrap_or(DEFAULT_NOTIFY_MAX_PER_HOUR)
+    }
+
+    /// `[notify.slack] user`, if set.
+    pub fn slack_user(&self) -> Option<&str> {
+        self.slack
+            .as_ref()?
+            .user
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
     }
 }
 

@@ -752,6 +752,26 @@ pub enum NotifyCommands {
 
     /// Remove the jeet:// link handler
     UninstallLink,
+
+    /// Set a backend up at your own terminal: for slack, store the bot
+    /// token in the OS keyring (read without echo) and set `[notify.slack]
+    /// user` (refused from an agent's pane)
+    Setup {
+        #[command(subcommand)]
+        backend: NotifySetup,
+    },
+
+    /// Queue a test notification and say whether the sender sent it
+    Test,
+
+    /// Print the Slack app manifest for `jeet notify setup slack`
+    SlackManifest,
+}
+
+#[derive(Subcommand)]
+pub enum NotifySetup {
+    /// A Slack app's bot: notifications as direct messages to you
+    Slack,
 }
 
 #[derive(Subcommand)]

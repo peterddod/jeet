@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use crate::watch::{first_line, launchctl, launchd_domain, systemd_word, xml};
 use crate::worktrees::now_secs;
 
-use super::{drain, make_dir, open_owned, outbox_path, sender_lock_path, NoTokens, Tokens};
+use super::{drain, make_dir, open_owned, outbox_path, secrets, sender_lock_path, Drained};
 
 /// The launchd job's label, and its plist's name.
 pub const LABEL: &str = "dev.jeet.notify";
@@ -32,15 +32,10 @@ const RETRY: Duration = Duration::from_secs(10);
 /// hour allows.
 const UNFOLD_SECS: i64 = 60;
 
-/// The tokens the sender's backends read. None yet: the keyring comes with
-/// the first backend that needs one.
-pub fn tokens() -> Box<dyn Tokens> {
-    Box::new(NoTokens)
-}
-
 /// `jeet notify serve`: send what is queued, until killed. One runs per
-/// jeet home; another refuses to start.
-pub fn serve(home: &Path) -> Result<()> {
+/// jeet home; another refuses to start. Run in what jeet takes for an
+/// agent's process (`agent`), it reads no token, and what needs one waits.
+pub fn serve(home: &Path, agent: bool) -> Result<()> {
     make_dir(home)?;
     let path = sender_lock_path(home);
     let lock = open_owned(
@@ -63,22 +58,34 @@ pub fn serve(home: &Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let tokens = tokens();
+    if agent {
+        eprintln!(
+            "jeet notify serve: this runs as an agent's process, so it reads no token; \
+             run it from your own terminal or with `jeet notify install`"
+        );
+    }
+    let tokens = secrets::for_sender(home, agent);
     let outbox = outbox_path(home);
     eprintln!(
         "jeet notify serve: sending what is queued in {}",
         outbox.display()
     );
     let mut routed = 0;
+    let mut left = Drained::default();
     loop {
-        let queued = std::fs::metadata(&outbox).is_ok_and(|m| m.len() > 0);
+        // Something queued since the last drain, or a failed send due again.
+        let len = std::fs::metadata(&outbox).map_or(0, |m| m.len());
         let now = now_secs();
-        if queued || now - routed >= UNFOLD_SECS {
+        let due = left.retry_at.is_some_and(|at| at <= now);
+        if len != left.left || due || now - routed >= UNFOLD_SECS {
             routed = now;
-            if let Err(e) = drain(home, tokens.as_ref(), true) {
-                eprintln!("jeet notify serve: {e:#}");
-                // Tried again once things may have changed, not every poll.
-                std::thread::sleep(RETRY);
+            match drain(home, tokens.as_ref(), true) {
+                Ok(drained) => left = drained,
+                Err(e) => {
+                    eprintln!("jeet notify serve: {e:#}");
+                    // Tried again once things may have changed, not every poll.
+                    std::thread::sleep(RETRY);
+                }
             }
         }
         std::thread::sleep(POLL);
@@ -87,6 +94,14 @@ pub fn serve(home: &Path) -> Result<()> {
 
 fn log_path(home: &Path) -> PathBuf {
     super::dir(home).join("sender.log")
+}
+
+/// Where the installed sender's output goes, for the user to look.
+pub fn log_hint(home: &Path) -> String {
+    match cfg!(target_os = "macos") {
+        true => log_path(home).display().to_string(),
+        false => format!("`journalctl --user -u {UNIT}`"),
+    }
 }
 
 /// The launchd job: `exe notify serve`, started at load and kept running,
