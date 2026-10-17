@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use super::{setup_dir, PRODUCT};
 use crate::agent::AgentSpec;
+use crate::cd;
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{RunState, TaskKind, TaskRecord, TaskSessionRecord, TaskState};
@@ -416,7 +417,9 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
     )?;
     let _ = app.db.touch_task(&task.id, now);
     let mut running = running;
-    if let Err(e) = tmux::split_window(&running.tmux_session, &dir, &APPLY_ENV, &apply_argv(&exe)) {
+    let home = app.home.to_string_lossy();
+    let env = apply_env(&home);
+    if let Err(e) = tmux::split_window(&running.tmux_session, &dir, &env, &apply_argv(&exe)) {
         running.warnings.push(format!(
             "could not open the apply pane: {e:#}; run `{PRODUCT} setup apply` in a terminal"
         ));
@@ -424,9 +427,19 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
     Ok(running)
 }
 
-/// The apply pane's environment: blank where the agent's session sets who
-/// it runs for, as apply refuses any agent's session.
-const APPLY_ENV: [(&str, &str); 2] = [(tasks::TASK_ID_ENV, ""), (permissions::ASSISTANT_ENV, "")];
+/// The apply pane's environment: this jeet home, and blank where the
+/// agent's session sets who it runs for, as apply refuses any agent's
+/// session.
+fn apply_env(home: &str) -> [(&str, &str); 4] {
+    [
+        // Named, not left to whatever the tmux server's environment says:
+        // apply must change this home's files, and open this index.
+        ("JEET_HOME", home),
+        (tasks::TASK_ID_ENV, ""),
+        (permissions::ASSISTANT_ENV, ""),
+        (cd::CD_FILE_ENV, ""),
+    ]
+}
 
 /// `jeet setup apply`, run again each time the user presses Enter.
 fn apply_argv(exe: &Path) -> Vec<String> {
@@ -566,6 +579,9 @@ mod tests {
         assert_eq!(argv[..2], ["sh", "-c"]);
         assert!(argv[2].contains("\"$1\" setup apply"));
         assert_eq!(argv[4], "/opt/my jeet");
-        assert!(APPLY_ENV.contains(&(tasks::TASK_ID_ENV, "")));
+        let env = apply_env("/tmp/h");
+        assert!(env.contains(&("JEET_HOME", "/tmp/h")), "{env:?}");
+        assert!(env.contains(&(tasks::TASK_ID_ENV, "")));
+        assert!(env.contains(&(permissions::ASSISTANT_ENV, "")));
     }
 }
