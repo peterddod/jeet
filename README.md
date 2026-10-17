@@ -756,17 +756,17 @@ keeps what it said before. PR titles are shown as text, never run.
 
 | Key | |
 |---|---|
-| `⏎` | the review's menu: `v` view the diff, `s` open the review's session |
+| `⏎` | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
-| `s` (in the menu) | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `e` | explore the review's worktree |
+| `R` | ask an active review's agent to review again, as `jeet review <pr> --rerun` does (without opening the viewer); on an archived review, `a` brings it back first |
 | `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
 | `D` | delete the review, after listing any work that would be lost |
 | `A` | show the archived reviews instead of the active ones, and back |
 | `/` | filter by PR (`api#131`), the review's name or title |
 
-A review has one worktree and one pull request, so `w` and `p` have nothing to
-show here.
+A review has one worktree and one pull request, so the task keys `w`, `p`, `S`,
+`n` and `o` do nothing here.
 
 A review whose PR is merged or closed is archived for you, the way `a` (or
 `jeet task archive`) archives it: its agent is ended, its worktree removed,
@@ -1591,8 +1591,9 @@ back.
   running; jeet did not start it, so it does not stop it.
 - The `<task>/.jeet/review.json` and `brought-back` files are folded into the
   review and no longer read.
-- In the reviews tab, `w` and `p` have nothing to show (a review has one
-  worktree and one PR), and a review is no longer "paused by hand" or
+- In the reviews tab, `⏎` opens the review's session and `R` reruns it; `w`,
+  `p`, `S`, `n` and `o` do nothing (a review has one worktree and one PR),
+  and a review is no longer "paused by hand" or
   "stopped" from a tree: it is paused only at its caps. `jeet manager stop
   --all` still ends the agents (and legacy jobs) of the reviews the
   assistant asked for, and drops them from the `max_live` queue.
@@ -2422,18 +2423,23 @@ warns instead of adopting it. After
 upgrading, an older jeet refuses the index.
 
 On a harness with deny rules (Claude Code), the assistant and every task
-with a parent are also denied, even with your approval at the prompt:
-force-pushes (`git push --force…`, `-f`, `+branch`, `--mirror`), `git push
+are also denied, even with your approval at the prompt:
+force-pushes (`git push --force` as a word, `-f`, `+branch`, `--mirror`;
+`--force-with-lease` and `--force-if-includes` still run), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the eight in all
 most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
-merge endpoints through `gh api` and `curl`, when the command names them). A task with a parent is also denied `gh pr
+merge endpoints through `gh api` and `curl`, when the command names them),
+`gh repo edit`, `gh secret` and `gh api -X DELETE` (or `--method
+DELETE`). A task with a parent is also denied `gh pr
 comment`, `gh issue comment` and `gh pr review` unless it holds
 `pr.comment`/`pr.review` (only those commands: the same through `gh api`
 still reaches your prompt); the assistant holding them runs them without a
-prompt. Top-level tasks get no deny rules. The rules match the start of a
+prompt. Top-level tasks get only the rules above, not the capability ones.
+Tasks, managers and the assistant may run `gh pr view`, `gh pr checks`,
+`gh pr diff`, `gh run view` and `gh run list` without a prompt. The rules match the start of a
 command only (`git -C . push -f` or `sh -c '…'` get past them), and a push
 whose destination is implied (`git push origin HEAD` while on `main`), a
 commit through the API (the contents endpoint, `createCommitOnBranch`) or a
@@ -2442,6 +2448,50 @@ mistakes, and branch protection on GitHub is the real control. A task with
 a parent on a harness without deny rules starts with a warning, as does the
 legacy `[review] command` of a review the assistant starts: no harness
 launches it, so it gets no deny rules.
+
+### Permission rules for agents
+
+`[permissions]` adds to the Claude Code rules jeet writes into each
+agent's settings at launch (`$JEET_HOME/run/<task>/<session>.json`). It
+never changes `~/.claude/settings.json`, and it cannot lift a rule jeet
+denies: in Claude Code a deny wins over an allow from any scope. Running
+agents get new rules when they restart (`jeet task restart`).
+
+```toml
+[permissions]
+push = "branches"           # "branches" | "ask" (default "ask")
+classifier_context = true   # default false
+
+[permissions.task]          # Claude Code rules, added as written
+allow = ["Bash(cargo test:*)"]
+deny  = []
+[permissions.manager]
+allow = []
+deny  = []
+[permissions.assistant]
+allow = []
+deny  = []
+```
+
+- **`push = "branches"`** lets work tasks push without a prompt:
+  `git push origin …`, `git push -u origin …`, `git push --set-upstream
+  origin …` and `git push --force-with-lease …`. Pushes to a default branch
+  and plain force-pushes stay denied, and pushes to other remotes still
+  prompt. Managers and reviews are still denied `git push`. Under `"ask"`
+  pushes are left to Claude Code, which asks or, in auto mode, classifies
+  them.
+- **`classifier_context = true`** gives Claude Code's auto-mode classifier
+  a short description of a task's routine work (`autoMode.environment`,
+  after its own defaults), so it stops flagging pushes of the task's own
+  branch and pull requests that no rule covers.
+- **`[permissions.task]`, `[permissions.manager]`, `[permissions.assistant]`**:
+  extra `allow` and `deny` rules in Claude Code's syntax, appended for work
+  tasks, managers and the assistant.
+
+Allow rules match each part of a compound command on its own, so run a
+jeet command bare: `for t in a b; do jeet task archive $t --force; done` or
+`cd … && jeet …` can still reach a prompt or the classifier even with
+`Bash(jeet task archive:*)` allowed.
 
 ```toml
 [managers]

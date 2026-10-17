@@ -3243,16 +3243,34 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "Bash(jeet worktree:*)",
             "Bash(jeet ls:*)",
             "Bash(jeet report:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr checks:*)",
+            "Bash(gh pr diff:*)",
+            "Bash(gh run view:*)",
+            "Bash(gh run list:*)",
             "Bash(gh pr create:*)"
         ])
     );
-    // A top-level task is not gated: it is denied only what its PR policy
-    // (draft, the default) denies.
-    assert_eq!(
-        settings["permissions"]["deny"],
-        serde_json::json!(["Bash(gh pr ready *)"]),
-        "{settings}"
+    // A top-level task is not gated, but is denied force-pushes, merges
+    // and pushes to a default branch as every other task is; a lease push
+    // is not caught.
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    for rule in [
+        "Bash(git push --force *)",
+        "Bash(gh pr merge *)",
+        "Bash(git push * main *)",
+    ] {
+        assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
+    }
+    assert!(
+        !deny
+            .iter()
+            .any(|d| d.as_str().unwrap().starts_with("Bash(git push --force*")),
+        "{deny:?}"
     );
+    assert!(!deny.contains(&"Bash(gh pr comment *)".into()), "{deny:?}");
+    // And what its PR policy (draft, the default) denies.
+    assert!(deny.contains(&"Bash(gh pr ready *)".into()), "{deny:?}");
     // Known before the agent ever ran.
     assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
     let hint = calls_of(&tmux, "set-option");
@@ -7252,7 +7270,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     let deny = settings["permissions"]["deny"].as_array().unwrap();
     for rule in [
         "Bash(gh pr merge *)",
-        "Bash(git push --force*)",
+        "Bash(git push --force *)",
         "Bash(git push * main *)",
         "Bash(git push * develop *)",
     ] {
@@ -11446,13 +11464,18 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         assert!(!w_deny.contains(&rule.into()), "{rule}: {w_deny:?}");
     }
     // What it holds is pre-approved, and only that (M37): the reads every
-    // task has, then the commands of each capability it holds, and never
+    // task has (jeet's and `gh`'s), then the commands of each capability it holds, and never
     // `jeet todo` nor what it does not hold (`jeet review`).
     let allow = api_settings["permissions"]["allow"].as_array().unwrap();
     let want: Vec<serde_json::Value> = [
         "jeet worktree",
         "jeet ls",
         "jeet report",
+        "gh pr view",
+        "gh pr checks",
+        "gh pr diff",
+        "gh run view",
+        "gh run list",
         "jeet prs",
         "jeet path",
         "jeet task ls",
@@ -13711,6 +13734,11 @@ fn a_node_launch_carries_deny_rules() {
             "Bash(jeet worktree:*)",
             "Bash(jeet ls:*)",
             "Bash(jeet report:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr checks:*)",
+            "Bash(gh pr diff:*)",
+            "Bash(gh run view:*)",
+            "Bash(gh run list:*)",
             "Bash(gh pr create:*)"
         ])
     );

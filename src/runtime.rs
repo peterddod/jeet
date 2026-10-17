@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentSpec;
 use crate::cd;
-use crate::config::{AssistantConfig, PrMode};
+use crate::config::{AssistantConfig, PermissionsConfig, PrMode, PushPolicy};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
@@ -558,11 +558,13 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 }
 
 /// jeet's hooks for a task's agent run by `harness`, with what it is denied
-/// (nothing for a top-level task, but what its PR policy denies a work
-/// task: [`pr_rules`]) and its wake channel ([`wake`]). A
-/// manager, started with nobody at its pane, also has the commands of what
-/// it holds pre-approved, read at each start, as the assistant has those of
-/// `[assistant] allow`.
+/// ([`permissions::task_deny`]), the read-only `gh` commands pre-approved,
+/// the rules of its role in `[permissions]` ([`with_config_rules`]) and its
+/// wake channel ([`wake`]). A manager, started with nobody at its pane, also
+/// has the commands of what it holds pre-approved, read at each start, as
+/// the assistant has those of `[assistant] allow`. A work task has
+/// [`permissions::PUSH_ALLOW`] too under `[permissions] push = "branches"`.
+/// A work task also has the rules of its PR policy ([`pr_rules`]).
 fn task_hooks(
     app: &App,
     task: &TaskRecord,
@@ -570,6 +572,7 @@ fn task_hooks(
     exe: std::path::PathBuf,
 ) -> Result<HookSetup> {
     let mut allow = ALLOWED.map(str::to_string).to_vec();
+    allow.extend(permissions::GH_READ_ONLY.iter().map(|c| c.to_string()));
     match task.kind {
         TaskKind::Manager => {
             let held: Vec<String> = permissions::effective(app, task)?
@@ -584,7 +587,13 @@ fn task_hooks(
                 }
             }
         }
-        TaskKind::Work | TaskKind::Assistant => {}
+        TaskKind::Work => match app.config.permissions.push() {
+            PushPolicy::Branches => {
+                allow.extend(permissions::PUSH_ALLOW.iter().map(|c| c.to_string()))
+            }
+            PushPolicy::Ask => {}
+        },
+        TaskKind::Assistant => {}
     }
     let mut deny = permissions::task_deny(app, task)?;
     if task.kind == TaskKind::Work {
@@ -596,13 +605,17 @@ fn task_hooks(
             }
         }
     }
-    Ok(HookSetup {
+    let hooks = HookSetup {
         exe,
         task_id: task.id.clone(),
         allow,
         deny,
+        extra_allow: Vec::new(),
+        extra_deny: Vec::new(),
+        environment: None,
         wake: wake(app, harness),
-    })
+    };
+    Ok(with_config_rules(hooks, &app.config.permissions, task.kind))
 }
 
 /// What a work task under PR policy `mode` is let run, and denied: `auto`
@@ -616,8 +629,29 @@ fn pr_rules(mode: PrMode) -> (&'static [&'static str], &'static [&'static str]) 
     }
 }
 
-/// jeet's hooks for the assistant, pre-approving the read-only jeet
-/// commands and those of each capability `[assistant] allow` lists, so
+/// `hooks` with what `[permissions]` adds for an agent of `kind`: the rules
+/// of its role, after jeet's own, and the classifier's context when
+/// `classifier_context` is on.
+pub fn with_config_rules(
+    mut hooks: HookSetup,
+    config: &PermissionsConfig,
+    kind: TaskKind,
+) -> HookSetup {
+    let rules = match kind {
+        TaskKind::Work => &config.task,
+        TaskKind::Manager => &config.manager,
+        TaskKind::Assistant => &config.assistant,
+    };
+    hooks.extra_allow = rules.allow.clone();
+    hooks.extra_deny = rules.deny.clone();
+    hooks.environment = config
+        .classifier_context()
+        .then(|| permissions::CLASSIFIER_CONTEXT.to_string());
+    hooks
+}
+
+/// jeet's hooks for the assistant, pre-approving the read-only jeet and
+/// `gh` commands and those of each capability `[assistant] allow` lists, so
 /// allowed actions do not prompt, and denying force-pushes, merges outside
 /// `jeet pr merge` and pushes to any of `branches`; with its wake channel
 /// when `wake` (see [`wake`]).
@@ -628,11 +662,16 @@ pub fn assistant_hooks(
     task_id: &str,
     wake: bool,
 ) -> HookSetup {
+    let mut allow = permissions::allowed_commands(&settings.allow);
+    allow.extend(permissions::GH_READ_ONLY.iter().map(|c| c.to_string()));
     HookSetup {
         exe,
         task_id: task_id.to_string(),
-        allow: permissions::allowed_commands(&settings.allow),
+        allow,
         deny: permissions::denied_commands(branches),
+        extra_allow: Vec::new(),
+        extra_deny: Vec::new(),
+        environment: None,
         wake,
     }
 }
@@ -1105,14 +1144,28 @@ mod tests {
         }
         assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
         assert!(!hooks.allow.contains(&"jeet todo".to_string()));
-        // A worker asks at the prompt, as before, but opens draft PRs it may
-        // not mark ready (the default PR policy).
+        // A worker asks at the prompt, as before, but for reading PRs and runs.
         let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
-        let mut want = ALLOWED.map(str::to_string).to_vec();
-        want.push("gh pr create".into());
-        assert_eq!(hooks.allow, want);
+        let mut reads: Vec<String> = ALLOWED
+            .iter()
+            .chain(permissions::GH_READ_ONLY)
+            .map(|c| c.to_string())
+            .collect();
+        // It opens draft PRs it may not mark ready (the default PR policy).
+        reads.push("gh pr create".into());
+        assert_eq!(hooks.allow, reads);
         assert!(hooks.deny.contains(&"gh pr ready".to_string()));
         assert!(hooks.wake);
+        // `push = "branches"` lets a worker push to origin, but not a manager.
+        app.config.permissions.push = Some(PushPolicy::Branches);
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        for push in permissions::PUSH_ALLOW {
+            assert!(hooks.allow.contains(&push.to_string()), "{push}");
+        }
+        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        assert!(!hooks.allow.iter().any(|a| a.starts_with("git push")));
+        assert!(hooks.deny.contains(&"git push".to_string()));
+        app.config.permissions.push = None;
         // A manager is given neither.
         let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
         assert!(!hooks.allow.contains(&"gh pr create".to_string()));
@@ -1157,6 +1210,43 @@ mod tests {
     }
 
     #[test]
+    fn config_rules_go_to_their_role_and_the_classifier_context_is_opt_in() {
+        let config: crate::config::Config = toml::from_str(
+            "[permissions]\nclassifier_context = true\n\
+             [permissions.task]\nallow = [\"Bash(cargo test:*)\"]\ndeny = [\"Bash(rm:*)\"]\n\
+             [permissions.manager]\nallow = [\"Bash(make:*)\"]\n\
+             [permissions.assistant]\ndeny = [\"WebFetch\"]\n",
+        )
+        .unwrap();
+        let rules = |kind| with_config_rules(HookSetup::default(), &config.permissions, kind);
+        let task = rules(TaskKind::Work);
+        assert_eq!(task.extra_allow, ["Bash(cargo test:*)"]);
+        assert_eq!(task.extra_deny, ["Bash(rm:*)"]);
+        assert_eq!(
+            task.environment.as_deref(),
+            Some(permissions::CLASSIFIER_CONTEXT)
+        );
+        assert_eq!(rules(TaskKind::Manager).extra_allow, ["Bash(make:*)"]);
+        assert!(rules(TaskKind::Manager).extra_deny.is_empty());
+        assert_eq!(rules(TaskKind::Assistant).extra_deny, ["WebFetch"]);
+        // Off by default, and nothing added.
+        let plain = with_config_rules(
+            HookSetup::default(),
+            &PermissionsConfig::default(),
+            TaskKind::Work,
+        );
+        assert!(plain.environment.is_none() && plain.extra_allow.is_empty());
+        // jeet's own denies stay whatever the config adds.
+        let settings = AssistantConfig::default();
+        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
+        let hooks = with_config_rules(hooks, &config.permissions, TaskKind::Assistant);
+        assert!(hooks.deny.contains(&"git push --force".to_string()));
+        for read in permissions::GH_READ_ONLY {
+            assert!(hooks.allow.contains(&read.to_string()), "{read}");
+        }
+    }
+
+    #[test]
     fn the_assistant_is_denied_merging_and_force_pushes_but_may_comment() {
         let settings = AssistantConfig {
             allow: Vec::new(),
@@ -1164,7 +1254,7 @@ mod tests {
             rules: Vec::new(),
         };
         let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
-        for denied in ["gh pr merge", "git push --force*", "git push * main"] {
+        for denied in ["gh pr merge", "git push --force", "git push * main"] {
             assert!(hooks.deny.contains(&denied.into()), "{:?}", hooks.deny);
         }
         // Commenting and reviewing are the user's to approve at the prompt.

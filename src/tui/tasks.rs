@@ -135,22 +135,8 @@ const NOT_USER: &str = "the agents pane acts as you; open jeet from your own ter
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
-/// Said for `w` and `p` on a review.
-const ONE_WORKTREE: &str =
-    "a review has one worktree and one pull request: e explores it, v shows the diff";
 /// Said when a key of the reviews view has no review under the cursor.
 const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
-
-/// The review menu's lines, in order: what each opens.
-pub const REVIEW_MENU: &[(&str, &str)] = &[
-    ("v", "view the diff: the PR in the review viewer"),
-    (
-        "s",
-        "open the review's session: attach to its agent, or resume it",
-    ),
-];
-const REVIEW_DIFF: usize = 0;
-const REVIEW_SESSION: usize = 1;
 
 /// Said for ⏎ on an empty answer.
 const TYPE_AN_ANSWER: &str = "type an answer";
@@ -837,14 +823,6 @@ pub enum Panel {
         /// Why the last ⏎ was refused.
         error: Option<String>,
     },
-    /// ⏎ in the reviews view: what to open of a review.
-    ReviewMenu {
-        task_id: String,
-        pr: PrKey,
-        /// `review jeet#55`.
-        label: String,
-        selected: usize,
-    },
     /// `l`, `i` and `b` in the agents view: text to read, scrolled.
     Text {
         title: String,
@@ -913,11 +891,15 @@ pub enum Action {
     ReviewViewer {
         task_id: String,
     },
-    /// `v` in the reviews view, or its menu: the review's PR in the review
-    /// viewer, from the task's checkout when it has one.
+    /// `v` in the reviews view: the review's PR in the review viewer, from
+    /// the task's checkout when it has one.
     ReviewDiff {
         task_id: String,
         pr: PrKey,
+    },
+    /// `R` in the reviews view: ask the review's agent to review again.
+    ReviewRerun {
+        task_id: String,
     },
     /// `v` in the PRs panel: that PR in the review viewer.
     ViewPr {
@@ -2046,6 +2028,16 @@ impl TasksUi {
                 None
             }
         };
+        let needs_review = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match ui
+            .selected_review_row()
+            .map(|row| row.id().to_string())
+        {
+            Some(id) => Some(make(id)),
+            None => {
+                ui.set_status(NO_REVIEW);
+                None
+            }
+        };
         match key.code {
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.drop_filter(id.as_deref());
@@ -2114,6 +2106,9 @@ impl TasksUi {
                 self.panel = Some(Panel::Inbox { selected: 0 });
                 None
             }
+            // A review has one worktree and one pull request, and no project
+            // or priority: the other task keys have nothing to do.
+            KeyCode::Char('w' | 'p' | 'S' | 'n' | 'o') if self.view == View::Reviews => None,
             KeyCode::Char('o') => {
                 self.by_priority = !self.by_priority;
                 self.resort(id.as_deref());
@@ -2126,17 +2121,15 @@ impl TasksUi {
             KeyCode::Char('n') => Some(Action::NewTaskForm { project: None }),
             KeyCode::Char('P') => Some(Action::Projects),
             KeyCode::Enter if self.view == View::Reviews => {
-                self.review_menu();
-                None
+                needs_review(self, &|task_id| Action::Open {
+                    task_id,
+                    session: None,
+                })
             }
             KeyCode::Char('v') if self.view == View::Reviews => self.review_diff(),
-            // A review has one worktree and one pull request: `e` and `v`
-            // reach them, and the rest of the task keys have nothing to do.
-            KeyCode::Char('w' | 'p') if self.view == View::Reviews => {
-                self.set_status(ONE_WORKTREE);
-                None
+            KeyCode::Char('R') if self.view == View::Reviews => {
+                needs_review(self, &|task_id| Action::ReviewRerun { task_id })
             }
-            KeyCode::Char('S') if self.view == View::Reviews => None,
             KeyCode::Char('A') if self.view == View::Active => {
                 self.archived_tasks = !self.archived_tasks;
                 self.selected = 0;
@@ -2256,21 +2249,6 @@ impl TasksUi {
             }),
             _ => None,
         }
-    }
-
-    /// ⏎ in the reviews view: the menu of what to open of the review.
-    fn review_menu(&mut self) {
-        let Some(line) = self.selected_review().cloned() else {
-            self.set_status(NO_REVIEW);
-            return;
-        };
-        let review = &self.review_rows[line.row].review;
-        self.panel = Some(Panel::ReviewMenu {
-            task_id: review.id.clone(),
-            label: format!("review {}", review.label()),
-            pr: line.pr,
-            selected: 0,
-        });
     }
 
     /// `v` in the reviews view: the review's PR in the review viewer.
@@ -2548,40 +2526,6 @@ impl TasksUi {
                     None
                 }
             },
-            Panel::ReviewMenu {
-                task_id,
-                pr,
-                label,
-                mut selected,
-            } => {
-                let choice = match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return None,
-                    KeyCode::Char('v' | 'd') => Some(REVIEW_DIFF),
-                    KeyCode::Char('s') => Some(REVIEW_SESSION),
-                    KeyCode::Enter => Some(selected),
-                    code => {
-                        selected = list_move(code, selected, REVIEW_MENU.len());
-                        None
-                    }
-                };
-                let Some(choice) = choice else {
-                    self.panel = Some(Panel::ReviewMenu {
-                        task_id,
-                        pr,
-                        label,
-                        selected,
-                    });
-                    return None;
-                };
-                match choice {
-                    REVIEW_DIFF => Some(Action::ReviewDiff { task_id, pr }),
-                    REVIEW_SESSION => Some(Action::Open {
-                        task_id,
-                        session: None,
-                    }),
-                    _ => None,
-                }
-            }
             Panel::Places {
                 task_id,
                 places,
@@ -4486,6 +4430,7 @@ impl Screen<'_> {
                 number,
             } => self.view_pr(&task_id, &repo_id, number)?,
             Action::ReviewDiff { task_id, pr } => self.view_pr(&task_id, &pr.repo_id, pr.number)?,
+            Action::ReviewRerun { task_id } => self.rerun_review(&task_id)?,
             Action::NewTaskForm { project } => {
                 let projects = projects::list(app)?;
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
@@ -5503,6 +5448,31 @@ impl Screen<'_> {
             },
         };
         self.view_pr_at(&path, number)
+    }
+
+    /// `R` on a review: `jeet review <pr> --rerun`, without the viewer.
+    fn rerun_review(&mut self, task_id: &str) -> Result<()> {
+        let Some(review) = self.review(task_id) else {
+            return Ok(());
+        };
+        if review.state == TaskState::Archived {
+            self.ui
+                .set_status(format!("{} is archived — a brings it back", review.slug));
+            return Ok(());
+        }
+        let app = self.app;
+        let label = format!("asking for a review of #{}", review.pr_number);
+        let outcome = self
+            .progress(&label, || commands::review::rerun(app, &review))
+            .and_then(|inner| inner);
+        match outcome {
+            Ok(line) => self.ui.set_status(line),
+            Err(e) => self
+                .ui
+                .set_status(format!("could not rerun the review: {e:#}")),
+        }
+        self.refresh(false);
+        Ok(())
     }
 
     fn view_pr_at(&mut self, path: &Path, number: u64) -> Result<()> {
@@ -7084,15 +7054,17 @@ mod tests {
     }
 
     #[test]
-    fn w_and_p_say_a_review_has_one_worktree_and_one_pr() {
+    fn the_task_keys_a_review_has_no_use_for_do_nothing() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
-        for key in ['w', 'p'] {
+        for key in ['w', 'p', 'S', 'n', 'o'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(key)), None);
-            assert_eq!(ui.status_line, ONE_WORKTREE);
+            assert_eq!(ui.status_line, "");
+            assert!(ui.panel.is_none());
         }
+        assert!(!ui.by_priority);
     }
 
     #[test]
@@ -7141,10 +7113,18 @@ mod tests {
     }
 
     #[test]
-    fn the_review_menu_opens_the_diff_or_the_session() {
+    fn enter_opens_the_reviews_session_and_the_letters_the_rest() {
         let mut ui = reviews_sample();
         ui.view = View::Reviews;
         ui.set_rows(ui.rows.clone());
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "r2".into(),
+                session: None,
+            })
+        );
+        assert!(ui.panel.is_none());
         assert_eq!(
             press(&mut ui, KeyCode::Char('v')),
             Some(Action::ReviewDiff {
@@ -7152,31 +7132,12 @@ mod tests {
                 pr: pr_key(2),
             })
         );
-        assert_eq!(press(&mut ui, KeyCode::Enter), None);
-        assert!(matches!(ui.panel, Some(Panel::ReviewMenu { .. })));
-        // ⏎ on the first line: the diff.
         assert_eq!(
-            press(&mut ui, KeyCode::Enter),
-            Some(Action::ReviewDiff {
-                task_id: "r2".into(),
-                pr: pr_key(2),
+            press(&mut ui, KeyCode::Char('R')),
+            Some(Action::ReviewRerun {
+                task_id: "r2".into()
             })
         );
-        assert!(ui.panel.is_none());
-        // ↓ ⏎, or s: the session, through the review's own open.
-        press(&mut ui, KeyCode::Enter);
-        press(&mut ui, KeyCode::Down);
-        let open = Some(Action::Open {
-            task_id: "r2".into(),
-            session: None,
-        });
-        assert_eq!(press(&mut ui, KeyCode::Enter), open);
-        press(&mut ui, KeyCode::Enter);
-        assert_eq!(press(&mut ui, KeyCode::Char('s')), open);
-        press(&mut ui, KeyCode::Enter);
-        assert_eq!(press(&mut ui, KeyCode::Esc), None);
-        assert!(ui.panel.is_none());
-        // The explorer and archive keys act on the review.
         assert_eq!(
             press(&mut ui, KeyCode::Char('e')),
             Some(Action::Explore {
@@ -7187,6 +7148,32 @@ mod tests {
             press(&mut ui, KeyCode::Char('a')),
             Some(Action::Archive { task_id, .. }) if task_id == "r2"
         ));
+    }
+
+    #[test]
+    fn r_in_the_archived_reviews_still_emits_the_rerun_which_try_perform_refuses() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_rows(ui.rows.clone());
+        press(&mut ui, KeyCode::Char('A'));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('R')),
+            Some(Action::ReviewRerun {
+                task_id: "old".into()
+            })
+        );
+    }
+
+    #[test]
+    fn r_and_enter_with_no_review_say_so() {
+        let mut ui = reviews_sample();
+        ui.view = View::Reviews;
+        ui.set_reviews(Vec::new());
+        for code in [KeyCode::Char('R'), KeyCode::Enter] {
+            ui.set_status("");
+            assert_eq!(press(&mut ui, code), None);
+            assert_eq!(ui.status_line, NO_REVIEW);
+        }
     }
 
     #[test]
