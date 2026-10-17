@@ -103,6 +103,7 @@ jeet report done "PR #12 is up"          # from inside such a task: tell the ass
 jeet watch install                       # poll GitHub in the background (launchd)
 jeet notify install                      # send notifications from a background sender
 jeet notify setup slack                  # notifications in Slack too (see Notifications)
+jeet notify setup ntfy                   # or on your phone, through ntfy
 
 # Worktrees — of the task you are in (or --task <name>)
 jeet worktree add api                    # detached at origin's default branch; prints the path
@@ -2451,12 +2452,13 @@ unit, `jeet-notify.service`, elsewhere) and `jeet notify uninstall` removes it.
 Nothing installs it but that command. Without it, the process that queued a
 notification sends it itself through every backend that needs no token, so
 `desktop` and `command` work as they always have; a backend that needs a
-token (`slack`) waits for the sender, and `jeet task ls` and the tasks
-screen say so. A send through such a backend that fails (Slack refuses it,
-or cannot be reached) stays in the outbox and is tried again after 30
+token (`slack`, and `ntfy`, whose token is optional) waits for the sender,
+and `jeet task ls` and the tasks screen say so. A send through such a
+backend that fails (Slack or ntfy refuses it, or cannot be reached) stays in the outbox and is tried again after 30
 seconds, then twice as long after each failure, up to an hour, and is
-dropped after 30 tries (about a day); the sender logs why. When Slack cannot
-be reached, or refuses the token or the user, what else waits for it in
+dropped after 30 tries (about a day); the sender logs why. When Slack or
+ntfy cannot be reached, is rate limiting, or refuses the token (or the
+Slack user), what else waits for it in
 that round waits as long, untried, rather than each failing in turn.
 
 ```toml
@@ -2480,6 +2482,8 @@ action = "ignore"   # or "notify"
   `JEET_NOTIFY_URL`. `JEET_NOTIFY_CMD`, in the environment of the process that
   sends, runs a command the same way in place of `desktop`.
 - `slack`: a direct message from your own Slack app (below).
+- `ntfy`: a push to an [ntfy](https://ntfy.sh) topic, for the ntfy app on
+  your phone or desktop (below).
 
 #### Slack
 
@@ -2524,6 +2528,50 @@ message for it, jeet sends it again without the button and the link (the
 logged once until a send goes through; run `jeet notify setup slack` again.
 Each message's channel and timestamp are kept in
 `$JEET_HOME/run/notify/slack-sent.jsonl`.
+
+#### ntfy
+
+Notifications are published to a topic on an ntfy server (`https://ntfy.sh`
+unless you name your own), through its JSON API. The title is the header
+("Question #41 from task x"); the message has the text, the task, kind, CI
+status and age, the command that acts on it and a `jeet open jeet://…`
+line. Questions and stuck work are sent at high priority, finished work at
+ntfy's default and the rest at low. A click opens the PR when there is
+one, else the `jeet://` link; buttons open the PR, any other page it links
+to, and the `jeet://` link. If the server refuses a message for its
+`jeet://` link, jeet sends it again without (the `jeet open` line stays)
+and leaves those links out from then on.
+
+**Pick an unguessable topic, or use a token.** On ntfy.sh, and any server
+that lets anyone in, a topic is public: whoever knows or guesses its name
+can read every notification published to it (task names, questions, PR
+links) and publish to it too. `jeet notify setup ntfy` suggests a random
+topic (`jeet-` and 32 hex digits). For more, reserve the topic or run your
+own server, and give jeet an access token (`tk_…`).
+
+1. At your own terminal (not a jeet pane), `jeet notify setup ntfy`: it asks
+   for the server and topic, which it writes as `[notify.ntfy]` in
+   config.toml unless that table is there already, then for an optional
+   access token (not echoed; it goes into the OS keyring, not a file).
+2. Subscribe to the topic in the ntfy app.
+3. Add `"ntfy"` to `[notify] via`, e.g. `via = ["desktop", "ntfy"]`.
+4. `jeet notify install`, so a sender runs (or restart it, if it does).
+5. `jeet notify test`.
+
+```toml
+[notify]
+via = ["desktop", "ntfy"]
+
+[notify.ntfy]
+server = "https://ntfy.sh"   # the default
+topic = "jeet-3f6c9b1e0a8d4c27b5e1f09d6a4c8e21"
+```
+
+Only the sender publishes to ntfy, even with no token: it alone may read
+the keyring to know whether one is stored. Without a token, jeet publishes
+anonymously. A token the server refuses (or a protected topic with none
+stored) is logged once until a send goes through; run `jeet notify setup
+ntfy` again.
 
 A notification about the same thing for the same reason (a question's
 `r41`, one run of a review) is sent once.

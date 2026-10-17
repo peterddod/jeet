@@ -349,6 +349,10 @@ pub struct NotifyConfig {
     /// The `slack` backend (`[notify.slack]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
+
+    /// The `ntfy` backend (`[notify.ntfy]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntfy: Option<NtfyConfig>,
 }
 
 /// `[notify.slack]` in config.toml.
@@ -359,6 +363,20 @@ pub struct SlackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 }
+
+/// `[notify.ntfy]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NtfyConfig {
+    /// The ntfy server (default: [`DEFAULT_NTFY_SERVER`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// The topic notifications are published to. On a public server
+    /// anyone who knows it can read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+}
+
+pub const DEFAULT_NTFY_SERVER: &str = "https://ntfy.sh";
 
 pub const DEFAULT_NOTIFY_VIA: &str = "desktop";
 pub const DEFAULT_NOTIFY_MAX_PER_HOUR: u32 = 6;
@@ -376,6 +394,7 @@ impl NotifyConfig {
             && self.stuck_blocked_mins.is_none()
             && self.stuck_ci_failures.is_none()
             && self.slack.is_none()
+            && self.ntfy.is_none()
     }
 
     pub fn events(&self) -> bool {
@@ -417,6 +436,26 @@ impl NotifyConfig {
             .as_deref()
             .map(str::trim)
             .filter(|u| !u.is_empty())
+    }
+
+    /// `[notify.ntfy] server`, without a trailing `/`, or ntfy.sh.
+    pub fn ntfy_server(&self) -> &str {
+        self.ntfy
+            .as_ref()
+            .and_then(|n| n.server.as_deref())
+            .map(|s| s.trim().trim_end_matches('/'))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_NTFY_SERVER)
+    }
+
+    /// `[notify.ntfy] topic`, if set.
+    pub fn ntfy_topic(&self) -> Option<&str> {
+        self.ntfy
+            .as_ref()?
+            .topic
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
     }
 }
 

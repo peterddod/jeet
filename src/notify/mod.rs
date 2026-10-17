@@ -12,11 +12,13 @@
 
 mod command;
 mod desktop;
+pub mod ntfy;
 mod route;
 pub mod scope;
 pub mod secrets;
 pub mod sender;
 pub mod slack;
+mod web;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -224,18 +226,25 @@ fn backend(name: &str, config: &NotifyConfig, home: &Path) -> Option<Box<dyn Not
             home: home.to_path_buf(),
             // The test binary never calls Slack.
             #[cfg(not(test))]
-            http: Box::new(slack::Ureq {
-                base: slack::API.to_string(),
-            }),
+            http: Box::new(slack::http()),
             #[cfg(test)]
-            http: Box::new(slack::Offline),
+            http: Box::new(web::Offline),
+        })),
+        ntfy::NAME => Some(Box::new(ntfy::Ntfy {
+            topic: config.ntfy_topic().map(str::to_string),
+            home: home.to_path_buf(),
+            // The test binary never calls a server.
+            #[cfg(not(test))]
+            http: Box::new(ntfy::http(config.ntfy_server())),
+            #[cfg(test)]
+            http: Box::new(web::Offline),
         })),
         _ => None,
     }
 }
 
 /// The backend names `via` may list.
-pub const BACKENDS: &[&str] = &["desktop", "command", "slack"];
+pub const BACKENDS: &[&str] = &["desktop", "command", "slack", "ntfy"];
 
 /// What in `[notify]` would send nothing where it was meant to: a `via`
 /// name jeet has no backend for, or `command` listed with no `[notify]
@@ -258,6 +267,24 @@ pub fn check(config: &NotifyConfig) -> Result<()> {
                 "[notify] via lists `slack`, but `[notify.slack] user` is not set (`jeet notify setup slack`)"
             );
         }
+        if name == ntfy::NAME {
+            check_ntfy(config)?;
+        }
+    }
+    Ok(())
+}
+
+/// `[notify.ntfy]`: a topic ntfy takes, on an http(s) server.
+fn check_ntfy(config: &NotifyConfig) -> Result<()> {
+    let Some(topic) = config.ntfy_topic() else {
+        bail!("[notify] via lists `ntfy`, but `[notify.ntfy] topic` is not set (`jeet notify setup ntfy`)");
+    };
+    if !ntfy::valid_topic(topic) {
+        bail!("[notify.ntfy] topic: {topic:?} is not an ntfy topic (1 to 64 letters, digits, `-` or `_`)");
+    }
+    let server = config.ntfy_server();
+    if !openable_url(server) {
+        bail!("[notify.ntfy] server: {server:?} is not an http(s) address");
     }
     Ok(())
 }
@@ -775,12 +802,24 @@ mod tests {
         for name in BACKENDS {
             assert!(backend(name, &config, home).is_some(), "{name}");
         }
-        assert!(backend("ntfy", &config, home).is_none());
+        assert!(backend("gotify", &config, home).is_none());
         let no_user = NotifyConfig {
             via: Some(vec!["slack".into()]),
             ..NotifyConfig::default()
         };
         assert!(check(&no_user).is_err());
+        let ntfy = |table: &str| -> NotifyConfig {
+            toml::from_str(&format!("via = [\"ntfy\"]\n{table}")).unwrap()
+        };
+        assert!(check(&ntfy("")).is_err());
+        assert!(check(&ntfy("[ntfy]\ntopic = \"a/b\"")).is_err());
+        assert!(check(&ntfy("[ntfy]\ntopic = \"jeet-x\"\nserver = \"ftp://x\"")).is_err());
+        let good = ntfy("[ntfy]\ntopic = \"jeet-x\"");
+        assert!(check(&good).is_ok());
+        assert_eq!(good.ntfy_server(), "https://ntfy.sh");
+        let own = ntfy("[ntfy]\ntopic = \"jeet-x\"\nserver = \"https://ntfy.example.com/\"");
+        assert!(check(&own).is_ok());
+        assert_eq!(own.ntfy_server(), "https://ntfy.example.com");
         let unset = NotifyConfig {
             via: Some(vec!["Desktop".into()]),
             ..NotifyConfig::default()
