@@ -158,7 +158,16 @@ fn lock_held(task_dir: &Path, session: &str) -> bool {
     let Ok(file) = open_regular(&wait_file(task_dir, session, "lock")) else {
         return false;
     };
-    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    match file.try_lock() {
+        // Unlocked, not only closed: a child forked meanwhile would hold
+        // this probe's lock until it execs, and a watcher find it taken.
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }
 }
 
 /// Whether a watcher is posting for `session`: see [`wake_state`]. One
@@ -977,6 +986,10 @@ impl<'a> Watcher<'a> {
         if why == Why::Refused {
             mark_off(app, &task, &task_dir, session, now_secs())?;
         }
+        // Unlocked, not only closed: a child forked meanwhile holds a copy
+        // of the file until it execs, and the flock with it. Should that
+        // fail, closing it still lets go once the child execs.
+        let _ = lock.unlock();
         drop(lock);
         if why != Why::Refused {
             return Ok(());
@@ -1206,6 +1219,15 @@ pub(crate) fn held_for_test(task_dir: &Path, session: &str) -> File {
     lock_within(&wait_file(task_dir, session, "lock"), 1, Duration::ZERO)
         .unwrap()
         .unwrap()
+}
+
+/// For other modules' tests: let go of a lock [`held_for_test`] gave.
+/// Dropping it is not enough: another test's child process holds a copy of
+/// every open file from its fork until its exec, and the flock stays held
+/// while any copy is open.
+#[cfg(test)]
+pub(crate) fn let_go_for_test(lock: File) {
+    lock.unlock().unwrap();
 }
 
 /// For other modules' tests: `msgs` posted to `session` at `posted_at`, to
@@ -1633,7 +1655,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(watched(&lab.app, &dir, "s"));
-        drop(held);
+        let_go_for_test(held);
         assert!(!watched(&lab.app, &dir, "s"));
     }
 
@@ -1737,7 +1759,7 @@ mod tests {
         assert_eq!(wake_state(&dir, "s", 699), backing);
         assert_eq!(wake_state(&dir, "s", 700), WakeState::Watched);
         // Backed off, with no watcher: unwatched, and not yet due.
-        drop(held);
+        let_go_for_test(held);
         assert_eq!(wake_state(&dir, "s", 700), WakeState::Unwatched);
         // Refused three times.
         off.refusals = 3;
@@ -2687,7 +2709,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!recover(&inbox, &dir, "s", 40).unwrap());
-        drop(held);
+        let_go_for_test(held);
         assert!(recover(&inbox, &dir, "s", 40).unwrap());
         drop(inbox);
         assert_eq!(lab.queued(), msgs);

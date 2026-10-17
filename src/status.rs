@@ -1879,7 +1879,7 @@ mod tests {
         assert_eq!(output, None);
         assert_eq!(read_status(&dir, "s").unwrap().state, State::Idle);
         assert_eq!(queued_for_w(&dir).len(), 1);
-        drop(watcher);
+        waiter::let_go_for_test(watcher);
     }
 
     #[test]
@@ -2179,7 +2179,7 @@ mod tests {
         assert_eq!(left.len(), 1);
         // Unwatched, it would be typed in: here, into a tmux unit tests
         // never have.
-        drop(watcher);
+        waiter::let_go_for_test(watcher);
         assert!(idle_prompt(&dir, &idle, &ctx, 400).is_err());
     }
 
