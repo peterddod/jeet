@@ -45,6 +45,9 @@ const QUEUED_MAX: usize = 4000;
 /// How long a notifier is waited for before it is left running.
 const NOTIFIER_WAIT: Duration = Duration::from_secs(2);
 
+/// How long one left running is given before it is ended.
+const NOTIFIER_KILL: Duration = Duration::from_secs(120);
+
 /// Why the user is told.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -312,14 +315,12 @@ pub fn enqueue(home: &Path, event: &Event) -> Result<()> {
     Ok(())
 }
 
-/// Everything in the locked `outbox`, which is left empty. A line that is
-/// not an event is dropped, with a word on stderr.
-fn take(outbox: &mut File) -> Result<Vec<Event>> {
-    let mut text = String::new();
-    outbox
-        .read_to_string(&mut text)
-        .context("read the outbox")?;
-    outbox.set_len(0).context("empty the outbox")?;
+/// Everything in the locked `outbox`, left as it is. A line that is not
+/// an event (or not text) is dropped, with a word on stderr.
+fn read_all(outbox: &mut File) -> Result<Vec<Event>> {
+    let mut bytes = Vec::new();
+    outbox.read_to_end(&mut bytes).context("read the outbox")?;
+    let text = String::from_utf8_lossy(&bytes);
     Ok(text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -358,33 +359,46 @@ fn save_state(home: &Path, state: &route::State) -> Result<()> {
 /// through every backend; any other process only through those that need
 /// no token, and puts the rest back for the sender.
 pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<()> {
-    let config = match config::load_or_create(home) {
-        Ok(config) => config.notify,
-        Err(e) => {
-            eprintln!("jeet: [notify] unreadable, so its defaults: {e:#}");
-            NotifyConfig::default()
-        }
-    };
+    // A config jeet cannot read keeps what is queued: sending it without
+    // the user's rules could send what they said not to.
+    let config = config::load_or_create(home)
+        .context("read config.toml, so notifications wait in the outbox")?
+        .notify;
     let backends = backends(&config);
     let sends = {
         let mut outbox = lock_outbox(home)?;
-        let events = take(&mut outbox)?;
+        let events = read_all(&mut outbox)?;
         let mut state = load_state(home);
         let now = now_secs();
         let mut ready: Vec<Event> = state.unfold(&config, now).into_iter().collect();
-        for event in events {
+        for mut event in events {
             match event.only.is_empty() {
                 true => ready.extend(state.admit(&config, event, now)),
-                false => ready.push(event),
+                // Only ever put back for a token backend: `only` naming
+                // any other would let a line skip the rules.
+                false => {
+                    event.only.retain(|name| needs_token(name, &config));
+                    if !event.only.is_empty() {
+                        ready.push(event);
+                    }
+                }
             }
         }
         let (sends, kept) = plan(ready, &backends, as_sender);
+        let mut lines = String::new();
         for event in &kept {
-            let mut line = serde_json::to_string(event)?;
-            line.push('\n');
-            outbox.write_all(line.as_bytes())?;
+            lines.push_str(&serde_json::to_string(event)?);
+            lines.push('\n');
         }
-        save_state(home, &state)?;
+        // Emptied only once all of it is routed, then what waits for the
+        // sender written back, under the one lock.
+        outbox.set_len(0).context("empty the outbox")?;
+        outbox
+            .write_all(lines.as_bytes())
+            .context("write the outbox")?;
+        if let Err(e) = save_state(home, &state) {
+            eprintln!("jeet: could not save what notifications were sent: {e:#}");
+        }
         sends
     };
     for (event, via) in sends {
@@ -438,7 +452,12 @@ pub fn sender_running(home: &Path) -> bool {
     let Ok(file) = open_owned(&path, OpenOptions::new().read(true)) else {
         return false;
     };
-    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    // Shared, so probes never hold each other off; a sender starting just
+    // then retries ([`sender::serve`]).
+    matches!(
+        file.try_lock_shared(),
+        Err(std::fs::TryLockError::WouldBlock)
+    )
 }
 
 /// A line saying notifications wait for a sender that is not running: only
@@ -464,10 +483,13 @@ pub fn notice(home: &Path, config: &NotifyConfig) -> Option<String> {
 fn backends_needing_token(config: &NotifyConfig) -> Vec<String> {
     config
         .via()
-        .iter()
-        .filter(|name| backend(name, config).is_some_and(|b| b.needs_token()))
-        .cloned()
+        .into_iter()
+        .filter(|name| needs_token(name, config))
         .collect()
+}
+
+fn needs_token(name: &str, config: &NotifyConfig) -> bool {
+    backend(name, config).is_some_and(|b| b.needs_token())
 }
 
 // ---------------------------------------------------------------------------
@@ -506,8 +528,19 @@ fn run(invocation: &Invocation) {
             _ => return,
         }
     }
-    // Still running: reap it whenever it does finish, if this process lasts.
-    thread::spawn(move || child.wait());
+    // Still running: reap it whenever it does finish, if this process lasts,
+    // and end it after a while, so a long-lived sender does not gather them.
+    thread::spawn(move || {
+        let deadline = Instant::now() + NOTIFIER_KILL;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(None) => thread::sleep(Duration::from_secs(1)),
+                _ => return,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    });
 }
 
 /// Whether `url` may be opened from a notification: a web page, nothing
@@ -585,11 +618,7 @@ mod tests {
         assert_eq!(mode(&outbox_path(home.path())), 0o600);
         assert_eq!(mode(&dir(home.path())), 0o700);
         let mut outbox = lock_outbox(home.path()).unwrap();
-        assert_eq!(take(&mut outbox).unwrap(), [event]);
-        assert_eq!(
-            std::fs::metadata(outbox_path(home.path())).unwrap().len(),
-            0
-        );
+        assert_eq!(read_all(&mut outbox).unwrap(), [event]);
     }
 
     #[test]
@@ -652,6 +681,37 @@ mod tests {
         // The sender sends a new one everywhere.
         let (sends, _) = plan(vec![event], &backends, true);
         assert_eq!(sends[0].1, [0, 1]);
+    }
+
+    #[test]
+    fn a_broken_config_keeps_the_outbox_and_a_forged_only_is_dropped() {
+        let home = tempfile::tempdir().unwrap();
+        let config = config::config_path(home.path());
+        std::fs::write(&config, "[notify\n").unwrap();
+        enqueue(home.path(), &Event::default()).unwrap();
+        assert!(drain(home.path(), &NoTokens, false).is_err());
+        let queued = std::fs::read_to_string(outbox_path(home.path())).unwrap();
+        assert_eq!(queued.lines().count(), 1);
+
+        // `only` naming a backend that needs no token skips no rule: it
+        // is dropped, not sent.
+        std::fs::write(
+            &config,
+            "[notify]\nvia = [\"command\"]\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(outbox_path(home.path()), "").unwrap();
+        let forged = Event {
+            only: vec!["command".into()],
+            ..Event::default()
+        };
+        enqueue(home.path(), &forged).unwrap();
+        drain(home.path(), &NoTokens, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outbox_path(home.path())).unwrap(),
+            ""
+        );
+        assert_eq!(load_state(home.path()).sent.len(), 0);
     }
 
     #[test]

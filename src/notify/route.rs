@@ -18,6 +18,13 @@ const HOUR_SECS: i64 = 3600;
 /// Titles listed in an "N more" notification; the rest are counted.
 const FOLDED_LISTED: usize = 5;
 
+/// How much of each of those titles is kept.
+const TITLE_KEPT: usize = 120;
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     /// When each notification of the last hour was sent.
@@ -26,9 +33,12 @@ pub struct State {
     /// `why|ref` of what was sent, with when.
     #[serde(default)]
     pub seen: BTreeMap<String, i64>,
-    /// The titles of what was held back over `max_per_hour`.
+    /// The titles of the first few held back over `max_per_hour`.
     #[serde(default)]
     pub folded: Vec<String>,
+    /// How many more than those were held back.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more: usize,
 }
 
 impl State {
@@ -56,7 +66,12 @@ impl State {
             self.seen.insert(key, now);
         }
         if self.full(config.max_per_hour()) {
-            self.folded.push(event.title);
+            match self.folded.len() < FOLDED_LISTED {
+                true => self
+                    .folded
+                    .push(event.title.chars().take(TITLE_KEPT).collect()),
+                false => self.more += 1,
+            }
             return None;
         }
         self.sent.push(now);
@@ -71,15 +86,11 @@ impl State {
             return None;
         }
         let folded = std::mem::take(&mut self.folded);
-        let n = folded.len();
-        let mut body = folded
-            .iter()
-            .take(FOLDED_LISTED)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("; ");
-        if n > FOLDED_LISTED {
-            body = format!("{body}; and {} others", n - FOLDED_LISTED);
+        let more = std::mem::take(&mut self.more);
+        let n = folded.len() + more;
+        let mut body = folded.join("; ");
+        if more > 0 {
+            body = format!("{body}; and {more} others");
         }
         self.sent.push(now);
         Some(Event {
@@ -218,8 +229,10 @@ action = "ignore"
         for i in 0..8 {
             state.admit(&config, event(&format!("k{i}"), None, None), 0);
         }
+        assert_eq!((state.folded.len(), state.more), (5, 2));
         let more = state.unfold(&config, HOUR_SECS).unwrap();
         assert_eq!(more.title, "jeet: 7 more notifications");
+        assert_eq!(state.more, 0);
         assert!(
             more.body.ends_with("k5 title; and 2 others"),
             "{}",

@@ -25,6 +25,9 @@ pub const UNIT: &str = "jeet-notify.service";
 /// How often the outbox is looked at.
 const POLL: Duration = Duration::from_millis(250);
 
+/// How long it waits after a failed send before trying again.
+const RETRY: Duration = Duration::from_secs(10);
+
 /// How often it routes with nothing queued, to send an "N more" once the
 /// hour allows.
 const UNFOLD_SECS: i64 = 60;
@@ -44,14 +47,21 @@ pub fn serve(home: &Path) -> Result<()> {
         &path,
         OpenOptions::new().create(true).truncate(false).write(true),
     )?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            bail!("a sender runs already for {}", home.display())
+    // A probe ([`super::sender_running`]) holds it shared for a moment:
+    // only one held throughout is another sender.
+    let mut tries = 0;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if tries < 20 => tries += 1,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                bail!("a sender runs already for {}", home.display())
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("lock {}", path.display()))
+            }
         }
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("lock {}", path.display()))
-        }
+        std::thread::sleep(Duration::from_millis(50));
     }
     let tokens = tokens();
     let outbox = outbox_path(home);
@@ -64,10 +74,12 @@ pub fn serve(home: &Path) -> Result<()> {
         let queued = std::fs::metadata(&outbox).is_ok_and(|m| m.len() > 0);
         let now = now_secs();
         if queued || now - routed >= UNFOLD_SECS {
+            routed = now;
             if let Err(e) = drain(home, tokens.as_ref(), true) {
                 eprintln!("jeet notify serve: {e:#}");
+                // Tried again once things may have changed, not every poll.
+                std::thread::sleep(RETRY);
             }
-            routed = now;
         }
         std::thread::sleep(POLL);
     }
