@@ -332,9 +332,19 @@ pub struct HookSetup {
     /// Commands the agent may not run, even with the user's approval: words
     /// from the start of the command, where `*` matches any run of
     /// characters, each followed by any further arguments, e.g.
-    /// `git push --force*`. Kept only by a harness with
+    /// `git push * main`. Kept only by a harness with
     /// [`Enforcement::Rules`].
     pub deny: Vec<String>,
+    /// Rules in the harness's own syntax, from `[permissions.<role>]`,
+    /// added to what `allow` and `deny` make, as written: for Claude Code,
+    /// `Bash(gh pr view:*)`. Kept only by a harness with
+    /// [`Enforcement::Rules`].
+    pub extra_allow: Vec<String>,
+    pub extra_deny: Vec<String>,
+    /// What the agent's work is, for a harness that classifies commands no
+    /// rule covers (Claude Code's auto mode): set with `[permissions]
+    /// classifier_context`.
+    pub environment: Option<String>,
     /// Install the wake channel's hook too: set from
     /// [`Harness::wake_hook`] and `[harness] wake`.
     pub wake: bool,
