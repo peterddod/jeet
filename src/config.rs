@@ -566,6 +566,8 @@ impl RoleRules {
     fn is_empty(&self) -> bool {
         self.allow.is_empty() && self.deny.is_empty()
     }
+}
+
 /// `[notify]` in config.toml.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
