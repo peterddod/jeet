@@ -593,7 +593,7 @@ fn task_hooks(
             }
             PushPolicy::Ask => {}
         },
-        TaskKind::Assistant => {}
+        TaskKind::Assistant | TaskKind::Setup => {}
     }
     let mut deny = permissions::task_deny(app, task)?;
     if task.kind == TaskKind::Work {
@@ -641,6 +641,8 @@ pub fn with_config_rules(
         TaskKind::Work => &config.task,
         TaskKind::Manager => &config.manager,
         TaskKind::Assistant => &config.assistant,
+        // Its rules are its own ([`crate::setup::hooks`]), whatever config says.
+        TaskKind::Setup => return hooks,
     };
     hooks.extra_allow = rules.allow.clone();
     hooks.extra_deny = rules.deny.clone();

@@ -98,7 +98,7 @@ const SLUG_MAX: usize = 48;
 
 /// The built-in skill every task gets, at `.claude/skills/jeet/SKILL.md`: how
 /// the agent gets at code from inside a blank-canvas task.
-const SKILL: &str = r#"---
+pub(crate) const SKILL: &str = r#"---
 name: jeet
 description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, open pull requests, and report to the task's parent with `jeet report`. Use whenever you need code from a repository, or to say how the task is going.
 ---
@@ -159,10 +159,12 @@ report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
 are refused. Ask your parent instead.
 "#;
 
-/// A task's directory; the assistant's is its home, outside `tasks/`.
+/// A task's directory; the assistant's and the setup agent's are their
+/// homes, outside `tasks/`.
 pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
     match task.kind {
         TaskKind::Assistant => crate::config::assistant_dir(&app.home),
+        TaskKind::Setup => crate::setup::setup_dir(&app.home),
         TaskKind::Work | TaskKind::Manager => app.tasks_root().join(&task.slug),
     }
 }
@@ -205,8 +207,9 @@ pub(crate) fn unique_slug(app: &App, base: &str) -> Result<String> {
     let mut n = 1;
     loop {
         let candidate = numbered(base, n);
-        // Kept for the assistant, whose tmux session is `jeet-assistant`.
-        let reserved = candidate == crate::assistant::SLUG;
+        // Kept for the assistant and the setup agent, whose tmux sessions
+        // are `jeet-assistant` and `jeet-setup`.
+        let reserved = candidate == crate::assistant::SLUG || candidate == crate::setup::SLUG;
         // A slug that spells another task's id would capture that id in
         // slug-first lookups (`find_exact`), so ids are kept too.
         if !reserved
@@ -765,6 +768,9 @@ fn scaffold(dir: &Path, task: &TaskRecord, project: Option<&Project>) -> Result<
             }
         }
         TaskKind::Work | TaskKind::Assistant => install_skill(dir)?,
+        TaskKind::Setup => {
+            crate::setup::ensure_files(dir)?;
+        }
     }
     Ok(notes)
 }
@@ -835,8 +841,9 @@ pub fn find_exact(app: &App, key: &str) -> Result<TaskRecord> {
 
 fn find_by(app: &App, key: &str, by_prefix: bool) -> Result<TaskRecord> {
     let key = key.trim();
-    // The assistant is no task to open, archive or delete by name.
-    let listed = |task: &TaskRecord| task.kind != TaskKind::Assistant;
+    // The assistant and the setup agent are no tasks to open, archive or
+    // delete by name.
+    let listed = |task: &TaskRecord| !matches!(task.kind, TaskKind::Assistant | TaskKind::Setup);
     if let Some(task) = app.db.get_task_by_slug(key)?.filter(listed) {
         return Ok(task);
     }
@@ -1027,6 +1034,7 @@ pub fn add_worktree(
     let read_only = match task.kind {
         TaskKind::Manager if branch.is_some() => bail!("{MANAGER_READ_ONLY}"),
         TaskKind::Manager => true,
+        TaskKind::Setup => bail!("the setup agent works on jeet's own files, not in worktrees"),
         TaskKind::Work | TaskKind::Assistant => false,
     };
     if let Some(name) = name {
@@ -2146,6 +2154,7 @@ fn fan_out_of(app: &App, parent: &TaskRecord) -> Result<Option<u32>> {
             None => Ok(Some(app.config.manager_policy()?.max_children)),
         },
         TaskKind::Work => Ok(parent.max_children),
+        TaskKind::Setup => bail!("the setup agent has no tasks under it"),
     }
 }
 

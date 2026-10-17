@@ -205,12 +205,13 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             let app = context::App::open()?;
             commands::chat::run(&app, new, pick)?;
         }
-        Commands::Setup { command } => {
+        Commands::Setup { new, command } => {
             let app = context::App::open()?;
             match command {
-                SetupCommands::Apply => setup::apply::apply(&app)?,
-                SetupCommands::Status => setup::apply::status(&app)?,
-                SetupCommands::Discard => setup::apply::discard(&app)?,
+                None => setup::agent::run(&app, new)?,
+                Some(SetupCommands::Apply) => setup::apply::apply(&app)?,
+                Some(SetupCommands::Status) => setup::apply::status(&app)?,
+                Some(SetupCommands::Discard) => setup::apply::discard(&app)?,
             }
         }
         Commands::Todo { command } => {

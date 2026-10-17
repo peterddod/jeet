@@ -64,14 +64,14 @@ pub enum Trust {
 /// `dir`: only with `auto_trust` on, only under `$JEET_HOME/tasks`, and for
 /// a review only with `auto_trust_reviews` on too. A manager follows
 /// `auto_trust` as a worker does: its parent starts it with nobody at its
-/// pane. Never the assistant's.
+/// pane. Never the assistant's or the setup agent's.
 pub fn may_auto_trust(config: &Config, home: &Path, who: Trust, dir: &Path) -> bool {
     let (tasks, reviews) = config.auto_trust();
     let in_tasks = dir.starts_with(config::tasks_root(home));
     match who {
         Trust::Task(TaskKind::Work | TaskKind::Manager) => tasks && in_tasks,
         Trust::Review => reviews && in_tasks,
-        Trust::Task(TaskKind::Assistant) => false,
+        Trust::Task(TaskKind::Assistant | TaskKind::Setup) => false,
     }
 }
 

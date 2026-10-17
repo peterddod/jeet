@@ -23,6 +23,9 @@ pub enum TaskKind {
     /// A node below the assistant that delegates rather than codes: it has
     /// children of its own and holds its worktrees read-only.
     Manager,
+    /// The setup agent (`jeet setup`): there is one, kept out of the tasks
+    /// list like the assistant; see [`crate::setup`].
+    Setup,
 }
 
 impl TaskKind {
@@ -31,6 +34,7 @@ impl TaskKind {
             TaskKind::Work => "work",
             TaskKind::Assistant => "assistant",
             TaskKind::Manager => "manager",
+            TaskKind::Setup => "setup",
         }
     }
 
@@ -39,6 +43,7 @@ impl TaskKind {
             "work" => Ok(TaskKind::Work),
             "assistant" => Ok(TaskKind::Assistant),
             "manager" => Ok(TaskKind::Manager),
+            "setup" => Ok(TaskKind::Setup),
             other => Err(bad_enum("kind", other)),
         }
     }
@@ -921,7 +926,7 @@ impl Database {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {TASK_COLUMNS} FROM tasks
-             WHERE (?1 IS NULL OR state = ?1) AND kind != 'assistant'
+             WHERE (?1 IS NULL OR state = ?1) AND kind NOT IN ('assistant', 'setup')
              ORDER BY last_activity DESC, created_at DESC, slug"
         ))?;
         let rows = stmt.query_map(params![state.map(TaskState::as_str)], task_from_row)?;
@@ -958,6 +963,18 @@ impl Database {
             })
             .optional()?;
         Ok(pr.flatten().as_deref().and_then(PrMode::parse))
+    }
+
+    /// The setup agent's row, once it has one.
+    pub fn get_setup_task(&self) -> Result<Option<TaskRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE kind = 'setup'"),
+                [],
+                task_from_row,
+            )
+            .optional()?)
     }
 
     pub fn set_task_state(&self, id: &str, state: TaskState) -> Result<()> {
@@ -2127,6 +2144,28 @@ mod tests {
         assert_eq!(db.get_task("a").unwrap(), Some(assistant));
         let mut second = task("b", "assistant-2", 1);
         second.kind = TaskKind::Assistant;
+        assert!(db.insert_task(&second).is_err());
+    }
+
+    #[test]
+    fn there_is_one_setup_agent_and_it_is_never_listed() {
+        let (_dir, db) = open();
+        assert!(db.get_setup_task().unwrap().is_none());
+        let mut setup = task("s", "setup", 50);
+        setup.kind = TaskKind::Setup;
+        db.insert_task(&setup).unwrap();
+        db.insert_task(&task("w", "work", 10)).unwrap();
+        assert_eq!(db.get_setup_task().unwrap(), Some(setup.clone()));
+        let listed: Vec<String> = db
+            .list_tasks(None)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(listed, ["work"]);
+        assert_eq!(db.get_task("s").unwrap(), Some(setup));
+        let mut second = task("b", "setup-2", 1);
+        second.kind = TaskKind::Setup;
         assert!(db.insert_task(&second).is_err());
     }
 

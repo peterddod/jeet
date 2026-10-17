@@ -875,7 +875,7 @@ impl Config {
             TaskKind::Manager => {
                 self.messages.render.managers.unwrap_or(Render::Quiet) == Render::Quiet
             }
-            TaskKind::Work => false,
+            TaskKind::Work | TaskKind::Setup => false,
         }
     }
 
