@@ -2427,10 +2427,12 @@ it.
 What needs you still reaches you, by notification ([`[notify]
 events`](#notifications)): a question or a block from a task directly under
 the assistant, or one you started, the moment it is asked; an ask passed up
-to the assistant; anything stuck; and every ask still open after
-`escalate_mins`. A `jeet watch` event a rule hands to the assistant is
-notified as well, as one was before when no session of the assistant's
-could take it.
+to the assistant, or moved onto it by `jeet task delete --reparent`;
+anything stuck; and every ask still open after `escalate_mins`. Off the push
+path, a task directly under the assistant that waits on a prompt only you
+can answer tells you too (kind `waiting`, which the quiet flag does not hold
+back), and so does a `jeet watch` event a rule hands to the assistant, as
+one did before when no session of the assistant's could take it.
 
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).

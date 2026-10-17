@@ -421,37 +421,60 @@ fn escalate_with(
     // it does, under the same `(why, r<id>)`; a step between managers
     // does not.
     if to.kind == TaskKind::Assistant {
-        let raise = Raise {
-            raised: Raised::Escalated,
-            kind: row.kind.as_str(),
-            reference: Some(format!("r{}", row.id)),
-            title: format!(
-                "jeet: {} {} (#{}), passed up to the assistant",
-                asker.label(),
-                match row.kind {
-                    ReportKind::Blocked => "is blocked",
-                    _ => "has a question",
-                },
-                row.id
-            ),
-            subtitle: Some(path.clone()),
-            body: row.body.clone(),
-            link: Some(Link::Report(row.id)),
-        };
-        match asker.origin(app) {
-            Ok(origin) => {
-                if let Some(event) = scope::event_for(app, &origin, raise) {
-                    notifier(event);
-                }
-            }
-            Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
-        }
+        let how = "passed up to the assistant";
+        tell_reached(
+            app,
+            &asker.label(),
+            asker.origin(app),
+            &row,
+            &path,
+            how,
+            notifier,
+        );
     }
     Ok(Escalated {
         row,
         to: Some(to),
         delivered: Some(delivered),
     })
+}
+
+/// Tell the user that ask `row`, from `asker` at `path` with `origin`, has
+/// reached the assistant `how` (`passed up to the assistant`): as an ask
+/// from directly under it does, under the same `(why, r<id>)`.
+fn tell_reached(
+    app: &App,
+    asker: &str,
+    origin: Result<Origin>,
+    row: &TaskReportRecord,
+    path: &str,
+    how: &str,
+    notifier: &dyn Fn(Event),
+) {
+    let raise = Raise {
+        raised: Raised::Escalated,
+        kind: row.kind.as_str(),
+        reference: Some(format!("r{}", row.id)),
+        title: format!(
+            "jeet: {asker} {} (#{}), {how}",
+            match row.kind {
+                ReportKind::Blocked => "is blocked",
+                _ => "has a question",
+            },
+            row.id
+        ),
+        subtitle: Some(path.to_string()),
+        body: row.body.clone(),
+        link: Some(Link::Report(row.id)),
+    };
+    match origin {
+        Ok(origin) => {
+            if let Some(event) = scope::event_for(app, &origin, raise) {
+                notifier(event);
+            }
+        }
+        Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
+    }
 }
 
 /// The title, subtitle and body of the notification that ask `row` from
@@ -474,23 +497,30 @@ const MOVED_VIA: &str = "jeet (moved)";
 /// task deleted with `--reparent`, that is an open ask `to` holds now,
 /// fenced as [`escalate`] fences one and allowed to start `to` only as an
 /// escalation would. One the user holds stays with the user. Returns each
-/// ask delivered, by id, and how it went.
+/// ask delivered, by id, and how it went. One that reaches the assistant
+/// so tells the user, as an escalation to it does.
 pub fn redeliver_moved(
     app: &App,
     to: &TaskRecord,
     moved: &[i64],
 ) -> Result<Vec<(i64, Result<Delivered>)>> {
-    redeliver_moved_with(app, to, moved, &|to, text, may_start| {
-        deliver_to(app, to, text, may_start)
-    })
+    redeliver_moved_with(
+        app,
+        to,
+        moved,
+        &|to, text, may_start| deliver_to(app, to, text, may_start),
+        &|e| notify::event(app, e),
+    )
 }
 
-/// [`redeliver_moved`], delivering with `deliver`.
+/// [`redeliver_moved`], delivering with `deliver` and notifying with
+/// `notifier`.
 fn redeliver_moved_with(
     app: &App,
     to: &TaskRecord,
     moved: &[i64],
     deliver: &DeliverFn,
+    notifier: &dyn Fn(Event),
 ) -> Result<Vec<(i64, Result<Delivered>)>> {
     let mut delivered = Vec::new();
     for row in app.db.open_asks(Some(&to.id))? {
@@ -505,6 +535,12 @@ fn redeliver_moved_with(
                     bail!("the task that asked #{} is gone", row.id);
                 };
                 let path = manager::tree_path(app, &asker)?;
+                if to.kind == TaskKind::Assistant {
+                    let how = "moved to the assistant";
+                    let origin = Origin::task(app, &asker);
+                    let label = manager::label(&asker);
+                    tell_reached(app, &label, origin, &row, &path, how, notifier);
+                }
                 Ok(assistant::fence_escalated(
                     row.id,
                     &manager::label(&asker),
@@ -926,6 +962,24 @@ fn auto_status_from(
     };
     if event == StatusEvent::Ended {
         let raise = stuck_raise(id, &src.label, &src.path, "ended without done", &body);
+        scope::raise(app, &src.origin, raise);
+    }
+    // Nothing pushes it to the assistant, which would have told the user:
+    // jeet does, whatever the quiet flag says, as the prompt is the user's.
+    if event == StatusEvent::Waiting
+        && parent.kind == TaskKind::Assistant
+        && !app.config.assistant.push()
+    {
+        let raise = Raise {
+            // As an ask that reaches the assistant: quiet or not.
+            raised: Raised::Escalated,
+            kind: "waiting",
+            reference: Some(format!("r{id}")),
+            title: format!("jeet: {} is waiting on you", src.label),
+            subtitle: Some(src.path.clone()),
+            body: body.clone(),
+            link: Some(Link::Report(id)),
+        };
         scope::raise(app, &src.origin, raise);
     }
     let delivered = deliver(app, src, &parent, id, ReportKind::Status, &body, false);
@@ -2175,6 +2229,31 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_on_the_user_under_the_assistant_tells_them_off_the_push_path() {
+        let (_dir, mut app) = ask_lab();
+        app.db.set_task_quiet("api", true).unwrap();
+        let api = app.db.get_task("api").unwrap().unwrap();
+        let body = "waiting on a prompt only the user can answer";
+        let (id, delivered) = auto_status(&app, &api, StatusEvent::Waiting, body, 5, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.unwrap(), Delivered::Stored);
+        let queued = notify::queued(&app.home);
+        assert_eq!(queued.len(), 1, "quiet or not");
+        assert_eq!(queued[0].why, Why::NeedsUser);
+        assert_eq!(queued[0].kind, "waiting");
+        assert_eq!(queued[0].reference, Some(format!("r{id}")));
+        assert_eq!(queued[0].title, "jeet: manager api is waiting on you");
+        // Under a manager, which is told, or pushed: nothing.
+        clear_told(&app);
+        let sub = app.db.get_task("sub").unwrap().unwrap();
+        auto_status(&app, &sub, StatusEvent::Waiting, body, 6, 0).unwrap();
+        app.config.assistant.push = Some(true);
+        auto_status(&app, &api, StatusEvent::Waiting, body, 7, 0).unwrap();
+        assert!(told(&app).is_empty());
+    }
+
+    #[test]
     fn a_block_left_open_is_stuck_once() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
@@ -2522,7 +2601,18 @@ mod tests {
         assert_eq!(moved, [held, answered]);
         moved.push(users);
         let sent = Sent::default();
-        let asks = redeliver_moved_with(&app, &plan.to, &moved, &recording(&sent)).unwrap();
+        let told = RefCell::new(Vec::new());
+        let notifier = |e: Event| told.borrow_mut().push((e.title, e.reference));
+        let asks =
+            redeliver_moved_with(&app, &plan.to, &moved, &recording(&sent), &notifier).unwrap();
+        // Reaching the assistant, it tells the user, as an escalation does.
+        assert_eq!(
+            told.into_inner(),
+            [(
+                format!("jeet: task ww has a question (#{held}), moved to the assistant"),
+                Some(format!("r{held}"))
+            )]
+        );
         let ids: Vec<i64> = asks.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [held]);
         assert!(asks[0].1.is_ok());
