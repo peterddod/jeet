@@ -1022,7 +1022,15 @@ pub fn dispatch(app: &App, rules: &[Rule], events: &[Event]) -> Vec<Sent> {
     }
     // In the order they came, whatever sent them here.
     for_assistant.sort_by_key(|(i, _)| *i);
-    for (text, carried) in batched(ASSISTANT_HEAD, &for_assistant) {
+    // Kept for `jeet brief`, each is its own item, under its own ref.
+    let batches = match app.config.assistant.push() {
+        true => batched(ASSISTANT_HEAD, &for_assistant),
+        false => for_assistant
+            .iter()
+            .flat_map(|one| batched(ASSISTANT_HEAD, std::slice::from_ref(one)))
+            .collect(),
+    };
+    for (text, carried) in batches {
         let meta = watch_meta(events, &carried);
         match assistant::deliver(app, &text, true, Some(meta)) {
             Ok((delivered, _)) => {
@@ -1095,10 +1103,11 @@ fn pr_origin(app: &App, event: &Event) -> Result<scope::Origin> {
 }
 
 /// Whether an event delivered as `delivered` is notified as well: only
-/// when its agent could not be started. Paused, or waiting on `max_live`,
+/// when its agent could not be started, or it was kept for the assistant's
+/// `jeet brief`, which nothing starts. Paused, or waiting on `max_live`,
 /// it is not lost: it gets it once resumed or started.
 fn still_notified(delivered: Delivered) -> bool {
-    delivered == Delivered::Held
+    matches!(delivered, Delivered::Held | Delivered::Stored)
 }
 
 /// A desktop notification for each of `events`, or one for them all when
@@ -2207,6 +2216,7 @@ mod tests {
             (Delivered::Paused, false),
             (Delivered::StartQueued { live: 1, max: 1 }, false),
             (Delivered::Wake, false),
+            (Delivered::Stored, true),
         ] {
             assert_eq!(still_notified(delivered), notified, "{delivered:?}");
         }

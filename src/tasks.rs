@@ -2835,6 +2835,7 @@ fn delivered_words(delivered: &Result<Delivered>) -> String {
         Ok(Delivered::Queued) => "queued; it gets it when it finishes or sits idle".to_string(),
         Ok(Delivered::Started) => "started a session with it".to_string(),
         Ok(Delivered::Held) => "it waits for its next session".to_string(),
+        Ok(Delivered::Stored) => "kept for its `jeet brief`".to_string(),
         Ok(Delivered::Paused) => "it waits until it is resumed".to_string(),
         Ok(Delivered::StartQueued { live, max }) => {
             format!("it waits for its start ({live}/{max} live)")

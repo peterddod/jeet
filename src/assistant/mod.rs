@@ -52,6 +52,8 @@ use crate::manager::fence::fenced;
 use crate::manager::run::StartGuard;
 use crate::manager::{self, take_inbox, ChildLine, Role};
 
+pub mod brief;
+
 pub use crate::manager::fence::{
     fence_answer, fence_brief, fence_escalated, fence_message, fence_report,
 };
@@ -492,6 +494,8 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// Get `message`, sent by `from` (`task fix-login`, say), to the assistant,
 /// by the same rules as `jeet task send`, in the session [`target`] picks;
 /// with none running, a new session called `events <date>` starts with it.
+/// Off the push path, an agent's is kept instead (see [`deliver`]); the
+/// user's still goes this way.
 ///
 /// It is not the user typing to the assistant, whatever it says, so it goes
 /// fenced as untrusted, with who sent it: see [`fence_message`].
@@ -508,7 +512,12 @@ pub fn send(
 ) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
     let meta = send_meta(from, &message, from_user);
-    deliver(app, &fence_message(from, &message), true, meta)
+    let text = fence_message(from, &message);
+    match from_user {
+        // The user's own goes to the assistant as ever.
+        true => deliver_pushed(app, &text, true, meta),
+        false => deliver(app, &text, true, meta),
+    }
 }
 
 /// The meta of `message` from `from` to the assistant: a line for an
@@ -531,7 +540,25 @@ fn send_meta(from: &str, message: &str, from_user: bool) -> Option<Meta> {
 /// `meta` is what jeet knows of it to render it by (see [`crate::render`]).
 /// One with no ref yet is not a report: rendered quietly, its whole text is
 /// kept in the assistant's `delivered.jsonl`, and it gets the ref `m<id>`.
+///
+/// With `[assistant] push = false` (the default), none of that: it is kept
+/// for `jeet brief` ([`brief::store`]), and no session is started or told.
 pub fn deliver(
+    app: &App,
+    text: &str,
+    may_start: bool,
+    meta: Option<Meta>,
+) -> Result<(Delivered, Option<String>)> {
+    if !app.config.assistant.push() {
+        let task = ensure(app)?;
+        let dir = tasks::task_dir(app, &task);
+        return Ok((brief::store(app, &dir, text, meta)?, None));
+    }
+    deliver_pushed(app, text, may_start, meta)
+}
+
+/// [`deliver`] as `[assistant] push = true` has it, whatever the key says.
+fn deliver_pushed(
     app: &App,
     text: &str,
     may_start: bool,
@@ -803,7 +830,7 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
     let todo = std::fs::read_to_string(todo::path(&dir)).unwrap_or_default();
     let held = manager::context::held(app, task)?;
     let inbox = take_inbox(&dir, session_id, running_sessions)?;
-    Ok(context_text(
+    let mut text = context_text(
         &date(now),
         &task_lines,
         &prs,
@@ -812,8 +839,18 @@ pub fn session_context(app: &App, task: &TaskRecord, session_id: &str, now: i64)
         &inbox,
         &children,
         &held,
-    ))
+    );
+    // Said here as well as in AGENTS.md, which an older home keeps as it was.
+    if !app.config.assistant.push() {
+        text.push_str(PULL_LINE);
+    }
+    Ok(text)
 }
+
+/// The summary's last line off the push path.
+pub const PULL_LINE: &str = "\njeet keeps what tasks, managers and `jeet watch` send you rather \
+                             than pushing it: when something is new, a hidden line on the user's \
+                             next prompt says so; run `jeet brief` to read it.\n";
 
 /// The summary's line on managers (M26), after its first.
 const MANAGERS_LINE: &str = "For an area of work too big for one task, the jeet-managers skill \

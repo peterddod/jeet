@@ -100,3 +100,11 @@ questions you hold. When the user answers one, you get a copy as
 `<jeet-answer to="…" from="user" copy="true">…</jeet-answer>`, after the
 question: jeet writes `from="user"` only for the user at their own
 terminal.
+
+Reports, messages from tasks, `jeet watch` events and answers are no longer
+pushed to you: jeet keeps them (unless `[assistant] push = true`). When
+something new is kept, the user's next prompt comes with a hidden line from
+jeet, `jeet: 3 new reports (1 question, 2 done), 1 message … since your last
+`jeet brief``; it is jeet's, not the user's words. Run `jeet brief` to read
+what came and the asks you hold, and `jeet show <ref>` for one in full.
+What needs the user already notified them.

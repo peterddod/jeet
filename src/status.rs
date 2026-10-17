@@ -331,8 +331,10 @@ pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) ->
 /// `jeet task-hook [--task <id>] <event>`: record what the hook on stdin
 /// says, as the harness called `harness` reports it, for `task`, the one
 /// jeet launched the agent for (none from hooks older than `--task`).
-/// Never fails, never prints to stdout; what goes wrong is noted on stderr,
-/// which the agent keeps out of the conversation.
+/// Never fails, and prints to stdout only what the harness takes from a
+/// hook (a session's context, a prompt's hidden line, a Stop's handover);
+/// what goes wrong is noted on stderr, which the agent keeps out of the
+/// conversation.
 pub fn run_hook(harness: &str, event: &str, task: Option<&str>) {
     let Some(found) = harness::by_id(harness) else {
         eprintln!("jeet task-hook {event}: no harness {harness:?}");
@@ -477,6 +479,11 @@ fn handle_hook(
     if let Some(EventKind::Stopped) = &hook.kind {
         if let Err(e) = sweep_if_assistant(&ctx.app, &task_id, now) {
             eprintln!("jeet task-hook {event}: {e:#}");
+        }
+    }
+    if matches!(hook.kind, Some(EventKind::Working(_))) {
+        if let Some(output) = prompt_summary(harness, event, &task_dir, session_id, &ctx) {
+            println!("{output}");
         }
     }
     let result = match hook.kind {
@@ -896,6 +903,30 @@ fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
     }
     cmd.spawn().context("start jeet manager drain")?;
     Ok(())
+}
+
+/// What the hook for `event`, the user's prompt to an assistant session
+/// off the push path, prints to tell it what was kept for it since its
+/// last `jeet brief`: nothing when nothing was, or for any other task.
+fn prompt_summary(
+    harness: &dyn Harness,
+    event: &str,
+    task_dir: &Path,
+    session_id: &str,
+    ctx: &HookCtx,
+) -> Option<String> {
+    let task = ctx.task.as_ref()?;
+    if task.kind != TaskKind::Assistant || ctx.app.config.assistant.push() {
+        return None;
+    }
+    harness.prompt_context_output(event, "")?;
+    match assistant::brief::summary_line(task_dir, session_id) {
+        Ok(line) => harness.prompt_context_output(event, &line?),
+        Err(e) => {
+            eprintln!("jeet task-hook {event}: {e:#}");
+            None
+        }
+    }
 }
 
 fn sweep_if_assistant(app: &App, task_id: &str, now: i64) -> Result<()> {
@@ -1489,7 +1520,7 @@ impl Activity {
 mod tests {
     use super::*;
     use crate::config;
-    use crate::db::tasks::TaskState;
+    use crate::db::tasks::{ReportKind, TaskState};
     use crate::db::Database;
 
     /// The app of the index in `home`.
@@ -2605,6 +2636,63 @@ mod tests {
         assert_eq!(
             activity(Some(&status), true).label(),
             "needs input – trust folder"
+        );
+    }
+
+    #[test]
+    fn the_users_prompt_to_the_assistant_carries_what_was_kept_since_its_brief() {
+        let (_home, mut app) = lab();
+        let root = crate::manager::root(&app).unwrap();
+        let w = app.db.get_task("w").unwrap().unwrap();
+        let dir = tasks::task_dir(&app, &root);
+        let claude = harness::by_id("claude-code").unwrap();
+        let ctx = |app: App, task: &TaskRecord| HookCtx {
+            task: Some(task.clone()),
+            ..quiet_ctx(app)
+        };
+        // Nothing kept: nothing said.
+        let c = ctx(app, &root);
+        assert_eq!(
+            prompt_summary(claude, "UserPromptSubmit", &dir, "s", &c),
+            None
+        );
+        app = c.app;
+        reports::send(&app, &w, ReportKind::Done, "merged", true)
+            .unwrap()
+            .1
+            .unwrap();
+        reports::send(&app, &w, ReportKind::Question, "which?", true)
+            .unwrap()
+            .1
+            .unwrap();
+        let c = ctx(app, &root);
+        let output = prompt_summary(claude, "UserPromptSubmit", &dir, "s", &c).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let line = value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            line.starts_with("jeet: 2 new reports (1 question, 1 done) since your last"),
+            "{line}"
+        );
+        // Only the prompt's hook, and only the assistant's.
+        assert_eq!(prompt_summary(claude, "PreToolUse", &dir, "s", &c), None);
+        app = c.app;
+        let c = ctx(app, &w);
+        assert_eq!(
+            prompt_summary(claude, "UserPromptSubmit", &dir, "s", &c),
+            None
+        );
+        // Pushed, it was told already.
+        let mut c = ctx(c.app, &root);
+        c.app.config.assistant.push = Some(true);
+        assert_eq!(
+            prompt_summary(claude, "UserPromptSubmit", &dir, "s", &c),
+            None
         );
     }
 }

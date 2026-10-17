@@ -253,6 +253,9 @@ pub(crate) fn delivered(to: &str, what: &str, failed: &str, d: &Result<Delivered
         Ok(Delivered::Held) => {
             format!("{to} is not running, so {what} waits for its next session")
         }
+        Ok(Delivered::Stored) => {
+            format!("kept for {to}, which reads it with `jeet brief`; nothing was pushed to it")
+        }
         Ok(Delivered::Paused) => {
             format!("{to} is paused or stopped, so {what} waits until it is resumed")
         }

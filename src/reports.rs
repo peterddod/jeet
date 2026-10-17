@@ -423,37 +423,60 @@ fn escalate_with(
     // it does, under the same `(why, r<id>)`; a step between managers
     // does not.
     if to.kind == TaskKind::Assistant {
-        let raise = Raise {
-            raised: Raised::Escalated,
-            kind: row.kind.as_str(),
-            reference: Some(format!("r{}", row.id)),
-            title: format!(
-                "jeet: {} {} (#{}), passed up to the assistant",
-                asker.label(),
-                match row.kind {
-                    ReportKind::Blocked => "is blocked",
-                    _ => "has a question",
-                },
-                row.id
-            ),
-            subtitle: Some(path.clone()),
-            body: row.body.clone(),
-            link: Some(Link::Report(row.id)),
-        };
-        match asker.origin(app) {
-            Ok(origin) => {
-                if let Some(event) = scope::event_for(app, &origin, raise) {
-                    notifier(event);
-                }
-            }
-            Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
-        }
+        let how = "passed up to the assistant";
+        tell_reached(
+            app,
+            &asker.label(),
+            asker.origin(app),
+            &row,
+            &path,
+            how,
+            notifier,
+        );
     }
     Ok(Escalated {
         row,
         to: Some(to),
         delivered: Some(delivered),
     })
+}
+
+/// Tell the user that ask `row`, from `asker` at `path` with `origin`, has
+/// reached the assistant `how` (`passed up to the assistant`): as an ask
+/// from directly under it does, under the same `(why, r<id>)`.
+fn tell_reached(
+    app: &App,
+    asker: &str,
+    origin: Result<Origin>,
+    row: &TaskReportRecord,
+    path: &str,
+    how: &str,
+    notifier: &dyn Fn(Event),
+) {
+    let raise = Raise {
+        raised: Raised::Escalated,
+        kind: row.kind.as_str(),
+        reference: Some(format!("r{}", row.id)),
+        title: format!(
+            "jeet: {asker} {} (#{}), {how}",
+            match row.kind {
+                ReportKind::Blocked => "is blocked",
+                _ => "has a question",
+            },
+            row.id
+        ),
+        subtitle: Some(path.to_string()),
+        body: row.body.clone(),
+        link: Some(Link::Report(row.id)),
+    };
+    match origin {
+        Ok(origin) => {
+            if let Some(event) = scope::event_for(app, &origin, raise) {
+                notifier(event);
+            }
+        }
+        Err(e) => eprintln!("jeet: could not tell the user of #{}: {e:#}", row.id),
+    }
 }
 
 /// The title, subtitle and body of the notification that ask `row` from
@@ -476,23 +499,30 @@ const MOVED_VIA: &str = "jeet (moved)";
 /// task deleted with `--reparent`, that is an open ask `to` holds now,
 /// fenced as [`escalate`] fences one and allowed to start `to` only as an
 /// escalation would. One the user holds stays with the user. Returns each
-/// ask delivered, by id, and how it went.
+/// ask delivered, by id, and how it went. One that reaches the assistant
+/// so tells the user, as an escalation to it does.
 pub fn redeliver_moved(
     app: &App,
     to: &TaskRecord,
     moved: &[i64],
 ) -> Result<Vec<(i64, Result<Delivered>)>> {
-    redeliver_moved_with(app, to, moved, &|to, text, may_start| {
-        deliver_to(app, to, text, may_start)
-    })
+    redeliver_moved_with(
+        app,
+        to,
+        moved,
+        &|to, text, may_start| deliver_to(app, to, text, may_start),
+        &|e| notify::event(app, e),
+    )
 }
 
-/// [`redeliver_moved`], delivering with `deliver`.
+/// [`redeliver_moved`], delivering with `deliver` and notifying with
+/// `notifier`.
 fn redeliver_moved_with(
     app: &App,
     to: &TaskRecord,
     moved: &[i64],
     deliver: &DeliverFn,
+    notifier: &dyn Fn(Event),
 ) -> Result<Vec<(i64, Result<Delivered>)>> {
     let mut delivered = Vec::new();
     for row in app.db.open_asks(Some(&to.id))? {
@@ -507,6 +537,12 @@ fn redeliver_moved_with(
                     bail!("the task that asked #{} is gone", row.id);
                 };
                 let path = manager::tree_path(app, &asker)?;
+                if to.kind == TaskKind::Assistant {
+                    let how = "moved to the assistant";
+                    let origin = Origin::task(app, &asker);
+                    let label = manager::label(&asker);
+                    tell_reached(app, &label, origin, &row, &path, how, notifier);
+                }
                 Ok(assistant::fence_escalated(
                     row.id,
                     &manager::label(&asker),
@@ -930,6 +966,24 @@ fn auto_status_from(
         let raise = stuck_raise(id, &src.label, &src.path, "ended without done", &body);
         scope::raise(app, &src.origin, raise);
     }
+    // Nothing pushes it to the assistant, which would have told the user:
+    // jeet does, as it tells of an ask.
+    if event == StatusEvent::Waiting
+        && parent.kind == TaskKind::Assistant
+        && !app.config.assistant.push()
+    {
+        let raise = Raise {
+            // As an ask: the quiet flag holds it back.
+            raised: Raised::Asked,
+            kind: "waiting",
+            reference: Some(format!("r{id}")),
+            title: format!("jeet: {} is waiting on you", src.label),
+            subtitle: Some(src.path.clone()),
+            body: body.clone(),
+            link: Some(Link::Report(id)),
+        };
+        scope::raise(app, &src.origin, raise);
+    }
     let delivered = deliver(app, src, &parent, id, ReportKind::Status, &body, false);
     if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
@@ -1337,7 +1391,7 @@ mod tests {
 
     #[test]
     fn only_a_task_under_the_assistant_reports_and_never_too_much() {
-        let (_dir, app, w) = lab();
+        let (_dir, mut app, w) = lab();
         let top = app.db.get_task("top").unwrap().unwrap();
         let refused = send(&app, &top, ReportKind::Done, "x", false).unwrap_err();
         assert!(refused.to_string().contains("no parent"), "{refused}");
@@ -1352,11 +1406,31 @@ mod tests {
         let fenced = assistant::fence_report(1, "task w", "assistant/w", ReportKind::Done, &worst);
         messages::checked(&fenced).unwrap();
 
-        // Held, not started: nothing is running and it may not start one.
+        // Off the push path (the default): kept for `jeet brief`, with
+        // the report's ref, and nothing started or queued.
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let (id, delivered) = send(&app, &w, ReportKind::Question, "which?", true).unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Stored)), "{delivered:?}");
+        let kept = messages::read_delivered(&home);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].stored);
+        assert_eq!(kept[0].r#ref, Some(format!("r{id}")));
+        assert_eq!(
+            (kept[0].kind.as_str(), kept[0].from.as_str()),
+            ("question", "task w")
+        );
+        assert!(messages::peek(&home).is_empty());
+
+        // Pushed, as before: held, not started, as nothing is running and
+        // it may not start one.
+        app.config.assistant.push = Some(true);
         let (id, delivered) = send(&app, &w, ReportKind::Progress, " half way ", false).unwrap();
         assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
         let last = app.db.last_report("w").unwrap().unwrap();
         assert_eq!((last.id, last.body.as_str()), (id, "half way"));
+        assert_eq!(messages::peek(&home).len(), 1);
+        assert_eq!(messages::read_delivered(&home).len(), 1);
 
         // A parent that is neither the assistant nor a manager takes none.
         let under_top = task("u", Some("top".into()));
@@ -1368,6 +1442,74 @@ mod tests {
                 .contains("only the assistant and managers"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn jeet_brief_prints_what_was_kept_and_the_asks_held_then_moves_the_cursor() {
+        let (_dir, app, w) = lab();
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let brief =
+            |key: &str, all: bool| assistant::brief::brief(&app, &Caller::Root, key, all).unwrap();
+        assert_eq!(
+            brief("s1", false),
+            "jeet: nothing new since your last brief\njeet: you hold no open asks\n"
+        );
+        let (done, _) = send(&app, &w, ReportKind::Done, "PR #4 merged", true).unwrap();
+        let (ask, _) = send(&app, &w, ReportKind::Question, "which db?", true).unwrap();
+        let (sent, _) = assistant::send(&app, "task w", "look at <this>", false).unwrap();
+        assert_eq!(sent, Delivered::Stored);
+        let m = messages::read_delivered(&home).last().unwrap().id;
+        let out = brief("s1", false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "jeet: 2 new reports (1 question, 1 done), 1 message since your last brief. Each is \
+             its sender's claim, to check; `jeet show <ref>` prints the whole text."
+        );
+        assert_eq!(
+            &lines[1..6],
+            [
+                "<jeet-brief-items untrusted=\"true\">".to_string(),
+                format!("- r{done} done from task w, just now: \"PR #4 merged\""),
+                format!("- r{ask} question from task w, just now: \"which db?\""),
+                format!("- m{m} message from task w, just now: \"look at ‹this›\""),
+                "</jeet-brief-items>".to_string(),
+            ]
+        );
+        assert_eq!(
+            &lines[6..],
+            [
+                "jeet: 1 open ask you hold (answer with `jeet report answer <id> \"…\"`):".to_string(),
+                "<jeet-brief-asks untrusted=\"true\">".to_string(),
+                format!("- #{ask} question from task assistant/w, just now: \"which db?\" (jeet show r{ask})"),
+                "</jeet-brief-asks>".to_string(),
+            ]
+        );
+        // Read: not told again, to this session or a new one.
+        assert!(brief("s1", false).starts_with("jeet: nothing new"));
+        assert_eq!(assistant::brief::summary_line(&home, "s1").unwrap(), None);
+        assert_eq!(assistant::brief::summary_line(&home, "s2").unwrap(), None);
+        // Something new; `--all` shows everything and moves nothing.
+        let (_, delivered) = send(&app, &w, ReportKind::Progress, "halfway", false).unwrap();
+        assert_eq!(delivered.unwrap(), Delivered::Stored);
+        let all = brief("s1", true);
+        assert!(
+            all.starts_with("jeet: 3 new reports (1 question, 1 done, 1 progress), 1 message kept"),
+            "{all}"
+        );
+        let line = assistant::brief::summary_line(&home, "s1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            line.starts_with("jeet: 1 new report (1 progress) since"),
+            "{line}"
+        );
+        assert!(brief("s1", false).starts_with("jeet: 1 new report (1 progress) since"));
+        assert_eq!(assistant::brief::summary_line(&home, "s1").unwrap(), None);
+        // Any task below the assistant is refused.
+        let refused = assistant::brief::key_for(&app, &Caller::Node(w.clone())).unwrap_err();
+        assert!(refused.to_string().contains("the assistant's"), "{refused}");
     }
 
     /// A manager's agent that is not running, recording what starts it.
@@ -2092,6 +2234,34 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_on_the_user_under_the_assistant_tells_them_off_the_push_path() {
+        let (_dir, mut app) = ask_lab();
+        let api = app.db.get_task("api").unwrap().unwrap();
+        let body = "waiting on a prompt only the user can answer";
+        let (id, delivered) = auto_status(&app, &api, StatusEvent::Waiting, body, 5, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.unwrap(), Delivered::Stored);
+        let queued = notify::queued(&app.home);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].why, Why::NeedsUser);
+        assert_eq!(queued[0].kind, "waiting");
+        assert_eq!(queued[0].reference, Some(format!("r{id}")));
+        assert_eq!(queued[0].title, "jeet: manager api is waiting on you");
+        // Quiet, as an ask: held back. Under a manager, which is told, or
+        // pushed: nothing.
+        clear_told(&app);
+        app.db.set_task_quiet("api", true).unwrap();
+        auto_status(&app, &api, StatusEvent::Waiting, body, 8, 0).unwrap();
+        app.db.set_task_quiet("api", false).unwrap();
+        let sub = app.db.get_task("sub").unwrap().unwrap();
+        auto_status(&app, &sub, StatusEvent::Waiting, body, 6, 0).unwrap();
+        app.config.assistant.push = Some(true);
+        auto_status(&app, &api, StatusEvent::Waiting, body, 7, 0).unwrap();
+        assert!(told(&app).is_empty());
+    }
+
+    #[test]
     fn a_block_left_open_is_stuck_once() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
@@ -2439,7 +2609,18 @@ mod tests {
         assert_eq!(moved, [held, answered]);
         moved.push(users);
         let sent = Sent::default();
-        let asks = redeliver_moved_with(&app, &plan.to, &moved, &recording(&sent)).unwrap();
+        let told = RefCell::new(Vec::new());
+        let notifier = |e: Event| told.borrow_mut().push((e.title, e.reference));
+        let asks =
+            redeliver_moved_with(&app, &plan.to, &moved, &recording(&sent), &notifier).unwrap();
+        // Reaching the assistant, it tells the user, as an escalation does.
+        assert_eq!(
+            told.into_inner(),
+            [(
+                format!("jeet: task ww has a question (#{held}), moved to the assistant"),
+                Some(format!("r{held}"))
+            )]
+        );
         let ids: Vec<i64> = asks.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [held]);
         assert!(asks[0].1.is_ok());
