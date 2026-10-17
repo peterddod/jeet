@@ -1481,4 +1481,18 @@ also look at #7
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(super::watched(empty.path(), &mut [], 0), Watched::default());
     }
+
+    #[test]
+    fn the_assistants_home_takes_the_overrides_beside_it() {
+        let home = tempfile::tempdir().unwrap();
+        let root = config::templates_dir(home.path()).join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "mine\n").unwrap();
+        let dir = home_dir(home.path());
+        ensure_files(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            "mine\n"
+        );
+    }
 }

@@ -99,12 +99,12 @@ pub fn template_override(templates: &Path, role: &str, rel: &str) -> Result<Opti
 }
 
 /// Write each of `role`'s templates that is not in `dir` yet, returning
-/// those written: the user's override in `templates` where there is one
+/// those written: the user's override in `overrides` where there is one
 /// ([`template_override`]), else the built-in one. Each harness's import of
 /// AGENTS.md is always the built-in one. Nothing there is ever replaced: a
 /// CLAUDE.md of the user's own, from before AGENTS.md, is moved to
 /// AGENTS.md rather than written over.
-pub fn ensure_files(dir: &Path, role: Role, templates: &Path) -> Result<Vec<&'static str>> {
+pub fn ensure_files(dir: &Path, role: Role, overrides: &Path) -> Result<Vec<&'static str>> {
     instructions::migrate(dir).context("move CLAUDE.md to AGENTS.md")?;
     let role_dir = match role {
         Role::Root => "root",
@@ -112,14 +112,15 @@ pub fn ensure_files(dir: &Path, role: Role, templates: &Path) -> Result<Vec<&'st
     };
     let imports = instructions::imports();
     let mut written = Vec::new();
-    for (rel, builtin) in self::templates(role) {
+    for (rel, builtin) in templates(role) {
         let path = dir.join(rel);
         if std::fs::symlink_metadata(&path).is_ok() {
             continue;
         }
-        let text = match imports.iter().any(|i| i.file == rel) {
-            true => None,
-            false => template_override(templates, role_dir, rel)?,
+        let text = if imports.iter().any(|i| i.file == rel) {
+            None
+        } else {
+            template_override(overrides, role_dir, rel)?
         };
         let text = text.as_deref().unwrap_or(builtin);
         if let Some(parent) = path.parent() {

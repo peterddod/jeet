@@ -2573,7 +2573,10 @@ An override applies only where jeet writes a template: a file missing from
 the assistant's or a new manager's home (existing files are never written
 over), and a task's `jeet` skill, which is written when the task is made
 and on `jeet projects resync`. `CLAUDE.md`, the import of `AGENTS.md`, is
-always jeet's. A path that is not a file is ignored. `jeet setup` stages
+always jeet's, and so are reviews' homes. A path that is not a file is
+ignored; an override that cannot be read stops the home being made, with
+its path in the error. Overrides are used as written: no placeholder in
+them is filled in. `jeet setup` stages
 overrides for `jeet setup apply` like any other change.
 
 ### Keeping the store fetched
