@@ -650,7 +650,7 @@ pub enum ProjectField {
     Repos,
 }
 
-/// `n` in the projects panel: a name, and the repositories every task made
+/// `N` on a project row: a name, and the repositories every task made
 /// from the project starts with.
 #[derive(Debug, Clone)]
 pub struct NewProjectForm {
@@ -704,16 +704,6 @@ pub struct WorktreeLine {
     /// The branch it is on now, or `detached @ sha`.
     pub head: String,
     pub status: WorktreeStatus,
-}
-
-/// One project in the projects panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectLine {
-    pub name: String,
-    pub tasks: usize,
-    /// `AGENTS.md, 2 skills`, or why the project cannot be read.
-    pub contents: String,
-    pub repos: String,
 }
 
 /// What a confirm overlay is asking about.
@@ -785,10 +775,6 @@ pub enum Panel {
         field: AddField,
     },
     NewTask(Box<NewTaskForm>),
-    Projects {
-        lines: Vec<ProjectLine>,
-        selected: usize,
-    },
     NewProject(NewProjectForm),
     Prs {
         task_id: String,
@@ -937,7 +923,6 @@ pub enum Action {
         task_id: String,
         recursive: bool,
     },
-    Projects,
     NewProjectForm,
     CreateProject {
         name: String,
@@ -1663,6 +1648,24 @@ impl TasksUi {
         }
     }
 
+    /// Show the projects list with the cursor on project `name`, in
+    /// whichever list (active, or the other projects) holds it.
+    fn show_project(&mut self, name: Option<&str>) {
+        self.view = View::Projects;
+        self.project = None;
+        self.project_path.clear();
+        self.filter.clear();
+        if let Some(name) = name {
+            if self.groups.members(self.archived_projects, name).is_none() {
+                self.archived_projects = !self.archived_projects;
+            }
+        }
+        self.refresh_visible(None);
+        self.selected = name
+            .and_then(|name| self.projects.iter().position(|line| line.name == name))
+            .unwrap_or(0);
+    }
+
     /// → or ⏎ on a project: list who is in it.
     fn enter_project(&mut self) {
         let Some(line) = self.projects.get(self.selected) else {
@@ -2021,6 +2024,7 @@ impl TasksUi {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let id = self.selected_id().map(str::to_string);
+        let on_project_row = self.view == View::Projects && self.project.is_none();
         let needs_task = |ui: &mut TasksUi, make: &dyn Fn(String) -> Action| match &id {
             Some(id) => Some(make(id.clone())),
             None => {
@@ -2118,8 +2122,32 @@ impl TasksUi {
                 });
                 None
             }
-            KeyCode::Char('n') => Some(Action::NewTaskForm { project: None }),
-            KeyCode::Char('P') => Some(Action::Projects),
+            // On a project's row: a task already in that project, and the
+            // project's own keys. Inside one, the task keys apply.
+            KeyCode::Char('n') if on_project_row => Some(Action::NewTaskForm {
+                project: self.projects.get(self.selected).map(|p| p.name.clone()),
+            }),
+            KeyCode::Char('n') => Some(Action::NewTaskForm {
+                project: match self.view {
+                    View::Projects => self.project.clone(),
+                    _ => None,
+                },
+            }),
+            KeyCode::Char('N') if on_project_row => Some(Action::NewProjectForm),
+            KeyCode::Char('E') if on_project_row => {
+                self.projects
+                    .get(self.selected)
+                    .map(|p| Action::EditProject {
+                        name: p.name.clone(),
+                    })
+            }
+            KeyCode::Char('D') if on_project_row => {
+                self.projects
+                    .get(self.selected)
+                    .map(|p| Action::AskDeleteProject {
+                        name: p.name.clone(),
+                    })
+            }
             KeyCode::Enter if self.view == View::Reviews => {
                 needs_review(self, &|task_id| Action::Open {
                     task_id,
@@ -2484,7 +2512,6 @@ impl TasksUi {
                     (Pending::DeleteProject { name }, true, _, _) => {
                         Some(Action::DeleteProject { name: name.clone() })
                     }
-                    (Pending::DeleteProject { .. }, _, _, true) => Some(Action::Projects),
                     (Pending::ForceResync { task_id }, _, true, _) => Some(Action::Resync {
                         task_id: task_id.clone(),
                         force: true,
@@ -2712,33 +2739,9 @@ impl TasksUi {
                 self.panel = Some(Panel::NewTask(form));
                 None
             }
-            Panel::Projects {
-                lines,
-                mut selected,
-            } => {
-                let name = lines.get(selected).map(|l| l.name.clone());
-                let action = match (key.code, name) {
-                    (KeyCode::Esc | KeyCode::Char('q' | 'P'), _) => return None,
-                    (KeyCode::Char('r'), _) => return Some(Action::Projects),
-                    (KeyCode::Char('n'), _) => return Some(Action::NewProjectForm),
-                    (KeyCode::Char('e'), Some(name)) => Some(Action::EditProject { name }),
-                    (KeyCode::Char('D'), Some(name)) => Some(Action::AskDeleteProject { name }),
-                    (KeyCode::Enter, Some(name)) => Some(Action::NewTaskForm {
-                        project: Some(name),
-                    }),
-                    (code, _) => {
-                        selected = list_move(code, selected, lines.len());
-                        None
-                    }
-                };
-                if action.is_none() {
-                    self.panel = Some(Panel::Projects { lines, selected });
-                }
-                action
-            }
             Panel::NewProject(mut form) => {
                 match (key.code, form.field) {
-                    (KeyCode::Esc, _) => return Some(Action::Projects),
+                    (KeyCode::Esc, _) => return None,
                     (KeyCode::Enter, _) => {
                         let name = form.name.trim().to_string();
                         if !name.is_empty() {
@@ -3674,7 +3677,7 @@ pub fn dir_size(dir: &Path) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Start {
     List,
-    /// `jeet projects` on a terminal: the projects panel, over the list.
+    /// `jeet projects` on a terminal: the projects view.
     Projects,
 }
 
@@ -3732,7 +3735,9 @@ impl Screen<'_> {
             .set_status("? for keys · ⏎ opens a task's agent · n starts a task");
         self.refresh(true);
         if start == Start::Projects {
-            self.perform(Action::Projects);
+            self.ui.view = View::Projects;
+            self.ui.selected = 0;
+            self.ui.refresh_visible(None);
         }
         let mut last_read = Instant::now();
         let mut last_watch = Instant::now();
@@ -4638,10 +4643,6 @@ impl Screen<'_> {
                     ),
                 }
             }
-            Action::Projects => {
-                let lines = project_lines(app)?;
-                self.ui.panel = Some(Panel::Projects { lines, selected: 0 });
-            }
             Action::NewProjectForm => {
                 let repos = app.db.list_repos(None)?.into_iter().map(|r| r.id).collect();
                 self.ui.panel = Some(Panel::NewProject(NewProjectForm::new(repos)));
@@ -4650,7 +4651,7 @@ impl Screen<'_> {
                 Ok(_) => {
                     self.show_projects(Some(&name))?;
                     self.ui.set_status(format!(
-                        "created project {name} — e edits it, ⏎ starts a task"
+                        "created project {name} — E edits it, n starts a task"
                     ));
                 }
                 Err(e) => {
@@ -4678,7 +4679,7 @@ impl Screen<'_> {
                         let back = self.ui.panel.take();
                         self.ui.message(
                             "project.toml is not valid",
-                            vec![format!("{e:#}"), String::new(), "e edits it again".into()],
+                            vec![format!("{e:#}"), String::new(), "E edits it again".into()],
                             back,
                         );
                     }
@@ -5662,12 +5663,9 @@ impl Screen<'_> {
     }
 
     fn show_projects(&mut self, select: Option<&str>) -> Result<()> {
-        let lines = project_lines(self.app)?;
         self.read_projects(true);
-        let selected = select
-            .and_then(|name| lines.iter().position(|l| l.name == name))
-            .unwrap_or(0);
-        self.ui.panel = Some(Panel::Projects { lines, selected });
+        self.ui.panel = None;
+        self.ui.show_project(select);
         Ok(())
     }
 
@@ -5858,30 +5856,6 @@ fn worktree_lines(app: &App, row: &TaskRow) -> Result<Vec<WorktreeLine>> {
             present,
             head,
             status,
-        });
-    }
-    Ok(lines)
-}
-
-fn project_lines(app: &App) -> Result<Vec<ProjectLine>> {
-    let mut lines = Vec::new();
-    for name in projects::list(app)? {
-        let tasks = projects::tasks_using(app, &name)?.len();
-        let (contents, repos) = match projects::load(app, &name) {
-            Ok(project) => (
-                project.contents_summary(),
-                match project.config.repos.as_slice() {
-                    [] => "-".to_string(),
-                    repos => repos.join(", "),
-                },
-            ),
-            Err(e) => (format!("broken: {e:#}"), "-".to_string()),
-        };
-        lines.push(ProjectLine {
-            name,
-            tasks,
-            contents,
-            repos,
         });
     }
     Ok(lines)
@@ -7317,7 +7291,7 @@ mod tests {
             press(&mut ui, KeyCode::Char('n')),
             Some(Action::NewTaskForm { project: None })
         );
-        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
+        assert_eq!(press(&mut ui, KeyCode::Char('P')), None);
         assert_eq!(press(&mut ui, KeyCode::Char('r')), Some(Action::Refresh));
         // Lowercase d is not delete.
         assert_eq!(press(&mut ui, KeyCode::Char('d')), None);
@@ -7570,33 +7544,62 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_panel_starts_a_task_from_a_project() {
-        let mut ui = sample();
-        ui.panel = Some(Panel::Projects {
-            lines: vec![ProjectLine {
-                name: "web".into(),
-                tasks: 0,
-                contents: "-".into(),
-                repos: "-".into(),
-            }],
-            selected: 0,
-        });
-        assert_eq!(
-            press(&mut ui, KeyCode::Enter),
-            Some(Action::NewTaskForm {
-                project: Some("web".into())
-            })
-        );
-        ui.panel = Some(Panel::Projects {
-            lines: Vec::new(),
-            selected: 0,
-        });
-        // Nothing to edit or delete in an empty panel; `n` still works.
-        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+    fn a_project_row_has_the_project_keys_and_inside_n_starts_a_task_in_it() {
+        let mut ui = by_project();
+        let name = ui.projects[ui.selected].name.clone();
         assert_eq!(
             press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewTaskForm {
+                project: Some(name.clone())
+            })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('N')),
             Some(Action::NewProjectForm)
         );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('E')),
+            Some(Action::EditProject { name: name.clone() })
+        );
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDeleteProject { name: name.clone() })
+        );
+        // The task keys have no task to act on.
+        assert_eq!(press(&mut ui, KeyCode::Char('e')), None);
+        assert_eq!(ui.status_line, NO_TASK);
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.project.as_deref(), Some(name.as_str()));
+        assert_eq!(
+            press(&mut ui, KeyCode::Char('n')),
+            Some(Action::NewTaskForm {
+                project: Some(name)
+            })
+        );
+        // `D` is the task's here, and `N` and `E` are not keys.
+        assert!(matches!(
+            press(&mut ui, KeyCode::Char('D')),
+            Some(Action::AskDelete { .. })
+        ));
+        assert_eq!(press(&mut ui, KeyCode::Char('N')), None);
+        assert_eq!(press(&mut ui, KeyCode::Char('E')), None);
+    }
+
+    #[test]
+    fn a_new_project_with_no_tasks_is_shown_in_the_other_projects() {
+        let mut ui = by_project();
+        ui.set_known_projects(
+            ["api", "fresh", "gone", "idle", "web"]
+                .map(String::from)
+                .to_vec(),
+        );
+        ui.show_project(Some("fresh"));
+        assert!(ui.archived_projects);
+        assert_eq!(ui.projects[ui.selected].name, "fresh");
+        // One with work is found in the active list.
+        ui.show_project(Some("web"));
+        assert!(!ui.archived_projects);
+        assert_eq!(ui.projects[ui.selected].name, "web");
     }
 
     #[test]
@@ -7621,7 +7624,8 @@ mod tests {
         );
         // Left up, so a failure can come back to it.
         assert!(matches!(ui.panel, Some(Panel::NewProject(_))));
-        assert_eq!(press(&mut ui, KeyCode::Esc), Some(Action::Projects));
+        assert_eq!(press(&mut ui, KeyCode::Esc), None);
+        assert!(ui.panel.is_none());
     }
 
     #[test]
@@ -8239,13 +8243,12 @@ mod tests {
                 task_id: "root".into()
             })
         );
-        // `p` and `P` are still PRs and projects in the active view.
+        // `p` is still PRs in the active view.
         press(&mut ui, KeyCode::BackTab);
         assert!(matches!(
             press(&mut ui, KeyCode::Char('p')),
             Some(Action::Prs { .. })
         ));
-        assert_eq!(press(&mut ui, KeyCode::Char('P')), Some(Action::Projects));
         // No tree, no node.
         let mut bare = sample();
         bare.user = true;

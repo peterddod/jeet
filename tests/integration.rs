@@ -4245,20 +4245,24 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
     screen.esc();
     // Back on the list, which carries on: `q` there quits.
 
-    // A project, from the projects panel.
-    screen.type_keys(b"P");
+    // A project, from the projects tab, then back to the list.
+    screen.type_keys(b"\t\t\t");
     screen.wait_for_text("no projects yet");
-    screen.type_keys(b"n");
+    screen.type_keys(b"N");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"webproj\r");
     wait_until("the project", || {
         stdout_of(&lab.jeet(&["projects", "ls"])).contains("webproj")
     });
-    screen.esc();
+    screen.type_keys(b"\t");
 
-    // The new task is selected; archiving it frees its worktree.
+    // Archiving the new task frees its worktree.
+    screen.wait_for_text("Widget work");
+    screen.type_keys(b"/widget\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"a");
     wait_until("the archive", || listed(true).contains("widget-work"));
+    screen.esc();
     assert!(!task.join("widget").exists());
 
     // Over in the archived tasks (`A`), delete it, confirming.

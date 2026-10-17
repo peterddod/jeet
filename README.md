@@ -603,7 +603,6 @@ read from its files on a thread of its own, like the statuses.
 | `a` | archive the task (asks first if its agent is running) — or, in the archived list (`A`), bring it back. A task with tasks under it takes them along, after one confirm |
 | `A` | list the archived tasks instead of the active ones, and back |
 | `D` | delete the task, after listing any work that would be lost; a task with tasks under it takes them along, after one listing for them all |
-| `P` | projects: `n` new, `e` edit `project.toml`, `D` delete, `⏎` start a task from one |
 | `S` | copy the task's project files in again |
 | `p` | the task's pull requests: state, size and title (a link); `⏎` or `o` opens one in the browser, `v` in the review viewer |
 | `v` | the task's pull request in the review viewer: the task's one open PR, else the `p` list to pick one |
@@ -617,7 +616,7 @@ read from its files on a thread of its own, like the statuses.
 | `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
 
 Launching the list also starts a background fetch of the store, when one is
-due. `jeet projects` on a terminal opens it with the projects panel up.
+due. `jeet projects` on a terminal opens it on the projects tab.
 
 ### The agents tab
 
@@ -688,8 +687,8 @@ active tab's: `⇥` back to it.
 
 The fourth tab groups the active tasks and managers by project: the jeet
 project a task was started from (`jeet task new --project`, `n` in the form).
-These are the projects `P` manages; `P` makes and edits them, and this tab shows
-the work in them. A manager is listed under every project that a task below it,
+These are the projects this tab manages (see below); it also shows the work in
+them. A manager is listed under every project that a task below it,
 through any tasks in between, was started from, and under its own project if it
 has one. Tasks and managers with no project are not listed here (the active
 tab has them).
@@ -716,6 +715,11 @@ and, from the top of the project, out of it. The line over the list says where
 you are (`projects › api › …`). `e`, `w`, `p`, `v`, `a`, `D`, `n` and `S` act on
 the task under the cursor as in the active tab. `/` filters the projects by
 name, or, inside one, its tasks by name.
+
+On a project's row, `n` starts a task already in that project, `N` makes a new
+project, `E` edits its `project.toml` and `D` deletes it, after a confirm. A new
+project with no tasks yet is listed under `A`. Inside a project, `n` starts a
+task in it and `D` deletes the task.
 
 `A` switches the tab to the other projects, every one with no active task or
 manager: those with only archived tasks and those with no tasks at all; inside
