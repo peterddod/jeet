@@ -969,7 +969,8 @@ fn report_step(
         | StatusEvent::Queued
         | StatusEvent::Moved
         | StatusEvent::Wake
-        | StatusEvent::Rejected => now,
+        | StatusEvent::Rejected
+        | StatusEvent::StartFailed => now,
     };
     match (&ctx.task, &ctx.review) {
         (Some(task), _) => reports::auto_status(&ctx.app, task, event, body, since, 0)?,

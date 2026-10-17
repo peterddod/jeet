@@ -48,6 +48,9 @@ pub enum StatusEvent {
     Wake,
     /// Lines of its inbox could not be read and were moved aside.
     Rejected,
+    /// Its agent did not start: jeet could not get it past its trust
+    /// prompt, or it ended there.
+    StartFailed,
 }
 
 impl StatusEvent {
@@ -62,6 +65,7 @@ impl StatusEvent {
             StatusEvent::Moved => "moved",
             StatusEvent::Wake => "wake",
             StatusEvent::Rejected => "rejected",
+            StatusEvent::StartFailed => "start failed",
         }
     }
 }

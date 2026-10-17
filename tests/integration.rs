@@ -3592,8 +3592,9 @@ fn a_trust_prompt_is_accepted_only_with_auto_trust() {
 }
 
 /// A trust prompt slow to redraw after Down is looked at again until
-/// "Yes" shows selected; one that never redraws gets no Enter, and the log
-/// says why with what the pane showed.
+/// "Yes" shows selected; one that never redraws gets no Enter, the log
+/// says why with what the pane showed, and the parent hears the start
+/// failed.
 #[cfg(unix)]
 #[test]
 fn a_slow_trust_redraw_is_waited_for_but_never_guessed() {
@@ -3603,7 +3604,13 @@ fn a_slow_trust_redraw_is_waited_for_but_never_guessed() {
         "scan_roots = []\n[harness]\nname = \"claude-code\"\nauto_trust = true\n",
     )
     .unwrap();
-    let task = lab.new_task("Fix login");
+    let output = lab.jeet_at(
+        &["task", "new", "Fix login", "--parent", "assistant"],
+        &lab.home(),
+        &[],
+    );
+    succeeded(&output);
+    let task = path_from(&output);
     let id = task_id(&task);
     let jeet = env!("CARGO_BIN_EXE_jeet");
     let run = |redraw: Option<u32>| {
@@ -3646,13 +3653,30 @@ fn a_slow_trust_redraw_is_waited_for_but_never_guessed() {
     assert_eq!(status["event"], "SessionStart");
     assert!(log.contains("Accepted"), "{log}");
 
-    // It never redraws: no second Down, no Enter, and the user is asked.
+    assert!(lab.reports_of(&id).is_empty());
+
+    // It never redraws: a few Downs, each after a full redraw's looks, a
+    // second try, no Enter; the user is asked and the parent told.
     let (keys, status, log) = run(None);
-    assert_eq!(keys, ["Down"], "{log}");
+    assert!(
+        keys.len() > 1 && keys.iter().all(|k| k == "Down"),
+        "{keys:?} {log}"
+    );
     assert_eq!(status["detail"], "trust folder");
     assert!(log.contains("CouldNotAccept"), "{log}");
+    assert!(log.contains("trying once more"), "{log}");
     assert!(log.contains("still not on accepting"), "{log}");
     assert!(log.contains("❯ No, exit"), "{log}");
+    assert_eq!(
+        lab.reports_of(&id),
+        [(
+            "status".to_string(),
+            lab.assistant_id(),
+            "start failed: the trust prompt was not accepted; \
+             it waits for the user to trust the folder"
+                .to_string()
+        )]
+    );
 }
 
 /// `kill-session` returns at once, while the agent may still be finishing a
