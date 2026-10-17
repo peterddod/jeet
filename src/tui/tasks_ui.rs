@@ -32,7 +32,7 @@ use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
 pub const HELP: &[(&str, &str)] = &[
-    ("→", "go into a manager: the managers and tasks under it"),
+    ("→", "go into a manager or a task with tasks under it"),
     (
         "⏎",
         "on a manager or task, open its agent in tmux (Ctrl-Q comes back here, leaving it running)",
@@ -353,6 +353,8 @@ fn row_hints(ui: &TasksUi) -> Vec<&'static str> {
             }
             if line.is_some_and(|line| line.manager) {
                 hints.push("→← open/close");
+            } else if line.is_some() && !root {
+                hints.push("← parent");
             }
             if ui.user && line.is_some() {
                 hints.extend(["l worklog", "I reports", "b brief", "y answer"]);
@@ -411,7 +413,10 @@ fn row_hints(ui: &TasksUi) -> Vec<&'static str> {
             hints.push(a_toggle);
             hints.push("n new");
             if row.is_some() {
-                hints.extend(["D delete", "p PRs", "v diff", "S resync"]);
+                hints.extend(["D delete", "p PRs", "v diff"]);
+                if row.is_some_and(|row| row.task.project.is_some()) {
+                    hints.push("S resync");
+                }
             }
         }
     }
@@ -421,19 +426,25 @@ fn row_hints(ui: &TasksUi) -> Vec<&'static str> {
 /// As many of the hints for the row under the cursor as fit, always ending
 /// with help and quit.
 fn hints(width: u16, ui: &TasksUi) -> String {
-    let head = row_hints(ui);
-    let head: Vec<&str> = head
-        .into_iter()
-        .chain(["c assistant", "t todo", "i inbox", "/ filter", "⇥ switch"])
-        .collect();
-    let tail = ["? help", "q quit"];
+    // Typed letters go to the filter: help and quit are not keys then.
+    let (head, tail): (Vec<&str>, &[&str]) = match ui.filtering {
+        true => (vec!["⏎ keep", "esc drop", "↑↓ move"], &[]),
+        false => {
+            let head = row_hints(ui);
+            let head = head
+                .into_iter()
+                .chain(["c assistant", "t todo", "i inbox", "/ filter", "⇥ switch"])
+                .collect();
+            (head, &["? help", "q quit"])
+        }
+    };
     let width = width as usize;
     (0..=head.len())
         .rev()
         .map(|keep| {
             head[..keep]
                 .iter()
-                .chain(&tail)
+                .chain(tail)
                 .copied()
                 .collect::<Vec<_>>()
                 .join("  ")
@@ -4208,6 +4219,26 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_shows_the_filters_keys_while_typing() {
+        let mut ui = TasksUi::new(vec![row("fix login", None)]);
+        press(&mut ui, KeyCode::Char('/'));
+        assert_eq!(bar(&ui), "⏎ keep  esc drop  ↑↓ move");
+        assert_eq!(hints(14, &ui), "⏎ keep");
+        press(&mut ui, KeyCode::Enter);
+        assert!(bar(&ui).ends_with("? help  q quit"), "{}", bar(&ui));
+    }
+
+    #[test]
+    fn resync_is_hinted_only_on_a_task_in_a_project() {
+        let mut fix = row("fix login", None);
+        let mut ui = TasksUi::new(vec![fix.clone()]);
+        assert!(!bar(&ui).contains("S resync"), "{}", bar(&ui));
+        fix.task.project = Some("api".into());
+        ui.set_rows(vec![fix]);
+        assert!(bar(&ui).contains("S resync"), "{}", bar(&ui));
+    }
+
+    #[test]
     fn an_empty_list_hints_no_row_keys() {
         let ui = TasksUi::default();
         let line = bar(&ui);
@@ -4249,6 +4280,7 @@ mod tests {
         // A worker does neither, and cannot have children.
         ui.selected = 2;
         let worker = bar(&ui);
+        assert!(worker.contains("← parent"), "{worker}");
         assert!(
             worker.contains("⏎ attach") && worker.contains("l worklog"),
             "{worker}"
