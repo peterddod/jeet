@@ -1,8 +1,11 @@
-//! `jeet setup`: what the setup agent stages in `$JEET_HOME/setup/proposed/`
-//! and what applies it. The agent only writes proposals; the user applies
-//! each one at their own terminal ([`apply`]).
+//! `jeet setup`: the setup agent ([`agent`]), what it stages in
+//! `$JEET_HOME/setup/proposed/`, and what applies it. The agent only writes
+//! proposals; the user applies each one at their own terminal ([`apply`]).
 
+pub mod agent;
 pub mod apply;
+
+pub use agent::{ensure_files, SLUG};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

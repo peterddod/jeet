@@ -1405,10 +1405,31 @@ assistant the `watch.install` capability; polling takes none.
 ## Setup
 
 ```bash
+jeet setup                         # start or resume the setup chat (tmux, attached)
+jeet setup --new                   # start a fresh setup session
 jeet setup status                  # what is staged, each target's hash, the last applied run
 jeet setup apply                   # one diff and one y/N/q per staged file
 jeet setup discard                 # drop everything staged
 ```
+
+`jeet setup` opens a chat with the setup agent in the tmux session
+`jeet-setup`, resuming its last session. It goes through jeet one topic at a
+time (repos, the harness, permissions, PR policy, the assistant, managers and
+reviews, watching GitHub, notifications, instructions), shows what is set,
+asks what you want and stages the changes. It applies nothing itself:
+`jeet setup apply` runs in a pane beside it, where you take or refuse each
+change. Its home is `~/.jeet/setup/`: an `AGENTS.md` and a `setup` skill
+(written only when missing, so your edits survive), `answers.md`, its notes on
+what you chose, which a later run starts from, and `builtin/`, the templates
+this jeet ships (the assistant's `AGENTS.md` and skills and those of new
+homes), rewritten at each launch for the agent to show you what changed
+upstream. Its settings let it read anything under `~/.jeet` and `~/.claude`
+and write only in its home, run jeet's read-only commands and `jeet setup
+status` without asking, and deny it `jeet setup apply`, `git push`, `gh` and
+edits to `~/.claude`, git and shell files. It never edits
+`~/.claude/settings.json`; it prints advice for that instead. It is not a
+task: it is not listed, opened, archived or deleted like one, and no task
+can be called `setup`.
 
 Changes to jeet's own files are staged in `~/.jeet/setup/proposed/`, each at
 its target id (`config.toml`, `assistant/AGENTS.md`,

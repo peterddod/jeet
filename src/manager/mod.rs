@@ -56,7 +56,7 @@ pub const WORKLOG_MD: &str = "notes/worklog.md";
 
 /// Each template for `role`, and where in the home it goes: AGENTS.md and
 /// each harness's import of it first.
-fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn templates(role: Role) -> Vec<(&'static str, &'static str)> {
     let (agents_md, rest) = match role {
         Role::Root => (
             AGENTS_MD,
@@ -314,6 +314,7 @@ pub fn label_at(task: &TaskRecord, path: &str) -> String {
         TaskKind::Assistant => "the assistant".to_string(),
         TaskKind::Manager => format!("manager {path}"),
         TaskKind::Work => format!("task {path}"),
+        TaskKind::Setup => "the setup agent".to_string(),
     }
 }
 

@@ -109,10 +109,15 @@ pub enum Commands {
         pick: bool,
     },
 
-    /// Setup: apply, list or drop the changes the setup agent staged
+    /// Set jeet up in a chat with the setup agent, which stages changes
+    /// for you to apply (with a subcommand: apply, list or drop them)
+    #[command(args_conflicts_with_subcommands = true)]
     Setup {
+        /// Start a fresh setup session instead of resuming the last one
+        #[arg(long)]
+        new: bool,
         #[command(subcommand)]
-        command: SetupCommands,
+        command: Option<SetupCommands>,
     },
 
     /// The assistant's todo list, `todo.md` in its home (with no

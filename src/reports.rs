@@ -206,7 +206,7 @@ fn checked(app: &App, src: &Source, body: &str) -> Result<(TaskRecord, String)> 
     };
     match parent.kind {
         TaskKind::Assistant | TaskKind::Manager => {}
-        TaskKind::Work => {
+        TaskKind::Work | TaskKind::Setup => {
             bail!("only the assistant and managers take reports")
         }
     }
@@ -299,7 +299,7 @@ fn deliver_to_with<'a>(
         TaskKind::Assistant => assistant::deliver(app, text, may_start, meta).map(|(d, _)| d),
         // Typed into its idle pane, queued while it is busy, and started
         // only with `may_start`; otherwise held in its inbox.
-        TaskKind::Manager | TaskKind::Work => messages::deliver(
+        TaskKind::Manager | TaskKind::Work | TaskKind::Setup => messages::deliver(
             &tasks::task_dir(app, to),
             agent(may_start).as_ref(),
             text,
@@ -357,7 +357,7 @@ fn escalate_with(
     refuse_unless_held(app, &row, &holder)?;
     let to = match holder.kind {
         TaskKind::Assistant => None,
-        TaskKind::Manager | TaskKind::Work => {
+        TaskKind::Manager | TaskKind::Work | TaskKind::Setup => {
             let parent = holder
                 .parent_id
                 .as_deref()
@@ -654,7 +654,9 @@ pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
         Caller::Root => app.db.open_asks(Some(&manager::root(app)?.id)),
         Caller::Node(task) => match task.kind {
             TaskKind::Assistant | TaskKind::Manager => app.db.open_asks(Some(&task.id)),
-            TaskKind::Work => Ok(manager::open_ask(app, task)?.into_iter().collect()),
+            TaskKind::Work | TaskKind::Setup => {
+                Ok(manager::open_ask(app, task)?.into_iter().collect())
+            }
         },
         Caller::Review(review) => Ok(app
             .db
@@ -1125,7 +1127,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     let to = manager::label(&parent);
     let own = match task.kind {
         TaskKind::Manager => "the tasks below you",
-        TaskKind::Work | TaskKind::Assistant => "this task",
+        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => "this task",
     };
     lines.push(format!(
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \

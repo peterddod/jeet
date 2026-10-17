@@ -509,6 +509,44 @@ const MIGRATIONS: &[&str] = &[
     -- Blocks from before are not told of all at once on the first poll.
     UPDATE task_reports SET stuck_told = 1;
     ",
+    // v12: the `setup` kind, for the setup agent (`jeet setup`): only ever
+    // one, kept out of the task lists as the assistant is. `tasks` is
+    // rebuilt for the kind CHECK, v8's way, keeping v10's `pr` and v11's
+    // `started_by` and `quiet`.
+    "
+    CREATE TABLE tasks_v12 (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        project TEXT,
+        kind TEXT NOT NULL DEFAULT 'work'
+            CHECK (kind IN ('work', 'assistant', 'manager', 'setup')),
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+        created_at INTEGER NOT NULL,
+        last_activity INTEGER NOT NULL,
+        parent_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+        placement TEXT NOT NULL DEFAULT 'local' CHECK (placement IN ('local')),
+        run_state TEXT NOT NULL DEFAULT 'run'
+            CHECK (run_state IN ('run', 'paused', 'stopped')),
+        run_state_by TEXT,
+        max_children INTEGER CHECK (max_children IS NULL OR max_children > 0),
+        pr TEXT CHECK (pr IS NULL OR pr IN ('auto', 'draft', 'ask')),
+        started_by TEXT,
+        quiet INTEGER NOT NULL DEFAULT 0 CHECK (quiet IN (0, 1)),
+        CHECK ((run_state = 'run') = (run_state_by IS NULL))
+    );
+    INSERT INTO tasks_v12 (id, slug, name, project, kind, state, created_at, last_activity,
+                           parent_id, placement, run_state, run_state_by, max_children, pr,
+                           started_by, quiet)
+        SELECT id, slug, name, project, kind, state, created_at, last_activity,
+               parent_id, placement, run_state, run_state_by, max_children, pr,
+               started_by, quiet FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE tasks_v12 RENAME TO tasks;
+    CREATE UNIQUE INDEX tasks_one_assistant ON tasks(kind) WHERE kind = 'assistant';
+    CREATE UNIQUE INDEX tasks_one_setup ON tasks(kind) WHERE kind = 'setup';
+    CREATE INDEX tasks_parent ON tasks(parent_id);
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
