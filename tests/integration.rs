@@ -5373,8 +5373,12 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\r");
     // The task's name is not waited for: the terminal only redraws the
     // cells that changed, so its tail can arrive split from the rest. The
-    // checks after exit show where the checkout went.
-    screen.wait_for_text("checked out #7 in task");
+    // checks after exit show where the checkout went. Nor is its start: it
+    // overwrites the store's path, whose temporary directory has random
+    // letters (`/tmp/.tmpogJu7h`, columns 9 to 14), and a cell that happens
+    // to hold the same letter is not drawn again — `#7` was left out after
+    // `.tmpogJu7h`. From column 15 the path is the same every run.
+    screen.wait_for_text("in task");
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");

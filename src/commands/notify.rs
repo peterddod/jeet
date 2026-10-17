@@ -5,6 +5,8 @@ use anyhow::{bail, Result};
 
 use crate::cli::NotifyCommands;
 use crate::config::{self, NotifyLevel};
+use crate::context::App;
+use crate::link;
 use crate::notify::{self, sender, Event};
 use crate::permissions;
 
@@ -43,5 +45,27 @@ pub fn run_command(command: NotifyCommands) -> Result<()> {
         NotifyCommands::Serve => sender::serve(&home),
         NotifyCommands::Install => sender::install(&home),
         NotifyCommands::Uninstall => sender::uninstall(),
+        NotifyCommands::InstallLink => install_link(&App::open()?),
+        NotifyCommands::UninstallLink => uninstall_link(&App::open()?),
     }
+}
+
+/// `jeet notify install-link`: make the system open `jeet://` links with
+/// `jeet open`. A change to the user's system, so theirs alone to make.
+pub fn install_link(app: &App) -> Result<()> {
+    require_terminal(app)?;
+    link::handler::install(&app.home)
+}
+
+/// `jeet notify uninstall-link`.
+pub fn uninstall_link(app: &App) -> Result<()> {
+    require_terminal(app)?;
+    link::handler::uninstall()
+}
+
+fn require_terminal(app: &App) -> Result<()> {
+    if !permissions::at_terminal(app)? {
+        bail!("this changes your system: run it from your own terminal, not a jeet pane");
+    }
+    Ok(())
 }

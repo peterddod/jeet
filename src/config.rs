@@ -60,6 +60,7 @@ pub struct Config {
     /// Where notifications go and which are sent (`[notify]`).
     #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
     pub notify: NotifyConfig,
+
     /// The harness rules jeet writes for each agent it starts
     /// (`[permissions]`).
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
@@ -309,6 +310,13 @@ pub struct NotifyConfig {
     /// that matches decides; none matching, it is sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<NotifyRule>,
+
+    /// The terminal `jeet open` starts when no jeet screen is open: a name
+    /// jeet knows (`ghostty`, `terminal`, ...), a command that the jeet
+    /// command line is appended to, or `none` to never start one (default:
+    /// the platform's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 pub const DEFAULT_NOTIFY_VIA: &str = "desktop";
@@ -320,6 +328,7 @@ impl NotifyConfig {
             && self.command.is_none()
             && self.max_per_hour.is_none()
             && self.rules.is_empty()
+            && self.terminal.is_none()
     }
 
     pub fn via(&self) -> Vec<String> {
@@ -1286,6 +1295,16 @@ mod tests {
         assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
         let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
         assert_eq!(config.review.prompt(), "Review {pr}");
+    }
+
+    #[test]
+    fn reads_the_notify_section() {
+        let config: Config = toml::from_str("[notify]\nterminal = \"wezterm start --\"\n").unwrap();
+        assert_eq!(config.notify.terminal.as_deref(), Some("wezterm start --"));
+        assert_eq!(Config::default().notify.terminal, None);
+        // Unset, it is not written out.
+        let written = toml::to_string(&Config::default()).unwrap();
+        assert!(!written.contains("[notify]"), "{written}");
     }
 
     fn review_policy_of(text: &str) -> Result<ReviewPolicy> {
