@@ -574,6 +574,9 @@ impl Database {
             );
         }
         if current < latest {
+            if let Some(path) = conn.path().filter(|p| !p.is_empty()) {
+                refuse_dev_migration(Path::new(path), current, latest)?;
+            }
             migrate_from(&mut conn, current, latest)?;
         }
         // Off by default in SQLite, and the task tables lean on ON DELETE
@@ -648,6 +651,79 @@ impl Database {
         }
         Ok(None)
     }
+}
+
+/// Set to `1` to let a development build migrate the index at the default
+/// home anyway.
+const ALLOW_DEV_MIGRATE: &str = "JEET_ALLOW_DEV_MIGRATE";
+
+/// Refuse to migrate the index at the default home (`~/.jeet`) from a
+/// development build: one built from an unreleased main would take it to a
+/// schema the installed release cannot open, and every jeet command would
+/// fail until it was restored from the backup.
+fn refuse_dev_migration(index: &Path, current: i64, latest: i64) -> Result<()> {
+    let Some(exe) = dev_build() else {
+        return Ok(());
+    };
+    if std::env::var(ALLOW_DEV_MIGRATE).as_deref() == Ok("1") {
+        return Ok(());
+    }
+    let Some(default) = dirs::home_dir().map(|h| crate::config::index_path(&h.join(".jeet")))
+    else {
+        return Ok(());
+    };
+    if !same_file(index, &default) {
+        return Ok(());
+    }
+    bail!(
+        "this is a development build of jeet ({exe}); it will not migrate the index at {} \
+         from schema v{current} to v{latest}, which the installed jeet could not then open. \
+         Set JEET_HOME to a scratch directory (e.g. JEET_HOME=$(mktemp -d)), or \
+         {ALLOW_DEV_MIGRATE}=1 to migrate it anyway",
+        index.display()
+    )
+}
+
+/// What makes this binary a development build, if it is one: a debug build,
+/// or one run from inside a cargo target directory: `target/<profile>/`,
+/// `target/<triple>/<profile>/` or `target/<profile>/deps/`, where cargo
+/// marks `target` with a `CACHEDIR.TAG`. Only those two levels are looked
+/// at, so a release unpacked somewhere under an unrelated tagged cache is
+/// not mistaken for one. An installed release is neither.
+fn dev_build() -> Option<String> {
+    let exe = std::env::current_exe().ok();
+    if cfg!(debug_assertions) {
+        return Some(exe.map_or("debug build".into(), |e| e.display().to_string()));
+    }
+    let exe = exe?;
+    exe.parent()?
+        .ancestors()
+        .skip(1)
+        .take(2)
+        .any(|dir| dir.join("CACHEDIR.TAG").is_file())
+        .then(|| exe.display().to_string())
+}
+
+/// Whether two paths name the same file, through symlinks where they exist.
+/// The file itself may not exist yet, so its directory is resolved then.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| {
+        if let Ok(p) = p.canonicalize() {
+            return p;
+        }
+        p.parent()
+            .map(|d| {
+                if d.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    d
+                }
+            })
+            .and_then(|d| d.canonicalize().ok())
+            .zip(p.file_name())
+            .map_or(p.to_path_buf(), |(d, f)| d.join(f))
+    };
+    canon(a) == canon(b)
 }
 
 /// Take the index from `current` to `latest`, after a copy of it as it is:

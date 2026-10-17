@@ -595,10 +595,10 @@ read from its files on a thread of its own, like the statuses.
 
 | Key | |
 |---|---|
-| `→` | on a manager, go into it: the managers and tasks under it |
+| `→` | on a manager, or a task with tasks under it, go into it: the managers and tasks under it |
 | `←` / `⌫` | back up a level; with a filter, drop it, the cursor on the match, on its level |
 | `ctrl-a` | attach to the agent of the manager or task under the cursor, as `⏎` |
-| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. On a task with tasks under it, `⏎` goes into it, as `→` |
+| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
@@ -2704,6 +2704,12 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+A development build (a debug build, or one run from a cargo `target/`
+directory) refuses to migrate the index at the default home, `~/.jeet`: it
+would leave it at a schema the installed release cannot open. Run it with
+`JEET_HOME=$(mktemp -d)`, or set `JEET_ALLOW_DEV_MIGRATE=1` to migrate the
+default index on purpose.
 
 [docs/harnesses.md](docs/harnesses.md) says how to add support for another
 coding agent.

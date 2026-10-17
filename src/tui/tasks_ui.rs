@@ -32,7 +32,7 @@ use crate::worktrees::WorktreeStatus;
 
 /// The key list, as `?` shows it.
 pub const HELP: &[(&str, &str)] = &[
-    ("→", "go into a manager: the managers and tasks under it"),
+    ("→", "go into a manager or a task with tasks under it"),
     (
         "⏎",
         "on a manager or task, open its agent in tmux (Ctrl-Q comes back here, leaving it running)",
@@ -336,116 +336,109 @@ pub fn help(view: View) -> &'static [(&'static str, &'static str)] {
 /// Width of the key column in the help panel.
 const KEY_WIDTH: usize = 10;
 
-const HINTS: &[&str] = &[
-    "⏎ open",
-    "←→ up/into",
-    "e explore",
-    "w worktrees",
-    "a archive",
-    "A archived",
-    "n new",
-    "c assistant",
-    "t todo",
-    "i inbox",
-    "D delete",
-    "p PRs",
-    "S resync",
-    "/ filter",
-    "⇥ switch",
-    "? help",
-    "q quit",
-];
+/// The keys that do something on the row under the cursor, in the order
+/// they are dropped from the end, with `/`, `⇥`, help and quit after them.
+fn row_hints(ui: &TasksUi) -> Vec<&'static str> {
+    let mut hints = Vec::new();
+    let empty = ui.shown_len() == 0;
+    let archived = ui.archived();
+    let a_toggle = if archived { "A back" } else { "A archived" };
+    let kind = ui.selected_row().map(|row| row.task.kind);
+    match ui.view {
+        View::Agents => {
+            let line = ui.tree.get(ui.selected);
+            let root = line.is_some_and(|line| line.at == At::Root);
+            if line.is_some() {
+                hints.push(if root { "⏎ sessions" } else { "⏎ attach" });
+            }
+            if line.is_some_and(|line| line.manager) {
+                hints.push("→← open/close");
+            } else if line.is_some() && !root {
+                hints.push("← parent");
+            }
+            if ui.user && line.is_some() {
+                hints.extend(["l worklog", "I reports", "b brief", "y answer"]);
+                // The assistant is refused a pause; `x` on it stops all.
+                if !root {
+                    hints.push("z/Z pause/resume");
+                }
+                hints.push("x stop");
+                if matches!(kind, Some(TaskKind::Assistant | TaskKind::Manager)) {
+                    hints.push("n new under");
+                }
+            }
+        }
+        View::Reviews => {
+            if !empty {
+                hints.extend(["⏎ session", "v diff", "e explore"]);
+                if !archived {
+                    hints.push("R rerun");
+                }
+                hints.push(if archived { "a unarchive" } else { "a archive" });
+            }
+            hints.extend([a_toggle, "r refresh"]);
+            if !empty {
+                hints.push("D delete");
+            }
+        }
+        View::Projects if ui.project.is_none() => {
+            if !empty {
+                hints.extend(["⏎ into", "n new task", "E edit", "D delete"]);
+            }
+            hints.extend(["N new project", a_toggle]);
+        }
+        View::Active | View::Projects => {
+            let row = ui.selected_row();
+            let in_project = ui.view == View::Projects;
+            let unarchive = row.is_some_and(|row| row.task.state == TaskState::Archived);
+            if let Some(row) = row {
+                if !unarchive {
+                    hints.push("⏎ open");
+                }
+                if ui.in_tree() && ui.enterable(row) {
+                    hints.push("→ into");
+                }
+            }
+            if (ui.in_tree() && !ui.path().is_empty()) || in_project {
+                hints.push("← up");
+            }
+            if row.is_some() {
+                hints.extend(["e explore", "w worktrees"]);
+                hints.push(if unarchive {
+                    "a unarchive"
+                } else {
+                    "a archive"
+                });
+            }
+            hints.push(a_toggle);
+            hints.push("n new");
+            if row.is_some() {
+                hints.extend(["D delete", "p PRs", "v diff"]);
+                if row.is_some_and(|row| row.task.project.is_some()) {
+                    hints.push("S resync");
+                }
+            }
+        }
+    }
+    hints
+}
 
-const HINTS_AGENTS: &[&str] = &[
-    "⏎ attach",
-    "→←⌫ open/close",
-    "l worklog",
-    "I reports",
-    "b brief",
-    "y answer",
-    "z/Z pause/resume",
-    "x stop",
-    "n new under",
-    "c assistant",
-    "t todo",
-    "i inbox",
-    "/ filter",
-    "⇥ switch",
-    "? help",
-    "q quit",
-];
-
-const HINTS_REVIEWS: &[&str] = &[
-    "⏎ session",
-    "v diff",
-    "e explore",
-    "R rerun",
-    "a archive",
-    "A archived",
-    "r refresh",
-    "/ filter",
-    "⇥ switch",
-    "? help",
-    "q quit",
-];
-
-/// On a project's row: the project's keys.
-const HINTS_PROJECT_ROWS: &[&str] = &[
-    "⏎ into",
-    "n new task",
-    "N new project",
-    "E edit",
-    "D delete",
-    "A archived",
-    "/ filter",
-    "⇥ switch",
-    "? help",
-    "q quit",
-];
-
-/// Inside a project: the tasks list's keys.
-const HINTS_PROJECTS: &[&str] = &[
-    "⏎ open",
-    "←→ up/into",
-    "e explore",
-    "w worktrees",
-    "p PRs",
-    "a archive",
-    "A archived",
-    "n new",
-    "D delete",
-    "/ filter",
-    "⇥ switch",
-    "? help",
-    "q quit",
-];
-
-/// As many of `view`'s hints as fit, always ending with help and quit.
-/// `archived`: the list shows the archived ones, so `a` brings back and
-/// `A` goes back. `project_rows`: the projects view is on its projects.
-fn hints(width: u16, view: View, archived: bool, project_rows: bool) -> String {
-    let hints = match view {
-        View::Agents => HINTS_AGENTS,
-        View::Reviews => HINTS_REVIEWS,
-        View::Projects if project_rows => HINTS_PROJECT_ROWS,
-        View::Projects => HINTS_PROJECTS,
-        View::Active => HINTS,
+/// As many of the hints for the row under the cursor as fit, always ending
+/// with help and quit.
+fn hints(width: u16, ui: &TasksUi) -> String {
+    // Typed letters go to the filter: help and quit are not keys then.
+    let (head, tail): (Vec<&str>, &[&str]) = match ui.filtering {
+        true => (vec!["⏎ keep", "esc drop", "↑↓ move"], &[]),
+        false => {
+            let head = row_hints(ui);
+            let head = head
+                .into_iter()
+                .chain(["c assistant", "t todo", "i inbox", "/ filter", "⇥ switch"])
+                .collect();
+            (head, &["? help", "q quit"])
+        }
     };
     let width = width as usize;
-    let tail = &hints[hints.len() - 2..];
-    // Only the active and projects views are trees.
-    let head: Vec<&str> = hints[..hints.len() - 2]
-        .iter()
-        .copied()
-        .filter(|&hint| {
-            (view == View::Active && !archived) || view == View::Projects || hint != "←→ up/into"
-        })
-        .map(|hint| match (archived, hint) {
-            (true, "a archive") => "a unarchive",
-            (true, "A archived") => "A back",
-            _ => hint,
-        })
-        .collect();
     (0..=head.len())
         .rev()
         .map(|keep| {
@@ -524,12 +517,7 @@ pub fn draw(frame: &mut Frame, ui: &mut TasksUi) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints(
-                chunks[5].width,
-                ui.view,
-                ui.archived(),
-                ui.project.is_none(),
-            ),
+            hints(chunks[5].width, ui),
             Style::default().fg(Color::DarkGray),
         ))),
         chunks[5],
@@ -4139,56 +4127,242 @@ mod tests {
         assert!(help(View::Active).iter().any(|(k, _)| *k == "e"));
     }
 
+    fn press(ui: &mut TasksUi, code: KeyCode) {
+        ui.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn bar(ui: &TasksUi) -> String {
+        hints(300, ui)
+    }
+
     #[test]
     fn hints_always_keep_help_and_quit() {
-        for width in [10u16, 20, 40, 80, 200] {
-            let line = hints(width, View::Active, false, false);
-            assert!(line.width() <= width as usize, "{width}: {line}");
+        let uis = [
+            TasksUi::new(vec![row("fix login", None)]),
+            TasksUi::default(),
+            agents_ui(),
+            reviews_ui(),
+        ];
+        for ui in &uis {
+            for width in [10u16, 20, 40, 80, 200] {
+                let line = hints(width, ui);
+                assert!(line.width() <= width as usize, "{width}: {line}");
+            }
+            assert!(hints(20, ui).contains("q quit"));
+            assert!(bar(ui).ends_with("? help  q quit"), "{}", bar(ui));
+            assert!(!bar(ui).contains("ctrl"), "{}", bar(ui));
         }
-        assert!(hints(20, View::Active, false, false).contains("q quit"));
-        assert!(hints(200, View::Active, false, false).contains("⏎ open"));
-        assert!(hints(200, View::Agents, false, false).contains("l worklog"));
-        assert!(hints(200, View::Reviews, false, false).contains("⏎ session"));
-        let rows = hints(200, View::Projects, false, true);
-        assert!(
-            rows.contains("N new project") && !rows.contains("explore"),
-            "{rows}"
-        );
-        assert!(hints(200, View::Projects, false, false).contains("e explore"));
         assert!(help(View::Reviews).iter().any(|(k, _)| *k == "v"));
-        assert!(!hints(200, View::Agents, false, false).contains("archive"));
+    }
+
+    #[test]
+    fn the_task_hints_follow_the_row() {
+        let mut manager = row("backend", None);
+        manager.task.kind = TaskKind::Manager;
+        let mut ui = TasksUi::new(vec![row("fix login", None), manager]);
+        let bar_on = |ui: &mut TasksUi, name: &str| {
+            ui.selected = ui
+                .visible
+                .iter()
+                .position(|&i| ui.rows[i].task.id == name)
+                .unwrap();
+            bar(ui)
+        };
+        // A task with nothing under it has nowhere to go, at the top.
+        let task = bar_on(&mut ui, "fix login");
+        assert!(
+            task.contains("⏎ open") && task.contains("e explore"),
+            "{task}"
+        );
+        assert!(!task.contains("→ into") && !task.contains("← up"), "{task}");
+        let manager = bar_on(&mut ui, "backend");
+        assert!(manager.contains("→ into"), "{manager}");
+        assert!(!manager.contains("← up"), "{manager}");
+        // Inside the manager there is a way back.
+        press(&mut ui, KeyCode::Right);
+        let inside = bar(&ui);
+        assert!(
+            inside.contains("← up") && !inside.contains("→ into"),
+            "{inside}"
+        );
+        assert!(!inside.contains("⏎ open"), "empty: {inside}");
     }
 
     #[test]
     fn the_hints_follow_the_archived_toggle() {
-        let on = hints(200, View::Active, false, false);
+        let mut old = row("old spike", None);
+        old.task.state = TaskState::Archived;
+        let mut ui = TasksUi::new(vec![row("fix login", None), old]);
+        let on = bar(&ui);
         assert!(
             on.contains("a archive") && on.contains("A archived"),
             "{on}"
         );
-        assert!(on.contains("←→ up/into"), "{on}");
-        let off = hints(200, View::Active, true, false);
+        ui.archived_tasks = true;
+        ui.set_rows(ui.rows.clone());
+        let off = bar(&ui);
         assert!(
             off.contains("a unarchive") && off.contains("A back"),
             "{off}"
         );
         assert!(
-            !off.contains("A archived") && !off.contains("up/into"),
+            !off.contains("A archived") && !off.contains("→") && !off.contains("⏎ open"),
             "{off}"
         );
-        let off = hints(200, View::Reviews, true, false);
-        assert!(
-            off.contains("a unarchive") && off.contains("A back"),
-            "{off}"
-        );
-        assert!(!off.contains("A archived"), "{off}");
         // A survives a normal width in both lists, either way.
-        for view in [View::Active, View::Reviews] {
-            for archived in [false, true] {
-                let line = hints(100, view, archived, false);
-                assert!(line.contains("A arch") || line.contains("A back"), "{line}");
-            }
+        for archived in [false, true] {
+            ui.archived_tasks = archived;
+            ui.set_rows(ui.rows.clone());
+            let line = hints(100, &ui);
+            assert!(line.contains("A arch") || line.contains("A back"), "{line}");
         }
+    }
+
+    #[test]
+    fn the_bar_shows_the_filters_keys_while_typing() {
+        let mut ui = TasksUi::new(vec![row("fix login", None)]);
+        press(&mut ui, KeyCode::Char('/'));
+        assert_eq!(bar(&ui), "⏎ keep  esc drop  ↑↓ move");
+        assert_eq!(hints(14, &ui), "⏎ keep");
+        press(&mut ui, KeyCode::Enter);
+        assert!(bar(&ui).ends_with("? help  q quit"), "{}", bar(&ui));
+    }
+
+    #[test]
+    fn resync_is_hinted_only_on_a_task_in_a_project() {
+        let mut fix = row("fix login", None);
+        let mut ui = TasksUi::new(vec![fix.clone()]);
+        assert!(!bar(&ui).contains("S resync"), "{}", bar(&ui));
+        fix.task.project = Some("api".into());
+        ui.set_rows(vec![fix]);
+        assert!(bar(&ui).contains("S resync"), "{}", bar(&ui));
+    }
+
+    #[test]
+    fn an_empty_list_hints_no_row_keys() {
+        let ui = TasksUi::default();
+        let line = bar(&ui);
+        assert!(
+            line.contains("n new") && line.contains("/ filter"),
+            "{line}"
+        );
+        for key in ["⏎", "e explore", "a archive", "D delete", "→", "S resync"] {
+            assert!(!line.contains(key), "{key}: {line}");
+        }
+        let reviews = TasksUi {
+            view: View::Reviews,
+            ..TasksUi::default()
+        };
+        let line = bar(&reviews);
+        assert!(!line.contains("⏎") && !line.contains("R rerun"), "{line}");
+    }
+
+    #[test]
+    fn the_agents_hints_follow_the_node() {
+        let mut ui = agents_ui();
+        ui.user = true;
+        // The assistant's root: no pause, but stop all and a new child.
+        ui.selected = 0;
+        let root = bar(&ui);
+        assert!(
+            root.contains("⏎ sessions") && root.contains("x stop"),
+            "{root}"
+        );
+        assert!(root.contains("n new under"), "{root}");
+        assert!(!root.contains("pause"), "{root}");
+        // A manager opens and closes.
+        ui.selected = 1;
+        let manager = bar(&ui);
+        assert!(
+            manager.contains("→← open/close") && manager.contains("z/Z"),
+            "{manager}"
+        );
+        // A worker does neither, and cannot have children.
+        ui.selected = 2;
+        let worker = bar(&ui);
+        assert!(worker.contains("← parent"), "{worker}");
+        assert!(
+            worker.contains("⏎ attach") && worker.contains("l worklog"),
+            "{worker}"
+        );
+        assert!(
+            !worker.contains("open/close") && !worker.contains("n new"),
+            "{worker}"
+        );
+        assert!(!worker.contains("archive"), "{worker}");
+        // Out of an agent's pane, the user's keys go.
+        ui.user = false;
+        let agent = bar(&ui);
+        for key in [
+            "l worklog",
+            "I reports",
+            "b brief",
+            "y answer",
+            "z/Z",
+            "x stop",
+            "n new",
+        ] {
+            assert!(!agent.contains(key), "{key}: {agent}");
+        }
+        assert!(agent.contains("⏎ attach"), "{agent}");
+    }
+
+    #[test]
+    fn the_reviews_hints_follow_the_list() {
+        let mut ui = reviews_ui();
+        let active = bar(&ui);
+        assert!(
+            active.contains("⏎ session") && active.contains("R rerun"),
+            "{active}"
+        );
+        assert!(
+            active.contains("a archive") && active.contains("A archived"),
+            "{active}"
+        );
+        assert!(
+            !active.contains("⏎ menu") && !active.contains("S resync"),
+            "{active}"
+        );
+        ui.archived_reviews = true;
+        ui.set_reviews(ui.review_rows.clone());
+        let archived = bar(&ui);
+        assert!(
+            archived.contains("a unarchive") && archived.contains("A back"),
+            "{archived}"
+        );
+        assert!(!archived.contains("R rerun"), "{archived}");
+    }
+
+    #[test]
+    fn the_projects_hints_follow_the_row() {
+        let mut fix = row("fix login", None);
+        fix.task.project = Some("api".into());
+        let mut ui = TasksUi::new(vec![fix]);
+        ui.set_known_projects(vec!["api".into()]);
+        ui.view = View::Projects;
+        ui.set_rows(ui.rows.clone());
+        let on = bar(&ui);
+        for key in [
+            "⏎ into",
+            "n new task",
+            "N new project",
+            "E edit",
+            "D delete",
+            "A archived",
+        ] {
+            assert!(on.contains(key), "{key}: {on}");
+        }
+        for key in ["e explore", "w worktrees", "a archive", "S resync"] {
+            assert!(!on.contains(key), "{key}: {on}");
+        }
+        // Inside it, the task keys apply and there is a way out.
+        press(&mut ui, KeyCode::Right);
+        let inside = bar(&ui);
+        assert!(
+            inside.contains("e explore") && inside.contains("← up"),
+            "{inside}"
+        );
+        assert!(!inside.contains("N new project"), "{inside}");
     }
 
     #[test]

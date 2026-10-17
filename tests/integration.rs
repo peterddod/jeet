@@ -13,6 +13,10 @@ fn jeet_bin() -> Command {
     // A background store sync would outlive the test and race its temp dirs;
     // the tests that want one turn it back on.
     cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
+    // Nor may one reach the developer's real ~/.jeet: a test that needs a
+    // home sets its own, which wins over this. Under /dev/null, so not even
+    // root can create it.
+    cmd.env("JEET_HOME", "/dev/null/jeet-test-home");
     // Running the suite from inside a task's agent session must not point
     // `jeet worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
@@ -313,6 +317,51 @@ fn hermetic_git(cmd: &mut Command) -> &mut Command {
         .env("GIT_AUTHOR_EMAIL", "test@test.com")
         .env("GIT_COMMITTER_NAME", "test")
         .env("GIT_COMMITTER_EMAIL", "test@test.com")
+}
+
+/// The test binary is a development build: it will not migrate the index at
+/// the default home, here a fake `$HOME/.jeet`, unless told to on purpose.
+#[test]
+fn a_dev_build_does_not_migrate_the_default_index() {
+    let home = TempDir::new().unwrap();
+    let ls = |allow: bool| {
+        let mut cmd = jeet_bin();
+        cmd.arg("ls")
+            .env("HOME", home.path())
+            .env_remove("JEET_HOME")
+            .env_remove("JEET_ALLOW_DEV_MIGRATE");
+        if allow {
+            cmd.env("JEET_ALLOW_DEV_MIGRATE", "1");
+        }
+        cmd.output().unwrap()
+    };
+    let output = ls(false);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    assert!(stderr.contains("JEET_HOME"), "{stderr}");
+    // Nor when JEET_HOME names it outright.
+    let explicit = format!("{}/.jeet/", home.path().display());
+    let output = jeet_bin()
+        .arg("ls")
+        .env("HOME", home.path())
+        .env("JEET_HOME", &explicit)
+        .env_remove("JEET_ALLOW_DEV_MIGRATE")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", stdout_of(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("development build"), "{stderr}");
+    // A scratch home is migrated as ever.
+    let scratch = TempDir::new().unwrap();
+    succeeded(
+        &jeet_bin()
+            .arg("ls")
+            .env("JEET_HOME", scratch.path())
+            .output()
+            .unwrap(),
+    );
+    succeeded(&ls(true));
 }
 
 #[test]
@@ -5371,14 +5420,22 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\x0f");
     screen.wait_for_text("Widen the store");
     screen.type_keys(b"\r");
-    // The task's name is not waited for: the terminal only redraws the
-    // cells that changed, so its tail can arrive split from the rest. The
-    // checks after exit show where the checkout went. Nor is its start: it
-    // overwrites the store's path, whose temporary directory has random
-    // letters (`/tmp/.tmpogJu7h`, columns 9 to 14), and a cell that happens
-    // to hold the same letter is not drawn again — `#7` was left out after
-    // `.tmpogJu7h`. From column 15 the path is the same every run.
-    screen.wait_for_text("in task");
+    // The status line is not waited for: the terminal only redraws the
+    // cells that changed, and it overwrites the store's path, whose
+    // temporary directory has random letters (`/tmp/.tmpogJu7h`, and more
+    // of them under macOS's `/var/folders`); a cell that happens to hold the
+    // same letter is not drawn again, so any part of the line can go
+    // missing. Recording the PR on the task is the checkout's last step,
+    // and keys typed before it ends are thrown away. The checks after exit
+    // show where it went.
+    wait_until("the PR on the task", || {
+        lab.index()
+            .query_row("SELECT COUNT(*) FROM task_prs WHERE number = 7", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+            > 0
+    });
     screen.esc();
     let status = screen.wait_for_exit();
     assert!(status.success(), "jeet explore exited with {status}");

@@ -2230,24 +2230,21 @@ impl TasksUi {
                 None
             }
             // The active view is a tree, walked like the explorer's folders:
-            // → goes into a manager, ⏎ opens its agent, as ctrl-a does.
-            KeyCode::Enter | KeyCode::Right if self.in_tree() => match self.selected_row() {
-                Some(row)
-                    if self.enterable(row)
-                        && (key.code == KeyCode::Right || row.task.kind != TaskKind::Manager) =>
-                {
+            // → goes into a task with tasks under it; ⏎ opens its agent.
+            KeyCode::Right if self.in_tree() => match self.selected_row() {
+                Some(row) if self.enterable(row) => {
                     let id = row.task.id.clone();
                     self.descend(&id);
                     None
                 }
-                Some(_) if key.code == KeyCode::Right => {
+                Some(_) => {
                     self.set_status("a task has nothing under it · ⏎ opens its agent");
                     None
                 }
-                _ => needs_task(self, &|task_id| Action::Open {
-                    task_id,
-                    session: None,
-                }),
+                None => {
+                    self.set_status(NO_TASK);
+                    None
+                }
             },
             KeyCode::Left | KeyCode::Backspace if self.in_tree() || self.view == View::Projects => {
                 self.ascend();
@@ -6373,7 +6370,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_goes_into_a_plain_task_with_tasks_under_it() {
+    fn right_goes_into_a_plain_task_with_tasks_under_it_and_enter_opens_it() {
         let mut ui = nested();
         let mut rows = ui.rows.clone();
         rows.iter_mut()
@@ -6383,7 +6380,14 @@ mod tests {
             .parent_id = Some("docs".into());
         ui.set_rows(rows);
         ui.select("docs");
-        assert_eq!(press(&mut ui, KeyCode::Enter), None);
+        assert_eq!(
+            press(&mut ui, KeyCode::Enter),
+            Some(Action::Open {
+                task_id: "docs".into(),
+                session: None
+            })
+        );
+        assert_eq!(press(&mut ui, KeyCode::Right), None);
         assert_eq!(ui.breadcrumb(), ["assistant", "docs"]);
         assert_eq!(shown(&ui), ["loose"]);
     }
