@@ -490,10 +490,16 @@ pub fn sender_running(home: &Path) -> bool {
     };
     // Shared, so probes never hold each other off; a sender starting just
     // then retries ([`sender::serve`]).
-    matches!(
-        file.try_lock_shared(),
-        Err(std::fs::TryLockError::WouldBlock)
-    )
+    match file.try_lock_shared() {
+        // Unlocked, not only closed: a child forked meanwhile would hold
+        // this probe's lock until it execs, and a sender find it taken.
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }
 }
 
 /// A line saying notifications wait for a sender that is not running: only
@@ -777,6 +783,9 @@ mod tests {
         lock.lock().unwrap();
         // flock locks are per open file: another open of it sees it held.
         assert!(sender_running(home.path()));
+        // Unlocked, not only closed: another test's forked child holds a
+        // copy of the file, and the flock with it, until it execs.
+        lock.unlock().unwrap();
         drop(lock);
         assert!(!sender_running(home.path()));
     }
