@@ -9208,6 +9208,120 @@ fn what_the_assistant_makes_reports_to_it_and_the_user_chooses() {
     }
 }
 
+/// Who started a task, and whether it is quiet: (started_by, quiet).
+#[cfg(unix)]
+fn notify_flags_of(lab: &StoreLab, task_id: &str) -> (Option<String>, bool) {
+    lab.index()
+        .query_row(
+            "SELECT started_by, quiet FROM tasks WHERE id = ?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A task is the user's when the user makes it at their own terminal, or
+/// the assistant makes it with `--for-user`; only those two quiet a task,
+/// which `task ls` and `manager show` say.
+#[cfg(unix)]
+#[test]
+fn the_user_and_the_assistant_start_and_quiet_tasks_for_the_user() {
+    let lab = StoreLab::new();
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"task.create\"]\nnotify = false\n",
+    )
+    .unwrap();
+    let mut root = lab.assistant_pane();
+    let assistant = lab.assistant_id();
+    let output = root.jeet(
+        &["task", "new", "x", "--for-user", "--quiet"],
+        &lab.home(),
+        &[],
+    );
+    succeeded(&output);
+    let x = task_id(&path_from(&output));
+    assert_eq!(notify_flags_of(&lab, &x), (Some("user".into()), true));
+    let output = root.jeet(&["task", "new", "y"], &lab.home(), &[]);
+    succeeded(&output);
+    let y = task_id(&path_from(&output));
+    assert_eq!(notify_flags_of(&lab, &y), (Some(assistant), false));
+    // The user's, at their own terminal, at any depth.
+    let z = lab.new_task_with("z", &["--parent", "assistant", "--goal", "g"]);
+    assert_eq!(notify_flags_of(&lab, &z), (Some("user".into()), false));
+
+    let ls = lab.jeet_at(&["task", "ls"], &lab.home(), &[]);
+    succeeded(&ls);
+    let listed = String::from_utf8_lossy(&ls.stdout).to_string();
+    let line = |slug: &str| {
+        listed
+            .lines()
+            .find(|l| l.starts_with(&format!("{slug} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("x").ends_with("(quiet)"), "{listed}");
+    assert!(!line("y").contains("(quiet)"), "{listed}");
+    let show = lab.jeet_at(&["manager", "show", "x"], &lab.home(), &[]);
+    succeeded(&show);
+    assert!(
+        String::from_utf8_lossy(&show.stdout).starts_with("task assistant/x (work, active, quiet)"),
+        "{}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+
+    succeeded(&root.jeet(&["task", "quiet", "y"], &lab.home(), &[]));
+    succeeded(&root.jeet(&["task", "quiet", "x", "--off"], &lab.home(), &[]));
+    assert!(notify_flags_of(&lab, &y).1);
+    assert!(!notify_flags_of(&lab, &x).1);
+    succeeded(&lab.jeet_at(&["task", "quiet", "x"], &lab.home(), &[]));
+    assert!(notify_flags_of(&lab, &x).1);
+
+    // A top-level task's agent is no user at their terminal: it may not
+    // speak for them.
+    lab.new_task("top");
+    let mut top = lab.task_pane("top");
+    let top_dir = lab.home().join("tasks/top");
+    let output = top.jeet(&["task", "quiet", "y", "--off"], &top_dir, &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("only the user, at their own terminal, or the assistant"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(notify_flags_of(&lab, &y).1);
+    let output = top.jeet(
+        &[
+            "task",
+            "new",
+            "k",
+            "--parent",
+            "assistant",
+            "--goal",
+            "g",
+            "--for-user",
+        ],
+        &top_dir,
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_of(&output).contains("--for-user and --quiet are for the user"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(!lab.home().join("tasks/k").exists());
+    // And a task below the assistant not at all.
+    let mut x_pane = lab.task_pane("x");
+    let output = x_pane.jeet(
+        &["task", "quiet", "x", "--off"],
+        &lab.home().join("tasks/x"),
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(notify_flags_of(&lab, &x).1);
+}
+
 #[cfg(unix)]
 #[test]
 fn the_assistant_stripping_its_environment_is_still_the_assistant() {

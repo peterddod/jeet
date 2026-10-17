@@ -53,7 +53,9 @@ what you wanted to do and why, and let them do it or allow it.
 
 ## Notifications
 
-jeet already notifies the user of each action it lets you take. Use
+jeet already notifies the user of each action it lets you take, and of
+the questions, blocks and dones of the tasks directly under you (and of
+those the user started), and of anything escalated or stuck. Use
 `jeet notify` for what they need to know and would not otherwise see: a
 decision that needs them, something finished, something stuck. One clear
 notification beats several; never notify just to say you are working.

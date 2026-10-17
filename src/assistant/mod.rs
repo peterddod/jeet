@@ -1366,6 +1366,7 @@ also look at #7
             branch: String::new(),
             sha: "abc".into(),
             state: state.into(),
+            failures: 0,
         }
     }
 

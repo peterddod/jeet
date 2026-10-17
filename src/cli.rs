@@ -340,7 +340,17 @@ pub enum TaskCommands {
         #[arg(long, value_enum)]
         pr: Option<crate::config::PrMode>,
         #[command(flatten)]
-        delegation: Delegation,
+        delegation: Box<Delegation>,
+    },
+
+    /// Keep a task's done and questions from notifying the user (what is
+    /// escalated or stuck still does); only the user or the assistant
+    Quiet {
+        #[arg(add = ArgValueCandidates::new(task_candidates))]
+        name: String,
+        /// Let them notify again
+        #[arg(long)]
+        off: bool,
     },
 
     /// List tasks, most recently active first
@@ -502,6 +512,15 @@ pub struct Delegation {
     /// comma-separated, within what is left above it
     #[arg(long, value_delimiter = ',', value_parser = crate::manager::budget::parse_part)]
     pub budget: Vec<BudgetPart>,
+    /// Started on the user's word: its done and questions notify the user
+    /// at any depth (`[notify] events`). For the assistant; what the user
+    /// makes at their own terminal is theirs already
+    #[arg(long)]
+    pub for_user: bool,
+    /// Its done and questions do not notify the user; what is escalated or
+    /// stuck still does. Only the user or the assistant sets it
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand)]

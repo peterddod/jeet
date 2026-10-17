@@ -72,6 +72,7 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
     }
     // `plan_child` refuses a manager with no goal, so the brief file is
     // folded into it first.
+    let flags = super::task::notify_flags(app, &caller, &d)?;
     let plan = tasks::plan_child(
         app,
         &caller,
@@ -93,6 +94,7 @@ pub fn new(app: &App, args: &NewManager) -> Result<()> {
     )?;
     warn_all(&created.warnings);
     let task = created.task;
+    super::task::set_notify_flags(app, &task.id, &flags)?;
     let dir = tasks::task_dir(app, &task);
     eprintln!(
         "jeet: manager {} ({}) -> {}",
@@ -284,6 +286,8 @@ pub struct Shown {
     pub kind: &'static str,
     pub state: &'static str,
     pub parent: Option<String>,
+    /// Its done and questions do not notify the user (`jeet task quiet`).
+    pub quiet: bool,
     pub brief: Option<Brief>,
     /// What its grant names, as stored.
     pub grant: Vec<String>,
@@ -521,12 +525,14 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
             needs_user: r.needs_user,
         });
     }
+    let quiet = app.db.task_notify_flags(&task.id)?.quiet;
     Ok(Shown {
         task: task.slug.clone(),
         path,
         kind: task.kind.as_str(),
         state: task.state.as_str(),
         parent,
+        quiet,
         brief,
         grant,
         effective,
@@ -544,7 +550,11 @@ pub fn shown_text(s: &Shown) -> String {
         true => "nothing".to_string(),
         false => items.join(", "),
     };
-    let mut out = format!("task {} ({}, {})\n", s.path, s.kind, s.state);
+    let quiet = match s.quiet {
+        true => ", quiet",
+        false => "",
+    };
+    let mut out = format!("task {} ({}, {}{quiet})\n", s.path, s.kind, s.state);
     match &s.brief {
         Some(b) => {
             out.push_str(&format!("goal (from {}): {}\n", b.created_by, b.goal));
@@ -978,6 +988,7 @@ mod tests {
             serde_json::json!({
                 "task": "api",
                 "path": "assistant/api",
+                "quiet": false,
                 "kind": "manager",
                 "state": "active",
                 "parent": "assistant",

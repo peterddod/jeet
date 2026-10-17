@@ -8,7 +8,9 @@ use anyhow::{bail, Result};
 use crate::context::App;
 use crate::db::reviews::ReviewRecord;
 use crate::db::tasks::{BudgetRow, RunState, TaskRecord};
+use crate::link::Link;
 use crate::messages::{Inbox, Sender};
+use crate::notify::scope;
 use crate::permissions::Caller;
 use crate::reports::{self, StatusEvent};
 use crate::review;
@@ -289,6 +291,16 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
             continue;
         };
         let (row, used) = (&check.row, check.used);
+        if check.level >= 100 && !stopped(app, task)? {
+            tell_stuck(
+                app,
+                scope::Origin::task(app, task),
+                &super::label(task),
+                &super::tree_path(app, task)?,
+                Link::Task(task.slug.clone()),
+                &usage(row, used),
+            );
+        }
         if check.level >= 100 {
             if task.id == node.id || !held_before {
                 crossed = crossed.max(Threshold::Hit100);
@@ -349,6 +361,14 @@ pub fn enforce_review(app: &App, review: &ReviewRecord) -> Result<Threshold> {
         return Ok(Threshold::None);
     };
     if check.level >= 100 {
+        tell_stuck(
+            app,
+            scope::Origin::review(app, review),
+            &format!("review {}", review.label()),
+            &review.slug,
+            Link::Review(review.slug.clone()),
+            &usage(&check.row, check.used),
+        );
         return Ok(Threshold::Hit100);
     }
     let pct = percent(&check.row, check.used).unwrap_or(80);
@@ -467,6 +487,35 @@ fn tell_parent(app: &App, task: &TaskRecord, body: &str) {
     }
 }
 
+/// Tell the user a budget is used up: something stuck, at any depth. Once
+/// per crossing, as the check that crossed it claims it.
+fn tell_stuck(
+    app: &App,
+    origin: Result<scope::Origin>,
+    label: &str,
+    path: &str,
+    link: Link,
+    usage: &str,
+) {
+    let origin = match origin {
+        Ok(origin) => origin,
+        Err(e) => {
+            eprintln!("jeet: could not tell the user {label}'s budget is used up: {e:#}");
+            return;
+        }
+    };
+    let raise = scope::Raise {
+        raised: scope::Raised::Stuck,
+        kind: "stuck",
+        reference: None,
+        title: format!("jeet: {label} is stuck: budget used up"),
+        subtitle: Some(path.to_string()),
+        body: format!("budget used up ({usage}); paused"),
+        link: Some(link),
+    };
+    scope::raise(app, &origin, raise);
+}
+
 fn least(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -552,6 +601,7 @@ mod tests {
         assert_eq!(enforce(&app, &w).unwrap(), Threshold::None);
         assert!(budget_reports(&app, "m").is_empty());
 
+        assert!(crate::notify::queued(&app.home).is_empty());
         app.db.charge("w", 0, 1).unwrap();
         assert_eq!(enforce(&app, &w).unwrap(), Threshold::Warn80);
         assert_eq!(
@@ -588,6 +638,13 @@ mod tests {
             budget_reports(&app, "m")[1],
             "budget used up (100 of 100turns); paused"
         );
+        // The user hears of it as stuck, whatever the depth; 80% was not.
+        let told = crate::notify::queued(&app.home);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].why, crate::notify::Why::Stuck);
+        assert_eq!(told[0].title, "jeet: manager m is stuck: budget used up");
+        assert_eq!(told[0].task.as_deref(), Some("m"));
+        assert_eq!(told[0].link.as_deref(), Some("jeet://task/m"));
         assert_eq!(get(&app, "w").run_state, RunState::Run);
         // Told once.
         app.db.charge("w", 0, 1).unwrap();
