@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::identity;
 use crate::link::Link;
 use crate::review::process_alive;
 use crate::worktrees::now_secs;
@@ -29,6 +30,10 @@ pub struct Screen {
     pub app: Option<String>,
     /// Unix seconds.
     pub started: i64,
+    /// When its process started, as [`identity::start_of`] has it: a pid
+    /// reused by another process is not this screen.
+    #[serde(default)]
+    pub process_start: Option<i64>,
 }
 
 impl Screen {
@@ -41,6 +46,7 @@ impl Screen {
             tmux_pane: env("TMUX_PANE").filter(|_| in_tmux),
             app: env("__CFBundleIdentifier").filter(|_| cfg!(target_os = "macos")),
             started: now_secs(),
+            process_start: identity::start_of(std::process::id()),
         }
     }
 }
@@ -80,7 +86,8 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().context("no directory to write in")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let name = path.file_name().context("no file name")?.to_string_lossy();
-    let tmp = dir.join(format!(".{name}.tmp"));
+    // Named for this process too: two writers must not share a temp file.
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
     fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))
 }
@@ -112,13 +119,16 @@ impl Drop for Registration {
     }
 }
 
-/// The screens open now, newest first. A record whose process has gone, or
-/// that cannot be read, is removed on the way.
+/// The screens open now, newest first. A record whose process has gone (or
+/// is another one under the same pid), or that cannot be read, is removed
+/// on the way: windows closed and processes killed leave records behind.
 pub fn live(home: &Path) -> Vec<Screen> {
-    live_with(home, process_alive)
+    live_with(home, |pid, start| {
+        process_alive(pid) && start.is_none_or(|s| identity::start_of(pid) == Some(s))
+    })
 }
 
-fn live_with(home: &Path, alive: impl Fn(u32) -> bool) -> Vec<Screen> {
+fn live_with(home: &Path, alive: impl Fn(u32, Option<i64>) -> bool) -> Vec<Screen> {
     let Ok(entries) = fs::read_dir(dir(home)) else {
         return Vec::new();
     };
@@ -135,7 +145,7 @@ fn live_with(home: &Path, alive: impl Fn(u32) -> bool) -> Vec<Screen> {
         let screen = fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<Screen>(&text).ok())
-            .filter(|screen| screen.pid == pid && alive(pid));
+            .filter(|screen| screen.pid == pid && alive(pid, screen.process_start));
         match screen {
             Some(screen) => screens.push(screen),
             None => {
@@ -153,13 +163,28 @@ pub fn request(home: &Path, pid: u32, link: &Link) -> Result<()> {
     write_atomic(&goto_path(home, pid), &link.to_string())
 }
 
+/// Whether the screen of `pid` has a request it has not taken yet.
+pub fn requested(home: &Path, pid: u32) -> bool {
+    goto_path(home, pid).exists()
+}
+
+/// Withdraw a request that was not taken, and the record of the screen that
+/// did not take it: it is not answering.
+pub fn forget(home: &Path, pid: u32) {
+    let _ = fs::remove_file(goto_path(home, pid));
+    let _ = fs::remove_file(record_path(home, pid));
+}
+
 /// What the screen of `pid` was asked to go to, taking the request: the
-/// text of a link, which the caller reads.
+/// text of a link, which the caller reads. The file is renamed away first,
+/// so a request written meanwhile is not deleted unread.
 pub fn take_request(home: &Path, pid: u32) -> Option<String> {
     let path = goto_path(home, pid);
-    let text = fs::read_to_string(&path).ok()?;
-    let _ = fs::remove_file(&path);
-    Some(text.trim().to_string())
+    let mine = dir(home).join(format!(".{pid}.goto.taken"));
+    fs::rename(&path, &mine).ok()?;
+    let text = fs::read_to_string(&mine);
+    let _ = fs::remove_file(&mine);
+    Some(text.ok()?.trim().to_string())
 }
 
 #[cfg(test)]
@@ -173,6 +198,7 @@ mod tests {
             tmux_pane: None,
             app: None,
             started,
+            process_start: None,
         }
     }
 
@@ -182,11 +208,11 @@ mod tests {
         let old = register(home.path(), &screen(10, 100)).unwrap();
         let new = register(home.path(), &screen(11, 200)).unwrap();
         let pids = |screens: Vec<Screen>| screens.iter().map(|s| s.pid).collect::<Vec<_>>();
-        assert_eq!(pids(live_with(home.path(), |_| true)), [11, 10]);
+        assert_eq!(pids(live_with(home.path(), |_, _| true)), [11, 10]);
         drop(new);
-        assert_eq!(pids(live_with(home.path(), |_| true)), [10]);
+        assert_eq!(pids(live_with(home.path(), |_, _| true)), [10]);
         drop(old);
-        assert!(live_with(home.path(), |_| true).is_empty());
+        assert!(live_with(home.path(), |_, _| true).is_empty());
     }
 
     #[test]
@@ -195,10 +221,25 @@ mod tests {
         let _gone = register(home.path(), &screen(20, 100)).unwrap();
         let _here = register(home.path(), &screen(21, 50)).unwrap();
         request(home.path(), 20, &Link::task("x")).unwrap();
-        let found = live_with(home.path(), |pid| pid == 21);
+        let found = live_with(home.path(), |pid, _| pid == 21);
         assert_eq!(found, [screen(21, 50)]);
         assert!(!record_path(home.path(), 20).exists());
         assert!(!goto_path(home.path(), 20).exists());
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_screen() {
+        let home = tempfile::tempdir().unwrap();
+        let mut mine = screen(40, 1);
+        mine.process_start = Some(500);
+        let _reg = register(home.path(), &mine).unwrap();
+        assert!(live_with(home.path(), |_, start| start == Some(501)).is_empty());
+        assert!(!record_path(home.path(), 40).exists());
+        let _reg = register(home.path(), &mine).unwrap();
+        assert_eq!(
+            live_with(home.path(), |_, start| start == Some(500)).len(),
+            1
+        );
     }
 
     #[test]
@@ -214,7 +255,7 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("notes.txt"), "x").unwrap();
-        assert!(live_with(home.path(), |_| true).is_empty());
+        assert!(live_with(home.path(), |_, _| true).is_empty());
         assert!(!dir.join("30.json").exists());
         assert!(dir.join("notes.txt").exists());
     }
@@ -230,6 +271,17 @@ mod tests {
             Some("jeet://task/fix")
         );
         assert_eq!(take_request(home.path(), 5), None);
+    }
+
+    #[test]
+    fn an_untaken_request_is_withdrawn_with_its_record() {
+        let home = tempfile::tempdir().unwrap();
+        let _reg = register(home.path(), &screen(8, 1)).unwrap();
+        request(home.path(), 8, &Link::task("x")).unwrap();
+        assert!(requested(home.path(), 8));
+        forget(home.path(), 8);
+        assert!(!requested(home.path(), 8));
+        assert!(live_with(home.path(), |_, _| true).is_empty());
     }
 
     #[test]

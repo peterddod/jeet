@@ -37,12 +37,12 @@ pub enum Link {
 }
 
 impl Link {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn task(slug: &str) -> Link {
         Link::Task(slug.to_string())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn review(slug: &str) -> Link {
         Link::Review(slug.to_string())
     }

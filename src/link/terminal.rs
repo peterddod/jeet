@@ -7,6 +7,7 @@
 //! the setting, the platform and which programs exist; [`start`] spawns it.
 
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -212,9 +213,10 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// Run `run`, detached: its output goes nowhere. A launcher that fails
-/// within [`LAUNCH_WAIT`] is an error; one still running then is a terminal
-/// that is up, and is left to itself.
+/// Run `run`, detached: its output goes nowhere, and it is in a process
+/// group of its own, so it outlives the one `jeet open` was run in. Only a
+/// launcher that cannot be run is an error: what it does after that, `open`
+/// handing the job over or a terminal staying up, is its own.
 pub fn start(run: &Invocation) -> Result<()> {
     if let Some((path, text)) = &run.script {
         write_script(path, text)?;
@@ -224,6 +226,7 @@ pub fn start(run: &Invocation) -> Result<()> {
     };
     let mut child = Command::new(program)
         .args(args)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -232,8 +235,7 @@ pub fn start(run: &Invocation) -> Result<()> {
     let deadline = Instant::now() + LAUNCH_WAIT;
     while Instant::now() < deadline {
         match child.try_wait()? {
-            Some(status) if status.success() => return Ok(()),
-            Some(status) => bail!("{program} could not start the terminal ({status})"),
+            Some(_) => return Ok(()),
             None => thread::sleep(Duration::from_millis(20)),
         }
     }

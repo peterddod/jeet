@@ -1713,6 +1713,7 @@ impl TasksUi {
         self.refresh_visible(Some(id));
         if self.selected_id() != Some(id) {
             self.filter.clear();
+            self.filtering = false;
             self.refresh_visible(Some(id));
         }
     }
@@ -3708,6 +3709,23 @@ pub enum Start {
     Link(Link),
 }
 
+/// Whether `panel` holds text being typed, which a link must not throw away.
+fn holds_draft(panel: &Option<Panel>) -> bool {
+    matches!(
+        panel,
+        Some(
+            Panel::NewTask(_)
+                | Panel::NewProject(_)
+                | Panel::AddWorktree { .. }
+                | Panel::Answer { .. }
+                | Panel::Todo {
+                    adding: Some(_),
+                    ..
+                }
+        )
+    )
+}
+
 /// Whether the caller is known to be the user at their own terminal
 /// (R17): a top-level task's agent is [`Caller::User`] but not at one.
 /// Anyone else, and who it is not being told, fail closed.
@@ -3739,6 +3757,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         bg: Background::start(&app.home, &app.config),
         reviews_asked: None,
         kept_reviews: HashSet::new(),
+        pending_link: None,
     };
     let result = screen.go(start);
     let exit = screen.ui.exit.take();
@@ -3759,6 +3778,9 @@ struct Screen<'a> {
     /// Reviews whose PR is done that archiving refused or kept back: not
     /// tried again while the screen is open.
     kept_reviews: HashSet<String>,
+    /// A link that came while a panel held something being typed: gone to
+    /// when the panel closes.
+    pending_link: Option<Link>,
 }
 
 impl Screen<'_> {
@@ -3815,6 +3837,11 @@ impl Screen<'_> {
                     }
                 }
             }
+            if self.ui.panel.is_none() {
+                if let Some(link) = self.pending_link.take() {
+                    self.goto(&link);
+                }
+            }
             let frame = self
                 .terminal
                 .draw(|frame| tasks_ui::draw(frame, &mut self.ui))?;
@@ -3846,6 +3873,11 @@ impl Screen<'_> {
     /// Go to what `link` names: close any panel, put the cursor on it, and
     /// for a report open its task's inbox & reports.
     fn goto(&mut self, link: &Link) {
+        if holds_draft(&self.ui.panel) {
+            self.pending_link = Some(link.clone());
+            self.ui.set_status("a link is waiting — esc to go to it");
+            return;
+        }
         let was = self.ui.view;
         self.ui.panel = None;
         let report = match link {
@@ -6623,6 +6655,27 @@ mod tests {
                 task_id: "c".into()
             })
         );
+    }
+
+    #[test]
+    fn only_panels_with_typing_hold_a_link_back() {
+        assert!(!holds_draft(&None));
+        assert!(!holds_draft(&Some(Panel::Help { scroll: 0 })));
+        let todo = |adding| {
+            Some(Panel::Todo {
+                selected: 0,
+                adding,
+            })
+        };
+        assert!(!holds_draft(&todo(None)));
+        assert!(holds_draft(&todo(Some(String::new()))));
+        assert!(holds_draft(&Some(Panel::Answer {
+            id: 1,
+            title: String::new(),
+            question: Vec::new(),
+            input: String::new(),
+            error: None,
+        })));
     }
 
     #[test]

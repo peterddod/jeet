@@ -8,7 +8,10 @@
 //! terminal's alone.
 
 use std::io::{self, IsTerminal};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -21,44 +24,72 @@ use crate::permissions;
 use crate::runtime;
 use crate::tmux::{self, Client};
 
+/// How long a screen is given to take the link it was sent.
+const TAKE_WAIT: Duration = Duration::from_millis(1500);
+
 pub fn run(app: &App, url: &str) -> Result<()> {
     if !permissions::at_terminal(app)? {
         bail!("jeet open acts on your screen: run it from your own terminal, not a jeet pane");
     }
+    // Read once and not passed on: what the screen run here starts is not
+    // a terminal jeet started.
+    let started = std::env::var_os(STARTED_ENV).is_some();
+    std::env::remove_var(STARTED_ENV);
     let link = link::parse(url)?;
-    let screens = registry::live(&app.home);
+    let mut screens = registry::live(&app.home);
     let clients = tmux::clients();
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let setting = app.config.notify.terminal.as_deref();
-    match plan(&link, &screens, &clients, tmux::has_session, interactive) {
-        Plan::Screen { screen, bring } => {
-            registry::request(&app.home, screen.pid, &link)?;
-            let said = match &bring {
-                Bring::Pane { client, pane } => {
-                    tmux::switch_client(client, pane).map(|()| "switched tmux to its pane")
+    loop {
+        match plan(&link, &screens, &clients, tmux::has_session, interactive) {
+            Plan::Screen { screen, bring } => {
+                registry::request(&app.home, screen.pid, &link)?;
+                let said = match &bring {
+                    Bring::Pane { client, pane } => {
+                        tmux::switch_client(client, pane).map(|()| "switched tmux to its pane")
+                    }
+                    Bring::Detach { client } => {
+                        tmux::detach_client(client).map(|()| "detached tmux back to it")
+                    }
+                    Bring::Nothing => Ok("sent"),
+                };
+                let said = said.unwrap_or_else(|e| {
+                    eprintln!("jeet: could not bring it forward: {e:#}");
+                    "sent"
+                });
+                activate(screen.app.as_deref(), setting);
+                if !taken(&app.home, screen.pid) {
+                    // Not answering: a record a killed process left, or a
+                    // screen that is stuck. Go on without it.
+                    registry::forget(&app.home, screen.pid);
+                    screens.retain(|s| s.pid != screen.pid);
+                    continue;
                 }
-                Bring::Detach { client } => {
-                    tmux::detach_client(client).map(|()| "detached tmux back to it")
-                }
-                Bring::Nothing => Ok("sent"),
-            };
-            let said = said.unwrap_or_else(|e| {
-                eprintln!("jeet: could not bring it forward: {e:#}");
-                "sent"
-            });
-            activate(screen.app.as_deref(), setting);
-            println!("{said}: {link} on the jeet screen (pid {})", screen.pid);
-            Ok(())
+                println!("{said}: {link} on the jeet screen (pid {})", screen.pid);
+                return Ok(());
+            }
+            Plan::Session { client, session } => {
+                tmux::switch_client(&client, &tmux::target(&session))?;
+                activate(None, setting);
+                println!("switched tmux to {session}");
+                return Ok(());
+            }
+            Plan::Here => return tasks::run_link(app, link),
+            Plan::Terminal => return start_terminal(app, &link, started),
         }
-        Plan::Session { client, session } => {
-            tmux::switch_client(&client, &tmux::session_target(&session))?;
-            activate(None, setting);
-            println!("switched tmux to {session}");
-            Ok(())
-        }
-        Plan::Here => tasks::run_link(app, link),
-        Plan::Terminal => start_terminal(app, &link),
     }
+}
+
+/// Whether the screen of `pid` takes its request, waiting a moment for it.
+fn taken(home: &Path, pid: u32) -> bool {
+    let deadline = Instant::now() + TAKE_WAIT;
+    while registry::requested(home, pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 /// How a screen that is open is brought in front of the user.
@@ -169,8 +200,8 @@ fn activate(bundle: Option<&str>, setting: Option<&str>) {
         .status();
 }
 
-fn start_terminal(app: &App, link: &Link) -> Result<()> {
-    if std::env::var_os(STARTED_ENV).is_some() {
+fn start_terminal(app: &App, link: &Link, started: bool) -> Result<()> {
+    if started {
         bail!("the terminal jeet started is not one; not starting another");
     }
     let setting = app.config.notify.terminal.as_deref();
@@ -198,6 +229,7 @@ mod tests {
             tmux_pane: pane.map(str::to_string),
             app: None,
             started,
+            process_start: None,
         }
     }
 

@@ -7,6 +7,11 @@
 //! (`jeet notify install-link`). On Linux it is a `.desktop` file and an
 //! `xdg-mime` default.
 //!
+//! The path of the jeet binary is the one running at install time
+//! (`current_exe`) and is written into the handler: install again after
+//! moving or reinstalling jeet. The terminal `jeet open` starts bakes it
+//! in the same way, but fresh each time.
+//!
 //! The text of both is built by pure functions, and what goes into them is
 //! quoted for the format it lands in, as the paths come from the
 //! environment.
@@ -89,17 +94,24 @@ fn install_macos(home: &Path, exe: &Path, path: &str) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     fs::create_dir_all(home.join("tui"))?;
 
-    // Replace what is there, forgetting it first so the system does not
-    // keep two handlers.
+    // Build beside the old one, so that a build that fails leaves it be,
+    // then swap, forgetting the old so the system does not keep two.
+    let fresh = dir.join("JeetLink.app.new");
+    let source = dir.join(".JeetLink.applescript");
+    let _ = fs::remove_dir_all(&fresh);
+    fs::write(&source, script).with_context(|| format!("write {}", source.display()))?;
+    let built = build_bundle(&source, &fresh);
+    let _ = fs::remove_file(&source);
+    if let Err(e) = built {
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(e);
+    }
     if bundle.exists() {
         let _ = run(LSREGISTER, &["-u", &bundle.to_string_lossy()]);
         fs::remove_dir_all(&bundle).with_context(|| format!("remove {}", bundle.display()))?;
     }
-    let source = dir.join(".JeetLink.applescript");
-    fs::write(&source, script).with_context(|| format!("write {}", source.display()))?;
-    let built = build_bundle(&source, &bundle);
-    let _ = fs::remove_file(&source);
-    built?;
+    fs::rename(&fresh, &bundle).with_context(|| format!("move into {}", bundle.display()))?;
+    run(LSREGISTER, &["-f", &bundle.to_string_lossy()])?;
 
     println!("installed the jeet:// link handler at {}", bundle.display());
     println!("test it with: open jeet://task/<a task's name>");
@@ -143,8 +155,7 @@ fn build_bundle(source: &Path, bundle: &Path) -> Result<()> {
     )?;
     // Editing the plist broke the seal osacompile put on it: seal it again,
     // ad hoc.
-    run("codesign", &["--force", "-s", "-", &bundle_text])?;
-    run(LSREGISTER, &["-f", &bundle_text])
+    run("codesign", &["--force", "-s", "-", &bundle_text])
 }
 
 fn uninstall_macos() -> Result<()> {
@@ -171,7 +182,9 @@ fn applications_dir() -> Result<PathBuf> {
 
 /// An argument of a `.desktop` file's `Exec`, quoted as the Desktop Entry
 /// specification has it: in double quotes, with `"`, `` ` ``, `$` and `\`
-/// escaped, and `%` doubled, as `%u` and the like are field codes.
+/// escaped, and `%` doubled, as `%u` and the like are field codes. The
+/// file's own string escapes are undone before the quoting is read, so a
+/// literal `\` is written as four.
 fn desktop_quote(arg: &str) -> Result<String> {
     if arg.chars().any(char::is_control) {
         bail!("cannot put {arg:?} in a link handler: it has a control character");
@@ -179,10 +192,11 @@ fn desktop_quote(arg: &str) -> Result<String> {
     let mut out = String::from("\"");
     for c in arg.chars() {
         match c {
-            '"' | '`' | '$' | '\\' => {
+            '"' | '`' | '$' => {
                 out.push('\\');
                 out.push(c);
             }
+            '\\' => out.push_str("\\\\\\\\"),
             '%' => out.push_str("%%"),
             c => out.push(c),
         }
@@ -228,11 +242,28 @@ fn install_linux(home: &Path, exe: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `mimeapps.list` without its `x-scheme-handler/jeet=` lines.
+/// `mimeapps.list` without jeet's own entry on its `x-scheme-handler/jeet=`
+/// lines: another app's stays, and a line left empty goes.
 fn without_jeet_handler(list: &str) -> String {
+    let key = format!("{MIME_TYPE}=");
     let mut out: String = list
         .lines()
-        .filter(|line| !line.starts_with(&format!("{MIME_TYPE}=")))
+        .filter_map(|line| {
+            let Some(value) = line.strip_prefix(&key) else {
+                return Some(line.to_string());
+            };
+            let kept: Vec<&str> = value
+                .split(';')
+                .filter(|app| !app.is_empty() && *app != DESKTOP_FILE)
+                .collect();
+            match kept.len() {
+                0 => None,
+                _ if kept.len() == value.split(';').filter(|a| !a.is_empty()).count() => {
+                    Some(line.to_string())
+                }
+                _ => Some(format!("{key}{};", kept.join(";"))),
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if list.ends_with('\n') && !out.is_empty() {
@@ -330,7 +361,7 @@ mod tests {
         assert_eq!(desktop_quote("plain").unwrap(), "\"plain\"");
         assert_eq!(
             desktop_quote("a \"b\" `c` $d \\e 50%").unwrap(),
-            "\"a \\\"b\\\" \\`c\\` \\$d \\\\e 50%%\""
+            "\"a \\\"b\\\" \\`c\\` \\$d \\\\\\\\e 50%%\""
         );
         assert!(desktop_quote("a\nb").is_err());
     }
@@ -366,5 +397,14 @@ mod tests {
         );
         let untouched = "[Default Applications]\ntext/html=firefox.desktop\n";
         assert_eq!(without_jeet_handler(untouched), untouched);
+        let shared = "x-scheme-handler/jeet=other.desktop;jeet-link.desktop;\n\
+                      x-scheme-handler/jeet=other.desktop\n\
+                      x-scheme-handler/jeet=jeet-link.desktop-not\n";
+        assert_eq!(
+            without_jeet_handler(shared),
+            "x-scheme-handler/jeet=other.desktop;\n\
+             x-scheme-handler/jeet=other.desktop\n\
+             x-scheme-handler/jeet=jeet-link.desktop-not\n"
+        );
     }
 }

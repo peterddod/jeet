@@ -2307,12 +2307,18 @@ tmux to its pane, or detaching a `tmux attach` it is suspended under, and
 raising the terminal on macOS); else switches the tmux client attached to
 jeet's sessions to the task's or review's session; else runs the screen in
 the terminal it was run from; else starts a terminal to run it in. It acts on
-your screen, so it is refused from an agent's pane.
+your screen, so it is refused from an agent's pane. That check covers only
+running `jeet open` directly: once `install-link` has been run, anything that
+can open a URL (`open jeet://...`, a browser, a chat message) reaches
+`jeet open` through the handler. It only navigates: it never changes a task
+or answers anything.
 
 `jeet notify install-link` makes the system open `jeet://` links with it (a
 small signed-ad-hoc app in `~/Library/Application Support/jeet` on macOS, a
 `.desktop` file and an `xdg-mime` default on Linux), so a notification, a
-browser or Slack can open one; a browser asks once before the first.
+browser or Slack can open one; a browser asks once before the first. The handler holds the path of the jeet
+binary that ran `install-link`; run it again after moving or reinstalling
+jeet.
 `jeet notify uninstall-link` removes it. Nothing installs it by itself.
 
 ```toml

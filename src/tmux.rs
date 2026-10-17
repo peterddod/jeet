@@ -149,7 +149,7 @@ fn quiet() -> Command {
 
 /// An exact-match session target. A bare name is matched as a prefix, so
 /// `jeet-api` would otherwise find `jeet-api-2` once `jeet-api` is gone.
-fn target(name: &str) -> String {
+pub fn target(name: &str) -> String {
     format!("={name}")
 }
 
@@ -862,11 +862,6 @@ pub fn detach_client(client: &str) -> Result<()> {
         bail!("tmux could not detach {client}");
     }
     Ok(())
-}
-
-/// The exact-match target of session `name`, for [`switch_client`].
-pub fn session_target(name: &str) -> String {
-    target(name)
 }
 
 fn send_keys(args: &[&str]) -> Result<()> {
