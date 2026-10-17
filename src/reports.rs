@@ -1068,7 +1068,7 @@ fn reask_ask(
         // else holds one.
         TaskKind::Assistant | TaskKind::Work | TaskKind::Setup => return Ok(()),
     }
-    if !app.db.claim_reask(row.id)? {
+    if !app.db.claim_reask(row.id, &holder.id)? {
         return Ok(());
     }
     let text =
@@ -1079,6 +1079,7 @@ fn reask_ask(
             row.id,
             manager::label(&holder)
         );
+        app.db.release_reask(row.id)?;
     }
     Ok(())
 }
@@ -2165,6 +2166,21 @@ mod tests {
             )]
         );
         assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]), "told once");
+    }
+
+    #[test]
+    fn a_repost_that_does_not_get_through_is_tried_again() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        let sent = Sent::default();
+        let notifier = |_: Event| {};
+        sweep_asks_with(&app, at + 15 * 60, &failing(&sent, &["sub"]), &notifier).unwrap();
+        assert_eq!(sent.borrow().len(), 1);
+        let (sent, _) = swept(&app, at + 16 * 60);
+        assert_eq!(sent.len(), 1, "tried again");
+        assert_eq!(swept(&app, at + 17 * 60), (vec![], vec![]));
     }
 
     #[test]

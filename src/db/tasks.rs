@@ -1047,17 +1047,28 @@ impl Database {
         Ok(changed == 1)
     }
 
-    /// Claim open ask `id` to be re-posted to its holder: true only the
-    /// first time, and only while it is open.
-    pub fn claim_reask(&self, id: i64) -> Result<bool> {
+    /// Claim open ask `id` to be re-posted to `holder`: true only the
+    /// first time, and only while it is open, `holder` holds it and the
+    /// user does not.
+    pub fn claim_reask(&self, id: i64, holder: &str) -> Result<bool> {
         let changed = self.conn().execute(
             &format!(
                 "UPDATE task_reports AS r SET reasked = 1 WHERE r.id = ?1 AND r.reasked = 0 \
-                 AND {OPEN_ASK}"
+                 AND r.to_id = ?2 AND r.needs_user = 0 AND {OPEN_ASK}"
             ),
-            params![id],
+            params![id, holder],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Undo [`Self::claim_reask`], for a re-post that did not get through:
+    /// the next sweep tries again.
+    pub fn release_reask(&self, id: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE task_reports SET reasked = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// Claim open ask `id` to tell the user it is unanswered: true only the

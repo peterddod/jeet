@@ -2378,7 +2378,8 @@ an idle pane stays full text.
 
 No question is lost: `jeet watch` looks at each open ask (a `question` or
 `blocked` report not answered, and its task's latest) on every poll. After
-`reask_mins` it posts the ask again, whole, to the manager holding it, once
+`reask_mins` from when it was asked, it posts the ask again, whole, to the
+manager holding it then, once
 (one the assistant holds, or has passed to you, is not: you were told when
 it reached the assistant). After `escalate_mins` it notifies you, once,
 whoever holds it, with the ask's id. The quiet flag does not hold that back,
