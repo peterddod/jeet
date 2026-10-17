@@ -25,10 +25,10 @@
 //! view lists the archived tasks instead (a flat list), and back. The agents view shows the
 //! assistant at the root of the tree of the active tasks under it, with what
 //! each needs rolled up to the nodes above ([`managers`]): `⏎` attaches,
-//! `→`/`←` open and close managers, `l`, `i` and `b` read a node's
-//! worklog, inbox and reports, and brief, `p`, `P` and `x` pause, resume
-//! and stop its subtree, and `n` makes a task or manager under it, through
-//! the CLI's own checks, as the user.
+//! `→`/`←`/`⌫` open and close managers, `l`, `I` and `b` read a node's
+//! worklog, inbox and reports, and brief, `z`, `Z` and `x` pause, resume
+//! and stop its subtree, `y` answers its open question, and `n` makes a
+//! task or manager under it, through the CLI's own checks, as the user.
 //! Its index facts come from a tree thread of its own, running only while
 //! the view is shown.
 //! The reviews view lists every review, with where its PR and its review
@@ -798,7 +798,7 @@ pub enum Panel {
     Inbox {
         selected: usize,
     },
-    /// `a` in the agents view: the answer to open ask `id`, being typed.
+    /// `y` in the agents view: the answer to open ask `id`, being typed.
     Answer {
         id: i64,
         /// Which ask, from whom.
@@ -809,7 +809,7 @@ pub enum Panel {
         /// Why the last ⏎ was refused.
         error: Option<String>,
     },
-    /// `l`, `i` and `b` in the agents view: text to read, scrolled.
+    /// `l`, `I` and `b` in the agents view: text to read, scrolled.
     Text {
         title: String,
         lines: Vec<String>,
@@ -975,7 +975,7 @@ pub enum Action {
     Worklog {
         task_id: String,
     },
-    /// `i` in the agents view: the node's open ask, inbox and reports.
+    /// `I` in the agents view: the node's open ask, inbox and reports.
     Reports {
         task_id: String,
     },
@@ -983,15 +983,15 @@ pub enum Action {
     Brief {
         task_id: String,
     },
-    /// `p` in the agents view: pause the node and its subtree.
+    /// `z` in the agents view: pause the node and its subtree.
     Pause {
         task_id: String,
     },
-    /// `P` in the agents view: let the node run again.
+    /// `Z` in the agents view: let the node run again.
     Resume {
         task_id: String,
     },
-    /// `a` in the agents view: read the open ask of task `task_id` and
+    /// `y` in the agents view: read the open ask of task `task_id` and
     /// open the answer form for it.
     AskAnswer {
         task_id: String,
@@ -2293,7 +2293,7 @@ impl TasksUi {
 
     /// The keys the agents view has of its own (Q22), or `None` for one it
     /// shares with the other views: moving, `/`, `?`, `r`, `q`, `⇥`, `c`,
-    /// `C` and `t`.
+    /// `C`, `t` and `i`.
     fn agents_key(&mut self, key: KeyEvent) -> Option<Option<Action>> {
         let line = self.tree.get(self.selected).cloned();
         let id = self.selected_id().map(str::to_string);
@@ -2330,7 +2330,7 @@ impl TasksUi {
                 None
             }
             // Close an open manager, else go to its parent (not while filtering).
-            KeyCode::Left => {
+            KeyCode::Left | KeyCode::Backspace => {
                 let line = line?;
                 match (line.manager, line.open, id) {
                     (true, true, Some(id)) if self.filter.is_empty() => {
@@ -2345,7 +2345,7 @@ impl TasksUi {
                 }
                 None
             }
-            KeyCode::Char(c @ ('l' | 'i' | 'b')) => match (self.user, id) {
+            KeyCode::Char(c @ ('l' | 'I' | 'b')) => match (self.user, id) {
                 (false, _) => {
                     self.set_status(NOT_USER);
                     None
@@ -2356,21 +2356,21 @@ impl TasksUi {
                 }
                 (true, Some(task_id)) => Some(match c {
                     'l' => Action::Worklog { task_id },
-                    'i' => Action::Reports { task_id },
+                    'I' => Action::Reports { task_id },
                     _ => Action::Brief { task_id },
                 }),
             },
             // The assistant is refused a pause by `in_scope`, as the CLI
             // refuses it; `x` on it is `stop --all`, the user's alone (P8).
-            KeyCode::Char(c @ ('p' | 'P' | 'x')) => match (self.user, line.map(|l| l.at), id) {
+            KeyCode::Char(c @ ('z' | 'Z' | 'x')) => match (self.user, line.map(|l| l.at), id) {
                 (false, _, _) => {
                     self.set_status(NOT_USER);
                     None
                 }
                 (true, Some(At::Root), _) if c == 'x' => Some(Action::AskStop { task_id: None }),
                 (true, _, Some(task_id)) => Some(match c {
-                    'p' => Action::Pause { task_id },
-                    'P' => Action::Resume { task_id },
+                    'z' => Action::Pause { task_id },
+                    'Z' => Action::Resume { task_id },
                     _ => Action::AskStop {
                         task_id: Some(task_id),
                     },
@@ -2382,7 +2382,7 @@ impl TasksUi {
             },
             // The open question at or nearest below the node, one with the
             // user first, as the tree thread last read them (R15).
-            KeyCode::Char('a') => match (self.user, id, &self.assistant_row) {
+            KeyCode::Char('y') => match (self.user, id, &self.assistant_row) {
                 (false, _, _) => {
                     self.set_status(NOT_USER);
                     None
@@ -2438,7 +2438,7 @@ impl TasksUi {
                     }
                 }
             }
-            KeyCode::Char('e' | 'w' | 'v' | 'o' | 'D' | 'S') => {
+            KeyCode::Char('e' | 'w' | 'p' | 'v' | 'o' | 'D' | 'S') => {
                 self.set_status(NOT_IN_AGENTS);
                 None
             }
@@ -4965,7 +4965,7 @@ impl Screen<'_> {
         self.ui.set_status(made);
     }
 
-    /// `a` in the agents view: the answer form for the ask task `task_id`
+    /// `y` in the agents view: the answer form for the ask task `task_id`
     /// has open, as the index has it now.
     fn ask_answer(&mut self, task_id: &str) -> Result<()> {
         let app = self.app;
@@ -5105,7 +5105,7 @@ impl Screen<'_> {
         Ok(())
     }
 
-    /// `p`, `P` and `x` in the agents view: `verb` on task `task_id` and its
+    /// `z`, `Z` and `x` in the agents view: `verb` on task `task_id` and its
     /// subtree, or with `None` `stop --all`, as `jeet manager pause`,
     /// `resume` and `stop` do it: `in_scope`, then [`run`], as the user
     /// (Q15). What came of each node is shown; then the screen is painted
@@ -8099,6 +8099,18 @@ mod tests {
     }
 
     #[test]
+    fn backspace_backs_out_like_left() {
+        let mut ui = agents_sample();
+        press(&mut ui, KeyCode::Right);
+        assert_eq!(ui.selected_id(), Some("m"));
+        press(&mut ui, KeyCode::Backspace);
+        assert!(ui.collapsed.contains("m"));
+        assert_eq!(ui.selected_id(), Some("m"));
+        press(&mut ui, KeyCode::Backspace);
+        assert_eq!(ui.selected_id(), Some("root"));
+    }
+
+    #[test]
     fn a_filter_ignores_collapse_and_the_arrows_leave_it_alone() {
         let mut ui = agents_sample();
         ui.filter = "w".to_string();
@@ -8148,14 +8160,14 @@ mod tests {
     fn the_agents_view_keeps_its_own_keys() {
         let mut ui = agents_sample();
         press(&mut ui, KeyCode::Down);
-        for c in ['e', 'w', 'v', 'o', 'D', 'S'] {
+        for c in ['e', 'w', 'p', 'v', 'o', 'D', 'S'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
             assert_eq!(ui.status_line, NOT_IN_AGENTS, "{c}");
         }
         assert!(!ui.by_priority);
         // Not archive: answering, which is the user's.
-        assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
+        assert_eq!(press(&mut ui, KeyCode::Char('y')), None);
         assert_eq!(ui.status_line, NOT_USER);
         // The assistant's keys are not a node's.
         assert_eq!(
@@ -8164,6 +8176,10 @@ mod tests {
         );
         press(&mut ui, KeyCode::Char('t'));
         assert!(matches!(ui.panel, Some(Panel::Todo { .. })));
+        press(&mut ui, KeyCode::Esc);
+        // `i` is the assistant's inbox here too; `I` is the node's reports.
+        press(&mut ui, KeyCode::Char('i'));
+        assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
         press(&mut ui, KeyCode::Esc);
         press(&mut ui, KeyCode::Char('?'));
         assert!(matches!(ui.panel, Some(Panel::Help { .. })));
@@ -8174,7 +8190,7 @@ mod tests {
         let mut ui = agents_sample();
         press(&mut ui, KeyCode::Down);
         // Inside an agent's pane, or not known to be the user.
-        for c in ['l', 'i', 'b'] {
+        for c in ['l', 'I', 'b'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
             assert_eq!(ui.status_line, NOT_USER, "{c}");
@@ -8186,7 +8202,7 @@ mod tests {
             Some(Action::Worklog { task_id: m() })
         );
         assert_eq!(
-            press(&mut ui, KeyCode::Char('i')),
+            press(&mut ui, KeyCode::Char('I')),
             Some(Action::Reports { task_id: m() })
         );
         assert_eq!(
@@ -8201,8 +8217,7 @@ mod tests {
                 task_id: "root".into()
             })
         );
-        // `i` is still the assistant's inbox in the active view.
-        press(&mut ui, KeyCode::BackTab);
+        // `i` is the assistant's inbox here as in the other views.
         assert_eq!(press(&mut ui, KeyCode::Char('i')), None);
         assert!(matches!(ui.panel, Some(Panel::Inbox { .. })));
     }
@@ -8211,7 +8226,7 @@ mod tests {
     fn pausing_resuming_and_stopping_are_for_the_user_alone() {
         let mut ui = agents_sample();
         press(&mut ui, KeyCode::Down);
-        for c in ['p', 'P', 'x'] {
+        for c in ['z', 'Z', 'x'] {
             ui.set_status("");
             assert_eq!(press(&mut ui, KeyCode::Char(c)), None, "{c}");
             assert_eq!(ui.status_line, NOT_USER, "{c}");
@@ -8219,11 +8234,11 @@ mod tests {
         ui.user = true;
         let m = || "m".to_string();
         assert_eq!(
-            press(&mut ui, KeyCode::Char('p')),
+            press(&mut ui, KeyCode::Char('z')),
             Some(Action::Pause { task_id: m() })
         );
         assert_eq!(
-            press(&mut ui, KeyCode::Char('P')),
+            press(&mut ui, KeyCode::Char('Z')),
             Some(Action::Resume { task_id: m() })
         );
         assert_eq!(
@@ -8238,7 +8253,7 @@ mod tests {
             Some(Action::AskStop { task_id: None })
         );
         assert_eq!(
-            press(&mut ui, KeyCode::Char('p')),
+            press(&mut ui, KeyCode::Char('z')),
             Some(Action::Pause {
                 task_id: "root".into()
             })
@@ -8607,31 +8622,32 @@ mod tests {
     }
 
     #[test]
-    fn a_answers_the_open_question_at_or_below_the_node() {
+    fn y_answers_the_open_question_at_or_below_the_node() {
         let mut ui = asking_sample(true);
         // Not the user at their own terminal.
-        assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
+        assert_eq!(press(&mut ui, KeyCode::Char('y')), None);
         assert_eq!(ui.status_line, NOT_USER);
         ui.user = true;
         let ask_w = Some(Action::AskAnswer {
             task_id: "w".into(),
         });
         // On the assistant, on the manager and on the asker.
-        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+        assert_eq!(press(&mut ui, KeyCode::Char('y')), ask_w);
         press(&mut ui, KeyCode::Down);
         assert_eq!(ui.selected_id(), Some("m"));
-        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+        assert_eq!(press(&mut ui, KeyCode::Char('y')), ask_w);
         press(&mut ui, KeyCode::Down);
-        assert_eq!(press(&mut ui, KeyCode::Char('a')), ask_w);
+        assert_eq!(press(&mut ui, KeyCode::Char('y')), ask_w);
 
         // Nothing open: said, and no action.
         let mut calm = agents_sample();
         calm.user = true;
         press(&mut calm, KeyCode::Down);
-        assert_eq!(press(&mut calm, KeyCode::Char('a')), None);
+        assert_eq!(press(&mut calm, KeyCode::Char('y')), None);
         assert_eq!(calm.status_line, "no open question at or below m");
 
-        // `a` is still archive in the active view.
+        // `a` is archive in the active view, and nothing here.
+        assert_eq!(press(&mut ui, KeyCode::Char('a')), None);
         press(&mut ui, KeyCode::BackTab);
         assert!(matches!(
             press(&mut ui, KeyCode::Char('a')),
@@ -8728,7 +8744,7 @@ mod tests {
     }
 
     #[test]
-    fn i_and_b_read_a_node_and_the_assistant_unfenced() {
+    fn reports_and_brief_read_a_node_and_the_assistant_unfenced() {
         let dir = tempfile::tempdir().unwrap();
         let app = app_at(&dir.path().canonicalize().unwrap());
         let record = |id: &str, kind, parent: Option<&str>| {

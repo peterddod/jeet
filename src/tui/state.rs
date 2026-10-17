@@ -1021,6 +1021,19 @@ mod tests {
     }
 
     #[test]
+    fn backspace_backs_out_only_once_the_filter_is_empty() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path());
+        assert!(explorer.descend().unwrap());
+        explorer.push_filter('a');
+        // ⌫ deletes a character first, then ascends, as `handle_browse_key`.
+        assert!(explorer.pop_filter());
+        assert!(!explorer.pop_filter());
+        assert!(explorer.ascend().unwrap());
+        assert_eq!(explorer.cwd, dir.path());
+    }
+
+    #[test]
     fn ascend_stops_at_the_root() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());

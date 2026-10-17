@@ -133,7 +133,7 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "the worklog (notes/worklog.md) of the assistant or a manager",
     ),
     (
-        "i",
+        "I",
         "its open ask, inbox and reports, newest first; ⏎ its pull requests",
     ),
     (
@@ -141,7 +141,7 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "its brief, grant, what it may do, budget, run state and tasks",
     ),
     (
-        "p / P",
+        "z / Z",
         "pause the node and everything below it / let it run again",
     ),
     (
@@ -153,12 +153,12 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
         "a task or manager under the assistant or a manager; a manager starts at once",
     ),
     (
-        "a",
+        "y",
         "answer the open question here or nearest below; one with you first",
     ),
     (
         "",
-        "l, i, b, p, P, x, n and a only from your own terminal, not a pane of jeet's",
+        "l, I, b, z, Z, x, n and y only from your own terminal, not a pane of jeet's",
     ),
     ("", ""),
     (
@@ -358,15 +358,17 @@ const HINTS: &[&str] = &[
 
 const HINTS_AGENTS: &[&str] = &[
     "⏎ attach",
-    "→← open/close",
+    "→←⌫ open/close",
     "l worklog",
-    "i inbox",
+    "I reports",
     "b brief",
-    "p/P pause/resume",
+    "y answer",
+    "z/Z pause/resume",
     "x stop",
     "n new under",
     "c assistant",
     "t todo",
+    "i inbox",
     "/ filter",
     "⇥ switch",
     "? help",

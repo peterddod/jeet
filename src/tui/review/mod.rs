@@ -910,7 +910,7 @@ impl Viewer {
             code => code,
         };
         match code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 if self.busy.is_some() {
                     self.status = "still waiting on GitHub — let it answer first".into();
                 } else {
@@ -1237,6 +1237,25 @@ mod tests {
         let mut viewer = loaded_viewer(None);
         viewer.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(viewer.exit, Some(Exit::Quit));
+    }
+
+    #[test]
+    fn q_backs_out_like_esc_but_types_into_a_box() {
+        let mut viewer = loaded_viewer(None);
+        viewer.handle_key(key(KeyCode::Char('C')));
+        viewer.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(viewer.exit, None);
+        assert_eq!(viewer.draft.as_ref().map(|d| d.input.as_str()), Some("q"));
+        viewer.handle_key(key(KeyCode::Esc));
+        assert!(viewer.draft.is_none());
+        viewer.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(viewer.exit, Some(Exit::Back));
+
+        // Not while a request is out, as with esc.
+        let mut viewer = loaded_viewer(None);
+        viewer.busy = Some("posting".into());
+        viewer.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(viewer.exit, None);
     }
 
     #[test]
