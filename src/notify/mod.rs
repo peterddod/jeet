@@ -611,6 +611,23 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
+    fn every_backend_check_allows_is_one_jeet_sends_through() {
+        let config = NotifyConfig {
+            command: Some("page-me".into()),
+            ..NotifyConfig::default()
+        };
+        for name in BACKENDS {
+            assert!(backend(name, &config).is_some(), "{name}");
+        }
+        assert!(backend("slack", &config).is_none());
+        let unset = NotifyConfig {
+            via: Some(vec!["Desktop".into()]),
+            ..NotifyConfig::default()
+        };
+        assert!(check(&unset).is_err());
+    }
+
+    #[test]
     fn text_is_flattened_and_cut() {
         assert_eq!(one_line(" a\nb\tc\u{1b}[2J ", 20), "a b c[2J");
         assert_eq!(one_line("abcdef", 4), "abc…");

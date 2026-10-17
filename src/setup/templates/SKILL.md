@@ -168,7 +168,8 @@ and how often they want to be interrupted.
   command line is appended to (`"wezterm start --"`). Leave it unset unless
   they care.
 - The switches beside it: `[assistant] notify` (one per action the assistant
-  takes) and `[review] notify` (a review being ready).
+  takes) and `[review] notify`, which only covers the deprecated `[review]
+  command` finishing or failing; raise it only if they use that.
 - Offer, for the user to run: `{name} notify install`, which keeps a sender
   running in the background, and `{name} notify install-link`, so that a
   click on a notification opens the task.
