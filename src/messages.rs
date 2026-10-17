@@ -216,7 +216,7 @@ pub fn delivered_path(task_dir: &Path) -> PathBuf {
 const DELIVERED_KEEP_SECS: i64 = 30 * 86_400;
 
 /// A line of `delivered.jsonl`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     /// The `m` in `m45`: unique across all of jeet's tasks.
     pub id: i64,
@@ -224,6 +224,16 @@ pub struct Delivery {
     pub kind: String,
     pub from: String,
     pub message: String,
+    /// Kept for the assistant's `jeet brief` instead of being pushed to it
+    /// (`[assistant] push = false`), not only for `jeet show`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stored: bool,
+    /// What it is besides `m<id>`: `r12` for a report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    /// The start of its text, as [`Meta::summary`] has it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
 }
 
 /// What `delivered.jsonl` in `task_dir` holds: nothing if it has none.
@@ -249,6 +259,31 @@ pub fn number(home: &Path, task_dir: &Path, meta: Meta, message: &str) -> Result
 }
 
 fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) -> Result<Meta> {
+    let id = keep(home, task_dir, &meta, message, false, now)?;
+    Ok(Meta {
+        r#ref: Some(format!("m{id}")),
+        ..meta
+    })
+}
+
+/// Keep `message`, with `meta`, in the `delivered.jsonl` of the task in
+/// `task_dir` as stored for `jeet brief`, rather than delivered: under a
+/// new `m<id>`, returned, as [`number`] keeps one, and with `meta`'s own
+/// ref, a report's, if it has one.
+pub fn store(home: &Path, task_dir: &Path, meta: &Meta, message: &str, now: i64) -> Result<i64> {
+    keep(home, task_dir, meta, message, true, now)
+}
+
+/// Add `message` to `task_dir`'s `delivered.jsonl` under the next id, which
+/// it returns.
+fn keep(
+    home: &Path,
+    task_dir: &Path,
+    meta: &Meta,
+    message: &str,
+    stored: bool,
+    now: i64,
+) -> Result<i64> {
     let run = home.join("run");
     std::fs::create_dir_all(&run).with_context(|| format!("create {}", run.display()))?;
     // The counter is replaced whole, so its lock is on a file of its own.
@@ -294,12 +329,15 @@ fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) 
         kind: meta.kind.clone(),
         from: meta.from.clone(),
         message: message.to_string(),
+        stored,
+        r#ref: meta.r#ref.clone().filter(|_| stored),
+        summary: match stored {
+            true => meta.summary.clone(),
+            false => String::new(),
+        },
     };
     append_delivered(task_dir, &entry, now)?;
-    Ok(Meta {
-        r#ref: Some(format!("m{id}")),
-        ..meta
-    })
+    Ok(id)
 }
 
 /// The highest id in `task_dir`'s `delivered.jsonl` and those of the task
@@ -877,6 +915,9 @@ pub enum Delivered {
     },
     /// Queued for the agent's wake channel, which hands it over now.
     Wake,
+    /// Kept for the assistant's `jeet brief`, not pushed to it
+    /// (`[assistant] push = false`); its user's next prompt says it came.
+    Stored,
 }
 
 /// `text` as a message: without control characters, not blank and not too
@@ -2633,7 +2674,8 @@ mod tests {
                 at: 100 * day,
                 kind: "message".into(),
                 from: "task x".into(),
-                message: "first".into()
+                message: "first".into(),
+                ..Default::default()
             }]
         );
         // Younger than 30 days: kept, and appended to.
@@ -2665,6 +2707,7 @@ mod tests {
             kind: "message".into(),
             from: "x".into(),
             message: "m".into(),
+            ..Default::default()
         };
         std::fs::write(
             delivered_path(&other),
@@ -2694,6 +2737,7 @@ mod tests {
             kind: "message".into(),
             from: "x".into(),
             message: "m".into(),
+            ..Default::default()
         };
         let text: String = [entry(1, now - 31 * 86_400), entry(2, now - 29 * 86_400)]
             .iter()

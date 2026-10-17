@@ -305,7 +305,7 @@ pub const READ_ONLY: &[&str] = &[
 /// The assistant's own files, which it keeps through jeet: pre-approved
 /// too, and needing no capability. Refused to every task, a manager
 /// included (M39).
-pub const OWN: &[&str] = &["jeet todo"];
+pub const OWN: &[&str] = &["jeet todo", "jeet brief"];
 
 pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
@@ -670,6 +670,8 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Report { .. }
         // Its own todo list.
         | Commands::Todo { .. }
+        // What was kept for it; the command refuses any other agent.
+        | Commands::Brief { .. }
         // Reads only, and cuts itself to what the caller reaches.
         | Commands::Show { .. }
         // Reads only.
@@ -1268,6 +1270,7 @@ fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     match command? {
         Commands::Notify { command: None, .. } => Some("notify the user"),
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
+        Commands::Brief { .. } => Some("read what was kept for the assistant"),
         // Only `jeet review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
         _ if stops_all(command) => Some("stop every task under the assistant"),
@@ -1544,6 +1547,7 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::Notify { command: None, .. }
         | Commands::Report { .. }
         | Commands::Todo { .. }
+        | Commands::Brief { .. }
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. }
@@ -3020,6 +3024,7 @@ mod tests {
             (&["report", "escalate", "4"], true),
             (&["report", "ls"], true),
             (&["show", "r1"], true),
+            (&["brief"], true),
             (&["init-shell"], true),
             (&["install-shell"], false),
             (&["completions", "zsh"], true),

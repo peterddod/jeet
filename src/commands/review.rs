@@ -335,6 +335,8 @@ pub fn send(app: &App, review: &ReviewRecord, message: &str) -> Result<()> {
         Delivered::Wake => {
             eprintln!("jeet: sent to {called}'s agent; it gets it now, through its wake channel")
         }
+        // Only the assistant's are stored.
+        Delivered::Stored => eprintln!("jeet: the message is queued for {called}'s agent"),
     }
     Ok(())
 }

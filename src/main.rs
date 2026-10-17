@@ -162,6 +162,10 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             let app = context::App::open()?;
             commands::show::run(&app, &reference)?
         }
+        Commands::Brief { all } => {
+            let app = context::App::open()?;
+            assistant::brief::run(&app, all)?
+        }
         Commands::InstallShell => commands::install_shell::run()?,
         Commands::Watch { once, command } => {
             let app = context::App::open()?;

@@ -379,6 +379,8 @@ pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
             "jeet: sent to {}'s agent; it gets it now, through its wake channel",
             called
         ),
+        // Only the assistant's are stored.
+        Delivered::Stored => eprintln!("jeet: the message is queued for {}'s agent", called),
     }
     Ok(())
 }
@@ -777,6 +779,10 @@ fn send_to_assistant(app: &App, message: &str) -> Result<()> {
         Delivered::Held => eprintln!(
             "jeet: no session of the assistant's is running and none can be started from here, \
              so the message is queued; the next session starts with it"
+        ),
+        Delivered::Stored => eprintln!(
+            "jeet: kept for the assistant (`[assistant] push = false`); the user's next prompt \
+             to it says it came, and `jeet brief` shows it"
         ),
         // The assistant is never held, nor counted by the start gate.
         Delivered::Paused | Delivered::StartQueued { .. } => {

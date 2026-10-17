@@ -186,6 +186,21 @@ impl Harness for ClaudeCode {
         )
     }
 
+    /// UserPromptSubmit runs, and is waited on, before the prompt goes to
+    /// the model; its `additionalContext` goes with the prompt as a system
+    /// reminder, which the user's screen does not show.
+    fn prompt_context_output(&self, event: &str, context: &str) -> Option<String> {
+        (event == "UserPromptSubmit").then(|| {
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            })
+            .to_string()
+        })
+    }
+
     fn has_session(&self, dir: &Path, id: &str) -> bool {
         session_dir(dir).is_some_and(|d| d.join(format!("{id}.jsonl")).is_file())
     }

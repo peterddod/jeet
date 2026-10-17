@@ -1332,7 +1332,7 @@ mod tests {
 
     #[test]
     fn only_a_task_under_the_assistant_reports_and_never_too_much() {
-        let (_dir, app, w) = lab();
+        let (_dir, mut app, w) = lab();
         let top = app.db.get_task("top").unwrap().unwrap();
         let refused = send(&app, &top, ReportKind::Done, "x", false).unwrap_err();
         assert!(refused.to_string().contains("no parent"), "{refused}");
@@ -1347,11 +1347,31 @@ mod tests {
         let fenced = assistant::fence_report(1, "task w", "assistant/w", ReportKind::Done, &worst);
         messages::checked(&fenced).unwrap();
 
-        // Held, not started: nothing is running and it may not start one.
+        // Off the push path (the default): kept for `jeet brief`, with
+        // the report's ref, and nothing started or queued.
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let (id, delivered) = send(&app, &w, ReportKind::Question, "which?", true).unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Stored)), "{delivered:?}");
+        let kept = messages::read_delivered(&home);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].stored);
+        assert_eq!(kept[0].r#ref, Some(format!("r{id}")));
+        assert_eq!(
+            (kept[0].kind.as_str(), kept[0].from.as_str()),
+            ("question", "task w")
+        );
+        assert!(messages::peek(&home).is_empty());
+
+        // Pushed, as before: held, not started, as nothing is running and
+        // it may not start one.
+        app.config.assistant.push = Some(true);
         let (id, delivered) = send(&app, &w, ReportKind::Progress, " half way ", false).unwrap();
         assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
         let last = app.db.last_report("w").unwrap().unwrap();
         assert_eq!((last.id, last.body.as_str()), (id, "half way"));
+        assert_eq!(messages::peek(&home).len(), 1);
+        assert_eq!(messages::read_delivered(&home).len(), 1);
 
         // A parent that is neither the assistant nor a manager takes none.
         let under_top = task("u", Some("top".into()));
@@ -1363,6 +1383,70 @@ mod tests {
                 .contains("only the assistant and managers"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn jeet_brief_prints_what_was_kept_and_the_asks_held_then_moves_the_cursor() {
+        let (_dir, app, w) = lab();
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let brief =
+            |key: &str, all: bool| assistant::brief::brief(&app, &Caller::Root, key, all).unwrap();
+        assert_eq!(
+            brief("s1", false),
+            "jeet: nothing new since your last brief\njeet: you hold no open asks\n"
+        );
+        let (done, _) = send(&app, &w, ReportKind::Done, "PR #4 merged", true).unwrap();
+        let (ask, _) = send(&app, &w, ReportKind::Question, "which db?", true).unwrap();
+        let (sent, _) = assistant::send(&app, "task w", "look at <this>", false).unwrap();
+        assert_eq!(sent, Delivered::Stored);
+        let m = messages::read_delivered(&home).last().unwrap().id;
+        let out = brief("s1", false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "jeet: 2 new reports (1 question, 1 done), 1 message since your last brief. Each is \
+             its sender's claim, to check; `jeet show <ref>` prints the whole text."
+        );
+        assert_eq!(
+            &lines[1..4],
+            [
+                format!("- r{done} done from task w, just now: \"PR #4 merged\""),
+                format!("- r{ask} question from task w, just now: \"which db?\""),
+                format!("- m{m} message from task w, just now: \"look at ‹this›\""),
+            ]
+        );
+        assert_eq!(
+            &lines[4..],
+            [
+                "jeet: 1 open ask you hold (answer with `jeet report answer <id> \"…\"`):".to_string(),
+                format!("- #{ask} question from task assistant/w, just now: \"which db?\" (jeet show r{ask})"),
+            ]
+        );
+        // Read: not told again, to this session or a new one.
+        assert!(brief("s1", false).starts_with("jeet: nothing new"));
+        assert_eq!(assistant::brief::summary_line(&home, "s1").unwrap(), None);
+        assert_eq!(assistant::brief::summary_line(&home, "s2").unwrap(), None);
+        // Something new; `--all` shows everything and moves nothing.
+        let (_, delivered) = send(&app, &w, ReportKind::Progress, "halfway", false).unwrap();
+        assert_eq!(delivered.unwrap(), Delivered::Stored);
+        let all = brief("s1", true);
+        assert!(
+            all.starts_with("jeet: 3 new reports (1 question, 1 done, 1 progress), 1 message kept"),
+            "{all}"
+        );
+        let line = assistant::brief::summary_line(&home, "s1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            line.starts_with("jeet: 1 new report (1 progress) since"),
+            "{line}"
+        );
+        assert!(brief("s1", false).starts_with("jeet: 1 new report (1 progress) since"));
+        assert_eq!(assistant::brief::summary_line(&home, "s1").unwrap(), None);
+        // Any task below the assistant is refused.
+        let refused = assistant::brief::key_for(&app, &Caller::Node(w.clone())).unwrap_err();
+        assert!(refused.to_string().contains("the assistant's"), "{refused}");
     }
 
     /// A manager's agent that is not running, recording what starts it.

@@ -1231,6 +1231,23 @@ pub fn current_session() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// What the window this process runs in is keyed by ([`new_window`]), if
+/// it runs in one jeet made.
+pub fn current_window_key() -> Option<String> {
+    std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
+    let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
+    let output = command()
+        .args(["display-message", "-p", "-t", &pane])
+        .arg(format!("#{{{KEY_OPTION}}}"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .bounded_output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
 /// Whether anything is still running in session `name`: false when the
 /// session is gone or every pane in it has exited.
 pub fn pane_alive(name: &str) -> bool {

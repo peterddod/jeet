@@ -7931,6 +7931,8 @@ fn the_assistant_starts_each_session_with_a_summary_of_the_work() {
 #[test]
 fn messages_for_the_assistant_go_to_its_primary_or_latest_running_session() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
+    push_delivery(&lab);
     let scratch = TempDir::new().unwrap();
     let tmux = stub_window_tmux(scratch.path());
     let tmux_env = tmux.to_string_lossy().to_string();
@@ -8215,9 +8217,13 @@ fn watch_hands_new_github_events_to_the_assistant_or_notifies_them() {
         ("JEET_AGENT", "claude"),
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
     ];
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
         r#"scan_roots = []
+
+[assistant]
+push = true
 
 [[assistant.rules]]
 on = ["review_requested"]
@@ -8373,9 +8379,13 @@ fn watch_in_the_background_never_starts_a_tmux_server() {
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
         ("JEET_BACKGROUND", "1"),
     ];
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
         r#"scan_roots = []
+
+[assistant]
+push = true
 
 [[assistant.rules]]
 on = ["review_requested"]
@@ -8695,12 +8705,14 @@ action = "manager:api"
 #[test]
 fn a_rule_for_a_missing_or_archived_manager_goes_to_the_assistant() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
         r#"scan_roots = []
 
 [assistant]
 notify = false
+push = true
 
 [[assistant.rules]]
 on = ["review_requested"]
@@ -8796,12 +8808,14 @@ action = "manager:Fe API"
 #[test]
 fn a_manager_that_cannot_be_told_hands_its_events_to_the_assistant() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
         r#"scan_roots = []
 
 [assistant]
 notify = false
+push = true
 
 [[assistant.rules]]
 on = ["ci_failed"]
@@ -9587,6 +9601,8 @@ fn a_review_the_assistant_checks_out_reports_to_it() {
 #[test]
 fn a_task_in_the_assistants_home_is_not_the_assistant() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
+    push_delivery(&lab);
     lab.new_task_with("x", &["--parent", "assistant"]);
     let z = lab.new_task_with("z", &["--parent", "assistant", "--goal", "look"]);
     let background = [("JEET_BACKGROUND", "1")];
@@ -9687,6 +9703,8 @@ fn one_stub_tmux_runs_several_tasks_apart() {
 #[test]
 fn a_task_reports_to_its_parent_and_nobody_else_can() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
+    push_delivery(&lab);
     let x = lab.new_task_with("x", &["--parent", "assistant"]);
     let y = lab.new_task_with("y", &[]);
     let assistant = lab.assistant_id();
@@ -9803,6 +9821,8 @@ fn a_task_reports_to_its_parent_and_nobody_else_can() {
 #[test]
 fn a_report_jeet_cannot_deliver_is_kept() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
+    push_delivery(&lab);
     let x = lab.new_task_with("x", &["--parent", "assistant"]);
     let assistant = lab.assistant_id();
     // The assistant's inbox cannot be appended to.
@@ -9883,9 +9903,10 @@ fn idle_since(dir: &std::path::Path, secs: u64) {
 #[test]
 fn the_assistants_turn_ending_and_each_watch_poll_tell_it_of_idle_tasks() {
     let lab = StoreLab::new();
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[managers]\nidle_report_mins = 1\n[messages]\nrender = { assistant = \"full\" }\n",
+        "scan_roots = []\n[assistant]\npush = true\n[managers]\nidle_report_mins = 1\n[messages]\nrender = { assistant = \"full\" }\n",
     )
     .unwrap();
     let x = lab.new_task_with("x", &["--parent", "assistant"]);
@@ -12425,15 +12446,27 @@ fn a_managers_run_state_holds_its_whole_subtree() {
     assert!(stub.join("alive/jeet-w").exists());
 }
 
+/// Config for a lab whose assistant is pushed to, as it was before
+/// delivery to it was stored by default.
+#[cfg(unix)]
+fn push_delivery(lab: &StoreLab) {
+    std::fs::write(
+        lab.home().join("config.toml"),
+        "scan_roots = []\n[assistant]\npush = true\n",
+    )
+    .unwrap();
+}
+
 /// A real tree for `--recursive`: the manager `api`, from `jeet manager
 /// new`, and its worker `w`, made by `api`'s own pane with a worktree of
 /// `widget`, both running under `tmux`, a [`multi_session`] stub. Their
 /// ids, and the panes, which must outlive the test's use of them.
 #[cfg(unix)]
 fn running_tree(lab: &StoreLab, tmux: &std::path::Path) -> (String, String, Vec<PaneShell>) {
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+        "scan_roots = []\n[assistant]\nnotify = false\npush = true\nallow = [\"task.create\", \
          \"task.send\", \"worktree.add\"]\n",
     )
     .unwrap();
@@ -16305,9 +16338,10 @@ fn an_unanchored_agent_is_listed_with_its_fix_and_cannot_adopt_itself() {
 /// stub. Their ids, and the panes, `api`'s first.
 #[cfg(unix)]
 fn asking_tree(lab: &StoreLab, tmux: &std::path::Path) -> (String, String, Vec<PaneShell>) {
+    // Today's push delivery, as `[assistant] push = true` keeps it.
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+        "scan_roots = []\n[assistant]\nnotify = false\npush = true\nallow = [\"task.create\", \
          \"task.send\", \"manager.create\"]\n",
     )
     .unwrap();
@@ -17494,4 +17528,162 @@ fn a_task_is_told_its_pr_policy_the_most_specific_one_winning() {
     );
     let context = context_of(&plain, "plain");
     assert!(context.starts_with("PR policy: auto — "), "{context}");
+}
+
+#[test]
+#[cfg(unix)]
+fn off_the_push_path_the_assistant_hears_on_the_users_prompt_and_reads_with_brief() {
+    let lab = StoreLab::new();
+    let scratch = TempDir::new().unwrap();
+    let gh = stub_watch_gh(scratch.path());
+    let tmux = stub_window_tmux(scratch.path());
+    let notifier = stub_notifier(scratch.path());
+    let path = path_with(&gh);
+    let tmux_env = tmux.to_string_lossy().to_string();
+    let notifier_env = notifier.to_string_lossy().to_string();
+    // No `push` key: the default keeps what is sent to the assistant.
+    std::fs::write(
+        lab.home().join("config.toml"),
+        r#"scan_roots = []
+
+[[assistant.rules]]
+on = ["review_requested"]
+repos = ["acme/*"]
+action = "assistant"
+"#,
+    )
+    .unwrap();
+    let x = lab.new_task_with("x", &["--parent", "assistant"]);
+    let assistant = lab.assistant_id();
+    let kept = || {
+        std::fs::read_to_string(lab.home().join("assistant/.jeet/delivered.jsonl"))
+            .unwrap_or_default()
+    };
+
+    // A question, where a session may be started: kept, none started, and
+    // nothing queued for one.
+    let mut x_agent = lab.task_pane("x");
+    let fg = [("JEET_TMUX", tmux_env.as_str())];
+    let output = x_agent.jeet(&["report", "question", "which db?"], &lab.home(), &fg);
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("kept for the assistant, which reads it with `jeet brief`"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        lab.reports_of(&x),
+        [("question".into(), assistant.clone(), "which db?".into())]
+    );
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    assert!(
+        std::fs::read_to_string(lab.home().join("assistant/.jeet/inbox.jsonl"))
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+    );
+    assert!(kept().contains(r#""stored":true,"ref":"r1""#), "{}", kept());
+
+    // Watch events a rule hands to it: kept, one by one, and notified, as
+    // nothing starts a session for them.
+    let env = [
+        ("PATH", path.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+        ("JEET_AGENT", "claude"),
+        ("JEET_NOTIFY_CMD", notifier_env.as_str()),
+    ];
+    std::fs::write(
+        gh.join("notifications"),
+        watch_fixture("notifications_before.json"),
+    )
+    .unwrap();
+    std::fs::write(gh.join("last-modified"), "Sat, 10 Oct 2026 12:00:00 GMT").unwrap();
+    my_pr_42(&gh, "1111111111111111111111111111111111111111", "PENDING");
+    succeeded(&lab.jeet_at(&["watch", "--once"], &lab.home(), &env));
+    std::fs::write(
+        gh.join("notifications"),
+        watch_fixture("notifications.json"),
+    )
+    .unwrap();
+    std::fs::write(gh.join("last-modified"), "Sat, 10 Oct 2026 12:05:00 GMT").unwrap();
+    std::fs::write(
+        gh.join("pull-9.json"),
+        r#"{"state":"closed","merged":true,"merged_by":{"login":"carol"}}"#,
+    )
+    .unwrap();
+    let output = lab.jeet_at(&["watch", "--once"], &lab.home(), &env);
+    succeeded(&output);
+    assert!(calls_of(&tmux, "new-session").is_empty());
+    let watched = kept().matches(r#""kind":"watch""#).count();
+    assert!(watched >= 1, "{}", kept());
+    let notes = notes_once(&notifier, |n| {
+        n.iter().any(|l| l.contains("review requested acme/api"))
+    });
+    assert!(
+        notes
+            .iter()
+            .any(|l| l.contains("review requested acme/api")),
+        "{notes:?}"
+    );
+
+    // The user's next prompt to the assistant carries one hidden line.
+    let as_assistant = [
+        ("JEET_ASSISTANT", "1"),
+        ("JEET_TASK_ID", assistant.as_str()),
+        ("JEET_TMUX", tmux_env.as_str()),
+    ];
+    let session = "11111111-2222-4333-8444-555555555555";
+    let prompt = hook_input("UserPromptSubmit", session, &lab.home().join("assistant"));
+    let told = || {
+        let output = lab.hook("UserPromptSubmit", &prompt, &as_assistant);
+        succeeded(&output);
+        let value: serde_json::Value = serde_json::from_str(&stdout_of(&output)).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let events = match watched {
+        1 => "1 watch event".to_string(),
+        n => format!("{n} watch events"),
+    };
+    let line = told();
+    assert!(
+        line.starts_with(&format!(
+            "jeet: 1 new report (1 question), {events} since your last `jeet brief`"
+        )),
+        "{line}"
+    );
+
+    // `jeet brief` at the user's terminal: what came, the asks, and then
+    // nothing new; the assistant's session keeps its own cursor.
+    let output = lab.jeet_at(&["brief"], &lab.home(), &[]);
+    succeeded(&output);
+    let brief = stdout_of(&output);
+    assert!(
+        brief.starts_with(&format!(
+            "jeet: 1 new report (1 question), {events} since your last brief."
+        )),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("- r1 question from task x, just now: \"which db?\"\n"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("- #1 question from task assistant/x"),
+        "{brief}"
+    );
+    let again = stdout_of(&lab.jeet_at(&["brief"], &lab.home(), &[]));
+    assert!(
+        again.starts_with("jeet: nothing new since your last brief\n"),
+        "{again}"
+    );
+    assert_eq!(told(), line);
+    let all = stdout_of(&lab.jeet_at(&["brief", "--all"], &lab.home(), &[]));
+    assert!(all.contains("- r1 question from task x"), "{all}");
 }

@@ -276,15 +276,29 @@ pub struct AssistantConfig {
     /// the first rule that matches decides; none matching, it is notified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
+
+    /// Whether what jeet's agents and events address to the assistant is
+    /// pushed into its sessions, as before (default: off). Off, it is kept
+    /// for `jeet brief`, and the user's next prompt carries a line saying
+    /// what is new; nothing starts a session for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<bool>,
 }
 
 impl AssistantConfig {
     fn is_empty(&self) -> bool {
-        self.allow.is_empty() && self.notify.is_none() && self.rules.is_empty()
+        self.allow.is_empty()
+            && self.notify.is_none()
+            && self.rules.is_empty()
+            && self.push.is_none()
     }
 
     pub fn notify(&self) -> bool {
         self.notify.unwrap_or(true)
+    }
+
+    pub fn push(&self) -> bool {
+        self.push.unwrap_or(false)
     }
 }
 

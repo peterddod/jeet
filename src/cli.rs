@@ -250,6 +250,15 @@ pub enum Commands {
         reference: String,
     },
 
+    /// Print what was kept for the assistant since you last ran this
+    /// (reports, messages, watch events), then the open asks you hold
+    Brief {
+        /// Everything kept (the last 30 days), leaving what you have read
+        /// as it is
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Print shell integration snippet for native cd command
     InitShell,
 
