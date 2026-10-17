@@ -547,6 +547,16 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX tasks_one_setup ON tasks(kind) WHERE kind = 'setup';
     CREATE INDEX tasks_parent ON tasks(parent_id);
     ",
+    // v13: what `sweep_asks` did with an open ask, so each step is taken
+    // once: re-posted to its holder after `[messages] reask_mins`, and the
+    // user told after `escalate_mins`. Every ask from before counts as done
+    // both ways, so an upgrade does not send them all at once. Additive
+    // only.
+    "
+    ALTER TABLE task_reports ADD COLUMN reasked INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE task_reports ADD COLUMN unanswered_told INTEGER NOT NULL DEFAULT 0;
+    UPDATE task_reports SET reasked = 1, unanswered_told = 1;
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one

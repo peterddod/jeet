@@ -973,6 +973,127 @@ pub fn sweep_stuck(app: &App, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// What an ask re-posted to its holder by [`sweep_asks`] is said to come
+/// by.
+const REASK_VIA: &str = "jeet (unanswered)";
+
+/// Look after each open ask that is still unanswered (DESIGN §4.3, "no
+/// question is lost"): after `[messages] reask_mins`, post it again to the
+/// manager holding it, once; after `escalate_mins`, tell the user, once.
+/// One the assistant holds, or has passed to the user, is not re-posted:
+/// the user was told when it reached the assistant. The user's reminder is
+/// for every ask, whoever holds it, under its own `(why, ref)`; the quiet
+/// flag does not hold it back; `[notify] events = false` does, as for
+/// jeet's other events, and `[[notify.rules]]` filter it. Runs from `jeet
+/// watch`, as nothing else happens when an ask just waits.
+pub fn sweep_asks(app: &App, now: i64) -> Result<()> {
+    sweep_asks_with(
+        app,
+        now,
+        &|to, text, may_start| deliver_to(app, to, text, may_start),
+        &|e| notify::event(app, e),
+    )
+}
+
+/// [`sweep_asks`], delivering with `deliver` and notifying with `notifier`.
+fn sweep_asks_with(
+    app: &App,
+    now: i64,
+    deliver: &DeliverFn,
+    notifier: &dyn Fn(Event),
+) -> Result<()> {
+    let reask = app.config.reask_secs();
+    // The user's decision: `[notify] events` mutes the reminder too.
+    let escalate = app
+        .config
+        .escalate_secs()
+        .filter(|_| app.config.notify.events());
+    if reask.is_none() && escalate.is_none() {
+        return Ok(());
+    }
+    let due = |after: Option<i64>, at: i64| after.is_some_and(|after| now - at >= after);
+    for row in app.db.open_asks(None)? {
+        let (reask_due, escalate_due) = (due(reask, row.at), due(escalate, row.at));
+        if !reask_due && !escalate_due {
+            continue;
+        }
+        let Some(asker) = Asker::find(app, &row.task_id)? else {
+            continue;
+        };
+        let path = match asker.path(app) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("jeet: could not look after unanswered #{}: {e:#}", row.id);
+                continue;
+            }
+        };
+        if reask_due {
+            reask_ask(app, &row, &asker, &path, deliver)?;
+        }
+        // Claimed last: one that cannot be told now is tried again.
+        if escalate_due && app.db.claim_unanswered(row.id)? {
+            notifier(Event {
+                why: Why::NeedsUser,
+                kind: row.kind.as_str().into(),
+                level: Some(asker.level()),
+                task: Some(asker.slug().to_string()),
+                // Neither `r<id>` (it reached the assistant) nor
+                // `r<id>/user` (it reached the user): either would swallow
+                // this.
+                reference: Some(format!("r{}/unanswered", row.id)),
+                title: format!(
+                    "jeet: {} has waited {}m for an answer (#{})",
+                    asker.label(),
+                    (now - row.at) / 60,
+                    row.id
+                ),
+                subtitle: Some(path.clone()),
+                body: row.body.clone(),
+                link: Some(crate::link::link_for(&Link::Report(row.id))),
+                only: Vec::new(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Post ask `row` from `asker`, at `path`, again to the manager holding
+/// it, once, fenced as an escalation is and as able to start it.
+fn reask_ask(
+    app: &App,
+    row: &TaskReportRecord,
+    asker: &Asker,
+    path: &str,
+    deliver: &DeliverFn,
+) -> Result<()> {
+    if row.needs_user {
+        return Ok(());
+    }
+    let Some(holder) = app.db.get_task(&row.to_id)? else {
+        return Ok(());
+    };
+    match holder.kind {
+        TaskKind::Manager => {}
+        // The assistant's asks told the user when they reached it; nothing
+        // else holds one.
+        TaskKind::Assistant | TaskKind::Work | TaskKind::Setup => return Ok(()),
+    }
+    if !app.db.claim_reask(row.id, &holder.id)? {
+        return Ok(());
+    }
+    let text =
+        assistant::fence_escalated(row.id, &asker.label(), path, row.kind, &row.body, REASK_VIA);
+    if let Err(e) = deliver(&holder, &text, wakes(row.kind)) {
+        eprintln!(
+            "jeet: could not post unanswered #{} to {} again: {e:#}",
+            row.id,
+            manager::label(&holder)
+        );
+        app.db.release_reask(row.id)?;
+    }
+    Ok(())
+}
+
 /// Tell the parents of tasks idle longer than `[managers] idle_report_mins`,
 /// and charge each task in the tree the time its agent has been busy so
 /// far, holding a long turn to its budget before it ends (M19). No event
@@ -1995,6 +2116,155 @@ mod tests {
         );
         sweep_stuck(&app, at + 90 * 60).unwrap();
         assert_eq!(told(&app).len(), 1, "told once");
+    }
+
+    /// The title and ref of each notification a sweep gave.
+    type Told = Vec<(String, Option<String>)>;
+
+    /// Run [`sweep_asks_with`] at `now`: what it posted, and what it told
+    /// the user.
+    fn swept(app: &App, now: i64) -> (Vec<(String, String, bool)>, Told) {
+        let sent = Sent::default();
+        let notified = RefCell::new(Vec::new());
+        sweep_asks_with(app, now, &recording(&sent), &|e: Event| {
+            assert_eq!(e.why, Why::NeedsUser);
+            let id = e
+                .reference
+                .as_deref()
+                .unwrap()
+                .trim_end_matches("/unanswered");
+            assert_eq!(e.link, Some(format!("jeet://report/{}", &id[1..])));
+            notified.borrow_mut().push((e.title, e.reference));
+        })
+        .unwrap();
+        (sent.into_inner(), notified.into_inner())
+    }
+
+    #[test]
+    fn an_unanswered_ask_is_reposted_to_its_manager_then_told_to_the_user_once_each() {
+        let (_dir, app) = ask_lab();
+        // Quiet does not hold the reminder back.
+        app.db.set_task_quiet("ww", true).unwrap();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+
+        assert_eq!(swept(&app, at + 14 * 60), (vec![], vec![]));
+        let (sent, notified) = swept(&app, at + 15 * 60);
+        assert!(notified.is_empty());
+        assert_eq!(sent.len(), 1);
+        let (to, text, may_start) = &sent[0];
+        assert_eq!(to, "sub");
+        assert!(may_start, "as an escalation, it may start its holder");
+        assert_eq!(
+            *text,
+            format!(
+                "<jeet-report id=\"{id}\" from=\"task ww\" path=\"assistant/api/sub/ww\" \
+                 kind=\"question\" via=\"jeet (unanswered)\" untrusted=\"true\">\nkeep v1?\n\
+                 </jeet-report>"
+            )
+        );
+        assert_eq!(swept(&app, at + 30 * 60), (vec![], vec![]), "posted once");
+
+        let (sent, notified) = swept(&app, at + 61 * 60);
+        assert!(sent.is_empty());
+        assert_eq!(
+            notified,
+            [(
+                format!("jeet: task ww has waited 61m for an answer (#{id})"),
+                Some(format!("r{id}/unanswered"))
+            )]
+        );
+        assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]), "told once");
+    }
+
+    #[test]
+    fn a_repost_that_does_not_get_through_is_tried_again() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        let sent = Sent::default();
+        let notifier = |_: Event| {};
+        sweep_asks_with(&app, at + 15 * 60, &failing(&sent, &["sub"]), &notifier).unwrap();
+        assert_eq!(sent.borrow().len(), 1);
+        let (sent, _) = swept(&app, at + 16 * 60);
+        assert_eq!(sent.len(), 1, "tried again");
+        assert_eq!(swept(&app, at + 17 * 60), (vec![], vec![]));
+    }
+
+    #[test]
+    fn an_answered_or_superseded_ask_is_left_alone() {
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        app.db.answer_report(id, Some("sub"), "yes", "sub").unwrap();
+        assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]));
+        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done anyway", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]));
+    }
+
+    #[test]
+    fn the_assistants_asks_are_not_reposted_but_still_told_at_the_hour() {
+        let (_dir, app, w) = lab();
+        let (id, _) = send(&app, &w, ReportKind::Blocked, "no key", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        assert_eq!(swept(&app, at + 15 * 60), (vec![], vec![]));
+        let (sent, notified) = swept(&app, at + 60 * 60);
+        assert!(sent.is_empty());
+        assert_eq!(
+            notified,
+            [(
+                format!("jeet: task w has waited 60m for an answer (#{id})"),
+                Some(format!("r{id}/unanswered"))
+            )]
+        );
+
+        // Passed to the user, it is not re-posted to the assistant either.
+        let (_dir, app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let root = assistant::ensure(&app).unwrap().id;
+        app.db.escalate_report(id, "sub", &root, true).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        let (sent, notified) = swept(&app, at + 60 * 60);
+        assert!(sent.is_empty());
+        assert_eq!(notified.len(), 1);
+    }
+
+    #[test]
+    fn zero_turns_either_step_off() {
+        let (_dir, mut app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        app.config.messages.reask_mins = Some(0);
+        app.config.messages.escalate_mins = Some(0);
+        assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]));
+        app.config.messages.escalate_mins = Some(60);
+        let (sent, notified) = swept(&app, at + 120 * 60);
+        assert!(sent.is_empty());
+        assert_eq!(notified.len(), 1);
+        app.config.messages.reask_mins = Some(15);
+        let (sent, notified) = swept(&app, at + 120 * 60);
+        assert_eq!(sent.len(), 1);
+        assert!(notified.is_empty());
+    }
+
+    #[test]
+    fn notify_events_off_mutes_the_reminder_but_not_the_repost() {
+        let (_dir, mut app) = ask_lab();
+        let ww = app.db.get_task("ww").unwrap().unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let at = app.db.get_report(id).unwrap().unwrap().at;
+        app.config.notify.events = Some(false);
+        let (sent, notified) = swept(&app, at + 120 * 60);
+        assert_eq!(sent.len(), 1);
+        assert!(notified.is_empty());
+        assert_eq!(swept(&app, at + 121 * 60), (vec![], vec![]));
     }
 
     #[test]
