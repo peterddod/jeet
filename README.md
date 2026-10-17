@@ -1448,8 +1448,9 @@ hash = "af63dc4c8601ec8c"              # the target's hash when staged; omit for
 manifest, a staged file reached through a symlink, and a target that is one.
 For each file it prints a coloured unified diff (or "new file") and
 asks `Apply this change? [y/N/q]`. A staged `config.toml` is first loaded as
-jeet would load it, with the `[managers]` and `[review]` policies and the
-`[assistant] allow` capabilities checked, and refused if any fails. The diff
+jeet would load it, with the `[managers]` and `[review]` policies, the
+`[assistant] allow` capabilities and the `[notify] via` backends (`command`
+needs `[notify] command`) checked, and refused if any fails. The diff
 shows exactly the bytes that would be written. A file
 whose target changed since it was staged (its hash no longer matches, as
 `jeet setup status` shows) is refused too: stage it again. On `y`, the old

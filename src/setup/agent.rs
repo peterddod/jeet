@@ -476,6 +476,29 @@ mod tests {
     }
 
     #[test]
+    fn the_skill_covers_every_notify_setting_and_backend() {
+        let skill = fill(SKILL);
+        let section = &skill[skill.find("### 9. Notifications").unwrap()..];
+        let section = &section[..section.find("### 10.").unwrap()];
+        for needle in [
+            "`via`",
+            "`command`",
+            "`max_per_hour`",
+            "`[[notify.rules]]`",
+            "`terminal`",
+            "`[assistant] notify`",
+            "`[review] notify`",
+            "notify install",
+        ] {
+            assert!(section.contains(needle), "{needle}");
+        }
+        for backend in crate::notify::BACKENDS {
+            assert!(section.contains(&format!("`{backend}`")), "{backend}");
+        }
+        assert!(!section.contains("has not landed"));
+    }
+
+    #[test]
     fn ensure_files_writes_what_is_missing_and_keeps_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let written = ensure_files(dir.path()).unwrap();

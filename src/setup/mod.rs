@@ -134,8 +134,9 @@ pub fn target_path(home: &Path, id: &str) -> Result<PathBuf> {
 }
 
 /// Check a staged `config.toml` as jeet would read it: its deserializer,
-/// then the `[managers]` and `[review]` policies and the capabilities in
-/// `[assistant] allow`, which are otherwise checked only where used.
+/// then the `[managers]` and `[review]` policies, the capabilities in
+/// `[assistant] allow` and the backends of `[notify] via`, which are
+/// otherwise checked only where used.
 pub fn check_config(text: &str) -> Result<()> {
     let config: Config = toml::from_str(text).context("parse")?;
     config.manager_policy()?;
@@ -145,6 +146,7 @@ pub fn check_config(text: &str) -> Result<()> {
             bail!("[assistant] allow: {e}");
         }
     }
+    crate::notify::check(&config.notify)?;
     Ok(())
 }
 
@@ -241,6 +243,38 @@ mod tests {
         let err = check_config("[assistant]\nallow = [\"task.creat\"]\n").unwrap_err();
         assert!(format!("{err:#}").contains("task.creat"), "{err:#}");
         assert!(check_config("[assistant]\nallow = [\"task.create\"]\n").is_ok());
+    }
+
+    #[test]
+    fn checks_the_notify_section() {
+        for good in [
+            "[notify]\nvia = []\n",
+            "[notify]\nvia = [\"desktop\"]\nmax_per_hour = 0\n",
+            "[notify]\nvia = [\"desktop\", \"command\"]\ncommand = \"page-me\"\n",
+            "[notify]\nterminal = \"none\"\n\n[[notify.rules]]\nkind = [\"action\"]\nlevel = [\"assistant\"]\naction = \"ignore\"\n",
+        ] {
+            assert!(check_config(good).is_ok(), "{good}");
+        }
+        for (bad, says) in [
+            ("[notify]\nvia = [\"slack\"]\n", "slack"),
+            ("[notify]\nvia = [\"command\"]\n", "[notify] command"),
+            (
+                "[notify]\nvia = [\"command\"]\ncommand = \" \"\n",
+                "[notify] command",
+            ),
+            (
+                "[[notify.rules]]\nlevel = [\"worker\"]\naction = \"ignore\"\n",
+                "worker",
+            ),
+            (
+                "[[notify.rules]]\nkind = [\"review\"]\naction = \"mute\"\n",
+                "mute",
+            ),
+            ("[notify]\nmax_per_hour = -1\n", "max_per_hour"),
+        ] {
+            let err = check_config(bad).unwrap_err();
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
     }
 
     #[test]
