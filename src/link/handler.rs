@@ -38,6 +38,16 @@ pub fn install(home: &Path) -> Result<()> {
     }
 }
 
+/// Whether `jeet notify install-link` has put the handler in place, so a
+/// `jeet://` link is worth offering to click.
+pub fn installed() -> bool {
+    let path = match cfg!(target_os = "macos") {
+        true => bundle_path(),
+        false => applications_dir().map(|dir| dir.join(DESKTOP_FILE)),
+    };
+    path.is_ok_and(|p| p.exists())
+}
+
 /// `jeet notify uninstall-link`.
 pub fn uninstall() -> Result<()> {
     match cfg!(target_os = "macos") {
