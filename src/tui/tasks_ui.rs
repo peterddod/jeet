@@ -15,7 +15,7 @@ use super::reviews::{PrReview, ReviewLine, ReviewRow, Verdict};
 use super::state::human_size;
 use super::tasks::{
     AddField, Field, NewProjectForm, NewTaskForm, Panel, Picker, ProjectField, TaskRow, TasksUi,
-    View, REVIEW_MENU,
+    View,
 };
 use super::term::Link;
 use super::ui::{centered_rect, content_rect, draw_working, fitted_rect, truncate};
@@ -207,17 +207,17 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
 pub const HELP_REVIEWS: &[(&str, &str)] = &[
     (
         "⏎",
-        "the review's menu: v view the diff, s open its session",
+        "the review's session: its agent, attached, resumed or started",
     ),
     (
         "v",
         "the review's PR in the review viewer, showing its diff",
     ),
-    (
-        "",
-        "the session is the review's agent: attached, resumed or started",
-    ),
     ("e", "explore the review's worktree"),
+    (
+        "R",
+        "ask the review's agent to review again, as jeet review <pr> --rerun · an archived review: a first",
+    ),
     ("a", "archive the review · unarchive, on an archived one"),
     (
         "A",
@@ -371,9 +371,10 @@ const HINTS_AGENTS: &[&str] = &[
 ];
 
 const HINTS_REVIEWS: &[&str] = &[
-    "⏎ menu",
+    "⏎ session",
     "v diff",
     "e explore",
+    "R rerun",
     "a archive",
     "A archived",
     "r refresh",
@@ -1927,28 +1928,6 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             );
             render_list(frame, area, title, items, *selected);
         }
-        Panel::ReviewMenu {
-            label, selected, ..
-        } => {
-            let items = REVIEW_MENU
-                .iter()
-                .map(|(key, what)| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{key}  "),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(what.to_string()),
-                    ]))
-                })
-                .collect();
-            let label = printable(label);
-            let area = content_rect(70, REVIEW_MENU.len() + 2, full);
-            let title = format!(" {label} · ⏎ choose  esc cancel ");
-            render_list(frame, area, title, items, *selected);
-        }
         Panel::Places {
             task_id,
             places,
@@ -3413,15 +3392,6 @@ mod tests {
                 scroll: 3,
                 prs: None,
             }),
-            Some(Panel::ReviewMenu {
-                task_id: "a".into(),
-                pr: crate::tui::reviews::PrKey {
-                    repo_id: "github.com/acme/api".into(),
-                    number: 7,
-                },
-                label: "review \u{1b}[2Japi#7".into(),
-                selected: 1,
-            }),
             Some(Panel::Answer {
                 id: 42,
                 title: "#42 question from task \u{1b}[2Jw".into(),
@@ -4189,7 +4159,7 @@ mod tests {
         assert!(hints(20, View::Active, false).contains("q quit"));
         assert!(hints(200, View::Active, false).contains("⏎ open"));
         assert!(hints(200, View::Agents, false).contains("l worklog"));
-        assert!(hints(200, View::Reviews, false).contains("⏎ menu"));
+        assert!(hints(200, View::Reviews, false).contains("⏎ session"));
         assert!(help(View::Reviews).iter().any(|(k, _)| *k == "v"));
         assert!(!hints(200, View::Agents, false).contains("archive"));
     }
