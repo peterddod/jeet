@@ -14,8 +14,9 @@ fn jeet_bin() -> Command {
     // the tests that want one turn it back on.
     cmd.env("JEET_SYNC_INTERVAL_SECS", "0");
     // Nor may one reach the developer's real ~/.jeet: a test that needs a
-    // home sets its own, which wins over this.
-    cmd.env("JEET_HOME", "/nonexistent/jeet-test-home");
+    // home sets its own, which wins over this. Under /dev/null, so not even
+    // root can create it.
+    cmd.env("JEET_HOME", "/dev/null/jeet-test-home");
     // Running the suite from inside a task's agent session must not point
     // `jeet worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("JEET_TASK_ID").env_remove("JEET_CD_FILE");
@@ -339,6 +340,16 @@ fn a_dev_build_does_not_migrate_the_default_index() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("development build"), "{stderr}");
     assert!(stderr.contains("JEET_HOME"), "{stderr}");
+    // Nor when JEET_HOME names it outright.
+    let explicit = format!("{}/.jeet/", home.path().display());
+    let output = jeet_bin()
+        .arg("ls")
+        .env("HOME", home.path())
+        .env("JEET_HOME", &explicit)
+        .env_remove("JEET_ALLOW_DEV_MIGRATE")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", stdout_of(&output));
     // A scratch home is migrated as ever.
     let scratch = TempDir::new().unwrap();
     succeeded(

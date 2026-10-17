@@ -672,24 +672,40 @@ fn refuse_dev_migration(index: &Path, current: i64, latest: i64) -> Result<()> {
 }
 
 /// What makes this binary a development build, if it is one: a debug build,
-/// or one run from inside a cargo target directory (which cargo marks with a
-/// `CACHEDIR.TAG`). An installed release is neither.
+/// or one run from inside a cargo target directory: `target/<profile>/`,
+/// `target/<triple>/<profile>/` or `target/<profile>/deps/`, where cargo
+/// marks `target` with a `CACHEDIR.TAG`. Only those two levels are looked
+/// at, so a release unpacked somewhere under an unrelated tagged cache is
+/// not mistaken for one. An installed release is neither.
 fn dev_build() -> Option<String> {
     let exe = std::env::current_exe().ok();
     if cfg!(debug_assertions) {
         return Some(exe.map_or("debug build".into(), |e| e.display().to_string()));
     }
     let exe = exe?;
-    exe.ancestors()
+    exe.parent()?
+        .ancestors()
         .skip(1)
+        .take(2)
         .any(|dir| dir.join("CACHEDIR.TAG").is_file())
         .then(|| exe.display().to_string())
 }
 
 /// Whether two paths name the same file, through symlinks where they exist.
+/// The file itself may not exist yet, so its directory is resolved then.
 fn same_file(a: &Path, b: &Path) -> bool {
     let canon = |p: &Path| {
+        if let Ok(p) = p.canonicalize() {
+            return p;
+        }
         p.parent()
+            .map(|d| {
+                if d.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    d
+                }
+            })
             .and_then(|d| d.canonicalize().ok())
             .zip(p.file_name())
             .map_or(p.to_path_buf(), |(d, f)| d.join(f))
