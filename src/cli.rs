@@ -109,6 +109,12 @@ pub enum Commands {
         pick: bool,
     },
 
+    /// Setup: apply, list or drop the changes the setup agent staged
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommands,
+    },
+
     /// The assistant's todo list, `todo.md` in its home (with no
     /// subcommand: the list)
     Todo {
@@ -657,6 +663,19 @@ pub enum TodoCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SetupCommands {
+    /// Review each staged change as a diff and apply it with a yes, after a
+    /// backup (only at your own terminal)
+    Apply,
+
+    /// List the staged changes, their targets' hashes and the last applied run
+    Status,
+
+    /// Drop every staged change
+    Discard,
 }
 
 #[derive(Subcommand)]
