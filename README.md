@@ -2639,6 +2639,45 @@ can answer tells you too (kind `waiting`, held back by the quiet flag as an
 ask is), and so does a `jeet watch` event a rule hands to the assistant, as
 one did before when no session of the assistant's could take it.
 
+### Letting a task interrupt the assistant
+
+The inbox stays the default. A task or manager you choose may push a
+message straight into the assistant's session instead, when it holds
+`assistant.interrupt` and asks for it per message:
+
+```bash
+jeet report blocked --interrupt "the deploy is down; I need a decision"
+jeet task send assistant --interrupt "…"   # the same, as a message
+```
+
+`assistant.interrupt` is never in a default grant: give it by name, like
+any capability, and list it in `[assistant] allow` first, as each list
+above a task cuts its grant:
+
+```bash
+jeet task new fix-x --allow worktree.add,assistant.interrupt
+jeet manager grant backend task.create,worktree.add,assistant.interrupt
+```
+
+It can also go in `[managers] worker_default` or `manager_default`, if you
+want every new task to have it. A manager can pass it down only if it holds
+it.
+
+An interrupt goes through the wake channel of the assistant's session. At an
+idle prompt it is posted at once. During a turn it is handed over when that
+turn ends; it never cuts the turn short, because only you interrupt the
+assistant. With no session running, it is kept for `jeet brief` like
+anything else, and no session is started for it. It is fenced like any report or message,
+marked `interrupt="true"`, and still `untrusted="true"`. A report's
+`--interrupt` counts only for a report to the assistant; a manager gets its
+reports pushed already.
+
+Each use is written to the sender's `actions.log`, or to the assistant's
+for a top-level task or your terminal, which are not gated. Refusals are
+logged too. Without the capability, the report or message is kept for the
+assistant as ever, and the command fails saying why and not to send it
+again.
+
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
@@ -2847,7 +2886,10 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
 (`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`)
-and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
+`manager.stop` (`jeet manager pause`, `resume` and `stop`) and
+`assistant.interrupt` (`--interrupt` on `jeet report` and `jeet task send
+assistant`, for the tasks under the assistant; see [Letting a task
+interrupt the assistant](#letting-a-task-interrupt-the-assistant)). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr

@@ -73,6 +73,14 @@ report `blocked` or `question` rather than look for a way around it.
 Keep reports short. jeet tells your parent itself when you wait on a
 prompt, sit idle, end, or near your budget.
 
+A report to the assistant waits in its inbox until it reads it. If your
+brief's `You may:` line lists `assistant.interrupt` and you report to the
+assistant, `--interrupt` (`jeet report blocked --interrupt "…"`) pushes the
+report into its session: it is posted at once if the assistant is idle, or
+when its current turn ends. Use it only for what cannot wait, never for
+progress. You can pass the capability to a task below you only by naming it
+in `--allow` or `jeet manager grant`; no default grant includes it.
+
 ## Questions from below
 
 A `question` or `blocked` report from a task below you is yours to deal

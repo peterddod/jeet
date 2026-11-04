@@ -1643,6 +1643,21 @@ mod tests {
     }
 
     #[test]
+    fn no_default_grant_holds_assistant_interrupt() {
+        let policy = Config::default().manager_policy().unwrap();
+        assert!(!policy.worker_default.contains(&"assistant.interrupt"));
+        assert!(!policy.manager_default.contains(&"assistant.interrupt"));
+        // Named by the user, it is given.
+        let policy = toml::from_str::<Config>(
+            "[managers]\nworker_default = [\"worktree.add\", \"assistant.interrupt\"]\n",
+        )
+        .unwrap()
+        .manager_policy()
+        .unwrap();
+        assert!(policy.worker_default.contains(&"assistant.interrupt"));
+    }
+
+    #[test]
     fn manager_policy_fills_in_its_defaults() {
         let policy = Config::default().manager_policy().unwrap();
         assert_eq!(

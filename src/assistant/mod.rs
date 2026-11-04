@@ -55,7 +55,7 @@ use crate::manager::{self, take_inbox, ChildLine, Role};
 pub mod brief;
 
 pub use crate::manager::fence::{
-    fence_answer, fence_brief, fence_escalated, fence_message, fence_report,
+    fence_answer, fence_brief, fence_escalated, fence_message, fence_report, mark_interrupt,
 };
 pub use crate::manager::{date, TODO};
 
@@ -504,20 +504,48 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// ([`permissions::at_terminal`]): the class comes from the kind, and the
 /// user's words are not an agent's message, so it carries no meta and is
 /// rendered whole.
+///
+/// `interrupt`, which the caller has checked (`assistant.interrupt`), sends
+/// an agent's as [`deliver_interrupt`] does, rendered whole.
 pub fn send(
     app: &App,
     from: &str,
     message: &str,
     from_user: bool,
+    interrupt: bool,
 ) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
-    let meta = send_meta(from, &message, from_user);
+    let mut meta = send_meta(from, &message, from_user);
     let text = fence_message(from, &message);
-    match from_user {
+    match (from_user, interrupt) {
         // The user's own goes to the assistant as ever.
-        true => deliver_pushed(app, &text, true, meta),
-        false => deliver(app, &text, true, meta),
+        (true, _) => deliver_pushed(app, &text, true, meta),
+        (false, true) => {
+            if let Some(meta) = &mut meta {
+                meta.class = Class::Full;
+            }
+            deliver_interrupt(app, &mark_interrupt(&text), meta)
+        }
+        (false, false) => deliver(app, &text, true, meta),
     }
+}
+
+/// Get `text`, fenced and marked as an interrupt ([`mark_interrupt`]), to
+/// the assistant now, whatever `[assistant] push` says: through the wake
+/// channel of the session [`target`] picks, posted at once at an idle
+/// prompt and at the end of a running turn, which it never cuts short.
+/// It starts no session: with none running, it is kept as [`deliver`]
+/// keeps anything else.
+pub fn deliver_interrupt(
+    app: &App,
+    text: &str,
+    meta: Option<Meta>,
+) -> Result<(Delivered, Option<String>)> {
+    let task = ensure(app)?;
+    if !sessions(app, &task)?.iter().any(Session::running) {
+        return deliver(app, text, false, meta);
+    }
+    deliver_pushed(app, text, false, meta)
 }
 
 /// The meta of `message` from `from` to the assistant: a line for an

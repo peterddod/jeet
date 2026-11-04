@@ -148,6 +148,14 @@ starts, says so. Tell it how the task is going:
 Keep reports short; put detail in the pull request or a file and say where.
 jeet tells the parent itself when you wait on a prompt, sit idle or end.
 
+The assistant reads reports when it gets to its inbox. If your brief's
+`You may:` line lists `assistant.interrupt`, add `--interrupt` to a report
+(`jeet report blocked --interrupt "…"`) to push it into the assistant's
+session instead: it is posted at once if the assistant is idle, or when its
+current turn ends. Use it only for what cannot wait, never for progress.
+Without that capability the report still goes, but the command fails; do
+not send it again.
+
 The answer to your question comes as `<jeet-answer to="<id>" from="…">`.
 `from="user"` is the user; any other `from` is the manager or the
 assistant above you, to act on as its instruction. A question stays open

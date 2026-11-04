@@ -118,6 +118,10 @@ impl Source {
 /// Without `may_start` it never starts a session of the parent's, and a
 /// progress or status report never does whatever `may_start` says.
 ///
+/// With `interrupt`, which the caller has checked (`assistant.interrupt`),
+/// a report to the assistant goes as [`assistant::deliver_interrupt`]
+/// sends it.
+///
 /// Never called holding `task`'s own inbox lock.
 pub fn send(
     app: &App,
@@ -125,8 +129,16 @@ pub fn send(
     kind: ReportKind,
     body: &str,
     may_start: bool,
+    interrupt: bool,
 ) -> Result<(i64, Result<Delivered>)> {
-    send_from(app, &Source::task(app, task)?, kind, body, may_start)
+    send_from(
+        app,
+        &Source::task(app, task)?,
+        kind,
+        body,
+        may_start,
+        interrupt,
+    )
 }
 
 /// [`send`] for a review's agent: to the task that asked for the review.
@@ -137,7 +149,14 @@ pub fn send_review(
     body: &str,
     may_start: bool,
 ) -> Result<(i64, Result<Delivered>)> {
-    send_from(app, &Source::review(app, review)?, kind, body, may_start)
+    send_from(
+        app,
+        &Source::review(app, review)?,
+        kind,
+        body,
+        may_start,
+        false,
+    )
 }
 
 fn send_from(
@@ -146,6 +165,7 @@ fn send_from(
     kind: ReportKind,
     body: &str,
     may_start: bool,
+    interrupt: bool,
 ) -> Result<(i64, Result<Delivered>)> {
     let (parent, body) = checked(app, src, body)?;
     let id = app
@@ -154,7 +174,8 @@ fn send_from(
     if let Some(raise) = report_raise(src, id, kind, &body) {
         scope::raise(app, &src.origin, raise);
     }
-    Ok((id, deliver(app, src, &parent, id, kind, &body, may_start)))
+    let delivered = deliver(app, src, &parent, id, kind, &body, may_start, interrupt);
+    Ok((id, delivered))
 }
 
 /// What the user may be told of report `id` from `src`: its asks and its
@@ -229,7 +250,9 @@ fn checked(app: &App, src: &Source, body: &str) -> Result<(TaskRecord, String)> 
     Ok((parent, body.to_string()))
 }
 
-/// Deliver report `id`, recorded already, to `src`'s `parent`.
+/// Deliver report `id`, recorded already, to `src`'s `parent`; with
+/// `interrupt`, as [`send`] says.
+#[allow(clippy::too_many_arguments)]
 fn deliver(
     app: &App,
     src: &Source,
@@ -238,10 +261,29 @@ fn deliver(
     kind: ReportKind,
     body: &str,
     may_start: bool,
+    interrupt: bool,
 ) -> Result<Delivered> {
+    if interrupt && parent.kind == TaskKind::Assistant {
+        let fenced = assistant::fence_report(id, &src.label, &src.path, kind, body);
+        let mut meta = report_meta(id, src, kind, body);
+        meta.class = render::Class::Full;
+        return assistant::deliver_interrupt(app, &assistant::mark_interrupt(&fenced), Some(meta))
+            .map(|(d, _)| d);
+    }
     deliver_with(app, src, parent, id, kind, body, may_start, &|may_start| {
         Box::new(TmuxAgent::new(app, parent).may_start(may_start))
     })
+}
+
+/// What jeet knows of report `id` from `src`, to render it by.
+fn report_meta(id: i64, src: &Source, kind: ReportKind, body: &str) -> Meta {
+    Meta::new(
+        render::class_of_report(kind),
+        kind.as_str(),
+        &src.label,
+        body,
+        Some(format!("r{id}")),
+    )
 }
 
 /// [`deliver`], with a manager parent's agent, allowed to start or not,
@@ -258,13 +300,7 @@ fn deliver_with<'a>(
     manager_agent: &dyn Fn(bool) -> Box<dyn Agent + 'a>,
 ) -> Result<Delivered> {
     let fenced = assistant::fence_report(id, &src.label, &src.path, kind, body);
-    let meta = Meta::new(
-        render::class_of_report(kind),
-        kind.as_str(),
-        &src.label,
-        body,
-        Some(format!("r{id}")),
-    );
+    let meta = report_meta(id, src, kind, body);
     // Started only by a report that wakes it.
     deliver_to_with(
         app,
@@ -984,7 +1020,16 @@ fn auto_status_from(
         };
         scope::raise(app, &src.origin, raise);
     }
-    let delivered = deliver(app, src, &parent, id, ReportKind::Status, &body, false);
+    let delivered = deliver(
+        app,
+        src,
+        &parent,
+        id,
+        ReportKind::Status,
+        &body,
+        false,
+        false,
+    );
     if let Err(e) = &delivered {
         eprintln!("jeet: report #{id} recorded, but not delivered: {e:#}");
     }
@@ -1306,6 +1351,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
             Vec::new()
         }
     };
+    let interrupts = may.contains(&"assistant.interrupt");
     may.push("report");
     lines.push(format!("You may: {}", may.join(", ")));
     let to = manager::label(&parent);
@@ -1317,6 +1363,14 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
         "Report to {to} with `jeet report done|progress|blocked|question \"…\"`; it is the \
          only way to reach anyone outside {own}."
     ));
+    if interrupts && parent.kind == TaskKind::Assistant {
+        lines.push(
+            "A report waits in the assistant's inbox; add --interrupt to push it to the \
+             assistant now (posted when it is next idle), only for what cannot wait, never \
+             progress."
+                .to_string(),
+        );
+    }
     // Said here, every session, as no template reaches an existing home.
     // In jeet's words inside the fence, so no tag is spelled out.
     if task.kind == TaskKind::Manager {
@@ -1393,11 +1447,11 @@ mod tests {
     fn only_a_task_under_the_assistant_reports_and_never_too_much() {
         let (_dir, mut app, w) = lab();
         let top = app.db.get_task("top").unwrap().unwrap();
-        let refused = send(&app, &top, ReportKind::Done, "x", false).unwrap_err();
+        let refused = send(&app, &top, ReportKind::Done, "x", false, false).unwrap_err();
         assert!(refused.to_string().contains("no parent"), "{refused}");
 
         let long = "a".repeat(MAX_REPORT + 1);
-        let refused = send(&app, &w, ReportKind::Done, &long, false).unwrap_err();
+        let refused = send(&app, &w, ReportKind::Done, &long, false, false).unwrap_err();
         assert!(refused.to_string().contains("2000 bytes"), "{refused}");
         assert!(app.db.last_report("w").unwrap().is_none());
 
@@ -1410,7 +1464,7 @@ mod tests {
         // the report's ref, and nothing started or queued.
         let root = assistant::ensure(&app).unwrap();
         let home = tasks::task_dir(&app, &root);
-        let (id, delivered) = send(&app, &w, ReportKind::Question, "which?", true).unwrap();
+        let (id, delivered) = send(&app, &w, ReportKind::Question, "which?", true, false).unwrap();
         assert!(matches!(delivered, Ok(Delivered::Stored)), "{delivered:?}");
         let kept = messages::read_delivered(&home);
         assert_eq!(kept.len(), 1);
@@ -1425,7 +1479,8 @@ mod tests {
         // Pushed, as before: held, not started, as nothing is running and
         // it may not start one.
         app.config.assistant.push = Some(true);
-        let (id, delivered) = send(&app, &w, ReportKind::Progress, " half way ", false).unwrap();
+        let (id, delivered) =
+            send(&app, &w, ReportKind::Progress, " half way ", false, false).unwrap();
         assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
         let last = app.db.last_report("w").unwrap().unwrap();
         assert_eq!((last.id, last.body.as_str()), (id, "half way"));
@@ -1435,13 +1490,34 @@ mod tests {
         // A parent that is neither the assistant nor a manager takes none.
         let under_top = task("u", Some("top".into()));
         app.db.insert_task(&under_top).unwrap();
-        let refused = send(&app, &under_top, ReportKind::Done, "x", false).unwrap_err();
+        let refused = send(&app, &under_top, ReportKind::Done, "x", false, false).unwrap_err();
         assert!(
             refused
                 .to_string()
                 .contains("only the assistant and managers"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn an_interrupt_with_no_session_running_is_kept_marked_and_starts_nothing() {
+        let (_dir, app, w) = lab();
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let (id, delivered) =
+            send(&app, &w, ReportKind::Blocked, "deploy is down", true, true).unwrap();
+        assert!(matches!(delivered, Ok(Delivered::Stored)), "{delivered:?}");
+        let kept = messages::read_delivered(&home);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].r#ref, Some(format!("r{id}")));
+        assert!(
+            kept[0]
+                .message
+                .contains(" interrupt=\"true\" untrusted=\"true\">"),
+            "{}",
+            kept[0].message
+        );
+        assert!(messages::peek(&home).is_empty());
     }
 
     #[test]
@@ -1455,9 +1531,9 @@ mod tests {
             brief("s1", false),
             "jeet: nothing new since your last brief\njeet: you hold no open asks\n"
         );
-        let (done, _) = send(&app, &w, ReportKind::Done, "PR #4 merged", true).unwrap();
-        let (ask, _) = send(&app, &w, ReportKind::Question, "which db?", true).unwrap();
-        let (sent, _) = assistant::send(&app, "task w", "look at <this>", false).unwrap();
+        let (done, _) = send(&app, &w, ReportKind::Done, "PR #4 merged", true, false).unwrap();
+        let (ask, _) = send(&app, &w, ReportKind::Question, "which db?", true, false).unwrap();
+        let (sent, _) = assistant::send(&app, "task w", "look at <this>", false, false).unwrap();
         assert_eq!(sent, Delivered::Stored);
         let m = messages::read_delivered(&home).last().unwrap().id;
         let out = brief("s1", false);
@@ -1491,7 +1567,7 @@ mod tests {
         assert_eq!(assistant::brief::summary_line(&home, "s1").unwrap(), None);
         assert_eq!(assistant::brief::summary_line(&home, "s2").unwrap(), None);
         // Something new; `--all` shows everything and moves nothing.
-        let (_, delivered) = send(&app, &w, ReportKind::Progress, "halfway", false).unwrap();
+        let (_, delivered) = send(&app, &w, ReportKind::Progress, "halfway", false, false).unwrap();
         assert_eq!(delivered.unwrap(), Delivered::Stored);
         let all = brief("s1", true);
         assert!(
@@ -1640,7 +1716,7 @@ mod tests {
     #[test]
     fn a_task_under_a_manager_reports_to_it() {
         let (_dir, app, m, mw) = manager_lab();
-        let (id, delivered) = send(&app, &mw, ReportKind::Done, "shipped", false).unwrap();
+        let (id, delivered) = send(&app, &mw, ReportKind::Done, "shipped", false, false).unwrap();
         assert!(matches!(delivered, Ok(Delivered::Held)), "{delivered:?}");
         let last = app.db.last_report("mw").unwrap().unwrap();
         assert_eq!((last.id, last.to_id.as_str()), (id, "m"));
@@ -1685,7 +1761,7 @@ mod tests {
         auto_status(&app, &w, idle, "idle 10m; last report none", again, 0).unwrap();
         assert_eq!(last_status(&app, "w"), Some(2));
 
-        let (_, delivered) = send(&app, &w, ReportKind::Done, "shipped", false).unwrap();
+        let (_, delivered) = send(&app, &w, ReportKind::Done, "shipped", false, false).unwrap();
         delivered.unwrap();
         auto_status(
             &app,
@@ -1737,7 +1813,8 @@ mod tests {
     fn a_done_from_an_earlier_run_does_not_hide_this_runs_end() {
         let (_dir, app, w) = lab();
         // Run one reported done: its end is not news.
-        let (_, delivered) = send(&app, &w, ReportKind::Done, "posted review", false).unwrap();
+        let (_, delivered) =
+            send(&app, &w, ReportKind::Done, "posted review", false, false).unwrap();
         delivered.unwrap();
         let first = now_secs() - 1;
         let ended = StatusEvent::Ended;
@@ -1786,7 +1863,8 @@ mod tests {
         sweep_idle_with(&app, since + mins * 60 - 1, idle, |_| true).unwrap();
         assert!(app.db.last_report("w").unwrap().is_none());
 
-        let (_, delivered) = send(&app, &w, ReportKind::Progress, "half way", false).unwrap();
+        let (_, delivered) =
+            send(&app, &w, ReportKind::Progress, "half way", false, false).unwrap();
         delivered.unwrap();
         let now = since + mins * 60;
         sweep_idle_with(&app, now, idle, |_| true).unwrap();
@@ -1907,6 +1985,19 @@ mod tests {
             brief.contains("\nYou may: worktree.add, report\n"),
             "{brief}"
         );
+        assert!(!brief.contains("--interrupt"), "{brief}");
+
+        // Given `assistant.interrupt`, it is told how and when to use it.
+        app.config.assistant.allow = vec!["worktree.add".into(), "assistant.interrupt".into()];
+        app.db
+            .set_grants("w", &["worktree.add", "assistant.interrupt"])
+            .unwrap();
+        let brief = brief_context(&app, &w).unwrap();
+        assert!(
+            brief.contains("\nYou may: assistant.interrupt, worktree.add, report\n"),
+            "{brief}"
+        );
+        assert!(brief.contains("add --interrupt to push it"), "{brief}");
     }
 
     #[test]
@@ -2076,7 +2167,7 @@ mod tests {
     /// `ww`'s question, passed up by each of `by` in turn.
     fn asked_and_passed(app: &App, by: &[Caller]) -> i64 {
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let sent = Sent::default();
         for caller in by {
             escalate_with(app, caller, id, &recording(&sent), &|_| {}).unwrap();
@@ -2114,11 +2205,11 @@ mod tests {
     #[test]
     fn a_task_under_the_assistant_tells_the_user_its_asks_and_done() {
         let (_dir, app, w) = lab();
-        let _ = send(&app, &w, ReportKind::Progress, "half way", false).unwrap();
+        let _ = send(&app, &w, ReportKind::Progress, "half way", false, false).unwrap();
         assert!(told(&app).is_empty(), "progress tells nobody");
-        let (q, _) = send(&app, &w, ReportKind::Question, "which DB?", false).unwrap();
-        let (b, _) = send(&app, &w, ReportKind::Blocked, "no key", false).unwrap();
-        let (d, _) = send(&app, &w, ReportKind::Done, "PR #7", false).unwrap();
+        let (q, _) = send(&app, &w, ReportKind::Question, "which DB?", false, false).unwrap();
+        let (b, _) = send(&app, &w, ReportKind::Blocked, "no key", false, false).unwrap();
+        let (d, _) = send(&app, &w, ReportKind::Done, "PR #7", false, false).unwrap();
         assert_eq!(
             told(&app),
             [
@@ -2149,8 +2240,8 @@ mod tests {
         // Quiet, its done and asks tell nobody.
         clear_told(&app);
         app.db.set_task_quiet("w", true).unwrap();
-        let _ = send(&app, &w, ReportKind::Question, "again?", false).unwrap();
-        let _ = send(&app, &w, ReportKind::Done, "PR #8", false).unwrap();
+        let _ = send(&app, &w, ReportKind::Question, "again?", false, false).unwrap();
+        let _ = send(&app, &w, ReportKind::Done, "PR #8", false, false).unwrap();
         assert!(told(&app).is_empty());
     }
 
@@ -2158,28 +2249,28 @@ mod tests {
     fn deeper_down_only_what_the_user_started_tells() {
         let (_dir, mut app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
-        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false, false).unwrap();
         assert!(told(&app).is_empty());
 
         app.db
             .set_task_started_by("ww", crate::db::tasks::STARTED_BY_USER)
             .unwrap();
-        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
-        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false, false).unwrap();
         let kinds: Vec<String> = told(&app).into_iter().map(|t| t.1).collect();
         assert_eq!(kinds, ["question", "done"]);
 
         // A manager's own id as the starter is not the user.
         clear_told(&app);
         app.db.set_task_started_by("ww", "sub").unwrap();
-        let _ = send(&app, &ww, ReportKind::Done, "done", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done", false, false).unwrap();
         assert!(told(&app).is_empty());
 
         // `[notify] events = false` tells nothing new.
         let w = app.db.get_task("api").unwrap().unwrap();
         app.config.notify.events = Some(false);
-        let _ = send(&app, &w, ReportKind::Done, "done", false).unwrap();
+        let _ = send(&app, &w, ReportKind::Done, "done", false, false).unwrap();
         assert!(told(&app).is_empty());
     }
 
@@ -2265,7 +2356,7 @@ mod tests {
     fn a_block_left_open_is_stuck_once() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         // A question is not a block.
         let ask = TaskRecord {
@@ -2273,7 +2364,7 @@ mod tests {
             ..task("q", Some("api".into()))
         };
         app.db.insert_task(&ask).unwrap();
-        let _ = send(&app, &ask, ReportKind::Question, "why?", false).unwrap();
+        let _ = send(&app, &ask, ReportKind::Question, "why?", false, false).unwrap();
         assert!(told(&app).is_empty());
 
         sweep_stuck(&app, at + 29 * 60).unwrap();
@@ -2319,7 +2410,7 @@ mod tests {
         // Quiet does not hold the reminder back.
         app.db.set_task_quiet("ww", true).unwrap();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
 
         assert_eq!(swept(&app, at + 14 * 60), (vec![], vec![]));
@@ -2355,7 +2446,7 @@ mod tests {
     fn a_repost_that_does_not_get_through_is_tried_again() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         let sent = Sent::default();
         let notifier = |_: Event| {};
@@ -2370,12 +2461,12 @@ mod tests {
     fn an_answered_or_superseded_ask_is_left_alone() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         app.db.answer_report(id, Some("sub"), "yes", "sub").unwrap();
         assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]));
-        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false).unwrap();
-        let _ = send(&app, &ww, ReportKind::Done, "done anyway", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Blocked, "no key", false, false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Done, "done anyway", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         assert_eq!(swept(&app, at + 120 * 60), (vec![], vec![]));
     }
@@ -2383,7 +2474,7 @@ mod tests {
     #[test]
     fn the_assistants_asks_are_not_reposted_but_still_told_at_the_hour() {
         let (_dir, app, w) = lab();
-        let (id, _) = send(&app, &w, ReportKind::Blocked, "no key", false).unwrap();
+        let (id, _) = send(&app, &w, ReportKind::Blocked, "no key", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         assert_eq!(swept(&app, at + 15 * 60), (vec![], vec![]));
         let (sent, notified) = swept(&app, at + 60 * 60);
@@ -2399,7 +2490,7 @@ mod tests {
         // Passed to the user, it is not re-posted to the assistant either.
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let root = assistant::ensure(&app).unwrap().id;
         app.db.escalate_report(id, "sub", &root, true).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
@@ -2412,7 +2503,7 @@ mod tests {
     fn zero_turns_either_step_off() {
         let (_dir, mut app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         app.config.messages.reask_mins = Some(0);
         app.config.messages.escalate_mins = Some(0);
@@ -2431,7 +2522,7 @@ mod tests {
     fn notify_events_off_mutes_the_reminder_but_not_the_repost() {
         let (_dir, mut app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let at = app.db.get_report(id).unwrap().unwrap().at;
         app.config.notify.events = Some(false);
         let (sent, notified) = swept(&app, at + 120 * 60);
@@ -2562,7 +2653,7 @@ mod tests {
     fn a_failed_delivery_keeps_the_escalation_recorded() {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, "keep v1?", false, false).unwrap();
         let sent = Sent::default();
         let escalated = escalate_with(
             &app,
@@ -2588,12 +2679,20 @@ mod tests {
         let held = asked_and_passed(&app, &[node(&app, "sub")]);
         // Still waiting on it: progress keeps it open, so it moves.
         let ww = app.db.get_task("ww").unwrap().unwrap();
-        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let _ = send(
+            &app,
+            &ww,
+            ReportKind::Progress,
+            "still waiting",
+            false,
+            false,
+        )
+        .unwrap();
         let sub = app.db.get_task("sub").unwrap().unwrap();
-        let (answered, _) = send(&app, &sub, ReportKind::Question, "split?", false).unwrap();
+        let (answered, _) = send(&app, &sub, ReportKind::Question, "split?", false, false).unwrap();
         answer_by(&app, &node(&app, "api"), answered, "yes");
         let fe = app.db.get_task("fe").unwrap().unwrap();
-        let (users, _) = send(&app, &fe, ReportKind::Blocked, "no key", false).unwrap();
+        let (users, _) = send(&app, &fe, ReportKind::Blocked, "no key", false, false).unwrap();
         escalate_with(
             &app,
             &Caller::Root,
@@ -2702,12 +2801,20 @@ mod tests {
         let ww = app.db.get_task("ww").unwrap().unwrap();
         // Passed on after progress, then the user answers after more.
         let id = asked_and_passed(&app, &[]);
-        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let _ = send(
+            &app,
+            &ww,
+            ReportKind::Progress,
+            "still waiting",
+            false,
+            false,
+        )
+        .unwrap();
         let sent = Sent::default();
         escalate_with(&app, &node(&app, "sub"), id, &recording(&sent), &|_| {}).unwrap();
         escalate_with(&app, &node(&app, "api"), id, &recording(&sent), &|_| {}).unwrap();
         escalate_with(&app, &Caller::Root, id, &recording(&sent), &|_| {}).unwrap();
-        let _ = send(&app, &ww, ReportKind::Progress, "more", false).unwrap();
+        let _ = send(&app, &ww, ReportKind::Progress, "more", false, false).unwrap();
         let (answered, sent) = answer_by(&app, &Caller::User, id, "drop it");
         assert_eq!(answered.row.answer.as_deref(), Some("drop it"));
         assert!(matches!(answered.to_asker, Ok(Delivered::Queued)));
@@ -2719,7 +2826,15 @@ mod tests {
 
         // A holder answers after progress too.
         let id = asked_and_passed(&app, &[node(&app, "sub")]);
-        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let _ = send(
+            &app,
+            &ww,
+            ReportKind::Progress,
+            "still waiting",
+            false,
+            false,
+        )
+        .unwrap();
         let (answered, sent) = answer_by(&app, &node(&app, "api"), id, "keep it");
         assert_eq!(answered.row.answered_by.as_deref(), Some("api"));
         assert_eq!(sent[0].0, "ww");
@@ -2805,25 +2920,33 @@ mod tests {
                 .to_string()
         };
         assert_eq!(refused(999), "there is no report #999");
-        let (progress, _) = send(&app, &ww, ReportKind::Progress, "half", false).unwrap();
+        let (progress, _) = send(&app, &ww, ReportKind::Progress, "half", false, false).unwrap();
         assert_eq!(
             refused(progress),
             format!("#{progress} is a progress report")
         );
-        let (q, _) = send(&app, &ww, ReportKind::Question, "v1?", false).unwrap();
-        let (done, _) = send(&app, &ww, ReportKind::Done, "shipped", false).unwrap();
+        let (q, _) = send(&app, &ww, ReportKind::Question, "v1?", false, false).unwrap();
+        let (done, _) = send(&app, &ww, ReportKind::Done, "shipped", false, false).unwrap();
         assert_eq!(
             refused(q),
             format!("task ww has filed a done report since (#{done}); #{q} is no longer open")
         );
-        let (q, _) = send(&app, &ww, ReportKind::Question, "v2?", false).unwrap();
-        let (b, _) = send(&app, &ww, ReportKind::Blocked, "creds", false).unwrap();
+        let (q, _) = send(&app, &ww, ReportKind::Question, "v2?", false, false).unwrap();
+        let (b, _) = send(&app, &ww, ReportKind::Blocked, "creds", false, false).unwrap();
         assert_eq!(
             refused(q),
             format!("task ww has filed a blocked report since (#{b}); #{q} is no longer open")
         );
         // Progress since does not close it.
-        let _ = send(&app, &ww, ReportKind::Progress, "still waiting", false).unwrap();
+        let _ = send(
+            &app,
+            &ww,
+            ReportKind::Progress,
+            "still waiting",
+            false,
+            false,
+        )
+        .unwrap();
         // jeet's own words since do not close it.
         auto_status(&app, &ww, StatusEvent::Waiting, "waiting", 1, 0).unwrap();
         let empty = answer_with(
@@ -2855,7 +2978,7 @@ mod tests {
         let (_dir, app) = ask_lab();
         let ww = app.db.get_task("ww").unwrap().unwrap();
         let worst = "<".repeat(MAX_REPORT);
-        let (id, _) = send(&app, &ww, ReportKind::Question, &worst, false).unwrap();
+        let (id, _) = send(&app, &ww, ReportKind::Question, &worst, false, false).unwrap();
         escalate_with(
             &app,
             &node(&app, "sub"),
@@ -2880,7 +3003,7 @@ mod tests {
         let (_dir, app) = ask_lab();
         let at_api = asked_and_passed(&app, &[node(&app, "sub")]);
         let fe = app.db.get_task("fe").unwrap().unwrap();
-        let (with_user, _) = send(&app, &fe, ReportKind::Blocked, "creds", false).unwrap();
+        let (with_user, _) = send(&app, &fe, ReportKind::Blocked, "creds", false, false).unwrap();
         escalate_with(
             &app,
             &Caller::Root,

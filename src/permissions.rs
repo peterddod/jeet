@@ -137,6 +137,9 @@ pub const CAPABILITIES: &[Capability] = &[
         "change what tasks under it may do and spend",
         &["jeet manager grant", "jeet manager budget"],
     ),
+    // Used through `--interrupt` on `jeet report` and `jeet task send
+    // assistant`, which check it themselves; never in a default grant.
+    cap("assistant.interrupt", "interrupt the assistant", &[]),
     cap(
         "manager.stop",
         "pause, resume and stop tasks under it",
@@ -849,7 +852,14 @@ fn task_gate(command: &TaskCommands) -> Gate {
             needs("task.create", action)
         }
         TaskCommands::Open { name, .. } => needs("task.open", format!("opened task {name}")),
-        TaskCommands::Send { name, message } => needs(
+        // Checks `assistant.interrupt` itself, and lands in the inbox
+        // without it.
+        TaskCommands::Send {
+            name,
+            interrupt: true,
+            ..
+        } if name.trim() == crate::assistant::SLUG => Gate::Free,
+        TaskCommands::Send { name, message, .. } => needs(
             "task.send",
             format!("messaged task {name}: {}", first_line(message, 80)),
         ),
@@ -1009,6 +1019,47 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
         None => Ok(authorized),
         Some(message) => bail!("{} is not in the store: {message}", url.escape_debug()),
     }
+}
+
+/// Whether `caller` may interrupt the assistant with what it sends
+/// (`--interrupt`), `action` saying what: the refusal if not. Either way
+/// it is logged, to the sender's `actions.log` (a person's and a top-level
+/// task's, which are not gated, to the assistant's).
+pub fn may_interrupt(app: &App, caller: &Caller, action: &str) -> Result<Option<String>> {
+    const CAP: &str = "assistant.interrupt";
+    let (log, refusal) = match caller {
+        Caller::User => (actions_log(&app.home), None),
+        Caller::Root => (
+            actions_log(&app.home),
+            Some("the assistant does not interrupt itself".to_string()),
+        ),
+        Caller::Review(review) => (
+            actions_log(&app.home),
+            Some(format!(
+                "review {}'s agent may not interrupt the assistant",
+                review.label()
+            )),
+        ),
+        Caller::Node(node) => {
+            let refusal = match effective(app, node)?.contains(&CAP) {
+                true => None,
+                false => {
+                    let about = self::capability(CAP).map_or("do that", |c| c.about);
+                    let cut = cut_by(app, node, CAP)?;
+                    Some(node_refusal(&node.slug, about, CAP, cut.as_deref()))
+                }
+            };
+            (actions_log_for(app, node), refusal)
+        }
+    };
+    let outcome = match refusal {
+        None => Outcome::Done,
+        Some(_) => Outcome::Denied,
+    };
+    if let Err(e) = append(&log, CAP, action, outcome, None) {
+        eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+    }
+    Ok(refusal)
 }
 
 /// The command prefixes the assistant's harness pre-approves: the read-only
@@ -1602,6 +1653,13 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
             TaskCommands::Last { name, .. } => verb(Verb::TaskLast, key(name)),
             TaskCommands::Path { name } => verb(Verb::TaskPath, key(name)),
             TaskCommands::Prs { name, .. } => verb(Verb::TaskPrs, Target::Current(name.clone())),
+            // To the assistant only as an interrupt, which checks
+            // `assistant.interrupt` itself.
+            TaskCommands::Send {
+                name,
+                interrupt: true,
+                ..
+            } if name.trim() == crate::assistant::SLUG => Some(Scope::NoTarget),
             TaskCommands::Send { name, .. } => verb(Verb::TaskSend, key(name)),
             TaskCommands::Interrupt { name } => verb(Verb::TaskInterrupt, key(name)),
             TaskCommands::Open { name, .. } => verb(Verb::TaskOpen, key(name)),
@@ -3668,5 +3726,84 @@ mod tests {
         assert!(check_review_job(&db, "r", 11).is_err());
         db.finish_review_job("r", 2, 0, None).unwrap();
         assert!(check_review_job(&db, "r", 10).is_err());
+    }
+
+    #[test]
+    fn interrupting_the_assistant_needs_assistant_interrupt_down_the_chain() {
+        let (_dir, mut app, _w) = tree();
+        let root = crate::assistant::ensure(&app).unwrap();
+        let m = add(
+            &app,
+            "mi",
+            TaskKind::Manager,
+            Some(&root),
+            &["assistant.interrupt"],
+        );
+        let w = add(
+            &app,
+            "wi",
+            TaskKind::Work,
+            Some(&m),
+            &["assistant.interrupt"],
+        );
+        let bare = add(&app, "bi", TaskKind::Work, Some(&root), &["worktree.add"]);
+        let may = |app: &App, caller: &Caller| may_interrupt(app, caller, "x").unwrap();
+        // Cut by `[assistant] allow`, which does not list it.
+        let e = may(&app, &Caller::Node(w.clone())).unwrap();
+        assert!(e.contains("cut by `[assistant] allow`"), "{e}");
+        app.config.assistant.allow = vec!["assistant.interrupt".into()];
+        assert_eq!(may(&app, &Caller::Node(w.clone())), None);
+        let e = may(&app, &Caller::Node(bare.clone())).unwrap();
+        assert!(e.contains("not in its grant"), "{e}");
+        // A manager that lacks it cuts it from the task below.
+        app.db.set_grants(&m.id, &["worktree.add"]).unwrap();
+        let e = may(&app, &Caller::Node(w.clone())).unwrap();
+        assert!(e.contains("cut by"), "{e}");
+        // Not gated, or the assistant itself.
+        assert_eq!(may(&app, &Caller::User), None);
+        assert!(may(&app, &Caller::Root).is_some());
+        // Each use is logged in the sender's own log, refusals too.
+        let log = std::fs::read_to_string(actions_log_for(&app, &w)).unwrap();
+        let outcomes: Vec<Outcome> = log
+            .lines()
+            .map(|l| serde_json::from_str::<ActionRecord>(l).unwrap())
+            .inspect(|r| assert_eq!(r.capability, "assistant.interrupt"))
+            .map(|r| r.outcome)
+            .collect();
+        assert_eq!(outcomes, [Outcome::Denied, Outcome::Done, Outcome::Denied]);
+    }
+
+    #[test]
+    fn task_send_assistant_interrupt_checks_its_capability_itself() {
+        assert_eq!(
+            gate_of(&["task", "send", "assistant", "--interrupt", "hi"]),
+            Gate::Free
+        );
+        assert!(matches!(
+            gate_of(&["task", "send", "assistant", "hi"]),
+            Gate::Needs {
+                capability: "task.send",
+                ..
+            }
+        ));
+        assert!(matches!(
+            gate_of(&["task", "send", "w", "--interrupt", "hi"]),
+            Gate::Needs {
+                capability: "task.send",
+                ..
+            }
+        ));
+        let cli = |args: &[&str]| {
+            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+                .unwrap()
+                .command
+        };
+        let interrupt = cli(&["task", "send", "assistant", "--interrupt", "hi"]);
+        assert_eq!(node_scope(interrupt.as_ref()), Some(Scope::NoTarget));
+        let plain = cli(&["task", "send", "assistant", "hi"]);
+        assert!(matches!(
+            node_scope(plain.as_ref()),
+            Some(Scope::Verb(Verb::TaskSend, _))
+        ));
     }
 }

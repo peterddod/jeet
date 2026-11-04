@@ -2657,11 +2657,11 @@ mod tests {
             None
         );
         app = c.app;
-        reports::send(&app, &w, ReportKind::Done, "merged", true)
+        reports::send(&app, &w, ReportKind::Done, "merged", true, false)
             .unwrap()
             .1
             .unwrap();
-        reports::send(&app, &w, ReportKind::Question, "which?", true)
+        reports::send(&app, &w, ReportKind::Question, "which?", true, false)
             .unwrap()
             .1
             .unwrap();
