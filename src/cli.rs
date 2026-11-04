@@ -391,9 +391,6 @@ pub enum TaskCommands {
     Open {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
-        /// Resume this agent session instead of the task's latest one
-        #[arg(long, value_name = "ID")]
-        session: Option<String>,
     },
 
     /// Send the task's agent a message: typed in when it is idle, queued

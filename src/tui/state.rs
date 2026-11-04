@@ -13,8 +13,6 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::AgentSpec;
-use crate::db::tasks::TaskRecord;
 use crate::db::RepoRecord;
 use crate::github::{PendingReview, PullRequest, Verdict};
 use crate::review::Job;
@@ -135,12 +133,6 @@ pub enum PendingAction {
 pub enum Overlay {
     /// Selection into [`Explorer::worktree_rows`].
     Worktrees { selected: usize },
-    /// The sessions of the task being browsed, whose agent ⏎ resumes one of.
-    Sessions {
-        task: TaskRecord,
-        sessions: Vec<super::tasks::SessionChoice>,
-        selected: usize,
-    },
     Confirm {
         title: String,
         lines: Vec<String>,
@@ -231,7 +223,6 @@ pub struct Explorer {
     /// Scroll position of the file list, kept here so a redraw mid-operation
     /// does not jump the view back to the top.
     pub list: ListState,
-    pub agent: AgentSpec,
     pub should_quit: bool,
     pub exit: Exit,
     /// Where the explorer started, so quitting in place is a no-op.
@@ -270,7 +261,6 @@ impl Explorer {
         root_kind: String,
         root_status: WorktreeStatus,
         cwd: PathBuf,
-        agent: AgentSpec,
     ) -> Result<Self> {
         let mut explorer = Self {
             repo,
@@ -291,7 +281,6 @@ impl Explorer {
             status_line: String::new(),
             working: None,
             list: ListState::default(),
-            agent,
             should_quit: false,
             exit: Exit::Stay,
             list_area: Rect::default(),
@@ -989,10 +978,6 @@ mod tests {
             remote_url: "https://github.com/acme/widget.git".into(),
             default_branch: "main".into(),
         };
-        let config = crate::config::Config {
-            agent: Some("claude".into()),
-            ..crate::config::Config::default()
-        };
         Explorer::new(
             Some(repo),
             root.to_path_buf(),
@@ -1000,7 +985,6 @@ mod tests {
             "trunk".into(),
             WorktreeStatus::default(),
             root.to_path_buf(),
-            AgentSpec::from_config(&config).unwrap(),
         )
         .unwrap()
     }
@@ -1110,7 +1094,6 @@ mod tests {
             "task canvas".into(),
             WorktreeStatus::default(),
             dir.path().to_path_buf(),
-            AgentSpec::from_command("claude").unwrap(),
         )
         .unwrap();
         assert!(explorer.visible_len() > 0);

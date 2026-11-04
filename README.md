@@ -199,7 +199,6 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | key | action |
 |-----|--------|
 | `ctrl-a` | the task's coding agent, in its tmux session — started if it is not running |
-| `ctrl-s` | the task's agent sessions (`⏎` resumes one) |
 | `ctrl-w` | the repository's worktrees: `⏎` switches to one, `o` opens its PR |
 | `ctrl-f` | diff the highlighted file or folder against the default branch |
 | `ctrl-p` | the pull request: `o` open, `a` approve, `c` comment, `x` request changes, `d` diff, `v` review output |
@@ -223,11 +222,10 @@ Leaving your shell in the right directory needs the shell wrapper
 (`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
 
 The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
-agent defaults to `claude`. Both are configurable (see below). `ctrl-a` and
-`ctrl-s` act on the task you are browsing in — its agent runs in the task's
-tmux session, exactly as `⏎` in the tasks list runs it — so outside a task
-(a store trunk, say) they only say so. Sessions are Claude Code's; other agents
-still run with `ctrl-a`, they just have no sessions to show.
+agent defaults to `claude`. Both are configurable (see below). `ctrl-a` acts on
+the task you are browsing in — its agent runs in the task's tmux session,
+exactly as `⏎` in the tasks list runs it — so outside a task (a store trunk,
+say) it only says so.
 
 ### Diffs
 
@@ -609,7 +607,7 @@ read from its files on a thread of its own, like the statuses.
 | `→` | on a manager, or a task with tasks under it, go into it: the managers and tasks under it |
 | `←` / `⌫` | back up a level; with a filter, drop it, the cursor on the match, on its level |
 | `ctrl-a` | attach to the agent of the manager or task under the cursor, as `⏎` |
-| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — with a choice of session when there is more than one to resume. `Ctrl-Q` comes back here and leaves it running. |
+| `⏎` | on a manager or task, attach to its agent in tmux, starting it if need be — resuming its one session. `Ctrl-Q` comes back here and leaves it running. |
 | `e` | the explorer, on the task's only worktree, or a choice of its worktrees and the task directory itself; `esc` comes back |
 | `w` | the task's worktrees, with branch, ahead/behind and diff: `n` adds one, `D` removes one, `⏎` explores it |
 | `n` | a new task: a name, and optionally a project, repositories and a branch. Left blank, an empty canvas |
@@ -829,8 +827,7 @@ title shown as `‹` and `›`: a title is whatever its author typed.
 ### The agent
 
 ```bash
-jeet task open fix-login                 # attach to the task's agent, starting it if needed
-jeet task open fix-login --session <id>  # resume that session instead of the latest
+jeet task open fix-login   # attach to the task's agent, starting it if needed
 ```
 
 Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
@@ -1575,7 +1572,7 @@ into tasks.
 | `jeet checkout <branch>` | `jeet worktree add <repo> --branch <branch>` in a task |
 | `jeet exec <repo> --branch <b>`, `jeet path <repo> --branch <b>` | `jeet worktree path <name>` |
 | `jeet exec <repo> --ephemeral` | `jeet task new <name> --repo <repo>`, then `jeet task delete` |
-| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer, inside a task |
+| `jeet sessions` | `jeet task open <task>` |
 | `jeet worktree clean`, `jeet worktree rename` | `jeet worktree rm`, `jeet task delete` |
 
 ## Migration from v0.1.x
