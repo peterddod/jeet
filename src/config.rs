@@ -35,6 +35,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "MergeConfig::is_empty")]
     pub merge: MergeConfig,
 
+    /// What `jeet search` leaves out (`[search]`).
+    #[serde(default, skip_serializing_if = "SearchConfig::is_empty")]
+    pub search: SearchConfig,
+
     /// Minimum seconds between background fetches of the store (default:
     /// 300). `0` turns background syncing off; `jeet sync` still works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +258,37 @@ impl ReviewConfig {
 
     pub fn notify(&self) -> bool {
         self.notify.unwrap_or(true)
+    }
+}
+
+/// `[search]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// Path prefixes (`~` expanded) whose documents `jeet search` never
+    /// indexes or shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+
+    /// Repository filters, as `jeet ls` takes them, left out of every
+    /// search scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_repos: Option<Vec<String>>,
+}
+
+impl SearchConfig {
+    fn is_empty(&self) -> bool {
+        self.exclude.is_none() && self.exclude_repos.is_none()
+    }
+
+    /// `exclude` as paths, `~` expanded.
+    pub fn excluded_paths(&self) -> Vec<PathBuf> {
+        let list = self.exclude.as_deref().unwrap_or_default();
+        list.iter().map(|p| expand_path(p)).collect()
+    }
+
+    /// `exclude_repos`, as written.
+    pub fn excluded_repos(&self) -> &[String] {
+        self.exclude_repos.as_deref().unwrap_or_default()
     }
 }
 
@@ -958,6 +993,7 @@ impl Default for Config {
             agent: None,
             review: ReviewConfig::default(),
             merge: MergeConfig::default(),
+            search: SearchConfig::default(),
             sync_interval_secs: None,
             assistant: AssistantConfig::default(),
             watch: None,
@@ -1504,6 +1540,7 @@ mod tests {
         let out = toml::to_string_pretty(&config).unwrap();
         assert!(!out.contains("editor"), "{out}");
         assert!(!out.contains("review"), "{out}");
+        assert!(!out.contains("search"), "{out}");
         assert!(!out.contains("sync"), "{out}");
     }
 
@@ -1654,6 +1691,23 @@ mod tests {
         assert_eq!(Config::default().review.prompt(), DEFAULT_REVIEW_PROMPT);
         let config: Config = toml::from_str("[review]\nprompt = \"Review {pr}\"\n").unwrap();
         assert_eq!(config.review.prompt(), "Review {pr}");
+    }
+
+    #[test]
+    fn reads_the_search_section() {
+        let text = "[search]\nexclude = [\"~/notes/private\", \"/srv/docs\"]\nexclude_repos = [\"acme/api\"]\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.search.excluded_repos(), ["acme/api".to_string()]);
+        let paths = config.search.excluded_paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[1], PathBuf::from("/srv/docs"));
+        assert!(Config::default().search.excluded_paths().is_empty());
+        assert!(Config::default().search.excluded_repos().is_empty());
+        // Round trip: every key written back.
+        let out = toml::to_string_pretty(&config).unwrap();
+        let back = toml::from_str::<Config>(&out).unwrap().search;
+        assert_eq!(back.exclude, config.search.exclude);
+        assert_eq!(back.exclude_repos, config.search.exclude_repos);
     }
 
     #[test]
