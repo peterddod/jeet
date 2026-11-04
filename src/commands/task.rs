@@ -443,7 +443,7 @@ pub fn interrupt(app: &App, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// End task `name`'s agent and resume its latest session in a new one, in
+/// End task `name`'s agent and resume its session in a new one, in
 /// the same tmux session: it keeps its conversation, and runs with this
 /// jeet's hooks and a record of its process. `assistant` restarts each of
 /// the assistant's running windows. Refused for an agent mid-turn, waiting
@@ -513,7 +513,7 @@ pub fn restart(app: &App, name: &str, force: bool) -> Result<()> {
     }
     let dir = tasks::task_dir(app, &task);
     let known = app.db.list_task_sessions(&task.id)?;
-    let Some(session) = runtime::latest_session(&dir, &known) else {
+    let Some(session) = runtime::task_session(app, &task, &dir, &known)? else {
         bail!(
             "task {} has no session jeet knows of to resume; stop it and `jeet task open {}`",
             called,
@@ -1437,7 +1437,7 @@ pub fn last(app: &App, name: &str, count: usize, json: bool) -> Result<()> {
     };
     let harness = AgentSpec::from_config(&app.config)?.harness;
     let known = app.db.list_task_sessions(&task.id)?;
-    let Some(session) = runtime::latest_session(&dir, &known) else {
+    let Some(session) = runtime::task_session(app, &task, &dir, &known)? else {
         bail!("task {}'s agent has no session yet", called);
     };
     let Some(turn) = harness.last_messages(&dir, &session, count) else {

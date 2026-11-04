@@ -266,6 +266,12 @@ fn start_tmux(
         true => app.db.list_task_sessions(&task.id)?,
         false => Vec::new(),
     };
+    // Its one session, unless another is named.
+    let current = match (session, spec.supports_sessions()) {
+        (None, true) => task_session(app, task, &dir, &known_sessions)?,
+        _ => None,
+    };
+    let session = session.or(current.as_deref());
     let hooks = match spec.supports_sessions() {
         true => {
             let exe = std::env::current_exe().context("locate the jeet binary")?;
@@ -308,7 +314,8 @@ fn start_tmux(
                 name: task.name.clone(),
                 created_at: now,
                 last_activity: now,
-            })
+            })?;
+            app.db.set_task_session(&task.id, id)
         },
     )?;
     let _ = app.db.touch_task(&task.id, now_secs());
@@ -541,6 +548,21 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
     };
     let resume = spec.harness.has_session(dir, &id);
     Ok((id, resume))
+}
+
+/// The one session of a work task or manager, the one it resumes: the one
+/// set for it, else (for a task from before there was one, or one set to a
+/// session since forgotten) its latest.
+pub fn task_session(
+    app: &App,
+    task: &TaskRecord,
+    dir: &Path,
+    known: &[TaskSessionRecord],
+) -> Result<Option<String>> {
+    Ok(match app.db.task_session(&task.id)? {
+        Some(id) if known.iter().any(|s| s.session_id == id) => Some(id),
+        _ => latest_session(dir, known),
+    })
 }
 
 /// The task's most recently active session, by what the index recorded and

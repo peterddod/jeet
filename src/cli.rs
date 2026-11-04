@@ -414,7 +414,7 @@ pub enum TaskCommands {
         name: String,
     },
 
-    /// End the task's agent and resume its latest session in a new one, so
+    /// End the task's agent and resume its session in a new one, so
     /// it runs on this jeet and keeps its conversation (`assistant`: each of
     /// the assistant's windows). Whatever it left running in the background
     /// (subagents, workflows, /loop schedules) ends with it (a review's name

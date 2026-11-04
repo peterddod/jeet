@@ -3072,6 +3072,17 @@ impl StoreLab {
             .unwrap()
     }
 
+    /// A task's one session, the one it resumes.
+    fn task_session(&self, task_id: &str) -> Option<String> {
+        self.index()
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     /// A review's state, by slug.
     fn review_state(&self, slug: &str) -> String {
         self.review_row(slug).unwrap().1
@@ -3155,6 +3166,7 @@ fn task_hook_writes_the_status_each_event_leaves() {
     // SessionStart recorded the session; clearing the conversation starts
     // another, which follows on from it.
     assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+    assert_eq!(lab.task_session(&id).as_deref(), Some(session));
     let cleared = "66666666-7777-4888-8999-000000000000";
     hook_ok(&lab.hook(
         "SessionStart",
@@ -3168,6 +3180,8 @@ fn task_hook_writes_the_status_each_event_leaves() {
             (cleared.to_string(), Some(session.to_string()))
         ]
     );
+    // The cleared one is the task's one session now, the one it resumes.
+    assert_eq!(lab.task_session(&id).as_deref(), Some(cleared));
     // Seen again on resume, it keeps its parent.
     hook_ok(&lab.hook(
         "SessionStart",
@@ -3439,6 +3453,26 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
     );
     assert!(!resumed.contains(&"--session-id".to_string()));
     assert_eq!(lab.sessions(&id).len(), 1);
+    assert_eq!(lab.task_session(&id).as_deref(), Some(session.as_str()));
+
+    // Another session the index has, more recently active, is not the
+    // task's one session, so it is not the one resumed.
+    let other = "99999999-8888-4777-8666-555555555555";
+    lab.index()
+        .execute(
+            "INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
+             VALUES (?1, ?2, 'old', 1, 99999999999)",
+            [other, id.as_str()],
+        )
+        .unwrap();
+    std::fs::write(transcripts.join(format!("{other}.jsonl")), "{}\n").unwrap();
+    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    let resumed = calls_of(&tmux, "new-session").pop().unwrap();
+    assert!(
+        resumed.windows(2).any(|w| w == ["--resume", &session]),
+        "{resumed:?}"
+    );
 
     // A session the task never had is refused, before anything starts.
     std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();

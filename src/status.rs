@@ -1324,6 +1324,12 @@ fn record_session(
         created_at: now,
         last_activity: now,
     })?;
+    // A work task or manager has the one session: this one, from now on.
+    if matches!(task.kind, TaskKind::Work | TaskKind::Manager) {
+        if let Err(e) = app.db.set_task_session(task_id, session_id) {
+            eprintln!("jeet task-hook SessionStart: {e:#}");
+        }
+    }
     app.db.touch_task(task_id, now)
 }
 

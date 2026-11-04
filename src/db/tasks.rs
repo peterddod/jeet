@@ -1285,6 +1285,28 @@ impl Database {
             .optional()?)
     }
 
+    /// Make `session_id` the task's one session, the one it resumes.
+    pub fn set_task_session(&self, task_id: &str, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE tasks SET session_id = ?2 WHERE id = ?1",
+            params![task_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// The task's one session, if one has been set.
+    pub fn task_session(&self, task_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Forget a session.
     pub fn delete_task_session(&self, session_id: &str) -> Result<()> {
         self.conn().execute(
