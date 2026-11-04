@@ -1126,23 +1126,24 @@ fn start_tmux(
 
 /// jeet's hooks for a review's agent run by `harness`: what it is let run
 /// ([`allowed`]), what it is denied ([`crate::permissions::review_deny`]),
-/// and no wake channel, which watches a task's inbox.
+/// the rules of `[permissions.review]` and no wake channel, which watches a task's inbox.
 fn review_hooks(
     app: &App,
     review: &ReviewRecord,
     _harness: &dyn crate::harness::Harness,
     exe: PathBuf,
 ) -> Result<crate::harness::HookSetup> {
-    Ok(crate::harness::HookSetup {
+    let hooks = crate::harness::HookSetup {
         exe,
         task_id: review.id.clone(),
         allow: allowed(review),
-        deny: crate::permissions::review_deny(app)?,
+        deny: crate::permissions::review_deny(app, review)?,
         extra_allow: Vec::new(),
         extra_deny: Vec::new(),
         environment: None,
         wake: false,
-    })
+    };
+    Ok(runtime::with_review_rules(hooks, &app.config.permissions))
 }
 
 /// What the review's agent is doing. Runs tmux and reads files, so it

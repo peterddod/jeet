@@ -58,8 +58,8 @@ report `blocked` or `question` rather than look for a way around it.
 
 - `cd "$(jeet worktree add <repo>)"` adds a worktree to your home and
   prints its path. It is detached at the freshly fetched default branch and
-  read-only: `--branch` is refused, and `git commit`, `git push` and new
-  branches are denied. Code changes go to a worker under you.
+  read-only: `--branch` is refused. Do not commit, push or make branches
+  there; code changes go to a worker under you.
 - `jeet worktree ls` lists your worktrees.
 
 ## Reporting to your parent

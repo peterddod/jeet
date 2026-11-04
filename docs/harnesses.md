@@ -196,17 +196,21 @@ another session, which cannot approve anything). See
 
 ## Deny rules
 
-`HookSetup::deny` lists commands the agent must not run. jeet fills it for
-the assistant, for every task with a parent and for every review's agent,
-whoever asked for the review (which also may not push at all, or comment on
-or review the pull request through the API); top-level tasks the user made
-get none, so a user's own `git push --force-with-lease` keeps working.
+`HookSetup::deny` lists commands the agent must not run. By default jeet
+fills it only for a task with a parent, and for a review's agent, with the
+commands of each capability whoever asked does not hold (the last item
+below). The rest of the list below is opt-in: with `[permissions] guards =
+true` it goes to the assistant, every task and every review's agent, so a
+user's own `git push --force-with-lease` keeps working only without it. With
+`[review] read_only = true` a review's agent is also denied every push, and
+commenting on or reviewing the pull request through the API. `[permissions.<role>]
+deny` adds rules of your own.
 The legacy, deprecated `[review] command` of a review the assistant asked
 for is the exception (the review agent that replaces it is launched like
 any other, deny rules and all): it is the user's own command, run by `jeet
 review-job` rather than launched through a harness, so it gets no deny rules,
 and `jeet review` warns when it starts one.
-The list is:
+The list under `guards` is:
 
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
@@ -223,7 +227,8 @@ The list is:
   `enablePullRequestAutoMerge`, `mergeBranch` and `enqueuePullRequest`
   mutations (any `gh api` or `curl` command naming one, flags before
   `graphql` included);
-- for a parented task only, the commands of each capability it does not
+- for a parented task (and a review, by whoever asked for it) only, with or
+  without `guards`, the commands of each capability it does not
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are
   not denied, but still go to the user's permission prompt (a worker's
@@ -233,14 +238,14 @@ The list is:
   default, and at worst the user approves them at the prompt. Only these
   commands are denied, not the same through `gh api` or `curl` (see
   below);
-- for a manager (phase 2) only, `git commit`, `git push`, `git checkout -b`
+- for a manager (phase 2) only, under `guards`, `git commit`, `git push`, `git checkout -b`
   and `git switch -c`: its worktrees are read-only, and workers make the
   changes. `git branch` is not denied, so `git branch -a` still reads.
 
 A repo's default branch is what jeet recorded when it cloned or imported
 it: `origin/HEAD`, or, without one, the branch checked out then, which may
 be a feature branch. That name is then denied as a push destination in
-every repo, to the assistant and every parented task; a push the agent
+every repo, to every agent under `guards`; a push the agent
 cannot make, say so, and push it yourself.
 
 `jeet pr merge` runs `gh` from jeet's own process, so the merge denies do
