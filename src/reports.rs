@@ -1521,6 +1521,19 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_interrupt_message_is_kept_even_on_the_push_path() {
+        let (_dir, mut app, _w) = lab();
+        app.config.assistant.push = Some(true);
+        let root = assistant::ensure(&app).unwrap();
+        let home = tasks::task_dir(&app, &root);
+        let (sent, _) =
+            assistant::send(&app, "task w", "urgent", false, assistant::How::Keep).unwrap();
+        assert_eq!(sent, Delivered::Stored);
+        assert_eq!(messages::read_delivered(&home).len(), 1);
+        assert!(messages::peek(&home).is_empty());
+    }
+
+    #[test]
     fn jeet_brief_prints_what_was_kept_and_the_asks_held_then_moves_the_cursor() {
         let (_dir, app, w) = lab();
         let root = assistant::ensure(&app).unwrap();
@@ -1533,7 +1546,14 @@ mod tests {
         );
         let (done, _) = send(&app, &w, ReportKind::Done, "PR #4 merged", true, false).unwrap();
         let (ask, _) = send(&app, &w, ReportKind::Question, "which db?", true, false).unwrap();
-        let (sent, _) = assistant::send(&app, "task w", "look at <this>", false, false).unwrap();
+        let (sent, _) = assistant::send(
+            &app,
+            "task w",
+            "look at <this>",
+            false,
+            assistant::How::Usual,
+        )
+        .unwrap();
         assert_eq!(sent, Delivered::Stored);
         let m = messages::read_delivered(&home).last().unwrap().id;
         let out = brief("s1", false);

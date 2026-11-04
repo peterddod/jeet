@@ -326,7 +326,7 @@ pub fn send(app: &App, name: &str, message: &str, interrupt: bool) -> Result<()>
             // in its own subtree, if anything: never the assistant,
             // whatever a child is called.
             (Caller::Node(_), false) => {}
-            (_, false) => return send_to_assistant(app, message, false),
+            (_, false) => return send_to_assistant(app, message, assistant::How::Usual),
         }
     } else if interrupt {
         bail!("--interrupt is for `jeet task send assistant`; a task's agent gets messages pushed already");
@@ -780,7 +780,11 @@ fn interrupt_assistant(app: &App, caller: &Caller, message: &str) -> Result<()> 
         crate::render::summary(message)
     );
     let refusal = permissions::may_interrupt(app, caller, &action)?;
-    send_to_assistant(app, message, refusal.is_none())?;
+    let how = match refusal {
+        None => assistant::How::Interrupt,
+        Some(_) => assistant::How::Keep,
+    };
+    send_to_assistant(app, message, how)?;
     match refusal {
         None => Ok(()),
         Some(why) => bail!(
@@ -790,13 +794,13 @@ fn interrupt_assistant(app: &App, caller: &Caller, message: &str) -> Result<()> 
     }
 }
 
-fn send_to_assistant(app: &App, message: &str, interrupt: bool) -> Result<()> {
+fn send_to_assistant(app: &App, message: &str, how: assistant::How) -> Result<()> {
     let (delivered, session) = assistant::send(
         app,
         &sender(app),
         message,
         permissions::at_terminal(app)?,
-        interrupt,
+        how,
     )?;
     let session = session.map(|name| printable(&name)).unwrap_or_default();
     match delivered {

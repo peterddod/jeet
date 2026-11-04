@@ -2692,9 +2692,9 @@ reports pushed already.
 
 Each use is written to the sender's `actions.log`, or to the assistant's
 for a top-level task or your terminal, which are not gated. Refusals are
-logged too. Without the capability, the report or message is kept for the
-assistant as ever, and the command fails saying why and not to send it
-again.
+logged too. Without the capability, the command fails saying why and not
+to send it again: the report has gone as any report does, and the message
+has been kept for `jeet brief`, whatever `[assistant] push` says.
 
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).

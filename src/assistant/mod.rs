@@ -512,29 +512,46 @@ pub fn target(sessions: &[Session]) -> Option<&Session> {
 /// user's words are not an agent's message, so it carries no meta and is
 /// rendered whole.
 ///
-/// `interrupt`, which the caller has checked (`assistant.interrupt`), sends
-/// an agent's as [`deliver_interrupt`] does, rendered whole.
+/// `how` says how an agent's goes: see [`How`].
 pub fn send(
     app: &App,
     from: &str,
     message: &str,
     from_user: bool,
-    interrupt: bool,
+    how: How,
 ) -> Result<(Delivered, Option<String>)> {
     let message = messages::checked(message)?;
     let mut meta = send_meta(from, &message, from_user);
     let text = fence_message(from, &message);
-    match (from_user, interrupt) {
+    match (from_user, how) {
         // The user's own goes to the assistant as ever.
         (true, _) => deliver_pushed(app, &text, true, meta),
-        (false, true) => {
+        (false, How::Interrupt) => {
             if let Some(meta) = &mut meta {
                 meta.class = Class::Full;
             }
             deliver_interrupt(app, &mark_interrupt(&text), meta)
         }
-        (false, false) => deliver(app, &text, true, meta),
+        (false, How::Usual) => deliver(app, &text, true, meta),
+        (false, How::Keep) => {
+            let task = ensure(app)?;
+            let dir = tasks::task_dir(app, &task);
+            Ok((brief::store(app, &dir, &text, meta)?, None))
+        }
     }
+}
+
+/// How an agent's message goes to the assistant ([`send`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// As [`deliver`] has it.
+    Usual,
+    /// As [`deliver_interrupt`] has it, rendered whole: the caller has
+    /// checked `assistant.interrupt`.
+    Interrupt,
+    /// Kept for `jeet brief`, whatever `[assistant] push` says: an
+    /// interrupt refused, from a sender that may not otherwise message it.
+    Keep,
 }
 
 /// Get `text`, fenced and marked as an interrupt ([`mark_interrupt`]), to
