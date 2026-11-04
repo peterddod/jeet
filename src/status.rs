@@ -1324,6 +1324,10 @@ fn record_session(
         created_at: now,
         last_activity: now,
     })?;
+    // A work task or manager has the one session: this one, from now on.
+    if matches!(task.kind, TaskKind::Work | TaskKind::Manager) {
+        app.db.set_task_session(task_id, session_id)?;
+    }
     app.db.touch_task(task_id, now)
 }
 

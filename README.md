@@ -837,8 +837,10 @@ Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
 task directory, so it keeps working when you detach (`Ctrl-Q`, or tmux's own `C-b d`) or close the
 terminal. tmux is required (`brew install tmux`, `apt install tmux`); without
 it `jeet task open` says so. Opening a task attaches to its session, starting
-the agent first if it is not running: Claude Code resumes the task's latest
-session, or starts a new one. Without a terminal, `open` leaves the agent
+the agent first if it is not running: Claude Code resumes the task's one
+session, or starts a new one. A task or manager has one session, as a review
+has: a `/clear` or a compact starts a new one, which replaces it from then on
+(the old one stays on record). Without a terminal, `open` leaves the agent
 running detached and prints the task directory.
 
 jeet starts Claude Code with hooks (passed with `--settings`, as a file
@@ -881,7 +883,7 @@ jeet task last fix-login -n 3    # its last three messages, oldest first
 jeet task last fix-login --json  # the same, for scripts
 ```
 
-`jeet task last` reads the task's latest session from the agent's own record
+`jeet task last` reads the task's session from the agent's own record
 of it (Claude Code's transcript), not from its tmux pane, and says how the
 last turn ended: `finished`, `interrupted`, `API error: <what it said>`, or
 `still running`, beside the task's status as `jeet task ls` shows it. An

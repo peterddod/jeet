@@ -557,6 +557,14 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE task_reports ADD COLUMN unanswered_told INTEGER NOT NULL DEFAULT 0;
     UPDATE task_reports SET reasked = 1, unanswered_told = 1;
     ",
+    // v14: a work task's or manager's one session, as a review has: the one
+    // it resumes, moved on to each session its agent starts (a `/clear`, a
+    // compact). The others stay in `task_sessions` as history. NULL for a
+    // task from before, which falls back to its latest session until its
+    // next start sets it. Additive only; a rebuild of `tasks` must copy it.
+    "
+    ALTER TABLE tasks ADD COLUMN session_id TEXT;
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
