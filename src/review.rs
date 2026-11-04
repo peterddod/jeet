@@ -304,6 +304,11 @@ pub fn worktree_path(app: &App, review: &ReviewRecord) -> Option<PathBuf> {
     Some(dir(app, review).join(review.dir_name.as_deref()?))
 }
 
+/// [`session_name`] among `sessions`, listed once for a loop over many reviews.
+pub fn session_name_in(sessions: &[String], review: &ReviewRecord) -> String {
+    tmux::pick_session(sessions, &review.slug)
+}
+
 /// The review's agent's tmux session.
 pub fn session_name(review: &ReviewRecord) -> String {
     runtime::session_name_for(&review.slug)
@@ -1448,8 +1453,8 @@ fn launch(app: &App, log: &Path, worktree: &Path, runner_for: &str) -> Result<()
         .get_review(runner_for)?
         .is_some_and(|r| r.requested_by.is_none());
     if users {
-        cmd.env_remove(crate::tasks::TASK_ID_ENV)
-            .env_remove(crate::permissions::ASSISTANT_ENV);
+        crate::env::remove_both(&mut cmd, crate::tasks::TASK_ID_ENV);
+        crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
     }
     let mut child = cmd.spawn().context("start the review command")?;
     hand_over(app, runner_for, users, &mut child)
@@ -1662,13 +1667,12 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
     // that started it: the runner itself stays the assistant's, so the
     // check on its job still applies.
     if job.env.iter().any(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
-        cmd.env_remove(crate::permissions::ASSISTANT_ENV);
+        crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
     }
-    let code = match cmd
-        .envs(job.env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .status()
-    {
+    for (k, v) in &job.env {
+        crate::env::set_both(&mut cmd, k, v);
+    }
+    let code = match cmd.stdin(Stdio::null()).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("jeet: could not run the review command: {e}");

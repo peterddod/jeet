@@ -25,6 +25,8 @@ impl App {
         // jeet stop recognising its own worktrees. Resolve the home once, up
         // front, so every derived root is stable whether or not it exists yet.
         let home = home.canonicalize().unwrap_or(home);
+        // The same for where new items go, which may not exist yet.
+        let new_home = new_home.map(|h| config::canonicalize_lenient(&h));
         let db = Database::open(&config::index_path(&home))?;
         Ok(Self {
             home,

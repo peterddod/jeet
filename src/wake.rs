@@ -163,8 +163,9 @@ fn live_sessions(app: &App) -> Result<Vec<Live>> {
     if !tmux::available() {
         return Ok(live);
     }
+    let sessions = tmux::list_sessions();
     for task in app.db.list_tasks(Some(TaskState::Active))? {
-        if !tmux::agent_alive(&runtime::session_name(&task)) {
+        if !tmux::agent_alive(&runtime::session_name_in(&sessions, &task)) {
             continue;
         }
         let dir = tasks::task_dir(app, &task);

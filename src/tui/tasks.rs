@@ -3458,10 +3458,12 @@ impl Background {
 
     /// Have the status poller read every task's and review's status now.
     fn probe(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        // One listing for every row.
+        let sessions = tmux::list_sessions();
         let tasks = rows.iter().map(|row| Probe {
             id: row.task.id.clone(),
             dir: row.dir.clone(),
-            session: runtime::session_name(&row.task),
+            session: runtime::session_name_in(&sessions, &row.task),
             touched: row.task.last_activity,
             active: row.task.state == TaskState::Active,
             review: false,
@@ -3469,7 +3471,7 @@ impl Background {
         let reviews = reviews.iter().map(|row| Probe {
             id: row.id().to_string(),
             dir: row.dir.clone(),
-            session: crate::review::session_name(&row.review),
+            session: crate::review::session_name_in(&sessions, &row.review),
             touched: row.review.last_activity,
             active: !row.archived(),
             review: true,

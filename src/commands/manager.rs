@@ -699,8 +699,13 @@ pub fn grant(app: &App, name: &str, caps: &[String], none: bool) -> Result<()> {
         );
     }
     let tmux_ok = tmux::available();
+    let sessions = if tmux_ok {
+        tmux::list_sessions()
+    } else {
+        Vec::new()
+    };
     for (node, lost) in stale(app, &before)? {
-        if !(tmux_ok && tmux::pane_alive(&runtime::session_name(&node))) {
+        if !(tmux_ok && tmux::pane_alive(&runtime::session_name_in(&sessions, &node))) {
             continue;
         }
         eprintln!(

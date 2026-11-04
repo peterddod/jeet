@@ -952,8 +952,8 @@ impl Config {
             [
                 env_non_empty("JEET_EDITOR"),
                 self.editor.clone(),
-                env_non_empty("VISUAL"),
-                env_non_empty("EDITOR"),
+                plain_env_non_empty("VISUAL"),
+                plain_env_non_empty("EDITOR"),
             ],
             "vim",
         )
@@ -1141,6 +1141,11 @@ fn first_set(candidates: impl IntoIterator<Item = Option<String>>, default: &str
         .unwrap_or_else(|| default.to_string())
 }
 
+/// A variable that is not jeet's own, read as it is.
+fn plain_env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
 fn env_non_empty(key: &str) -> Option<String> {
     crate::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -1217,20 +1222,47 @@ pub fn default_home_candidates(user_home: &Path) -> [PathBuf; 2] {
     ]
 }
 
+/// `path` with symlinks resolved as far as it exists: the longest existing
+/// ancestor is canonicalised and the rest appended. Nothing is created.
+pub fn canonicalize_lenient(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(canon) = at.canonicalize() {
+            return rest.iter().rev().fold(canon, |p, name| p.join(name));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// Pick the homes from the environment: `$PLETE_HOME`, then `$JEET_HOME`,
 /// then the defaults. An explicit home is the only one, except that a
 /// `$JEET_HOME` naming the default `~/.jeet` (as old sessions and launchd
 /// jobs set it) with an index in it is still the default, so it stays split.
+/// A parent that is split passes `$PLETE_NEW_HOME` with its home, which an
+/// explicit home then keeps.
 fn resolve_homes(
     plete_home: Option<PathBuf>,
     jeet_home: Option<PathBuf>,
+    new_home: Option<PathBuf>,
     user_home: &Path,
 ) -> (PathBuf, Option<PathBuf>) {
     if let Some(home) = plete_home {
-        return (home, None);
+        return (home, new_home);
     }
     match jeet_home {
-        Some(home) if home == user_home.join(LEGACY_HOME_DIR) && index_path(&home).exists() => {
+        Some(home) if new_home.is_some() => (home, new_home),
+        Some(home)
+            if canonicalize_lenient(&home)
+                == canonicalize_lenient(&user_home.join(LEGACY_HOME_DIR))
+                && index_path(&home).exists() =>
+        {
             default_homes(user_home)
         }
         Some(home) => (home, None),
@@ -1242,10 +1274,11 @@ fn resolve_homes(
 pub fn jeet_homes() -> Result<(PathBuf, Option<PathBuf>)> {
     let env_home = |name| std::env::var_os(name).map(PathBuf::from);
     let (plete, jeet) = (env_home("PLETE_HOME"), env_home("JEET_HOME"));
+    let new_home = env_home(crate::env::NEW_HOME_VAR).filter(|_| plete.is_some() || jeet.is_some());
     let user_home = dirs::home_dir();
     if plete.is_some() || jeet.is_some() {
         let user_home = user_home.unwrap_or_default();
-        return Ok(resolve_homes(plete, jeet, &user_home));
+        return Ok(resolve_homes(plete, jeet, new_home, &user_home));
     }
     let user_home = user_home.context("could not determine home directory")?;
     Ok(default_homes(&user_home))
@@ -1333,6 +1366,17 @@ pub fn expand_path(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn other_programs_variables_are_not_prefixed() {
+        std::env::set_var("CFGTEST_EDITOR", "ed");
+        std::env::set_var("JEET_CFGTEST_EDITOR", "wrong");
+        assert_eq!(plain_env_non_empty("CFGTEST_EDITOR").as_deref(), Some("ed"));
+        // Reached through `env_non_empty`, a name without the prefix is as is.
+        assert_eq!(env_non_empty("CFGTEST_EDITOR").as_deref(), Some("ed"));
+        std::env::remove_var("CFGTEST_EDITOR");
+        std::env::remove_var("JEET_CFGTEST_EDITOR");
+    }
+
+    #[test]
     fn default_homes_unsplit_is_the_legacy_home() {
         let u = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(u.path().join(".plete")).unwrap();
@@ -1362,15 +1406,49 @@ mod tests {
     }
 
     #[test]
+    fn a_split_parents_new_home_rides_with_an_explicit_home() {
+        let u = tempfile::tempdir().unwrap();
+        let (a, n) = (PathBuf::from("/x/a"), PathBuf::from("/x/n"));
+        assert_eq!(
+            resolve_homes(None, Some(a.clone()), Some(n.clone()), u.path()),
+            (a.clone(), Some(n.clone()))
+        );
+        assert_eq!(
+            resolve_homes(Some(a.clone()), None, Some(n.clone()), u.path()),
+            (a, Some(n))
+        );
+    }
+
+    #[test]
+    fn canonicalising_leniently_keeps_what_does_not_exist() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().canonicalize().unwrap();
+        #[cfg(unix)]
+        {
+            let link = d.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(canonicalize_lenient(&link.join("a/b")), real.join("a/b"));
+        }
+        assert_eq!(canonicalize_lenient(&real.join("x/y")), real.join("x/y"));
+        assert!(!real.join("x").exists());
+    }
+
+    #[test]
     fn explicit_homes_win_in_order() {
         let u = tempfile::tempdir().unwrap();
         let (a, b) = (PathBuf::from("/x/a"), PathBuf::from("/x/b"));
         assert_eq!(
-            resolve_homes(Some(a.clone()), Some(b.clone()), u.path()),
+            resolve_homes(Some(a.clone()), Some(b.clone()), None, u.path()),
             (a, None)
         );
-        assert_eq!(resolve_homes(None, Some(b.clone()), u.path()), (b, None));
-        assert_eq!(resolve_homes(None, None, u.path()), default_homes(u.path()));
+        assert_eq!(
+            resolve_homes(None, Some(b.clone()), None, u.path()),
+            (b, None)
+        );
+        assert_eq!(
+            resolve_homes(None, None, None, u.path()),
+            default_homes(u.path())
+        );
     }
 
     use super::*;

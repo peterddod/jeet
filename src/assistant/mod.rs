@@ -324,13 +324,17 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         .collect();
     let argv = launch_argv(app, task, &spec, &id, &name, resume, prompt, &running)?;
     let home = app.home.to_string_lossy();
-    let env = [
+    let mut env = vec![
         // Its hooks find it by this even after it `cd`s into a task.
         (tasks::TASK_ID_ENV, task.id.as_str()),
         ("JEET_HOME", home.as_ref()),
         (permissions::ASSISTANT_ENV, "1"),
         (cd::CD_FILE_ENV, ""),
     ];
+    let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
+    if let Some(new_home) = &new_home {
+        env.push((crate::env::NEW_HOME_VAR, new_home.as_ref()));
+    }
     let (window, pane) = tmux::new_window(&tmux_session(), &id, &title(&name), &dir, &env, &argv)?;
     let mut warnings: Vec<String> = spec.version_warning().into_iter().collect();
     if let Err(e) = identity::record(

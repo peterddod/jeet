@@ -34,7 +34,9 @@ pub fn run(app: &App, url: &str) -> Result<()> {
     // Read once and not passed on: what the screen run here starts is not
     // a terminal jeet started.
     let started = crate::env::var_os(STARTED_ENV).is_some();
-    std::env::remove_var(STARTED_ENV);
+    for name in crate::env::both_names(STARTED_ENV) {
+        std::env::remove_var(name);
+    }
     let link = link::parse(url)?;
     let mut screens = registry::live(&app.home);
     let clients = tmux::clients();
@@ -158,7 +160,7 @@ fn plan(
         let session = runtime::session_name_for(slug);
         let attached: Vec<Client> = clients
             .iter()
-            .filter(|c| c.session.starts_with(tmux::SESSION_PREFIX))
+            .filter(|c| tmux::is_ours(&c.session))
             .cloned()
             .collect();
         if let Some(client) = tmux::most_recent(&attached) {

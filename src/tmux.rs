@@ -34,7 +34,7 @@ pub fn find_session(slug: &str) -> String {
     pick_session(&list_sessions(), slug)
 }
 
-fn pick_session(existing: &[String], slug: &str) -> String {
+pub fn pick_session(existing: &[String], slug: &str) -> String {
     [NEW_SESSION_PREFIX, LEGACY_SESSION_PREFIX]
         .into_iter()
         .map(|prefix| format!("{prefix}{slug}"))
@@ -51,7 +51,7 @@ pub fn is_session_of(name: &str, slug: &str) -> bool {
 }
 
 /// Whether tmux session `name` is one of jeet's, under either prefix.
-fn is_ours(name: &str) -> bool {
+pub fn is_ours(name: &str) -> bool {
     name.starts_with(NEW_SESSION_PREFIX) || name.starts_with(LEGACY_SESSION_PREFIX)
 }
 
@@ -202,6 +202,19 @@ pub fn require() -> Result<()> {
     Ok(())
 }
 
+/// Take out of `cmd`'s environment what must not reach a tmux server (and so
+/// every pane it makes), under both names.
+fn remove_ours(cmd: &mut Command) {
+    for name in [
+        crate::cd::CD_FILE_ENV,
+        crate::tasks::TASK_ID_ENV,
+        crate::permissions::ASSISTANT_ENV,
+        BACKGROUND_ENV,
+    ] {
+        crate::env::remove_both(cmd, name);
+    }
+}
+
 /// Whether this process runs as a background job: see [`BACKGROUND_ENV`].
 fn in_background() -> bool {
     crate::env::var_os(BACKGROUND_ENV).is_some_and(|v| !v.is_empty())
@@ -304,17 +317,16 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         .args(["-s", name, "-c"])
         .arg(cwd);
     for (key, value) in env {
-        cmd.arg("-e").arg(format!("{key}={value}"));
+        for name in crate::env::both_names(key) {
+            cmd.arg("-e").arg(format!("{name}={value}"));
+        }
     }
     cmd.arg("--").args(argv);
     // A server this starts keeps a copy of our environment for every pane it
     // ever makes: the shell wrapper's cd file, this task's id and the
     // assistant's restrictions must not leak into other sessions that way.
-    cmd.env_remove(crate::cd::CD_FILE_ENV)
-        .env_remove(crate::tasks::TASK_ID_ENV)
-        .env_remove(crate::permissions::ASSISTANT_ENV)
-        .env_remove(BACKGROUND_ENV)
-        .stdin(Stdio::null());
+    remove_ours(&mut cmd);
+    cmd.stdin(Stdio::null());
     let output = cmd.bounded_output().context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -592,14 +604,13 @@ pub fn new_window(
         // shell command: the name is the user's, so it goes in literally.
         cmd.args(["-n", &format_literal(title), "-c"]).arg(cwd);
         for (key, value) in env {
-            cmd.arg("-e").arg(format!("{key}={value}"));
+            for name in crate::env::both_names(key) {
+                cmd.arg("-e").arg(format!("{name}={value}"));
+            }
         }
         cmd.arg("--").args(argv);
-        cmd.env_remove(crate::cd::CD_FILE_ENV)
-            .env_remove(crate::tasks::TASK_ID_ENV)
-            .env_remove(crate::permissions::ASSISTANT_ENV)
-            .env_remove(BACKGROUND_ENV)
-            .stdin(Stdio::null());
+        remove_ours(&mut cmd);
+        cmd.stdin(Stdio::null());
         let output = cmd.bounded_output().context("run tmux")?;
         // Another jeet made the session between the look and the start:
         // a window in it does as well.
@@ -707,7 +718,9 @@ pub fn split_window(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String
     cmd.args(["split-window", "-d", "-h", "-t", &pane, "-c"])
         .arg(cwd);
     for (key, value) in env {
-        cmd.arg("-e").arg(format!("{key}={value}"));
+        for name in crate::env::both_names(key) {
+            cmd.arg("-e").arg(format!("{name}={value}"));
+        }
     }
     cmd.arg("--").args(argv).stdin(Stdio::null());
     let output = cmd.bounded_output().context("run tmux")?;

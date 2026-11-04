@@ -42,6 +42,11 @@ pub fn session_name(task: &TaskRecord) -> String {
     session_name_for(&task.slug)
 }
 
+/// [`session_name`] among `sessions`, listed once for a loop over many tasks.
+pub fn session_name_in(sessions: &[String], task: &TaskRecord) -> String {
+    tmux::pick_session(sessions, &task.slug)
+}
+
 /// The tmux session of whatever has `slug`: see [`tmux::find_session`].
 pub fn session_name_for(slug: &str) -> String {
     tmux::find_session(slug)
@@ -379,7 +384,7 @@ pub fn launch_tmux(
         warnings.push(format!("could not note the agent's launch: {e:#}"));
     }
     let home = app.home.to_string_lossy();
-    let env = [
+    let mut env = vec![
         (tasks::TASK_ID_ENV, launch.id.as_str()),
         // The agent's own `jeet` calls and hooks must find this index, not
         // whatever the tmux server's environment says.
@@ -388,6 +393,10 @@ pub fn launch_tmux(
         // `jeet worktree add` must not move the user's shell.
         (cd::CD_FILE_ENV, ""),
     ];
+    let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
+    if let Some(new_home) = &new_home {
+        env.push((crate::env::NEW_HOME_VAR, new_home.as_ref()));
+    }
     let pane = tmux::new_session(&name, &launch.dir, &env, &argv)?;
     if let Err(e) = record_anchor(&pane) {
         warnings.push(identity::unidentified(&launch.slug, &e));

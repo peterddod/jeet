@@ -681,8 +681,8 @@ pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<
     if let Some(session) = session {
         cmd.args(["--session", session]);
     }
-    cmd.env("JEET_HOME", &app.home)
-        .current_dir(&app.home)
+    crate::env::set_home(&mut cmd, &app.home, app.new_home.as_deref());
+    cmd.current_dir(&app.home)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);

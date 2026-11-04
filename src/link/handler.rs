@@ -88,6 +88,7 @@ fn applescript(path: &str, home: &Path, exe: &Path) -> Result<String> {
         "on open location theURL\n\
          \tdo shell script \"/usr/bin/env \" & quoted form of \"PATH={path}\" \
          & \" \" & quoted form of \"JEET_HOME={home}\" \
+         & \" \" & quoted form of \"PLETE_HOME={home}\" \
          & \" \" & quoted form of \"{exe}\" & \" open \" & quoted form of theURL \
          & \" > \" & quoted form of \"{log}\" & \" 2>&1\"\n\
          end open location\n",
@@ -226,12 +227,13 @@ fn desktop_entry(path: &str, home: &Path, exe: &Path) -> Result<String> {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=jeet link\n\
-         Exec=/usr/bin/env {} {} {} open %u\n\
+         Exec=/usr/bin/env {} {} {} {} open %u\n\
          MimeType={mimes};\n\
          NoDisplay=true\n\
          Terminal=false\n",
         desktop_quote(&format!("PATH={path}"))?,
         desktop_quote(&format!("JEET_HOME={}", home.display()))?,
+        desktop_quote(&format!("PLETE_HOME={}", home.display()))?,
         desktop_quote(&exe.to_string_lossy())?,
         mimes = MIME_TYPES.join(";"),
     ))
@@ -365,6 +367,7 @@ mod tests {
             "on open location theURL\n\
              \tdo shell script \"/usr/bin/env \" & quoted form of \"PATH=/usr/bin:/bin\" \
              & \" \" & quoted form of \"JEET_HOME=/Users/me/.jeet\" \
+             & \" \" & quoted form of \"PLETE_HOME=/Users/me/.jeet\" \
              & \" \" & quoted form of \"/opt/jeet\" & \" open \" & quoted form of theURL \
              & \" > \" & quoted form of \"/Users/me/.jeet/tui/link.log\" & \" 2>&1\"\n\
              end open location\n"
@@ -406,7 +409,7 @@ mod tests {
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=jeet link\n\
-             Exec=/usr/bin/env \"PATH=/usr/bin:/bin\" \"JEET_HOME=/h/.jeet\" \"/opt/my jeet\" open %u\n\
+             Exec=/usr/bin/env \"PATH=/usr/bin:/bin\" \"JEET_HOME=/h/.jeet\" \"PLETE_HOME=/h/.jeet\" \"/opt/my jeet\" open %u\n\
              MimeType=x-scheme-handler/plete;x-scheme-handler/jeet;\n\
              NoDisplay=true\n\
              Terminal=false\n"

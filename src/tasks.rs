@@ -1498,17 +1498,22 @@ fn set_aside_leftovers(
     snapshot: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut kept = Vec::new();
-    if let Some(old) = git::rev_parse(trunk, &existing_ref(trunk, "head", task_id, dir_name)) {
-        if old != head
-            && !git::is_ancestor(trunk, &old, head)
-            && unreachable(trunk, &old) != Some(0)
-        {
-            kept.push(keep(trunk, task_id, dir_name, "head", &old)?);
+    // A ref in each namespace is each its own work to keep.
+    for name in ref_names("head", task_id, dir_name) {
+        if let Some(old) = git::rev_parse(trunk, &name) {
+            if old != head
+                && !git::is_ancestor(trunk, &old, head)
+                && unreachable(trunk, &old) != Some(0)
+            {
+                kept.push(keep(trunk, task_id, dir_name, "head", &old)?);
+            }
         }
     }
-    if let Some(old) = git::rev_parse(trunk, &existing_ref(trunk, "stash", task_id, dir_name)) {
-        if !snapshot.is_some_and(|new| same_changes(trunk, &old, new)) {
-            kept.push(keep(trunk, task_id, dir_name, "stash", &old)?);
+    for name in ref_names("stash", task_id, dir_name) {
+        if let Some(old) = git::rev_parse(trunk, &name) {
+            if !snapshot.is_some_and(|new| same_changes(trunk, &old, new)) {
+                kept.push(keep(trunk, task_id, dir_name, "stash", &old)?);
+            }
         }
     }
     Ok(kept)
@@ -1871,6 +1876,10 @@ pub(crate) fn archive_worktree(
             "{what}: work an earlier unarchive could not put back is kept at {name}"
         ));
     }
+    // Whatever was under either name is set aside above; clear both so the
+    // write name is the only one left.
+    delete_ref_everywhere(&trunk, "head", owner_id, what);
+    delete_ref_everywhere(&trunk, "stash", owner_id, what);
     let head_ref = jeet_ref("head", owner_id, what);
     git::update_ref(&trunk, &head_ref, &head).with_context(|| format!("{what}: pin HEAD"))?;
     let stash_ref = jeet_ref("stash", owner_id, what);

@@ -887,11 +887,11 @@ fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
         .with_context(|| format!("open {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let mut cmd = Command::new("nohup");
+    crate::env::set_home(&mut cmd, &app.home, app.new_home.as_deref());
+    crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
+    crate::env::remove_both(&mut cmd, tasks::TASK_ID_ENV);
     cmd.arg(exe)
         .args(["manager", "drain", "--after", task_id])
-        .env("JEET_HOME", &app.home)
-        .env_remove(crate::permissions::ASSISTANT_ENV)
-        .env_remove(tasks::TASK_ID_ENV)
         .current_dir(&app.home)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)

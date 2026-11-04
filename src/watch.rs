@@ -1430,12 +1430,10 @@ fn launch(home: &Path) -> Result<()> {
 /// assistant, nor the task whose terminal opened the tasks list.
 fn once_command(home: &Path, exe: &Path) -> Command {
     let mut cmd = Command::new("nohup");
-    cmd.arg(exe)
-        .args(["watch", "--once"])
-        .env("JEET_HOME", home)
-        .env_remove(crate::permissions::ASSISTANT_ENV)
-        .env_remove(crate::tasks::TASK_ID_ENV)
-        .current_dir(home);
+    cmd.arg(exe).args(["watch", "--once"]).current_dir(home);
+    crate::env::set_both(&mut cmd, "JEET_HOME", home);
+    crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
+    crate::env::remove_both(&mut cmd, crate::tasks::TASK_ID_ENV);
     cmd
 }
 
@@ -1482,7 +1480,11 @@ pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
 	<dict>
 		<key>JEET_HOME</key>
 		<string>{home}</string>
+		<key>PLETE_HOME</key>
+		<string>{home}</string>
 		<key>{background}</key>
+		<string>1</string>
+		<key>PLETE_BACKGROUND</key>
 		<string>1</string>
 		<key>PATH</key>
 		<string>{path}</string>
@@ -1516,9 +1518,11 @@ pub(crate) fn systemd_word(text: &str) -> String {
 pub fn systemd_units(exe: &Path, home: &Path, interval: u64) -> [(&'static str, String); 2] {
     let service = format!(
         "[Unit]\nDescription=jeet: poll GitHub for the assistant and your tasks\n\n\
-         [Service]\nType=oneshot\nEnvironment={env}\nEnvironment={background}=1\n\
+         [Service]\nType=oneshot\nEnvironment={env}\nEnvironment={new_env}\n\
+         Environment={background}=1\nEnvironment=PLETE_BACKGROUND=1\n\
          ExecStart={exe} watch --once\n",
         env = systemd_word(&format!("JEET_HOME={}", home.display())),
+        new_env = systemd_word(&format!("PLETE_HOME={}", home.display())),
         background = tmux::BACKGROUND_ENV,
         exe = systemd_word(&exe.to_string_lossy()),
     );
@@ -2490,7 +2494,11 @@ mod tests {
 	<dict>
 		<key>JEET_HOME</key>
 		<string>/Users/me/.jeet</string>
+		<key>PLETE_HOME</key>
+		<string>/Users/me/.jeet</string>
 		<key>JEET_BACKGROUND</key>
+		<string>1</string>
+		<key>PLETE_BACKGROUND</key>
 		<string>1</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/bin</string>
@@ -2517,7 +2525,8 @@ mod tests {
             service,
             "[Unit]\nDescription=jeet: poll GitHub for the assistant and your tasks\n\n\
              [Service]\nType=oneshot\nEnvironment=\"JEET_HOME=/home/me/100%% \\\"j\\\"\"\n\
-             Environment=JEET_BACKGROUND=1\n\
+             Environment=\"PLETE_HOME=/home/me/100%% \\\"j\\\"\"\n\
+             Environment=JEET_BACKGROUND=1\nEnvironment=PLETE_BACKGROUND=1\n\
              ExecStart=\"/home/me/bin/jeet\" watch --once\n"
         );
         assert_eq!(timer_name, "jeet-watch.timer");

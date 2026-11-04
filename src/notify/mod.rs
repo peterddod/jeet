@@ -729,9 +729,12 @@ fn run(invocation: &Invocation) {
     let Some((program, args)) = invocation.argv.split_first() else {
         return;
     };
-    let child = Command::new(program)
-        .args(args)
-        .envs(invocation.env.iter().map(|(k, v)| (k, v)))
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    for (k, v) in &invocation.env {
+        crate::env::set_both(&mut cmd, k, v);
+    }
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

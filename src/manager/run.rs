@@ -479,7 +479,7 @@ pub fn live_set(app: &App) -> Result<HashSet<String>> {
 /// one `tmux list-sessions`, then a look at the agent's pane of each
 /// task's session in it.
 fn live_tasks(app: &App) -> Result<Vec<TaskRecord>> {
-    let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
+    let sessions = tmux::list_sessions();
     if sessions.is_empty() {
         return Ok(Vec::new());
     }
@@ -488,7 +488,7 @@ fn live_tasks(app: &App) -> Result<Vec<TaskRecord>> {
         .list_tasks(Some(TaskState::Active))?
         .into_iter()
         .filter(|t| {
-            let name = runtime::session_name(t);
+            let name = runtime::session_name_in(&sessions, t);
             sessions.contains(&name) && tmux::agent_alive(&name)
         })
         .collect())
@@ -592,7 +592,7 @@ pub fn admit_review_over(
 /// The review agents whose pane is live: one `tmux list-sessions`, then a
 /// look at the agent's pane of each active review's session in it.
 pub fn live_reviews(app: &App) -> Result<Vec<ReviewRecord>> {
-    let sessions: HashSet<String> = tmux::list_sessions().into_iter().collect();
+    let sessions = tmux::list_sessions();
     if sessions.is_empty() {
         return Ok(Vec::new());
     }
@@ -601,7 +601,7 @@ pub fn live_reviews(app: &App) -> Result<Vec<ReviewRecord>> {
         .list_reviews(Some(TaskState::Active))?
         .into_iter()
         .filter(|r| {
-            let name = review::session_name(r);
+            let name = review::session_name_in(&sessions, r);
             sessions.contains(&name) && tmux::agent_alive(&name)
         })
         .collect())

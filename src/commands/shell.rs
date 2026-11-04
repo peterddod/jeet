@@ -51,7 +51,7 @@ jeet() {
   if [[ -n "$_JEET_CD_FILE" ]]; then
     : >"$_JEET_CD_FILE"
   fi
-  JEET_CD_FILE="$_JEET_CD_FILE" "$_jeet_bin" "$@"
+  JEET_CD_FILE="$_JEET_CD_FILE" PLETE_CD_FILE="$_JEET_CD_FILE" "$_jeet_bin" "$@"
   _jeet_status=$?
   if [[ -n "$_JEET_CD_FILE" && -s "$_JEET_CD_FILE" ]]; then
     _jeet_target="$(cat "$_JEET_CD_FILE")"
