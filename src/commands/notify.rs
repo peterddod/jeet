@@ -52,7 +52,7 @@ pub fn run_command(command: NotifyCommands) -> Result<()> {
             let app = App::open()?;
             sender::serve(&home, !permissions::at_terminal(&app)?)
         }
-        NotifyCommands::Install => sender::install(&home),
+        NotifyCommands::Install => sender::install(&home, App::open()?.new_home.as_deref()),
         NotifyCommands::Uninstall => sender::uninstall(),
         NotifyCommands::InstallLink => install_link(&App::open()?),
         NotifyCommands::UninstallLink => uninstall_link(&App::open()?),
@@ -365,7 +365,7 @@ fn waits(home: &Path) -> bool {
 /// `plete open`. A change to the user's system, so theirs alone to make.
 pub fn install_link(app: &App) -> Result<()> {
     require_terminal(app)?;
-    link::handler::install(&app.home)
+    link::handler::install(&app.home, app.new_home.as_deref())
 }
 
 /// `plete notify uninstall-link`.

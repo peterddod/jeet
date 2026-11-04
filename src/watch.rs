@@ -1384,7 +1384,7 @@ fn summary(sent: &[Sent]) -> String {
 /// is due, and none is running. Best effort and quick — two small files and
 /// maybe a process — though the tasks list still calls it off its draw
 /// path.
-pub fn maybe_background(home: &Path, config: &Config) {
+pub fn maybe_background(home: &Path, new_home: Option<&Path>, config: &Config) {
     let Some(watch) = &config.watch else {
         return;
     };
@@ -1401,12 +1401,12 @@ pub fn maybe_background(home: &Path, config: &Config) {
     if record_claim(home, now).is_err() {
         return;
     }
-    let _ = launch(home);
+    let _ = launch(home, new_home);
 }
 
 /// Launch `plete watch --once` detached, the way the store sync is: under
 /// `nohup`, in its own process group, appending to the log.
-fn launch(home: &Path) -> Result<()> {
+fn launch(home: &Path, new_home: Option<&Path>) -> Result<()> {
     let log = home.join(LOG_FILE);
     let out = OpenOptions::new()
         .create(true)
@@ -1414,7 +1414,7 @@ fn launch(home: &Path) -> Result<()> {
         .open(&log)
         .with_context(|| format!("open {}", log.display()))?;
     let exe = crate::paths::plete_exe()?;
-    let mut cmd = once_command(home, &exe);
+    let mut cmd = once_command(home, new_home, &exe);
     cmd.stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
@@ -1429,10 +1429,10 @@ fn launch(home: &Path) -> Result<()> {
 
 /// `nohup <exe> watch --once` for `home`, as no one in particular: not the
 /// assistant, nor the task whose terminal opened the tasks list.
-fn once_command(home: &Path, exe: &Path) -> Command {
+fn once_command(home: &Path, new_home: Option<&Path>, exe: &Path) -> Command {
     let mut cmd = Command::new("nohup");
     cmd.arg(exe).args(["watch", "--once"]).current_dir(home);
-    crate::env::set_both(&mut cmd, "PLETE_HOME", home);
+    crate::env::set_home(&mut cmd, home, new_home);
     crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
     crate::env::remove_both(&mut cmd, crate::tasks::TASK_ID_ENV);
     cmd
@@ -1456,8 +1456,21 @@ pub(crate) fn xml(text: &str) -> String {
 /// own has no `gh` or `tmux`), logging to `watch.log`. It is marked as a
 /// background job, so it never starts a tmux server with launchd's bare
 /// environment for the user's own panes to inherit.
-pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
+pub fn plist(
+    exe: &Path,
+    home: &Path,
+    new_home: Option<&Path>,
+    interval: u64,
+    path_env: &str,
+) -> String {
     let log = home.join(LOG_FILE);
+    let new_home = new_home.map_or(String::new(), |h| {
+        format!(
+            "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+            crate::env::NEW_HOME_VAR,
+            xml(&h.to_string_lossy())
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1483,7 +1496,7 @@ pub fn plist(exe: &Path, home: &Path, interval: u64, path_env: &str) -> String {
 		<string>{home}</string>
 		<key>PLETE_HOME</key>
 		<string>{home}</string>
-		<key>JEET_BACKGROUND</key>
+{new_home}		<key>JEET_BACKGROUND</key>
 		<string>1</string>
 		<key>PLETE_BACKGROUND</key>
 		<string>1</string>
@@ -1515,10 +1528,19 @@ pub(crate) fn systemd_word(text: &str) -> String {
 
 /// The systemd user service and timer that do what the launchd job does:
 /// (file name, contents) for each.
-pub fn systemd_units(exe: &Path, home: &Path, interval: u64) -> [(&'static str, String); 2] {
+pub fn systemd_units(
+    exe: &Path,
+    home: &Path,
+    new_home: Option<&Path>,
+    interval: u64,
+) -> [(&'static str, String); 2] {
+    let new_home = new_home.map_or(String::new(), |h| {
+        let var = format!("{}={}", crate::env::NEW_HOME_VAR, h.display());
+        format!("Environment={}\n", systemd_word(&var))
+    });
     let service = format!(
         "[Unit]\nDescription=plete: poll GitHub for the assistant and your tasks\n\n\
-         [Service]\nType=oneshot\nEnvironment={env}\nEnvironment={new_env}\n\
+         [Service]\nType=oneshot\nEnvironment={env}\nEnvironment={new_env}\n{new_home}\
          Environment=JEET_BACKGROUND=1\nEnvironment=PLETE_BACKGROUND=1\n\
          ExecStart={exe} watch --once\n",
         env = systemd_word(&format!("JEET_HOME={}", home.display())),
@@ -1624,7 +1646,7 @@ pub fn install(app: &App) -> Result<()> {
     // Homebrew's, it outlives an upgrade.
     let exe = crate::paths::plete_exe()?;
     if !cfg!(target_os = "macos") {
-        let [service, timer] = systemd_units(&exe, &app.home, interval);
+        let [service, timer] = systemd_units(&exe, &app.home, app.new_home.as_deref(), interval);
         for (name, text) in [&service, &timer] {
             println!("# ~/.config/systemd/user/{name}\n{text}");
         }
@@ -1640,13 +1662,18 @@ pub fn install(app: &App) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    // The job from before the rename is replaced by this one.
-    if retire_job(LEGACY_LABEL)? {
-        eprintln!("plete: replaced the {LEGACY_LABEL} job");
-    }
     let path_env = std::env::var("PATH").unwrap_or_default();
-    std::fs::write(&path, plist(&exe, &app.home, interval, &path_env))
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(
+        &path,
+        plist(
+            &exe,
+            &app.home,
+            app.new_home.as_deref(),
+            interval,
+            &path_env,
+        ),
+    )
+    .with_context(|| format!("write {}", path.display()))?;
     let domain = launchd_domain()?;
     // Installed before: replaced, with this plete and interval.
     let replaced =
@@ -1664,6 +1691,11 @@ pub fn install(app: &App) -> Result<()> {
             path.display(),
             first_line(&output.stderr)
         );
+    }
+    // Only now that this one is loaded is the job from before the rename
+    // replaced by it.
+    if retire_job(LEGACY_LABEL)? {
+        eprintln!("plete: replaced the {LEGACY_LABEL} job");
     }
     eprintln!(
         "plete: polling GitHub every {interval}s with launchd ({LABEL}); it logs to {}",
@@ -1763,7 +1795,7 @@ mod tests {
     #[test]
     fn the_background_poll_runs_as_no_task() {
         let home = Path::new("/plete-home");
-        let cmd = once_command(home, Path::new("/bin/plete"));
+        let cmd = once_command(home, None, Path::new("/bin/plete"));
         let envs: Vec<_> = cmd.get_envs().collect();
         for name in [crate::tasks::TASK_ID_ENV, crate::permissions::ASSISTANT_ENV] {
             assert!(
@@ -2499,10 +2531,43 @@ mod tests {
     }
 
     #[test]
+    fn a_split_home_is_baked_into_the_job() {
+        let new = Path::new("/Users/me/.plete");
+        let text = plist(
+            Path::new("/bin/plete"),
+            Path::new("/Users/me/.jeet"),
+            Some(new),
+            120,
+            "/usr/bin",
+        );
+        assert!(
+            text.contains("<key>PLETE_NEW_HOME</key>\n\t\t<string>/Users/me/.plete</string>"),
+            "{text}"
+        );
+        let [(_, service), _] = systemd_units(
+            Path::new("/bin/plete"),
+            Path::new("/home/me/.jeet"),
+            Some(new),
+            90,
+        );
+        assert!(
+            service.contains("Environment=\"PLETE_NEW_HOME=/Users/me/.plete\"\n"),
+            "{service}"
+        );
+        let cmd = once_command(Path::new("/h/.jeet"), Some(new), Path::new("/bin/plete"));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("PLETE_NEW_HOME"),
+            Some(new.as_os_str())
+        )));
+    }
+
+    #[test]
     fn the_launchd_plist_runs_one_poll_every_interval() {
         let text = plist(
             Path::new("/opt/plete & co/plete"),
             Path::new("/Users/me/.plete"),
+            None,
             120,
             "/opt/homebrew/bin:/usr/bin",
         );
@@ -2552,6 +2617,7 @@ mod tests {
         let [(service_name, service), (timer_name, timer)] = systemd_units(
             Path::new("/home/me/bin/plete"),
             Path::new("/home/me/100% \"j\""),
+            None,
             90,
         );
         assert_eq!(service_name, "plete-watch.service");

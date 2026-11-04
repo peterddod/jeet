@@ -214,7 +214,13 @@ fn start_terminal(app: &App, link: &Link, started: bool) -> Result<()> {
     }
     let exe = crate::paths::plete_exe()?;
     let path = std::env::var("PATH").unwrap_or_default();
-    let plete = terminal::open_argv(&exe, &app.home, &path, &link.to_string());
+    let plete = terminal::open_argv(
+        &exe,
+        &app.home,
+        app.new_home.as_deref(),
+        &path,
+        &link.to_string(),
+    );
     let script = registry::dir(&app.home).join(format!("open-{}.command", std::process::id()));
     terminal::start(&terminal::invocation(&choice, &plete, &script)?)?;
     println!("started a terminal for {link}");

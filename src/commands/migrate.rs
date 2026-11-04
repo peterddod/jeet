@@ -156,6 +156,12 @@ fn rebase(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
 /// In every text column of the index at `db_path`, put `new` where a path
 /// starts with `old`. Returns how many values changed. All or nothing.
 pub fn rewrite_index(db_path: &Path, old: &Path, new: &Path) -> Result<usize> {
+    rewrite_index_as(db_path, old, new, true)
+}
+
+/// [`rewrite_index`], or with `commit` false, only counting what it would
+/// change.
+fn rewrite_index_as(db_path: &Path, old: &Path, new: &Path, commit: bool) -> Result<usize> {
     let mut conn = rusqlite::Connection::open(db_path)
         .with_context(|| format!("open {}", db_path.display()))?;
     let (old, new) = (old.to_string_lossy(), new.to_string_lossy());
@@ -191,7 +197,10 @@ pub fn rewrite_index(db_path: &Path, old: &Path, new: &Path) -> Result<usize> {
             )?;
         }
     }
-    tx.commit()?;
+    match commit {
+        true => tx.commit()?,
+        false => tx.rollback()?,
+    }
     Ok(changed)
 }
 
@@ -223,19 +232,30 @@ fn repair_trunk(trunk: &Path, old: &Path, new: &Path) -> Result<usize> {
     Ok(moved.len())
 }
 
-/// Rename the folders of Claude Code's session store named for a path under
-/// the old home to the name of the same path under the new one, so
-/// `--resume` still finds its transcripts. Returns `(from, to)` for each.
-pub fn rename_claude_projects(
+/// The folders of Claude Code's session store that [`rename_claude_projects`]
+/// renames, as `(from, to)`: those named for a path under the old home. A
+/// name cannot tell `~/.jeet/x` from `~/.jeet-x`, so when a directory like
+/// the second exists under `user_home`, what could be either is left alone.
+pub fn plan_claude_renames(
     projects: &Path,
+    user_home: &Path,
     old: &Path,
     new: &Path,
-) -> Result<Vec<(String, String)>> {
+) -> Vec<(String, String)> {
     let (from, to) = (project_slug(old), project_slug(new));
     let Ok(entries) = std::fs::read_dir(projects) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    let mut renamed = Vec::new();
+    // Slugs of the siblings whose names start like the old home's.
+    let siblings: Vec<String> = std::fs::read_dir(user_home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p != old && project_slug(p).starts_with(&from))
+        .map(|p| project_slug(&p))
+        .collect();
+    let mut plan = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let Some(rest) = name.strip_prefix(&from) else {
@@ -244,16 +264,33 @@ pub fn rename_claude_projects(
         if !(rest.is_empty() || rest.starts_with('-')) {
             continue;
         }
+        let ambiguous = siblings
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s}-")));
         let target = format!("{to}{rest}");
-        if projects.join(&target).exists() {
+        if ambiguous || projects.join(&target).exists() {
             continue;
         }
-        std::fs::rename(entry.path(), projects.join(&target))
-            .with_context(|| format!("rename {name} to {target}"))?;
-        renamed.push((name, target));
+        plan.push((name, target));
     }
-    renamed.sort();
-    Ok(renamed)
+    plan.sort();
+    plan
+}
+
+/// Rename the folders [`plan_claude_renames`] lists, so `--resume` still
+/// finds its transcripts.
+pub fn rename_claude_projects(
+    projects: &Path,
+    user_home: &Path,
+    old: &Path,
+    new: &Path,
+) -> Result<Vec<(String, String)>> {
+    let plan = plan_claude_renames(projects, user_home, old, new);
+    for (name, target) in &plan {
+        std::fs::rename(projects.join(name), projects.join(target))
+            .with_context(|| format!("rename {name} to {target}"))?;
+    }
+    Ok(plan)
 }
 
 /// Copy the files worth having back to `dir`: the index (and its write-ahead
@@ -304,7 +341,19 @@ moving ~/.jeet to ~/.plete may break, for as long as it takes:
   - tmux sessions started in a task folder keep a working directory that has moved
   - the launchd jobs (watch, notify) and the link handler, which are installed again
   - open task lists (TUIs) and anything else holding files under ~/.jeet
+  - Claude asks again whether to trust a moved task's folder (~/.claude.json is not rewritten)
 ~/.jeet is left as a link to ~/.plete, so a path that still names it keeps working.";
+
+/// Whether a run that moved the files from `old` to `new` stopped before it
+/// finished: the new home has the index, the old does not and is no link,
+/// and either it still exists or the index still names paths under it.
+fn interrupted(old: &Path, new: &Path) -> Result<bool> {
+    let index = config::index_path(new);
+    if !index.is_file() {
+        return Ok(false);
+    }
+    Ok(old.exists() || rewrite_index_as(&index, old, new, false)? > 0)
+}
 
 /// Move the old home into the new one. `confirmed` is `--yes`, `force` is
 /// `--force` (go on with sessions alive). Without `confirmed`, only the
@@ -321,14 +370,26 @@ pub fn migrate(
     if old.is_symlink() {
         bail!("{} is already a link; nothing to move", old.display());
     }
-    if !config::index_path(&old).is_file() {
+    // An earlier run that moved the files and stopped short of the rest.
+    let resume = !config::index_path(&old).is_file() && interrupted(&old, &new)?;
+    if !resume && !config::index_path(&old).is_file() {
         bail!("{} has no index; nothing to move", old.display());
     }
-    let moves = plan_moves(&old, &new)?;
+    let mut moves = Vec::new();
     println!("{RISKS}\n");
-    println!("{} entries move into {}:", moves.len(), new.display());
-    for (from, _) in &moves {
-        println!("  {}", from.display());
+    if resume {
+        println!("an earlier run moved the files; it finishes what came after:");
+    } else {
+        moves = plan_moves(&old, &new)?;
+        println!("{} entries move into {}:", moves.len(), new.display());
+        for (from, _) in &moves {
+            println!("  {}", from.display());
+        }
+    }
+    let renames = plan_claude_renames(&homes.claude_projects, &homes.user_home, &old, &new);
+    println!("{} Claude project folders are renamed:", renames.len());
+    for (from, to) in &renames {
+        println!("  {from} -> {to}");
     }
     if !confirmed {
         println!("\nnothing moved; run `plete migrate-home --yes` to go ahead");
@@ -344,17 +405,23 @@ pub fn migrate(
 
     let jobs = machine.installed();
     let backup = new.join("backups").join(format!("migrate-{stamp}"));
-    back_up(&old, &backup, &machine.files_to_back_up())?;
-    println!(
-        "\nbacked up the index, config and plists to {}",
-        backup.display()
-    );
-    std::fs::create_dir_all(&new).with_context(|| format!("create {}", new.display()))?;
-    apply_moves(&moves)?;
+    if !resume {
+        back_up(&old, &backup, &machine.files_to_back_up())?;
+        println!(
+            "\nbacked up the index, config and plists to {}",
+            backup.display()
+        );
+        // The backup made `backups` in the new home: plan again, so that an
+        // old one merges into it rather than clashing.
+        moves = plan_moves(&old, &new)?;
+        std::fs::create_dir_all(&new).with_context(|| format!("create {}", new.display()))?;
+        apply_moves(&moves)?;
+    }
 
     let after = |step: &str, e: &anyhow::Error| {
         format!(
-            "{step} failed after the files moved: {e:#}; the backup is in {}",
+            "{step} failed after the files moved: {e:#}; run `plete migrate-home --yes` again to \
+             finish (the backup is in {})",
             backup.display()
         )
     };
@@ -368,9 +435,10 @@ pub fn migrate(
             Err(e) => eprintln!("plete: git worktree repair in {}: {e:#}", trunk.display()),
         }
     }
-    let projects = rename_claude_projects(&homes.claude_projects, &old, &new)?;
+    let projects = rename_claude_projects(&homes.claude_projects, &homes.user_home, &old, &new)
+        .map_err(|e| anyhow::anyhow!(after("renaming the Claude project folders", &e)))?;
 
-    if !remove_empty_tree(&old) {
+    if old.exists() && !remove_empty_tree(&old) {
         bail!(
             "{} still holds files that did not move; it was not replaced by a link",
             old.display()
@@ -432,10 +500,10 @@ impl Machine for Real {
             crate::watch::install(&app)?;
         }
         if jobs.notify {
-            crate::notify::sender::install(&app.home)?;
+            crate::notify::sender::install(&app.home, app.new_home.as_deref())?;
         }
         if jobs.link {
-            crate::link::handler::install(&app.home)?;
+            crate::link::handler::install(&app.home, app.new_home.as_deref())?;
         }
         Ok(())
     }
@@ -573,6 +641,7 @@ mod tests {
             );
             std::fs::create_dir_all(old.join("tasks/fix/.jeet")).unwrap();
             std::fs::write(old.join("config.toml"), "# mine\n").unwrap();
+            std::fs::create_dir_all(old.join("backups/setup-1")).unwrap();
             let db = crate::db::Database::open(&config::index_path(&old)).unwrap();
             db.upsert_repo(&crate::db::RepoRecord {
                 id: "acme/widget".into(),
@@ -645,6 +714,8 @@ mod tests {
             "# mine\n"
         );
 
+        // Its own backups merged with the one just made.
+        assert!(new.join("backups/setup-1").is_dir());
         // The backup holds the index and the config.
         let backup = new.join("backups/migrate-7");
         assert!(backup.join("index.db").is_file() && backup.join("config.toml").is_file());
@@ -674,6 +745,46 @@ mod tests {
 
         // Done once: it will not run on the link.
         assert!(migrate(&lab.homes(), &machine, true, false, 8).is_err());
+    }
+
+    #[test]
+    fn a_run_that_stopped_after_the_moves_is_finished_by_the_next() {
+        let lab = Lab::new();
+        let (old, new) = (
+            lab.user_home().join(".jeet"),
+            lab.user_home().join(".plete"),
+        );
+        // As if the files moved and the rest failed.
+        let moves = plan_moves(&old, &new).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        apply_moves(&moves).unwrap();
+        assert!(!config::index_path(&old).exists());
+
+        let done = migrate(&lab.homes(), &Fake::default(), true, false, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.rows, 1);
+        assert_eq!(done.worktrees, 1);
+        assert_eq!(done.projects.len(), 1);
+        assert!(old.is_symlink());
+        // And once finished, it is done.
+        assert!(migrate(&lab.homes(), &Fake::default(), true, false, 4).is_err());
+    }
+
+    #[test]
+    fn a_sibling_named_like_the_old_home_keeps_its_claude_folders() {
+        let lab = Lab::new();
+        let (old, new) = (
+            lab.user_home().join(".jeet"),
+            lab.user_home().join(".plete"),
+        );
+        let sibling = lab.user_home().join(".jeet-other");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let theirs = project_slug(&sibling.join("proj"));
+        std::fs::create_dir_all(lab.projects().join(&theirs)).unwrap();
+        let plan = plan_claude_renames(&lab.projects(), &lab.user_home(), &old, &new);
+        assert_eq!(plan.len(), 1, "{plan:?}");
+        assert!(plan.iter().all(|(from, _)| *from != theirs));
     }
 
     #[test]

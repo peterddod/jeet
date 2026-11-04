@@ -37,7 +37,7 @@ fn open(app: &App, start: Start) -> Result<()> {
     // background; before the screen goes up, as it may say something.
     store::maybe_sync_background(app);
     // And GitHub to be polled, when `[watch]` asks for it.
-    watch::maybe_background(&app.home, &app.config);
+    watch::maybe_background(&app.home, app.new_home.as_deref(), &app.config);
     match tasks::run(app, start)? {
         Exit::ChangeDir(path) => explore::hand_off(&path),
         Exit::Stay | Exit::Back => Ok(()),

@@ -77,8 +77,11 @@ if [ -n "$_plete_old" ]; then
   _plete_names+=(jeet)
 fi
 _plete_pt="$(command -v pt 2>/dev/null)"
-if [ -z "$_plete_pt" ] || { [ "${_plete_pt#/}" != "$_plete_pt" ] && [ "$_plete_pt" -ef "${_PLETE_BIN:-/nonexistent}" ]; }; then
+# (Read again, `pt` is our own function, which the marker tells from another.)
+if [ -z "$_plete_pt" ] || { [ -n "${_PLETE_PT_FN:-}" ] && [ "$_plete_pt" = pt ]; } \
+  || { [ "${_plete_pt#/}" != "$_plete_pt" ] && [ "$_plete_pt" -ef "${_PLETE_BIN:-/nonexistent}" ]; }; then
   pt() { plete "$@"; }
+  _PLETE_PT_FN=1
   _plete_names+=(pt)
 fi
 unset _plete_old _plete_pt

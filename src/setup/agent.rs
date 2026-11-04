@@ -425,7 +425,8 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
     let _ = app.db.touch_task(&task.id, now);
     let mut running = running;
     let home = app.home.to_string_lossy();
-    let env = apply_env(&home);
+    let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
+    let env = apply_env(&home, new_home.as_deref());
     if let Err(e) = tmux::split_window(&running.tmux_session, &dir, &env, &apply_argv(&exe)) {
         running.warnings.push(format!(
             "could not open the apply pane: {e:#}; run `{PRODUCT} setup apply` in a terminal"
@@ -437,15 +438,19 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
 /// The apply pane's environment: this plete home, and blank where the
 /// agent's session sets who it runs for, as apply refuses any agent's
 /// session.
-fn apply_env(home: &str) -> [(&str, &str); 4] {
-    [
+fn apply_env<'a>(home: &'a str, new_home: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![
         // Named, not left to whatever the tmux server's environment says:
         // apply must change this home's files, and open this index.
         ("PLETE_HOME", home),
         (tasks::TASK_ID_ENV, ""),
         (permissions::ASSISTANT_ENV, ""),
         (cd::CD_FILE_ENV, ""),
-    ]
+    ];
+    if let Some(new_home) = new_home {
+        env.push((crate::env::NEW_HOME_VAR, new_home));
+    }
+    env
 }
 
 /// `plete setup apply`, run again each time the user presses Enter.
@@ -627,8 +632,12 @@ mod tests {
         assert_eq!(argv[..2], ["sh", "-c"]);
         assert!(argv[2].contains("\"$1\" setup apply"));
         assert_eq!(argv[4], "/opt/my plete");
-        let env = apply_env("/tmp/h");
+        let env = apply_env("/tmp/h", Some("/tmp/n"));
         assert!(env.contains(&("PLETE_HOME", "/tmp/h")), "{env:?}");
+        assert!(env.contains(&("PLETE_NEW_HOME", "/tmp/n")));
+        assert!(!apply_env("/tmp/h", None)
+            .iter()
+            .any(|(k, _)| *k == "PLETE_NEW_HOME"));
         assert!(env.contains(&(tasks::TASK_ID_ENV, "")));
         assert!(env.contains(&(permissions::ASSISTANT_ENV, "")));
     }

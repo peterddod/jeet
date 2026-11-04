@@ -260,6 +260,36 @@ mod tests {
     }
 
     #[test]
+    fn the_old_jeet_tags_are_still_neutralised() {
+        for tag in [
+            "message",
+            "report",
+            "reports",
+            "answer",
+            "brief",
+            "brief-items",
+            "brief-asks",
+        ] {
+            assert_eq!(
+                defang(&format!("<jeet-{tag}>")),
+                format!("‹jeet-{tag}>"),
+                "{tag}"
+            );
+            assert_eq!(
+                defang(&format!("</JEET-{tag}>")),
+                format!("‹/JEET-{tag}>"),
+                "{tag}"
+            );
+            assert_eq!(
+                defang(&format!("<plete-{tag}>")),
+                format!("‹plete-{tag}>"),
+                "{tag}"
+            );
+        }
+        assert_eq!(defang("<jeeted>"), "<jeeted>");
+    }
+
+    #[test]
     fn defang_sees_the_text_as_delivery_will_clean_it() {
         assert_eq!(defang("<plete-answer"), "‹plete-answer");
         assert_eq!(defang("</PLETE-message>"), "‹/PLETE-message>");

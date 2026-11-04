@@ -113,8 +113,15 @@ pub fn log_hint(home: &Path) -> String {
 /// The launchd job: `exe notify serve`, started at load and kept running,
 /// with plete's home and the `PATH` it was installed from (launchd's own
 /// has no `terminal-notifier`).
-pub fn plist(exe: &Path, home: &Path, path_env: &str) -> String {
+pub fn plist(exe: &Path, home: &Path, new_home: Option<&Path>, path_env: &str) -> String {
     let log = log_path(home);
+    let new_home = new_home.map_or(String::new(), |h| {
+        format!(
+            "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+            crate::env::NEW_HOME_VAR,
+            xml(&h.to_string_lossy())
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -138,7 +145,7 @@ pub fn plist(exe: &Path, home: &Path, path_env: &str) -> String {
 		<string>{home}</string>
 		<key>PLETE_HOME</key>
 		<string>{home}</string>
-		<key>PATH</key>
+{new_home}		<key>PATH</key>
 		<string>{path}</string>
 	</dict>
 	<key>StandardOutPath</key>
@@ -156,10 +163,14 @@ pub fn plist(exe: &Path, home: &Path, path_env: &str) -> String {
 }
 
 /// The systemd user service that does what the launchd job does.
-pub fn systemd_unit(exe: &Path, home: &Path, path_env: &str) -> String {
+pub fn systemd_unit(exe: &Path, home: &Path, new_home: Option<&Path>, path_env: &str) -> String {
+    let split = new_home.map_or(String::new(), |h| {
+        let var = format!("{}={}", crate::env::NEW_HOME_VAR, h.display());
+        format!("Environment={}\n", systemd_word(&var))
+    });
     format!(
         "[Unit]\nDescription=plete: send notifications\n\n\
-         [Service]\nEnvironment={home}\nEnvironment={new_home}\nEnvironment={path}\n\
+         [Service]\nEnvironment={home}\nEnvironment={new_home}\n{split}Environment={path}\n\
          ExecStart={exe} notify serve\nRestart=always\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n",
         home = systemd_word(&format!("JEET_HOME={}", home.display())),
@@ -216,13 +227,20 @@ pub fn installed() -> bool {
 }
 
 /// `plete notify install`.
-pub fn install(home: &Path) -> Result<()> {
+pub fn install(home: &Path, new_home: Option<&Path>) -> Result<()> {
     make_dir(home)?;
     // As run, not canonicalized: through a package manager's link, such as
     // Homebrew's, it outlives an upgrade.
     let exe = crate::paths::plete_exe()?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     if !cfg!(target_os = "macos") {
+        let path = unit_path(UNIT)?;
+        write_file(&path, &systemd_unit(&exe, home, new_home, &path_env))?;
+        systemctl(&["daemon-reload"])?;
+        // Installed before: restarted, with this plete.
+        systemctl(&["enable", UNIT])?;
+        systemctl(&["restart", UNIT])?;
+        // Only now is the unit from before the rename replaced by this one.
         // The unit from before the rename is replaced by this one.
         let old = unit_path(LEGACY_UNIT)?;
         if old.exists() {
@@ -230,12 +248,6 @@ pub fn install(home: &Path) -> Result<()> {
             std::fs::remove_file(&old).with_context(|| format!("remove {}", old.display()))?;
             eprintln!("plete: replaced the {LEGACY_UNIT} unit");
         }
-        let path = unit_path(UNIT)?;
-        write_file(&path, &systemd_unit(&exe, home, &path_env))?;
-        systemctl(&["daemon-reload"])?;
-        // Installed before: restarted, with this plete.
-        systemctl(&["enable", UNIT])?;
-        systemctl(&["restart", UNIT])?;
         eprintln!(
             "plete: systemd runs the notification sender ({UNIT}, {}); `journalctl --user -u \
              {UNIT}` has what it says",
@@ -244,11 +256,7 @@ pub fn install(home: &Path) -> Result<()> {
         return Ok(());
     }
     let path = plist_path(LABEL)?;
-    // The job from before the rename is replaced by this one.
-    if retire_job(LEGACY_LABEL)? {
-        eprintln!("plete: replaced the {LEGACY_LABEL} job");
-    }
-    write_file(&path, &plist(&exe, home, &path_env))?;
+    write_file(&path, &plist(&exe, home, new_home, &path_env))?;
     let domain = launchd_domain()?;
     // Installed before: replaced, with this plete.
     let replaced =
@@ -266,6 +274,11 @@ pub fn install(home: &Path) -> Result<()> {
             path.display(),
             first_line(&output.stderr)
         );
+    }
+    // Only now that this one is loaded is the job from before the rename
+    // replaced by it.
+    if retire_job(LEGACY_LABEL)? {
+        eprintln!("plete: replaced the {LEGACY_LABEL} job");
     }
     eprintln!(
         "plete: launchd runs the notification sender ({LABEL}); it logs to {}",
@@ -317,6 +330,7 @@ mod tests {
         let text = plist(
             Path::new("/opt/plete & co/plete"),
             Path::new("/Users/me/.plete"),
+            None,
             "/opt/homebrew/bin:/usr/bin",
         );
         assert!(text.contains(
@@ -339,7 +353,12 @@ mod tests {
     fn plutil_reads_the_plist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.plist");
-        let text = plist(Path::new("/a <b>/plete"), Path::new("/h&/.plete"), "/x:/y");
+        let text = plist(
+            Path::new("/a <b>/plete"),
+            Path::new("/h&/.plete"),
+            None,
+            "/x:/y",
+        );
         std::fs::write(&path, text).unwrap();
         let output = Command::new("plutil")
             .arg("-lint")
@@ -382,10 +401,36 @@ mod tests {
     }
 
     #[test]
+    fn a_split_home_is_baked_into_the_sender() {
+        let new = Path::new("/home/me/.plete");
+        let text = plist(
+            Path::new("/bin/plete"),
+            Path::new("/home/me/.jeet"),
+            Some(new),
+            "/usr/bin",
+        );
+        assert!(
+            text.contains("<key>PLETE_NEW_HOME</key>\n\t\t<string>/home/me/.plete</string>"),
+            "{text}"
+        );
+        let unit = systemd_unit(
+            Path::new("/bin/plete"),
+            Path::new("/home/me/.jeet"),
+            Some(new),
+            "/usr/bin",
+        );
+        assert!(
+            unit.contains("Environment=\"PLETE_NEW_HOME=/home/me/.plete\"\n"),
+            "{unit}"
+        );
+    }
+
+    #[test]
     fn the_systemd_unit_restarts_the_sender() {
         let text = systemd_unit(
             Path::new("/opt/plete 100%/plete"),
             Path::new("/home/me/.plete"),
+            None,
             "/usr/bin",
         );
         assert_eq!(

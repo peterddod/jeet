@@ -3827,8 +3827,11 @@ impl Screen<'_> {
             if last_watch.elapsed() >= WATCH_EVERY {
                 last_watch = Instant::now();
                 let home = self.app.home.clone();
+                let new_home = self.app.new_home.clone();
                 let config = self.app.config.clone();
-                std::thread::spawn(move || watch::maybe_background(&home, &config));
+                std::thread::spawn(move || {
+                    watch::maybe_background(&home, new_home.as_deref(), &config)
+                });
             }
             // The agent adds and removes worktrees as it goes, and other
             // pletes make and archive tasks: keep the rows in step.

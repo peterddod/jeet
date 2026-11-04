@@ -17874,6 +17874,25 @@ for n in plete jeet pt; do [ "$(type -t $n)" = function ] && echo $n; done; true
         defined(&format!("{}:{base}", bin.display())),
         ["plete", "jeet", "pt"]
     );
+    // Read twice, our own pt function is kept; a function of the user's own
+    // that was there first is not overwritten.
+    let twice = |before: &str| {
+        let program = format!(
+            r#"export PATH="{}"; {before}
+. "{}"; . "{}"
+type -t pt; pt --version"#,
+            bin.display().to_string() + ":" + &base,
+            script.display(),
+            script.display()
+        );
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", &program])
+            .output()
+            .unwrap();
+        stdout_of(&output)
+    };
+    assert!(twice("").starts_with("function\nplete "), "{}", twice(""));
+    assert_eq!(twice("pt() { echo mine; }"), "function\nmine\n");
     // Our link named pt still counts as free; another program does not.
     linked_as(&bin, "pt");
     assert!(defined(&format!("{}:{base}", bin.display())).contains(&"pt".to_string()));

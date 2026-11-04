@@ -32,12 +32,12 @@ const LEGACY_DESKTOP_FILE: &str = "jeet-link.desktop";
 const MIME_TYPES: [&str; 2] = ["x-scheme-handler/plete", "x-scheme-handler/jeet"];
 
 /// `plete notify install-link`.
-pub fn install(home: &Path) -> Result<()> {
+pub fn install(home: &Path, new_home: Option<&Path>) -> Result<()> {
     let exe = crate::paths::plete_exe()?;
     let path = std::env::var("PATH").context("read $PATH")?;
     match cfg!(target_os = "macos") {
-        true => install_macos(home, &exe, &path),
-        false => install_linux(home, &exe, &path),
+        true => install_macos(home, new_home, &exe, &path),
+        false => install_linux(home, new_home, &exe, &path),
     }
 }
 
@@ -110,16 +110,24 @@ fn applescript_string(value: &str) -> Result<String> {
 /// The applet's script: on a URL, run `plete open` on it with `PATH` and
 /// `PLETE_HOME` as they are now, as an applet's shell has almost no
 /// environment, and say what happened in `<home>/tui/link.log`.
-fn applescript(path: &str, home: &Path, exe: &Path) -> Result<String> {
+fn applescript(path: &str, home: &Path, new_home: Option<&Path>, exe: &Path) -> Result<String> {
     let lit = |s: &str| applescript_string(s);
     let home_text = home.to_string_lossy();
     let log = home.join("tui").join("link.log");
+    let split = match new_home {
+        Some(h) => format!(
+            "& \" \" & quoted form of \"{}={}\" ",
+            crate::env::NEW_HOME_VAR,
+            lit(&h.to_string_lossy())?
+        ),
+        None => String::new(),
+    };
     Ok(format!(
         "on open location theURL\n\
          \tdo shell script \"/usr/bin/env \" & quoted form of \"PATH={path}\" \
          & \" \" & quoted form of \"JEET_HOME={home}\" \
          & \" \" & quoted form of \"PLETE_HOME={home}\" \
-         & \" \" & quoted form of \"{exe}\" & \" open \" & quoted form of theURL \
+         {split}& \" \" & quoted form of \"{exe}\" & \" open \" & quoted form of theURL \
          & \" > \" & quoted form of \"{log}\" & \" 2>&1\"\n\
          end open location\n",
         path = lit(path)?,
@@ -129,9 +137,9 @@ fn applescript(path: &str, home: &Path, exe: &Path) -> Result<String> {
     ))
 }
 
-fn install_macos(home: &Path, exe: &Path, path: &str) -> Result<()> {
+fn install_macos(home: &Path, new_home: Option<&Path>, exe: &Path, path: &str) -> Result<()> {
     let bundle = bundle_path()?;
-    let script = applescript(path, home, exe)?;
+    let script = applescript(path, home, new_home, exe)?;
     let dir = bundle.parent().context("no directory for the handler")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     fs::create_dir_all(home.join("tui"))?;
@@ -262,12 +270,19 @@ fn desktop_quote(arg: &str) -> Result<String> {
     Ok(out)
 }
 
-fn desktop_entry(path: &str, home: &Path, exe: &Path) -> Result<String> {
+fn desktop_entry(path: &str, home: &Path, new_home: Option<&Path>, exe: &Path) -> Result<String> {
+    let split = match new_home {
+        Some(h) => format!(
+            "{} ",
+            desktop_quote(&format!("{}={}", crate::env::NEW_HOME_VAR, h.display()))?
+        ),
+        None => String::new(),
+    };
     Ok(format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=plete link\n\
-         Exec=/usr/bin/env {} {} {} {} open %u\n\
+         Exec=/usr/bin/env {} {} {} {split}{} open %u\n\
          MimeType={mimes};\n\
          NoDisplay=true\n\
          Terminal=false\n",
@@ -279,10 +294,10 @@ fn desktop_entry(path: &str, home: &Path, exe: &Path) -> Result<String> {
     ))
 }
 
-fn install_linux(home: &Path, exe: &Path, path: &str) -> Result<()> {
+fn install_linux(home: &Path, new_home: Option<&Path>, exe: &Path, path: &str) -> Result<()> {
     let dir = applications_dir()?;
     let file = dir.join(DESKTOP_FILE);
-    let entry = desktop_entry(path, home, exe)?;
+    let entry = desktop_entry(path, home, new_home, exe)?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::write(&file, entry).with_context(|| format!("write {}", file.display()))?;
     println!("wrote {}", file.display());
@@ -401,10 +416,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_split_home_is_baked_into_the_handler() {
+        let (home, new) = (Path::new("/Users/me/.jeet"), Path::new("/Users/me/.plete"));
+        let script = applescript("/bin", home, Some(new), Path::new("/e")).unwrap();
+        assert!(
+            script.contains("quoted form of \"PLETE_NEW_HOME=/Users/me/.plete\""),
+            "{script}"
+        );
+        let entry = desktop_entry("/bin", home, Some(new), Path::new("/e")).unwrap();
+        assert!(
+            entry.contains("\"PLETE_NEW_HOME=/Users/me/.plete\""),
+            "{entry}"
+        );
+    }
+
+    #[test]
     fn the_applet_script_embeds_quoted_values() {
         let script = applescript(
             "/usr/bin:/bin",
             Path::new("/Users/me/.plete"),
+            None,
             Path::new("/opt/plete"),
         )
         .unwrap();
@@ -428,7 +459,7 @@ mod tests {
         );
         assert!(applescript_string("a\nb").is_err());
         assert!(applescript_string("a\u{0}b").is_err());
-        let err = applescript("p\nq", Path::new("/h"), Path::new("/e"));
+        let err = applescript("p\nq", Path::new("/h"), None, Path::new("/e"));
         assert!(err.is_err());
     }
 
@@ -447,6 +478,7 @@ mod tests {
         let entry = desktop_entry(
             "/usr/bin:/bin",
             Path::new("/h/.plete"),
+            None,
             Path::new("/opt/my plete"),
         )
         .unwrap();

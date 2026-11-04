@@ -522,7 +522,11 @@ fn handle_hook(
     {
         // The test binary is no plete.
         if !cfg!(test) {
-            crate::watch::maybe_background(&ctx.app.home, &ctx.app.config);
+            crate::watch::maybe_background(
+                &ctx.app.home,
+                ctx.app.new_home.as_deref(),
+                &ctx.app.config,
+            );
         }
     }
     // A slot under `max_live` may be free now.

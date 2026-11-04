@@ -111,8 +111,15 @@ pub struct Invocation {
 /// What `plete open <url>` is, run from anywhere: its environment is set in
 /// the command, as a terminal started by another app or by `open` has not
 /// plete's.
-pub fn open_argv(exe: &Path, home: &Path, path: &str, url: &str) -> Vec<String> {
-    [
+pub fn open_argv(
+    exe: &Path,
+    home: &Path,
+    new_home: Option<&Path>,
+    path: &str,
+    url: &str,
+) -> Vec<String> {
+    let split = new_home.map(|h| format!("{}={}", crate::env::NEW_HOME_VAR, h.display()));
+    let mut argv: Vec<String> = [
         "/usr/bin/env".to_string(),
         format!("PATH={path}"),
         format!("JEET_HOME={}", home.display()),
@@ -123,7 +130,12 @@ pub fn open_argv(exe: &Path, home: &Path, path: &str, url: &str) -> Vec<String> 
         "open".to_string(),
         url.to_string(),
     ]
-    .to_vec()
+    .to_vec();
+    if let Some(split) = split {
+        // After the other variables, ahead of the program.
+        argv.insert(6, split);
+    }
+    argv
 }
 
 /// How to start `choice` running `plete`, a whole command line. `script` is
@@ -269,9 +281,27 @@ mod tests {
         open_argv(
             Path::new("/opt/bin/plete"),
             Path::new("/home/me/.plete"),
+            None,
             "/usr/bin:/bin",
             "plete://task/fix",
         )
+    }
+
+    #[test]
+    fn a_split_home_rides_along_in_the_open_command() {
+        let argv = open_argv(
+            Path::new("/opt/bin/plete"),
+            Path::new("/home/me/.jeet"),
+            Some(Path::new("/home/me/.plete")),
+            "/usr/bin",
+            "plete://task/fix",
+        );
+        assert!(
+            argv.contains(&"PLETE_NEW_HOME=/home/me/.plete".to_string()),
+            "{argv:?}"
+        );
+        let at = argv.iter().position(|a| a == "/opt/bin/plete").unwrap();
+        assert!(argv[..at].contains(&"PLETE_NEW_HOME=/home/me/.plete".to_string()));
     }
 
     fn resolved(setting: Option<&str>, os: Os, have: &[&str]) -> Result<Choice> {
