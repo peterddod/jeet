@@ -314,13 +314,22 @@ pub(crate) fn assistant_parent(app: &App) -> Result<TaskRecord> {
 
 /// Get a message to the task's agent, however it is doing; see
 /// [`messages`]. `assistant` is the assistant, whose message goes to the
-/// session [`assistant::target`] picks.
-pub fn send(app: &App, name: &str, message: &str) -> Result<()> {
-    // A task with a parent was let through for a task of that name in its
-    // own subtree, if anything: never the assistant, whatever a child is
-    // called.
-    if name.trim() == assistant::SLUG && !matches!(permissions::caller(app)?, Caller::Node(_)) {
-        return send_to_assistant(app, message);
+/// session [`assistant::target`] picks. `interrupt`, for the assistant
+/// only, pushes it to the assistant now when the sender may
+/// (`assistant.interrupt`), and fails, keeping it all the same, when not.
+pub fn send(app: &App, name: &str, message: &str, interrupt: bool) -> Result<()> {
+    if name.trim() == assistant::SLUG {
+        let caller = permissions::caller(app)?;
+        match (&caller, interrupt) {
+            (_, true) => return interrupt_assistant(app, &caller, message),
+            // A task with a parent was let through for a task of that name
+            // in its own subtree, if anything: never the assistant,
+            // whatever a child is called.
+            (Caller::Node(_), false) => {}
+            (_, false) => return send_to_assistant(app, message, assistant::How::Usual),
+        }
+    } else if interrupt {
+        bail!("--interrupt is for `plete task send assistant`; a task's agent gets messages pushed already");
     }
     let task = match super::review::named_agent(app, Verb::TaskSend, name)? {
         super::review::Named::Task(task) => task,
@@ -760,9 +769,40 @@ fn confirm_typed(report: &str, word: &str) -> Result<()> {
     Ok(())
 }
 
-fn send_to_assistant(app: &App, message: &str) -> Result<()> {
-    let (delivered, session) =
-        assistant::send(app, &sender(app), message, permissions::at_terminal(app)?)?;
+/// `plete task send assistant --interrupt`: pushed to the assistant when
+/// `caller` may interrupt it, else kept for it as any message is and
+/// refused, so the sender does not send it again.
+fn interrupt_assistant(app: &App, caller: &Caller, message: &str) -> Result<()> {
+    if *caller == Caller::Root {
+        bail!("the assistant does not interrupt itself");
+    }
+    let action = format!(
+        "interrupted the assistant: {}",
+        crate::render::summary(message)
+    );
+    let refusal = permissions::may_interrupt(app, caller, &action)?;
+    let how = match refusal {
+        None => assistant::How::Interrupt,
+        Some(_) => assistant::How::Keep,
+    };
+    send_to_assistant(app, message, how)?;
+    match refusal {
+        None => Ok(()),
+        Some(why) => bail!(
+            "not an interrupt: {why}. The message was kept for the assistant all the same; do \
+             not send it again"
+        ),
+    }
+}
+
+fn send_to_assistant(app: &App, message: &str, how: assistant::How) -> Result<()> {
+    let (delivered, session) = assistant::send(
+        app,
+        &sender(app),
+        message,
+        permissions::at_terminal(app)?,
+        how,
+    )?;
     let session = session.map(|name| printable(&name)).unwrap_or_default();
     match delivered {
         Delivered::Typed => eprintln!("plete: sent to the assistant's session {session}"),
