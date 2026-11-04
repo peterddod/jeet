@@ -777,8 +777,9 @@ pub fn delete(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
 // The review's agent
 // ---------------------------------------------------------------------------
 
-/// What `review`'s agent is let run without a permission prompt: the
-/// read-only commands, and `jeet report` when a task asked for the review.
+/// What `review`'s agent has pre-approved in the harness: the read-only
+/// commands, and `jeet report` when a task asked for the review. It is not
+/// the gate: what jeet lets it run is `permissions::authorize_as`.
 fn allowed(review: &ReviewRecord) -> Vec<String> {
     let mut allow: Vec<String> = ["jeet ls", "jeet prs", "jeet path"]
         .map(str::to_string)
@@ -1136,23 +1137,25 @@ fn start_tmux(
 
 /// jeet's hooks for a review's agent run by `harness`: what it is let run
 /// ([`allowed`]), what it is denied ([`crate::permissions::review_deny`]),
-/// and no wake channel, which watches a task's inbox.
+/// the rules of `[permissions.review]`, and no wake channel, which watches
+/// a task's inbox.
 fn review_hooks(
     app: &App,
     review: &ReviewRecord,
     _harness: &dyn crate::harness::Harness,
     exe: PathBuf,
 ) -> Result<crate::harness::HookSetup> {
-    Ok(crate::harness::HookSetup {
+    let hooks = crate::harness::HookSetup {
         exe,
         task_id: review.id.clone(),
         allow: allowed(review),
-        deny: crate::permissions::review_deny(app)?,
+        deny: crate::permissions::review_deny(app, review)?,
         extra_allow: Vec::new(),
         extra_deny: Vec::new(),
         environment: None,
         wake: false,
-    })
+    };
+    Ok(runtime::with_review_rules(hooks, &app.config.permissions))
 }
 
 /// What the review's agent is doing. Runs tmux and reads files, so it
@@ -2913,6 +2916,29 @@ mod tests {
     /// Each review asked gets `[review]`'s time and turns afresh on top of
     /// what it has used, whoever asked, and the pause its last review's
     /// limits set is lifted.
+    #[test]
+    fn a_reviews_hooks_carry_permissions_review_whether_or_not_read_only() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = test_app(home.path());
+        app.config.permissions.review = crate::config::RoleRules {
+            allow: vec!["Bash(gh pr view:*)".into()],
+            deny: vec!["Bash(rm:*)".into()],
+        };
+        let review = ReviewRecord::new("r".into(), "review-x-1".into(), "github.com/a/x", 1, 0);
+        let harness = crate::harness::default_harness();
+        for read_only in [None, Some(true)] {
+            app.config.review.read_only = read_only;
+            let hooks = review_hooks(&app, &review, harness, "/bin/jeet".into()).unwrap();
+            assert_eq!(hooks.extra_allow, ["Bash(gh pr view:*)"]);
+            assert_eq!(hooks.extra_deny, ["Bash(rm:*)"]);
+            // Only the read-only review is denied every push.
+            assert_eq!(
+                hooks.deny.contains(&"git push".to_string()),
+                read_only.is_some()
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn each_review_gets_its_caps_afresh() {

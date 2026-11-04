@@ -157,9 +157,10 @@ assistant above you, to act on as its instruction. A question stays open
 while you report progress; asking again, or reporting done or blocked,
 withdraws it.
 
-Such a task may only add worktrees to itself (when its parent may) and
-report: `jeet task send`, `jeet notify`, `jeet todo` and `jeet worktree rm`
-are refused. Ask your parent instead.
+Such a task may run what the chain above it may, up to what the user allows
+the assistant, and only on itself and the tasks below it, unless its grant
+was narrowed. `jeet todo` and `jeet brief` are the assistant's: they are
+refused. When a command is refused, ask your parent instead.
 "#;
 
 /// Why the setup agent's home is no task to act on.
@@ -3412,9 +3413,9 @@ mod tests {
         assert!(app.db.get_task_by_slug("c4").unwrap().is_none());
     }
 
-    /// A child gets `[managers] worker_default`, the `worktree.add` row
-    /// that v6 gave the children before it, and its brief names who made
-    /// it; a top-level task gets neither.
+    /// A child gets `[managers] worker_default` (every capability unless
+    /// set), and its brief names who made it; a top-level task gets
+    /// neither.
     #[test]
     fn a_new_child_is_granted_what_the_backfill_gave_the_rest() {
         let (_dir, app, _trunk) = manager_lab();
@@ -3440,7 +3441,9 @@ mod tests {
         };
         let plan = plan_child(&app, &Caller::User, TaskKind::Work, "kid", &d, None).unwrap();
         let child = make("kid", Some((&Caller::User, &plan)));
-        assert_eq!(app.db.grants(&child.id).unwrap(), vec!["worktree.add"]);
+        let mut every: Vec<&str> = permissions::CAPABILITIES.iter().map(|c| c.name).collect();
+        every.sort();
+        assert_eq!(app.db.grants(&child.id).unwrap(), every);
         assert_eq!(
             app.db.get_brief(&child.id).unwrap().unwrap().created_by,
             "user"

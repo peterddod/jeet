@@ -404,7 +404,14 @@ fn launch_argv(
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let branches = permissions::default_branches(app)?;
     let wake = runtime::wake(app, spec.harness);
-    let hooks = runtime::assistant_hooks(exe, &app.config.assistant, &branches, &task.id, wake);
+    let hooks = runtime::assistant_hooks(
+        exe,
+        &app.config.assistant,
+        app.config.permissions.guards(),
+        &branches,
+        &task.id,
+        wake,
+    );
     let hooks = runtime::with_config_rules(hooks, &app.config.permissions, TaskKind::Assistant);
     argv.extend(runtime::hook_args(
         &app.home,

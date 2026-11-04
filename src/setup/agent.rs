@@ -196,13 +196,15 @@ fn create_record(app: &App) -> Result<TaskRecord> {
 /// not allowed either, so it prompts), and run jeet's read-only
 /// commands and `jeet setup status` without asking. It may not run
 /// `jeet setup apply`, push or use `gh`, nor edit the user's global
-/// harness, git and shell files. Like all of jeet's rules, a lint: the
+/// harness, git and shell files. It is denied `denied_commands` too under
+/// `[permissions] guards`. Like all of jeet's rules, a lint: the
 /// real control is that only the user's terminal applies.
 pub fn hooks(
     exe: PathBuf,
     task_id: &str,
     home: &Path,
     home_entries: &[String],
+    guards: bool,
     branches: &[String],
     wake: bool,
 ) -> HookSetup {
@@ -211,7 +213,11 @@ pub fn hooks(
         .map(|c| c.to_string())
         .collect();
     allow.push(format!("{PRODUCT} setup status"));
-    let mut deny = permissions::denied_commands(branches);
+    let mut deny = if guards {
+        permissions::denied_commands(branches)
+    } else {
+        Vec::new()
+    };
     for command in [
         format!("{PRODUCT} setup apply"),
         format!("{PRODUCT} setup discard"),
@@ -383,6 +389,7 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
         &task.id,
         &app.home,
         &home_entries(&app.home),
+        app.config.permissions.guards(),
         &permissions::default_branches(app)?,
         runtime::wake(app, spec.harness),
     );
@@ -555,9 +562,23 @@ mod tests {
             "t1",
             home,
             &entries,
+            true,
             &["main".to_string()],
             false,
         );
+        // Without `guards`, only its own rules deny.
+        let plain = self::hooks(
+            PathBuf::from("/bin/jeet"),
+            "t1",
+            home,
+            &entries,
+            false,
+            &["main".to_string()],
+            false,
+        );
+        assert!(!plain.deny.contains(&"git push * main".to_string()));
+        assert!(plain.deny.contains(&"git push".to_string()));
+        assert!(hooks.deny.contains(&"git push * main".to_string()));
         let settings = settings_of(&hooks);
         let rules = |key: &str| -> Vec<String> {
             settings["permissions"][key]
