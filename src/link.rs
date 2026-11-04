@@ -1,18 +1,18 @@
-//! `jeet://` links: a way to name a task, a review or a report from outside
-//! jeet, in a notification, a browser or a chat message, and to open it.
+//! `plete://` links: a way to name a task, a review or a report from outside
+//! plete, in a notification, a browser or a chat message, and to open it.
 //!
 //! ```text
-//! jeet://task/<slug>      a task
-//! jeet://review/<slug>    a review
-//! jeet://review/<slug>/diff     a review's PR diff, in jeet
-//! jeet://review/<slug>/explore  a review's worktree, in the explorer
-//! jeet://report/<id>      a report (`r123` works too)
+//! plete://task/<slug>      a task
+//! plete://review/<slug>    a review
+//! plete://review/<slug>/diff     a review's PR diff, in plete
+//! plete://review/<slug>/explore  a review's worktree, in the explorer
+//! plete://report/<id>      a report (`r123` works too)
 //! ```
 //!
 //! A link is read strictly: it arrives from anywhere, so anything that is
 //! not exactly one of these is refused rather than guessed at. [`registry`]
-//! is how `jeet open` finds the jeet screen that is open; [`terminal`] how
-//! it starts one; [`handler`] makes the system pass `jeet://` links to it.
+//! is how `plete open` finds the plete screen that is open; [`terminal`] how
+//! it starts one; [`handler`] makes the system pass `plete://` links to it.
 
 pub mod handler;
 pub mod registry;
@@ -25,7 +25,7 @@ use anyhow::{bail, Result};
 /// The schemes a link is read from: the new name and the old.
 const SCHEMES: [&str; 2] = ["plete://", "jeet://"];
 /// The scheme links are written with.
-const SCHEME: &str = SCHEMES[1]; // flipped to plete in the rename PR
+const SCHEME: &str = SCHEMES[0];
 
 /// Longest slug a link carries.
 const SLUG_MAX: usize = 128;
@@ -70,7 +70,7 @@ impl fmt::Display for Link {
 }
 
 /// The URL for `link`: what a notification's `Event.link` holds, so that
-/// clicking it runs `jeet open` on it.
+/// clicking it runs `plete open` on it.
 pub fn link_for(link: &Link) -> String {
     link.to_string()
 }
@@ -83,7 +83,7 @@ pub fn parse(url: &str) -> Result<Link> {
             .is_some_and(|h| h.eq_ignore_ascii_case(s))
     });
     let Some(scheme) = scheme else {
-        bail!("not a jeet link ({SCHEME}...): {url:?}");
+        bail!("not a plete link ({SCHEME}...): {url:?}");
     };
     let rest = &url[scheme.len()..];
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -92,7 +92,7 @@ pub fn parse(url: &str) -> Result<Link> {
         [kind, name] => (kind, name, None),
         [kind, name, view] if kind.eq_ignore_ascii_case("review") => (kind, name, Some(view)),
         _ => bail!(
-            "a jeet link is {SCHEME}task/<slug>, review/<slug>, review/<slug>/diff, \
+            "a plete link is {SCHEME}task/<slug>, review/<slug>, review/<slug>/diff, \
              review/<slug>/explore or report/<id>: {url:?}"
         ),
     };
@@ -105,7 +105,7 @@ pub fn parse(url: &str) -> Result<Link> {
             Some(_) => bail!("a review link goes on to diff or explore: {url:?}"),
         },
         "report" => Ok(Link::Report(report_id(name)?)),
-        _ => bail!("unknown kind {kind:?} in a jeet link (task, review or report): {url:?}"),
+        _ => bail!("unknown kind {kind:?} in a plete link (task, review or report): {url:?}"),
     }
 }
 
@@ -141,7 +141,7 @@ mod tests {
     fn both_schemes_are_read_and_the_old_one_written() {
         assert_eq!(parse("plete://task/fix").unwrap(), Link::task("fix"));
         assert_eq!(parse("PLETE://Report/r7").unwrap(), Link::Report(7));
-        assert_eq!(parse("jeet://task/fix").unwrap(), Link::task("fix"));
+        assert_eq!(parse("plete://task/fix").unwrap(), Link::task("fix"));
         assert!(parse("plete://task/a b").is_err());
         assert!(parse("plet://task/fix").is_err());
         assert_eq!(Link::task("fix").to_string(), format!("{SCHEME}task/fix"));
@@ -151,33 +151,33 @@ mod tests {
     fn links_round_trip() {
         for link in [
             Link::task("fix-login"),
-            Link::review("jeet-55"),
+            Link::review("plete-55"),
             Link::task("a.b_c-9"),
-            Link::ReviewDiff("jeet-55".into()),
-            Link::ReviewExplore("jeet-55".into()),
+            Link::ReviewDiff("plete-55".into()),
+            Link::ReviewExplore("plete-55".into()),
             Link::Report(123),
         ] {
             assert_eq!(parse(&link_for(&link)).unwrap(), link);
         }
-        assert_eq!(Link::Report(7).to_string(), "jeet://report/7");
+        assert_eq!(Link::Report(7).to_string(), "plete://report/7");
         assert_eq!(
-            Link::ReviewDiff("jeet-55".into()).to_string(),
-            "jeet://review/jeet-55/diff"
+            Link::ReviewDiff("plete-55".into()).to_string(),
+            "plete://review/plete-55/diff"
         );
     }
 
     #[test]
     fn reading_is_forgiving_only_where_promised() {
-        assert_eq!(parse("JEET://Task/Fix").unwrap(), Link::task("Fix"));
-        assert_eq!(parse("jeet://task/fix/").unwrap(), Link::task("fix"));
-        assert_eq!(parse("jeet://report/r123").unwrap(), Link::Report(123));
-        assert_eq!(parse("jeet://report/123/").unwrap(), Link::Report(123));
+        assert_eq!(parse("PLETE://Task/Fix").unwrap(), Link::task("Fix"));
+        assert_eq!(parse("plete://task/fix/").unwrap(), Link::task("fix"));
+        assert_eq!(parse("plete://report/r123").unwrap(), Link::Report(123));
+        assert_eq!(parse("plete://report/123/").unwrap(), Link::Report(123));
         assert_eq!(
-            parse("JEET://Review/x/Diff/").unwrap(),
+            parse("PLETE://Review/x/Diff/").unwrap(),
             Link::ReviewDiff("x".into())
         );
         assert_eq!(
-            parse("jeet://review/x/explore").unwrap(),
+            parse("plete://review/x/explore").unwrap(),
             Link::ReviewExplore("x".into())
         );
     }
@@ -186,41 +186,41 @@ mod tests {
     fn anything_else_is_refused() {
         for bad in [
             "",
-            "jeet:/task/x",
+            "plete:/task/x",
             "http://task/x",
-            "jeet://",
-            "jeet://task",
-            "jeet://task/",
-            "jeet://task//",
-            "jeet://task/x//",
-            "jeet://task/x/y",
-            "jeet://task/x/diff",
-            "jeet://review/x/y",
-            "jeet://review/x/diff/y",
-            "jeet://review//diff",
-            "jeet://review/.hidden/diff",
-            "jeet://report/1/diff",
-            "jeet://task/x?a=b",
-            "jeet://task/x#y",
-            "jeet://task/x%20y",
-            "jeet://task/x y",
-            "jeet://task/ x",
-            "jeet://task/.hidden",
-            "jeet://task/..",
-            "jeet://task/\u{e9}",
-            "jeet://other/x",
-            "jeet://report/",
-            "jeet://report/r",
-            "jeet://report/-1",
-            "jeet://report/1x",
-            "jeet://report/99999999999999999999",
+            "plete://",
+            "plete://task",
+            "plete://task/",
+            "plete://task//",
+            "plete://task/x//",
+            "plete://task/x/y",
+            "plete://task/x/diff",
+            "plete://review/x/y",
+            "plete://review/x/diff/y",
+            "plete://review//diff",
+            "plete://review/.hidden/diff",
+            "plete://report/1/diff",
+            "plete://task/x?a=b",
+            "plete://task/x#y",
+            "plete://task/x%20y",
+            "plete://task/x y",
+            "plete://task/ x",
+            "plete://task/.hidden",
+            "plete://task/..",
+            "plete://task/\u{e9}",
+            "plete://other/x",
+            "plete://report/",
+            "plete://report/r",
+            "plete://report/-1",
+            "plete://report/1x",
+            "plete://report/99999999999999999999",
             "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} should be refused");
         }
-        let long = format!("jeet://task/{}", "a".repeat(SLUG_MAX + 1));
+        let long = format!("plete://task/{}", "a".repeat(SLUG_MAX + 1));
         assert!(parse(&long).is_err());
-        let longest = format!("jeet://task/{}", "a".repeat(SLUG_MAX));
+        let longest = format!("plete://task/{}", "a".repeat(SLUG_MAX));
         assert!(parse(&longest).is_ok());
     }
 
@@ -229,7 +229,7 @@ mod tests {
         use crate::cli::{Cli, Commands, NotifyCommands};
         use clap::Parser;
         let parse = |args: &[&str]| {
-            Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied())).unwrap()
+            Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied())).unwrap()
         };
         let Some(Commands::Notify { title, command, .. }) =
             parse(&["notify", "done", "--body", "x"]).command
@@ -246,7 +246,7 @@ mod tests {
         assert!(title.is_none());
         assert!(matches!(command, Some(NotifyCommands::InstallLink)));
         assert!(matches!(
-            parse(&["open", "jeet://task/x"]).command,
+            parse(&["open", "plete://task/x"]).command,
             Some(Commands::Open { .. })
         ));
     }

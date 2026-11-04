@@ -3,7 +3,7 @@
 //! `chat.postMessage`, with the bot token only the sender reads.
 //!
 //! What it sends, each sent message's channel and `ts` (for replies, later)
-//! and whether Slack takes `jeet://` links are kept beside the outbox.
+//! and whether Slack takes `plete://` links are kept beside the outbox.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -91,7 +91,7 @@ impl Slack {
                 &self.home,
                 NAME,
                 &format!(
-                    "Slack refused the bot token ({e}): store a new one with `jeet notify setup slack`"
+                    "Slack refused the bot token ({e}): store a new one with `plete notify setup slack`"
                 ),
             ),
             Failed::Slack(e) => anyhow!("Slack's {method}: {e}"),
@@ -120,7 +120,7 @@ impl Notifier for Slack {
             return Err(bad_token(
                 &self.home,
                 NAME,
-                "no Slack token is stored: run `jeet notify setup slack` at your terminal",
+                "no Slack token is stored: run `plete notify setup slack` at your terminal",
             ));
         };
         let opened = self
@@ -135,23 +135,23 @@ impl Notifier for Slack {
         };
         let ci = ci_status(&self.home, event.pr.as_deref());
         let now = now_secs();
-        let mut links = web::load(&self.home, NAME).jeet_links.unwrap_or(true);
+        let mut links = web::load(&self.home, NAME).plete_links.unwrap_or(true);
         let post = |links: bool| {
             let mut message = message(event, ci.as_deref(), now, links);
             message["channel"] = json!(channel);
             self.call("chat.postMessage", &token, &message)
         };
         let posted = match post(links) {
-            // Slack may not take a `jeet://` link: once more without, and
+            // Slack may not take a `plete://` link: once more without, and
             // if that goes, never with one again.
-            Err(Failed::Slack(e)) if links && has_jeet_link(event) && refused_blocks(&e) => {
+            Err(Failed::Slack(e)) if links && has_plete_link(event) && refused_blocks(&e) => {
                 links = false;
                 let posted = post(false);
                 if posted.is_ok() {
                     eprintln!(
-                        "jeet: Slack refused a jeet:// link ({e}); messages go without one from now on"
+                        "plete: Slack refused a plete:// link ({e}); messages go without one from now on"
                     );
-                    web::refuse_jeet_links(&self.home, NAME);
+                    web::refuse_plete_links(&self.home, NAME);
                 }
                 posted
             }
@@ -167,10 +167,10 @@ impl Notifier for Slack {
             reference: event.reference.clone(),
             channel: posted["channel"].as_str().unwrap_or(channel).to_string(),
             ts: posted["ts"].as_str().unwrap_or_default().to_string(),
-            jeet_link: links && has_jeet_link(event),
+            plete_link: links && has_plete_link(event),
         };
         if let Err(e) = record(&self.home, &sent) {
-            eprintln!("jeet: could not keep where Slack put a notification: {e:#}");
+            eprintln!("plete: could not keep where Slack put a notification: {e:#}");
         }
         Ok(())
     }
@@ -180,7 +180,7 @@ impl Notifier for Slack {
 // The message
 // ---------------------------------------------------------------------------
 
-/// `event` as `chat.postMessage`'s `text` and `blocks`; `jeet://` links as
+/// `event` as `chat.postMessage`'s `text` and `blocks`; `plete://` links as
 /// links only if `links`.
 pub fn message(event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value {
     let mut blocks = vec![json!({
@@ -222,7 +222,7 @@ pub fn message(event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value 
     if !fields.is_empty() {
         blocks.push(json!({ "type": "section", "fields": fields }));
     }
-    let jeet = jeet_link(event);
+    let plete = plete_link(event);
     let mut buttons = Vec::new();
     let mut button = |id: &str, text: &str, url: &str| {
         if url.len() > URL_MAX {
@@ -250,17 +250,17 @@ pub fn message(event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value 
     {
         button("open", "Open", page);
     }
-    if let (Some(jeet), true) = (&jeet, links) {
-        button("jeet", "Open in jeet", jeet);
+    if let (Some(plete), true) = (&plete, links) {
+        button("plete", "Open in plete", plete);
     }
     if !buttons.is_empty() {
         blocks.push(json!({ "type": "actions", "elements": buttons }));
     }
     let mut context = Vec::new();
-    if let Some(jeet) = &jeet {
+    if let Some(plete) = &plete {
         context.push(match links {
-            true => format!("<{jeet}|Open in jeet> · `jeet open {jeet}`"),
-            false => format!("`jeet open {jeet}`"),
+            true => format!("<{plete}|Open in plete> · `plete open {plete}`"),
+            false => format!("`plete open {plete}`"),
         });
     }
     if let Some(act) = act(event) {
@@ -305,13 +305,13 @@ pub(super) fn header(event: &Event) -> String {
         }
     });
     let title = event.title.trim();
-    let title = title.strip_prefix("jeet: ").unwrap_or(title);
+    let title = title.strip_prefix("plete: ").unwrap_or(title);
     match (event.kind.as_str(), report_id(event), from) {
         ("question", Some(id), Some(from)) => format!("Question #{id} from {from}"),
         ("blocked", Some(id), Some(from)) => format!("Blocked #{id}: {from}"),
         ("done", Some(id), Some(from)) => format!("Done #{id}: {from}"),
         _ if !title.is_empty() => title.to_string(),
-        _ => "jeet".to_string(),
+        _ => "plete".to_string(),
     }
 }
 
@@ -319,13 +319,13 @@ pub(super) fn header(event: &Event) -> String {
 pub(super) fn act(event: &Event) -> Option<String> {
     let id = report_id(event)?;
     Some(match event.kind.as_str() {
-        "question" | "blocked" => format!("jeet report answer {id} \"…\""),
-        _ => format!("jeet show r{id}"),
+        "question" | "blocked" => format!("plete report answer {id} \"…\""),
+        _ => format!("plete show r{id}"),
     })
 }
 
-/// The event's `jeet://` link, as jeet writes it, if it has a good one.
-pub(super) fn jeet_link(event: &Event) -> Option<String> {
+/// The event's `plete://` link, as plete writes it, if it has a good one.
+pub(super) fn plete_link(event: &Event) -> Option<String> {
     let parsed = link::parse(event.link.as_deref()?).ok()?;
     let url = link::link_for(&parsed);
     // Kept out of mrkdwn's `<url|text>` and a code span whatever a slug holds.
@@ -335,8 +335,8 @@ pub(super) fn jeet_link(event: &Event) -> Option<String> {
     plain.then_some(url)
 }
 
-pub(super) fn has_jeet_link(event: &Event) -> bool {
-    jeet_link(event).is_some()
+pub(super) fn has_plete_link(event: &Event) -> bool {
+    plete_link(event).is_some()
 }
 
 /// A GitHub PR's checks page.
@@ -361,7 +361,7 @@ pub(super) fn age(secs: i64) -> String {
     }
 }
 
-/// What `jeet watch` last saw of `pr`'s checks, if it watches it.
+/// What `plete watch` last saw of `pr`'s checks, if it watches it.
 pub(super) fn ci_status(home: &Path, pr: Option<&str>) -> Option<String> {
     let pr = pr?;
     let path = config::watch_state_path(home);
@@ -416,12 +416,12 @@ pub struct Sent {
     pub reference: Option<String>,
     pub channel: String,
     pub ts: String,
-    /// Whether it went with its `jeet://` link.
+    /// Whether it went with its `plete://` link.
     #[serde(default)]
-    pub jeet_link: bool,
+    pub plete_link: bool,
 }
 
-/// `$JEET_HOME/run/notify/slack-sent.jsonl`: one [`Sent`] a line.
+/// `$PLETE_HOME/run/notify/slack-sent.jsonl`: one [`Sent`] a line.
 pub fn sent_path(home: &Path) -> PathBuf {
     dir(home).join("slack-sent.jsonl")
 }
@@ -456,11 +456,11 @@ pub fn sent(home: &Path) -> Vec<Sent> {
 pub fn manifest() -> String {
     let manifest = json!({
         "display_information": {
-            "name": "jeet",
-            "description": "Notifications from jeet",
+            "name": "plete",
+            "description": "Notifications from plete",
         },
         "features": {
-            "bot_user": { "display_name": "jeet", "always_online": false },
+            "bot_user": { "display_name": "plete", "always_online": false },
             "app_home": {
                 "home_tab_enabled": false,
                 "messages_tab_enabled": true,
@@ -556,10 +556,10 @@ mod tests {
             level: Some(NotifyLevel::Task),
             task: Some("x".into()),
             reference: Some("r41".into()),
-            title: "jeet: task x has a question (#41)".into(),
+            title: "plete: task x has a question (#41)".into(),
             subtitle: Some("assistant/x".into()),
             body: "Ship it <now> & then?".into(),
-            link: Some("jeet://report/41".into()),
+            link: Some("plete://report/41".into()),
             pr: Some("https://github.com/acme/api/pull/7".into()),
             at: Some(1000),
             ..Event::default()
@@ -583,7 +583,7 @@ mod tests {
         let (method, _, posted) = &calls[1];
         assert_eq!(method, "chat.postMessage");
         assert_eq!(posted["channel"], "D1");
-        assert_eq!(posted["text"], "jeet: task x has a question (#41)");
+        assert_eq!(posted["text"], "plete: task x has a question (#41)");
         let blocks = posted["blocks"].as_array().unwrap();
         assert_eq!(blocks[0]["text"]["text"], "Question #41 from task x");
         assert_eq!(blocks[1]["text"]["text"], "Ship it &lt;now&gt; &amp; then?");
@@ -602,18 +602,18 @@ mod tests {
             buttons[1]["url"],
             "https://github.com/acme/api/pull/7/checks"
         );
-        assert_eq!(buttons[2]["url"], "jeet://report/41");
+        assert_eq!(buttons[2]["url"], "plete://report/41");
         let context = texts(&blocks[4]);
         assert!(
-            context.contains("<jeet://report/41|Open in jeet>"),
+            context.contains("<plete://report/41|Open in plete>"),
             "{context}"
         );
         assert!(
-            context.contains("`jeet open jeet://report/41`"),
+            context.contains("`plete open plete://report/41`"),
             "{context}"
         );
         assert!(
-            context.contains("`jeet report answer 41 \\\"…\\\"`"),
+            context.contains("`plete report answer 41 \\\"…\\\"`"),
             "{context}"
         );
 
@@ -622,14 +622,14 @@ mod tests {
         assert_eq!(sent[0].channel, "D1");
         assert_eq!(sent[0].ts, "1700000000.000100");
         assert_eq!(sent[0].reference.as_deref(), Some("r41"));
-        assert!(sent[0].jeet_link);
+        assert!(sent[0].plete_link);
     }
 
     #[test]
-    fn a_refused_jeet_link_is_resent_without_and_never_tried_again() {
+    fn a_refused_plete_link_is_resent_without_and_never_tried_again() {
         let home = tempfile::tempdir().unwrap();
         let (slack, calls) = slack(home.path(), |method, body| {
-            if method == "chat.postMessage" && body.to_string().contains("<jeet://") {
+            if method == "chat.postMessage" && body.to_string().contains("<plete://") {
                 return Ok(json!({ "ok": false, "error": "invalid_blocks" }));
             }
             ok(method, body)
@@ -641,12 +641,15 @@ mod tests {
             let posts: Vec<_> = calls.iter().filter(|c| c.0 == "chat.postMessage").collect();
             assert_eq!(posts.len(), 2);
             let resent = texts(&posts[1].2);
-            assert!(!resent.contains("<jeet://"), "{resent}");
-            assert!(!resent.contains("\"url\":\"jeet://"), "{resent}");
-            assert!(resent.contains("`jeet open jeet://report/41`"), "{resent}");
+            assert!(!resent.contains("<plete://"), "{resent}");
+            assert!(!resent.contains("\"url\":\"plete://"), "{resent}");
+            assert!(
+                resent.contains("`plete open plete://report/41`"),
+                "{resent}"
+            );
         }
-        assert_eq!(web::load(home.path(), NAME).jeet_links, Some(false));
-        assert!(!sent(home.path())[0].jeet_link);
+        assert_eq!(web::load(home.path(), NAME).plete_links, Some(false));
+        assert!(!sent(home.path())[0].plete_link);
 
         calls.borrow_mut().clear();
         slack.send(&question(), &tokens).unwrap();
@@ -707,7 +710,7 @@ mod tests {
         let first = slack.send(&question(), &tokens).unwrap_err();
         assert!(first.downcast_ref::<Said>().is_none());
         assert!(
-            format!("{first:#}").contains("jeet notify setup slack"),
+            format!("{first:#}").contains("plete notify setup slack"),
             "{first:#}"
         );
         let again = slack.send(&question(), &tokens).unwrap_err();
@@ -732,7 +735,7 @@ mod tests {
         assert_eq!(blocks[0]["text"]["text"], "Deployed");
         assert_eq!(blocks[1]["text"]["text"], "all good");
         let all = texts(&m);
-        assert!(!all.contains("jeet open"), "{all}");
+        assert!(!all.contains("plete open"), "{all}");
         assert!(all.contains("\"url\":\"https://example.com/x\""), "{all}");
         assert!(!all.contains("*Age*"), "{all}");
     }
@@ -762,10 +765,10 @@ mod tests {
         );
         assert_eq!(m["settings"]["socket_mode_enabled"], false);
         assert!(m["settings"].get("event_subscriptions").is_none());
-        // A link jeet would not write is not used.
+        // A link plete would not write is not used.
         let mut e = question();
-        e.link = Some("jeet://report/41|x".into());
-        assert_eq!(jeet_link(&e), None);
+        e.link = Some("plete://report/41|x".into());
+        assert_eq!(plete_link(&e), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
-//! `jeet chat --pick`: the assistant's sessions, to resume one, start a new
+//! `plete chat --pick`: the assistant's sessions, to resume one, start a new
 //! one, rename or end one, or mark the one events go to first.
 //!
 //! The screen only picks. Whatever is chosen is opened and attached to by
-//! `jeet chat` once the screen is down, so tmux has the terminal to itself.
+//! `plete chat` once the screen is down, so tmux has the terminal to itself.
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};

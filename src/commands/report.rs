@@ -1,4 +1,4 @@
-//! `jeet report`: a task with a parent tells it how it is going, and a
+//! `plete report`: a task with a parent tells it how it is going, and a
 //! node answers, passes on or lists the questions that reach it.
 
 use anyhow::{bail, Result};
@@ -39,22 +39,22 @@ fn send_kind(app: &App, kind: ReportKind, message: &str, interrupt: bool) -> Res
     let task = match permissions::caller(app)? {
         Caller::Node(task) => task,
         Caller::Review(review) => return send_review(app, &review, kind, message, interrupt),
-        Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
+        Caller::Root => bail!("the assistant has no parent; `plete notify` tells the user"),
         Caller::User => match crate::env::var(TASK_ID_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty())
         {
             Some(id) => match app.db.get_task(id.trim())? {
                 Some(_) => bail!(
-                    "this task has no parent; `jeet report` is for tasks made under the assistant or a \
+                    "this task has no parent; `plete report` is for tasks made under the assistant or a \
                      manager"
                 ),
                 None => bail!(
-                    "${TASK_ID_ENV} is {}, which is no task jeet knows; was it deleted?",
+                    "${TASK_ID_ENV} is {}, which is no task plete knows; was it deleted?",
                     id.trim()
                 ),
             },
-            None => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
+            None => bail!("`plete report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
         },
     };
     let parent = match task.parent_id.as_deref() {
@@ -92,7 +92,7 @@ fn send_kind(app: &App, kind: ReportKind, message: &str, interrupt: bool) -> Res
         Some(parent) => manager::label(parent),
         None => "its parent".to_string(),
     };
-    eprintln!("jeet: reported {} to {to} (#{id})", kind.as_str());
+    eprintln!("plete: reported {} to {to} (#{id})", kind.as_str());
     eprintln!(
         "{}",
         delivered_line(
@@ -143,7 +143,7 @@ fn send_review(
         Some(parent) => manager::label(&parent),
         None => "the task that asked".to_string(),
     };
-    eprintln!("jeet: reported {} to {to} (#{id})", kind.as_str());
+    eprintln!("plete: reported {} to {to} (#{id})", kind.as_str());
     eprintln!(
         "{}",
         delivered_line(
@@ -158,12 +158,12 @@ fn send_review(
 
 /// Who runs this, refused when it is the user's word and this is not the
 /// user's own terminal: a top-level task's agent, or a window in one of
-/// jeet's sessions, is [`Caller::User`] too (R8).
+/// plete's sessions, is [`Caller::User`] too (R8).
 fn caller_at_terminal(app: &App, doing: &str) -> Result<Caller> {
     let caller = permissions::caller(app)?;
     if caller == Caller::User && !permissions::at_terminal(app)? {
         bail!(
-            "{doing} as you runs at your own terminal, outside jeet's tmux sessions and any \
+            "{doing} as you runs at your own terminal, outside plete's tmux sessions and any \
              task's pane"
         );
     }
@@ -179,7 +179,7 @@ fn answer(app: &App, id: i64, message: &str) -> Result<()> {
         Caller::User => " (as the user)",
         Caller::Root | Caller::Node(_) | Caller::Review(_) => "",
     };
-    eprintln!("jeet: answered #{id} for {asker}{by}");
+    eprintln!("plete: answered #{id} for {asker}{by}");
     eprintln!(
         "{}",
         delivered_line(
@@ -208,11 +208,11 @@ fn escalate(app: &App, id: i64) -> Result<()> {
     let escalated = reports::escalate(app, &caller, id)?;
     let id = escalated.row.id;
     let (Some(to), Some(delivered)) = (escalated.to, escalated.delivered) else {
-        eprintln!("jeet: #{id} is with the user now; notified");
+        eprintln!("plete: #{id} is with the user now; notified");
         return Ok(());
     };
     let to = manager::label(&to);
-    eprintln!("jeet: passed #{id} to {to}");
+    eprintln!("plete: passed #{id} to {to}");
     eprintln!(
         "{}",
         delivered_line(
@@ -229,7 +229,7 @@ fn ls(app: &App) -> Result<()> {
     let caller = caller_at_terminal(app, "listing every open question")?;
     let held = reports::held(app, &caller)?;
     if held.is_empty() {
-        eprintln!("jeet: no open question reaches you");
+        eprintln!("plete: no open question reaches you");
         return Ok(());
     }
     let me = match &caller {
@@ -244,7 +244,7 @@ fn ls(app: &App) -> Result<()> {
     Ok(())
 }
 
-/// Ask `row` as `jeet report ls` lists it to `me` (None: the user): `#42
+/// Ask `row` as `plete report ls` lists it to `me` (None: the user): `#42
 /// question task assistant/api/w 12m ago, with you`, then the question,
 /// as written for the user, fenced as the asker's claim for an agent.
 fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String> {
@@ -293,10 +293,10 @@ fn listed(app: &App, me: Option<&str>, row: &TaskReportRecord) -> Result<String>
 /// How `what` (`the report`, `the answer`) got to `to`, as a line for
 /// stderr; `failed` says what was kept when it did not.
 fn delivered_line(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> String {
-    format!("jeet: {}", delivered(to, what, failed, d))
+    format!("plete: {}", delivered(to, what, failed, d))
 }
 
-/// [`delivered_line`] without its `jeet: `, as the agents pane shows it.
+/// [`delivered_line`] without its `plete: `, as the agents pane shows it.
 pub(crate) fn delivered(to: &str, what: &str, failed: &str, d: &Result<Delivered>) -> String {
     match d {
         Ok(Delivered::Typed) => format!("typed into {to}'s session"),
@@ -309,7 +309,7 @@ pub(crate) fn delivered(to: &str, what: &str, failed: &str, d: &Result<Delivered
             format!("{to} is not running, so {what} waits for its next session")
         }
         Ok(Delivered::Stored) => {
-            format!("kept for {to}, which reads it with `jeet brief`; nothing was pushed to it")
+            format!("kept for {to}, which reads it with `plete brief`; nothing was pushed to it")
         }
         Ok(Delivered::Paused) => {
             format!("{to} is paused or stopped, so {what} waits until it is resumed")
@@ -328,7 +328,7 @@ mod tests {
 
     fn parsed(args: &[&str]) -> ReportCommands {
         let cli =
-            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+            crate::cli::Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied()))
                 .unwrap();
         match cli.command {
             Some(crate::cli::Commands::Report { what }) => what,
@@ -363,8 +363,10 @@ mod tests {
             &["report", "escalate"],
         ] {
             assert!(
-                crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(bad.iter().copied()))
-                    .is_err(),
+                crate::cli::Cli::try_parse_from(
+                    std::iter::once("plete").chain(bad.iter().copied())
+                )
+                .is_err(),
                 "{bad:?}"
             );
         }
@@ -380,7 +382,7 @@ mod tests {
         );
         assert_eq!(
             queued,
-            "jeet: manager api is busy, so the report is queued; it gets it when it finishes or \
+            "plete: manager api is busy, so the report is queued; it gets it when it finishes or \
              sits idle"
         );
         let failed = delivered_line(
@@ -391,7 +393,7 @@ mod tests {
         );
         assert_eq!(
             failed,
-            "jeet: the answer to #4 is kept, but not delivered to task w: no inbox"
+            "plete: the answer to #4 is kept, but not delivered to task w: no inbox"
         );
     }
 }

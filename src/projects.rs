@@ -1,6 +1,6 @@
 //! Projects: templates a task can start from.
 //!
-//! A project is a directory under `$JEET_HOME/projects/<name>`:
+//! A project is a directory under `$PLETE_HOME/projects/<name>`:
 //! - `project.toml`: the repositories every task made from it starts with a
 //!   worktree of, and extra arguments for the coding agent in those tasks.
 //! - `AGENTS.md`: instructions for the agent, and a `CLAUDE.md` importing
@@ -9,7 +9,7 @@
 //!
 //! A task gets a *copy* of the project's instruction files and skills — a
 //! snapshot, so editing the project leaves tasks already started alone. What
-//! was copied is recorded in the task's `.jeet/project-files`, with a hash of
+//! was copied is recorded in the task's `.plete/project-files`, with a hash of
 //! each file, so a later [`resync`] can tell a file the task changed (kept)
 //! from one it did not (brought up to date).
 //!
@@ -36,8 +36,9 @@ const TASK_SKILLS: &str = ".claude/skills";
 /// Inside the task's marker directory: what [`copy_files`] last copied, and
 /// its hash.
 const MANIFEST: &str = "project-files";
-/// The built-in skill every task gets; a project cannot replace it.
-const RESERVED_SKILL: &str = "jeet";
+/// The built-in skill every task gets, under its name and its old one; a
+/// project cannot replace either.
+const RESERVED_SKILLS: [&str; 2] = ["plete", "jeet"];
 
 /// Where a manager keeps the project's AGENTS.md: its own AGENTS.md is the
 /// manager role's, so the project's sits beside it, imported from there.
@@ -46,7 +47,7 @@ pub const MANAGER_INSTRUCTIONS: &str = "PROJECT.md";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Repository specs, as `jeet worktree add` takes them: `api`,
+    /// Repository specs, as `plete worktree add` takes them: `api`,
     /// `owner/repo`, a store id, or a clone URL.
     #[serde(default)]
     pub repos: Vec<String>,
@@ -160,7 +161,7 @@ pub fn dir(app: &App, name: &str) -> Result<PathBuf> {
 pub fn existing_dir(app: &App, name: &str) -> Result<PathBuf> {
     let dir = dir(app, name)?;
     if !dir.is_dir() {
-        bail!("no project named {name}; `jeet projects ls` lists them");
+        bail!("no project named {name}; `plete projects ls` lists them");
     }
     Ok(dir)
 }
@@ -275,7 +276,7 @@ fn starter_agents_md(name: &str) -> String {
     let mut text = format!(
         "# {name}\n\n\
          Instructions for the coding agent in every task made from the {name} project.\n\
-         jeet copies this file, and the skills next to it, into each new task.\n"
+         plete copies this file, and the skills next to it, into each new task.\n"
     );
     for import in instructions::imports() {
         text.push_str(&format!(
@@ -320,7 +321,7 @@ pub fn tasks_using(app: &App, name: &str) -> Result<Vec<TaskRecord>> {
 /// the project is now, unlike its files. None without a project, and none
 /// for a manager.
 pub fn agent_args(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
-    // A manager's launch is jeet's: a project's arguments are for the
+    // A manager's launch is plete's: a project's arguments are for the
     // coding agents of tasks, and could undo what a manager is run with.
     if task.kind == TaskKind::Manager {
         return Ok(Vec::new());
@@ -473,7 +474,7 @@ pub fn copy_files_for(
 }
 
 /// Bring a task's copies of its project's files up to date: see
-/// [`copy_files`]. The built-in jeet skill is put back too.
+/// [`copy_files`]. The built-in plete skill is put back too.
 pub fn resync(app: &App, task: &TaskRecord, force: bool) -> Result<FileSync> {
     let Some(name) = &task.project else {
         bail!("task {} was not made from a project", task.slug);
@@ -531,11 +532,13 @@ fn project_files(
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|e| !(e.depth() == 1 && e.file_name() == RESERVED_SKILL));
-    if skills.join(RESERVED_SKILL).exists() {
-        skipped.push(format!(
-            "{SKILLS_DIR}/{RESERVED_SKILL}: the built-in skill's name; not copied"
-        ));
+        .filter_entry(|e| !(e.depth() == 1 && RESERVED_SKILLS.iter().any(|r| e.file_name() == *r)));
+    for reserved in RESERVED_SKILLS {
+        if skills.join(reserved).exists() {
+            skipped.push(format!(
+                "{SKILLS_DIR}/{reserved}: the built-in skill's name; not copied"
+            ));
+        }
     }
     for entry in walk {
         let entry = entry.with_context(|| format!("read {}", skills.display()))?;
@@ -836,7 +839,7 @@ mod tests {
             &project.path().join("skills/deploy/ref/notes.md"),
             "notes\n",
         );
-        write(&project.path().join("skills/jeet/SKILL.md"), "mine\n");
+        write(&project.path().join("skills/plete/SKILL.md"), "mine\n");
         write(&project.path().join("project.toml"), "repos = []\n");
 
         let sync = copy_files(&project_at(project.path()), task.path(), false).unwrap();
@@ -851,7 +854,7 @@ mod tests {
         );
         assert!(sync.kept.is_empty());
         assert_eq!(sync.skipped.len(), 1, "{:?}", sync.skipped);
-        assert!(!task.path().join(".claude/skills/jeet").exists());
+        assert!(!task.path().join(".claude/skills/plete").exists());
         assert!(!task.path().join("project.toml").exists());
         assert_eq!(read(&task.path().join("AGENTS.md")), "rules\n");
         assert_eq!(read(&task.path().join("CLAUDE.md")), CLAUDE_SHIM);

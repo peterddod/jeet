@@ -24,7 +24,7 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
     let Ok(tasks) = app.db.list_tasks(None) else {
         return Vec::new();
     };
-    // Reviews are named as tasks are, by `jeet task open|archive|…`.
+    // Reviews are named as tasks are, by `plete task open|archive|…`.
     let reviews = app.db.list_reviews(None).unwrap_or_default();
     tasks
         .into_iter()
@@ -34,7 +34,7 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// Reviews, for the `jeet review` subcommands.
+/// Reviews, for the `plete review` subcommands.
 pub fn review_candidates() -> Vec<CompletionCandidate> {
     let Ok(app) = App::open() else {
         return Vec::new();
@@ -47,7 +47,7 @@ pub fn review_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// Tasks under the assistant, for the `jeet manager` verbs.
+/// Tasks under the assistant, for the `plete manager` verbs.
 pub fn manager_candidates() -> Vec<CompletionCandidate> {
     tree_candidates(|_| true)
 }

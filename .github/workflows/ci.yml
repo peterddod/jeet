@@ -33,7 +33,7 @@ jobs:
         if: always()
         run: |
           sleep 2
-          if pgrep -fl 'target/debug/jeet|tmux-stub'; then
+          if pgrep -fl 'target/debug/plete|tmux-stub'; then
             echo "::error::the tests left the processes above running"
             exit 1
           fi
@@ -42,10 +42,32 @@ jobs:
         run: |
           chmod +x packaging/completions/generate.sh
           cargo build --release --locked
-          packaging/completions/generate.sh target/release/jeet
+          packaging/completions/generate.sh target/release/plete
           cargo install cargo-deb --locked
           cargo deb --no-build
-          dpkg-deb -c target/debian/jeet_*.deb | tee /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/bash-completion/completions/jeet' /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/zsh/vendor-completions/_jeet' /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/fish/vendor_completions.d/jeet.fish' /tmp/jeet-deb-contents.txt
+          dpkg-deb -c target/debian/plete_*.deb | tee /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/bash-completion/completions/plete' /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/zsh/vendor-completions/_plete' /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/fish/vendor_completions.d/plete.fish' /tmp/plete-deb-contents.txt
+          # Renamed from jeet: the package keeps a jeet link, never a pt.
+          if grep -qE 'usr/bin/pt$' /tmp/plete-deb-contents.txt; then
+            echo "::error::the deb must not ship pt"
+            exit 1
+          fi
+          # Installed over an old jeet package, as on a machine upgrading.
+          mkdir -p /tmp/jeet-stub/DEBIAN /tmp/jeet-stub/usr/bin
+          printf 'Package: jeet\nVersion: 0.15.0\nArchitecture: all\nMaintainer: ci\nDescription: stub\n' \
+            > /tmp/jeet-stub/DEBIAN/control
+          printf '#!/bin/sh\necho jeet stub\n' > /tmp/jeet-stub/usr/bin/jeet
+          chmod 755 /tmp/jeet-stub/usr/bin/jeet
+          dpkg-deb --build /tmp/jeet-stub /tmp/jeet-stub.deb
+          sudo dpkg -i /tmp/jeet-stub.deb
+          sudo apt-get install -y ./target/debian/plete_*.deb
+          test "$(dpkg-query -W -f='${Status}' jeet 2>/dev/null || true)" != "install ok installed"
+          test "$(readlink /usr/bin/jeet)" = plete
+          /usr/bin/jeet --version | grep -q '^plete '
+          test ! -e /usr/bin/pt
+          test ! -L /usr/bin/pt
+          sudo dpkg -r plete
+          test ! -e /usr/bin/jeet
+          test ! -L /usr/bin/jeet

@@ -1,8 +1,8 @@
-//! `jeet import`: bring work from outside jeet into the store and into tasks.
+//! `plete import`: bring work from outside plete into the store and into tasks.
 //!
-//! The way in for a new user, and the way out of the layout jeet had before
+//! The way in for a new user, and the way out of the layout plete had before
 //! tasks. It looks for git checkouts under the paths given, else under
-//! `scan_roots`, jeet's old `worktrees/` and `ephemeral/` directories and
+//! `scan_roots`, plete's old `worktrees/` and `ephemeral/` directories and
 //! every trunk the index knows, and then:
 //!
 //! - a repository outside the store is cloned into it from its origin, and
@@ -12,8 +12,8 @@
 //!   original, and uncommitted changes (untracked files included) follow as a
 //!   stash-shaped commit, applied in the new worktree. The original is only
 //!   read, and stays as it was unless `--remove-originals` is given;
-//! - a worktree of a store trunk that sits outside any task — one jeet made
-//!   before tasks, or one made by hand — is jeet's own, so it is moved into a
+//! - a worktree of a store trunk that sits outside any task — one plete made
+//!   before tasks, or one made by hand — is plete's own, so it is moved into a
 //!   task with `git worktree move`, work and all. With paths given, only the
 //!   worktrees under them are; and a pull request's checkout — one a review
 //!   job ran in, or one the explorer made before PR checkouts moved into
@@ -53,15 +53,15 @@ use crate::worktrees::{self, now_secs};
 pub fn run(app: &App, paths: &[String], yes: bool, remove_originals: bool) -> Result<()> {
     let interactive = io::stdin().is_terminal();
     if !yes && !interactive {
-        bail!("jeet import asks what to import; pass --yes to import everything it finds");
+        bail!("plete import asks what to import; pass --yes to import everything it finds");
     }
-    eprintln!("jeet: looking for repositories…");
+    eprintln!("plete: looking for repositories…");
     let plan = discover(app, paths)?;
     for note in &plan.notes {
-        eprintln!("jeet: {note}");
+        eprintln!("plete: {note}");
     }
     if plan.repos.iter().all(|r| r.in_store) && plan.items.is_empty() {
-        eprintln!("jeet: nothing to import");
+        eprintln!("plete: nothing to import");
         return Ok(());
     }
     print_plan(&plan);
@@ -72,7 +72,7 @@ pub fn run(app: &App, paths: &[String], yes: bool, remove_originals: bool) -> Re
         match ask(PICK)?.as_deref().map(str::trim) {
             // End of input is no answer, and certainly not "all".
             None | Some("q" | "quit") => {
-                eprintln!("jeet: nothing imported");
+                eprintln!("plete: nothing imported");
                 return Ok(());
             }
             Some(answer) => parse_selection(answer, plan.items.len())?,
@@ -81,12 +81,12 @@ pub fn run(app: &App, paths: &[String], yes: bool, remove_originals: bool) -> Re
 
     let outcome = execute(app, &plan, &groups);
     for line in &outcome.lines {
-        eprintln!("jeet: {line}");
+        eprintln!("plete: {line}");
     }
     let tasks = outcome.tasks;
     let failed = outcome.failed;
     eprintln!(
-        "jeet: imported {} into {} task{}{}",
+        "plete: imported {} into {} task{}{}",
         outcome.imported,
         tasks,
         if tasks == 1 { "" } else { "s" },
@@ -101,26 +101,26 @@ pub fn run(app: &App, paths: &[String], yes: bool, remove_originals: bool) -> Re
     }
     if !remove_originals {
         eprintln!(
-            "jeet: the originals are untouched; `jeet import --remove-originals` removes the \
+            "plete: the originals are untouched; `plete import --remove-originals` removes the \
              ones it has copied"
         );
         return Ok(());
     }
-    eprintln!("jeet: originals now copied into tasks:");
+    eprintln!("plete: originals now copied into tasks:");
     for original in &outcome.originals {
         eprintln!("  {}", original.describe());
     }
     if !yes {
         let answer = ask("Remove them? Type `yes` to remove: ")?;
         if answer.as_deref().map(str::trim) != Some("yes") {
-            eprintln!("jeet: originals left in place");
+            eprintln!("plete: originals left in place");
             return Ok(());
         }
     }
     for original in &outcome.originals {
         match original.remove() {
-            Ok(()) => eprintln!("jeet: removed {}", original.describe()),
-            Err(e) => eprintln!("jeet: could not remove {}: {e:#}", original.describe()),
+            Ok(()) => eprintln!("plete: removed {}", original.describe()),
+            Err(e) => eprintln!("plete: could not remove {}: {e:#}", original.describe()),
         }
     }
     Ok(())
@@ -197,7 +197,7 @@ struct Plan {
     notes: Vec<String>,
 }
 
-/// What to scan: the paths given, else `scan_roots` and jeet's old
+/// What to scan: the paths given, else `scan_roots` and plete's old
 /// directories. The store, the tasks and the projects are never scanned.
 fn discover(app: &App, paths: &[String]) -> Result<Plan> {
     let explicit = !paths.is_empty();
@@ -233,7 +233,7 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
     .collect();
     let mut checkouts = find_checkouts(&roots, &skip);
 
-    // Every trunk jeet knows, so a repository registered before tasks, and
+    // Every trunk plete knows, so a repository registered before tasks, and
     // the worktrees of the store's own trunks, are found wherever they are.
     let mut store_trunks: HashMap<PathBuf, RepoRecord> = HashMap::new();
     for repo in app.db.list_repos(None)? {
@@ -352,7 +352,7 @@ fn plan_store_repo(
         let pr = scope.is_pr(&e.path);
         if pr {
             plan.notes.push(format!(
-                "left {}: a pull request's checkout, from `jeet review` or the explorer; \
+                "left {}: a pull request's checkout, from `plete review` or the explorer; \
                  `git worktree remove` removes it",
                 e.path.display()
             ));
@@ -390,7 +390,7 @@ fn plan_external_repo(
     entries: &[git::GitWorktreeEntry],
 ) -> Result<()> {
     let origin = git::origin_url(checkout).map_err(|_| {
-        anyhow::anyhow!("it has no origin remote, so jeet cannot tell where it belongs")
+        anyhow::anyhow!("it has no origin remote, so plete cannot tell where it belongs")
     })?;
     let identity = remote::parse_remote_url_anyhow(&origin)?;
     let id = identity.id();
@@ -668,7 +668,7 @@ fn snapshot_trees(path: &Path) -> Option<Changes> {
 }
 
 /// Directories under `roots` holding a `.git`: checkouts. A checkout is not
-/// searched for more inside it, and neither is anything under `skip` (jeet's
+/// searched for more inside it, and neither is anything under `skip` (plete's
 /// own store, tasks and projects) or a `.git` itself. Symlinks are not
 /// followed.
 fn find_checkouts(roots: &[PathBuf], skip: &[PathBuf]) -> Vec<PathBuf> {
@@ -746,7 +746,7 @@ impl Item {
                 match unpushed {
                     Some(0) => {}
                     Some(n) => work.push(plural(*n, "unpushed commit")),
-                    None => work.push("commits jeet could not check".to_string()),
+                    None => work.push("commits plete could not check".to_string()),
                 }
                 if *dirty > 0 {
                     work.push(plural(*dirty, "uncommitted change"));
@@ -779,7 +779,7 @@ fn plural(n: usize, what: &str) -> String {
 fn print_plan(plan: &Plan) {
     let new: Vec<&FoundRepo> = plan.repos.iter().filter(|r| !r.in_store).collect();
     if !new.is_empty() {
-        eprintln!("jeet: into the store, cloned from origin:");
+        eprintln!("plete: into the store, cloned from origin:");
         let mut seen = Vec::new();
         for repo in new {
             if seen.contains(&&repo.id) {
@@ -790,10 +790,10 @@ fn print_plan(plan: &Plan) {
         }
     }
     if plan.items.is_empty() {
-        eprintln!("jeet: no branches or worktrees with work in them to make tasks of");
+        eprintln!("plete: no branches or worktrees with work in them to make tasks of");
         return;
     }
-    eprintln!("jeet: to import, one task each unless grouped:");
+    eprintln!("plete: to import, one task each unless grouped:");
     let width = plan.items.len().to_string().len();
     for (i, item) in plan.items.iter().enumerate() {
         eprintln!(
@@ -876,7 +876,7 @@ struct Outcome {
     originals: Vec<Original>,
 }
 
-/// A worktree or branch outside jeet whose work a task now has.
+/// A worktree or branch outside plete whose work a task now has.
 struct Original {
     /// The repository's git directory, where git can act on it.
     common: PathBuf,
@@ -1030,7 +1030,7 @@ fn execute(app: &App, plan: &Plan, groups: &[Group]) -> Outcome {
             // Made a moment ago for this, and nothing came of it.
             if let Err(e) = tasks::delete(app, &task, false) {
                 outcome.lines.push(format!(
-                    "the empty task {} could not be removed ({e:#}); `jeet task delete {} \
+                    "the empty task {} could not be removed ({e:#}); `plete task delete {} \
                      --force` cleans it up",
                     task.slug, task.slug
                 ));
@@ -1058,7 +1058,7 @@ fn ensure_in_store(app: &App, repo: &FoundRepo) -> Result<RepoRecord> {
             + app.db.review_worktrees_of_repo(&repo.id)?.len();
         if in_use > 0 {
             bail!(
-                "{} task worktree{} use its trunk at {}; jeet leaves it there",
+                "{} task worktree{} use its trunk at {}; plete leaves it there",
                 in_use,
                 if in_use == 1 { "" } else { "s" },
                 record.trunk_path
@@ -1086,7 +1086,7 @@ fn ensure_in_store(app: &App, repo: &FoundRepo) -> Result<RepoRecord> {
         app.db.upsert_repo(&record)?;
         return Ok(record);
     }
-    eprintln!("jeet: cloning {}…", repo.origin);
+    eprintln!("plete: cloning {}…", repo.origin);
     clone::clone_into_store(app, &repo.origin)
 }
 
@@ -1359,7 +1359,7 @@ fn copy_sessions(app: &App, task: &TaskRecord, from: &Path, warnings: &mut Vec<S
     }
     if !copied.is_empty() {
         warnings.push(format!(
-            "{} copied; `jeet task open {}` resumes the latest",
+            "{} copied; `plete task open {}` resumes the latest",
             plural(copied.len(), &format!("{} session", harness.name())),
             task.slug
         ));
@@ -1572,14 +1572,14 @@ mod tests {
     }
 
     #[test]
-    fn checkouts_are_found_without_descending_into_them_or_jeets_own() {
+    fn checkouts_are_found_without_descending_into_them_or_pletes_own() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         for path in [
             "a/.git",
             "a/nested/.git",
             "group/b/.git",
-            "jeet/store/c/.git",
+            "plete/store/c/.git",
             "plain/src",
         ] {
             std::fs::create_dir_all(root.join(path)).unwrap();
@@ -1588,7 +1588,7 @@ mod tests {
         std::fs::create_dir_all(root.join("wt")).unwrap();
         std::fs::write(root.join("wt/.git"), "gitdir: /elsewhere").unwrap();
 
-        let found = find_checkouts(std::slice::from_ref(&root), &[root.join("jeet/store")]);
+        let found = find_checkouts(std::slice::from_ref(&root), &[root.join("plete/store")]);
         assert_eq!(
             found,
             vec![root.join("a"), root.join("group/b"), root.join("wt")]

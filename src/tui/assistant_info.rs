@@ -1,6 +1,6 @@
 //! What the tasks list shows of the assistant: its sessions and what each is
 //! doing, the messages queued for it, its todo list, and an activity feed of
-//! the GitHub events jeet watched for and the actions the assistant took.
+//! the GitHub events plete watched for and the actions the assistant took.
 //!
 //! All of it lives in files — status files, `inbox.jsonl`, `todo.md`,
 //! `watch-events.jsonl`, `actions.log` — read by [`gather`] on a background
@@ -39,7 +39,7 @@ pub const FEED_MAX: usize = 200;
 /// thread of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// `$JEET_HOME`, where the events log is.
+    /// `$PLETE_HOME`, where the events log is.
     pub home: PathBuf,
     /// The assistant's home.
     pub dir: PathBuf,
@@ -83,7 +83,7 @@ pub struct Info {
     pub todo_error: Option<String>,
     /// Newest first.
     pub feed: Vec<FeedEntry>,
-    /// How many of its running windows jeet has no record of starting
+    /// How many of its running windows plete has no record of starting
     /// ([`assistant::unanchored_windows`]).
     pub unanchored: usize,
 }
@@ -97,7 +97,7 @@ impl Info {
 /// Where a feed entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedKind {
-    /// A GitHub event `jeet watch` saw.
+    /// A GitHub event `plete watch` saw.
     Event,
     /// Something the assistant did, or was refused.
     Action,
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_follows_the_index_and_the_screen_changes_the_list_jeet_todo_keeps() {
+    fn the_probe_follows_the_index_and_the_screen_changes_the_list_plete_todo_keeps() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
         let app = App {
@@ -651,7 +651,7 @@ mod tests {
     fn a_queued_message_shows_what_it_says_not_its_fence() {
         assert_eq!(
             first_line(
-                "<jeet-message from=\"x\" untrusted=\"true\">\n\nhello\nmore\n</jeet-message>"
+                "<plete-message from=\"x\" untrusted=\"true\">\n\nhello\nmore\n</plete-message>"
             ),
             "hello"
         );

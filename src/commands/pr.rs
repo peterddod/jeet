@@ -1,4 +1,4 @@
-//! `jeet pr merge <pr>`: merge a pull request, but only one GitHub would let
+//! `plete pr merge <pr>`: merge a pull request, but only one GitHub would let
 //! through its merge button without anyone's override: open, not a draft,
 //! free of conflicts, every check passed, and not blocked by branch
 //! protection. Nothing here bypasses a rule; a PR that is not ready is
@@ -31,7 +31,7 @@ pub fn merge(
     // A title, check names and a branch are written by whoever opened the
     // PR, a fork's author included: an agent gets them fenced.
     let caller = permissions::caller(app)?;
-    eprintln!("jeet: looking up #{number}");
+    eprintln!("plete: looking up #{number}");
     let status = github::merge_status(trunk, number)?;
     if let Some(why) = refusal(&status) {
         bail!("not merging: {}", shown_github(&caller, &why));
@@ -41,7 +41,7 @@ pub fn merge(
     let method = choose_method(method, configured, &settings)?;
     if let Some(configured) = configured.filter(|c| *c != method) {
         eprintln!(
-            "jeet: the repository does not allow {} merges ([merge] method); using {}",
+            "plete: the repository does not allow {} merges ([merge] method); using {}",
             configured.as_str(),
             method.as_str()
         );
@@ -50,7 +50,7 @@ pub fn merge(
     let pr = &status.history.pr;
     github::merge_pr(trunk, number, method, &pr.head_ref_oid)?;
     eprintln!(
-        "jeet: merged #{number} {} ({})",
+        "plete: merged #{number} {} ({})",
         shown_github(&caller, &pr.title),
         method.as_str()
     );
@@ -61,13 +61,13 @@ pub fn merge(
     if !keep_branch && !pr.is_cross_repository && !settings.delete_branch_on_merge {
         let branch = shown_github(&caller, &pr.head_ref_name);
         match github::delete_remote_branch(trunk, &pr.head_ref_name) {
-            Ok(()) => eprintln!("jeet: deleted branch {branch} on GitHub"),
-            Err(e) => eprintln!("jeet: warning: could not delete branch {branch}: {e:#}"),
+            Ok(()) => eprintln!("plete: deleted branch {branch} on GitHub"),
+            Err(e) => eprintln!("plete: warning: could not delete branch {branch}: {e:#}"),
         }
     }
 
     if let Err(e) = record(app, &repo, &status) {
-        eprintln!("jeet: warning: could not record the merge in task history: {e:#}");
+        eprintln!("plete: warning: could not record the merge in task history: {e:#}");
     }
     Ok(())
 }
@@ -180,7 +180,7 @@ pub fn choose_method(
     }
     match settings.default_method().or(allowed.first().copied()) {
         Some(method) => Ok(method),
-        None => bail!("the repository allows no merge method jeet knows"),
+        None => bail!("the repository allows no merge method plete knows"),
     }
 }
 

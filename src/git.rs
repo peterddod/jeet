@@ -38,7 +38,7 @@ where
         run_captured(&mut cmd, what)?;
     } else {
         // git progress goes to stderr; keeping its stdout out of ours means
-        // `jeet worktree` can still print a path callers can consume.
+        // `plete worktree` can still print a path callers can consume.
         let status = cmd
             .stdout(Stdio::null())
             .status()
@@ -315,6 +315,19 @@ pub fn worktree_move(repo_path: &Path, from: &Path, dest: &Path) -> Result<()> {
         ],
         "git worktree move",
     )
+}
+
+/// Repair the links between the repository at `repo_path` and the linked
+/// worktrees at `worktrees`, after either has moved.
+pub fn worktree_repair(repo_path: &Path, worktrees: &[PathBuf]) -> Result<()> {
+    let mut args = vec![
+        "-C".to_string(),
+        repo_path.to_string_lossy().to_string(),
+        "worktree".to_string(),
+        "repair".to_string(),
+    ];
+    args.extend(worktrees.iter().map(|w| w.to_string_lossy().to_string()));
+    run_git(&args, "git worktree repair")
 }
 
 pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<()> {
@@ -770,7 +783,7 @@ pub fn count_commits_not_in(path: &Path, rev: &str, exclude: &[&str]) -> Option<
 }
 
 /// Fetch `refspecs` into the repository at `repo_path` from the one at
-/// `source`, a local path: how `jeet import` copies branches and commits into
+/// `source`, a local path: how `plete import` copies branches and commits into
 /// the store without going through a remote. Only fast-forwards, unless a
 /// refspec says otherwise, and git refuses to move a branch that is checked
 /// out anywhere.
@@ -804,7 +817,7 @@ pub fn delete_ref(repo_path: &Path, name: &str) -> Result<()> {
 }
 
 /// Every ref whose name starts with `prefix` (a directory such as
-/// `refs/jeet/stash/<id>/`).
+/// `refs/plete/stash/<id>/`).
 pub fn refs_under(repo_path: &Path, prefix: &str) -> Result<Vec<String>> {
     let out = git_output(
         repo_path,
@@ -829,11 +842,11 @@ pub fn stash_apply(wt_path: &Path, rev: &str, index: bool) -> Result<()> {
     run_captured(&mut cmd, "git stash apply")
 }
 
-// Snapshots are jeet's own bookkeeping commits, so they carry a fixed
+// Snapshots are plete's own bookkeeping commits, so they carry a fixed
 // identity: `git stash create` and `commit-tree` refuse to run at all where
 // no user.name/user.email is configured (CI runners, fresh machines).
-const IDENT_NAME: &str = "user.name=jeet";
-const IDENT_EMAIL: &str = "user.email=jeet@localhost";
+const IDENT_NAME: &str = "user.name=plete";
+const IDENT_EMAIL: &str = "user.email=plete@localhost";
 
 /// Save every uncommitted change in the worktree at `wt_path` — staged,
 /// unstaged and untracked (but not ignored) files — as one commit, returning
@@ -898,7 +911,7 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
                     "-p",
                     &head,
                     "-m",
-                    "jeet: index",
+                    "plete: index",
                 ],
                 &[],
                 None,
@@ -915,7 +928,7 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
             "rev-parse",
             "--path-format=absolute",
             "--git-path",
-            "jeet-snapshot-index",
+            "plete-snapshot-index",
         ],
         &[],
         None,
@@ -947,7 +960,7 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
             "--no-gpg-sign",
             &untracked_tree,
             "-m",
-            "jeet: untracked files",
+            "plete: untracked files",
         ],
         &[],
         None,
@@ -969,7 +982,7 @@ pub fn snapshot_changes(wt_path: &Path) -> Result<Option<String>> {
             "-p",
             &untracked_commit,
             "-m",
-            "jeet: uncommitted changes",
+            "plete: uncommitted changes",
         ],
         &[],
         None,

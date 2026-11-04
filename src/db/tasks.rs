@@ -23,7 +23,7 @@ pub enum TaskKind {
     /// A node below the assistant that delegates rather than codes: it has
     /// children of its own and holds its worktrees read-only.
     Manager,
-    /// The setup agent (`jeet setup`): there is one, kept out of the tasks
+    /// The setup agent (`plete setup`): there is one, kept out of the tasks
     /// list like the assistant; see [`crate::setup`].
     Setup,
 }
@@ -108,7 +108,7 @@ impl RunState {
 pub enum Setter {
     User,
     Root,
-    /// jeet, when the task's subtree used up its budget.
+    /// plete, when the task's subtree used up its budget.
     Budget,
     /// A manager above the task, or the task itself, by id.
     Node(String),
@@ -135,15 +135,15 @@ impl Setter {
     }
 }
 
-/// What a task told its parent with `jeet report`, or, as `Status`, what
-/// jeet told the parent about it on its own (waiting, idle, ended).
+/// What a task told its parent with `plete report`, or, as `Status`, what
+/// plete told the parent about it on its own (waiting, idle, ended).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ReportKind {
     Progress,
     Done,
     Blocked,
     Question,
-    /// jeet's, never the task's: not offered to `jeet report`.
+    /// plete's, never the task's: not offered to `plete report`.
     #[value(skip)]
     Status,
 }
@@ -226,7 +226,7 @@ pub struct TaskWorktreeRecord {
     pub stash_ref: Option<String>,
     pub pr_number: Option<u64>,
     pub created_at: i64,
-    /// Held by a manager, which reads and does not write; jeet keeps it
+    /// Held by a manager, which reads and does not write; plete keeps it
     /// detached.
     pub read_only: bool,
 }
@@ -345,9 +345,9 @@ pub const STARTED_BY_USER: &str = "user";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NotifyFlags {
     /// [`STARTED_BY_USER`], the id of the task that made it, or `None` for
-    /// one made before jeet kept it.
+    /// one made before plete kept it.
     pub started_by: Option<String>,
-    /// Its done and questions do not notify (`jeet task quiet`).
+    /// Its done and questions do not notify (`plete task quiet`).
     pub quiet: bool,
 }
 
@@ -375,7 +375,7 @@ fn prefixed(columns: &str, alias: &str) -> String {
 }
 
 /// How far up or down the tree a walk goes before it calls the index
-/// corrupt: far deeper than any limit jeet lets a tree grow to, so only a
+/// corrupt: far deeper than any limit plete lets a tree grow to, so only a
 /// cycle made by hand reaches it.
 const MAX_HOPS: u32 = 64;
 
@@ -452,7 +452,7 @@ const TASK_REPORT_COLUMNS: &str =
     "id, task_id, to_id, kind, body, at, needs_user, answer, answered_by";
 
 /// The reports that close an ask their task filed before: done, blocked or
-/// a question. A progress report (still waiting, say) or jeet's own status
+/// a question. A progress report (still waiting, say) or plete's own status
 /// report does not.
 const CLOSES_ASK: &str = "kind IN ('done', 'blocked', 'question')";
 
@@ -734,8 +734,8 @@ fn outranks_in(conn: &Connection, new: &Setter, old: &Setter) -> Result<bool> {
     }
 }
 
-/// What changed since a move was planned, in jeet's words.
-const MOVE_CHANGED: &str = "the tasks to move changed since jeet looked; try again";
+/// What changed since a move was planned, in plete's words.
+const MOVE_CHANGED: &str = "the tasks to move changed since plete looked; try again";
 
 /// Why `rows` cannot be written, if it cannot: invariants 1, 2, 4, 6, 8 and
 /// 10 of a move, read on `conn`. The movers are tasks under the assistant
@@ -830,7 +830,7 @@ fn move_refusal_in(conn: &Connection, rows: &MoveRows) -> Result<Option<String>>
     }
     // What the new chain of managers lets through, as they hold it now: a
     // grant narrowed meanwhile must not leave a node with more than its new
-    // parent has (C14). The assistant's list is config, fixed while jeet runs.
+    // parent has (C14). The assistant's list is config, fixed while plete runs.
     let mut through: Option<Vec<String>> = None;
     for t in chain.iter().filter(|t| t.kind != TaskKind::Assistant) {
         let held: Vec<String> = conn
@@ -964,7 +964,7 @@ impl Database {
             .optional()?)
     }
 
-    /// Set a task's own PR policy (`jeet task new --pr`).
+    /// Set a task's own PR policy (`plete task new --pr`).
     pub fn set_task_pr(&self, id: &str, pr: Option<PrMode>) -> Result<()> {
         self.conn().execute(
             "UPDATE tasks SET pr = ?2 WHERE id = ?1",
@@ -1006,7 +1006,7 @@ impl Database {
         Ok(())
     }
 
-    /// Make a task quiet, or not (`jeet task quiet`).
+    /// Make a task quiet, or not (`plete task quiet`).
     pub fn set_task_quiet(&self, id: &str, quiet: bool) -> Result<()> {
         let changed = self.conn().execute(
             "UPDATE tasks SET quiet = ?2 WHERE id = ?1",
@@ -1459,7 +1459,7 @@ impl Database {
         self.last_report_where(task_id, "1")
     }
 
-    /// The latest report jeet sent about a task on its own.
+    /// The latest report plete sent about a task on its own.
     pub fn last_status_report(&self, task_id: &str) -> Result<Option<TaskReportRecord>> {
         self.last_report_where(task_id, "kind = 'status'")
     }
@@ -2178,7 +2178,7 @@ mod tests {
 
         let mut archived = rows[0].clone();
         archived.head_oid = Some("abc".into());
-        archived.stash_ref = Some("refs/jeet/stash/t/api".into());
+        archived.stash_ref = Some("refs/plete/stash/t/api".into());
         archived.pr_number = Some(42);
         db.update_task_worktree(&archived).unwrap();
         assert_eq!(db.get_task_worktree("t", "api").unwrap(), Some(archived));
@@ -2590,7 +2590,7 @@ mod tests {
             .insert_report("c", "m", ReportKind::Question, "v1?", 1)
             .unwrap();
         assert_eq!(open_ids(&db, None), [q]);
-        // jeet's own words while it waits do not close it.
+        // plete's own words while it waits do not close it.
         db.insert_report("c", "m", ReportKind::Status, "waiting", 2)
             .unwrap();
         assert_eq!(open_ids(&db, None), [q]);

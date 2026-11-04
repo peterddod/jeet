@@ -1,14 +1,14 @@
-//! What the assistant may do, enforced by jeet rather than by its prompt.
+//! What the assistant may do, enforced by plete rather than by its prompt.
 //!
-//! The assistant's session runs with `JEET_ASSISTANT=1`. Every jeet command
+//! The assistant's session runs with `PLETE_ASSISTANT=1`. Every plete command
 //! it runs is classified here before it does anything: free (it only reads,
-//! or is jeet's own plumbing), interactive (it needs a person at a
+//! or is plete's own plumbing), interactive (it needs a person at a
 //! terminal), or one that needs a capability. A capability is used only when
 //! `[assistant] allow` in config.toml lists it; otherwise the command fails
 //! with a message the assistant can pass on, so it asks the user instead.
 //!
 //! Each mutating action it is allowed is appended to
-//! `$JEET_HOME/assistant/actions.log` (one JSON object per line) and, unless
+//! `$PLETE_HOME/assistant/actions.log` (one JSON object per line) and, unless
 //! `[assistant] notify = false`, announced with a desktop notification.
 //! Refusals are logged too, and an action that ran but did nothing is
 //! logged as skipped and not announced.
@@ -32,8 +32,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    Commands, ManagerCommands, PrCommands, ProjectCommands, ReviewCommands, SetupCommands,
-    TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    AliasCommands, Commands, ManagerCommands, PrCommands, ProjectCommands, ReviewCommands,
+    SetupCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::NotifyLevel;
 use crate::config::{self, ManagerPolicy};
@@ -46,7 +46,7 @@ use crate::worktrees::now_secs;
 
 /// Set in the assistant's session; anything but empty or `0` turns the
 /// checks on.
-pub const ASSISTANT_ENV: &str = "JEET_ASSISTANT";
+pub const ASSISTANT_ENV: &str = "PLETE_ASSISTANT";
 
 /// One thing the assistant can be allowed to do.
 pub struct Capability {
@@ -56,7 +56,7 @@ pub struct Capability {
     /// The command lines that use it, pre-approved in the assistant's
     /// harness when it is allowed.
     pub commands: &'static [&'static str],
-    /// Commands outside jeet that use it, as [`HookSetup::deny`] patterns:
+    /// Commands outside plete that use it, as [`HookSetup::deny`] patterns:
     /// pre-approved for the assistant when it is allowed, and denied to a
     /// task with a parent that does not hold it.
     ///
@@ -65,39 +65,39 @@ pub struct Capability {
 }
 
 pub const CAPABILITIES: &[Capability] = &[
-    cap("task.create", "create tasks", &["jeet task new"]),
-    cap("task.open", "start task agents", &["jeet task open"]),
+    cap("task.create", "create tasks", &["plete task new"]),
+    cap("task.open", "start task agents", &["plete task open"]),
     cap(
         "task.send",
         "message and interrupt task agents",
-        &["jeet task send", "jeet task interrupt"],
+        &["plete task send", "plete task interrupt"],
     ),
-    cap("task.archive", "archive tasks", &["jeet task archive"]),
+    cap("task.archive", "archive tasks", &["plete task archive"]),
     cap(
         "task.unarchive",
         "unarchive tasks",
-        &["jeet task unarchive"],
+        &["plete task unarchive"],
     ),
-    cap("task.delete", "delete tasks", &["jeet task delete"]),
+    cap("task.delete", "delete tasks", &["plete task delete"]),
     cap(
         "task.resync",
         "copy project files into tasks again",
-        &["jeet task resync"],
+        &["plete task resync"],
     ),
     cap(
         "worktree.add",
         "add worktrees to tasks",
-        &["jeet worktree add"],
+        &["plete worktree add"],
     ),
     cap(
         "worktree.rm",
         "remove worktrees from tasks",
-        &["jeet worktree rm"],
+        &["plete worktree rm"],
     ),
     cap(
         "review.start",
         "check pull requests out for review",
-        &["jeet review"],
+        &["plete review"],
     ),
     ext(
         "pr.comment",
@@ -109,47 +109,47 @@ pub const CAPABILITIES: &[Capability] = &[
         "submit pull request reviews",
         &["gh pr review"],
     ),
-    cap("pr.merge", "merge pull requests", &["jeet pr merge"]),
-    cap("project.read", "list projects", &["jeet projects ls"]),
-    cap("project.create", "make projects", &["jeet projects new"]),
-    cap("project.delete", "delete projects", &["jeet projects rm"]),
+    cap("pr.merge", "merge pull requests", &["plete pr merge"]),
+    cap("project.read", "list projects", &["plete projects ls"]),
+    cap("project.create", "make projects", &["plete projects new"]),
+    cap("project.delete", "delete projects", &["plete projects rm"]),
     cap(
         "repo.clone",
         "clone repositories into the store",
-        &["jeet clone"],
+        &["plete clone"],
     ),
     cap(
         "repo.import",
-        "import repositories and work into jeet",
-        &["jeet import"],
+        "import repositories and work into plete",
+        &["plete import"],
     ),
-    cap("repo.sync", "fetch the store", &["jeet sync"]),
+    cap("repo.sync", "fetch the store", &["plete sync"]),
     cap(
         "shell.install",
         "change your shell's startup files",
-        &["jeet install-shell"],
+        &["plete install-shell"],
     ),
     cap(
         "watch.install",
         "install or remove the background GitHub watcher",
-        &["jeet watch install", "jeet watch uninstall"],
+        &["plete watch install", "plete watch uninstall"],
     ),
-    cap("manager.create", "make managers", &["jeet manager new"]),
+    cap("manager.create", "make managers", &["plete manager new"]),
     cap(
         "manager.grant",
         "change what tasks under it may do and spend",
-        &["jeet manager grant", "jeet manager budget"],
+        &["plete manager grant", "plete manager budget"],
     ),
-    // Used through `--interrupt` on `jeet report` and `jeet task send
+    // Used through `--interrupt` on `plete report` and `plete task send
     // assistant`, which check it themselves; never in a default grant.
     cap("assistant.interrupt", "interrupt the assistant", &[]),
     cap(
         "manager.stop",
         "pause, resume and stop tasks under it",
         &[
-            "jeet manager pause",
-            "jeet manager resume",
-            "jeet manager stop",
+            "plete manager pause",
+            "plete manager resume",
+            "plete manager stop",
         ],
     ),
 ];
@@ -167,7 +167,7 @@ const fn cap(
     }
 }
 
-/// A capability used through commands outside jeet.
+/// A capability used through commands outside plete.
 const fn ext(
     name: &'static str,
     about: &'static str,
@@ -181,9 +181,9 @@ const fn ext(
     }
 }
 
-/// What no agent jeet gates may run, whatever it holds: rewriting a
-/// branch's history, and merging other than through `jeet pr merge` (which
-/// runs `gh` from jeet itself, not from the agent's shell). Patterns as for
+/// What no agent plete gates may run, whatever it holds: rewriting a
+/// branch's history, and merging other than through `plete pr merge` (which
+/// runs `gh` from plete itself, not from the agent's shell). Patterns as for
 /// [`HookSetup::deny`], anchored at the start of the command, so
 /// `git -C . push -f`, `sh -c '…'` and aliases get past them: a lint
 /// against mistakes, with branch protection as the real control.
@@ -294,36 +294,36 @@ pub const MAX_DEFAULT_BRANCHES: usize = 8;
 
 /// Commands that only read, pre-approved whatever is allowed.
 pub const READ_ONLY: &[&str] = &[
-    "jeet ls",
-    "jeet prs",
-    "jeet path",
-    "jeet task ls",
-    "jeet task path",
-    "jeet task prs",
-    "jeet task last",
-    "jeet worktree ls",
-    "jeet worktree path",
-    "jeet manager ls",
-    "jeet manager show",
-    "jeet notify",
+    "plete ls",
+    "plete prs",
+    "plete path",
+    "plete task ls",
+    "plete task path",
+    "plete task prs",
+    "plete task last",
+    "plete worktree ls",
+    "plete worktree path",
+    "plete manager ls",
+    "plete manager show",
+    "plete notify",
 ];
 
-/// The assistant's own files, which it keeps through jeet: pre-approved
+/// The assistant's own files, which it keeps through plete: pre-approved
 /// too, and needing no capability. Refused to every task, a manager
 /// included (M39).
-pub const OWN: &[&str] = &["jeet todo", "jeet brief"];
+pub const OWN: &[&str] = &["plete todo", "plete brief"];
 
 pub fn capability(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.name == name)
 }
 
-/// A capability on the command line (`--allow`, `manager grant`): one jeet
+/// A capability on the command line (`--allow`, `manager grant`): one plete
 /// knows, so a typo fails before anything is made.
 pub fn parse_capability(s: &str) -> Result<String, String> {
     match capability(s.trim()) {
         Some(c) => Ok(c.name.to_string()),
         None => Err(format!(
-            "{s:?} is not a capability; jeet knows {}",
+            "{s:?} is not a capability; plete knows {}",
             CAPABILITIES
                 .iter()
                 .map(|c| c.name)
@@ -333,7 +333,7 @@ pub fn parse_capability(s: &str) -> Result<String, String> {
     }
 }
 
-/// Whether this jeet says it runs for the assistant: a hint, which
+/// Whether this plete says it runs for the assistant: a hint, which
 /// [`identity`] checks.
 ///
 /// [`identity`]: crate::identity
@@ -344,7 +344,7 @@ pub fn assistant_mode() -> bool {
     })
 }
 
-/// Who runs this jeet, as far as what it may do goes.
+/// Who runs this plete, as far as what it may do goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caller {
     /// A person, or an agent of a top-level task: not gated.
@@ -359,7 +359,7 @@ pub enum Caller {
     Review(Box<ReviewRecord>),
 }
 
-/// Who the task this jeet runs under makes the caller: the assistant is
+/// Who the task this plete runs under makes the caller: the assistant is
 /// the Root, a task with a parent a Node, and anything else, or no task,
 /// the user.
 fn classify(task: Option<&TaskRecord>) -> Caller {
@@ -379,17 +379,17 @@ fn classify_identity(me: &identity::Identity) -> Caller {
     }
 }
 
-/// Who runs this jeet, by the task it runs under ([`identity::identify`]),
-/// never the working directory. A claim jeet cannot confirm, or a database
+/// Who runs this plete, by the task it runs under ([`identity::identify`]),
+/// never the working directory. A claim plete cannot confirm, or a database
 /// error, is an error, so what is gated fails closed.
 pub fn caller(app: &App) -> Result<Caller> {
     Ok(classify_identity(&identity::identify(app)?))
 }
 
-/// Whether this jeet runs at the user's own terminal, the bar for acting as
+/// Whether this plete runs at the user's own terminal, the bar for acting as
 /// the user where a top-level task's agent, also [`Caller::User`], must
 /// not: it runs under no task, says it runs for none, and runs in no pane
-/// of jeet's tmux sessions, so an agent's window with its environment
+/// of plete's tmux sessions, so an agent's window with its environment
 /// cleared does not pass. An identity error is an error, so it fails
 /// closed.
 pub fn at_terminal(app: &App) -> Result<bool> {
@@ -400,32 +400,32 @@ pub fn at_terminal(app: &App) -> Result<bool> {
             me.task.as_ref(),
             env_task.as_deref(),
             assistant_mode(),
-            || identity::runs_under_any(&crate::tmux::jeet_pane_pids()),
+            || identity::runs_under_any(&crate::tmux::plete_pane_pids()),
         ))
 }
 
-/// [`at_terminal`], given the task this jeet runs under, `$JEET_TASK_ID`,
+/// [`at_terminal`], given the task this plete runs under, `$PLETE_TASK_ID`,
 /// whether it says it runs for the assistant, and whether it runs in a pane
-/// of jeet's, which tmux is asked only when nothing else says no.
+/// of plete's, which tmux is asked only when nothing else says no.
 fn at_terminal_of(
     task: Option<&TaskRecord>,
     env_task: Option<&str>,
     assistant: bool,
-    under_jeet_pane: impl FnOnce() -> bool,
+    under_plete_pane: impl FnOnce() -> bool,
 ) -> bool {
     task.is_none()
         && env_task.is_none_or(|v| v.trim().is_empty())
         && !assistant
-        && !under_jeet_pane()
+        && !under_plete_pane()
 }
 
-/// The capabilities `[assistant] allow` lists that jeet knows: the root's
+/// The capabilities `[assistant] allow` lists that plete knows: the root's
 /// list, which every list below it is cut by.
 fn root_list(app: &App) -> Vec<&'static str> {
     known(app.config.assistant.allow.iter().map(String::as_str))
 }
 
-/// The capabilities among `names` that jeet knows, once each.
+/// The capabilities among `names` that plete knows, once each.
 fn known<'a>(names: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
     let mut list: Vec<&'static str> = Vec::new();
     for c in names.filter_map(|n| capability(n.trim())) {
@@ -548,7 +548,7 @@ pub fn check_grant(
     let mut caps: Vec<&'static str> = Vec::new();
     for name in requested {
         let Some(c) = capability(name.trim()) else {
-            bail!("{name} is not a capability jeet knows");
+            bail!("{name} is not a capability plete knows");
         };
         if !parents.contains(&c.name) {
             let whose = match parent.kind {
@@ -637,7 +637,7 @@ fn record_held_with(
 /// What running a command takes, for the assistant.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Gate {
-    /// Reads, or is jeet's own plumbing.
+    /// Reads, or is plete's own plumbing.
     Free,
     /// A screen or a shell for a person to use.
     Interactive,
@@ -656,8 +656,8 @@ fn needs(capability: &'static str, action: String) -> Gate {
     }
 }
 
-/// Classify `command` (`None`: bare `jeet`). `terminal` says whether one is
-/// attached, which decides what `jeet projects` does.
+/// Classify `command` (`None`: bare `plete`). `terminal` says whether one is
+/// attached, which decides what `plete projects` does.
 pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
     let Some(command) = command else {
         return Gate::Interactive;
@@ -682,7 +682,7 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         | Commands::Show { .. }
         // Reads only.
         | Commands::Doctor { .. }
-        // Started by jeet itself, under the command that was checked.
+        // Started by plete itself, under the command that was checked.
         | Commands::ReviewJob { .. }
         | Commands::StoreSync
         | Commands::TaskHook { .. }
@@ -697,6 +697,13 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
             command: Some(_), ..
         } => Gate::Interactive,
         Commands::InstallShell => needs("shell.install", "installed shell integration".into()),
+        // Reads only.
+        Commands::Alias {
+            command: AliasCommands::Status,
+        } => Gate::Free,
+        // Both change what is on the user's machine, outside plete's home:
+        // the user's, at a terminal.
+        Commands::Alias { .. } | Commands::MigrateHome { .. } => Gate::Interactive,
         // Lists what is staged. Applying is the user's at a terminal (the
         // command refuses any agent's session too); discarding drops what
         // the user has not seen yet.
@@ -735,11 +742,11 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
             command: Some(command),
             ..
         } => match command {
-            // As `jeet task open <review>`.
+            // As `plete task open <review>`.
             ReviewCommands::Open { review, .. } => {
                 needs("task.open", format!("opened review {review}"))
             }
-            // Screens for the user, as `jeet explore` is.
+            // Screens for the user, as `plete explore` is.
             ReviewCommands::Diff { .. } | ReviewCommands::Explore { .. } => Gate::Interactive,
         },
         Commands::Review { pr, repo, .. } => needs(
@@ -955,18 +962,18 @@ pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option
         .collect();
     if !unknown.is_empty() {
         message.push_str(&format!(
-            " (it also lists {}, which jeet does not know)",
+            " (it also lists {}, which plete does not know)",
             unknown.join(", ")
         ));
     }
     Some(message)
 }
 
-/// Check that the caller may clone `url` into the store, which `jeet
-/// worktree add` and `jeet task new --repo` do for a repository the store
-/// lacks: the same `repo.clone` that `jeet clone` needs, so no command
+/// Check that the caller may clone `url` into the store, which `plete
+/// worktree add` and `plete task new --repo` do for a repository the store
+/// lacks: the same `repo.clone` that `plete clone` needs, so no command
 /// reaches the store without it. Returns the clone to [`Authorized::record`]
-/// once it has run, logged (and for the assistant, announced) as `jeet
+/// once it has run, logged (and for the assistant, announced) as `plete
 /// clone` would be.
 pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
     let action = format!("cloned {url}");
@@ -979,10 +986,10 @@ pub fn may_clone(app: &App, url: &str) -> Result<Option<Authorized>> {
                 &app.config.assistant.allow,
                 &config::config_path(&app.home),
             );
-            // Logged as a refused `jeet clone` is ([`authorize_as`]).
+            // Logged as a refused `plete clone` is ([`authorize_as`]).
             if message.is_some() {
                 if let Err(e) = append(&log, "repo.clone", &action, Outcome::Denied, None) {
-                    eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+                    eprintln!("plete: warning: could not write {}: {e:#}", log.display());
                 }
             }
             let authorized = Authorized {
@@ -1060,13 +1067,13 @@ pub fn may_interrupt(app: &App, caller: &Caller, action: &str) -> Result<Option<
         Some(_) => Outcome::Denied,
     };
     if let Err(e) = append(&log, CAP, action, outcome, None) {
-        eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+        eprintln!("plete: warning: could not write {}: {e:#}", log.display());
     }
     Ok(refusal)
 }
 
 /// The command prefixes the assistant's harness pre-approves: the read-only
-/// jeet commands, its own, and the commands, jeet's and others, of each
+/// plete commands, its own, and the commands, plete's and others, of each
 /// allowed capability.
 pub fn allowed_commands(allow: &[String]) -> Vec<String> {
     let allowed = CAPABILITIES
@@ -1118,7 +1125,7 @@ fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
     branches
 }
 
-/// What `[permissions] guards` denies every agent jeet launches:
+/// What `[permissions] guards` denies every agent plete launches:
 /// [`ALWAYS_DENY`], and pushing to any of `branches`.
 pub fn denied_commands(branches: &[String]) -> Vec<String> {
     let mut deny: Vec<String> = ALWAYS_DENY.iter().map(|d| d.to_string()).collect();
@@ -1138,7 +1145,7 @@ pub fn denied_commands(branches: &[String]) -> Vec<String> {
     deny
 }
 
-/// The commands outside jeet of every capability not in `held`.
+/// The commands outside plete of every capability not in `held`.
 fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str> + 'a {
     CAPABILITIES
         .iter()
@@ -1148,7 +1155,7 @@ fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str
 
 /// What `task`'s agent is denied: with `[permissions] guards`,
 /// [`denied_commands`], and for a manager [`MANAGER_DENY`] too. A task with a
-/// parent is also denied the commands outside jeet of every capability it
+/// parent is also denied the commands outside plete of every capability it
 /// does not hold, guards or not: the harness's half of [`effective`].
 pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let guards = app.config.permissions.guards();
@@ -1174,7 +1181,7 @@ pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// worker is denied that holds nothing (force-pushes, merges, pushes to a
 /// default branch, `gh pr comment` and `gh pr review`), no push of any
 /// kind, and the API forms of commenting and reviewing. Otherwise the
-/// commands outside jeet of what its requester's chain does not hold
+/// commands outside plete of what its requester's chain does not hold
 /// (`[assistant] allow` with no requester), and [`denied_commands`] under
 /// `[permissions] guards`. A lint, as [`ALWAYS_DENY`] is.
 pub fn review_deny(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
@@ -1222,7 +1229,7 @@ fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
     deny
 }
 
-/// Add the commands outside jeet of every capability not in `held`.
+/// Add the commands outside plete of every capability not in `held`.
 fn add_withheld(deny: &mut Vec<String>, held: &[&str]) {
     for command in withheld_externals(held) {
         if !deny.iter().any(|d| d == command) {
@@ -1250,7 +1257,7 @@ pub struct Authorized {
     capability: &'static str,
     action: String,
     log: PathBuf,
-    /// The jeet home to queue its announcement in, when it is announced.
+    /// The plete home to queue its announcement in, when it is announced.
     notify: Option<PathBuf>,
 }
 
@@ -1264,7 +1271,7 @@ pub struct Authorized {
 pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     // Only what is gated, scoped, or only the root may do, opens the
-    // index: plumbing like hooks and `jeet report` never does.
+    // index: plumbing like hooks and `plete report` never does.
     if gate(command, terminal) == Gate::Free
         && node_only(command).is_none()
         && matches!(node_scope(command), Some(Scope::NoTarget | Scope::Listed))
@@ -1275,7 +1282,7 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
     let me = identity::identify(&app)?;
     if let Some(Commands::ReviewJob { review }) = command {
         check_review_job(&app.db, review, std::process::id())?;
-        // The runner `jeet review` started, as the task it runs for.
+        // The runner `plete review` started, as the task it runs for.
         if me.self_job {
             return Ok(None);
         }
@@ -1285,7 +1292,7 @@ pub fn authorize(command: Option<&Commands>) -> Result<Option<Authorized>> {
 
 /// Check that `caller` may run `command`: the assistant only what
 /// `[assistant] allow` lets it, the agent of a task with a parent only what
-/// [`node`] does, and anyone else anything. The `jeet manager` verbs act
+/// [`node`] does, and anyone else anything. The `plete manager` verbs act
 /// only on a task under the assistant, for everyone.
 pub fn authorize_as(
     app: &App,
@@ -1305,14 +1312,14 @@ pub fn authorize_as(
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
-            "only the user stops every task under the assistant; `jeet manager stop <task>` \
+            "only the user stops every task under the assistant; `plete manager stop <task>` \
              stops one"
         );
     }
     if let Some(Scope::Verb(verb, target)) = node_scope(command) {
         if verb.reach() == Reach::Tree {
             let target = resolve(app, caller, &target)
-                .map_err(|e| anyhow!("`jeet {}`: {e:#}", verb.name()))?;
+                .map_err(|e| anyhow!("`plete {}`: {e:#}", verb.name()))?;
             in_scope(app, caller, verb, &target)?;
         }
     }
@@ -1335,7 +1342,7 @@ pub fn authorize_as(
         let about = self::capability(capability).map_or("", |c| c.about);
         let tried = action.unwrap_or_else(|| about.to_string());
         if let Err(e) = append(&log, capability, &tried, Outcome::Denied, None) {
-            eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+            eprintln!("plete: warning: could not write {}: {e:#}", log.display());
         }
         bail!(message);
     }
@@ -1349,9 +1356,9 @@ pub fn authorize_as(
 
 /// What a review's agent may run under `[review] read_only`, the same for
 /// every review: the read-only
-/// commands `jeet ls`, `jeet path` and `jeet prs`, and `jeet report` when a
+/// commands `plete ls`, `plete path` and `plete prs`, and `plete report` when a
 /// task asked for the review (the report itself finds the task). Nothing
-/// that changes anything, in jeet or outside it ([`review_deny`] is the
+/// that changes anything, in plete or outside it ([`review_deny`] is the
 /// harness's half of this).
 fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Option<Authorized>> {
     match command {
@@ -1362,10 +1369,10 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
             review.label()
         ),
         _ => bail!(
-            "review {} may not run that: a review's agent only reads, with `jeet ls`,              `jeet path` and `jeet prs`{}",
+            "review {} may not run that: a review's agent only reads, with `plete ls`,              `plete path` and `plete prs`{}",
             review.label(),
             match review.requested_by {
-                Some(_) => ", and reports with `jeet report`",
+                Some(_) => ", and reports with `plete report`",
                 None => "",
             }
         ),
@@ -1374,7 +1381,7 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
 
 /// A review's agent, when `[review] read_only` is off: gated like the task
 /// that asked for it, else like the assistant. What only the root may
-/// ([`node_only`]) stays refused to it, and `jeet report` needs a requester.
+/// ([`node_only`]) stays refused to it, and `plete report` needs a requester.
 fn review_as_requester(
     app: &App,
     review: &ReviewRecord,
@@ -1383,7 +1390,7 @@ fn review_as_requester(
 ) -> Result<Option<Authorized>> {
     if let Some(about) = node_only(command) {
         bail!(
-            "review {} may not {about}: a review's agent reports with `jeet report`",
+            "review {} may not {about}: a review's agent reports with `plete report`",
             review.label()
         );
     }
@@ -1414,14 +1421,14 @@ fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     match command? {
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         Commands::Brief { .. } => Some("read what was kept for the assistant"),
-        // Only `jeet review` starts one, and a Node may not review.
+        // Only `plete review` starts one, and a Node may not review.
         Commands::ReviewJob { .. } => Some("run review jobs"),
         _ if stops_all(command) => Some("stop every task under the assistant"),
         _ => None,
     }
 }
 
-/// Whether `command` is `jeet manager stop --all`, the user's alone (M11).
+/// Whether `command` is `plete manager stop --all`, the user's alone (M11).
 fn stops_all(command: Option<&Commands>) -> bool {
     matches!(
         command,
@@ -1432,7 +1439,7 @@ fn stops_all(command: Option<&Commands>) -> bool {
 }
 
 /// How to ask instead, ending every refusal a Node gets.
-const ASK: &str = "ask with `jeet report blocked|question \"…\"`";
+const ASK: &str = "ask with `plete report blocked|question \"…\"`";
 
 /// Check that `node`, a task with a parent, may run `command`: only on
 /// tasks in its reach ([`node_scope`], reads included), and only what its
@@ -1449,13 +1456,13 @@ fn node(
     if let Some(about) = node_only(command) {
         bail!(
             "task {slug} may not {about}: a task with a parent tells its parent with \
-             `jeet report progress|done|blocked|question \"…\"`"
+             `plete report progress|done|blocked|question \"…\"`"
         );
     }
     let caller = Caller::Node(node.clone());
     match node_scope(command) {
         None => bail!(
-            "task {slug} may not run that: jeet has no rule for what a task with a parent \
+            "task {slug} may not run that: plete has no rule for what a task with a parent \
              may run it on; {ASK}"
         ),
         Some(Scope::NoTarget | Scope::Listed) => {}
@@ -1549,7 +1556,7 @@ pub fn resolve(app: &App, caller: &Caller, target: &Target) -> Result<TaskRecord
         .with_context(|| format!("among task {} and the tasks below it", node.slug))
 }
 
-/// [`resolve`], for the caller running this jeet: how a command finds the
+/// [`resolve`], for the caller running this plete: how a command finds the
 /// task it was checked against.
 pub fn resolve_target(app: &App, target: &Target) -> Result<(Caller, TaskRecord)> {
     let caller = caller(app)?;
@@ -1607,7 +1614,7 @@ pub enum Reach {
 }
 
 impl Verb {
-    /// The command, after `jeet `.
+    /// The command, after `plete `.
     pub fn name(self) -> &'static str {
         match self {
             Verb::WorktreeAdd => "worktree add",
@@ -1668,7 +1675,7 @@ enum Scope {
 }
 
 /// The table of what a task with a parent may run each command on
-/// (`None`, bare `jeet`: the tasks screen). A command it leaves out is
+/// (`None`, bare `plete`: the tasks screen). A command it leaves out is
 /// refused to every task with a parent, reads included, so a new one fails
 /// closed until it says.
 fn node_scope(command: Option<&Commands>) -> Option<Scope> {
@@ -1794,21 +1801,21 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
 }
 
 /// Check that `caller` may run `verb` on `target`: a task with a parent
-/// only on the tasks in the verb's [`Reach`], and anyone a `jeet manager`
+/// only on the tasks in the verb's [`Reach`], and anyone a `plete manager`
 /// verb only on a task under the assistant.
 pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> Result<()> {
     if verb.reach() == Reach::Tree
         && (target.parent_id.is_none() || target.kind == TaskKind::Assistant)
     {
         bail!(
-            "`jeet {}` is for a task under the assistant, and task {} has no parent",
+            "`plete {}` is for a task under the assistant, and task {} has no parent",
             verb.name(),
             target.slug
         );
     }
     if let Caller::Review(review) = caller {
         bail!(
-            "review {} may not run `jeet {}`: a review's agent only reads",
+            "review {} may not run `plete {}`: a review's agent only reads",
             review.label(),
             verb.name()
         );
@@ -1823,13 +1830,13 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
         Reach::OwnOrBelow => own || below,
         Reach::Below | Reach::Tree => below,
         Reach::Parent if own && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet {}`: a task with a parent cannot make tasks \
+            "task {} may not run `plete {}`: a task with a parent cannot make tasks \
              unless it is a manager; {ASK}",
             node.slug,
             verb.name()
         ),
         Reach::Parent if below && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `jeet {}` under task {}: only a manager has tasks \
+            "task {} may not run `plete {}` under task {}: only a manager has tasks \
              under it; {ASK}",
             node.slug,
             verb.name(),
@@ -1860,7 +1867,7 @@ fn out_of_reach(slug: &str, verb: Verb, what: &str) -> String {
         _ => "",
     };
     format!(
-        "task {slug} may not run `jeet {}` on {what}: it may run it only on {reach}{sideways}; \
+        "task {slug} may not run `plete {}` on {what}: it may run it only on {reach}{sideways}; \
          {ASK}",
         verb.name()
     )
@@ -1926,7 +1933,7 @@ impl Authorized {
             error.as_deref(),
         ) {
             eprintln!(
-                "jeet: warning: could not write {}: {e:#}",
+                "plete: warning: could not write {}: {e:#}",
                 self.log.display()
             );
         }
@@ -1946,12 +1953,12 @@ impl Authorized {
 }
 
 /// A review job runs the command its review's row records, so only a job
-/// `jeet review` recorded runs, once, and as the runner it launched
-/// (`runner`, the pid `jeet review` recorded, or none yet): not a command an
+/// `plete review` recorded runs, once, and as the runner it launched
+/// (`runner`, the pid `plete review` recorded, or none yet): not a command an
 /// agent has named itself.
 pub fn check_review_job(db: &crate::db::Database, review_id: &str, runner: u32) -> Result<()> {
     let Some(review) = db.get_review(review_id)? else {
-        bail!("review jobs run only for a review jeet knows; {review_id} is none");
+        bail!("review jobs run only for a review plete knows; {review_id} is none");
     };
     let Some(job) = review.job else {
         bail!("review {} has no job to run", review.slug);
@@ -1965,21 +1972,21 @@ pub fn check_review_job(db: &crate::db::Database, review_id: &str, runner: u32) 
     Ok(())
 }
 
-/// Log something jeet did to keep an agent's wake channel working, as its own
+/// Log something plete did to keep an agent's wake channel working, as its own
 /// words in the assistant's log.
 pub fn log_wake(home: &Path, action: &str, outcome: Outcome) -> Result<()> {
     append(&actions_log(home), "wake", action, outcome, None)
 }
 
-/// Log that `who`, the agent jeet identified, claimed to be another
-/// ([`identity::identify`]). Only jeet's own words: what it claimed, and
+/// Log that `who`, the agent plete identified, claimed to be another
+/// ([`identity::identify`]). Only plete's own words: what it claimed, and
 /// what it ran, are the agent's, and the assistant reads this log as its
 /// own record.
 pub fn log_mismatch(home: &Path, who: &str) {
     let log = actions_log(home);
     let action = format!("{who} claimed to be another task or the assistant");
     if let Err(e) = append(&log, "identity", &action, Outcome::Denied, None) {
-        eprintln!("jeet: warning: could not write {}: {e:#}", log.display());
+        eprintln!("plete: warning: could not write {}: {e:#}", log.display());
     }
 }
 
@@ -2016,7 +2023,7 @@ pub struct ActionRecord {
 }
 
 /// Append one record to the log, as a single line in a single write so two
-/// jeets writing at once do not interleave.
+/// pletes writing at once do not interleave.
 fn append(
     log: &Path,
     capability: &str,
@@ -2054,7 +2061,7 @@ mod tests {
 
     fn gate_of(args: &[&str]) -> Gate {
         let cli =
-            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+            crate::cli::Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied()))
                 .unwrap();
         gate(cli.command.as_ref(), false)
     }
@@ -2290,7 +2297,7 @@ mod tests {
             assert_eq!(gate_of(args), Gate::Interactive, "{args:?}");
         }
         assert_eq!(gate(None, false), Gate::Interactive);
-        let cli = crate::cli::Cli::try_parse_from(["jeet", "projects"]).unwrap();
+        let cli = crate::cli::Cli::try_parse_from(["plete", "projects"]).unwrap();
         assert_eq!(gate(cli.command.as_ref(), true), Gate::Interactive);
     }
 
@@ -2308,8 +2315,8 @@ mod tests {
         ] {
             assert_eq!(gate_of(args), Gate::Free, "{args:?}");
         }
-        // jeet's own kind is not the task's to send.
-        assert!(crate::cli::Cli::try_parse_from(["jeet", "report", "status", "x"]).is_err());
+        // plete's own kind is not the task's to send.
+        assert!(crate::cli::Cli::try_parse_from(["plete", "report", "status", "x"]).is_err());
     }
 
     fn task(parent_id: Option<&str>) -> TaskRecord {
@@ -2344,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_terminal_under_no_task_and_no_jeet_pane_is_the_users() {
+    fn only_a_terminal_under_no_task_and_no_plete_pane_is_the_users() {
         let no = || false;
         assert!(at_terminal_of(None, None, false, no));
         assert!(at_terminal_of(None, Some(" "), false, no));
@@ -2426,7 +2433,7 @@ mod tests {
 
     fn run_as(app: &App, caller: &Caller, args: &[&str], terminal: bool) -> Result<()> {
         let cli =
-            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+            crate::cli::Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied()))
                 .unwrap_or_else(|e| panic!("{args:?}: {e}"));
         authorize_as(app, caller, cli.command.as_ref(), terminal).map(|_| ())
     }
@@ -2513,7 +2520,7 @@ mod tests {
         assert_eq!(cut_by(&app, &m3, "task.create").unwrap(), None);
         assert_eq!(cut_by(&app, &m2, "task.send").unwrap(), None);
 
-        // A name jeet does not know is dropped.
+        // A name plete does not know is dropped.
         app.db
             .set_grants(&m1.id, &["bogus", "task.create"])
             .unwrap();
@@ -2762,7 +2769,7 @@ mod tests {
         ]
     }
 
-    /// `jeet manager stop --all` is the user's alone (M11), whatever the
+    /// `plete manager stop --all` is the user's alone (M11), whatever the
     /// others hold.
     #[test]
     fn only_the_user_stops_everything() {
@@ -2777,7 +2784,7 @@ mod tests {
             e.contains("may not stop every task under the assistant"),
             "{e}"
         );
-        assert!(e.contains("jeet report"), "{e}");
+        assert!(e.contains("plete report"), "{e}");
         // One task, the assistant may stop.
         run_as(&app, &Caller::Root, &["manager", "stop", "m"], false).unwrap();
     }
@@ -2848,8 +2855,8 @@ mod tests {
                         true => result.unwrap_or_else(|e| panic!("{caller} {args:?}: {e:#}")),
                         false => {
                             let e = result.expect_err(&format!("{caller} {args:?}")).to_string();
-                            assert!(e.contains(&format!("jeet {}", verb.name())), "{e}");
-                            assert!(e.contains("jeet report"), "{e}");
+                            assert!(e.contains(&format!("plete {}", verb.name())), "{e}");
+                            assert!(e.contains("plete report"), "{e}");
                         }
                     }
                 }
@@ -2867,8 +2874,8 @@ mod tests {
             let e = node_of(&app, &row("m"), args, false)
                 .unwrap_err()
                 .to_string();
-            assert!(e.contains(&format!("jeet {} {}", args[0], args[1])), "{e}");
-            assert!(e.contains("jeet report"), "{e}");
+            assert!(e.contains(&format!("plete {} {}", args[0], args[1])), "{e}");
+            assert!(e.contains("plete report"), "{e}");
         }
         // Sideways messages say why.
         let e = node_of(&app, &row("wk"), &["task", "send", "fix-b", "hi"], false).unwrap_err();
@@ -2881,7 +2888,7 @@ mod tests {
         );
         node_of(&app, &row("m"), &["task", "new", "x"], false).unwrap();
 
-        // The user and the assistant reach any task, but the `jeet manager`
+        // The user and the assistant reach any task, but the `plete manager`
         // verbs (but `new`) only a task under the assistant.
         for caller in [Caller::User, Caller::Root] {
             for target in targets {
@@ -2897,7 +2904,7 @@ mod tests {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
                             let e = result.expect_err(&format!("{caller:?} {args:?}"));
-                            assert!(e.to_string().contains(&format!("jeet {}", verb.name())));
+                            assert!(e.to_string().contains(&format!("plete {}", verb.name())));
                         }
                     }
                 }
@@ -2912,7 +2919,7 @@ mod tests {
             let e = run_as(&app, &Caller::Root, args, false).unwrap_err();
             assert!(
                 e.to_string()
-                    .contains(&format!("jeet {} {}", args[0], args[1])),
+                    .contains(&format!("plete {} {}", args[0], args[1])),
                 "{e}"
             );
         }
@@ -3005,7 +3012,7 @@ mod tests {
     }
 
     fn cli_of(args: &[&str]) -> Option<Commands> {
-        crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+        crate::cli::Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied()))
             .unwrap()
             .command
     }
@@ -3067,7 +3074,7 @@ mod tests {
         ];
         for args in refused {
             let message = node_of(&app, &w, args, false).unwrap_err().to_string();
-            assert!(message.contains("jeet report"), "{args:?}: {message}");
+            assert!(message.contains("plete report"), "{args:?}: {message}");
         }
         for args in [
             &["task", "send", "sib", "x"][..],
@@ -3197,6 +3204,11 @@ mod tests {
             (&["watch", "uninstall"], false),
             (&["watch", "status"], true),
             (&["doctor", "wake"], false),
+            (&["doctor", "rename"], false),
+            (&["alias", "install"], false),
+            (&["alias", "status"], false),
+            (&["alias", "uninstall"], false),
+            (&["migrate-home"], false),
             (&["setup"], false),
             (&["setup", "status"], true),
             (&["setup", "apply"], false),
@@ -3204,7 +3216,7 @@ mod tests {
             (&["notify", "t"], true),
             (&["notify", "install-link"], false),
             (&["notify", "uninstall-link"], false),
-            (&["open", "jeet://task/x"], false),
+            (&["open", "plete://task/x"], false),
             (&["notify", "serve"], false),
             (&["notify", "install"], false),
             (&["notify", "uninstall"], false),
@@ -3231,7 +3243,7 @@ mod tests {
                 samples.iter().any(|(args, _)| args
                     .starts_with(&path.iter().map(String::as_str).collect::<Vec<_>>())
                     && args.len() > path.len() - 1),
-                "no sample of `jeet {}`: add it, and decide its scope",
+                "no sample of `plete {}`: add it, and decide its scope",
                 path.join(" ")
             );
         }
@@ -3260,7 +3272,7 @@ mod tests {
         // A typo is pointed out rather than silently denying.
         let message = refusal("task.create", &["task.creat".into()], path).unwrap();
         assert!(
-            message.contains("task.creat, which jeet does not know"),
+            message.contains("task.creat, which plete does not know"),
             "{message}"
         );
     }
@@ -3268,21 +3280,21 @@ mod tests {
     #[test]
     fn the_harness_pre_approves_exactly_the_allowed_commands() {
         let rules = allowed_commands(&["task.create".into(), "task.send".into(), "bogus".into()]);
-        assert!(rules.contains(&"jeet task new".to_string()));
-        assert!(rules.contains(&"jeet task send".to_string()));
-        assert!(rules.contains(&"jeet task interrupt".to_string()));
-        assert!(rules.contains(&"jeet task ls".to_string()));
-        assert!(rules.contains(&"jeet notify".to_string()));
+        assert!(rules.contains(&"plete task new".to_string()));
+        assert!(rules.contains(&"plete task send".to_string()));
+        assert!(rules.contains(&"plete task interrupt".to_string()));
+        assert!(rules.contains(&"plete task ls".to_string()));
+        assert!(rules.contains(&"plete notify".to_string()));
         assert!(!rules
             .iter()
             .any(|r| r.contains("delete") || r.contains("archive")));
-        assert!(!rules.contains(&"jeet worktree".to_string()));
-        assert!(rules.contains(&"jeet todo".to_string()));
-        assert!(!rules.iter().any(|r| r.starts_with("jeet pr ")));
+        assert!(!rules.contains(&"plete worktree".to_string()));
+        assert!(rules.contains(&"plete todo".to_string()));
+        assert!(!rules.iter().any(|r| r.starts_with("plete pr ")));
         assert_eq!(allowed_commands(&[]).len(), READ_ONLY.len() + OWN.len());
         // Merging is pre-approved only once allowed.
         let rules = allowed_commands(&["pr.merge".into()]);
-        assert!(rules.contains(&"jeet pr merge".to_string()));
+        assert!(rules.contains(&"plete pr merge".to_string()));
     }
 
     #[test]
@@ -3292,8 +3304,8 @@ mod tests {
                 let mut args: Vec<&str> = command.split(' ').skip(1).collect();
                 // Enough arguments for clap to accept it.
                 match c.name {
-                    "task.send" if *command == "jeet task send" => args.extend(["x", "hi"]),
-                    "manager.grant" if *command == "jeet manager grant" => {
+                    "task.send" if *command == "plete task send" => args.extend(["x", "hi"]),
+                    "manager.grant" if *command == "plete manager grant" => {
                         args.extend(["x", "task.send"])
                     }
                     "manager.grant" => args.extend(["x", "+1h"]),
@@ -3353,10 +3365,10 @@ mod tests {
     }
 
     #[test]
-    fn externals_are_not_jeet_commands() {
+    fn externals_are_not_plete_commands() {
         for c in CAPABILITIES {
             for external in c.external {
-                assert!(!external.starts_with("jeet "), "{external}");
+                assert!(!external.starts_with("plete "), "{external}");
             }
         }
     }
@@ -3478,7 +3490,7 @@ mod tests {
         }
     }
 
-    /// A capability with commands jeet never sees run is lifted from the
+    /// A capability with commands plete never sees run is lifted from the
     /// deny list only while the task's grant holds it cut by every list
     /// above it, not by its own grant alone.
     #[test]
@@ -3556,7 +3568,7 @@ mod tests {
     }
 
     /// A model of how Claude Code (2.1) matches the `Bash(…)` deny rules
-    /// jeet writes for `pattern` (see `deny_rules` in the Claude harness):
+    /// plete writes for `pattern` (see `deny_rules` in the Claude harness):
     /// `*` matches any run of characters, and a trailing ` *` also matches
     /// nothing, but only when it is the rule's one `*`. It is not Claude
     /// itself; docs/harnesses.md lists what to check by hand.
@@ -3661,7 +3673,7 @@ mod tests {
             "gh pr create",
             "gh pr view 3",
             "gh pr checks 3",
-            "jeet pr merge 3",
+            "plete pr merge 3",
             "git log main",
             "git commit -m 'gh pr merge later'",
             "rg 'gh pr merge'",
@@ -3793,7 +3805,7 @@ mod tests {
                 );
             }
         }
-        // `jeet report` only with a task to report to.
+        // `plete report` only with a task to report to.
         run_as(&app, &asked, &["report", "done", "ok"], false).unwrap();
         let e = run_as(&app, &user_asked, &["report", "done", "ok"], false).unwrap_err();
         assert!(e.to_string().contains("no one to report to"), "{e}");
@@ -3815,7 +3827,7 @@ mod tests {
         assert!(e.to_string().contains("[assistant] allow"), "{e}");
         app.config.assistant.allow = vec!["worktree.add".into()];
         run_as(&app, &none, &new, false).unwrap();
-        // A top-level task's agent is ungated in jeet, so is its review's.
+        // A top-level task's agent is ungated in plete, so is its review's.
         run_as(&app, &top, &new, false).unwrap();
         // A node's: only when its own grant holds it too.
         run_as(&app, &node, &new, false).unwrap_err();
@@ -3893,10 +3905,10 @@ mod tests {
         assert!(deny.iter().any(|d| d == "git push * main"), "{deny:?}");
     }
 
-    /// A review job runs only a command `jeet review` recorded on a review,
+    /// A review job runs only a command `plete review` recorded on a review,
     /// once, as the runner it launched.
     #[test]
-    fn a_review_job_runs_only_what_jeet_recorded_for_its_runner() {
+    fn a_review_job_runs_only_what_plete_recorded_for_its_runner() {
         use crate::db::reviews::{Job, ReviewRecord};
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("index.db")).unwrap();
@@ -4000,7 +4012,7 @@ mod tests {
             }
         ));
         let cli = |args: &[&str]| {
-            crate::cli::Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied()))
+            crate::cli::Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied()))
                 .unwrap()
                 .command
         };

@@ -1,12 +1,12 @@
 //! tmux: where task agents run.
 //!
-//! Every task's agent lives in a detached tmux session named `jeet-<slug>`,
+//! Every task's agent lives in a detached tmux session named `plete-<slug>`,
 //! so it keeps working after the terminal that started it has gone, and can
 //! be attached to again from anywhere. The assistant, which may have several
 //! sessions going at once, has a window for each in one tmux session; see
 //! [`new_window`].
 //!
-//! `$JEET_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
+//! `$PLETE_TMUX` names the tmux binary, for a tmux outside `$PATH` and for
 //! tests, which point it at a stub so they never reach a real server.
 
 use std::io::{Read, Write};
@@ -18,14 +18,14 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{bail, Context, Result};
 
 #[cfg_attr(test, allow(dead_code))]
-pub const BINARY_ENV: &str = "JEET_TMUX";
+pub const BINARY_ENV: &str = "PLETE_TMUX";
 
 /// What a tmux session's name starts with, under the new name and the old.
 pub const NEW_SESSION_PREFIX: &str = "plete-";
 pub const LEGACY_SESSION_PREFIX: &str = "jeet-";
 
-/// Every tmux session jeet makes is named with this in front.
-pub const SESSION_PREFIX: &str = LEGACY_SESSION_PREFIX; // flipped to plete in the rename PR
+/// Every tmux session plete makes is named with this in front.
+pub const SESSION_PREFIX: &str = NEW_SESSION_PREFIX;
 
 /// The name of the session of whatever has `slug`: one already running under
 /// either prefix (the new one first), else the name a new session gets.
@@ -50,19 +50,19 @@ pub fn is_session_of(name: &str, slug: &str) -> bool {
         .any(|prefix| name.strip_prefix(prefix) == Some(slug))
 }
 
-/// Whether tmux session `name` is one of jeet's, under either prefix.
+/// Whether tmux session `name` is one of plete's, under either prefix.
 pub fn is_ours(name: &str) -> bool {
     name.starts_with(NEW_SESSION_PREFIX) || name.starts_with(LEGACY_SESSION_PREFIX)
 }
 
-/// Set by jeet's launchd job and systemd unit. A tmux server keeps the
+/// Set by plete's launchd job and systemd unit. A tmux server keeps the
 /// environment of whoever started it, and hands it to every pane it makes
 /// from then on, the user's own included; a job runs with almost none of the
 /// user's. So a process with this set never starts a server, only sessions
 /// on one already running.
-pub const BACKGROUND_ENV: &str = "JEET_BACKGROUND";
+pub const BACKGROUND_ENV: &str = "PLETE_BACKGROUND";
 
-pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not found; install it \
+pub const INSTALL_HINT: &str = "plete runs task agents in tmux, which was not found; install it \
      (`brew install tmux` on macOS, `sudo apt install tmux` on Debian and Ubuntu)";
 
 #[cfg(not(test))]
@@ -75,15 +75,15 @@ fn binary() -> String {
 
 /// Unit tests run in this process, where an environment variable set for
 /// one would reach every test at once: they never reach a tmux server, the
-/// user's or any other, whatever `$JEET_TMUX` says. To them tmux is not
+/// user's or any other, whatever `$PLETE_TMUX` says. To them tmux is not
 /// installed.
 #[cfg(test)]
 fn binary() -> String {
-    "/nonexistent/jeet-unit-test-tmux".to_string()
+    "/nonexistent/plete-unit-test-tmux".to_string()
 }
 
-/// How long one tmux command gets before jeet gives up on it and kills it.
-/// A server that has stopped answering must not hang jeet with it: a review
+/// How long one tmux command gets before plete gives up on it and kills it.
+/// A server that has stopped answering must not hang plete with it: a review
 /// job's runner, detached and waiting on tmux to tell the assistant the
 /// review ended, would wait forever.
 const CALL_LIMIT: Duration = Duration::from_secs(20);
@@ -159,10 +159,10 @@ fn finish(mut child: Child, limit: Duration) -> std::io::Result<Output> {
     })
 }
 
-/// A tmux command whose output jeet reads. `-u`, as tmux replaces the tabs
-/// that jeet's formats split fields on, and anything else outside printable
+/// A tmux command whose output plete reads. `-u`, as tmux replaces the tabs
+/// that plete's formats split fields on, and anything else outside printable
 /// ASCII, with `_` for a client whose locale is not UTF-8: a launchd job's
-/// or systemd unit's, which sets none. Run so, `jeet watch` could start a
+/// or systemd unit's, which sets none. Run so, `plete watch` could start a
 /// window and then not read which pane it started, so never anchored it.
 fn command() -> Command {
     let mut cmd = Command::new(binary());
@@ -180,7 +180,7 @@ fn quiet() -> Command {
 }
 
 /// An exact-match session target. A bare name is matched as a prefix, so
-/// `jeet-api` would otherwise find `jeet-api-2` once `jeet-api` is gone.
+/// `plete-api` would otherwise find `plete-api-2` once `plete-api` is gone.
 pub fn target(name: &str) -> String {
     format!("={name}")
 }
@@ -344,10 +344,10 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
 
 /// The session option that holds the tmux id (`%3`) of the pane
 /// [`new_session`] started the agent in.
-const AGENT_PANE_OPTION: &str = "@jeet-agent-pane"; // flipped to plete in the rename PR
+const AGENT_PANE_OPTION: &str = "@plete-agent-pane";
 /// The name sessions made under the other name carry it by, read when the
 /// option above is not set.
-const AGENT_PANE_FALLBACK: &str = "@plete-agent-pane"; // flipped to jeet in the rename PR
+const AGENT_PANE_FALLBACK: &str = "@jeet-agent-pane";
 
 /// A tmux format that expands to option `first` when it is set, else to
 /// `fallback`: sessions and windows made under the other name carry it.
@@ -370,7 +370,7 @@ fn record_agent_pane(name: &str, pane: &str) {
 /// [`new_session`] noted. The session's active pane may be one the user
 /// opened there, splitting the agent's window or in a window of its own,
 /// for a shell or an editor, which must not get the agent's keys. A
-/// session started before jeet noted the id falls back to the active pane
+/// session started before plete noted the id falls back to the active pane
 /// of its first window, the one the agent was started in.
 fn agent_pane(name: &str) -> String {
     pane_or_first_window(name, &recorded_agent_pane(name))
@@ -439,7 +439,7 @@ fn paste(pane: &str, text: &str) -> Result<()> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let buffer = format!("jeet-{}-{nanos}", std::process::id());
+    let buffer = format!("plete-{}-{nanos}", std::process::id());
     let mut load = command()
         .args(["load-buffer", "-b", &buffer, "-"])
         .stdin(Stdio::piped())
@@ -480,17 +480,17 @@ fn paste(pane: &str, text: &str) -> Result<()> {
 }
 
 /// The window option a window made by [`new_window`] is keyed by.
-const KEY_OPTION: &str = "@jeet_key"; // flipped to plete in the rename PR
+const KEY_OPTION: &str = "@plete_key";
 /// The name windows made under the other name carry it by, read when the
 /// option above is not set.
-const KEY_FALLBACK: &str = "@plete_key"; // flipped to jeet in the rename PR
+const KEY_FALLBACK: &str = "@jeet_key";
 
 /// The window option holding the key a window made by [`new_window`] was
 /// first given, which [`set_window_key`] never changes: what its program was
 /// launched as, whatever it has gone on to since.
-const LAUNCH_OPTION: &str = "@jeet_launch"; // flipped to plete in the rename PR
+const LAUNCH_OPTION: &str = "@plete_launch";
 /// As [`KEY_FALLBACK`].
-const LAUNCH_FALLBACK: &str = "@plete_launch"; // flipped to jeet in the rename PR
+const LAUNCH_FALLBACK: &str = "@jeet_launch";
 
 /// One window of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,7 +612,7 @@ pub fn new_window(
         remove_ours(&mut cmd);
         cmd.stdin(Stdio::null());
         let output = cmd.bounded_output().context("run tmux")?;
-        // Another jeet made the session between the look and the start:
+        // Another plete made the session between the look and the start:
         // a window in it does as well.
         if !output.status.success() && creating && attempts == 1 && has_session(name) {
             creating = false;
@@ -935,7 +935,7 @@ pub fn most_recent(clients: &[Client]) -> Option<&Client> {
     clients.iter().max_by_key(|c| c.activity)
 }
 
-/// Point `client` at `target`: a session (`=jeet-api`), or a pane (`%3`),
+/// Point `client` at `target`: a session (`=plete-api`), or a pane (`%3`),
 /// which also changes its session and window.
 pub fn switch_client(client: &str, target: &str) -> Result<()> {
     let status = quiet()
@@ -977,17 +977,17 @@ fn send_keys(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The way back to jeet that leaves the agent running: one key, no prefix.
+/// The way back to plete that leaves the agent running: one key, no prefix.
 /// Quitting Claude ends it; detaching is what keeps it going, and `C-b d`
 /// is two steps that Claude Code's own `C-b` gets in the way of.
 pub const DETACH_KEY: &str = "C-q";
 
 /// What the status line says about [`DETACH_KEY`].
-const DETACH_HINT: &str = " Ctrl-Q → back to jeet (keeps running) ";
+const DETACH_HINT: &str = " Ctrl-Q → back to plete (keeps running) ";
 
 /// Make [`DETACH_KEY`] detach from session `name`, and say so in its status
 /// line. Key bindings belong to the whole server, so the key only detaches
-/// from jeet's own sessions and is passed through everywhere else.
+/// from plete's own sessions and is passed through everywhere else.
 /// Cosmetic, so failures are ignored.
 fn set_detach_hint(name: &str) {
     let _ = quiet()
@@ -1015,13 +1015,13 @@ fn set_detach_hint(name: &str) {
 /// Code asks, and takes Shift+Enter for a new line. tmux has it off.
 const EXTENDED_KEYS: &str = "extended-keys";
 
-/// Set on the server once jeet has turned [`EXTENDED_KEYS`] on there, so a
+/// Set on the server once plete has turned [`EXTENDED_KEYS`] on there, so a
 /// user who turns it off again is not overruled.
-const EXTENDED_KEYS_MARK: &str = "@jeet-extended-keys"; // flipped to plete in the rename PR
+const EXTENDED_KEYS_MARK: &str = "@plete-extended-keys";
 /// The mark of a server set up under the other name, which counts too.
-const EXTENDED_KEYS_MARK_FALLBACK: &str = "@plete-extended-keys"; // flipped to jeet in the rename PR
+const EXTENDED_KEYS_MARK_FALLBACK: &str = "@jeet-extended-keys";
 
-/// A tmux command to run first, in the same call, wherever jeet starts a
+/// A tmux command to run first, in the same call, wherever plete starts a
 /// session or window: it turns [`EXTENDED_KEYS`] on, and tells tmux the
 /// outer terminal can send such keys too (which takes effect for a client
 /// on attaching). It has to come first: tmux drops a program's request for
@@ -1309,7 +1309,7 @@ pub fn current_session() -> Option<String> {
 }
 
 /// What the window this process runs in is keyed by ([`new_window`]), if
-/// it runs in one jeet made.
+/// it runs in one plete made.
 pub fn current_window_key() -> Option<String> {
     std::env::var_os("TMUX").filter(|v| !v.is_empty())?;
     let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
@@ -1436,10 +1436,10 @@ fn parse_live_pane(line: &str) -> Option<LivePane> {
     })
 }
 
-/// The processes tmux started in the live panes of jeet's sessions (those
+/// The processes tmux started in the live panes of plete's sessions (those
 /// named [`SESSION_PREFIX`]…): every task's and the assistant's, and the
 /// windows the user opened in them.
-pub fn jeet_pane_pids() -> Vec<u32> {
+pub fn plete_pane_pids() -> Vec<u32> {
     let Ok(output) = command()
         .args([
             "list-panes",
@@ -1456,10 +1456,10 @@ pub fn jeet_pane_pids() -> Vec<u32> {
     if !output.status.success() {
         return Vec::new();
     }
-    parse_jeet_pane_pids(&String::from_utf8_lossy(&output.stdout))
+    parse_plete_pane_pids(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
+fn parse_plete_pane_pids(listing: &str) -> Vec<u32> {
     let ours: String = listing
         .lines()
         .filter_map(|line| line.split_once('\t'))
@@ -1480,7 +1480,7 @@ mod tests {
         // None running: the name a new one gets.
         assert_eq!(pick_session(&sessions(&["other"]), "api"), write);
         // One from before the rename.
-        assert_eq!(pick_session(&sessions(&["jeet-api"]), "api"), "jeet-api");
+        assert_eq!(pick_session(&sessions(&["plete-api"]), "api"), "plete-api");
         assert_eq!(pick_session(&sessions(&["plete-api"]), "api"), "plete-api");
         // Both: the new one.
         assert_eq!(
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn a_session_name_is_matched_under_either_prefix() {
-        assert!(is_session_of("jeet-api", "api"));
+        assert!(is_session_of("plete-api", "api"));
         assert!(is_session_of("plete-api", "api"));
         assert!(!is_session_of("plete-api-2", "api"));
         assert!(!is_session_of("api", "api"));
@@ -1512,18 +1512,18 @@ mod tests {
 
     #[test]
     fn client_activity_is_that_of_the_clients_showing_the_window() {
-        let listing = "1700000100\tjeet-a\t@1\n1700000200\tjeet-a\t@2\n\
+        let listing = "1700000100\tplete-a\t@1\n1700000200\tplete-a\t@2\n\
                        1700000300\tother\t@1\nnot a client\n";
         assert_eq!(
-            parse_client_activity(listing, "jeet-a", Some("@2")),
+            parse_client_activity(listing, "plete-a", Some("@2")),
             [1_700_000_200]
         );
         assert_eq!(
-            parse_client_activity(listing, "jeet-a", None),
+            parse_client_activity(listing, "plete-a", None),
             [1_700_000_100, 1_700_000_200]
         );
-        assert!(parse_client_activity(listing, "jeet-a", Some("@9")).is_empty());
-        assert!(parse_client_activity("", "jeet-a", None).is_empty());
+        assert!(parse_client_activity(listing, "plete-a", Some("@9")).is_empty());
+        assert!(parse_client_activity("", "plete-a", None).is_empty());
     }
 
     /// A tmux that hangs is killed once its time is up, rather than
@@ -1570,9 +1570,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_live_panes_of_jeets_sessions_are_its() {
-        let listing = "jeet-api\t0 10\njeet-api\t1 11\nwork\t0 12\njeet-assistant\t0 13\n";
-        assert_eq!(parse_jeet_pane_pids(listing), vec![10, 13]);
+    fn only_the_live_panes_of_pletes_sessions_are_its() {
+        let listing = "plete-api\t0 10\nplete-api\t1 11\nwork\t0 12\nplete-assistant\t0 13\n";
+        assert_eq!(parse_plete_pane_pids(listing), vec![10, 13]);
     }
 
     #[test]
@@ -1599,26 +1599,26 @@ mod tests {
 
     #[test]
     fn clients_are_read_with_their_activity() {
-        let listing = "/dev/ttys001\t/dev/ttys001\tjeet-a\t100\n\
+        let listing = "/dev/ttys001\t/dev/ttys001\tplete-a\t100\n\
                        /dev/ttys002\t/dev/ttys002\twork\t300\n\
                        broken\n\
                        x\ty\tz\tsoon\n";
         let clients = parse_clients(listing);
         assert_eq!(clients.len(), 2);
-        assert_eq!(clients[0].session, "jeet-a");
+        assert_eq!(clients[0].session, "plete-a");
         assert_eq!(most_recent(&clients).unwrap().name, "/dev/ttys002");
         assert_eq!(most_recent(&[]), None);
     }
 
     #[test]
     fn targets_match_exactly() {
-        assert_eq!(target("jeet-api"), "=jeet-api");
+        assert_eq!(target("plete-api"), "=plete-api");
         // The agent's pane, by its id, not whichever pane is active.
-        assert_eq!(pane_or_first_window("jeet-api", "%12\n"), "%12");
+        assert_eq!(pane_or_first_window("plete-api", "%12\n"), "%12");
         // No id noted: the agent's window, not whichever window is active.
-        assert_eq!(pane_or_first_window("jeet-api", ""), "=jeet-api:^");
-        assert_eq!(pane_or_first_window("jeet-api", "%\n"), "=jeet-api:^");
-        assert_eq!(pane_or_first_window("jeet-api", "C-b"), "=jeet-api:^");
+        assert_eq!(pane_or_first_window("plete-api", ""), "=plete-api:^");
+        assert_eq!(pane_or_first_window("plete-api", "%\n"), "=plete-api:^");
+        assert_eq!(pane_or_first_window("plete-api", "C-b"), "=plete-api:^");
     }
 
     #[test]
@@ -1679,17 +1679,17 @@ mod tests {
     #[test]
     fn the_current_window_is_one_of_the_session() {
         assert_eq!(
-            parse_current_window("jeet-assistant\t@4\tabc\n", "jeet-assistant"),
+            parse_current_window("plete-assistant\t@4\tabc\n", "plete-assistant"),
             Some(("@4".into(), Some("abc".into())))
         );
         assert_eq!(
-            parse_current_window("jeet-assistant\t@4\t\n", "jeet-assistant"),
+            parse_current_window("plete-assistant\t@4\t\n", "plete-assistant"),
             Some(("@4".into(), None))
         );
         // Another session's window, or nothing sensible.
-        assert!(parse_current_window("jeet-api\t@4\tabc\n", "jeet-assistant").is_none());
-        assert!(parse_current_window("jeet-assistant\t%4\tabc", "jeet-assistant").is_none());
-        assert!(parse_current_window("", "jeet-assistant").is_none());
+        assert!(parse_current_window("plete-api\t@4\tabc\n", "plete-assistant").is_none());
+        assert!(parse_current_window("plete-assistant\t%4\tabc", "plete-assistant").is_none());
+        assert!(parse_current_window("", "plete-assistant").is_none());
     }
 
     #[test]
@@ -1711,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn a_process_tree_takes_in_every_descendant_but_zombies_and_jeet() {
+    fn a_process_tree_takes_in_every_descendant_but_zombies_and_plete() {
         let procs = parse_processes(
             "    1     0 Ss\n   10     1 S\n   11    10 S+\n   12    11 R\n   \
              13    10 Z\n   14     1 S\n   15    12 S\n   99    11 S\n",

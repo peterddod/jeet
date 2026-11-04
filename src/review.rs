@@ -3,7 +3,7 @@
 //! and one session (columns of its row), and its own directory under
 //! `tasks/`, where its agent runs and keeps its status.
 //!
-//! `jeet review` finds or makes the PR's review ([`review_for`]), checks the
+//! `plete review` finds or makes the PR's review ([`review_for`]), checks the
 //! PR out in it, and asks its agent to review it ([`start_agent`]): the
 //! agent runs in the review's tmux pane like a task's, with `[review]
 //! prompt` as its first prompt. A review asked for again types the prompt
@@ -14,13 +14,13 @@
 //!
 //! The rest is the legacy, deprecated `[review] command`: a background job.
 //! A job is the `job_*` columns of the review's row, plus a log under
-//! `$JEET_HOME/reviews`, keyed by repository and PR number. `jeet review`
-//! records the job and launches the hidden `jeet review-job <review id>`
+//! `$PLETE_HOME/reviews`, keyed by repository and PR number. `plete review`
+//! records the job and launches the hidden `plete review-job <review id>`
 //! runner detached from the terminal; the runner runs the configured
 //! command with its output going to the log, records how it ended, and
 //! raises a desktop notification. Anything that wants to know how a review
-//! is going — the explorer, a second `jeet review` — reads the row back.
-//! Older jeets kept a job as a JSON file there instead; [`adopt_jobs`]
+//! is going — the explorer, a second `plete review` — reads the row back.
+//! Older pletes kept a job as a JSON file there instead; [`adopt_jobs`]
 //! makes reviews of the files they left.
 
 use std::cell::RefCell;
@@ -194,7 +194,7 @@ pub fn running_refusal(review: &ReviewRecord, job: &Job) -> String {
 /// latest is recorded as the review's one session if it has none yet. Only
 /// once the job has finished: until then it is still writing. Best effort:
 /// what fails is a warning. Nothing for a harness that keeps no sessions
-/// jeet knows of.
+/// plete knows of.
 pub fn adopt_sessions(app: &App, review: &ReviewRecord) -> Vec<String> {
     let mut warnings = Vec::new();
     let Ok(spec) = AgentSpec::from_config(&app.config) else {
@@ -280,12 +280,12 @@ pub fn expand(template: &str, pr: &PullRequest) -> String {
 
 fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
     vec![
-        ("JEET_PR".into(), pr.number.to_string()),
-        ("JEET_PR_URL".into(), pr.url.clone()),
-        ("JEET_PR_TITLE".into(), pr.title.clone()),
-        ("JEET_PR_BRANCH".into(), pr.head_ref_name.clone()),
-        ("JEET_PR_BASE".into(), pr.base_ref_name.clone()),
-        ("JEET_REVIEW_LOG".into(), log.to_string_lossy().to_string()),
+        ("PLETE_PR".into(), pr.number.to_string()),
+        ("PLETE_PR_URL".into(), pr.url.clone()),
+        ("PLETE_PR_TITLE".into(), pr.title.clone()),
+        ("PLETE_PR_BRANCH".into(), pr.head_ref_name.clone()),
+        ("PLETE_PR_BASE".into(), pr.base_ref_name.clone()),
+        ("PLETE_REVIEW_LOG".into(), log.to_string_lossy().to_string()),
     ]
 }
 
@@ -314,31 +314,31 @@ pub fn session_name(review: &ReviewRecord) -> String {
     runtime::session_name_for(&review.slug)
 }
 
-/// What names the review's agent in messages: `review jeet#55`.
+/// What names the review's agent in messages: `review plete#55`.
 pub fn subject(review: &ReviewRecord) -> String {
     format!("review {}", review.label())
 }
 
-/// `review-<repo>-<n>`: what `jeet review` calls the review of a PR.
+/// `review-<repo>-<n>`: what `plete review` calls the review of a PR.
 pub fn review_name(repo: &RepoRecord, number: u64) -> String {
     format!("review-{}-{number}", tasks::repo_short_name(repo))
 }
 
-/// The jeet skill in a review's directory: what its agent may do.
+/// The plete skill in a review's directory: what its agent may do.
 const SKILL: &str = r#"---
-name: jeet
-description: How to work in this jeet review directory.
+name: plete
+description: How to work in this plete review directory.
 ---
 
-# jeet review
+# plete review
 
 You are reviewing one pull request. Its checkout is the worktree in this
 directory; the review is yours to read and judge, not to change.
 
-- `jeet ls`, `jeet path` and `jeet prs` read; nothing else of jeet's runs.
+- `plete ls`, `plete path` and `plete prs` read; nothing else of plete's runs.
 - You may not push, merge, approve, or comment on the pull request: say what
   you found in this session, and the user decides.
-- When the assistant asked for this review, `jeet report done|progress|blocked|question "…"`
+- When the assistant asked for this review, `plete report done|progress|blocked|question "…"`
   tells it how the review went. When you were asked by the user, there is
   no one to report to.
 "#;
@@ -362,7 +362,7 @@ pub struct ReviewCheckout {
 /// PR that cannot be checked out is undone — it holds nothing yet.
 ///
 /// A review made here is `requested_by` the task that asked, if any; one
-/// found keeps who asked (`jeet review` says who asks now, with
+/// found keeps who asked (`plete review` says who asks now, with
 /// [`start_agent`]).
 pub fn review_for(
     app: &App,
@@ -401,7 +401,7 @@ pub fn review_for(
             Ok(_) => e,
             Err(undo) => e.context(format!(
                 "and the half-made review could not be removed ({undo:#}); \
-                 `jeet task delete {} --force` cleans it up",
+                 `plete task delete {} --force` cleans it up",
                 review.slug
             )),
         }),
@@ -410,7 +410,7 @@ pub fn review_for(
 }
 
 /// Make the review of `pr`: its directory, marker and skill, then its row.
-/// Another `jeet review` of the same PR may have made it meanwhile: that
+/// Another `plete review` of the same PR may have made it meanwhile: that
 /// one is then the review, and this one's directory goes. True when this
 /// made it.
 fn make_review(
@@ -451,19 +451,19 @@ fn make_review(
 }
 
 fn install_skill(dir: &Path) -> Result<()> {
-    let rel = Path::new(".claude").join("skills").join("jeet");
+    let rel = Path::new(".claude").join("skills").join("plete");
     if crate::manager::has_legacy_counterpart(dir, &rel.to_string_lossy()) {
         return Ok(());
     }
     let skill = dir.join(rel);
     std::fs::create_dir_all(&skill).with_context(|| format!("create {}", skill.display()))?;
-    std::fs::write(skill.join("SKILL.md"), SKILL).context("write the jeet skill")
+    std::fs::write(skill.join("SKILL.md"), SKILL).context("write the plete skill")
 }
 
 /// Somewhere in a task to look at `pr`, for the explorer's PR list: the task
 /// worktree that has the PR's branch already — the author's own, say —
 /// brought up to date with the PR when clean, else the PR's review, as
-/// `jeet review` makes it but without starting a review. Never a checkout
+/// `plete review` makes it but without starting a review. Never a checkout
 /// outside a task or review.
 pub fn browse_pr(app: &App, repo: &RepoRecord, pr: &PullRequest) -> Result<BrowsedPr> {
     let trunk = PathBuf::from(&repo.trunk_path);
@@ -528,7 +528,7 @@ fn check_out(
     }
     // `gh pr checkout` fetches into the trunk: keep a store sync out of its way.
     let _fetch = store::lock_repo(&app.home, &repo.id)?;
-    // Another `jeet review` of this PR may have made the worktree while this
+    // Another `plete review` of this PR may have made the worktree while this
     // one waited for the lock: it is the review's one, so use it.
     if let Some(fresh) = app.db.get_review(&review.id)? {
         *review = fresh;
@@ -541,7 +541,7 @@ fn check_out(
             let warnings = worktrees::refresh_pr_worktree(&path, pr, row.branch.as_deref());
             return Ok((path, warnings));
         }
-        // Gone from under jeet: forget it, and have git forget it too, or
+        // Gone from under plete: forget it, and have git forget it too, or
         // its branch would still count as checked out there. An archive that
         // stopped part-way leaves what is needed to bring it back, and that
         // stays.
@@ -551,7 +551,7 @@ fn check_out(
         } else {
             bail!(
                 "the review's checkout was archived and not brought back; \
-                 `jeet task unarchive {}` first",
+                 `plete task unarchive {}` first",
                 review.slug
             );
         }
@@ -641,7 +641,7 @@ fn charge_before_end(app: &App, review: &ReviewRecord, warnings: &mut Vec<String
 /// forget their processes: the agent works in the worktree about to be
 /// removed, and what it wrote after the snapshot would be lost. Refused
 /// from inside the agent's session or under a job, which ending would end
-/// this jeet with. Returns how many jobs were still running.
+/// this plete with. Returns how many jobs were still running.
 fn end_agent(
     app: &App,
     review: &ReviewRecord,
@@ -657,10 +657,10 @@ fn end_agent(
         + stop_jobs_in(app, &dir).context("end the review's job")?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Job)?;
-    // An adopted job, started by an older jeet, has no runner jeet knows.
+    // An adopted job, started by an older plete, has no runner plete knows.
     if let Some(job) = running_job(app, review) {
         warnings.push(format!(
-            "its review job (pid {}) keeps running; jeet did not start it, so it is not stopped",
+            "its review job (pid {}) keeps running; plete did not start it, so it is not stopped",
             job.pid.unwrap_or(0)
         ));
     }
@@ -670,7 +670,7 @@ fn end_agent(
     Ok(jobs)
 }
 
-/// End `review`'s agent and jobs for `jeet manager stop --all`, and leave
+/// End `review`'s agent and jobs for `plete manager stop --all`, and leave
 /// the review as it is: not archived, and started again the next time it is
 /// asked for or opened. Says what came of it.
 pub fn stop(app: &App, review: &ReviewRecord) -> Result<String> {
@@ -694,7 +694,7 @@ pub fn stop(app: &App, review: &ReviewRecord) -> Result<String> {
 }
 
 /// Archive `review`: end its agent, free the disk its worktree takes while
-/// keeping what is needed to bring it back as it was, as `jeet task archive`
+/// keeping what is needed to bring it back as it was, as `plete task archive`
 /// does a task's. The review is marked archived first, so a failure
 /// part-way leaves it archived with its worktree still there, and running
 /// archive again finishes the job. Files git ignores are not kept; the
@@ -755,7 +755,7 @@ pub fn losses(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
 }
 
 /// Delete `review` and everything it owns: its agent, its worktree, the
-/// branch it made, its `refs/jeet` refs, its directory and its row. The
+/// branch it made, its `refs/plete` refs, its directory and its row. The
 /// caller has already confirmed what [`losses`] lists. The row goes last,
 /// so a failure part-way leaves a review that can be deleted again.
 pub fn delete(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
@@ -778,14 +778,14 @@ pub fn delete(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// What `review`'s agent has pre-approved in the harness: the read-only
-/// commands, and `jeet report` when a task asked for the review. It is not
-/// the gate: what jeet lets it run is `permissions::authorize_as`.
+/// commands, and `plete report` when a task asked for the review. It is not
+/// the gate: what plete lets it run is `permissions::authorize_as`.
 fn allowed(review: &ReviewRecord) -> Vec<String> {
-    let mut allow: Vec<String> = ["jeet ls", "jeet prs", "jeet path"]
+    let mut allow: Vec<String> = ["plete ls", "plete prs", "plete path"]
         .map(str::to_string)
         .to_vec();
     if review.requested_by.is_some() {
-        allow.push("jeet report".to_string());
+        allow.push("plete report".to_string());
     }
     allow
 }
@@ -859,7 +859,7 @@ impl messages::Agent for ReviewAgent<'_> {
         // Before it is typed: a pause that finds it idle in between waits
         // for the turn this starts, which no hook has reported yet.
         if let Err(e) = status::mark_typed(&dir(self.app, self.review)) {
-            eprintln!("jeet: warning: could not note the message typed in: {e:#}");
+            eprintln!("plete: warning: could not note the message typed in: {e:#}");
         }
         tmux::send_text(&session_name(self.review), text)
     }
@@ -925,7 +925,7 @@ impl messages::Agent for ReviewAgent<'_> {
             Some(kept) => kept.borrow_mut().extend(running.warnings),
             None => {
                 for warning in &running.warnings {
-                    eprintln!("jeet: {warning}");
+                    eprintln!("plete: {warning}");
                 }
             }
         }
@@ -1014,7 +1014,7 @@ pub fn ensure_running_admitted(
 /// Start `review`'s agent, admitted under `guard`, resuming `session` when
 /// given, with what waits for it in its locked `inbox` as its first prompt,
 /// as much of it as fits, or with none when nothing does, or when its
-/// harness takes no first prompt from jeet.
+/// harness takes no first prompt from plete.
 pub fn start_with_inbox(
     app: &App,
     review: &ReviewRecord,
@@ -1086,7 +1086,7 @@ fn start_tmux(
     // Only a harness with sessions has hooks to install.
     let hooks = match spec.supports_sessions() {
         true => {
-            let exe = std::env::current_exe().context("locate the jeet binary")?;
+            let exe = crate::paths::plete_exe()?;
             Some(review_hooks(app, review, spec.harness, exe)?)
         }
         false => None,
@@ -1135,7 +1135,7 @@ fn start_tmux(
     Ok(running)
 }
 
-/// jeet's hooks for a review's agent run by `harness`: what it is let run
+/// plete's hooks for a review's agent run by `harness`: what it is let run
 /// ([`allowed`]), what it is denied ([`crate::permissions::review_deny`]),
 /// the rules of `[permissions.review]`, and no wake channel, which watches
 /// a task's inbox.
@@ -1171,7 +1171,7 @@ pub fn shown_activity(app: &App, review: &ReviewRecord, tmux_ok: bool) -> Activi
     with_job(activity(app, review, tmux_ok), Some(&app.db), &review.id)
 }
 
-/// When anything last happened in the review: jeet touching it, a hook
+/// When anything last happened in the review: plete touching it, a hook
 /// reporting, or a harness recording a session.
 pub fn last_activity(app: &App, review: &ReviewRecord) -> i64 {
     runtime::last_activity_at(&dir(app, review), review.last_activity)
@@ -1190,7 +1190,7 @@ pub fn deliver(app: &App, review: &ReviewRecord, text: &str, may_start: bool) ->
 // ---------------------------------------------------------------------------
 
 /// `[review] prompt` with `{pr}`, `{url}` and `{worktree}` filled in: all
-/// GitHub's or jeet's own. The PR's branch and title are whoever opened
+/// GitHub's or plete's own. The PR's branch and title are whoever opened
 /// it's, so never pasted into the agent's prompt; it reads them with `gh`.
 pub fn expand_prompt(template: &str, pr: &PullRequest, worktree: &Path) -> String {
     expand(template, pr).replace("{worktree}", &worktree.to_string_lossy())
@@ -1297,10 +1297,10 @@ pub fn start_agent(
         .db
         .set_review_asked(&review.id, &pr.head_ref_oid, now_secs())
     {
-        eprintln!("jeet: warning: could not record the review asked for: {e:#}");
+        eprintln!("plete: warning: could not record the review asked for: {e:#}");
     }
     let session = session_name(review);
-    let watch = format!("`jeet task open {}` to watch it", review.slug);
+    let watch = format!("`plete task open {}` to watch it", review.slug);
     Ok(match delivered {
         Delivered::Started => {
             format!(
@@ -1366,7 +1366,7 @@ fn give_budget(app: &App, review: &ReviewRecord) -> Result<()> {
 }
 
 /// Start the review command for `pr` in `worktree`, detached from this
-/// terminal so it outlives both jeet and the shell it was started from.
+/// terminal so it outlives both plete and the shell it was started from.
 ///
 /// `as_task` is the review's id when a task asked for it: the command then
 /// runs as the review's agent, which reports to that task, not as whoever
@@ -1415,7 +1415,7 @@ pub fn start(
     // papered over with a stale copy. So launching records only the runner,
     // before the go-ahead — and that launching failed, which would otherwise
     // leave a job that reads as running forever, refusing every later
-    // `jeet review`, `--rerun` included.
+    // `plete review`, `--rerun` included.
     if let Err(e) = launch(app, &log, worktree, runner_for) {
         job.finished_at = Some(now_secs());
         job.exit_code = Some(127);
@@ -1430,7 +1430,7 @@ pub fn start(
 /// archiving or deleting the review finds it to end.
 fn launch(app: &App, log: &Path, worktree: &Path, runner_for: &str) -> Result<()> {
     let out = File::create(log).with_context(|| format!("create {}", log.display()))?;
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     // `nohup` so closing the terminal does not take the review with it — the
     // ignored SIGHUP survives into everything the command runs — and a process
     // group of its own so a ctrl-c meant for the explorer does not either.
@@ -1484,7 +1484,7 @@ fn hand_over(
     {
         Err(e) if users => {
             eprintln!(
-                "jeet: warning: {e:#}; archiving or deleting the review will not end this job"
+                "plete: warning: {e:#}; archiving or deleting the review will not end this job"
             );
             Ok(())
         }
@@ -1510,7 +1510,7 @@ fn hand_over(
     Ok(())
 }
 
-/// The runners jeet recorded for review `review_id`'s jobs.
+/// The runners plete recorded for review `review_id`'s jobs.
 fn task_jobs(db: &Database, review_id: &str) -> Result<Vec<Anchor>> {
     db.task_anchors(review_id, AnchorKind::Job)
 }
@@ -1538,22 +1538,22 @@ fn jobs_in(app: &App, dir: &Path) -> Result<Vec<Anchor>> {
     Ok(runners)
 }
 
-/// Fail when this jeet runs under one of the review jobs [`stop_jobs`] or
+/// Fail when this plete runs under one of the review jobs [`stop_jobs`] or
 /// [`stop_jobs_in`] would end for review `review_id`, in `dir`: ending the
-/// job to `verb` the review would end this jeet with it, part-way through.
+/// job to `verb` the review would end this plete with it, part-way through.
 pub fn refuse_inside_job(app: &App, review_id: &str, dir: &Path, verb: &str) -> Result<()> {
     let mut runners = task_jobs(&app.db, review_id)?;
     runners.extend(jobs_in(app, dir)?);
     if runners.iter().any(identity::runs_under) {
         bail!(
-            "this jeet runs under a review job in the review, which {verb} would end, and this \
-             jeet with it; {verb} the review once the job is done, or from outside it"
+            "this plete runs under a review job in the review, which {verb} would end, and this \
+             plete with it; {verb} the review once the job is done, or from outside it"
         );
     }
     Ok(())
 }
 
-/// End the review jobs running for review `task_id`: each runner jeet
+/// End the review jobs running for review `task_id`: each runner plete
 /// recorded for it, while it is still that process, with its process group
 /// ([`launch`] gives it one), so the command it runs goes too. Returns
 /// once they have exited, with how many were still running.
@@ -1602,10 +1602,10 @@ const GO: &[u8] = b"g";
 /// Wait for [`launch`]'s go-ahead, before the runner asks who it is: until
 /// it has one, it is not yet recorded as its task's. Anything else on
 /// stdin, a terminal or nothing at all, means it was not started by
-/// `jeet review`.
+/// `plete review`.
 pub fn await_go() -> Result<()> {
     let mut stdin = std::io::stdin();
-    let refused = "review-job is started only by `jeet review`";
+    let refused = "review-job is started only by `plete review`";
     if stdin.is_terminal() {
         bail!(refused);
     }
@@ -1617,9 +1617,9 @@ pub fn await_go() -> Result<()> {
 }
 
 /// The runner for review `id`'s job, refused before it ran the command,
-/// or never given the go-ahead (its `jeet review` died first): record that
+/// or never given the go-ahead (its `plete review` died first): record that
 /// it ended, or the job reads as running forever, refusing
-/// every later `jeet review`. Only a job jeet recorded, not yet ended and
+/// every later `plete review`. Only a job plete recorded, not yet ended and
 /// no other runner's.
 pub fn refused(id: &str) {
     if let Ok(app) = App::open() {
@@ -1642,7 +1642,7 @@ const REFUSED: i32 = 126;
 /// time: it stopped without finishing.
 const LOST: i32 = 127;
 
-/// `jeet review-job <review id>`: run a review's job's command and record
+/// `plete review-job <review id>`: run a review's job's command and record
 /// how it ended.
 ///
 /// Its stdout and stderr are already the job's log.
@@ -1656,7 +1656,7 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
     let Some((slug, job)) = app.db.get_review(id)?.and_then(|r| Some((r.slug, r.job?))) else {
         bail!("review {id} has no job");
     };
-    // Our own pid, which is the one `jeet review` launched: `nohup` execs us.
+    // Our own pid, which is the one `plete review` launched: `nohup` execs us.
     if !app
         .db
         .set_review_job_runner(id, me, identity::start_of(me))?
@@ -1678,7 +1678,7 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
     let code = match cmd.stdin(Stdio::null()).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("jeet: could not run the review command: {e}");
+            eprintln!("plete: could not run the review command: {e}");
             127
         }
     };
@@ -1689,7 +1689,7 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
     // task's Node, the runner says so for it, unless it reported done.
     if let Some((_, task)) = job.env.iter().find(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
         if let Err(e) = report_end(app, task, code, job.started_at) {
-            eprintln!("jeet: could not report the review's end: {e:#}");
+            eprintln!("plete: could not report the review's end: {e:#}");
         }
     }
 
@@ -1701,7 +1701,7 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
         let url = job
             .env
             .iter()
-            .find(|(key, _)| key == "JEET_PR_URL")
+            .find(|(key, _)| key == "PLETE_PR_URL")
             .map(|(_, url)| url.as_str());
         crate::notify::event(
             app,
@@ -1712,7 +1712,7 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
                 task: Some(slug),
                 // Each run of the review is told once.
                 reference: Some(format!("{id}@{}", job.started_at)),
-                title: "jeet".into(),
+                title: "plete".into(),
                 subtitle: Some(job.title.clone()),
                 body: message,
                 link: url.map(str::to_string),
@@ -1745,7 +1745,7 @@ fn report_end(app: &App, id: &str, code: i32, since: i64) -> Result<()> {
 
 /// Whether a PR in GitHub's `state` (as [`PullRequest::state_label`] has
 /// it) has no more review to do: merged, or closed unmerged. A closed PR
-/// may be reopened; `jeet review` then brings its archived review back.
+/// may be reopened; `plete review` then brings its archived review back.
 pub fn pr_done(state: &str) -> bool {
     matches!(state, "merged" | "closed")
 }
@@ -1755,7 +1755,7 @@ pub fn pr_done(state: &str) -> bool {
 pub enum Retired {
     /// Archived, with what archiving warned of.
     Archived(Vec<String>),
-    /// Left for now: its agent is mid-turn, or jeet cannot tell it is not.
+    /// Left for now: its agent is mid-turn, or plete cannot tell it is not.
     /// A later look tries again.
     Busy(String),
     /// Left until the user archives it by hand, and why.
@@ -1766,7 +1766,7 @@ pub enum Retired {
 
 /// Whether `activity` leaves a review free to archive: its agent idle,
 /// gone or never started. One running, starting, asking the user, or with
-/// no hooks to say (`Live`) is mid-turn as far as jeet can tell.
+/// no hooks to say (`Live`) is mid-turn as far as plete can tell.
 pub fn idle(activity: &Activity) -> bool {
     matches!(
         activity,
@@ -1777,7 +1777,7 @@ pub fn idle(activity: &Activity) -> bool {
 /// Whether an ignored `path` (as `git status --ignored` lists it, a
 /// directory with a trailing `/`) is a build cache or tool clutter that a
 /// build makes again: what an unattended archive may let go with its
-/// worktree, as `jeet task archive --force` would. Anything else — a
+/// worktree, as `plete task archive --force` would. Anything else — a
 /// `.env`, local config — keeps the review for the user to archive.
 pub fn rebuildable(path: &str) -> bool {
     const CACHES: &[&str] = &[
@@ -1805,7 +1805,7 @@ pub fn rebuildable(path: &str) -> bool {
     CACHES.contains(&name) || name.ends_with(".pyc")
 }
 
-/// Archive `review`, whose PR is done, the way `jeet task archive` does a
+/// Archive `review`, whose PR is done, the way `plete task archive` does a
 /// task: its agent ended, its worktree removed, its uncommitted work kept in
 /// the trunk to come back on unarchive. Not while its agent is mid-turn
 /// ([`idle`]), and not when the worktree has ignored files that are not
@@ -1851,7 +1851,7 @@ pub fn retire(app: &App, review: &ReviewRecord, closed_at: Option<i64>) -> Resul
 
 /// Retire every active review whose PR GitHub says is done: one line for
 /// each review archived or kept back, and for each PR that could not be
-/// asked about. For `jeet watch`, which runs unattended.
+/// asked about. For `plete watch`, which runs unattended.
 pub fn sweep(app: &App) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     for review in app.db.list_reviews(Some(TaskState::Active))? {
@@ -1913,10 +1913,10 @@ pub fn sweep(app: &App) -> Result<Vec<String>> {
 /// work to do.
 const PENDING: &str = "reviews_v8_pending";
 
-/// Under `$JEET_HOME/logs`: what [`migrate_leftovers`] did, one line each.
+/// Under `$PLETE_HOME/logs`: what [`migrate_leftovers`] did, one line each.
 const MIGRATE_LOG: &str = "migrate-v8.log";
 
-/// The lock `name` under `$JEET_HOME/locks`, or None while another command
+/// The lock `name` under `$PLETE_HOME/locks`, or None while another command
 /// holds it: what it guards is being done already, and is left to it.
 fn lock_or_skip(app: &App, name: &str) -> Result<Option<std::fs::File>> {
     let locks = app.home.join("locks");
@@ -1937,15 +1937,15 @@ fn lock_or_skip(app: &App, name: &str) -> Result<Option<std::fs::File>> {
     }
 }
 
-/// What the move of reviews out of `tasks` (schema v8) left for jeet to do
+/// What the move of reviews out of `tasks` (schema v8) left for plete to do
 /// on disk, once, at the first command after the upgrade. Best effort, and
 /// idempotent: what it cannot do now it does at the next command.
 ///
 /// - What a review task kept in files under its directory — what its agent
 ///   was asked, when it was brought back — goes on the review's row.
-/// - Each duplicate review task's worktree is archived the way `jeet task
+/// - Each duplicate review task's worktree is archived the way `plete task
 ///   archive` archives one (uncommitted work kept in the trunk under
-///   `refs/jeet`, the ref logged), unless it has ignored files that are not
+///   `refs/plete`, the ref logged), unless it has ignored files that are not
 ///   [`rebuildable`], when it is left where it is. Nothing is ever deleted
 ///   but the worktree an archive removes: not the duplicate's directory,
 ///   not a ref.
@@ -1954,7 +1954,7 @@ fn lock_or_skip(app: &App, name: &str) -> Result<Option<std::fs::File>> {
 /// is a line of the log, and a summary goes to stderr once.
 pub fn migrate_leftovers(app: &App) {
     if let Err(e) = migrate(app) {
-        eprintln!("jeet: warning: could not finish moving reviews out of the tasks: {e:#}");
+        eprintln!("plete: warning: could not finish moving reviews out of the tasks: {e:#}");
     }
 }
 
@@ -2026,7 +2026,7 @@ fn migrate_held(app: &App) -> Result<()> {
             left += 1;
             continue;
         }
-        // Ending its session would end this jeet.
+        // Ending its session would end this plete.
         if tmux::current_session().is_some_and(|s| s == session) {
             say(format!(
                 "waiting: {what}: this runs inside its tmux session"
@@ -2103,7 +2103,7 @@ fn migrate_held(app: &App) -> Result<()> {
                     });
                 let note = format!(
                     "archived: HEAD at {}, {stash}",
-                    tasks::jeet_ref("head", &old.task_id, &old.dir_name)
+                    tasks::plete_ref("head", &old.task_id, &old.dir_name)
                 );
                 app.db.finish_leftover(&old.task_id, &old.dir_name, &note)?;
                 say(format!("{what}: {note}"));
@@ -2131,7 +2131,7 @@ fn migrate_held(app: &App) -> Result<()> {
     // Once per change: a leftover that waits to be tried again is not news.
     if archived + left + gone > 0 {
         eprintln!(
-            "jeet: reviews moved out of the tasks: {archived} duplicate worktrees archived, \
+            "plete: reviews moved out of the tasks: {archived} duplicate worktrees archived, \
              {left} left in place, {waiting} to retry; see {}",
             log_path.display()
         );
@@ -2158,14 +2158,14 @@ fn give_up_after_three(
 }
 
 // ---------------------------------------------------------------------------
-// Adopting the job files older jeets left (schema v9)
+// Adopting the job files older pletes left (schema v9)
 // ---------------------------------------------------------------------------
 
 /// The `meta` marker that [`adopt_jobs`] has been through
-/// `$JEET_HOME/reviews`: it reads the directory once.
+/// `$PLETE_HOME/reviews`: it reads the directory once.
 const JOBS_ADOPTED: &str = "legacy_jobs_adopted";
 
-/// Under `$JEET_HOME/logs`: what [`adopt_jobs`] did, one line per file.
+/// Under `$PLETE_HOME/logs`: what [`adopt_jobs`] did, one line per file.
 const ADOPT_LOG: &str = "migrate-v9.log";
 
 /// How [`adopt_file`] dealt with one job file.
@@ -2179,12 +2179,12 @@ enum Adoption {
     Folded,
     /// Its PR's review has a job already; the file is not needed.
     Held,
-    /// Not a job jeet can read: left alone.
+    /// Not a job plete can read: left alone.
     Left,
 }
 
-/// Older jeets kept each `[review] command` job as a JSON file under
-/// `$JEET_HOME/reviews/<host>/<owner>/<repo>/<n>.json`, and the Reviews tab
+/// Older pletes kept each `[review] command` job as a JSON file under
+/// `$PLETE_HOME/reviews/<host>/<owner>/<repo>/<n>.json`, and the Reviews tab
 /// listed them read-only. At the first commands after the upgrade to schema
 /// v9, each file whose PR has no review becomes one: archived when the job
 /// finished or was lost (its process is gone), active while it still runs,
@@ -2204,7 +2204,7 @@ enum Adoption {
 /// on stderr.
 pub fn adopt_jobs(app: &App) {
     if let Err(e) = adopt(app) {
-        eprintln!("jeet: warning: could not adopt the review jobs older jeets left: {e:#}");
+        eprintln!("plete: warning: could not adopt the review jobs older pletes left: {e:#}");
     }
 }
 
@@ -2304,7 +2304,7 @@ fn adopt_held(app: &App) -> Result<()> {
     let [archived, running, folded, held, left] = counts;
     if archived + running + folded + gave_up > 0 {
         eprintln!(
-            "jeet: review jobs older jeets left in {} are now reviews: {} adopted ({archived} \
+            "plete: review jobs older pletes left in {} are now reviews: {} adopted ({archived} \
              archived, {running} still running), {folded} put on a review that had none, \
              {held} already held, {left} left unread, {gave_up} given up on, {retry} to retry; \
              nothing was deleted; see {}",
@@ -2487,7 +2487,7 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
     })
 }
 
-/// Put what review `review`'s task kept in files — `<dir>/.jeet/review.json`
+/// Put what review `review`'s task kept in files — `<dir>/.plete/review.json`
 /// (what its agent was asked) and `brought-back` — on its row, where they
 /// are not yet.
 ///
@@ -2645,11 +2645,11 @@ mod tests {
             "claude -p '/review-pr 7' # https://github.com/acme/widget/pull/7 {branch} {title}"
         );
         let env = job_env(&pr(), Path::new("/l"));
-        assert!(env.contains(&("JEET_PR_BRANCH".into(), "x;touch pwned".into())));
+        assert!(env.contains(&("PLETE_PR_BRANCH".into(), "x;touch pwned".into())));
     }
 
     #[test]
-    fn the_review_prompt_takes_only_github_and_jeet_values() {
+    fn the_review_prompt_takes_only_github_and_plete_values() {
         let prompt = expand_prompt(
             "Review #{pr} ({url}) in {worktree}: {branch} {title}",
             &pr(),
@@ -2744,8 +2744,8 @@ mod tests {
         let app = test_app(home.path());
         let mut j = job(None, "abc");
         j.worktree = home.path().to_path_buf();
-        j.command = "test \"$JEET_PR\" = 7 && exit 3".into();
-        j.env = vec![("JEET_PR".into(), "7".into())];
+        j.command = "test \"$PLETE_PR\" = 7 && exit 3".into();
+        j.env = vec![("PLETE_PR".into(), "7".into())];
         app.db.set_review_job("t", &j).unwrap();
         let me = std::process::id();
         run(&app, "t", me).unwrap();
@@ -2928,7 +2928,7 @@ mod tests {
         let harness = crate::harness::default_harness();
         for read_only in [None, Some(true)] {
             app.config.review.read_only = read_only;
-            let hooks = review_hooks(&app, &review, harness, "/bin/jeet".into()).unwrap();
+            let hooks = review_hooks(&app, &review, harness, "/bin/plete".into()).unwrap();
             assert_eq!(hooks.extra_allow, ["Bash(gh pr view:*)"]);
             assert_eq!(hooks.extra_deny, ["Bash(rm:*)"]);
             // Only the read-only review is denied every push.
@@ -3165,12 +3165,12 @@ mod tests {
             .unwrap()
             .is_empty());
     }
-    /// The job files older jeets left become reviews, once, and nothing is
+    /// The job files older pletes left become reviews, once, and nothing is
     /// deleted: archived when finished or lost, active while running; a PR
     /// that has a review gets no second.
     #[cfg(unix)]
     #[test]
-    fn job_files_older_jeets_left_become_reviews_once() {
+    fn job_files_older_pletes_left_become_reviews_once() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path().canonicalize().unwrap();
         let app = test_app(&home);
@@ -3561,7 +3561,7 @@ mod tests {
         assert_eq!(archived.state, TaskState::Archived);
         assert!(!worktree.exists());
         assert!(archived.head_oid.is_some() && archived.stash_ref.is_some());
-        let head_ref = tasks::jeet_ref("head", &review.id, "api");
+        let head_ref = tasks::plete_ref("head", &review.id, "api");
         assert!(git::ref_exists(trunk, &head_ref).unwrap());
         // Archiving again, or running it half-way, changes nothing more.
         archive(&app, &archived).unwrap();
@@ -3589,7 +3589,7 @@ mod tests {
         assert!(!dir(&app, &review).exists());
         // The branch it made goes with it, and so do its refs.
         assert!(!git::branch_exists(trunk, "pr/7").unwrap());
-        assert!(git::refs_under(trunk, "refs/jeet/")
+        assert!(git::refs_under(trunk, "refs/plete/")
             .unwrap_or_default()
             .is_empty());
     }
@@ -3602,13 +3602,13 @@ mod tests {
         let (first, created) = make_review(&app, &repo, &pr, Some(&assistant.id)).unwrap();
         assert!(created);
         assert_eq!(first.requested_by.as_deref(), Some(assistant.id.as_str()));
-        // As two `jeet review`s racing: the slower finds the faster's.
+        // As two `plete review`s racing: the slower finds the faster's.
         let (second, created) = make_review(&app, &repo, &pr, None).unwrap();
         assert!(!created);
         assert_eq!(second.id, first.id);
         assert_eq!(app.db.list_reviews(None).unwrap().len(), 1);
         assert!(!app.tasks_root().join(format!("{}-2", first.slug)).exists());
-        assert!(dir(&app, &first).join(".jeet/task-id").is_file());
+        assert!(dir(&app, &first).join(".plete/task-id").is_file());
         // Another PR, another review; the same name is never a task's.
         let other = PullRequest { number: 8, ..pr };
         let (third, _) = make_review(&app, &repo, &other, None).unwrap();
@@ -3650,7 +3650,7 @@ mod tests {
     }
 
     /// What migration to v8 leaves of a duplicate's worktree is archived the
-    /// way `jeet task archive` does it, unless it has ignored files that
+    /// way `plete task archive` does it, unless it has ignored files that
     /// are not caches, when it stays where it is; and a second look finds
     /// nothing to do.
     #[test]
@@ -3692,8 +3692,8 @@ mod tests {
         migrate_held(&app).unwrap();
         // The dirty one: its work kept in the trunk, the worktree gone.
         assert!(!dirty.exists());
-        let head = tasks::jeet_ref("head", "dup-dirty", "api");
-        let stash = tasks::jeet_ref("stash", "dup-dirty", "api");
+        let head = tasks::plete_ref("head", "dup-dirty", "api");
+        let stash = tasks::plete_ref("stash", "dup-dirty", "api");
         assert!(git::ref_exists(trunk, &head).unwrap());
         assert!(git::ref_exists(trunk, &stash).unwrap());
         // Its task directory is never removed, nor is the branch.
@@ -3853,7 +3853,7 @@ mod tests {
         ));
     }
 
-    /// The second of two `jeet review`s that raced for the lock finds the
+    /// The second of two `plete review`s that raced for the lock finds the
     /// first's worktree recorded and uses it, making no second.
     #[test]
     fn a_second_check_out_reuses_the_first_ones_worktree() {

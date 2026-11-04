@@ -1,13 +1,13 @@
-//! Who runs this jeet: the task whose agent it was started under, found by
-//! walking up the process tree to a process jeet launched for that task.
+//! Who runs this plete: the task whose agent it was started under, found by
+//! walking up the process tree to a process plete launched for that task.
 //!
-//! The jeet that starts a task's pane, an assistant window or a review job
+//! The plete that starts a task's pane, an assistant window or a review job
 //! records the process it started as the task's anchor: its pid and start
 //! time, read from the kernel, never re-bound. A process never records its
 //! own. The one other writer is [`adopt`]: the user, at a terminal outside
-//! every pane of jeet's, vouching for an agent an older jeet started. The
+//! every pane of plete's, vouching for an agent an older plete started. The
 //! caller is the task of the nearest anchor among this process and
-//! its ancestors. `$JEET_TASK_ID` and `$JEET_ASSISTANT` are hints: one that
+//! its ancestors. `$PLETE_TASK_ID` and `$PLETE_ASSISTANT` are hints: one that
 //! disagrees with the anchor, or claims a task with a parent or the
 //! assistant with no anchor behind it, is refused.
 //!
@@ -186,7 +186,7 @@ fn proc_info(_pid: u32) -> Option<ProcInfo> {
 }
 
 /// This process and its ancestors, nearest first, as (pid, start): up to
-/// init, another user's process (no agent jeet started runs above one), a
+/// init, another user's process (no agent plete started runs above one), a
 /// process that cannot be read, a loop, or [`MAX_DEPTH`]. With it, the
 /// process that could not be read, if that is where it stopped.
 fn ancestry() -> (Vec<(u32, i64)>, Option<u32>) {
@@ -213,13 +213,13 @@ pub fn live(anchor: &Anchor) -> bool {
     proc_info(anchor.pid).is_some_and(|info| info.start == anchor.start)
 }
 
-/// Whether this jeet runs under `anchor`'s process: is it, or descends
+/// Whether this plete runs under `anchor`'s process: is it, or descends
 /// from it. Only as far up as [`ancestry`] can read.
 pub fn runs_under(anchor: &Anchor) -> bool {
     ancestry().0.contains(&(anchor.pid, anchor.start))
 }
 
-/// Whether this jeet runs in any of `pids` or below one: the live
+/// Whether this plete runs in any of `pids` or below one: the live
 /// processes tmux started in panes, say. Only as far up as [`ancestry`] can
 /// read.
 pub fn runs_under_any(pids: &[u32]) -> bool {
@@ -229,9 +229,9 @@ pub fn runs_under_any(pids: &[u32]) -> bool {
 /// What the environment says the caller is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Hint {
-    /// `$JEET_TASK_ID`.
+    /// `$PLETE_TASK_ID`.
     task: Option<String>,
-    /// `$JEET_ASSISTANT`.
+    /// `$PLETE_ASSISTANT`.
     assistant: bool,
 }
 
@@ -318,27 +318,27 @@ pub enum Refused {
     /// logged as a refusal.
     #[error("{0}")]
     Mismatch(String),
-    /// Its environment claims a task jeet cannot find it under.
+    /// Its environment claims a task plete cannot find it under.
     #[error("{0}")]
     Unconfirmed(String),
 }
 
-/// Who runs this jeet.
+/// Who runs this plete.
 pub struct Identity {
     /// The task it runs under, if any.
     pub task: Option<TaskRecord>,
     /// The review it runs under, if any: a review has an id of its own
-    /// that the anchors and `$JEET_TASK_ID` name, as a task's. The user's
+    /// that the anchors and `$PLETE_TASK_ID` name, as a task's. The user's
     /// own review job is not one: it runs as the user.
     pub review: Option<ReviewRecord>,
-    /// It is the review job runner jeet started for `task`.
+    /// It is the review job runner plete started for `task`.
     pub self_job: bool,
 }
 
-/// Who runs this jeet, by its process ancestry: see the module docs. A
-/// claim jeet cannot confirm, or one that disagrees, is an error
+/// Who runs this plete, by its process ancestry: see the module docs. A
+/// claim plete cannot confirm, or one that disagrees, is an error
 /// ([`Refused`]), as is a database error. One that disagrees is also
-/// written to `actions.log`, in jeet's words only: the claim is the
+/// written to `actions.log`, in plete's words only: the claim is the
 /// caller's, so none of it goes where the assistant reads.
 pub fn identify(app: &App) -> Result<Identity> {
     let db = &app.db;
@@ -388,7 +388,7 @@ pub fn identify(app: &App) -> Result<Identity> {
             };
             permissions::log_mismatch(&app.home, &format!("{who} ({anchored})"));
             return Err(Refused::Mismatch(format!(
-                "this jeet runs under {who} ({anchored}), but {claim}; jeet refuses a caller \
+                "this plete runs under {who} ({anchored}), but {claim}; plete refuses a caller \
                  that claims to be another"
             ))
             .into());
@@ -403,8 +403,8 @@ pub fn identify(app: &App) -> Result<Identity> {
             };
             if let (Some(id), Some(review)) = (&claimed, &review) {
                 return Err(Refused::Unconfirmed(format!(
-                    "jeet can't confirm this is review {}'s agent ({id}): jeet has no record of \
-                     starting it, as for an agent an older jeet started; `jeet task open {}` \
+                    "plete can't confirm this is review {}'s agent ({id}): plete has no record of \
+                     starting it, as for an agent an older plete started; `plete task open {}` \
                      starts it again in a new session, or run this outside the agent's tmux \
                      session",
                     review.label(),
@@ -415,8 +415,8 @@ pub fn identify(app: &App) -> Result<Identity> {
             let (who, reopen) = match (claimed, found) {
                 (Some(id), Some(None)) => {
                     return Err(Refused::Unconfirmed(format!(
-                        "${TASK_ID_ENV} is {id}, which is no task jeet knows (was it deleted?); \
-                         jeet refuses a claim it cannot confirm, so run this outside that \
+                        "${TASK_ID_ENV} is {id}, which is no task plete knows (was it deleted?); \
+                         plete refuses a claim it cannot confirm, so run this outside that \
                          task's agent"
                     ))
                     .into())
@@ -424,33 +424,33 @@ pub fn identify(app: &App) -> Result<Identity> {
                 (Some(id), Some(Some(t))) if t.kind != TaskKind::Assistant => (
                     format!("{}'s agent", label(&id)),
                     format!(
-                        "the user can restart it (`jeet task restart {0}`, which keeps its \
-                         conversation) or adopt it (`jeet task adopt {0}`)",
+                        "the user can restart it (`plete task restart {0}`, which keeps its \
+                         conversation) or adopt it (`plete task adopt {0}`)",
                         t.slug
                     ),
                 ),
                 _ => (
                     "the assistant".to_string(),
-                    "the user can restart it (`jeet task restart assistant`, which keeps its \
-                     conversation) or adopt it (`jeet task adopt assistant`)"
+                    "the user can restart it (`plete task restart assistant`, which keeps its \
+                     conversation) or adopt it (`plete task adopt assistant`)"
                         .to_string(),
                 ),
             };
             let advice = match unreadable {
                 // A sandbox that hides the processes outside it, say.
                 Some(pid) => format!(
-                    "it cannot read process {pid} above this jeet, so cannot reach the agent's; \
-                     if the agent runs its commands in a sandbox, exclude jeet from it"
+                    "it cannot read process {pid} above this plete, so cannot reach the agent's; \
+                     if the agent runs its commands in a sandbox, exclude plete from it"
                 ),
                 None => format!(
-                    "jeet has no record of starting it, as for an agent an older jeet \
+                    "plete has no record of starting it, as for an agent an older plete \
                      started: {reopen}; or run this outside the agent's tmux session; if the agent runs its commands in a \
-                     sandbox with its own process ids (Claude Code's on Linux), exclude jeet \
+                     sandbox with its own process ids (Claude Code's on Linux), exclude plete \
                      from it"
                 ),
             };
             return Err(Refused::Unconfirmed(format!(
-                "jeet can't confirm this is {who}: {advice}"
+                "plete can't confirm this is {who}: {advice}"
             ))
             .into());
         }
@@ -526,11 +526,11 @@ pub fn record(
     Ok(())
 }
 
-/// Record process `pid`, the agent an older jeet started in tmux pane
+/// Record process `pid`, the agent an older plete started in tmux pane
 /// `pane_id` for task `task_id`, as its anchor, on the user's word: what
-/// `jeet task adopt` writes once the user has confirmed it. `jeet_panes`
-/// are the processes in the panes of jeet's tmux sessions. Refused unless
-/// this jeet runs outside every one of them, so no agent, nor anything it
+/// `plete task adopt` writes once the user has confirmed it. `plete_panes`
+/// are the processes in the panes of plete's tmux sessions. Refused unless
+/// this plete runs outside every one of them, so no agent, nor anything it
 /// starts in its pane, adopts itself or another; and when a live process
 /// is anchored to the task already (`per_window`: that process only, for
 /// the assistant, whose windows each have one), so none is ever re-bound or
@@ -542,12 +542,12 @@ pub fn adopt(
     task_id: &str,
     pane_id: &str,
     pid: u32,
-    jeet_panes: &[u32],
+    plete_panes: &[u32],
     per_window: bool,
 ) -> Result<()> {
-    if runs_under_any(jeet_panes) || runs_under_any(&[pid]) {
+    if runs_under_any(plete_panes) || runs_under_any(&[pid]) {
         bail!(
-            "this jeet runs in a pane of jeet's tmux sessions; adopt an agent from a terminal \
+            "this plete runs in a pane of plete's tmux sessions; adopt an agent from a terminal \
              of your own, outside them"
         );
     }
@@ -557,7 +557,7 @@ pub fn adopt(
         .filter(live)
         .any(|a| !per_window || a.pid == pid);
     if anchored {
-        bail!("jeet already knows this agent's process");
+        bail!("plete already knows this agent's process");
     }
     record(db, task_id, AnchorKind::Pane, Some(pane_id), pid)
 }
@@ -567,7 +567,7 @@ pub fn adopt(
 /// refused, but a command that drops the claim runs as the user.
 pub fn unidentified(name: &str, e: &anyhow::Error) -> String {
     format!(
-        "task {name}'s agent cannot be identified ({e:#}): its jeet commands that name the \
+        "task {name}'s agent cannot be identified ({e:#}): its plete commands that name the \
          task are refused, but one run without ${TASK_ID_ENV} and ${ASSISTANT_ENV} runs as \
          the user; stop it and open the task again"
     )
@@ -750,7 +750,7 @@ mod tests {
             verdict(&chain, &none, &hint(Some("top"), false)),
             Verdict::Nobody
         );
-        // A task jeet does not know, deleted under a job still running for
+        // A task plete does not know, deleted under a job still running for
         // it say, is no claim to take for the user's.
         assert_eq!(
             verdict(&chain, &none, &hint(Some("unknown"), false)),
@@ -813,7 +813,7 @@ mod tests {
         let (_dir, db) = db();
         let mut agent = sleeper();
         let pid = agent.id();
-        // From a pane of jeet's: this test's own process stands in for it.
+        // From a pane of plete's: this test's own process stands in for it.
         let here = std::process::id();
         let e = adopt(&db, "t", "%1", pid, &[here], false).unwrap_err();
         assert!(e.to_string().contains("outside"), "{e}");

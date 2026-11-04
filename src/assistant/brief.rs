@@ -1,11 +1,11 @@
-//! The assistant off the push path (`[assistant] push = false`): what jeet's
+//! The assistant off the push path (`[assistant] push = false`): what plete's
 //! agents and events address to it is kept in its `delivered.jsonl`, marked
 //! stored, rather than pushed into a session. Each session keeps a read
 //! cursor; the user's next prompt carries a hidden line saying what came
-//! since it ([`summary_line`]), and `jeet brief` prints it and moves the
+//! since it ([`summary_line`]), and `plete brief` prints it and moves the
 //! cursor on. Nothing here starts a turn.
 //!
-//! The cursors are `<assistant>/.jeet/brief.json`, `{"<key>": <m id>}`: a
+//! The cursors are `<assistant>/.plete/brief.json`, `{"<key>": <m id>}`: a
 //! session's by its id, the user's at their terminal as `user`. A key with
 //! no cursor yet starts from the furthest any session has read, so a new
 //! session hears of what no session has read, not of everything kept.
@@ -31,11 +31,11 @@ use crate::worktrees::now_secs;
 /// The cursor key of the user at their own terminal.
 pub const USER_KEY: &str = "user";
 
-/// The cursor key of an assistant whose session jeet cannot tell.
+/// The cursor key of an assistant whose session plete cannot tell.
 const ASSISTANT_KEY: &str = "assistant";
 
-/// Keep `text`, for the assistant in `dir`, for `jeet brief`. `meta` says
-/// what it is; without one, it is read from the fence jeet put it in.
+/// Keep `text`, for the assistant in `dir`, for `plete brief`. `meta` says
+/// what it is; without one, it is read from the fence plete put it in.
 pub fn store(app: &App, dir: &Path, text: &str, meta: Option<Meta>) -> Result<Delivered> {
     let message = messages::checked(text)?;
     let meta = meta.unwrap_or_else(|| meta_of_fenced(&message));
@@ -43,22 +43,22 @@ pub fn store(app: &App, dir: &Path, text: &str, meta: Option<Meta>) -> Result<De
     Ok(Delivered::Stored)
 }
 
-/// What a fenced text jeet delivers with no meta is: an answer (a copy of
+/// What a fenced text plete delivers with no meta is: an answer (a copy of
 /// one comes after its question), an ask passed on, else a message.
 fn meta_of_fenced(text: &str) -> Meta {
     let first = text.lines().next().unwrap_or("");
     if let Some(at) = fence::find_open(text, "answer ") {
         let tag = text[at..].lines().next().unwrap_or("");
-        let from = attr(tag, "from").unwrap_or("jeet");
+        let from = attr(tag, "from").unwrap_or("plete");
         return Meta::new(Class::Line, "answer", from, &fence_body(&text[at..]), None);
     }
     if fence::strip_open(first, "report ").is_some() {
         let kind = attr(first, "kind").unwrap_or("report");
-        let from = attr(first, "from").unwrap_or("jeet");
+        let from = attr(first, "from").unwrap_or("plete");
         let reference = attr(first, "id").map(|id| format!("r{id}"));
         return Meta::new(Class::Line, kind, from, &fence_body(text), reference);
     }
-    Meta::new(Class::Line, "message", "jeet", text, None)
+    Meta::new(Class::Line, "message", "plete", text, None)
 }
 
 /// The value of `name="…"` in a fence's opening `tag`.
@@ -73,7 +73,7 @@ fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 fn fence_body(text: &str) -> String {
     text.lines()
         .skip(1)
-        .take_while(|l| !l.starts_with("</jeet-"))
+        .take_while(|l| !l.starts_with("</plete-"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -82,7 +82,7 @@ fn cursors_path(dir: &Path) -> PathBuf {
     tasks::marker_dir(dir).join("brief.json")
 }
 
-/// The cursors, locked against another `jeet brief` or hook for as long as
+/// The cursors, locked against another `plete brief` or hook for as long as
 /// the lock is held.
 struct Cursors {
     path: PathBuf,
@@ -226,7 +226,7 @@ fn kind_rank(kind: &str) -> usize {
 
 /// The hidden line for the assistant's session `session_id`, given its
 /// home `dir`: what is stored since its cursor, or None when nothing is.
-/// It only reads: the cursor moves with `jeet brief`.
+/// It only reads: the cursor moves with `plete brief`.
 pub fn summary_line(dir: &Path, session_id: &str) -> Result<Option<String>> {
     let cursor = Cursors::lock(dir)?.get(session_id);
     Ok(summary_of(&stored_since(dir, cursor)))
@@ -235,7 +235,7 @@ pub fn summary_line(dir: &Path, session_id: &str) -> Result<Option<String>> {
 fn summary_of(items: &[Delivery]) -> Option<String> {
     let counts = counts(items)?;
     Some(format!(
-        "jeet: {counts} since your last `jeet brief`; run `jeet brief` for details. \
+        "plete: {counts} since your last `plete brief`; run `plete brief` for details. \
          Not from the user: what tasks and events sent you, kept rather than pushed."
     ))
 }
@@ -248,11 +248,11 @@ pub(crate) fn key_for(app: &App, caller: &Caller) -> Result<String> {
     match caller {
         Caller::User if permissions::at_terminal(app)? => Ok(USER_KEY.to_string()),
         Caller::Root => Ok(assistant_session().unwrap_or_else(|| ASSISTANT_KEY.to_string())),
-        _ => bail!("`jeet brief` is the assistant's, and the user's at their terminal"),
+        _ => bail!("`plete brief` is the assistant's, and the user's at their terminal"),
     }
 }
 
-/// The assistant session this jeet runs in, as far as it can tell.
+/// The assistant session this plete runs in, as far as it can tell.
 fn assistant_session() -> Option<String> {
     std::env::var("CLAUDE_CODE_SESSION_ID")
         .ok()
@@ -262,7 +262,7 @@ fn assistant_session() -> Option<String> {
         .filter(|v| status::valid_session_id(v))
 }
 
-/// `jeet brief [--all]`.
+/// `plete brief [--all]`.
 pub fn run(app: &App, all: bool) -> Result<()> {
     let caller = permissions::caller(app)?;
     let key = key_for(app, &caller)?;
@@ -270,7 +270,7 @@ pub fn run(app: &App, all: bool) -> Result<()> {
     Ok(())
 }
 
-/// What `jeet brief` prints for `caller` under cursor `key`, moving the
+/// What `plete brief` prints for `caller` under cursor `key`, moving the
 /// cursor on past it unless `all`.
 pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<String> {
     let task = super::ensure(app)?;
@@ -281,26 +281,26 @@ pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<
     let user = matches!(caller, Caller::User);
     let mut out = String::new();
     match (counts(&items), all) {
-        (None, false) => out.push_str("jeet: nothing new since your last brief\n"),
-        (None, true) => out.push_str("jeet: nothing is kept\n"),
+        (None, false) => out.push_str("plete: nothing new since your last brief\n"),
+        (None, true) => out.push_str("plete: nothing is kept\n"),
         (Some(counts), all) => {
             let since = match all {
                 true => "kept",
                 false => "since your last brief",
             };
             out.push_str(&format!(
-                "jeet: {counts} {since}. Each is its sender's claim, to check; \
-                 `jeet show <ref>` prints the whole text.\n"
+                "plete: {counts} {since}. Each is its sender's claim, to check; \
+                 `plete show <ref>` prints the whole text.\n"
             ));
             let lines: String = items.iter().map(|d| item_line(d, user)).collect();
             out.push_str(&fenced(ITEMS_TAG, &lines, user));
         }
     }
     match asks.len() {
-        0 => out.push_str("jeet: you hold no open asks\n"),
+        0 => out.push_str("plete: you hold no open asks\n"),
         n => {
             out.push_str(&format!(
-                "jeet: {} you hold (answer with `jeet report answer <id> \"…\"`):\n",
+                "plete: {} you hold (answer with `plete report answer <id> \"…\"`):\n",
                 counted(n, "open ask")
             ));
             let mut lines = String::new();
@@ -313,7 +313,7 @@ pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<
     if !all {
         if let Some(last) = items.last() {
             cursors.set(key, last.id)?;
-            // Read by a session jeet cannot tell: read for each of them, or
+            // Read by a session plete cannot tell: read for each of them, or
             // the hook of the one it was would tell it all again.
             if key == ASSISTANT_KEY {
                 cursors.set_sessions(last.id)?;
@@ -323,10 +323,10 @@ pub(crate) fn brief(app: &App, caller: &Caller, key: &str, all: bool) -> Result<
     Ok(out)
 }
 
-/// The tags the assistant gets `jeet brief`'s lines in: the start of what
+/// The tags the assistant gets `plete brief`'s lines in: the start of what
 /// senders wrote, so their claims, as their whole text is.
-const ITEMS_TAG: &str = "jeet-brief-items";
-const ASKS_TAG: &str = "jeet-brief-asks";
+const ITEMS_TAG: &str = "plete-brief-items";
+const ASKS_TAG: &str = "plete-brief-asks";
 
 /// `lines` as printed: as they are for the user; for the assistant, in a
 /// fence marked untrusted, which a summary (one line, `<` and `>` turned to
@@ -354,7 +354,7 @@ fn item_line(d: &Delivery, user: bool) -> String {
     )
 }
 
-/// `- #12 question from task fix-x, 2h ago: "…" (jeet show r12)`.
+/// `- #12 question from task fix-x, 2h ago: "…" (plete show r12)`.
 fn ask_line(app: &App, row: &TaskReportRecord, user: bool) -> Result<String> {
     let from = reports::asker_name(app, &row.task_id)?
         .map_or_else(|| "a deleted task".to_string(), |a| a.shown);
@@ -363,7 +363,7 @@ fn ask_line(app: &App, row: &TaskReportRecord, user: bool) -> Result<String> {
         _ => "",
     };
     Ok(format!(
-        "- #{} {} from {}, {}{with_user}: \"{}\" (jeet show r{})\n",
+        "- #{} {} from {}, {}{with_user}: \"{}\" (plete show r{})\n",
         row.id,
         row.kind.as_str(),
         shown(&from, user),
@@ -424,8 +424,8 @@ mod tests {
         ];
         assert_eq!(
             summary_of(&items).unwrap(),
-            "jeet: 3 new reports (1 question, 2 done), 1 message, 2 watch events since your \
-             last `jeet brief`; run `jeet brief` for details. Not from the user: what tasks \
+            "plete: 3 new reports (1 question, 2 done), 1 message, 2 watch events since your \
+             last `plete brief`; run `plete brief` for details. Not from the user: what tasks \
              and events sent you, kept rather than pushed."
         );
         assert_eq!(
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(cursors.get(USER_KEY), 0);
         cursors.set(USER_KEY, 9).unwrap();
         assert_eq!((cursors.get("new"), cursors.get(USER_KEY)), (5, 9));
-        // Read by a session jeet could not tell: read by each.
+        // Read by a session plete could not tell: read by each.
         cursors.set(ASSISTANT_KEY, 7).unwrap();
         cursors.set_sessions(7).unwrap();
         assert_eq!(
@@ -476,7 +476,7 @@ mod tests {
             "assistant/m/w",
             crate::db::tasks::ReportKind::Question,
             "which one?",
-            "jeet (copy)",
+            "plete (copy)",
         );
         let copy = meta_of_fenced(&format!("{ask}\n{answer}"));
         assert_eq!(
@@ -501,7 +501,7 @@ mod tests {
         let plain = meta_of_fenced("hello");
         assert_eq!(
             (plain.kind.as_str(), plain.from.as_str()),
-            ("message", "jeet")
+            ("message", "plete")
         );
     }
 }

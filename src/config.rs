@@ -27,16 +27,16 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
-    /// What `jeet review` does besides checking the PR out.
+    /// What `plete review` does besides checking the PR out.
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
     pub review: ReviewConfig,
 
-    /// How `jeet pr merge` merges (`[merge]`).
+    /// How `plete pr merge` merges (`[merge]`).
     #[serde(default, skip_serializing_if = "MergeConfig::is_empty")]
     pub merge: MergeConfig,
 
     /// Minimum seconds between background fetches of the store (default:
-    /// 300). `0` turns background syncing off; `jeet sync` still works.
+    /// 300). `0` turns background syncing off; `plete sync` still works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_interval_secs: Option<u64>,
 
@@ -44,7 +44,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "AssistantConfig::is_empty")]
     pub assistant: AssistantConfig,
 
-    /// What `jeet watch` looks at on GitHub (`[watch]`). Present, it also
+    /// What `plete watch` looks at on GitHub (`[watch]`). Present, it also
     /// has the tasks list poll while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchConfig>,
@@ -61,7 +61,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "NotifyConfig::is_empty")]
     pub notify: NotifyConfig,
 
-    /// The harness rules jeet writes for each agent it starts
+    /// The harness rules plete writes for each agent it starts
     /// (`[permissions]`).
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
     pub permissions: PermissionsConfig,
@@ -89,14 +89,14 @@ pub enum HarnessConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
         /// Accept the agent's "trust this folder?" prompt in task
-        /// directories under `$JEET_HOME/tasks` (default: off).
+        /// directories under `$PLETE_HOME/tasks` (default: off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_trust: Option<bool>,
         /// With `auto_trust`, accept it for reviews too, whose
         /// checkouts are other people's PR branches (default: off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_trust_reviews: Option<bool>,
-        /// Give each agent a wake channel (`jeet inbox watch`), where its
+        /// Give each agent a wake channel (`plete inbox watch`), where its
         /// harness has one, so what is sent to it reaches it now rather
         /// than at the end of its turn (default: on).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,7 +166,7 @@ pub struct ReviewConfig {
     pub turns: Option<u32>,
 
     /// Whether a review's agent may only read (default: off). On, it runs
-    /// only `jeet ls`, `jeet path` and `jeet prs` (and `jeet report` when a
+    /// only `plete ls`, `plete path` and `plete prs` (and `plete report` when a
     /// task asked), and is denied every push and commenting or reviewing
     /// through the API. Off, it is gated like whoever asked for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,14 +284,14 @@ pub struct AssistantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
 
-    /// What `jeet watch` does with each GitHub event (`[[assistant.rules]]`):
+    /// What `plete watch` does with each GitHub event (`[[assistant.rules]]`):
     /// the first rule that matches decides; none matching, it is notified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
 
-    /// Whether what jeet's agents and events address to the assistant is
+    /// Whether what plete's agents and events address to the assistant is
     /// pushed into its sessions, as before (default: off). Off, it is kept
-    /// for `jeet brief`, and the user's next prompt carries a line saying
+    /// for `plete brief`, and the user's next prompt carries a line saying
     /// what is new; nothing starts a session for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<bool>,
@@ -337,7 +337,7 @@ pub struct NotifyConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<NotifyRule>,
 
-    /// Whether jeet itself tells the user of the questions, blocks, dones
+    /// Whether plete itself tells the user of the questions, blocks, dones
     /// and stuck work in the tree (default: on); `[[notify.rules]]` filter
     /// them as any other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,8 +351,8 @@ pub struct NotifyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_ci_failures: Option<u32>,
 
-    /// The terminal `jeet open` starts when no jeet screen is open: a name
-    /// jeet knows (`ghostty`, `terminal`, ...), a command that the jeet
+    /// The terminal `plete open` starts when no plete screen is open: a name
+    /// plete knows (`ghostty`, `terminal`, ...), a command that the plete
     /// command line is appended to, or `none` to never start one (default:
     /// the platform's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,7 +518,7 @@ pub struct Rule {
     pub action: RuleAction,
 }
 
-/// What a GitHub event is about, as `jeet watch` tells them apart.
+/// What a GitHub event is about, as `plete watch` tells them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -664,7 +664,7 @@ pub struct ManagersConfig {
     pub manager_default: Option<Vec<String>>,
 
     /// Capabilities, besides [`HELD_FLOOR`], that are logged and notified
-    /// when a grant names them (`--allow`, `jeet manager grant`). The
+    /// when a grant names them (`--allow`, `plete manager grant`). The
     /// default grant holds them too and records nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Vec<String>>,
@@ -748,9 +748,9 @@ impl MessagesConfig {
     }
 }
 
-/// `[permissions]` in config.toml: rules added to the settings jeet
-/// generates for each launch. They add to jeet's own and never remove one:
-/// a rule jeet denies stays denied, as the harness's deny wins over any
+/// `[permissions]` in config.toml: rules added to the settings plete
+/// generates for each launch. They add to plete's own and never remove one:
+/// a rule plete denies stays denied, as the harness's deny wins over any
 /// allow.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -758,7 +758,7 @@ pub struct PermissionsConfig {
     /// Whether work tasks push without asking (default: `ask`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<PushPolicy>,
-    /// Tell the harness's auto-mode classifier what a jeet agent's routine
+    /// Tell the harness's auto-mode classifier what a plete agent's routine
     /// work is (default: off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_context: Option<bool>,
@@ -774,8 +774,8 @@ pub struct PermissionsConfig {
     /// Extra rules for reviews' agents (`[permissions.review]`).
     #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
     pub review: RoleRules,
-    /// Whether jeet denies every agent it launches force-pushes, merges
-    /// outside `jeet pr merge` and pushes to default branches, and a
+    /// Whether plete denies every agent it launches force-pushes, merges
+    /// outside `plete pr merge` and pushes to default branches, and a
     /// manager committing and pushing too (default: off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guards: Option<bool>,
@@ -832,7 +832,7 @@ impl RoleRules {
 #[serde(deny_unknown_fields)]
 pub struct TasksConfig {
     /// What a work task does once its work is pushed (default: `draft`).
-    /// A project's, then `jeet task new --pr`, override it.
+    /// A project's, then `plete task new --pr`, override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PrMode>,
 }
@@ -843,7 +843,7 @@ impl TasksConfig {
     }
 }
 
-/// A work task's PR policy: `[tasks] pr`, or `jeet task new --pr`.
+/// A work task's PR policy: `[tasks] pr`, or `plete task new --pr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum PrMode {
@@ -978,11 +978,11 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Editor command line, honouring `JEET_EDITOR`, then config, then `$VISUAL`/`$EDITOR`.
+    /// Editor command line, honouring `PLETE_EDITOR`, then config, then `$VISUAL`/`$EDITOR`.
     pub fn editor_command(&self) -> String {
         first_set(
             [
-                env_non_empty("JEET_EDITOR"),
+                env_non_empty("PLETE_EDITOR"),
                 self.editor.clone(),
                 plain_env_non_empty("VISUAL"),
                 plain_env_non_empty("EDITOR"),
@@ -1066,24 +1066,24 @@ impl Config {
         mins_secs(self.messages.escalate_mins.unwrap_or(DEFAULT_ESCALATE_MINS))
     }
 
-    /// Coding agent command line, honouring `JEET_AGENT`, then `[harness]
+    /// Coding agent command line, honouring `PLETE_AGENT`, then `[harness]
     /// command`, then `agent`, then the harness's `default`.
     pub fn agent_command(&self, default: Option<&str>) -> Option<String> {
         let command = match &self.harness {
             Some(HarnessConfig::Table { command, .. }) => command.clone(),
             _ => None,
         };
-        [env_non_empty("JEET_AGENT"), command, self.agent.clone()]
+        [env_non_empty("PLETE_AGENT"), command, self.agent.clone()]
             .into_iter()
             .flatten()
             .find(|v| !v.trim().is_empty())
             .or(default.map(str::to_string))
     }
 
-    /// Background sync throttle, honouring `JEET_SYNC_INTERVAL_SECS`, then
+    /// Background sync throttle, honouring `PLETE_SYNC_INTERVAL_SECS`, then
     /// config. An unparseable override is ignored rather than fatal.
     pub fn sync_interval_secs(&self) -> u64 {
-        env_non_empty("JEET_SYNC_INTERVAL_SECS")
+        env_non_empty("PLETE_SYNC_INTERVAL_SECS")
             .and_then(|v| v.trim().parse().ok())
             .or(self.sync_interval_secs)
             .unwrap_or(DEFAULT_SYNC_INTERVAL_SECS)
@@ -1143,7 +1143,7 @@ impl Config {
     }
 }
 
-/// `names` as capabilities, refusing one jeet does not know.
+/// `names` as capabilities, refusing one plete does not know.
 fn capabilities(key: &str, names: &[String]) -> Result<Vec<&'static str>> {
     names
         .iter()
@@ -1163,7 +1163,7 @@ fn first_set(candidates: impl IntoIterator<Item = Option<String>>, default: &str
         .unwrap_or_else(|| default.to_string())
 }
 
-/// A variable that is not jeet's own, read as it is.
+/// A variable that is not plete's own, read as it is.
 fn plain_env_non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -1208,16 +1208,17 @@ pub const LEGACY_HOME_DIR: &str = ".jeet";
 pub const NEW_HOME_DIR: &str = ".plete";
 
 /// Whether a default home holding only `~/.jeet` data is split: the index
-/// stays there, and new item directories go to `~/.plete`. Off until the
-/// rename; see [`default_homes`].
-const SPLIT_HOMES: bool = false; // flipped to true in the rename PR
+/// stays there, and new item directories go to `~/.plete`. See
+/// [`default_homes`].
+const SPLIT_HOMES: bool = true;
 
 /// The default homes under `user_home`: the index home, and the directory new
 /// item directories (tasks, projects, reviews, clones) go to when that
 /// differs from it.
 ///
-/// Unsplit: `~/.jeet` alone. Split: an existing `~/.jeet` index stays the
-/// index home with new items in `~/.plete`; anything else is `~/.plete`.
+/// Unsplit: `~/.jeet` alone. Split: an existing `~/.jeet` index (and none in
+/// `~/.plete`) stays the index home with new items in `~/.plete`; anything
+/// else is `~/.plete`.
 pub fn default_homes(user_home: &Path) -> (PathBuf, Option<PathBuf>) {
     default_homes_with(SPLIT_HOMES, user_home)
 }
@@ -1293,7 +1294,7 @@ fn resolve_homes(
 }
 
 /// The index home, and where new item directories go if elsewhere.
-pub fn jeet_homes() -> Result<(PathBuf, Option<PathBuf>)> {
+pub fn plete_homes() -> Result<(PathBuf, Option<PathBuf>)> {
     let env_home = |name| std::env::var_os(name).map(PathBuf::from);
     let (plete, jeet) = (env_home("PLETE_HOME"), env_home("JEET_HOME"));
     let new_home = env_home(crate::env::NEW_HOME_VAR).filter(|_| plete.is_some() || jeet.is_some());
@@ -1306,8 +1307,8 @@ pub fn jeet_homes() -> Result<(PathBuf, Option<PathBuf>)> {
     Ok(default_homes(&user_home))
 }
 
-pub fn jeet_home() -> Result<PathBuf> {
-    Ok(jeet_homes()?.0)
+pub fn plete_home() -> Result<PathBuf> {
+    Ok(plete_homes()?.0)
 }
 
 pub fn config_path(home: &Path) -> PathBuf {
@@ -1338,32 +1339,32 @@ pub fn assistant_dir(home: &Path) -> PathBuf {
     home.join("assistant")
 }
 
-/// The user's overrides of the templates jeet writes into new homes:
+/// The user's overrides of the templates plete writes into new homes:
 /// `root/` and `manager/` laid out as the assistant's and a manager's home
 /// are, and `worker/SKILL.md` for the skill every task gets.
 pub fn templates_dir(home: &Path) -> PathBuf {
     home.join("templates")
 }
 
-/// What `jeet watch` remembers between polls.
+/// What `plete watch` remembers between polls.
 pub fn watch_state_path(home: &Path) -> PathBuf {
     home.join("watch.json")
 }
 
 /// Where free-standing worktrees lived before tasks. Nothing new is made
-/// here; `jeet import` moves what is left into tasks.
+/// here; `plete import` moves what is left into tasks.
 pub fn worktrees_root(home: &Path) -> PathBuf {
     home.join("worktrees")
 }
 
-/// Where `jeet exec --ephemeral` put its throwaway checkouts before tasks;
-/// `jeet import` moves any that survived into tasks.
+/// Where `plete exec --ephemeral` put its throwaway checkouts before tasks;
+/// `plete import` moves any that survived into tasks.
 pub fn ephemeral_root(home: &Path) -> PathBuf {
     home.join("ephemeral")
 }
 
 pub fn load_or_create(home: &Path) -> Result<Config> {
-    std::fs::create_dir_all(home).context("create jeet home")?;
+    std::fs::create_dir_all(home).context("create plete home")?;
     let path = config_path(home);
     if path.exists() {
         let text = std::fs::read_to_string(&path).context("read config")?;
@@ -1390,19 +1391,19 @@ mod tests {
     #[test]
     fn other_programs_variables_are_not_prefixed() {
         std::env::set_var("CFGTEST_EDITOR", "ed");
-        std::env::set_var("JEET_CFGTEST_EDITOR", "wrong");
+        std::env::set_var("PLETE_CFGTEST_EDITOR", "wrong");
         assert_eq!(plain_env_non_empty("CFGTEST_EDITOR").as_deref(), Some("ed"));
         // Reached through `env_non_empty`, a name without the prefix is as is.
         assert_eq!(env_non_empty("CFGTEST_EDITOR").as_deref(), Some("ed"));
         std::env::remove_var("CFGTEST_EDITOR");
-        std::env::remove_var("JEET_CFGTEST_EDITOR");
+        std::env::remove_var("PLETE_CFGTEST_EDITOR");
     }
 
     #[test]
     fn default_homes_unsplit_is_the_legacy_home() {
         let u = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(u.path().join(".plete")).unwrap();
-        std::fs::write(u.path().join(".plete/index.db"), "").unwrap();
+        std::fs::create_dir_all(u.path().join(".jeet")).unwrap();
+        std::fs::write(u.path().join(".jeet/index.db"), "").unwrap();
         let (home, new) = default_homes_with(false, u.path());
         assert_eq!(home, u.path().join(".jeet"));
         assert_eq!(new, None);
@@ -1489,7 +1490,7 @@ mod tests {
     #[test]
     fn precedence_prefers_the_first_set_candidate() {
         // Exercised directly so the test does not depend on the ambient
-        // JEET_EDITOR/VISUAL/EDITOR of whoever runs it.
+        // PLETE_EDITOR/VISUAL/EDITOR of whoever runs it.
         assert_eq!(
             first_set([None, Some("hx".into()), Some("vi".into()), None], "vim"),
             "hx"
@@ -1993,7 +1994,7 @@ mod tests {
     fn reads_the_watch_section_and_rules() {
         let text = r#"
 [watch]
-repos = ["acme/*", "me/jeet"]
+repos = ["acme/*", "me/plete"]
 projects = [{ owner = "acme", number = 3 }]
 interval_secs = 60
 
@@ -2008,7 +2009,7 @@ action = "task"
 "#;
         let config: Config = toml::from_str(text).unwrap();
         let watch = config.watch.unwrap();
-        assert_eq!(watch.repos, ["acme/*", "me/jeet"]);
+        assert_eq!(watch.repos, ["acme/*", "me/plete"]);
         assert_eq!(
             watch.projects,
             [ProjectRef {
@@ -2032,7 +2033,7 @@ action = "task"
             DEFAULT_WATCH_INTERVAL_SECS
         );
         assert!(Config::default().watch.is_none());
-        // A kind or an action jeet does not know is an error, not ignored.
+        // A kind or an action plete does not know is an error, not ignored.
         let bad = "[[assistant.rules]]\non = [\"reviewed\"]\naction = \"notify\"\n";
         assert!(toml::from_str::<Config>(bad).is_err());
         let bad = "[[assistant.rules]]\naction = \"merge\"\n";
@@ -2056,7 +2057,7 @@ action = "task"
             assert_eq!(RuleAction::parse(action).unwrap().to_string(), action);
         }
 
-        // A manager with no slug is an error, as is an action jeet does
+        // A manager with no slug is an error, as is an action plete does
         // not know.
         for bad in ["manager:", "manager: ", "manager", "Manager:api", "bogus"] {
             let text = format!("[[assistant.rules]]\naction = \"{bad}\"\n");

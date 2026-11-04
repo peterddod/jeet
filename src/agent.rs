@@ -1,7 +1,7 @@
 //! Coding-agent and editor integration.
 //!
-//! jeet shells out to whatever editor and coding agent you configure. The
-//! agent's [`Harness`] says what else jeet can do with it: give it a session
+//! plete shells out to whatever editor and coding agent you configure. The
+//! agent's [`Harness`] says what else plete can do with it: give it a session
 //! id and a first prompt, install its hooks, resume its sessions.
 
 use std::path::Path;
@@ -21,13 +21,13 @@ pub struct AgentSpec {
 }
 
 impl AgentSpec {
-    /// The agent config.toml (or `$JEET_AGENT`) sets up. A `harness` names
+    /// The agent config.toml (or `$PLETE_AGENT`) sets up. A `harness` names
     /// it; otherwise it is told by its program, e.g. `claude`.
     pub fn from_config(config: &Config) -> Result<Self> {
         let named = match config.harness_name() {
             Some(id) => Some(harness::by_id(id).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "config.toml sets harness = {id:?}; jeet knows {}",
+                    "config.toml sets harness = {id:?}; plete knows {}",
                     harness::ids()
                 )
             })?),
@@ -39,7 +39,7 @@ impl AgentSpec {
         let Some(command) = config.agent_command(default) else {
             bail!(
                 "no coding agent configured (set `harness` or `agent` in config.toml, or \
-                 $JEET_AGENT)"
+                 $PLETE_AGENT)"
             );
         };
         let spec = Self::from_command(&command)?;
@@ -67,7 +67,7 @@ impl AgentSpec {
     pub fn from_command(command: &str) -> Result<Self> {
         let argv = split_command(command);
         if argv.is_empty() {
-            bail!("no coding agent configured (set `agent` in config.toml or $JEET_AGENT)");
+            bail!("no coding agent configured (set `agent` in config.toml or $PLETE_AGENT)");
         }
         let harness = harness::detect(&argv[0]);
         Ok(Self { argv, harness })
@@ -77,12 +77,12 @@ impl AgentSpec {
         self.argv.join(" ")
     }
 
-    /// Whether jeet can record the agent's sessions and resume them.
+    /// Whether plete can record the agent's sessions and resume them.
     pub fn supports_sessions(&self) -> bool {
         self.harness.new_session_args("", "").is_some() && self.harness.resume_args("").is_some()
     }
 
-    /// Whether the agent reports what it is doing through jeet's hooks.
+    /// Whether the agent reports what it is doing through plete's hooks.
     /// Either way of installing them counts (see `runtime::hook_args`).
     pub fn has_hooks(&self) -> bool {
         harness::has_hooks(self.harness)
@@ -119,7 +119,7 @@ pub fn age_label(at: i64) -> String {
 pub fn editor_argv(config: &Config) -> Result<Vec<String>> {
     let argv = split_command(&config.editor_command());
     if argv.is_empty() {
-        bail!("no editor configured (set `editor` in config.toml, $JEET_EDITOR or $EDITOR)");
+        bail!("no editor configured (set `editor` in config.toml, $PLETE_EDITOR or $EDITOR)");
     }
     Ok(argv)
 }

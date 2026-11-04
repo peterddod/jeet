@@ -1,8 +1,8 @@
-//! Starting a terminal that runs `jeet open <url>`, for when a link is
-//! opened and no jeet screen is.
+//! Starting a terminal that runs `plete open <url>`, for when a link is
+//! opened and no plete screen is.
 //!
-//! `[notify] terminal` picks which: a name jeet has a recipe for, a command
-//! that jeet's own command line is appended to, or `none`. Unset, it is the
+//! `[notify] terminal` picks which: a name plete has a recipe for, a command
+//! that plete's own command line is appended to, or `none`. Unset, it is the
 //! platform's own terminal. What is run is worked out by pure functions of
 //! the setting, the platform and which programs exist; [`start`] spawns it.
 
@@ -18,9 +18,9 @@ use anyhow::{bail, Context, Result};
 use crate::config::split_command;
 use crate::harness::shell_quote;
 
-/// Set in the environment of the terminal jeet starts: one that then still
+/// Set in the environment of the terminal plete starts: one that then still
 /// finds no terminal to run in must not start another, forever.
-pub const STARTED_ENV: &str = "JEET_LINK_TERMINAL";
+pub const STARTED_ENV: &str = "PLETE_LINK_TERMINAL";
 
 /// How long a terminal's launcher is waited for before it is left running:
 /// `open` returns at once, a terminal started directly stays up.
@@ -60,9 +60,9 @@ pub enum Choice {
     Ghostty,
     /// Terminal.app.
     TerminalApp,
-    /// A Linux terminal jeet has a recipe for.
+    /// A Linux terminal plete has a recipe for.
     Named(&'static str),
-    /// Any other command, with jeet's appended.
+    /// Any other command, with plete's appended.
     Custom(String),
 }
 
@@ -108,36 +108,48 @@ pub struct Invocation {
     pub argv: Vec<String>,
 }
 
-/// What `jeet open <url>` is, run from anywhere: its environment is set in
+/// What `plete open <url>` is, run from anywhere: its environment is set in
 /// the command, as a terminal started by another app or by `open` has not
-/// jeet's.
-pub fn open_argv(exe: &Path, home: &Path, path: &str, url: &str) -> Vec<String> {
-    [
+/// plete's.
+pub fn open_argv(
+    exe: &Path,
+    home: &Path,
+    new_home: Option<&Path>,
+    path: &str,
+    url: &str,
+) -> Vec<String> {
+    let split = new_home.map(|h| format!("{}={}", crate::env::NEW_HOME_VAR, h.display()));
+    let mut argv: Vec<String> = [
         "/usr/bin/env".to_string(),
         format!("PATH={path}"),
         format!("JEET_HOME={}", home.display()),
         format!("PLETE_HOME={}", home.display()),
-        format!("{STARTED_ENV}=1"),
+        "JEET_LINK_TERMINAL=1".to_string(),
         "PLETE_LINK_TERMINAL=1".to_string(),
         exe.display().to_string(),
         "open".to_string(),
         url.to_string(),
     ]
-    .to_vec()
+    .to_vec();
+    if let Some(split) = split {
+        // After the other variables, ahead of the program.
+        argv.insert(6, split);
+    }
+    argv
 }
 
-/// How to start `choice` running `jeet`, a whole command line. `script` is
+/// How to start `choice` running `plete`, a whole command line. `script` is
 /// where Terminal.app's command file goes.
-pub fn invocation(choice: &Choice, jeet: &[String], script: &Path) -> Result<Invocation> {
+pub fn invocation(choice: &Choice, plete: &[String], script: &Path) -> Result<Invocation> {
     let with = |head: &[&str]| -> Vec<String> {
         head.iter()
             .map(|s| s.to_string())
-            .chain(jeet.iter().cloned())
+            .chain(plete.iter().cloned())
             .collect()
     };
     let plain = |argv| Invocation { script: None, argv };
     Ok(match choice {
-        Choice::Off => bail!("no jeet screen is open and `[notify] terminal` is none"),
+        Choice::Off => bail!("no plete screen is open and `[notify] terminal` is none"),
         Choice::Ghostty => plain(with(&[
             "open",
             "-na",
@@ -148,9 +160,9 @@ pub fn invocation(choice: &Choice, jeet: &[String], script: &Path) -> Result<Inv
             "-e",
         ])),
         // Terminal.app runs a file, not a command: the file removes itself
-        // and becomes jeet.
+        // and becomes plete.
         Choice::TerminalApp => {
-            let quoted: Vec<String> = jeet.iter().map(|w| shell_quote(w)).collect();
+            let quoted: Vec<String> = plete.iter().map(|w| shell_quote(w)).collect();
             Invocation {
                 script: Some((
                     script.to_path_buf(),
@@ -175,14 +187,14 @@ pub fn invocation(choice: &Choice, jeet: &[String], script: &Path) -> Result<Inv
             if argv.is_empty() {
                 bail!("`[notify] terminal` is empty");
             }
-            argv.extend(jeet.iter().cloned());
+            argv.extend(plete.iter().cloned());
             plain(argv)
         }
     })
 }
 
 /// The macOS app name that brings `choice`'s windows forward, when it is
-/// one jeet knows.
+/// one plete knows.
 pub fn app_name(choice: &Choice) -> Option<&'static str> {
     match choice {
         Choice::Ghostty => Some("Ghostty"),
@@ -216,7 +228,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// Run `run`, detached: its output goes nowhere, and it is in a process
-/// group of its own, so it outlives the one `jeet open` was run in. Only a
+/// group of its own, so it outlives the one `plete open` was run in. Only a
 /// launcher that cannot be run is an error: what it does after that, `open`
 /// handing the job over or a terminal staying up, is its own.
 pub fn start(run: &Invocation) -> Result<()> {
@@ -265,13 +277,31 @@ fn write_script(path: &Path, text: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn jeet() -> Vec<String> {
+    fn plete() -> Vec<String> {
         open_argv(
-            Path::new("/opt/bin/jeet"),
-            Path::new("/home/me/.jeet"),
+            Path::new("/opt/bin/plete"),
+            Path::new("/home/me/.plete"),
+            None,
             "/usr/bin:/bin",
-            "jeet://task/fix",
+            "plete://task/fix",
         )
+    }
+
+    #[test]
+    fn a_split_home_rides_along_in_the_open_command() {
+        let argv = open_argv(
+            Path::new("/opt/bin/plete"),
+            Path::new("/home/me/.jeet"),
+            Some(Path::new("/home/me/.plete")),
+            "/usr/bin",
+            "plete://task/fix",
+        );
+        assert!(
+            argv.contains(&"PLETE_NEW_HOME=/home/me/.plete".to_string()),
+            "{argv:?}"
+        );
+        let at = argv.iter().position(|a| a == "/opt/bin/plete").unwrap();
+        assert!(argv[..at].contains(&"PLETE_NEW_HOME=/home/me/.plete".to_string()));
     }
 
     fn resolved(setting: Option<&str>, os: Os, have: &[&str]) -> Result<Choice> {
@@ -279,19 +309,19 @@ mod tests {
     }
 
     #[test]
-    fn jeet_open_is_run_with_its_environment() {
+    fn plete_open_is_run_with_its_environment() {
         assert_eq!(
-            jeet(),
+            plete(),
             [
                 "/usr/bin/env",
                 "PATH=/usr/bin:/bin",
-                "JEET_HOME=/home/me/.jeet",
-                "PLETE_HOME=/home/me/.jeet",
+                "JEET_HOME=/home/me/.plete",
+                "PLETE_HOME=/home/me/.plete",
                 "JEET_LINK_TERMINAL=1",
                 "PLETE_LINK_TERMINAL=1",
-                "/opt/bin/jeet",
+                "/opt/bin/plete",
                 "open",
-                "jeet://task/fix"
+                "plete://task/fix"
             ]
         );
     }
@@ -336,8 +366,8 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_gets_the_jeet_argv_unparsed() {
-        let run = invocation(&Choice::Ghostty, &jeet(), Path::new("/x")).unwrap();
+    fn ghostty_gets_the_plete_argv_unparsed() {
+        let run = invocation(&Choice::Ghostty, &plete(), Path::new("/x")).unwrap();
         assert_eq!(run.script, None);
         assert_eq!(
             run.argv[..8],
@@ -352,14 +382,14 @@ mod tests {
                 "/usr/bin/env"
             ]
         );
-        assert_eq!(run.argv[7..], jeet());
+        assert_eq!(run.argv[7..], plete());
     }
 
     #[test]
     fn terminal_app_runs_a_command_file_that_removes_itself() {
-        let script = Path::new("/home/me/.jeet/tui/open-7.command");
-        let mut argv = jeet();
-        argv[2] = "JEET_HOME=/home/it's me/.jeet".into();
+        let script = Path::new("/home/me/.plete/tui/open-7.command");
+        let mut argv = plete();
+        argv[2] = "JEET_HOME=/home/it's me/.plete".into();
         let run = invocation(&Choice::TerminalApp, &argv, script).unwrap();
         assert_eq!(
             run.argv,
@@ -367,7 +397,7 @@ mod tests {
                 "open",
                 "-a",
                 "Terminal",
-                "/home/me/.jeet/tui/open-7.command"
+                "/home/me/.plete/tui/open-7.command"
             ]
         );
         let (path, text) = run.script.unwrap();
@@ -375,9 +405,9 @@ mod tests {
         assert_eq!(
             text,
             "#!/bin/sh\nrm -f \"$0\"\nexec '/usr/bin/env' 'PATH=/usr/bin:/bin' \
-             'JEET_HOME=/home/it'\\''s me/.jeet' 'PLETE_HOME=/home/me/.jeet' \
-             'JEET_LINK_TERMINAL=1' 'PLETE_LINK_TERMINAL=1' '/opt/bin/jeet' \
-             'open' 'jeet://task/fix'\n"
+             'JEET_HOME=/home/it'\\''s me/.plete' 'PLETE_HOME=/home/me/.plete' \
+             'JEET_LINK_TERMINAL=1' 'PLETE_LINK_TERMINAL=1' '/opt/bin/plete' \
+             'open' 'plete://task/fix'\n"
         );
     }
 
@@ -400,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_command_is_split_and_given_jeet() {
+    fn a_custom_command_is_split_and_given_plete() {
         let run = invocation(
             &Choice::Custom("wezterm start --cwd '/a b' --".into()),
             &["j".into(), "open".into()],
@@ -415,10 +445,10 @@ mod tests {
 
     #[test]
     fn none_starts_nothing() {
-        let err = invocation(&Choice::Off, &jeet(), Path::new("/x")).unwrap_err();
+        let err = invocation(&Choice::Off, &plete(), Path::new("/x")).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "no jeet screen is open and `[notify] terminal` is none"
+            "no plete screen is open and `[notify] terminal` is none"
         );
     }
 
