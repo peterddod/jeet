@@ -927,6 +927,8 @@ mod tests {
         };
         assert!(pr.is_none());
         assert!(matches!(command, Some(ReviewCommands::Diff { review }) if review == "foo"));
+        // A task's agent has one session: there is none to name.
+        assert!(Cli::try_parse_from(["jeet", "task", "open", "foo", "--session", "s"]).is_err());
         assert!(matches!(
             parse(&["review", "open", "foo", "--session", "s"]).command,
             Some(Commands::Review {
