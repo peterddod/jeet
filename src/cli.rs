@@ -280,7 +280,7 @@ pub enum Commands {
         /// Show what is indexed for you instead
         #[arg(long, conflicts_with = "reset")]
         status: bool,
-        /// Delete the search index; it is rebuilt on the next search (user
+        /// Empty the search index; it is rebuilt on the next search (user
         /// and assistant only)
         #[arg(long)]
         reset: bool,

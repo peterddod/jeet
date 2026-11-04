@@ -55,6 +55,7 @@ impl<'a> Section<'a> {
 /// its first `# ` heading, else the file name without its extension. Trimmed
 /// and cut to 120 characters.
 pub fn title(rel_path: &str, text: &str) -> String {
+    let text = without_bom(text);
     let found = front_matter_title(text)
         .or_else(|| first_h1(text))
         .filter(|t| !t.is_empty());
@@ -151,6 +152,12 @@ impl Fence {
     }
 }
 
+/// `text` without a byte-order mark in front, which would hide a first
+/// heading.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// An ATX heading: its level (1 to 6) and text.
 fn heading(line: &str) -> Option<(usize, String)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
@@ -166,13 +173,19 @@ fn heading(line: &str) -> Option<(usize, String)> {
     if !after.is_empty() && !after.starts_with([' ', '\t']) {
         return None;
     }
-    let text = after.trim().trim_end_matches('#').trim_end();
+    // A closing run of `#` counts only after a space: `# F#` is about F#.
+    let text = after.trim();
+    let text = match text.trim_end_matches('#') {
+        rest if rest.is_empty() || rest.ends_with([' ', '\t']) => rest.trim_end(),
+        _ => text,
+    };
     Some((level, text.to_string()))
 }
 
 /// Cut `text` into passages: sections at headings of level 1 to 3, small
 /// ones joined to a neighbour, large ones split at blank lines.
 pub fn passages(text: &str) -> Vec<Passage> {
+    let text = without_bom(text);
     let merged = merge(sections(text));
     let mut out = Vec::new();
     for section in merged {
@@ -329,6 +342,15 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].heading, "Top");
         assert!(found[0].text.contains("# not a heading"));
+    }
+
+    #[test]
+    fn a_closing_run_of_hashes_needs_a_space_and_a_bom_is_ignored() {
+        assert_eq!(heading("# Learning C#"), Some((1, "Learning C#".into())));
+        assert_eq!(heading("## Plan ##"), Some((2, "Plan".into())));
+        assert_eq!(heading("# ##"), Some((1, String::new())));
+        assert_eq!(title("a.md", "\u{feff}# Bom title\nx\n"), "Bom title");
+        assert_eq!(passages("\u{feff}# A\nbody\n")[0].heading, "A");
     }
 
     #[test]

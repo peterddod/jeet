@@ -17767,11 +17767,8 @@ fn search_finds_the_assistants_notes_for_the_user_and_lists_them_in_status() {
     succeeded(&output);
     assert!(stdout_of(&output).starts_with("No documents match.\n"));
 
-    // Reset deletes the file; the next search builds it again.
-    let index = lab.home().join("search/index.db");
-    assert!(index.is_file());
+    // Reset empties the index; the next search builds it again.
     succeeded(&lab.jeet_at(&["search", "--reset"], &lab.home(), &[]));
-    assert!(!index.exists());
     let output = lab.jeet_at(&["search", "zeppelin"], &lab.home(), &[]);
     assert!(stdout_of(&output).starts_with("1. "));
 }

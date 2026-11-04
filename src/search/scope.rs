@@ -15,7 +15,7 @@ use crate::resolve;
 /// Repositories that hold the tool's own docs, matched by the end of their
 /// store id. Every caller may search them, so an agent can look up how jeet
 /// and plete work.
-const PLETE_REPOS: &[&str] = &["/peterddod/jeet", "/peterddod/plete"];
+const PLETE_REPOS: &[&str] = &["github.com/peterddod/jeet", "github.com/peterddod/plete"];
 
 /// A set of documents that are indexed and allowed together.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +97,7 @@ pub fn for_caller(app: &App) -> Result<Vec<Source>> {
             out.push(source);
         }
     }
-    let excluded = excluded_repo_ids(app);
+    let excluded = excluded_repo_ids(app)?;
     out.retain(|s| !matches!(s, Source::Repo(id) if excluded.contains(id)));
     Ok(out)
 }
@@ -190,21 +190,33 @@ fn plete_repos(app: &App) -> Result<Vec<Source>> {
         .db
         .list_repos(None)?
         .into_iter()
-        .filter(|r| PLETE_REPOS.iter().any(|suffix| r.id.ends_with(suffix)))
+        .filter(|r| PLETE_REPOS.contains(&r.id.as_str()))
         .map(|r| Source::Repo(r.id))
         .collect())
 }
 
-/// The ids of the repositories `[search] exclude_repos` names. A filter that
-/// matches none, or more than one, leaves nothing out.
-fn excluded_repo_ids(app: &App) -> Vec<String> {
-    app.config
-        .search
-        .excluded_repos()
-        .iter()
-        .filter_map(|filter| resolve::resolve_repo_filter(&app.db, filter).ok())
+/// The ids of the repositories `[search] exclude_repos` names: each filter
+/// is a whole id or its last parts (`repo`, `owner/repo`), and leaves out
+/// every repository it matches, so an ambiguous one hides more, not less.
+fn excluded_repo_ids(app: &App) -> Result<Vec<String>> {
+    let filters = app.config.search.excluded_repos();
+    if filters.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(app
+        .db
+        .list_repos(None)?
+        .into_iter()
+        .filter(|r| filters.iter().any(|f| repo_matches(&r.id, f)))
         .map(|r| r.id)
-        .collect()
+        .collect())
+}
+
+/// Whether the repository `id` is `filter` or ends in `/` and `filter`,
+/// ignoring case.
+fn repo_matches(id: &str, filter: &str) -> bool {
+    let (id, filter) = (id.to_lowercase(), filter.trim().to_lowercase());
+    !filter.is_empty() && (id == filter || id.ends_with(&format!("/{filter}")))
 }
 
 #[cfg(test)]
@@ -254,6 +266,15 @@ mod tests {
                 default_branch: "main".into(),
             })
             .unwrap();
+    }
+
+    #[test]
+    fn an_excluded_repo_filter_matches_whole_parts() {
+        assert!(repo_matches("github.com/a/api", "api"));
+        assert!(repo_matches("github.com/a/api", "A/Api"));
+        assert!(repo_matches("github.com/a/api", "github.com/a/api"));
+        assert!(!repo_matches("github.com/a/rapi", "api"));
+        assert!(!repo_matches("github.com/a/api", " "));
     }
 
     fn keys(sources: &[Source]) -> Vec<String> {
@@ -335,7 +356,7 @@ mod tests {
         repo(&app, "github.com/acme/api");
         repo(&app, "github.com/acme/web");
         app.config.search.exclude_repos = Some(vec!["acme/web".into()]);
-        assert_eq!(excluded_repo_ids(&app), ["github.com/acme/web"]);
+        assert_eq!(excluded_repo_ids(&app).unwrap(), ["github.com/acme/web"]);
         let mut sources = vec![Source::Assistant, Source::Repo("x".into())];
         narrow(&mut sources, &[]);
         assert_eq!(sources.len(), 2);

@@ -8,7 +8,7 @@ mod scope;
 mod sources;
 mod split;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::context::App;
 pub use index::{DocHit, Status};
@@ -37,15 +37,8 @@ pub fn reset(app: &App) -> Result<()> {
     if !scope::is_user_or_assistant(app)? {
         bail!("only the user and the assistant can reset the search index");
     }
-    let path = index::index_path(app);
-    for suffix in ["", "-wal", "-shm"] {
-        let mut file = path.clone().into_os_string();
-        file.push(suffix);
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("delete {}", path.display())),
-        }
-    }
-    Ok(())
+    // Emptied rather than deleted: another search may have the file open,
+    // and would go on writing to a file nobody can see.
+    let conn = index::open(app)?;
+    index::clear(&conn)
 }

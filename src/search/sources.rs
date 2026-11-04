@@ -40,6 +40,8 @@ const TEST_DIRS: &[&str] = &["fixtures", "testdata"];
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// How much of a file is looked at for a NUL byte.
 const SNIFF_BYTES: usize = 8 * 1024;
+/// Bump when the rules above change, so repositories are listed again.
+const RULES_VERSION: &str = "1";
 /// The most documents one source holds.
 const MAX_DOCS: usize = 5_000;
 
@@ -65,7 +67,20 @@ pub fn stamp(app: &App, source: &Source) -> Option<String> {
     if !trunk.is_dir() {
         return None;
     }
-    read_head(&trunk.join(".git")).or_else(|| git::rev_parse(trunk, "HEAD"))
+    let head = read_head(&trunk.join(".git")).or_else(|| git::rev_parse(trunk, "HEAD"))?;
+    Some(format!("{head} {}", rules_stamp(app)))
+}
+
+/// What decides which files count, as a mark: a new [`RULES_VERSION`] or
+/// another `[search] exclude` lists a repository again although its HEAD
+/// has not moved.
+fn rules_stamp(app: &App) -> String {
+    let mut rules = RULES_VERSION.to_string();
+    for path in app.config.search.excluded_paths() {
+        rules.push('\n');
+        rules.push_str(&path.to_string_lossy());
+    }
+    super::index::fnv1a_hex(rules.as_bytes())
 }
 
 /// The commit HEAD names in the git directory `git_dir`, read from its files
@@ -139,7 +154,11 @@ fn task_files(root: &Path) -> Vec<FileEntry> {
         }
     }
     for sub in ["notes", "docs"] {
-        files.extend(walk(root, &root.join(sub)));
+        let dir = root.join(sub);
+        // A link could point anywhere, outside what the caller may read.
+        if dir.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            files.extend(walk(root, &dir));
+        }
     }
     files
 }
@@ -172,8 +191,7 @@ fn repo_path_allowed(rel: &str) -> bool {
     {
         return false;
     }
-    let upper = name.to_uppercase();
-    is_doc_name(name) || BARE_NAMES.iter().any(|b| upper.starts_with(b))
+    is_doc_name(name)
 }
 
 /// Every allowed file below `dir`, recursively, with paths relative to
@@ -181,6 +199,7 @@ fn repo_path_allowed(rel: &str) -> bool {
 fn walk(root: &Path, dir: &Path) -> Vec<FileEntry> {
     WalkDir::new(dir)
         .follow_links(false)
+        .follow_root_links(false)
         .into_iter()
         .filter_entry(|e| {
             e.depth() == 0 || !e.file_type().is_dir() || !skip_dir(&e.file_name().to_string_lossy())
@@ -207,7 +226,9 @@ fn is_doc_name(name: &str) -> bool {
 /// `path` as a document, if it is a plain file that is small enough and
 /// text.
 fn entry_of(root: &Path, path: &Path) -> Option<FileEntry> {
-    let meta = std::fs::metadata(path).ok()?;
+    // Not followed: a link in a repository could point at a file the
+    // caller may not read, which would then be indexed under that repository.
+    let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_BYTES {
         return None;
     }
@@ -241,6 +262,23 @@ fn entry_of(root: &Path, path: &Path) -> Option<FileEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn symbolic_links_are_not_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, outside) = (dir.path().join("task"), dir.path().join("secret"));
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("s.md"), "# Secret\n").unwrap();
+        std::fs::write(root.join("own.md"), "# Own\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("s.md"), root.join("link.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("real/docs")).unwrap();
+        let names: Vec<String> = task_files(&root).into_iter().map(|f| f.rel_path).collect();
+        assert_eq!(names, ["own.md"]);
+        assert!(walk(&root.join("real"), &root.join("real/docs")).is_empty());
+    }
 
     #[test]
     fn head_is_read_from_loose_and_packed_refs() {
@@ -333,6 +371,7 @@ mod tests {
             "CHANGELOG",
             "readme.markdown",
             "ReadMe",
+            "README.rst",
         ] {
             assert!(repo_path_allowed(yes), "{yes}");
         }
@@ -343,6 +382,9 @@ mod tests {
             "pkg/testdata/a.txt",
             "LICENSE",
             "docs/build/a.md",
+            "README.json",
+            "CHANGELOG.lock",
+            "READMEfoo",
         ] {
             assert!(!repo_path_allowed(no), "{no}");
         }

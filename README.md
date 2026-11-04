@@ -1437,7 +1437,7 @@ jeet search -n 10 how a task reports it is blocked
 jeet search --in repos --in projects deploy rollback
 jeet search --json retries                      # for scripts and agents
 jeet search --status                            # what is indexed for you
-jeet search --reset                             # delete the index (user and assistant)
+jeet search --reset                             # empty the index (user and assistant)
 ```
 
 Each document comes with up to three of its best passages: the heading path
@@ -1467,12 +1467,14 @@ contributes its top-level files (not the generated `AGENTS.md` and
 `CLAUDE.md`) and everything under `notes/` and `docs/`; a repository, the
 files git tracks at its trunk. Files over 2 MB, binaries, and the directories
 `.git`, `.claude`, `.jeet`, `node_modules`, `target`, `vendor`,
-`third_party`, `dist`, `build`, `out` and `*-backup` are skipped.
+`third_party`, `dist`, `build`, `out` and `*-backup` are skipped, and so are
+symbolic links, which could point outside what the caller may read.
 
 The index is one SQLite file, `~/.jeet/search/index.db`. It is a cache:
 every search first brings the sources it covers up to date (reading only
-files that changed; a repository is skipped outright while its HEAD is
-unchanged), and `jeet search --reset` deletes it.
+files that changed). A repository is listed again only when its HEAD moves
+or `[search] exclude` changes, so an uncommitted edit in a trunk is not
+seen. `jeet search --reset` empties it.
 
 ## Setup
 
@@ -3216,8 +3218,9 @@ exclude = ["~/.jeet/assistant/private"]   # path prefixes never indexed or shown
 exclude_repos = ["acme/legacy"]           # repositories left out of every scope
 ```
 
-`exclude_repos` takes the filters `jeet ls` takes; one that matches no
-repository, or more than one, leaves nothing out.
+Each `exclude_repos` entry is a repository's whole id or its last parts
+(`legacy`, `acme/legacy`), case aside, and leaves out every repository it
+matches.
 
 ### Template overrides
 

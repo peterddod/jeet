@@ -128,10 +128,12 @@ pub fn open_at(path: &Path) -> Result<Connection> {
         .ok();
     if version.as_deref().is_some_and(|v| v != SCHEMA_VERSION) {
         conn.execute_batch(
-            "DROP TABLE IF EXISTS passages_fts;
+            "BEGIN IMMEDIATE;
+             DROP TABLE IF EXISTS passages_fts;
              DROP TABLE IF EXISTS passages;
              DROP TABLE IF EXISTS docs;
-             DROP TABLE IF EXISTS sources;",
+             DROP TABLE IF EXISTS sources;
+             COMMIT;",
         )?;
     }
     conn.execute_batch(
@@ -211,6 +213,7 @@ pub fn refresh_source(
         }
     }
 
+    let mut unread = false;
     for file in &files {
         let path = file.abs_path.to_string_lossy().to_string();
         let old = known.remove(&path);
@@ -220,7 +223,9 @@ pub fn refresh_source(
             }
         }
         let Ok(bytes) = std::fs::read(&file.abs_path) else {
-            // Gone since it was listed: the next refresh drops it.
+            // Gone since it was listed: the next refresh drops it, so this
+            // one must not mark the source as done.
+            unread = true;
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
@@ -269,7 +274,7 @@ pub fn refresh_source(
     }
     tx.execute(
         "INSERT OR REPLACE INTO sources(source, stamp) VALUES(?1, ?2)",
-        params![key, stamp],
+        params![key, stamp.filter(|_| !unread)],
     )?;
     tx.commit()?;
     Ok(())
@@ -304,6 +309,18 @@ fn up_to_date(
         && files.iter().all(|f| {
             known.get(f.abs_path.to_string_lossy().as_ref()) == Some(&(f.mtime, f.size as i64))
         }))
+}
+
+/// Empty the index, under the write lock; the next search fills it again.
+pub fn clear(conn: &Connection) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "DELETE FROM passages_fts; DELETE FROM passages; DELETE FROM docs; DELETE FROM sources;",
+    )?;
+    tx.commit()?;
+    // Give the space back; skipped when another search holds the file.
+    let _ = conn.execute_batch("VACUUM");
+    Ok(())
 }
 
 /// Remove a document's passages, from the FTS table too.
@@ -341,7 +358,7 @@ fn insert_passages(conn: &Connection, doc_id: i64, title: &str, text: &str) -> R
 /// FNV-1a over `bytes`, 64 bits, as hex. It is written out here because
 /// the hash is stored: the standard library's hashers may change between
 /// Rust versions.
-fn fnv1a_hex(bytes: &[u8]) -> String {
+pub(super) fn fnv1a_hex(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         hash ^= u64::from(b);
@@ -403,6 +420,10 @@ fn rrf(rank: usize) -> f64 {
 /// The best documents for `query` among the sources named by `keys`, at
 /// most `limit`.
 pub fn query(conn: &Connection, keys: &[String], query: &str, limit: usize) -> Result<Vec<DocHit>> {
+    // One read transaction: a search refreshing the index meanwhile cannot
+    // take a passage away between finding it and reading it.
+    let tx = conn.unchecked_transaction()?;
+    let conn: &Connection = &tx;
     let tokens = query_tokens(query);
     if tokens.is_empty() || keys.is_empty() {
         return Ok(Vec::new());
