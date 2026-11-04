@@ -3400,16 +3400,10 @@ fn task_open_runs_claude_in_tmux_with_plete_hooks() {
         ]
     );
 
-    // Running already: nothing new starts, and the session asked for is not
-    // forced on it.
-    let output = lab.plete_at(
-        &["task", "open", "fix-login", "--session", &session],
-        &lab.home(),
-        &env,
-    );
+    // Running already: nothing new starts.
+    let output = lab.plete_at(&["task", "open", "fix-login"], &lab.home(), &env);
     succeeded(&output);
     assert_eq!(path_from(&output), task);
-    assert!(stderr_of(&output).contains("already running"));
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
     assert!(calls_of(&tmux, "has-session")
         .iter()
@@ -3492,18 +3486,6 @@ fn task_open_runs_claude_in_tmux_with_plete_hooks() {
         "{resumed:?}"
     );
 
-    // A session the task never had is refused, before anything starts.
-    std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
-    let before = calls_of(&tmux, "new-session").len();
-    let output = lab.plete_at(
-        &["task", "open", "fix-login", "--session", "nope"],
-        &lab.home(),
-        &env,
-    );
-    assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("has no session nope"));
-    assert_eq!(calls_of(&tmux, "new-session").len(), before);
-
     // Archiving ends the agent; so does deleting.
     succeeded(&lab.plete_at(&["task", "open", "fix-login"], &lab.home(), &env));
     succeeded(&lab.plete_at(&["task", "archive", "fix-login"], &lab.home(), &env));
@@ -3537,14 +3519,6 @@ fn an_agent_other_than_claude_just_runs_in_tmux() {
         ("PLETE_TMUX", tmux_env.as_str()),
         ("PLETE_AGENT", "aider --yes"),
     ];
-
-    let output = lab.plete_at(
-        &["task", "open", "plain", "--session", "x"],
-        &lab.home(),
-        &env,
-    );
-    assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("keeps no sessions"));
 
     succeeded(&lab.plete_at(&["task", "open", "plain"], &lab.home(), &env));
     let argv = calls_of(&tmux, "new-session").pop().unwrap();
@@ -4430,7 +4404,7 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
 }
 
 #[test]
-fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
+fn enter_in_the_tasks_list_attaches_to_the_tasks_one_session() {
     if !have_script() {
         eprintln!("no `script` to run a terminal with; skipping");
         return;
@@ -4447,12 +4421,11 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
         ("PLETE_AGENT", "claude"),
         ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
     ];
-    // Two sessions the agent reported, a second apart.
-    let (older, newer) = (
+    // The agent reported two sessions; the task has just the one.
+    for session in [
         "aaaaaaaa-1111-4111-8111-111111111111",
         "bbbbbbbb-2222-4222-8222-222222222222",
-    );
-    for session in [older, newer] {
+    ] {
         let output = lab.hook(
             "SessionStart",
             &hook_input("SessionStart", session, &task),
@@ -4461,18 +4434,12 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
         hook_ok(&output);
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }
+    let one = lab.task_session(&task_id(&task)).unwrap();
 
     let mut screen = Pty::open(&lab, "tasks", &lab.home(), &env);
     screen.wait_for_text("plete · tasks");
-    // No agent is running, and there are two sessions: which one?
+    // No agent is running: ⏎ starts it in the one session, with no picker.
     screen.type_keys(b"\r");
-    screen.wait_for_text("which session?");
-    assert!(
-        calls_of(&tmux, "new-session").is_empty(),
-        "nothing started yet"
-    );
-    // The newest is first; take the older one.
-    screen.type_keys(b"j\r");
     wait_until("the attach", || {
         !calls_of(&tmux, "attach-session").is_empty()
     });
@@ -4481,14 +4448,14 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
     assert_eq!(started.len(), 1, "{started:?}");
     let argv = &started[0];
     let at = argv.iter().position(|a| a == "--session-id").unwrap();
-    assert_eq!(argv[at + 1], older, "{argv:?}");
+    assert_eq!(argv[at + 1], one, "{argv:?}");
     let attached = calls_of(&tmux, "attach-session");
     assert_eq!(
         attached[0][1..],
         ["-t".to_string(), "=plete-fix-login".into()]
     );
 
-    // The agent is running now: ⏎ attaches straight away, no picker.
+    // The agent is running now: ⏎ attaches straight away.
     screen.type_keys(b"\r");
     wait_until("the second attach", || {
         calls_of(&tmux, "attach-session").len() == 2
@@ -5545,8 +5512,8 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     );
 }
 
-/// ctrl-s and ctrl-a in the explorer act on the task being browsed: its
-/// sessions, and its agent in tmux, as ⏎ in the tasks list does.
+/// ctrl-a in the explorer acts on the task being browsed: its agent in tmux,
+/// as ⏎ in the tasks list does.
 #[cfg(unix)]
 #[test]
 fn the_explorer_opens_the_tasks_agent_in_tmux() {
@@ -5566,27 +5533,22 @@ fn the_explorer_opens_the_tasks_agent_in_tmux() {
         ("PLETE_AGENT", "claude"),
         ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
     ];
-    let (older, newer) = (
-        "aaaaaaaa-1111-4111-8111-111111111111",
-        "bbbbbbbb-2222-4222-8222-222222222222",
-    );
-    for session in [older, newer] {
-        let output = lab.hook(
+    let output = lab.hook(
+        "SessionStart",
+        &hook_input(
             "SessionStart",
-            &hook_input("SessionStart", session, &task),
-            &[],
-        );
-        hook_ok(&output);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-    }
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            &task,
+        ),
+        &[],
+    );
+    hook_ok(&output);
+    let one = lab.task_session(&task_id(&task)).unwrap();
     std::fs::create_dir(task.join("notes")).unwrap();
 
     let mut screen = Pty::open(&lab, "explore", &task.join("notes"), &env);
     screen.wait_for_text("plete · task Fix login");
-    // The task's sessions, newest first; resume the older one.
-    screen.type_keys(b"\x13");
-    screen.wait_for_text("Fix login · sessions");
-    screen.type_keys(b"j\r");
+    screen.type_keys(b"\x01");
     wait_until("the attach", || {
         !calls_of(&tmux, "attach-session").is_empty()
     });
@@ -5600,7 +5562,7 @@ fn the_explorer_opens_the_tasks_agent_in_tmux() {
         "{argv:?}"
     );
     let at = argv.iter().position(|a| a == "--session-id").unwrap();
-    assert_eq!(argv[at + 1], older, "{argv:?}");
+    assert_eq!(argv[at + 1], one, "{argv:?}");
     assert!(argv.iter().any(|a| a == "--settings"), "{argv:?}");
     assert_eq!(
         calls_of(&tmux, "attach-session")[0][1..],
@@ -15860,23 +15822,12 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     assert!(!stub.join("alive/plete-c").exists());
     assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
 
-    // Opened in a session the user chose, as the TUI's session picker
-    // does: it still starts with what waited.
+    // Opened by the user, as ⏎ in the TUI does: it still starts with what
+    // waited, in the task's one session.
     let _c_agent = session_pane(&lab, &tmux, "c", &c);
-    let chosen = "22222222-3333-4444-8555-666666666666";
-    lab.index()
-        .execute(
-            "INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
-             VALUES (?1, ?2, 'c', 1, 1)",
-            [chosen, c.as_str()],
-        )
-        .unwrap();
-    let output = lab.plete_at(
-        &["task", "open", "c", "--session", chosen],
-        &lab.home(),
-        &env,
-    );
+    let output = lab.plete_at(&["task", "open", "c"], &lab.home(), &env);
     succeeded(&output);
+    let chosen = lab.task_session(&c).unwrap();
     assert!(
         stderr_of(&output).contains("over [managers] max_live (1/1"),
         "{}",
@@ -15888,7 +15839,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let c_start = started.last().unwrap();
     assert!(c_start.contains(&"plete-c".to_string()), "{c_start:?}");
     assert!(
-        c_start.windows(2).any(|w| w == ["--session-id", chosen]),
+        c_start.windows(2).any(|w| w == ["--session-id", &chosen]),
         "{c_start:?}"
     );
     assert!(

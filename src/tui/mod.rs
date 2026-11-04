@@ -35,7 +35,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use crate::agent::{self, AgentSpec};
+use crate::agent;
 use crate::context::App;
 use crate::db::tasks::{TaskRecord, TaskState};
 use crate::db::RepoRecord;
@@ -111,7 +111,6 @@ pub fn explore(
     start_dir: &Path,
     back: Option<&str>,
 ) -> Result<Exit> {
-    let spec = AgentSpec::from_config(&app.config)?;
     let (label, kind, status) = describe_root(app, repo, root);
 
     let mut explorer = Explorer::new(
@@ -121,7 +120,6 @@ pub fn explore(
         kind,
         status,
         start_dir.to_path_buf(),
-        spec,
     )?;
     explorer.back = back.map(str::to_string);
     if explorer.back.is_some() {
@@ -274,8 +272,7 @@ fn handle_browse_key(
         }
         KeyCode::Char('p') if ctrl => open_pr_panel(app, terminal, explorer, false),
         KeyCode::Char('o') if ctrl => open_repo_prs(app, terminal, explorer, None),
-        KeyCode::Char('a') if ctrl => open_agent(app, terminal, explorer, None)?,
-        KeyCode::Char('s') if ctrl => open_sessions(app, terminal, explorer),
+        KeyCode::Char('a') if ctrl => open_agent(app, terminal, explorer)?,
         KeyCode::Char('w') if ctrl => open_worktrees(app, terminal, explorer),
         // F1 alone would do, except macOS gives it to the media keys by
         // default and some terminals keep it for their own menu. ctrl-g is
@@ -565,7 +562,6 @@ fn handle_overlay_key(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let toggled_shut = match (&overlay, key.code) {
         (Overlay::Worktrees { .. }, KeyCode::Char('w')) => ctrl,
-        (Overlay::Sessions { .. }, KeyCode::Char('s')) => ctrl,
         (Overlay::PullRequest { .. }, KeyCode::Char('p')) => ctrl,
         (Overlay::RepoPrs { .. }, KeyCode::Char('o')) => ctrl,
         (Overlay::Help { .. }, KeyCode::Char('g')) => ctrl,
@@ -677,40 +673,6 @@ fn handle_overlay_key(
                 explorer.overlay = Some(Overlay::Worktrees { selected });
             }
             _ => explorer.overlay = Some(Overlay::Worktrees { selected }),
-        },
-        Overlay::Sessions {
-            task,
-            sessions,
-            mut selected,
-        } => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {}
-            KeyCode::Up | KeyCode::Char('k') => {
-                selected = selected.saturating_sub(1);
-                explorer.overlay = Some(Overlay::Sessions {
-                    task,
-                    sessions,
-                    selected,
-                });
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                selected = (selected + 1).min(sessions.len().saturating_sub(1));
-                explorer.overlay = Some(Overlay::Sessions {
-                    task,
-                    sessions,
-                    selected,
-                });
-            }
-            KeyCode::Enter => match sessions.get(selected) {
-                Some(session) => open_agent(app, terminal, explorer, Some(session.id.clone()))?,
-                None => explorer.set_status("no session selected"),
-            },
-            _ => {
-                explorer.overlay = Some(Overlay::Sessions {
-                    task,
-                    sessions,
-                    selected,
-                })
-            }
         },
         Overlay::PullRequest {
             pending,
@@ -951,56 +913,6 @@ fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
         from_panel: false,
     });
     None
-}
-
-/// ctrl-s: the sessions of this task's agent, ⏎ to resume one.
-fn open_sessions(app: &App, terminal: &mut Tui, explorer: &mut Explorer) {
-    let Some(task) = task_here(app, explorer) else {
-        return;
-    };
-    if !explorer.agent.supports_sessions() {
-        explorer.overlay = Some(Overlay::Message {
-            title: "sessions".into(),
-            lines: vec![format!(
-                "plete does not know where `{}` stores its sessions",
-                explorer.agent.display()
-            )],
-            from_panel: false,
-        });
-        return;
-    }
-    let dir = crate::tasks::task_dir(app, &task);
-    let sessions = with_progress(terminal, explorer, "reading sessions", || {
-        tasks::session_choices(app, &task, &dir)
-    })
-    .and_then(|inner| inner);
-    match sessions {
-        Ok(sessions) if sessions.is_empty() => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "sessions".into(),
-                lines: vec![
-                    format!("task {} has no agent sessions yet", task.name),
-                    String::new(),
-                    "press ctrl-a to start its agent".into(),
-                ],
-                from_panel: false,
-            });
-        }
-        Ok(sessions) => {
-            explorer.overlay = Some(Overlay::Sessions {
-                task,
-                sessions,
-                selected: 0,
-            })
-        }
-        Err(e) => {
-            explorer.overlay = Some(Overlay::Message {
-                title: "sessions".into(),
-                lines: vec![format!("{e:#}")],
-                from_panel: false,
-            })
-        }
-    }
 }
 
 /// Move the explorer to another worktree, leaving it where it was if the new
@@ -1549,16 +1461,10 @@ fn open_editor(app: &App, terminal: &mut Tui, explorer: &mut Explorer, file: &Pa
     Ok(())
 }
 
-/// ctrl-a, or ⏎ on a session: attach to the agent of the task being
-/// browsed, in its tmux session, starting it first if need be — resuming
-/// `session` when given, else the task's latest — exactly as ⏎ in the tasks
-/// list does. Detaching comes back here.
-fn open_agent(
-    app: &App,
-    terminal: &mut Tui,
-    explorer: &mut Explorer,
-    session: Option<String>,
-) -> Result<()> {
+/// ctrl-a: attach to the agent of the task being browsed, in its tmux
+/// session, starting it first if need be — resuming the task's session —
+/// exactly as ⏎ in the tasks list does. Detaching comes back here.
+fn open_agent(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
     let Some(task) = task_here(app, explorer) else {
         return Ok(());
     };
@@ -1567,7 +1473,7 @@ fn open_agent(
         explorer,
         &format!("starting {}'s agent", task.name),
         // The user at the terminal asked for it: past `max_live` too (M22).
-        || runtime::ensure_running(app, &task, session.as_deref(), None, Admission::Bypass),
+        || runtime::ensure_running(app, &task, None, None, Admission::Bypass),
     )?;
     let running = match running {
         Ok(running) => running,

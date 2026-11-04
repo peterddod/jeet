@@ -17,7 +17,7 @@ use crate::worktrees::WorktreeStatus;
 /// ones that replaced keys people knew. So the head and the tail always stay,
 /// and the middle is dropped from the right until the rest fits.
 const HINT_HEAD: &str = "type to filter";
-const HINT_MIDDLE: [&str; 12] = [
+const HINT_MIDDLE: [&str; 11] = [
     "⇥ complete",
     ": command",
     "/ enter",
@@ -27,7 +27,6 @@ const HINT_MIDDLE: [&str; 12] = [
     "^p PR",
     "^o PRs",
     "^w worktrees",
-    "^s sessions",
     "^a agent",
     "^d hidden",
 ];
@@ -622,51 +621,6 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 );
             frame.render_stateful_widget(list, area, &mut state);
         }
-        Overlay::Sessions {
-            task,
-            sessions,
-            selected,
-        } => {
-            let area = centered_rect(85, 70, frame.area());
-            frame.render_widget(Clear, area);
-            let items: Vec<ListItem> = sessions
-                .iter()
-                .map(|session| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:<10}", crate::agent::age_label(session.last)),
-                            Style::default().fg(Color::Blue),
-                        ),
-                        Span::styled(
-                            format!("{:<10}", session.state),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::raw(format!("{}  ", truncate(&session.name, 30))),
-                        Span::styled(session.id.clone(), Style::default().fg(Color::DarkGray)),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            state.select(if sessions.is_empty() {
-                None
-            } else {
-                Some((*selected).min(sessions.len() - 1))
-            });
-            let title = format!(" {} · sessions · ⏎ resume  esc close ", task.name);
-            let list = List::new(items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .title_style(Style::default().fg(Color::Green)),
-                )
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                );
-            frame.render_stateful_widget(list, area, &mut state);
-        }
         Overlay::Confirm {
             title,
             lines,
@@ -1020,7 +974,7 @@ pub(super) fn draw_review_body(
 }
 
 /// The key list, as it is both rendered and measured.
-const HELP: [(&str, &str); 27] = [
+const HELP: [(&str, &str); 26] = [
     (
         "a-z, 0-9, …",
         "type to filter this level (live, no key needed)",
@@ -1042,7 +996,6 @@ const HELP: [(&str, &str); 27] = [
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
     ("ctrl-a", "this task's agent, in tmux: started if need be"),
-    ("ctrl-s", "this task's agent sessions: ⏎ resumes one"),
     ("ctrl-w", "worktrees of this repository: switch to one"),
     ("", "  in the panel: o open its PR, r refresh, esc close"),
     (
@@ -1570,7 +1523,6 @@ mod tests {
             "worktree".into(),
             WorktreeStatus::default(),
             dir.path().to_path_buf(),
-            crate::agent::AgentSpec::from_command("claude").unwrap(),
         )
         .unwrap();
         explorer.pr = PrLookup::Found(Box::new(PullRequest {
@@ -1621,7 +1573,6 @@ mod tests {
             "task canvas".into(),
             WorktreeStatus::default(),
             dir.path().to_path_buf(),
-            crate::agent::AgentSpec::from_command("claude").unwrap(),
         )
         .unwrap();
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -1663,7 +1614,6 @@ mod tests {
             "worktree".into(),
             WorktreeStatus::default(),
             dir.path().to_path_buf(),
-            crate::agent::AgentSpec::from_command("claude").unwrap(),
         )
         .unwrap();
         let render = |explorer: &mut Explorer| {

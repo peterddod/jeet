@@ -542,8 +542,7 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
             }
             if !known.iter().any(|s| s.session_id == id) && !spec.harness.has_session(dir, id) {
                 bail!(
-                    "{} has no session {id} that plete or {} knows of; `plete task ls` \
-                     shows its tasks, and ctrl-s in a task's explorer its sessions",
+                    "{} has no session {id} that plete or {} knows of",
                     launch.subject,
                     spec.harness.name()
                 );

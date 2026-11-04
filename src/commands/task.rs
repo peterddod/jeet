@@ -944,10 +944,10 @@ pub fn unanchored_advice(slugs: &[String], assistant_windows: usize) -> Vec<Stri
 /// Attach to the task's agent in its tmux session, starting the agent first
 /// if it is not running. Without a terminal there is nobody to attach, so
 /// the agent is left running detached and the directory is printed instead.
-pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
+pub fn open(app: &App, name: &str) -> Result<()> {
     let task = match super::review::named(app, Verb::TaskOpen, name, false)? {
         super::review::Named::Task(task) => task,
-        super::review::Named::Review(review) => return super::review::open(app, &review, session),
+        super::review::Named::Review(review) => return super::review::open(app, &review, None),
     };
     if task.state == TaskState::Archived {
         bail!(
@@ -963,7 +963,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         Caller::User => Admission::Bypass,
         Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
     };
-    let running = runtime::ensure_running(app, &task, session, None, admission)?;
+    let running = runtime::ensure_running(app, &task, None, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
     match running.started {
