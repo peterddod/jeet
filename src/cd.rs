@@ -13,7 +13,7 @@ pub const CD_FILE_ENV: &str = "JEET_CD_FILE";
 
 /// Ask the shell wrapper to `cd` into `path` once jeet exits.
 pub fn request(path: &Path) -> Result<()> {
-    let Some(file) = std::env::var(CD_FILE_ENV).ok().filter(|f| !f.is_empty()) else {
+    let Some(file) = crate::env::var(CD_FILE_ENV).ok().filter(|f| !f.is_empty()) else {
         return Ok(());
     };
     std::fs::write(&file, path.to_string_lossy().as_bytes())
@@ -22,7 +22,7 @@ pub fn request(path: &Path) -> Result<()> {
 
 /// Whether the shell wrapper is active, so `cd` hand-off will be honoured.
 pub fn wrapper_active() -> bool {
-    std::env::var(CD_FILE_ENV)
+    crate::env::var(CD_FILE_ENV)
         .map(|v| !v.is_empty())
         .unwrap_or(false)
 }

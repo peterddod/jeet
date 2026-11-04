@@ -1922,32 +1922,6 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
             let area = content_rect(70, body.len() + 2, full);
             render_text(frame, area, format!(" {title} "), Color::Red, body);
         }
-        Panel::Sessions {
-            task_id,
-            sessions,
-            selected,
-        } => {
-            let items = sessions
-                .iter()
-                .map(|s| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:<10}", age_label(s.last)),
-                            Style::default().fg(Color::Blue),
-                        ),
-                        Span::styled(format!("{:<10}", s.state), Style::default().fg(Color::Cyan)),
-                        Span::raw(format!("{}  ", truncate(&s.name, 30))),
-                        dim(s.id.clone()),
-                    ]))
-                })
-                .collect();
-            let area = centered_rect(80, 60, full);
-            let title = format!(
-                " {} · which session? · ⏎ resume  esc cancel ",
-                task_name(ui, task_id)
-            );
-            render_list(frame, area, title, items, *selected);
-        }
         Panel::Places {
             task_id,
             places,

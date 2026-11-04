@@ -10,7 +10,7 @@ use crate::commands::path;
 use crate::context::App;
 
 pub fn run(app: &App, filter: &str) -> Result<()> {
-    if !io::stdout().is_terminal() && std::env::var("JEET_EXEC_INIT").is_err() {
+    if !io::stdout().is_terminal() && crate::env::var("JEET_EXEC_INIT").is_err() {
         bail!("jeet exec requires an interactive terminal; use `jeet path` for scripting");
     }
     let target = path::resolve_target(app, filter)?;
@@ -22,7 +22,7 @@ pub fn run(app: &App, filter: &str) -> Result<()> {
 }
 
 fn exec_shell(target: &Path) -> Result<i32> {
-    let shell = std::env::var("JEET_SHELL")
+    let shell = crate::env::var("JEET_SHELL")
         .or_else(|_| std::env::var("SHELL"))
         .unwrap_or_else(|_| "/bin/sh".to_string());
 
@@ -33,7 +33,7 @@ fn exec_shell(target: &Path) -> Result<i32> {
     let mut cmd = Command::new(&shell);
     cmd.current_dir(target);
 
-    if let Ok(init) = std::env::var("JEET_EXEC_INIT") {
+    if let Ok(init) = crate::env::var("JEET_EXEC_INIT") {
         cmd.arg("-c").arg(init);
     }
 

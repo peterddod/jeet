@@ -158,6 +158,7 @@ mod tests {
         let app = App {
             config: config::load_or_create(&path).unwrap(),
             db: Database::open(&config::index_path(&path)).unwrap(),
+            new_home: None,
             home: path,
         };
         let root = assistant::ensure(&app).unwrap();

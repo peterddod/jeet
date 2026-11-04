@@ -9,8 +9,21 @@ use anyhow::{bail, Result};
 
 use super::Tokens;
 
-/// The keyring service jeet's tokens are kept under.
-const SERVICE: &str = "jeet";
+/// The keyring services jeet's tokens are kept under, new name and old.
+const NEW_SERVICE: &str = "plete";
+const LEGACY_SERVICE: &str = "jeet";
+/// The service tokens are written to; both are read.
+const SERVICE: &str = LEGACY_SERVICE; // flipped to plete in the rename PR
+
+/// The first secret `lookup` finds under the new service, else the old one.
+fn first_found(mut lookup: impl FnMut(&str) -> Result<Option<String>>) -> Result<Option<String>> {
+    for service in [NEW_SERVICE, LEGACY_SERVICE] {
+        if let Some(secret) = lookup(service)? {
+            return Ok(Some(secret));
+        }
+    }
+    Ok(None)
+}
 
 /// Where secrets are kept: the OS keyring, or a map in tests.
 pub trait Keyring {
@@ -23,12 +36,14 @@ pub struct OsKeyring;
 
 impl Keyring for OsKeyring {
     fn get(&self, account: &str) -> Result<Option<String>> {
-        let entry = keyring::Entry::new(SERVICE, account)?;
-        match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        first_found(|service| {
+            let entry = keyring::Entry::new(service, account)?;
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
     }
 
     fn set(&self, account: &str, secret: &str) -> Result<()> {
@@ -104,6 +119,29 @@ impl Keyring for MemKeyring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_new_service_is_read_first_then_the_old() {
+        let found = |services: &[(&str, &str)]| {
+            first_found(|service| {
+                Ok(services
+                    .iter()
+                    .find(|(s, _)| *s == service)
+                    .map(|(_, v)| v.to_string()))
+            })
+            .unwrap()
+        };
+        assert_eq!(found(&[("jeet", "old")]).as_deref(), Some("old"));
+        assert_eq!(found(&[("plete", "new")]).as_deref(), Some("new"));
+        assert_eq!(
+            found(&[("jeet", "old"), ("plete", "new")]).as_deref(),
+            Some("new")
+        );
+        assert_eq!(found(&[]), None);
+        // A failure is not read as absent.
+        assert!(first_found(|_| bail!("locked")).is_err());
+        assert_eq!(SERVICE, LEGACY_SERVICE);
+    }
 
     #[test]
     fn tokens_are_kept_per_home_and_an_agent_reads_none() {

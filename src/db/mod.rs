@@ -557,6 +557,14 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE task_reports ADD COLUMN unanswered_told INTEGER NOT NULL DEFAULT 0;
     UPDATE task_reports SET reasked = 1, unanswered_told = 1;
     ",
+    // v14: a work task's or manager's one session, as a review has: the one
+    // it resumes, moved on to each session its agent starts (a `/clear`, a
+    // compact). The others stay in `task_sessions` as history. NULL for a
+    // task from before, which falls back to its latest session until its
+    // next start sets it. Additive only; a rebuild of `tasks` must copy it.
+    "
+    ALTER TABLE tasks ADD COLUMN session_id TEXT;
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
@@ -705,7 +713,7 @@ impl Database {
 /// home anyway.
 const ALLOW_DEV_MIGRATE: &str = "JEET_ALLOW_DEV_MIGRATE";
 
-/// Refuse to migrate the index at the default home (`~/.jeet`) from a
+/// Refuse to migrate the index at a default home (`~/.jeet` or `~/.plete`) from a
 /// development build: one built from an unreleased main would take it to a
 /// schema the installed release cannot open, and every jeet command would
 /// fail until it was restored from the backup.
@@ -713,14 +721,16 @@ fn refuse_dev_migration(index: &Path, current: i64, latest: i64) -> Result<()> {
     let Some(exe) = dev_build() else {
         return Ok(());
     };
-    if std::env::var(ALLOW_DEV_MIGRATE).as_deref() == Ok("1") {
+    if crate::env::var(ALLOW_DEV_MIGRATE).as_deref() == Ok("1") {
         return Ok(());
     }
-    let Some(default) = dirs::home_dir().map(|h| crate::config::index_path(&h.join(".jeet")))
-    else {
+    let Some(user_home) = dirs::home_dir() else {
         return Ok(());
     };
-    if !same_file(index, &default) {
+    let is_default = crate::config::default_home_candidates(&user_home)
+        .iter()
+        .any(|home| same_file(index, &crate::config::index_path(home)));
+    if !is_default {
         return Ok(());
     }
     bail!(

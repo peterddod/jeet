@@ -20,8 +20,40 @@ use anyhow::{bail, Context, Result};
 #[cfg_attr(test, allow(dead_code))]
 pub const BINARY_ENV: &str = "JEET_TMUX";
 
+/// What a tmux session's name starts with, under the new name and the old.
+pub const NEW_SESSION_PREFIX: &str = "plete-";
+pub const LEGACY_SESSION_PREFIX: &str = "jeet-";
+
 /// Every tmux session jeet makes is named with this in front.
-pub const SESSION_PREFIX: &str = "jeet-";
+pub const SESSION_PREFIX: &str = LEGACY_SESSION_PREFIX; // flipped to plete in the rename PR
+
+/// The name of the session of whatever has `slug`: one already running under
+/// either prefix (the new one first), else the name a new session gets.
+/// Sessions started before the rename keep their names.
+pub fn find_session(slug: &str) -> String {
+    pick_session(&list_sessions(), slug)
+}
+
+pub fn pick_session(existing: &[String], slug: &str) -> String {
+    [NEW_SESSION_PREFIX, LEGACY_SESSION_PREFIX]
+        .into_iter()
+        .map(|prefix| format!("{prefix}{slug}"))
+        .find(|name| existing.contains(name))
+        .unwrap_or_else(|| format!("{SESSION_PREFIX}{slug}"))
+}
+
+/// Whether tmux session `name` is the one of whatever has `slug`, under
+/// either prefix.
+pub fn is_session_of(name: &str, slug: &str) -> bool {
+    [NEW_SESSION_PREFIX, LEGACY_SESSION_PREFIX]
+        .into_iter()
+        .any(|prefix| name.strip_prefix(prefix) == Some(slug))
+}
+
+/// Whether tmux session `name` is one of jeet's, under either prefix.
+pub fn is_ours(name: &str) -> bool {
+    name.starts_with(NEW_SESSION_PREFIX) || name.starts_with(LEGACY_SESSION_PREFIX)
+}
 
 /// Set by jeet's launchd job and systemd unit. A tmux server keeps the
 /// environment of whoever started it, and hands it to every pane it makes
@@ -35,7 +67,7 @@ pub const INSTALL_HINT: &str = "jeet runs task agents in tmux, which was not fou
 
 #[cfg(not(test))]
 fn binary() -> String {
-    std::env::var(BINARY_ENV)
+    crate::env::var(BINARY_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "tmux".to_string())
@@ -170,9 +202,22 @@ pub fn require() -> Result<()> {
     Ok(())
 }
 
+/// Take out of `cmd`'s environment what must not reach a tmux server (and so
+/// every pane it makes), under both names.
+fn remove_ours(cmd: &mut Command) {
+    for name in [
+        crate::cd::CD_FILE_ENV,
+        crate::tasks::TASK_ID_ENV,
+        crate::permissions::ASSISTANT_ENV,
+        BACKGROUND_ENV,
+    ] {
+        crate::env::remove_both(cmd, name);
+    }
+}
+
 /// Whether this process runs as a background job: see [`BACKGROUND_ENV`].
 fn in_background() -> bool {
-    std::env::var_os(BACKGROUND_ENV).is_some_and(|v| !v.is_empty())
+    crate::env::var_os(BACKGROUND_ENV).is_some_and(|v| !v.is_empty())
 }
 
 /// Whether a tmux server is running, for a new session to join.
@@ -272,17 +317,16 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
         .args(["-s", name, "-c"])
         .arg(cwd);
     for (key, value) in env {
-        cmd.arg("-e").arg(format!("{key}={value}"));
+        for name in crate::env::both_names(key) {
+            cmd.arg("-e").arg(format!("{name}={value}"));
+        }
     }
     cmd.arg("--").args(argv);
     // A server this starts keeps a copy of our environment for every pane it
     // ever makes: the shell wrapper's cd file, this task's id and the
     // assistant's restrictions must not leak into other sessions that way.
-    cmd.env_remove(crate::cd::CD_FILE_ENV)
-        .env_remove(crate::tasks::TASK_ID_ENV)
-        .env_remove(crate::permissions::ASSISTANT_ENV)
-        .env_remove(BACKGROUND_ENV)
-        .stdin(Stdio::null());
+    remove_ours(&mut cmd);
+    cmd.stdin(Stdio::null());
     let output = cmd.bounded_output().context("run tmux")?;
     if !output.status.success() {
         bail!(
@@ -300,7 +344,16 @@ pub fn new_session(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String]
 
 /// The session option that holds the tmux id (`%3`) of the pane
 /// [`new_session`] started the agent in.
-const AGENT_PANE_OPTION: &str = "@jeet-agent-pane";
+const AGENT_PANE_OPTION: &str = "@jeet-agent-pane"; // flipped to plete in the rename PR
+/// The name sessions made under the other name carry it by, read when the
+/// option above is not set.
+const AGENT_PANE_FALLBACK: &str = "@plete-agent-pane"; // flipped to jeet in the rename PR
+
+/// A tmux format that expands to option `first` when it is set, else to
+/// `fallback`: sessions and windows made under the other name carry it.
+fn either_option(first: &str, fallback: &str) -> String {
+    format!("#{{?#{{{first}}},#{{{first}}},#{{{fallback}}}}}")
+}
 
 /// Note in session `name`, just started, the id `pane` of the pane its
 /// agent runs in, as tmux reported it when it started the session. An id
@@ -326,15 +379,20 @@ fn agent_pane(name: &str) -> String {
 /// What session `name` holds as its agent's pane id, as noted; empty when
 /// nothing is.
 fn recorded_agent_pane(name: &str) -> String {
-    command()
-        .args(["show-options", "-qv", "-t", &format!("{}:", target(name))])
-        .arg(AGENT_PANE_OPTION)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .bounded_output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    let show = |option: &str| {
+        command()
+            .args(["show-options", "-qv", "-t", &format!("{}:", target(name))])
+            .arg(option)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .bounded_output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .filter(|v| !v.trim().is_empty())
+    };
+    show(AGENT_PANE_OPTION)
+        .or_else(|| show(AGENT_PANE_FALLBACK))
         .unwrap_or_default()
 }
 
@@ -422,12 +480,17 @@ fn paste(pane: &str, text: &str) -> Result<()> {
 }
 
 /// The window option a window made by [`new_window`] is keyed by.
-const KEY_OPTION: &str = "@jeet_key";
+const KEY_OPTION: &str = "@jeet_key"; // flipped to plete in the rename PR
+/// The name windows made under the other name carry it by, read when the
+/// option above is not set.
+const KEY_FALLBACK: &str = "@plete_key"; // flipped to jeet in the rename PR
 
 /// The window option holding the key a window made by [`new_window`] was
 /// first given, which [`set_window_key`] never changes: what its program was
 /// launched as, whatever it has gone on to since.
-const LAUNCH_OPTION: &str = "@jeet_launch";
+const LAUNCH_OPTION: &str = "@jeet_launch"; // flipped to plete in the rename PR
+/// As [`KEY_FALLBACK`].
+const LAUNCH_FALLBACK: &str = "@plete_launch"; // flipped to jeet in the rename PR
 
 /// One window of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,7 +514,11 @@ pub fn windows(name: &str) -> Vec<Window> {
             "-t",
             &target(name),
             "-F",
-            &format!("#{{window_id}}\t#{{pane_dead}}\t#{{{KEY_OPTION}}}\t#{{{LAUNCH_OPTION}}}"),
+            &format!(
+                "#{{window_id}}\t#{{pane_dead}}\t{}\t{}",
+                either_option(KEY_OPTION, KEY_FALLBACK),
+                either_option(LAUNCH_OPTION, LAUNCH_FALLBACK)
+            ),
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -537,14 +604,13 @@ pub fn new_window(
         // shell command: the name is the user's, so it goes in literally.
         cmd.args(["-n", &format_literal(title), "-c"]).arg(cwd);
         for (key, value) in env {
-            cmd.arg("-e").arg(format!("{key}={value}"));
+            for name in crate::env::both_names(key) {
+                cmd.arg("-e").arg(format!("{name}={value}"));
+            }
         }
         cmd.arg("--").args(argv);
-        cmd.env_remove(crate::cd::CD_FILE_ENV)
-            .env_remove(crate::tasks::TASK_ID_ENV)
-            .env_remove(crate::permissions::ASSISTANT_ENV)
-            .env_remove(BACKGROUND_ENV)
-            .stdin(Stdio::null());
+        remove_ours(&mut cmd);
+        cmd.stdin(Stdio::null());
         let output = cmd.bounded_output().context("run tmux")?;
         // Another jeet made the session between the look and the start:
         // a window in it does as well.
@@ -610,7 +676,8 @@ pub fn current_window(name: &str) -> Option<(String, Option<String>)> {
     let output = command()
         .args(["display-message", "-p", "-t", &pane])
         .arg(format!(
-            "#{{session_name}}\t#{{window_id}}\t#{{{KEY_OPTION}}}"
+            "#{{session_name}}\t#{{window_id}}\t{}",
+            either_option(KEY_OPTION, KEY_FALLBACK)
         ))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -651,7 +718,9 @@ pub fn split_window(name: &str, cwd: &Path, env: &[(&str, &str)], argv: &[String
     cmd.args(["split-window", "-d", "-h", "-t", &pane, "-c"])
         .arg(cwd);
     for (key, value) in env {
-        cmd.arg("-e").arg(format!("{key}={value}"));
+        for name in crate::env::both_names(key) {
+            cmd.arg("-e").arg(format!("{name}={value}"));
+        }
     }
     cmd.arg("--").args(argv).stdin(Stdio::null());
     let output = cmd.bounded_output().context("run tmux")?;
@@ -923,7 +992,10 @@ const DETACH_HINT: &str = " Ctrl-Q → back to jeet (keeps running) ";
 fn set_detach_hint(name: &str) {
     let _ = quiet()
         .args(["bind-key", "-n", DETACH_KEY, "if-shell", "-F"])
-        .arg(format!("#{{m:{SESSION_PREFIX}*,#{{session_name}}}}"))
+        .arg(format!(
+            "#{{||:#{{m:{NEW_SESSION_PREFIX}*,#{{session_name}}}},\
+             #{{m:{LEGACY_SESSION_PREFIX}*,#{{session_name}}}}}}"
+        ))
         .args(["detach-client", &format!("send-keys {DETACH_KEY}")])
         .bounded_status();
     let _ = quiet()
@@ -945,7 +1017,9 @@ const EXTENDED_KEYS: &str = "extended-keys";
 
 /// Set on the server once jeet has turned [`EXTENDED_KEYS`] on there, so a
 /// user who turns it off again is not overruled.
-const EXTENDED_KEYS_MARK: &str = "@jeet-extended-keys";
+const EXTENDED_KEYS_MARK: &str = "@jeet-extended-keys"; // flipped to plete in the rename PR
+/// The mark of a server set up under the other name, which counts too.
+const EXTENDED_KEYS_MARK_FALLBACK: &str = "@plete-extended-keys"; // flipped to jeet in the rename PR
 
 /// A tmux command to run first, in the same call, wherever jeet starts a
 /// session or window: it turns [`EXTENDED_KEYS`] on, and tells tmux the
@@ -964,7 +1038,10 @@ fn extended_keys_first() -> Vec<String> {
     vec![
         "if-shell".into(),
         "-F".into(),
-        format!("#{{==:#{{{EXTENDED_KEYS}}}#{{{EXTENDED_KEYS_MARK}}},off}}"),
+        // Off, and marked by neither name.
+        format!(
+            "#{{==:#{{{EXTENDED_KEYS}}}#{{{EXTENDED_KEYS_MARK}}}#{{{EXTENDED_KEYS_MARK_FALLBACK}}},off}}"
+        ),
         format!(
             "set-option -s {EXTENDED_KEYS} on ; \
              set-option -as terminal-features 'xterm*:extkeys' ; \
@@ -1238,7 +1315,7 @@ pub fn current_window_key() -> Option<String> {
     let pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())?;
     let output = command()
         .args(["display-message", "-p", "-t", &pane])
-        .arg(format!("#{{{KEY_OPTION}}}"))
+        .arg(either_option(KEY_OPTION, KEY_FALLBACK))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .bounded_output()
@@ -1386,7 +1463,7 @@ fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
     let ours: String = listing
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .filter(|(session, _)| session.starts_with(SESSION_PREFIX))
+        .filter(|(session, _)| is_ours(session))
         .map(|(_, pane)| format!("{pane}\n"))
         .collect();
     parse_live_pane_pids(&ours)
@@ -1395,6 +1472,43 @@ fn parse_jeet_pane_pids(listing: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_found_under_either_prefix() {
+        let sessions = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let write = format!("{SESSION_PREFIX}api");
+        // None running: the name a new one gets.
+        assert_eq!(pick_session(&sessions(&["other"]), "api"), write);
+        // One from before the rename.
+        assert_eq!(pick_session(&sessions(&["jeet-api"]), "api"), "jeet-api");
+        assert_eq!(pick_session(&sessions(&["plete-api"]), "api"), "plete-api");
+        // Both: the new one.
+        assert_eq!(
+            pick_session(&sessions(&["jeet-api", "plete-api"]), "api"),
+            "plete-api"
+        );
+        // Another slug's, or a longer one, is not it.
+        assert_eq!(pick_session(&sessions(&["plete-api-2"]), "api"), write);
+        // Without a server there is no session, so the write name.
+        assert_eq!(find_session("api"), write);
+    }
+
+    #[test]
+    fn a_session_name_is_matched_under_either_prefix() {
+        assert!(is_session_of("jeet-api", "api"));
+        assert!(is_session_of("plete-api", "api"));
+        assert!(!is_session_of("plete-api-2", "api"));
+        assert!(!is_session_of("api", "api"));
+        assert!(is_ours("plete-x") && is_ours("jeet-x") && !is_ours("work"));
+    }
+
+    #[test]
+    fn an_option_reads_its_name_then_the_fallback() {
+        assert_eq!(
+            either_option("@jeet_key", "@plete_key"),
+            "#{?#{@jeet_key},#{@jeet_key},#{@plete_key}}"
+        );
+    }
 
     #[test]
     fn client_activity_is_that_of_the_clients_showing_the_window() {

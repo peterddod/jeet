@@ -96,7 +96,7 @@ pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
     }
     let _repo_lock = lock_repo(&app.home, &repo.id)?;
     git::fetch_prune(trunk)?;
-    if !in_store(&app.store_root(), trunk) {
+    if !app.in_store(trunk) {
         return Ok(Outcome::Fetched);
     }
 
@@ -144,7 +144,7 @@ pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
 
 /// Paths compare as given: both come from the index and the canonicalized
 /// home, so a trunk in the store always shares the store root's spelling.
-fn in_store(store_root: &Path, trunk: &Path) -> bool {
+pub(crate) fn in_store(store_root: &Path, trunk: &Path) -> bool {
     trunk.starts_with(store_root)
 }
 
@@ -416,7 +416,7 @@ pub fn maybe_sync_background(app: &App) {
         eprintln!("jeet: could not start a background sync: {e:#}");
         return;
     }
-    if let Err(e) = launch(&app.home) {
+    if let Err(e) = launch(app) {
         eprintln!("jeet: could not start a background sync: {e:#}");
     }
 }
@@ -424,14 +424,15 @@ pub fn maybe_sync_background(app: &App) {
 /// Launch `jeet store-sync` detached, as `review::launch` does a review: under
 /// `nohup` so closing the terminal does not kill it, in its own process group
 /// so a ctrl-c meant for the explorer does not either.
-fn launch(home: &Path) -> Result<()> {
+fn launch(app: &App) -> Result<()> {
+    let home = &app.home;
     let log = home.join(LOG_FILE);
     let out = File::create(&log).with_context(|| format!("create {}", log.display()))?;
     let exe = std::env::current_exe().context("locate the jeet binary")?;
     let mut cmd = Command::new("nohup");
+    crate::env::set_home(&mut cmd, home, app.new_home.as_deref());
     cmd.arg(exe)
         .arg("store-sync")
-        .env("JEET_HOME", home)
         .current_dir(home)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)

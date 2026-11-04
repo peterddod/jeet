@@ -559,6 +559,34 @@ fn path_from(output: &std::process::Output) -> std::path::PathBuf {
 /// A repository in the store whose origin *looks* like GitHub but is a local
 /// bare repo. Commands run against it with only `JEET_HOME` set, so the
 /// trunk's own config refuses the network outright should anything try.
+/// What a child is granted unless something narrows it, by name.
+const EVERY_CAPABILITY: [&str; 24] = [
+    "manager.create",
+    "manager.grant",
+    "manager.stop",
+    "pr.comment",
+    "pr.merge",
+    "pr.review",
+    "project.create",
+    "project.delete",
+    "project.read",
+    "repo.clone",
+    "repo.import",
+    "repo.sync",
+    "review.start",
+    "shell.install",
+    "task.archive",
+    "task.create",
+    "task.delete",
+    "task.open",
+    "task.resync",
+    "task.send",
+    "task.unarchive",
+    "watch.install",
+    "worktree.add",
+    "worktree.rm",
+];
+
 struct Lab {
     _store: StoreLab,
     home: String,
@@ -3044,6 +3072,17 @@ impl StoreLab {
             .unwrap()
     }
 
+    /// A task's one session, the one it resumes.
+    fn task_session(&self, task_id: &str) -> Option<String> {
+        self.index()
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     /// A review's state, by slug.
     fn review_state(&self, slug: &str) -> String {
         self.review_row(slug).unwrap().1
@@ -3127,6 +3166,7 @@ fn task_hook_writes_the_status_each_event_leaves() {
     // SessionStart recorded the session; clearing the conversation starts
     // another, which follows on from it.
     assert_eq!(lab.sessions(&id), [(session.to_string(), None)]);
+    assert_eq!(lab.task_session(&id).as_deref(), Some(session));
     let cleared = "66666666-7777-4888-8999-000000000000";
     hook_ok(&lab.hook(
         "SessionStart",
@@ -3140,6 +3180,8 @@ fn task_hook_writes_the_status_each_event_leaves() {
             (cleared.to_string(), Some(session.to_string()))
         ]
     );
+    // The cleared one is the task's one session now, the one it resumes.
+    assert_eq!(lab.task_session(&id).as_deref(), Some(cleared));
     // Seen again on resume, it keeps its parent.
     hook_ok(&lab.hook(
         "SessionStart",
@@ -3253,9 +3295,15 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "-c".into(),
             task.to_string_lossy().to_string(),
             "-e".into(),
+            format!("PLETE_TASK_ID={id}"),
+            "-e".into(),
             format!("JEET_TASK_ID={id}"),
             "-e".into(),
+            format!("PLETE_HOME={}", home.display()),
+            "-e".into(),
             format!("JEET_HOME={}", home.display()),
+            "-e".into(),
+            "PLETE_CD_FILE=".into(),
             "-e".into(),
             "JEET_CD_FILE=".into(),
         ]
@@ -3304,26 +3352,14 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "Bash(gh pr create:*)"
         ])
     );
-    // A top-level task is not gated, but is denied force-pushes, merges
-    // and pushes to a default branch as every other task is; a lease push
-    // is not caught.
+    // A top-level task is denied nothing by default but what its PR policy
+    // (draft, the default) denies; `[permissions] guards` adds the rest.
     let deny = settings["permissions"]["deny"].as_array().unwrap();
-    for rule in [
-        "Bash(git push --force *)",
-        "Bash(gh pr merge *)",
-        "Bash(git push * main *)",
-    ] {
-        assert!(deny.contains(&rule.into()), "{rule}: {deny:?}");
-    }
-    assert!(
-        !deny
-            .iter()
-            .any(|d| d.as_str().unwrap().starts_with("Bash(git push --force*")),
+    assert_eq!(
+        deny,
+        &[serde_json::json!("Bash(gh pr ready *)")],
         "{deny:?}"
     );
-    assert!(!deny.contains(&"Bash(gh pr comment *)".into()), "{deny:?}");
-    // And what its PR policy (draft, the default) denies.
-    assert!(deny.contains(&"Bash(gh pr ready *)".into()), "{deny:?}");
     // Known before the agent ever ran.
     assert_eq!(lab.sessions(&id), [(session.clone(), None)]);
     let hint = calls_of(&tmux, "set-option");
@@ -3346,22 +3382,16 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "C-q",
             "if-shell",
             "-F",
-            "#{m:jeet-*,#{session_name}}",
+            "#{||:#{m:plete-*,#{session_name}},#{m:jeet-*,#{session_name}}}",
             "detach-client",
             "send-keys C-q"
         ]
     );
 
-    // Running already: nothing new starts, and the session asked for is not
-    // forced on it.
-    let output = lab.jeet_at(
-        &["task", "open", "fix-login", "--session", &session],
-        &lab.home(),
-        &env,
-    );
+    // Running already: nothing new starts.
+    let output = lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env);
     succeeded(&output);
     assert_eq!(path_from(&output), task);
-    assert!(stderr_of(&output).contains("already running"));
     assert_eq!(calls_of(&tmux, "new-session").len(), 1);
     assert!(calls_of(&tmux, "has-session")
         .iter()
@@ -3423,18 +3453,26 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
     );
     assert!(!resumed.contains(&"--session-id".to_string()));
     assert_eq!(lab.sessions(&id).len(), 1);
+    assert_eq!(lab.task_session(&id).as_deref(), Some(session.as_str()));
 
-    // A session the task never had is refused, before anything starts.
+    // Another session the index has, more recently active, is not the
+    // task's one session, so it is not the one resumed.
+    let other = "99999999-8888-4777-8666-555555555555";
+    lab.index()
+        .execute(
+            "INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
+             VALUES (?1, ?2, 'old', 1, 99999999999)",
+            [other, id.as_str()],
+        )
+        .unwrap();
+    std::fs::write(transcripts.join(format!("{other}.jsonl")), "{}\n").unwrap();
     std::fs::remove_file(tmux.parent().unwrap().join("alive")).unwrap();
-    let before = calls_of(&tmux, "new-session").len();
-    let output = lab.jeet_at(
-        &["task", "open", "fix-login", "--session", "nope"],
-        &lab.home(),
-        &env,
+    succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
+    let resumed = calls_of(&tmux, "new-session").pop().unwrap();
+    assert!(
+        resumed.windows(2).any(|w| w == ["--resume", &session]),
+        "{resumed:?}"
     );
-    assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("has no session nope"));
-    assert_eq!(calls_of(&tmux, "new-session").len(), before);
 
     // Archiving ends the agent; so does deleting.
     succeeded(&lab.jeet_at(&["task", "open", "fix-login"], &lab.home(), &env));
@@ -3469,14 +3507,6 @@ fn an_agent_other_than_claude_just_runs_in_tmux() {
         ("JEET_TMUX", tmux_env.as_str()),
         ("JEET_AGENT", "aider --yes"),
     ];
-
-    let output = lab.jeet_at(
-        &["task", "open", "plain", "--session", "x"],
-        &lab.home(),
-        &env,
-    );
-    assert!(!output.status.success());
-    assert!(stderr_of(&output).contains("keeps no sessions"));
 
     succeeded(&lab.jeet_at(&["task", "open", "plain"], &lab.home(), &env));
     let argv = calls_of(&tmux, "new-session").pop().unwrap();
@@ -4011,7 +4041,7 @@ fn tmux_passes_shift_enter_unless_the_user_says_otherwise() {
         [
             "if-shell",
             "-F",
-            "#{==:#{extended-keys}#{@jeet-extended-keys},off}",
+            "#{==:#{extended-keys}#{@jeet-extended-keys}#{@plete-extended-keys},off}",
             "set-option -s extended-keys on ; \
              set-option -as terminal-features 'xterm*:extkeys' ; \
              set-option -s @jeet-extended-keys on",
@@ -4362,7 +4392,7 @@ fn the_tasks_list_makes_archives_and_deletes_tasks() {
 }
 
 #[test]
-fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
+fn enter_in_the_tasks_list_attaches_to_the_tasks_one_session() {
     if !have_script() {
         eprintln!("no `script` to run a terminal with; skipping");
         return;
@@ -4379,12 +4409,11 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
         ("JEET_AGENT", "claude"),
         ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
     ];
-    // Two sessions the agent reported, a second apart.
-    let (older, newer) = (
+    // The agent reported two sessions; the task has just the one.
+    for session in [
         "aaaaaaaa-1111-4111-8111-111111111111",
         "bbbbbbbb-2222-4222-8222-222222222222",
-    );
-    for session in [older, newer] {
+    ] {
         let output = lab.hook(
             "SessionStart",
             &hook_input("SessionStart", session, &task),
@@ -4393,18 +4422,12 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
         hook_ok(&output);
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }
+    let one = lab.task_session(&task_id(&task)).unwrap();
 
     let mut screen = Pty::open(&lab, "tasks", &lab.home(), &env);
     screen.wait_for_text("jeet · tasks");
-    // No agent is running, and there are two sessions: which one?
+    // No agent is running: ⏎ starts it in the one session, with no picker.
     screen.type_keys(b"\r");
-    screen.wait_for_text("which session?");
-    assert!(
-        calls_of(&tmux, "new-session").is_empty(),
-        "nothing started yet"
-    );
-    // The newest is first; take the older one.
-    screen.type_keys(b"j\r");
     wait_until("the attach", || {
         !calls_of(&tmux, "attach-session").is_empty()
     });
@@ -4413,14 +4436,14 @@ fn enter_in_the_tasks_list_offers_the_sessions_then_attaches() {
     assert_eq!(started.len(), 1, "{started:?}");
     let argv = &started[0];
     let at = argv.iter().position(|a| a == "--session-id").unwrap();
-    assert_eq!(argv[at + 1], older, "{argv:?}");
+    assert_eq!(argv[at + 1], one, "{argv:?}");
     let attached = calls_of(&tmux, "attach-session");
     assert_eq!(
         attached[0][1..],
         ["-t".to_string(), "=jeet-fix-login".into()]
     );
 
-    // The agent is running now: ⏎ attaches straight away, no picker.
+    // The agent is running now: ⏎ attaches straight away.
     screen.type_keys(b"\r");
     wait_until("the second attach", || {
         calls_of(&tmux, "attach-session").len() == 2
@@ -5477,8 +5500,8 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     );
 }
 
-/// ctrl-s and ctrl-a in the explorer act on the task being browsed: its
-/// sessions, and its agent in tmux, as ⏎ in the tasks list does.
+/// ctrl-a in the explorer acts on the task being browsed: its agent in tmux,
+/// as ⏎ in the tasks list does.
 #[cfg(unix)]
 #[test]
 fn the_explorer_opens_the_tasks_agent_in_tmux() {
@@ -5498,27 +5521,22 @@ fn the_explorer_opens_the_tasks_agent_in_tmux() {
         ("JEET_AGENT", "claude"),
         ("CLAUDE_CONFIG_DIR", claude_env.as_str()),
     ];
-    let (older, newer) = (
-        "aaaaaaaa-1111-4111-8111-111111111111",
-        "bbbbbbbb-2222-4222-8222-222222222222",
-    );
-    for session in [older, newer] {
-        let output = lab.hook(
+    let output = lab.hook(
+        "SessionStart",
+        &hook_input(
             "SessionStart",
-            &hook_input("SessionStart", session, &task),
-            &[],
-        );
-        hook_ok(&output);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-    }
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            &task,
+        ),
+        &[],
+    );
+    hook_ok(&output);
+    let one = lab.task_session(&task_id(&task)).unwrap();
     std::fs::create_dir(task.join("notes")).unwrap();
 
     let mut screen = Pty::open(&lab, "explore", &task.join("notes"), &env);
     screen.wait_for_text("jeet · task Fix login");
-    // The task's sessions, newest first; resume the older one.
-    screen.type_keys(b"\x13");
-    screen.wait_for_text("Fix login · sessions");
-    screen.type_keys(b"j\r");
+    screen.type_keys(b"\x01");
     wait_until("the attach", || {
         !calls_of(&tmux, "attach-session").is_empty()
     });
@@ -5532,7 +5550,7 @@ fn the_explorer_opens_the_tasks_agent_in_tmux() {
         "{argv:?}"
     );
     let at = argv.iter().position(|a| a == "--session-id").unwrap();
-    assert_eq!(argv[at + 1], older, "{argv:?}");
+    assert_eq!(argv[at + 1], one, "{argv:?}");
     assert!(argv.iter().any(|a| a == "--settings"), "{argv:?}");
     assert_eq!(
         calls_of(&tmux, "attach-session")[0][1..],
@@ -7413,7 +7431,7 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
     let env = [("JEET_TMUX", tmux_env.as_str()), ("JEET_AGENT", "claude")];
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"pr.comment\"]\n",
+        "scan_roots = []\n[permissions]\nguards = true\n[assistant]\nallow = [\"task.create\", \"pr.comment\"]\n",
     )
     .unwrap();
     succeeded(&lab.jeet(&["ls"]));
@@ -7471,8 +7489,8 @@ fn chat_sets_up_the_assistant_and_runs_each_session_in_its_own_window() {
         !allow.contains(&"Bash(jeet task delete:*)".into()),
         "{allow:?}"
     );
-    // Commenting, held, needs no prompt; merging outside `jeet pr merge`
-    // and force-pushing are denied whatever is held.
+    // Commenting, held, needs no prompt; under `guards`, merging outside
+    // `jeet pr merge` and force-pushing are denied whatever is held.
     assert!(allow.contains(&"Bash(gh pr comment:*)".into()), "{allow:?}");
     let deny = settings["permissions"]["deny"].as_array().unwrap();
     for rule in [
@@ -9872,7 +9890,7 @@ fn a_task_is_refused_when_jeet_cannot_read_the_index() {
         ("JEET_TMUX", tmux_env.as_str()),
         ("JEET_NOTIFY_CMD", notifier_env.as_str()),
     ];
-    for args in [&["task", "send", "y", "hi"][..], &["notify", "t"]] {
+    for args in [&["task", "send", "y", "hi"][..], &["todo", "ls"]] {
         let output = lab.jeet_at(args, &lab.home(), &env);
         assert!(!output.status.success(), "{args:?}");
         assert!(
@@ -10009,7 +10027,7 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
         lab.home().join("config.toml"),
         // `notify = false` silences the assistant's own actions, never a
         // held grant (M9).
-        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+        "scan_roots = []\n[permissions]\nguards = true\n[assistant]\nnotify = false\nallow = [\"task.create\", \
          \"worktree.add\", \"manager.grant\", \"pr.merge\"]\n",
     )
     .unwrap();
@@ -10056,10 +10074,10 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     );
     assert_eq!(lab.grants_of(&w), ["task.create", "worktree.add"]);
     assert_eq!(lab.budget_of(&w), Some((Some(3600), Some(20))));
-    // Unasked, a worker of the assistant's gets `worker_default` and no
-    // budget (M20).
+    // Unasked, a worker of the assistant's gets `worker_default` (every
+    // capability unless set) and no budget (M20).
     let v = lab.new_task_with("v", &parent);
-    assert_eq!(lab.grants_of(&v), ["worktree.add"]);
+    assert_eq!(lab.grants_of(&v), EVERY_CAPABILITY);
     assert_eq!(lab.budget_of(&v), None);
     let output = lab.jeet_at(&["task", "new", "x", "--parent", "w"], &lab.home(), &[]);
     assert!(!output.status.success());
@@ -10330,7 +10348,7 @@ fn only_a_caller_holding_repo_clone_clones_through_a_worktree() {
     // Its own grant is not enough while a list above it cuts it.
     index
         .execute(
-            "INSERT INTO task_grants (task_id, capability) VALUES (?1, 'repo.clone')",
+            "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, 'repo.clone')",
             [&api],
         )
         .unwrap();
@@ -10621,7 +10639,7 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
     );
     let w = task_id(&path_from(&output));
     assert_eq!(lab.parent_of(&w), Some(api.clone()));
-    assert_eq!(lab.grants_of(&w), ["worktree.add"]);
+    assert_eq!(lab.grants_of(&w), EVERY_CAPABILITY);
     assert_eq!(lab.budget_of(&w), Some((Some(3600), None)));
     let by: String = index
         .query_row(
@@ -10925,7 +10943,7 @@ fn a_manager_acts_on_the_task_its_check_resolved() {
     assert_eq!(shown["path"], "assistant/api/sib-2");
     succeeded(&mp.jeet(&["manager", "grant", "sib", "--none"], &api_dir, &[]));
     assert!(lab.grants_of(&inner).is_empty());
-    assert_eq!(lab.grants_of(&sib), ["worktree.add"]);
+    assert_eq!(lab.grants_of(&sib), EVERY_CAPABILITY);
     succeeded(&mp.jeet(&["task", "send", "sib", "hi"], &api_dir, &env));
     assert!(!lab.home().join("tasks/sib/.jeet/inbox.jsonl").exists());
     succeeded(&mp.jeet(&["task", "archive", "sib", "--force"], &api_dir, &env));
@@ -10996,7 +11014,8 @@ fn manager_new_makes_a_manager_under_the_assistant_and_starts_it() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"task.create\", \"task.send\"]\n",
+        "scan_roots = []\n[permissions]\nguards = true\n\
+         [assistant]\nallow = [\"task.create\", \"task.send\"]\n",
     )
     .unwrap();
     let scratch = TempDir::new().unwrap();
@@ -11506,7 +11525,7 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     let lab = StoreLab::new();
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nnotify = false\nallow = [\"task.create\", \
+        "scan_roots = []\n[permissions]\nguards = true\n[assistant]\nnotify = false\nallow = [\"task.create\", \
          \"task.send\", \"task.open\", \"task.archive\", \"task.unarchive\", \"task.delete\", \
          \"task.resync\", \"worktree.add\", \"worktree.rm\", \"review.start\", \"manager.create\", \"manager.grant\", \
          \"manager.stop\", \"pr.comment\"]\n",
@@ -11552,7 +11571,7 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     let w = task_id(&path_from(&output));
     let w_dir = lab.home().join("tasks/w");
     assert_eq!(lab.parent_of(&w), Some(api.clone()));
-    assert_eq!(lab.grants_of(&w), ["worktree.add"]);
+    assert_eq!(lab.grants_of(&w), EVERY_CAPABILITY);
     assert_eq!(lab.budget_of(&w), Some((Some(7200), None)));
     assert!(stub.join("alive/jeet-w").exists());
     let started = calls_of(&tmux, "new-session");
@@ -12669,7 +12688,7 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
     // The assistant may send; api may not, so w's grant may not use it.
     lab.index()
         .execute(
-            "INSERT INTO task_grants (task_id, capability) VALUES (?1, 'task.send')",
+            "INSERT OR IGNORE INTO task_grants (task_id, capability) VALUES (?1, 'task.send')",
             [&w],
         )
         .unwrap();
@@ -12747,7 +12766,7 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("w's grant drops task.send, which it could not use where it was"),
+        stderr.contains("w's grant drops ") && stderr.contains("task.send"),
         "{stderr}"
     );
     assert!(stderr.contains("1 report to api kept"), "{stderr}");
@@ -12784,7 +12803,7 @@ fn delete_reparent_moves_the_tasks_under_it_to_its_parent() {
             .map(Result::unwrap)
             .collect()
     };
-    assert_eq!(grants, ["worktree.add"]);
+    assert_eq!(grants, ["task.create", "worktree.add"]);
 
     // w's question is kept, now as asked of the assistant, which is told of
     // each task, and that the question is its own now.
@@ -13035,7 +13054,6 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
         &["task", "send", "y", "hi"][..],
         &["task", "archive", "y", "--force"],
         &["task", "send", "assistant", "hi"],
-        &["notify", "t"],
         &["todo", "add", "x"],
     ] {
         let output = x_agent.jeet(args, &x_dir, &[]);
@@ -13101,10 +13119,10 @@ fn a_task_with_a_parent_may_only_add_worktrees_to_itself() {
     }
 
     // With its environment stripped, it is still that task's agent.
-    let output = x_agent.run(r#"env -u JEET_TASK_ID "$JEET" notify t"#);
+    let output = x_agent.run(r#"env -u JEET_TASK_ID "$JEET" todo ls"#);
     assert!(!output.status.success());
     assert!(
-        stderr_of(&output).contains("task x may not notify"),
+        stderr_of(&output).contains("task x may not"),
         "{}",
         stderr_of(&output)
     );
@@ -13675,7 +13693,7 @@ fn a_review_job_cannot_archive_or_delete_its_own_task() {
             lab.home().join("config.toml"),
             format!(
                 "scan_roots = []\n[assistant]\nallow = [\"review.start\", \"task.archive\", \
-                 \"task.delete\"]\nnotify = false\n[review]\ncommand = \"cd /; '{jeet}' task archive \
+                 \"task.delete\"]\nnotify = false\n[review]\nread_only = true\ncommand = \"cd /; '{jeet}' task archive \
                  review-widget-7 --force 2> {}; '{jeet}' task delete review-widget-7 -f 2> {}; \
                  touch {}\"\nnotify = false\n",
                 quoted("archive"),
@@ -13725,7 +13743,7 @@ fn an_archived_tasks_agent_is_no_longer_its() {
             .unwrap()
     };
     assert_eq!(count(), 1);
-    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    let output = x_agent.jeet(&["todo", "ls"], &lab.home(), &[]);
     assert!(
         stderr_of(&output).contains("task x may not"),
         "{}",
@@ -13742,7 +13760,7 @@ fn an_archived_tasks_agent_is_no_longer_its() {
         &[("JEET_TMUX", &tmux)],
     ));
     assert_eq!(count(), 0);
-    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    let output = x_agent.jeet(&["todo", "ls"], &lab.home(), &[]);
     assert!(!output.status.success());
     let stderr = stderr_of(&output);
     assert!(stderr.contains("can't confirm"), "{stderr}");
@@ -13892,10 +13910,10 @@ fn an_orphan_with_its_environment_stripped_escapes_local_identity_5_7() {
     let rc = scratch.path().join("rc");
     let rc_quoted = sh_quote(&rc.to_string_lossy());
     // Still the Node, from its pane.
-    let output = x_agent.jeet(&["notify", "t"], &lab.home(), &[]);
+    let output = x_agent.jeet(&["todo", "ls"], &lab.home(), &[]);
     assert!(!output.status.success());
     succeeded(&x_agent.run(&format!(
-        r#"sh -c '(sleep 0.2; env -u JEET_TASK_ID "$JEET" notify escaped >{out} 2>&1; echo $? >{rc_quoted}.tmp; mv {rc_quoted}.tmp {rc_quoted}) & exit'"#,
+        r#"sh -c '(sleep 0.2; env -u JEET_TASK_ID "$JEET" todo ls >{out} 2>&1; echo $? >{rc_quoted}.tmp; mv {rc_quoted}.tmp {rc_quoted}) & exit'"#,
         out = out.replace('\'', r"'\''"),
         rc_quoted = rc_quoted.replace('\'', r"'\''"),
     )));
@@ -14043,10 +14061,15 @@ fn a_node_launch_carries_deny_rules() {
     // The root may comment and review; its node still may not.
     std::fs::write(
         lab.home().join("config.toml"),
-        "scan_roots = []\n[assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
+        "scan_roots = []\n[permissions]\nguards = true\n\
+         [assistant]\nallow = [\"pr.comment\", \"pr.review\"]\n",
     )
     .unwrap();
     let kid = lab.new_task_with("kid", &["--parent", "assistant"]);
+    // Its default grant holds everything; narrowed, it holds neither.
+    lab.index()
+        .execute("DELETE FROM task_grants WHERE task_id = ?1", [&kid])
+        .unwrap();
     index_develop_repo(&lab);
     // However long its name: the rules go in a file, not on the command line.
     lab.index()
@@ -15758,23 +15781,12 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     assert!(!stub.join("alive/jeet-c").exists());
     assert_eq!(lab.start_queue(), [c.as_str(), d.as_str()]);
 
-    // Opened in a session the user chose, as the TUI's session picker
-    // does: it still starts with what waited.
+    // Opened by the user, as ⏎ in the TUI does: it still starts with what
+    // waited, in the task's one session.
     let _c_agent = session_pane(&lab, &tmux, "c", &c);
-    let chosen = "22222222-3333-4444-8555-666666666666";
-    lab.index()
-        .execute(
-            "INSERT INTO task_sessions (session_id, task_id, name, created_at, last_activity)
-             VALUES (?1, ?2, 'c', 1, 1)",
-            [chosen, c.as_str()],
-        )
-        .unwrap();
-    let output = lab.jeet_at(
-        &["task", "open", "c", "--session", chosen],
-        &lab.home(),
-        &env,
-    );
+    let output = lab.jeet_at(&["task", "open", "c"], &lab.home(), &env);
     succeeded(&output);
+    let chosen = lab.task_session(&c).unwrap();
     assert!(
         stderr_of(&output).contains("over [managers] max_live (1/1"),
         "{}",
@@ -15786,7 +15798,7 @@ fn a_start_past_max_live_waits_for_a_session_to_end() {
     let c_start = started.last().unwrap();
     assert!(c_start.contains(&"jeet-c".to_string()), "{c_start:?}");
     assert!(
-        c_start.windows(2).any(|w| w == ["--session-id", chosen]),
+        c_start.windows(2).any(|w| w == ["--session-id", &chosen]),
         "{c_start:?}"
     );
     assert!(

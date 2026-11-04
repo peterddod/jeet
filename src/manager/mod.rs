@@ -104,6 +104,18 @@ pub fn template_override(templates: &Path, role: &str, rel: &str) -> Result<Opti
 /// AGENTS.md is always the built-in one. Nothing there is ever replaced: a
 /// CLAUDE.md of the user's own, from before AGENTS.md, is moved to
 /// AGENTS.md rather than written over.
+/// `rel` as it was named before the rename, when its name has the new one in
+/// it: a template is only written where nothing is, and a file of the old
+/// name is something, so the renamed copy would be a second one.
+fn legacy_counterpart(rel: &str) -> Option<String> {
+    rel.contains("plete").then(|| rel.replace("plete", "jeet"))
+}
+
+/// Whether `dir` already holds the legacy-named counterpart of `rel`.
+pub(crate) fn has_legacy_counterpart(dir: &Path, rel: &str) -> bool {
+    legacy_counterpart(rel).is_some_and(|old| std::fs::symlink_metadata(dir.join(old)).is_ok())
+}
+
 pub fn ensure_files(dir: &Path, role: Role, overrides: &Path) -> Result<Vec<&'static str>> {
     instructions::migrate(dir).context("move CLAUDE.md to AGENTS.md")?;
     let role_dir = match role {
@@ -114,7 +126,7 @@ pub fn ensure_files(dir: &Path, role: Role, overrides: &Path) -> Result<Vec<&'st
     let mut written = Vec::new();
     for (rel, builtin) in templates(role) {
         let path = dir.join(rel);
-        if std::fs::symlink_metadata(&path).is_ok() {
+        if std::fs::symlink_metadata(&path).is_ok() || has_legacy_counterpart(dir, rel) {
             continue;
         }
         let text = if imports.iter().any(|i| i.file == rel) {
@@ -167,7 +179,7 @@ pub fn write_brief(app: &App, node: &TaskRecord) -> Result<()> {
     if !dir.is_dir() {
         bail!("{} is missing", dir.display());
     }
-    let marker = dir.join(tasks::MARKER_DIR);
+    let marker = tasks::marker_dir(&dir);
     match std::fs::create_dir(&marker) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -420,6 +432,28 @@ pub fn child_line(child: &ChildLine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_renamed_template_has_its_old_name_as_counterpart() {
+        assert_eq!(
+            legacy_counterpart(".claude/skills/plete-managers/SKILL.md").as_deref(),
+            Some(".claude/skills/jeet-managers/SKILL.md")
+        );
+        assert_eq!(
+            legacy_counterpart(".claude/skills/plete/SKILL.md").as_deref(),
+            Some(".claude/skills/jeet/SKILL.md")
+        );
+        assert_eq!(legacy_counterpart("AGENTS.md"), None);
+        assert_eq!(legacy_counterpart(".claude/skills/jeet/SKILL.md"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let rel = ".claude/skills/plete-manager/SKILL.md";
+        assert!(!has_legacy_counterpart(dir.path(), rel));
+        let old = dir.path().join(".claude/skills/jeet-manager/SKILL.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(old, "mine").unwrap();
+        assert!(has_legacy_counterpart(dir.path(), rel));
+    }
     use crate::db::tasks::{RunState, Setter};
     use crate::instructions::CLAUDE_SHIM;
     use crate::todo;
@@ -541,6 +575,7 @@ mod tests {
         let mut app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         app.config.assistant.allow = vec!["task.create".into(), "task.send".into()];
@@ -700,7 +735,7 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(tasks::task_dir(&app, &api))
             .unwrap()
             .map(|e| e.unwrap().file_name())
-            .filter(|n| n != tasks::MARKER_DIR)
+            .filter(|n| n != tasks::NEW_MARKER_DIR && n != tasks::LEGACY_MARKER_DIR)
             .collect();
         assert_eq!(left, [BRIEF_MD], "{left:?}");
 

@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::db::tasks::ReportKind;
+use crate::manager::fence;
 use crate::messages::{Queued, QUEUE_SEPARATOR};
 
 /// How much of an item is posted.
@@ -125,11 +126,10 @@ fn full_kind(item: &Queued) -> String {
         return meta.kind.clone();
     }
     let message = item.message.as_str();
-    if message.starts_with("<jeet-answer") {
+    if fence::strip_open(message, "answer").is_some() {
         return "answer".to_string();
     }
-    let kind = message
-        .strip_prefix("<jeet-report")
+    let kind = fence::strip_open(message, "report")
         .and_then(|rest| rest.lines().next())
         .and_then(|tag| tag.split_once("kind=\"")?.1.split_once('"'))
         .map(|(kind, _)| kind);
@@ -254,6 +254,24 @@ pub fn fitting(items: &[Queued], limit: usize) -> usize {
 mod tests {
     use super::*;
     use crate::messages::Sender;
+
+    #[test]
+    fn a_fence_is_read_under_either_tag_name() {
+        for tag in ["jeet", "plete"] {
+            let answer = item(
+                1,
+                &format!("<{tag}-answer to=\"8\" from=\"user\">\nyes"),
+                None,
+            );
+            assert_eq!(full_kind(&answer), "answer");
+            let report = item(
+                2,
+                &format!("<{tag}-report id=\"7\" kind=\"blocked\" untrusted=\"true\">\nb"),
+                None,
+            );
+            assert_eq!(full_kind(&report), "blocked");
+        }
+    }
 
     fn item(at: i64, message: &str, meta: Option<Meta>) -> Queued {
         Queued {

@@ -13,10 +13,13 @@
 //! Refusals are logged too, and an action that ran but did nothing is
 //! logged as skipped and not announced.
 //!
-//! The agent of a task with a parent is gated too: by its grant, cut by
-//! every list above it ([`effective`]), and to the tasks in its reach
-//! ([`node_scope`]), reads included. What it is allowed is logged to its
-//! own `actions.log`.
+//! The agent of a task with a parent is bounded too: by its grant, cut by
+//! every list above it ([`effective`]) and so by `[assistant] allow`, and to
+//! the tasks in its reach ([`node_scope`]), reads included. Unless a
+//! default or `--allow` narrowed it, its grant is every capability. What it
+//! is allowed is logged to its own `actions.log`. A review's agent is
+//! bounded like whoever asked for it, or read-only under `[review]
+//! read_only`.
 //!
 //! Every command must be classified: [`gate`] matches them exhaustively, so a
 //! new one does not compile until it says what it needs; one [`node_scope`]
@@ -333,7 +336,7 @@ pub fn parse_capability(s: &str) -> Result<String, String> {
 ///
 /// [`identity`]: crate::identity
 pub fn assistant_mode() -> bool {
-    std::env::var(ASSISTANT_ENV).is_ok_and(|v| {
+    crate::env::var(ASSISTANT_ENV).is_ok_and(|v| {
         let v = v.trim();
         !v.is_empty() && v != "0"
     })
@@ -349,8 +352,8 @@ pub enum Caller {
     /// The agent of a task with a parent: gated by [`effective`], and only
     /// over itself.
     Node(TaskRecord),
-    /// A review's agent, whoever asked for the review: gated the same for
-    /// every review ([`review_allows`]).
+    /// A review's agent: gated like whoever asked for it, or the same for
+    /// every review under `[review] read_only` ([`review_gate`]).
     Review(Box<ReviewRecord>),
 }
 
@@ -389,7 +392,7 @@ pub fn caller(app: &App) -> Result<Caller> {
 /// closed.
 pub fn at_terminal(app: &App) -> Result<bool> {
     let me = identity::identify(app)?;
-    let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
+    let env_task = crate::env::var(crate::tasks::TASK_ID_ENV).ok();
     Ok(me.review.is_none()
         && at_terminal_of(
             me.task.as_ref(),
@@ -1067,8 +1070,8 @@ fn most_used_branches(indexed: impl Iterator<Item = String>) -> Vec<String> {
     branches
 }
 
-/// What every agent jeet gates (the assistant, and tasks with a parent) is
-/// denied: [`ALWAYS_DENY`], and pushing to any of `branches`.
+/// What `[permissions] guards` denies every agent jeet launches:
+/// [`ALWAYS_DENY`], and pushing to any of `branches`.
 pub fn denied_commands(branches: &[String]) -> Vec<String> {
     let mut deny: Vec<String> = ALWAYS_DENY.iter().map(|d| d.to_string()).collect();
     for branch in branches {
@@ -1095,53 +1098,89 @@ fn withheld_externals<'a>(held: &'a [&str]) -> impl Iterator<Item = &'static str
         .flat_map(|c| c.external.iter().copied())
 }
 
-/// What `task`'s agent is denied: [`denied_commands`] for a top-level task,
-/// which jeet does not otherwise gate; for one with a parent, those and the
-/// commands outside jeet of every capability it does not hold, and for a
-/// manager [`MANAGER_DENY`] too.
+/// What `task`'s agent is denied: with `[permissions] guards`,
+/// [`denied_commands`], and for a manager [`MANAGER_DENY`] too. A task with a
+/// parent is also denied the commands outside jeet of every capability it
+/// does not hold, guards or not: the harness's half of [`effective`].
 pub fn task_deny(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
-    let branches = default_branches(app)?;
-    if task.parent_id.is_none() {
-        return Ok(denied_commands(&branches));
+    let guards = app.config.permissions.guards();
+    let mut deny = if guards {
+        denied_commands(&default_branches(app)?)
+    } else {
+        Vec::new()
+    };
+    if task.parent_id.is_some() {
+        add_withheld(&mut deny, &effective(app, task)?);
     }
-    let held = effective(app, task)?;
-    let mut deny = node_deny(&held, &branches);
-    match task.kind {
-        TaskKind::Manager => {
-            for command in MANAGER_DENY {
-                if !deny.iter().any(|d| d == command) {
-                    deny.push(command.to_string());
-                }
+    if guards && task.kind == TaskKind::Manager {
+        for command in MANAGER_DENY {
+            if !deny.iter().any(|d| d == command) {
+                deny.push(command.to_string());
             }
         }
-        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => {}
     }
     Ok(deny)
 }
 
-/// What a review's agent is denied, whoever asked for the review: what a
-/// worker is denied that holds nothing ([`node_deny`]: force-pushes, merges,
-/// pushes to a default branch, `gh pr comment` and `gh pr review`), no push
-/// of any kind, and the API forms of commenting and reviewing. A lint, as
-/// [`ALWAYS_DENY`] is.
-pub fn review_deny(app: &App) -> Result<Vec<String>> {
-    let mut deny = node_deny(&[], &default_branches(app)?);
-    for command in REVIEW_DENY {
-        if !deny.iter().any(|d| d == command) {
-            deny.push(command.to_string());
+/// What `review`'s agent is denied. Under `[review] read_only`: what a
+/// worker is denied that holds nothing (force-pushes, merges, pushes to a
+/// default branch, `gh pr comment` and `gh pr review`), no push of any
+/// kind, and the API forms of commenting and reviewing. Otherwise the
+/// commands outside jeet of what its requester's chain does not hold
+/// (`[assistant] allow` with no requester), and [`denied_commands`] under
+/// `[permissions] guards`. A lint, as [`ALWAYS_DENY`] is.
+pub fn review_deny(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
+    if app.config.review.read_only() {
+        let mut deny = node_deny(&[], &default_branches(app)?);
+        for command in REVIEW_DENY {
+            if !deny.iter().any(|d| d == command) {
+                deny.push(command.to_string());
+            }
         }
+        return Ok(deny);
     }
+    let mut deny = if app.config.permissions.guards() {
+        denied_commands(&default_branches(app)?)
+    } else {
+        Vec::new()
+    };
+    let held = match requester_caller(app, review)? {
+        Some(Caller::Node(task)) => effective(app, &task)?,
+        Some(Caller::Root) => root_list(app),
+        Some(Caller::User) => every_capability(),
+        // Asked for by a task that is gone: nothing is held.
+        Some(Caller::Review(_)) | None => Vec::new(),
+    };
+    add_withheld(&mut deny, &held);
     Ok(deny)
+}
+
+fn every_capability() -> Vec<&'static str> {
+    CAPABILITIES.iter().map(|c| c.name).collect()
+}
+
+/// Who a non-read-only review's agent is gated as: the assistant when no
+/// task asked, else the task that did. `None`: a task asked and is gone.
+fn requester_caller(app: &App, review: &ReviewRecord) -> Result<Option<Caller>> {
+    let Some(id) = &review.requested_by else {
+        return Ok(Some(Caller::Root));
+    };
+    Ok(app.db.get_task(id)?.map(|task| classify(Some(&task))))
 }
 
 fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
     let mut deny = denied_commands(branches);
+    add_withheld(&mut deny, held);
+    deny
+}
+
+/// Add the commands outside jeet of every capability not in `held`.
+fn add_withheld(deny: &mut Vec<String>, held: &[&str]) {
     for command in withheld_externals(held) {
         if !deny.iter().any(|d| d == command) {
             deny.push(command.to_string());
         }
     }
-    deny
 }
 
 /// Why the command the assistant was allowed did nothing, when it ran
@@ -1211,7 +1250,10 @@ pub fn authorize_as(
         return node(app, task, command, gate, terminal);
     }
     if let Caller::Review(review) = caller {
-        return review_gate(review, command);
+        if app.config.review.read_only() {
+            return review_gate(review, command);
+        }
+        return review_as_requester(app, review, command, terminal);
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
@@ -1257,7 +1299,8 @@ pub fn authorize_as(
     }))
 }
 
-/// What a review's agent may run, the same for every review: the read-only
+/// What a review's agent may run under `[review] read_only`, the same for
+/// every review: the read-only
 /// commands `jeet ls`, `jeet path` and `jeet prs`, and `jeet report` when a
 /// task asked for the review (the report itself finds the task). Nothing
 /// that changes anything, in jeet or outside it ([`review_deny`] is the
@@ -1281,11 +1324,46 @@ fn review_gate(review: &ReviewRecord, command: Option<&Commands>) -> Result<Opti
     }
 }
 
+/// A review's agent, when `[review] read_only` is off: gated like the task
+/// that asked for it, else like the assistant. What only the root may
+/// ([`node_only`]) stays refused to it, and `jeet report` needs a requester.
+fn review_as_requester(
+    app: &App,
+    review: &ReviewRecord,
+    command: Option<&Commands>,
+    terminal: bool,
+) -> Result<Option<Authorized>> {
+    if let Some(about) = node_only(command) {
+        bail!(
+            "review {} may not {about}: a review's agent reports with `jeet report`",
+            review.label()
+        );
+    }
+    if matches!(command, Some(Commands::Report { .. })) && review.requested_by.is_none() {
+        bail!(
+            "review {} was not asked for by a task, so there is no one to report to",
+            review.label()
+        );
+    }
+    let Some(caller) = requester_caller(app, review)? else {
+        // Fails closed: what is gated has no one to be gated as.
+        if gate(command, terminal) == Gate::Free
+            && matches!(node_scope(command), Some(Scope::NoTarget | Scope::Listed))
+        {
+            return Ok(None);
+        }
+        bail!(
+            "the task that asked for review {} is gone, so its agent may not run that",
+            review.label()
+        );
+    };
+    authorize_as(app, &caller, command, terminal)
+}
+
 /// What `command` does that only the root may, for "task … may not …":
-/// reaching the user, and the assistant's own list.
+/// the assistant's own lists and the user's `stop --all`.
 fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     match command? {
-        Commands::Notify { command: None, .. } => Some("notify the user"),
         Commands::Todo { .. } => Some("keep the assistant's todo list"),
         Commands::Brief { .. } => Some("read what was kept for the assistant"),
         // Only `jeet review` starts one, and a Node may not review.
@@ -2235,6 +2313,7 @@ mod tests {
         let app = App {
             config: config::load_or_create(&home).unwrap(),
             db: Database::open(&config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let assistant = crate::assistant::ensure(&app).unwrap();
@@ -2292,6 +2371,27 @@ mod tests {
 
     fn node_of(app: &App, w: &TaskRecord, args: &[&str], terminal: bool) -> Result<()> {
         run_as(app, &Caller::Node(w.clone()), args, terminal)
+    }
+
+    #[test]
+    fn the_default_grant_is_every_capability_yet_cut_by_the_assistants_allow() {
+        let (_dir, mut app, _w) = tree();
+        let policy = app.config.manager_policy().unwrap();
+        for kind in [TaskKind::Work, TaskKind::Manager] {
+            assert_eq!(default_grant(kind, &policy).unwrap(), every());
+        }
+        app.config.assistant.allow = vec!["task.create".into(), "pr.merge".into()];
+        let root = crate::assistant::ensure(&app).unwrap();
+        let m = add(&app, "m", TaskKind::Manager, Some(&root), &every());
+        let k = add(&app, "k", TaskKind::Work, Some(&m), &every());
+        assert_eq!(
+            sorted(effective(&app, &m).unwrap()),
+            ["pr.merge", "task.create"]
+        );
+        assert_eq!(
+            sorted(effective(&app, &k).unwrap()),
+            ["pr.merge", "task.create"]
+        );
     }
 
     #[test]
@@ -2436,10 +2536,10 @@ mod tests {
         // Nothing asked: the kind's default, uncut, which its ancestors cut
         // at every check.
         let default = grant(&app, &Caller::Root, &root, TaskKind::Work, None).unwrap();
-        assert_eq!(default.caps, ["worktree.add"]);
+        assert_eq!(default.caps, every());
         assert!(default.held.is_empty());
         let default = grant(&app, &Caller::Root, &root, TaskKind::Manager, None).unwrap();
-        assert!(default.caps.is_empty());
+        assert_eq!(default.caps, every());
         app.config.managers = Some(config::ManagersConfig {
             manager_default: Some(vec!["task.create".into()]),
             ..Default::default()
@@ -2898,7 +2998,6 @@ mod tests {
             &["import"],
             &["install-shell"],
             &["watch", "install"],
-            &["notify", "t"],
             &["todo", "add", "x"],
             &["todo", "ls"],
             &["review-job", "s"],
@@ -2929,6 +3028,7 @@ mod tests {
             &["worktree", "ls"],
             &["worktree", "path", "r"],
             &["report", "done", "x"],
+            &["notify", "t"],
             &["watch", "status"],
             &["task-hook", "Stop"],
             // Held, so only ever granted by name.
@@ -3269,7 +3369,7 @@ mod tests {
     }
 
     #[test]
-    fn a_top_level_task_gets_the_shared_deny_and_a_node_the_whole_list() {
+    fn no_agent_is_denied_a_command_by_default_but_a_node_what_it_does_not_hold() {
         let (_dir, mut app, w) = tree();
         app.db
             .upsert_repo(&crate::db::RepoRecord {
@@ -3279,11 +3379,25 @@ mod tests {
                 default_branch: "develop".into(),
             })
             .unwrap();
-        // What the root holds is not handed down beyond the node's grant.
-        app.config.assistant.allow = CAPABILITIES.iter().map(|c| c.name.into()).collect();
         let top = app.db.get_task("top-id").unwrap().unwrap();
-        // Force-pushes, merges and default branches, but no capability is
-        // withheld from what jeet does not gate.
+        // Nothing for a top-level task, or a manager holding everything.
+        app.config.assistant.allow = every().iter().map(|c| c.to_string()).collect();
+        let root = crate::assistant::ensure(&app).unwrap();
+        let m2 = add(&app, "m2", TaskKind::Manager, Some(&root), &every());
+        for task in [&top, &m2] {
+            assert_eq!(task_deny(&app, task).unwrap(), Vec::<String>::new());
+        }
+        // A node is denied the externals of what it does not hold: the
+        // harness half of the bound.
+        let deny = task_deny(&app, &w).unwrap();
+        for denied in ["gh pr comment", "gh pr review", "gh issue comment"] {
+            assert!(deny.contains(&denied.to_string()), "{denied}: {deny:?}");
+        }
+        assert!(!deny.contains(&"gh pr merge".to_string()), "{deny:?}");
+        assert!(!deny.contains(&"git push --force".to_string()), "{deny:?}");
+
+        // `guards` puts the shared deny back, for the top-level task too.
+        app.config.permissions.guards = Some(true);
         let top_deny = task_deny(&app, &top).unwrap();
         assert_eq!(top_deny, denied_commands(&default_branches(&app).unwrap()));
         for denied in ["git push --force", "gh pr merge", "git push * develop"] {
@@ -3326,7 +3440,8 @@ mod tests {
 
     #[test]
     fn a_manager_is_denied_commits_and_new_branches_but_may_read_branches() {
-        let (_dir, app, w) = tree();
+        let (_dir, mut app, w) = tree();
+        app.config.permissions.guards = Some(true);
         let m = TaskRecord {
             id: "m-id".into(),
             slug: "m".into(),
@@ -3335,6 +3450,11 @@ mod tests {
             ..w.clone()
         };
         app.db.insert_task(&m).unwrap();
+        // Only under `guards`.
+        app.config.permissions.guards = None;
+        let plain = task_deny(&app, &m).unwrap();
+        assert!(!plain.iter().any(|d| d == "git commit"), "{plain:?}");
+        app.config.permissions.guards = Some(true);
         let deny = task_deny(&app, &m).unwrap();
         for denied in MANAGER_DENY {
             assert!(deny.contains(&denied.to_string()), "{denied}: {deny:?}");
@@ -3582,8 +3702,9 @@ mod tests {
     /// same for every review, whoever asked, and nothing that changes
     /// anything.
     #[test]
-    fn a_reviews_agent_reads_and_reports_only_to_a_task_that_asked() {
-        let (_dir, app, _w) = tree();
+    fn a_read_only_reviews_agent_reads_and_reports_only_to_a_task_that_asked() {
+        let (_dir, mut app, _w) = tree();
+        app.config.review.read_only = Some(true);
         let asked = review_of(Some("a-id"));
         let user_asked = review_of(None);
         for caller in [&asked, &user_asked] {
@@ -3617,11 +3738,87 @@ mod tests {
         assert!(e.to_string().contains("no one to report to"), "{e}");
     }
 
+    /// Unless `[review] read_only`, a review's agent is gated like whoever
+    /// asked for it: the assistant when no one did, a top-level task not at
+    /// all, and fails closed when the task is gone.
+    #[test]
+    fn a_review_agent_is_gated_like_whoever_asked_for_it() {
+        let (_dir, mut app, w) = tree();
+        let new = ["worktree", "add", "api"];
+        let none = review_of(None);
+        let top = review_of(Some("top-id"));
+        let node = review_of(Some("w-id"));
+        let gone = review_of(Some("gone-id"));
+        // As the assistant: `[assistant] allow` decides.
+        let e = run_as(&app, &none, &new, false).unwrap_err();
+        assert!(e.to_string().contains("[assistant] allow"), "{e}");
+        app.config.assistant.allow = vec!["worktree.add".into()];
+        run_as(&app, &none, &new, false).unwrap();
+        // A top-level task's agent is ungated in jeet, so is its review's.
+        run_as(&app, &top, &new, false).unwrap();
+        // A node's: only when its own grant holds it too.
+        run_as(&app, &node, &new, false).unwrap_err();
+        app.db.set_grants(&w.id, &["worktree.add"]).unwrap();
+        run_as(&app, &node, &new, false).unwrap();
+        // The task is gone: gated commands are refused, plain reads stay.
+        let e = run_as(&app, &gone, &new, false).unwrap_err();
+        assert!(e.to_string().contains("is gone"), "{e}");
+        run_as(&app, &gone, &["ls"], false).unwrap();
+        // What only the root may stays refused, and a report needs a task.
+        for caller in [&none, &top, &node, &gone] {
+            let e = run_as(&app, caller, &["todo"], false).unwrap_err();
+            assert!(e.to_string().contains("may not"), "{e}");
+        }
+        run_as(&app, &node, &["report", "done", "ok"], false).unwrap();
+        let e = run_as(&app, &none, &["report", "done", "ok"], false).unwrap_err();
+        assert!(e.to_string().contains("no one to report to"), "{e}");
+    }
+
+    #[test]
+    fn a_review_agent_is_denied_what_its_requesters_chain_does_not_hold() {
+        let (_dir, mut app, w) = tree();
+        let review = |by: Option<&str>| {
+            let Caller::Review(review) = review_of(by) else {
+                unreachable!()
+            };
+            review
+        };
+        // Nothing but what the chain withholds, and no guards.
+        let deny = review_deny(&app, &review(None)).unwrap();
+        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        assert!(!deny.contains(&"git push".to_string()), "{deny:?}");
+        assert!(!deny.iter().any(|d| d.contains("gh pr merge")), "{deny:?}");
+        app.config.assistant.allow = vec!["pr.comment".into()];
+        let deny = review_deny(&app, &review(None)).unwrap();
+        assert!(!deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        // The requester's chain, not the root's list alone.
+        app.db.set_grants(&w.id, &[]).unwrap();
+        let deny = review_deny(&app, &review(Some("w-id"))).unwrap();
+        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        // A top-level task is not gated, so nothing is withheld.
+        assert!(review_deny(&app, &review(Some("top-id")))
+            .unwrap()
+            .is_empty());
+        // A task that is gone holds nothing, whatever the root allows.
+        let deny = review_deny(&app, &review(Some("gone-id"))).unwrap();
+        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        // `guards` adds the shared deny.
+        app.config.permissions.guards = Some(true);
+        let deny = review_deny(&app, &review(None)).unwrap();
+        assert!(deny.contains(&"gh pr merge".to_string()), "{deny:?}");
+        assert!(deny.contains(&"git push * main".to_string()), "{deny:?}");
+        assert!(!deny.contains(&"git push".to_string()), "{deny:?}");
+    }
+
     /// The same deny rules and allowed commands for every review.
     #[test]
-    fn every_review_agent_is_denied_what_a_worker_without_a_grant_is() {
-        let (_dir, app, _w) = tree();
-        let deny = review_deny(&app).unwrap();
+    fn a_read_only_review_agent_is_denied_what_a_worker_without_a_grant_is() {
+        let (_dir, mut app, _w) = tree();
+        app.config.review.read_only = Some(true);
+        let Caller::Review(review) = review_of(None) else {
+            unreachable!()
+        };
+        let deny = review_deny(&app, &review).unwrap();
         for pattern in [
             "git push",
             "git push --force",

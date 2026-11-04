@@ -32,7 +32,7 @@ fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
         Caller::Node(task) => task,
         Caller::Review(review) => return send_review(app, &review, kind, message),
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
-        Caller::User => match std::env::var(TASK_ID_ENV)
+        Caller::User => match crate::env::var(TASK_ID_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty())
         {

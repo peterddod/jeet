@@ -130,6 +130,8 @@ pub fn plist(exe: &Path, home: &Path, path_env: &str) -> String {
 	<dict>
 		<key>JEET_HOME</key>
 		<string>{home}</string>
+		<key>PLETE_HOME</key>
+		<string>{home}</string>
 		<key>PATH</key>
 		<string>{path}</string>
 	</dict>
@@ -151,10 +153,11 @@ pub fn plist(exe: &Path, home: &Path, path_env: &str) -> String {
 pub fn systemd_unit(exe: &Path, home: &Path, path_env: &str) -> String {
     format!(
         "[Unit]\nDescription=jeet: send notifications\n\n\
-         [Service]\nEnvironment={home}\nEnvironment={path}\n\
+         [Service]\nEnvironment={home}\nEnvironment={new_home}\nEnvironment={path}\n\
          ExecStart={exe} notify serve\nRestart=always\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n",
         home = systemd_word(&format!("JEET_HOME={}", home.display())),
+        new_home = systemd_word(&format!("PLETE_HOME={}", home.display())),
         path = systemd_word(&format!("PATH={path_env}")),
         exe = systemd_word(&exe.to_string_lossy()),
     )
@@ -368,7 +371,8 @@ mod tests {
         assert_eq!(
             text,
             "[Unit]\nDescription=jeet: send notifications\n\n\
-             [Service]\nEnvironment=\"JEET_HOME=/home/me/.jeet\"\nEnvironment=\"PATH=/usr/bin\"\n\
+             [Service]\nEnvironment=\"JEET_HOME=/home/me/.jeet\"\n\
+             Environment=\"PLETE_HOME=/home/me/.jeet\"\nEnvironment=\"PATH=/usr/bin\"\n\
              ExecStart=\"/opt/jeet 100%%/jeet\" notify serve\nRestart=always\nRestartSec=5\n\n\
              [Install]\nWantedBy=default.target\n"
         );
