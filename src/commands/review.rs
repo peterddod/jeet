@@ -55,7 +55,7 @@ pub fn run(
     // What the assistant asks for reports to it: the review agent's done
     // and blocked go to the task that asked. A task with a parent never
     // gets here: `jeet review` is refused to it (`permissions::node_scope`
-    // has no rule for it), nor does a review's agent (`review_gate`).
+    // has no rule for it), nor does a review's agent.
     let requested_by = match caller {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User => None,

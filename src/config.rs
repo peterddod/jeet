@@ -164,6 +164,13 @@ pub struct ReviewConfig {
     /// 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<u32>,
+
+    /// Whether a review's agent may only read (default: off). On, it runs
+    /// only `jeet ls`, `jeet path` and `jeet prs` (and `jeet report` when a
+    /// task asked), and is denied every push and commenting or reviewing
+    /// through the API. Off, it is gated like whoever asked for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 pub const DEFAULT_REVIEW_MAX_LIVE: u32 = 2;
@@ -186,6 +193,11 @@ impl ReviewConfig {
             && self.max_live.is_none()
             && self.time.is_none()
             && self.turns.is_none()
+            && self.read_only.is_none()
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only.unwrap_or(false)
     }
 
     /// `max_live`, or its default, checked alone: a mistake in `time` or
@@ -639,17 +651,19 @@ pub struct ManagersConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_budget: Option<String>,
 
-    /// What a new worker may do unless given `--allow` (default:
-    /// `["worktree.add"]`).
+    /// What a new worker may do unless given `--allow` (default: every
+    /// capability, held ones too; each list above it still cuts it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_default: Option<Vec<String>>,
 
-    /// What a new manager may do unless given `--allow` (default: nothing).
+    /// What a new manager may do unless given `--allow` (default: every
+    /// capability, held ones too; each list above it still cuts it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_default: Option<Vec<String>>,
 
-    /// Capabilities, besides [`HELD_FLOOR`], that pass down only when named
-    /// and are logged and notified when granted.
+    /// Capabilities, besides [`HELD_FLOOR`], that are logged and notified
+    /// when a grant names them (`--allow`, `jeet manager grant`). The
+    /// default grant holds them too and records nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Vec<String>>,
 }
@@ -755,6 +769,14 @@ pub struct PermissionsConfig {
     /// Extra rules for the assistant (`[permissions.assistant]`).
     #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
     pub assistant: RoleRules,
+    /// Extra rules for reviews' agents (`[permissions.review]`).
+    #[serde(default, skip_serializing_if = "RoleRules::is_empty")]
+    pub review: RoleRules,
+    /// Whether jeet denies every agent it launches force-pushes, merges
+    /// outside `jeet pr merge` and pushes to default branches, and a
+    /// manager committing and pushing too (default: off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guards: Option<bool>,
 }
 
 impl PermissionsConfig {
@@ -768,6 +790,10 @@ impl PermissionsConfig {
 
     pub fn classifier_context(&self) -> bool {
         self.classifier_context.unwrap_or(false)
+    }
+
+    pub fn guards(&self) -> bool {
+        self.guards.unwrap_or(false)
     }
 }
 
@@ -894,9 +920,9 @@ pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 6;
 pub const DEFAULT_MAX_LIVE: u32 = 8;
 pub const DEFAULT_BUDGET: &str = "4h";
-pub const DEFAULT_WORKER_GRANT: &[&str] = &["worktree.add"];
 
-/// Capabilities that are always held, whatever `[managers] held` says.
+/// Capabilities that are always held, whatever `[managers] held` says: a
+/// grant that names one by hand is logged and notified.
 pub const HELD_FLOOR: &[&str] = &["pr.merge", "pr.comment", "pr.review", "task.delete"];
 
 /// `[managers]`, checked and with its defaults filled in.
@@ -1067,9 +1093,9 @@ impl Config {
 
     /// `[managers]` with its defaults, checked where it is used rather
     /// than when config.toml is read, so a mistake there breaks only the
-    /// tree. It refuses an unknown capability, a held one in a default the
-    /// user set, a limit of 0 and a budget that does not parse. The
-    /// built-in worker default drops whatever `held` names.
+    /// tree. It refuses an unknown capability, a limit of 0 and a budget that
+    /// does not parse. A default left unset is every capability, held ones
+    /// included.
     pub fn manager_policy(&self) -> Result<ManagerPolicy> {
         let m = self.managers.clone().unwrap_or_default();
         let limit = |key: &str, value: Option<u32>, default: u32| match value {
@@ -1083,29 +1109,13 @@ impl Config {
                 held.push(name);
             }
         }
-        let worker_default = match &m.worker_default {
-            Some(names) => capabilities("worker_default", names)?,
-            None => DEFAULT_WORKER_GRANT
-                .iter()
-                .copied()
-                .filter(|name| !held.contains(name))
-                .collect(),
+        let every = || permissions::CAPABILITIES.iter().map(|c| c.name).collect();
+        let default = |key: &str, names: &Option<Vec<String>>| match names {
+            Some(names) => capabilities(key, names),
+            None => Ok(every()),
         };
-        let manager_default = capabilities(
-            "manager_default",
-            m.manager_default.as_deref().unwrap_or_default(),
-        )?;
-        for (key, names) in [
-            ("worker_default", &worker_default),
-            ("manager_default", &manager_default),
-        ] {
-            if let Some(name) = names.iter().find(|n| held.contains(n)) {
-                bail!(
-                    "[managers] {key} names {name}, which is held: \
-                     it passes down only when a grant names it"
-                );
-            }
-        }
+        let worker_default = default("worker_default", &m.worker_default)?;
+        let manager_default = default("manager_default", &m.manager_default)?;
         let budget = m.default_budget.as_deref().unwrap_or(DEFAULT_BUDGET);
         let default_budget =
             budget::parse_limits(budget).map_err(|e| anyhow!("[managers] default_budget: {e}"))?;
@@ -1578,15 +1588,25 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.permissions.push(), PushPolicy::Ask);
         assert!(!config.permissions.classifier_context());
+        assert!(!config.permissions.guards());
+        assert!(!config.review.read_only());
         let out = toml::to_string_pretty(&config).unwrap();
-        assert!(!out.contains("permissions"), "{out}");
+        assert!(
+            !out.contains("permissions") && !out.contains("read_only"),
+            "{out}"
+        );
         let config: Config = toml::from_str(
-            "[permissions]\npush = \"branches\"\nclassifier_context = true\n\
-             [permissions.task]\nallow = [\"Bash(gh pr view:*)\"]\n",
+            "[permissions]\npush = \"branches\"\nclassifier_context = true\nguards = true\n\
+             [permissions.task]\nallow = [\"Bash(gh pr view:*)\"]\n\
+             [permissions.review]\ndeny = [\"Bash(git push:*)\"]\n\
+             [review]\nread_only = true\n",
         )
         .unwrap();
         assert_eq!(config.permissions.push(), PushPolicy::Branches);
         assert!(config.permissions.classifier_context());
+        assert!(config.permissions.guards());
+        assert!(config.review.read_only());
+        assert_eq!(config.permissions.review.deny, ["Bash(git push:*)"]);
         assert_eq!(config.permissions.task.allow, ["Bash(gh pr view:*)"]);
         assert!(config.permissions.manager.allow.is_empty());
         let back: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -1594,7 +1614,7 @@ mod tests {
         for bad in [
             "[permissions]\npush = \"always\"\n",
             "[permissions]\nforce = true\n",
-            "[permissions.review]\nallow = []\n",
+            "[permissions.review]\nalow = []\n",
             "[permissions.task]\nalow = []\n",
         ] {
             assert!(toml::from_str::<Config>(bad).is_err(), "{bad}");
@@ -1642,6 +1662,10 @@ mod tests {
             .manager_policy()
     }
 
+    fn every() -> Vec<&'static str> {
+        permissions::CAPABILITIES.iter().map(|c| c.name).collect()
+    }
+
     #[test]
     fn no_default_grant_holds_assistant_interrupt() {
         let policy = Config::default().manager_policy().unwrap();
@@ -1670,8 +1694,8 @@ mod tests {
                     secs: Some(4 * 3600),
                     turns: None
                 },
-                worker_default: vec!["worktree.add"],
-                manager_default: vec![],
+                worker_default: every(),
+                manager_default: every(),
                 held: HELD_FLOOR.to_vec(),
             }
         );
@@ -1706,11 +1730,16 @@ mod tests {
             ]
         );
 
-        // Holding the built-in worker default drops it from the default,
-        // rather than blaming a `worker_default` the user never set.
+        // Held capabilities are in the default grant, and a user default
+        // may name one.
         let policy = policy_of("held = [\"worktree.add\"]").unwrap();
-        assert!(policy.worker_default.is_empty());
+        assert_eq!(policy.worker_default, every());
         assert!(policy.held.contains(&"worktree.add"));
+        let policy =
+            policy_of("worker_default = [\"pr.merge\"]\nmanager_default = [\"task.delete\"]")
+                .unwrap();
+        assert_eq!(policy.worker_default, ["pr.merge"]);
+        assert_eq!(policy.manager_default, ["task.delete"]);
 
         // Round trip: every key written back.
         let config: Config = toml::from_str(&format!("[managers]\n{text}\n")).unwrap();
@@ -1737,23 +1766,6 @@ mod tests {
             "manager_default: nope is not",
         );
         refused("held = [\"nope\"]", "held: nope is not");
-        // A held capability in a default: the floor's, and one added.
-        refused(
-            "worker_default = [\"pr.merge\"]",
-            "worker_default names pr.merge",
-        );
-        refused(
-            "manager_default = [\"task.delete\"]",
-            "manager_default names task.delete",
-        );
-        refused(
-            "held = [\"task.create\"]\nmanager_default = [\"task.create\"]",
-            "names task.create, which is held",
-        );
-        refused(
-            "held = [\"worktree.add\"]\nworker_default = [\"worktree.add\"]",
-            "worker_default names worktree.add",
-        );
         // A limit of 0.
         for key in ["max_depth", "max_children", "max_live"] {
             refused(&format!("{key} = 0"), &format!("{key} = 0 allows nothing"));

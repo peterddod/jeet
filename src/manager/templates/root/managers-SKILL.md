@@ -18,7 +18,7 @@ time; a single change is a plain `jeet task new`.
   you and starts its agent on its brief. It needs `manager.create`.
   - `--allow` (comma-separated capabilities) is what it may do, within
     what you may; it hands at most that on. Without it, it gets
-    `[managers] manager_default`.
+    `[managers] manager_default`, else everything you may.
   - `--budget` (`4h`, `30m`, `20turns`, comma-separated) caps the busy
     time and turns of it and everything below it. Without it, it gets
     `[managers] default_budget`.
@@ -69,6 +69,7 @@ time; a single change is a plain `jeet task new`.
 
 A manager runs locally in tmux, as the user, like any task. jeet keeps it
 to its subtree, its grant, its budget, `[managers] max_live` running agents
-and read-only worktrees, and denies it `git commit` and `git push`. These
+and read-only worktrees (and, if the user set `[permissions] guards`, denies
+it `git commit` and `git push`). These
 limits are cooperative: they stop honest mistakes, not an agent set on
 getting round them. Grant it no more than its area needs.

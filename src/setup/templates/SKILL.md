@@ -103,8 +103,14 @@ each agent at launch).
   force-push).
 - `classifier_context`: a description of routine work for Claude Code's
   auto-mode classifier.
-- `[permissions.task]`, `[permissions.manager]`, `[permissions.assistant]`:
-  extra Claude Code rules, `allow` and `deny`, as written.
+- Nothing is denied to an agent by default: tasks, managers and reviews are
+  bound only by `[assistant] allow` and their own subtree. Restrictions are
+  opt-in. `guards = true` (in `[permissions]`) denies every agent force-pushes,
+  merges outside `{name} pr merge`, pushes to default branches, and a
+  manager committing and pushing.
+- `[permissions.task]`, `[permissions.manager]`, `[permissions.review]`,
+  `[permissions.assistant]`: extra Claude Code rules, `allow` and `deny`, as
+  written.
 - Say that deny rules are a lint (`git -C . push -f` gets past them) and
   that branch protection on GitHub is the real control; setup never changes
   it.
@@ -126,8 +132,14 @@ each agent at launch).
 ### 7. Managers and reviews
 
 - `[managers]`: `default_budget`, `max_depth`, `max_children`, `max_live`,
-  `worker_default`, `manager_default`, `held`, `idle_report_mins`.
-- `[review]` caps: `max_live`, `time`, `turns`.
+  `worker_default`, `manager_default`, `held`, `idle_report_mins`. Unset, a
+  new task or manager is granted every capability, held ones included (each
+  list above it still cuts it); setting `worker_default` or `manager_default`
+  restricts that, as does `--allow`. `held` capabilities are logged and
+  notified when a grant names them.
+- `[review]` caps: `max_live`, `time`, `turns`. A review is gated like whoever
+  asked for it; `read_only = true` limits it to reading and `{name} report`
+  and denies it every push.
 
 ### 8. Watching GitHub
 

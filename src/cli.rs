@@ -449,7 +449,7 @@ pub enum TaskCommands {
         name: String,
     },
 
-    /// End the task's agent and resume its latest session in a new one, so
+    /// End the task's agent and resume its session in a new one, so
     /// it runs on this jeet and keeps its conversation (`assistant`: each of
     /// the assistant's windows). Whatever it left running in the background
     /// (subagents, workflows, /loop schedules) ends with it (a review's name
@@ -565,7 +565,7 @@ pub struct Delegation {
     pub done_when: Option<String>,
     /// What it may do (comma-separated capabilities), within what its
     /// parent holds; default `[managers] worker_default`, or
-    /// `manager_default` for a manager
+    /// `manager_default` for a manager, else every capability
     #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
     pub allow: Option<Vec<String>>,
     /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
