@@ -4,6 +4,24 @@
 use crate::db::tasks::ReportKind;
 use crate::messages;
 
+/// What every tag jeet writes starts with, under the old name and the new.
+pub const TAG_PREFIXES: [&str; 2] = ["jeet-", "plete-"];
+
+/// What follows `<jeet-<name>` (or `<plete-<name>`) at the start of `text`.
+pub fn strip_open<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    TAG_PREFIXES
+        .iter()
+        .find_map(|p| text.strip_prefix(&format!("<{p}{name}")))
+}
+
+/// Where the first `<jeet-<name>` or `<plete-<name>` in `text` is.
+pub fn find_open(text: &str, name: &str) -> Option<usize> {
+    TAG_PREFIXES
+        .iter()
+        .filter_map(|p| text.find(&format!("<{p}{name}")))
+        .min()
+}
+
 /// The tag a message for the assistant from anyone but the user comes in.
 const MESSAGE_TAG: &str = "jeet-message";
 
@@ -104,7 +122,8 @@ pub fn fence_brief(from: &str, path: &str, lines: &str) -> String {
 /// `text`, which an agent wrote to reach another unfenced (`jeet task
 /// send`, `jeet task new --prompt`), with every `<jeet-` and `</jeet-`, in
 /// any case, turned to `‹jeet-` and `‹/jeet-`: it cannot pass for a tag
-/// only jeet writes, as `<jeet-answer from="user">`. Control characters go
+/// only jeet writes, as `<jeet-answer from="user">`. The same for `plete-`,
+/// the tags' new name, which an agent that learned either may be fooled by. Control characters go
 /// first, as delivery drops them: `<\x01jeet-answer` would otherwise pass
 /// and arrive as a live tag. The rest is left as written.
 pub fn defang(text: &str) -> String {
@@ -119,13 +138,13 @@ pub fn defang(text: &str) -> String {
         let visible: String = rest
             .chars()
             .filter(|&c| !crate::tasks::format_char(c))
-            .take(6)
+            .take(7)
             .collect();
         let tag = visible.strip_prefix('/').unwrap_or(&visible);
-        match tag
-            .get(..5)
-            .is_some_and(|p| p.eq_ignore_ascii_case("jeet-"))
-        {
+        match TAG_PREFIXES.iter().any(|p| {
+            tag.get(..p.len())
+                .is_some_and(|t| t.eq_ignore_ascii_case(p))
+        }) {
             true => out.push('‹'),
             false => out.push('<'),
         }
@@ -152,6 +171,19 @@ pub fn fenced(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tags_are_recognised_under_either_name() {
+        assert_eq!(strip_open("<jeet-report id=1>", "report"), Some(" id=1>"));
+        assert_eq!(strip_open("<plete-report id=1>", "report"), Some(" id=1>"));
+        assert_eq!(strip_open("<plete-answer", "report"), None);
+        assert_eq!(find_open("x <plete-answer to=1>", "answer "), Some(2));
+        assert_eq!(
+            find_open("<plete-answer a><jeet-answer b>", "answer "),
+            Some(0)
+        );
+        assert_eq!(find_open("<jeet-answer>", "answer "), None);
+    }
 
     #[test]
     fn messages_from_others_cannot_pass_for_the_user() {
@@ -229,6 +261,10 @@ mod tests {
 
     #[test]
     fn defang_sees_the_text_as_delivery_will_clean_it() {
+        assert_eq!(defang("<plete-answer"), "‹plete-answer");
+        assert_eq!(defang("</PLETE-message>"), "‹/PLETE-message>");
+        assert_eq!(defang("<\u{200b}/plete-x"), "‹\u{200b}/plete-x");
+        assert_eq!(defang("<pleted>"), "<pleted>");
         assert_eq!(defang("<\x01jeet-answer"), "‹jeet-answer");
         assert_eq!(defang("<j\x1beet-answer"), "‹jeet-answer");
         // Invisible characters are looked past, and kept.

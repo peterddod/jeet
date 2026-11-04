@@ -1161,11 +1161,16 @@ fn reask_ask(
 /// failure does not stop the others.
 pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
     let tmux_ok = tmux::available();
+    let sessions = if tmux_ok {
+        tmux::list_sessions()
+    } else {
+        Vec::new()
+    };
     sweep_idle_with(
         app,
         now,
         |task| runtime::activity(app, task, tmux_ok),
-        |task| tmux_ok && tmux::agent_alive(&runtime::session_name(task)),
+        |task| tmux_ok && tmux::agent_alive(&runtime::session_name_in(&sessions, task)),
     )?;
     sweep_idle_reviews(app, now, tmux_ok)
 }
@@ -1175,13 +1180,20 @@ pub fn sweep_idle(app: &App, now: i64) -> Result<()> {
 /// long enough.
 fn sweep_idle_reviews(app: &App, now: i64, tmux_ok: bool) -> Result<()> {
     let mins = app.config.idle_report_mins();
+    let sessions = if tmux_ok {
+        tmux::list_sessions()
+    } else {
+        Vec::new()
+    };
     for review in app.db.list_reviews(Some(TaskState::Active))? {
         let activity = crate::review::activity(app, &review, tmux_ok);
         let busy = matches!(
             activity,
             Activity::Running { .. } | Activity::Waiting { .. }
         );
-        let alive = busy && tmux_ok && tmux::agent_alive(&crate::review::session_name(&review));
+        let alive = busy
+            && tmux_ok
+            && tmux::agent_alive(&crate::review::session_name_in(&sessions, &review));
         match status::fold_busy_review(app, &review, alive, now) {
             Ok(Threshold::Hit100) => budget::report_blocked_review(app, &review),
             Ok(_) => {}
@@ -1356,6 +1368,7 @@ mod tests {
         let app = App {
             config: config::load_or_create(&home).unwrap(),
             db: Database::open(&config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let assistant = assistant::ensure(&app).unwrap();

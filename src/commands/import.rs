@@ -222,12 +222,13 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
         }
     }
     let skip: Vec<PathBuf> = [
-        app.store_root(),
-        app.tasks_root(),
-        app.projects_root(),
-        app.home.join("reviews"),
+        app.roots(config::store_root),
+        app.roots(config::tasks_root),
+        app.roots(config::projects_root),
+        app.roots(|home| home.join("reviews")),
     ]
     .into_iter()
+    .flatten()
     .map(|p| p.canonicalize().unwrap_or(p))
     .collect();
     let mut checkouts = find_checkouts(&roots, &skip);
@@ -235,13 +236,12 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
     // Every trunk jeet knows, so a repository registered before tasks, and
     // the worktrees of the store's own trunks, are found wherever they are.
     let mut store_trunks: HashMap<PathBuf, RepoRecord> = HashMap::new();
-    let store_root = app.store_root();
     for repo in app.db.list_repos(None)? {
         let trunk = PathBuf::from(&repo.trunk_path);
         if !trunk.is_dir() {
             continue;
         }
-        if trunk.starts_with(&store_root) {
+        if app.in_store(&trunk) {
             if let Ok(common) = git::git_common_dir(&trunk) {
                 store_trunks.insert(canonical(&common), repo.clone());
             }
@@ -269,7 +269,11 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
     let within: Option<Vec<PathBuf>> =
         explicit.then(|| roots.iter().map(|r| canonical(r)).collect());
     let stores = StoreScope {
-        tasks_root: canonical(&app.tasks_root()),
+        tasks_roots: app
+            .roots(config::tasks_root)
+            .iter()
+            .map(|root| canonical(root))
+            .collect(),
         within,
         reviews: review::recorded_worktrees(app)
             .iter()
@@ -302,7 +306,7 @@ fn discover(app: &App, paths: &[String]) -> Result<Plan> {
 /// Which of a store trunk's worktrees import may move into tasks.
 struct StoreScope {
     /// Those in tasks already are not.
-    tasks_root: PathBuf,
+    tasks_roots: Vec<PathBuf>,
     /// When paths were given, only those under one of them.
     within: Option<Vec<PathBuf>>,
     /// Worktrees review jobs run in, or ran in: moved, a job would lose its
@@ -312,7 +316,7 @@ struct StoreScope {
 
 impl StoreScope {
     fn takes(&self, path: &Path) -> bool {
-        if path.starts_with(&self.tasks_root) {
+        if self.tasks_roots.iter().any(|root| path.starts_with(root)) {
             return false;
         }
         let at = canonical(path);
@@ -393,7 +397,7 @@ fn plan_external_repo(
     let store_record = app
         .db
         .get_repo(&id)?
-        .filter(|r| Path::new(&r.trunk_path).starts_with(app.store_root()));
+        .filter(|r| app.in_store(Path::new(&r.trunk_path)));
     let default_branch = match &store_record {
         Some(record) => record.default_branch.clone(),
         None => git::default_branch(checkout)?,
@@ -554,14 +558,20 @@ struct TaskCopy {
 
 /// Each worktree a task has of this trunk.
 fn in_tasks(app: &App, trunk: &Path) -> Vec<TaskCopy> {
-    let root = canonical(&app.tasks_root());
+    let roots: Vec<PathBuf> = app
+        .roots(config::tasks_root)
+        .iter()
+        .map(|root| canonical(root))
+        .collect();
     let Ok(entries) = git::worktree_list(trunk) else {
         return Vec::new();
     };
     entries
         .into_iter()
         .filter_map(|e| {
-            let rel = e.path.strip_prefix(&root).ok()?;
+            let rel = roots
+                .iter()
+                .find_map(|root| e.path.strip_prefix(root).ok())?;
             let slug = rel.components().next()?.as_os_str().to_string_lossy();
             Some(TaskCopy {
                 slug: slug.to_string(),
@@ -1041,9 +1051,7 @@ fn execute(app: &App, plan: &Plan, groups: &[Group]) -> Outcome {
 fn ensure_in_store(app: &App, repo: &FoundRepo) -> Result<RepoRecord> {
     let existing = app.db.get_repo(&repo.id)?;
     if let Some(record) = &existing {
-        if Path::new(&record.trunk_path).starts_with(app.store_root())
-            && Path::new(&record.trunk_path).is_dir()
-        {
+        if app.in_store(Path::new(&record.trunk_path)) && Path::new(&record.trunk_path).is_dir() {
             return Ok(record.clone());
         }
         let in_use = app.db.task_worktrees_of_repo(&repo.id)?.len()
@@ -1058,7 +1066,10 @@ fn ensure_in_store(app: &App, repo: &FoundRepo) -> Result<RepoRecord> {
         }
     }
     let identity = remote::parse_remote_url_anyhow(&repo.origin)?;
-    let trunk = crate::paths::trunk_path(&app.store_root(), &identity);
+    let trunk = app.item_dir(
+        config::store_root,
+        &crate::paths::trunk_path(Path::new(""), &identity).to_string_lossy(),
+    );
     if trunk.exists() {
         // A clone the index lost track of: take it back if it is this one.
         let origin = git::origin_url(&trunk)
@@ -1124,7 +1135,7 @@ fn import_copy(
     };
 
     // Into the trunk under names of our own; the branch under its own name.
-    let scratch = format!("refs/jeet/import/{}", Uuid::new_v4());
+    let scratch = format!("{}/import/{}", tasks::WRITE_REF_NS, Uuid::new_v4());
     let mut specs = Vec::new();
     match branch {
         Some(branch) => specs.push(format!("refs/heads/{branch}:refs/heads/{branch}")),

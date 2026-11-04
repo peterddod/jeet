@@ -19,13 +19,18 @@ pub fn run(app: &App, url: &str) -> Result<()> {
 /// so callers that print a path keep stdout to themselves.
 pub fn clone_into_store(app: &App, url: &str) -> Result<RepoRecord> {
     let identity = remote::parse_remote_url_anyhow(url)?;
-    let store = app.store_root();
-    let trunk = paths::trunk_path(&store, &identity);
+    let stores = app.roots(crate::config::store_root);
+    let trunk = app.item_dir(
+        crate::config::store_root,
+        &paths::trunk_path(Path::new(""), &identity).to_string_lossy(),
+    );
     // parse_remote_url refuses `..` and the like; a lexical `starts_with`
     // would pass `store/../x`, so check every component is a plain name.
-    let inside = trunk.strip_prefix(&store).is_ok_and(|rel| {
-        rel.components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    let inside = stores.iter().any(|store| {
+        trunk.strip_prefix(store).is_ok_and(|rel| {
+            rel.components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        })
     });
     if !inside {
         bail!(
@@ -44,7 +49,7 @@ pub fn clone_into_store(app: &App, url: &str) -> Result<RepoRecord> {
     let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
     let folded = fold(&trunk);
     for other in app.db.list_repos(None)? {
-        if !Path::new(&other.trunk_path).starts_with(&store) {
+        if !app.in_store(Path::new(&other.trunk_path)) {
             continue;
         }
         let other_trunk = fold(Path::new(&other.trunk_path));

@@ -22,7 +22,10 @@ use std::fmt;
 
 use anyhow::{bail, Result};
 
-const SCHEME: &str = "jeet://";
+/// The schemes a link is read from: the new name and the old.
+const SCHEMES: [&str; 2] = ["plete://", "jeet://"];
+/// The scheme links are written with.
+const SCHEME: &str = SCHEMES[1]; // flipped to plete in the rename PR
 
 /// Longest slug a link carries.
 const SLUG_MAX: usize = 128;
@@ -75,13 +78,14 @@ pub fn link_for(link: &Link) -> String {
 /// Read a link. The scheme and the kind may be in any case; the slug is
 /// kept as written. One trailing `/` is let through.
 pub fn parse(url: &str) -> Result<Link> {
-    let Some(head) = url.get(..SCHEME.len()) else {
-        bail!("not a jeet link: {url:?}");
-    };
-    if !head.eq_ignore_ascii_case(SCHEME) {
+    let scheme = SCHEMES.into_iter().find(|s| {
+        url.get(..s.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(s))
+    });
+    let Some(scheme) = scheme else {
         bail!("not a jeet link ({SCHEME}...): {url:?}");
-    }
-    let rest = &url[SCHEME.len()..];
+    };
+    let rest = &url[scheme.len()..];
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     let parts: Vec<&str> = rest.split('/').collect();
     let (kind, name, view) = match parts[..] {
@@ -132,6 +136,16 @@ fn report_id(name: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_schemes_are_read_and_the_old_one_written() {
+        assert_eq!(parse("plete://task/fix").unwrap(), Link::task("fix"));
+        assert_eq!(parse("PLETE://Report/r7").unwrap(), Link::Report(7));
+        assert_eq!(parse("jeet://task/fix").unwrap(), Link::task("fix"));
+        assert!(parse("plete://task/a b").is_err());
+        assert!(parse("plet://task/fix").is_err());
+        assert_eq!(Link::task("fix").to_string(), format!("{SCHEME}task/fix"));
+    }
 
     #[test]
     fn links_round_trip() {

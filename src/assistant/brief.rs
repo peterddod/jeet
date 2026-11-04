@@ -19,6 +19,7 @@ use anyhow::{bail, Context, Result};
 use crate::agent::age_label;
 use crate::context::App;
 use crate::db::tasks::TaskReportRecord;
+use crate::manager::fence;
 use crate::messages::{self, Delivered, Delivery};
 use crate::permissions::{self, Caller};
 use crate::render::{self, Class, Meta};
@@ -46,12 +47,12 @@ pub fn store(app: &App, dir: &Path, text: &str, meta: Option<Meta>) -> Result<De
 /// one comes after its question), an ask passed on, else a message.
 fn meta_of_fenced(text: &str) -> Meta {
     let first = text.lines().next().unwrap_or("");
-    if let Some(at) = text.find("<jeet-answer ") {
+    if let Some(at) = fence::find_open(text, "answer ") {
         let tag = text[at..].lines().next().unwrap_or("");
         let from = attr(tag, "from").unwrap_or("jeet");
         return Meta::new(Class::Line, "answer", from, &fence_body(&text[at..]), None);
     }
-    if first.starts_with("<jeet-report ") {
+    if fence::strip_open(first, "report ").is_some() {
         let kind = attr(first, "kind").unwrap_or("report");
         let from = attr(first, "from").unwrap_or("jeet");
         let reference = attr(first, "id").map(|id| format!("r{id}"));
@@ -78,7 +79,7 @@ fn fence_body(text: &str) -> String {
 }
 
 fn cursors_path(dir: &Path) -> PathBuf {
-    dir.join(tasks::MARKER_DIR).join("brief.json")
+    tasks::marker_dir(dir).join("brief.json")
 }
 
 /// The cursors, locked against another `jeet brief` or hook for as long as
@@ -384,6 +385,18 @@ fn shown(text: &str, user: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fenced_text_is_read_under_either_tag_name() {
+        for tag in ["jeet", "plete"] {
+            let answer = meta_of_fenced(&format!("<{tag}-answer to=\"3\" from=\"user\">\nyes"));
+            assert_eq!(answer.kind, "answer", "{tag}");
+            let report = format!("<{tag}-report id=\"7\" from=\"task x\" kind=\"blocked\">\nb");
+            let meta = meta_of_fenced(&report);
+            assert_eq!(meta.kind, "blocked", "{tag}");
+            assert_eq!(meta.from, "task x", "{tag}");
+        }
+    }
 
     fn item(id: i64, kind: &str, reference: Option<&str>) -> Delivery {
         Delivery {

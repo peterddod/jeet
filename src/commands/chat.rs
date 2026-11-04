@@ -48,14 +48,14 @@ pub fn run(app: &App, new: Option<Option<String>>, pick: bool) -> Result<()> {
         eprintln!(
             "jeet: started the assistant's session {} in tmux session {}",
             printable(&opened.name),
-            assistant::TMUX_SESSION
+            assistant::tmux_session()
         );
     }
     let dir = assistant::home_dir(&app.home);
     if !terminal {
         eprintln!(
             "jeet: `tmux attach -t {}` to talk to the assistant",
-            assistant::TMUX_SESSION
+            assistant::tmux_session()
         );
         println!("{}", dir.display());
         return Ok(());

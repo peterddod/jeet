@@ -238,7 +238,7 @@ struct Hint {
 impl Hint {
     fn from_env() -> Self {
         Hint {
-            task: std::env::var(TASK_ID_ENV)
+            task: crate::env::var(TASK_ID_ENV)
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),

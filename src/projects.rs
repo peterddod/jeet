@@ -33,8 +33,9 @@ const SKILLS_DIR: &str = "skills";
 
 /// Where a project's skills land in a task.
 const TASK_SKILLS: &str = ".claude/skills";
-/// Inside the task directory: what [`copy_files`] last copied, and its hash.
-const MANIFEST: &str = ".jeet/project-files";
+/// Inside the task's marker directory: what [`copy_files`] last copied, and
+/// its hash.
+const MANIFEST: &str = "project-files";
 /// The built-in skill every task gets; a project cannot replace it.
 const RESERVED_SKILL: &str = "jeet";
 
@@ -152,7 +153,7 @@ fn check_new_name(name: &str) -> Result<()> {
 /// The directory a project of this name lives in, whether or not it exists.
 pub fn dir(app: &App, name: &str) -> Result<PathBuf> {
     check_name(name)?;
-    Ok(app.projects_root().join(name))
+    Ok(app.item_dir(crate::config::projects_root, name))
 }
 
 /// The directory of a project that exists.
@@ -183,21 +184,23 @@ pub fn load(app: &App, name: &str) -> Result<Project> {
 
 /// Every project's name, sorted.
 pub fn list(app: &App) -> Result<Vec<String>> {
-    let root = app.projects_root();
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", root.display())),
-    };
     let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("read {}", root.display()))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if check_name(&name).is_ok() && entry.path().is_dir() {
-            names.push(name);
+    for root in app.roots(crate::config::projects_root) {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", root.display())),
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read {}", root.display()))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if check_name(&name).is_ok() && entry.path().is_dir() {
+                names.push(name);
+            }
         }
     }
     names.sort();
+    names.dedup();
     Ok(names)
 }
 
@@ -209,9 +212,15 @@ pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
     if repos.iter().any(|r| r.trim().is_empty()) {
         bail!("a repository name cannot be empty");
     }
-    let root = app.projects_root();
+    let root = app.new_root(crate::config::projects_root);
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    let dir = root.join(name);
+    // A name taken in the other home is taken.
+    let dir = app.item_dir(crate::config::projects_root, name);
+    if dir.starts_with(&root) {
+        // Free to claim below.
+    } else {
+        bail!("project {name} already exists at {}", dir.display());
+    }
     // create_dir, not create_dir_all: it claims the name, failing if taken.
     match std::fs::create_dir(&dir) {
         Ok(()) => {}
@@ -598,7 +607,8 @@ fn reachable_without_links(root: &Path, rel: &str) -> bool {
 }
 
 fn read_manifest(task_dir: &Path) -> BTreeMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(task_dir.join(MANIFEST)) else {
+    let Ok(text) = std::fs::read_to_string(crate::tasks::marker_dir(task_dir).join(MANIFEST))
+    else {
         return BTreeMap::new();
     };
     parse_manifest(&text)
@@ -625,7 +635,7 @@ fn render_manifest(entries: &BTreeMap<String, u64>) -> String {
 
 /// Write the manifest whole or not at all: tmp + rename.
 fn write_manifest(task_dir: &Path, entries: &BTreeMap<String, u64>) -> Result<()> {
-    let path = task_dir.join(MANIFEST);
+    let path = crate::tasks::marker_dir(task_dir).join(MANIFEST);
     let dir = path.parent().unwrap_or(task_dir);
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let tmp = path.with_extension("tmp");
@@ -744,6 +754,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home: home.clone(),
         };
         let project = home.join("projects/web");

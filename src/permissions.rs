@@ -335,7 +335,7 @@ pub fn parse_capability(s: &str) -> Result<String, String> {
 ///
 /// [`identity`]: crate::identity
 pub fn assistant_mode() -> bool {
-    std::env::var(ASSISTANT_ENV).is_ok_and(|v| {
+    crate::env::var(ASSISTANT_ENV).is_ok_and(|v| {
         let v = v.trim();
         !v.is_empty() && v != "0"
     })
@@ -391,7 +391,7 @@ pub fn caller(app: &App) -> Result<Caller> {
 /// closed.
 pub fn at_terminal(app: &App) -> Result<bool> {
     let me = identity::identify(app)?;
-    let env_task = std::env::var(crate::tasks::TASK_ID_ENV).ok();
+    let env_task = crate::env::var(crate::tasks::TASK_ID_ENV).ok();
     Ok(me.review.is_none()
         && at_terminal_of(
             me.task.as_ref(),
@@ -2308,6 +2308,7 @@ mod tests {
         let app = App {
             config: config::load_or_create(&home).unwrap(),
             db: Database::open(&config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let assistant = crate::assistant::ensure(&app).unwrap();

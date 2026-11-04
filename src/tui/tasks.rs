@@ -3349,7 +3349,12 @@ fn tree_wanted(was: View, now: View) -> Option<bool> {
 }
 
 impl Background {
+    #[cfg(test)]
     fn start(home: &Path, config: &Config) -> Self {
+        Self::start_in(home, None, config)
+    }
+
+    fn start_in(home: &Path, new_home: Option<&Path>, config: &Config) -> Self {
         let (tx, rx) = mpsc::channel();
         let backlog = Arc::new(AtomicUsize::new(0));
         let updates = Updates {
@@ -3369,7 +3374,10 @@ impl Background {
         let assistant_tx = tx.clone();
         let tree_tx = tx.clone();
         let (status_home, assistant_home) = (home.to_path_buf(), home.to_path_buf());
-        let (tree_home, tree_config) = (home.to_path_buf(), config.clone());
+        let (tree_home, tree_config) = (
+            (home.to_path_buf(), new_home.map(Path::to_path_buf)),
+            config.clone(),
+        );
         std::thread::spawn(move || poll_statuses(probe_rx, status_tx, &status_home));
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
         std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx, &assistant_home));
@@ -3410,10 +3418,12 @@ impl Background {
 
     /// Have the status poller read every task's and review's status now.
     fn probe(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        // One listing for every row.
+        let sessions = tmux::list_sessions();
         let tasks = rows.iter().map(|row| Probe {
             id: row.task.id.clone(),
             dir: row.dir.clone(),
-            session: runtime::session_name(&row.task),
+            session: runtime::session_name_in(&sessions, &row.task),
             touched: row.task.last_activity,
             active: row.task.state == TaskState::Active,
             review: false,
@@ -3421,7 +3431,7 @@ impl Background {
         let reviews = reviews.iter().map(|row| Probe {
             id: row.id().to_string(),
             dir: row.dir.clone(),
-            session: crate::review::session_name(&row.review),
+            session: crate::review::session_name_in(&sessions, &row.review),
             touched: row.review.last_activity,
             active: !row.archived(),
             review: true,
@@ -3494,7 +3504,7 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Outbox, home: &Pa
     loop {
         if let Some(probe) = current.as_ref().filter(|_| !tx.stalled()) {
             let windows = match tmux_ok {
-                true => tmux::windows(assistant::TMUX_SESSION),
+                true => tmux::windows(&assistant::tmux_session()),
                 false => Vec::new(),
             };
             let mut info = assistant_info::gather(probe, &windows);
@@ -3517,7 +3527,12 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Outbox, home: &Pa
 /// [`POLL_EVERY`] after, until told to stop: only while the agents view is
 /// shown. Its own connection, opened as the other threads open theirs; a
 /// home with no index yet is looked at again on the next ask.
-fn poll_tree(asks: Receiver<TreeAsk>, tx: Outbox, home: PathBuf, config: Config) {
+fn poll_tree(
+    asks: Receiver<TreeAsk>,
+    tx: Outbox,
+    (home, new_home): (PathBuf, Option<PathBuf>),
+    config: Config,
+) {
     let tmux_ok = tmux::available();
     let mut app: Option<App> = None;
     let mut running: Option<u64> = None;
@@ -3547,6 +3562,7 @@ fn poll_tree(asks: Receiver<TreeAsk>, tx: Outbox, home: PathBuf, config: Config)
         if app.is_none() {
             app = open_index(&home).map(|db| App {
                 home: home.clone(),
+                new_home: new_home.clone(),
                 config: config.clone(),
                 db,
             });
@@ -3716,7 +3732,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         app,
         terminal: &mut terminal,
         ui,
-        bg: Background::start(&app.home, &app.config),
+        bg: Background::start_in(&app.home, app.new_home.as_deref(), &app.config),
         reviews_asked: None,
         kept_reviews: HashSet::new(),
         pending_link: None,
@@ -8712,6 +8728,7 @@ mod tests {
         App {
             config: config::load_or_create(home).unwrap(),
             db: Database::open(&config::index_path(home)).unwrap(),
+            new_home: None,
             home: home.to_path_buf(),
         }
     }

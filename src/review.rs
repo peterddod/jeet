@@ -296,12 +296,17 @@ fn job_env(pr: &PullRequest, log: &Path) -> Vec<(String, String)> {
 /// The review's directory under `tasks/`: where its agent runs and keeps
 /// its status, and where its worktree is.
 pub fn dir(app: &App, review: &ReviewRecord) -> PathBuf {
-    app.tasks_root().join(&review.slug)
+    app.item_dir(crate::config::tasks_root, &review.slug)
 }
 
 /// Where the review's worktree is, when it has one.
 pub fn worktree_path(app: &App, review: &ReviewRecord) -> Option<PathBuf> {
     Some(dir(app, review).join(review.dir_name.as_deref()?))
+}
+
+/// [`session_name`] among `sessions`, listed once for a loop over many reviews.
+pub fn session_name_in(sessions: &[String], review: &ReviewRecord) -> String {
+    tmux::pick_session(sessions, &review.slug)
 }
 
 /// The review's agent's tmux session.
@@ -427,7 +432,8 @@ fn make_review(
     review.pr_url = Some(pr.url.clone());
     review.requested_by = requested_by.map(str::to_string);
     let dir = dir(app, &review);
-    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
+    std::fs::create_dir_all(app.new_root(crate::config::tasks_root))
+        .context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     let made = tasks::write_marker(&dir, &review.id)
         .and_then(|()| install_skill(&dir))
@@ -445,7 +451,11 @@ fn make_review(
 }
 
 fn install_skill(dir: &Path) -> Result<()> {
-    let skill = dir.join(".claude").join("skills").join("jeet");
+    let rel = Path::new(".claude").join("skills").join("jeet");
+    if crate::manager::has_legacy_counterpart(dir, &rel.to_string_lossy()) {
+        return Ok(());
+    }
+    let skill = dir.join(rel);
     std::fs::create_dir_all(&skill).with_context(|| format!("create {}", skill.display()))?;
     std::fs::write(skill.join("SKILL.md"), SKILL).context("write the jeet skill")
 }
@@ -1446,8 +1456,8 @@ fn launch(app: &App, log: &Path, worktree: &Path, runner_for: &str) -> Result<()
         .get_review(runner_for)?
         .is_some_and(|r| r.requested_by.is_none());
     if users {
-        cmd.env_remove(crate::tasks::TASK_ID_ENV)
-            .env_remove(crate::permissions::ASSISTANT_ENV);
+        crate::env::remove_both(&mut cmd, crate::tasks::TASK_ID_ENV);
+        crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
     }
     let mut child = cmd.spawn().context("start the review command")?;
     hand_over(app, runner_for, users, &mut child)
@@ -1660,13 +1670,12 @@ fn run(app: &App, id: &str, me: u32) -> Result<()> {
     // that started it: the runner itself stays the assistant's, so the
     // check on its job still applies.
     if job.env.iter().any(|(k, _)| k == crate::tasks::TASK_ID_ENV) {
-        cmd.env_remove(crate::permissions::ASSISTANT_ENV);
+        crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
     }
-    let code = match cmd
-        .envs(job.env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .status()
-    {
+    for (k, v) in &job.env {
+        crate::env::set_both(&mut cmd, k, v);
+    }
+    let code = match cmd.stdin(Stdio::null()).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("jeet: could not run the review command: {e}");
@@ -2000,10 +2009,9 @@ fn migrate_held(app: &App) -> Result<()> {
         fold_markers(app, review, &mut say);
     }
 
-    let root = app.tasks_root();
     for old in app.db.pending_leftovers()? {
         let session = runtime::session_name_for(&old.slug);
-        let dir = root.join(&old.slug);
+        let dir = app.item_dir(crate::config::tasks_root, &old.slug);
         let path = dir.join(&old.dir_name);
         let what = format!("{}/{}", old.slug, old.dir_name);
         // A kept review's own, whatever else was recorded of it: never
@@ -2444,7 +2452,7 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
     // directory, not a directory that forces the next slug to `-2`.
     app.db.insert_review(&review)?;
     let dir = dir(app, &review);
-    let created = std::fs::create_dir_all(app.tasks_root())
+    let created = std::fs::create_dir_all(app.new_root(crate::config::tasks_root))
         .context("create the tasks directory")
         .and_then(|()| {
             std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))
@@ -2486,7 +2494,7 @@ fn adopt_file(app: &App, root: &Path, path: &Path) -> Result<Adopted> {
 /// True when a column was set.
 fn fold_markers(app: &App, review: &ReviewRecord, say: &mut dyn FnMut(String)) -> bool {
     let mut changed = false;
-    let marker = dir(app, review).join(tasks::MARKER_DIR);
+    let marker = tasks::marker_dir(&dir(app, review));
     if review.asked_at.is_none() {
         let asked = std::fs::read_to_string(marker.join("review.json"))
             .ok()
@@ -2832,6 +2840,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home: home.clone(),
         };
         app.db
@@ -2959,6 +2968,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(home).unwrap(),
             db: Database::open(&crate::config::index_path(home)).unwrap(),
+            new_home: None,
             home: home.to_path_buf(),
         };
         app.db
@@ -3271,7 +3281,7 @@ mod tests {
                 3 | 4 => assert_eq!(r.last_activity, 100),
                 _ => assert!(r.last_activity > 110),
             }
-            assert!(dir(&app, &r).join(tasks::MARKER_DIR).is_dir());
+            assert!(tasks::marker_dir(&dir(&app, &r)).is_dir());
             assert_eq!(r.job.as_ref().unwrap().worktree, worktree);
         }
         let state = |n: u64| job_of(&app, &get(api, n).unwrap()).unwrap().state();
@@ -3478,6 +3488,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let origin = root.join("origin");
@@ -3725,7 +3736,7 @@ mod tests {
     fn what_a_review_task_kept_in_files_goes_on_its_row() {
         let (_dir, app, repo) = git_lab();
         let review = reviewed(&app, &repo);
-        let marker = dir(&app, &review).join(tasks::MARKER_DIR);
+        let marker = tasks::marker_dir(&dir(&app, &review));
         std::fs::write(
             marker.join("review.json"),
             r#"{"pr": 7, "head": "abc", "at": 123}"#,
@@ -3819,7 +3830,7 @@ mod tests {
         let (_dir, app, repo) = git_lab();
         let review = reviewed(&app, &repo);
         assert!(asked(&review).is_none());
-        let marker = dir(&app, &review).join(tasks::MARKER_DIR);
+        let marker = tasks::marker_dir(&dir(&app, &review));
         std::fs::write(
             marker.join("review.json"),
             r#"{"pr": 7, "head": "abc", "at": 123}"#,
