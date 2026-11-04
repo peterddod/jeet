@@ -1,5 +1,5 @@
-//! `jeet todo …`: the assistant's todo list, scriptable. Items and `--json`
-//! go to stdout; what jeet has to say about them goes to stderr.
+//! `plete todo …`: the assistant's todo list, scriptable. Items and `--json`
+//! go to stdout; what plete has to say about them goes to stderr.
 
 use anyhow::Result;
 
@@ -17,7 +17,7 @@ pub fn ls(app: &App, json: bool) -> Result<()> {
         return Ok(());
     }
     if items.is_empty() {
-        eprintln!("jeet: nothing to do; `jeet todo add <text>` adds an item");
+        eprintln!("plete: nothing to do; `plete todo add <text>` adds an item");
         return Ok(());
     }
     for item in &items {
@@ -75,7 +75,7 @@ fn report(items: &[ItemView], what: &str, json: bool) -> Result<()> {
         return Ok(());
     }
     for item in items {
-        eprintln!("jeet: {what} {}", line(item));
+        eprintln!("plete: {what} {}", line(item));
     }
     Ok(())
 }

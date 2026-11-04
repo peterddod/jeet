@@ -158,7 +158,7 @@ pub const HELP_AGENTS: &[(&str, &str)] = &[
     ),
     (
         "",
-        "l, I, b, z, Z, x, n and y only from your own terminal, not a pane of jeet's",
+        "l, I, b, z, Z, x, n and y only from your own terminal, not a pane of plete's",
     ),
     ("", ""),
     (
@@ -215,7 +215,7 @@ pub const HELP_REVIEWS: &[(&str, &str)] = &[
     ("e", "explore the review's worktree"),
     (
         "R",
-        "ask the review's agent to review again, as jeet review <pr> --rerun · an archived review: a first",
+        "ask the review's agent to review again, as plete review <pr> --rerun · an archived review: a first",
     ),
     ("a", "archive the review · unarchive, on an archived one"),
     (
@@ -311,7 +311,7 @@ pub const HELP_PROJECTS: &[(&str, &str)] = &[
     ("", ""),
     (
         "project",
-        "a jeet project (project.toml): a task started from it is in it",
+        "a plete project (project.toml): a task started from it is in it",
     ),
     (
         "",
@@ -605,10 +605,10 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
         )),
     }
     let title = match ui.view {
-        View::Agents => " jeet · agents ",
-        View::Reviews => " jeet · reviews ",
-        View::Projects => " jeet · projects ",
-        View::Active => " jeet · tasks ",
+        View::Agents => " plete · agents ",
+        View::Reviews => " plete · reviews ",
+        View::Projects => " plete · projects ",
+        View::Active => " plete · tasks ",
     };
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
@@ -621,7 +621,7 @@ fn draw_header(frame: &mut Frame, area: Rect, ui: &TasksUi) {
 
 /// The assistant, pinned above the list: how many sessions it has, and the
 /// one `c` opens — the most recently active. In red, only while there are
-/// any, how many of its windows jeet did not start.
+/// any, how many of its windows plete did not start.
 pub fn assistant_line(info: Option<&AssistantInfo>) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " ✦ assistant  ",
@@ -874,7 +874,7 @@ fn draw_reviews(frame: &mut Frame, area: Rect, ui: &mut TasksUi) {
     if ui.reviews.is_empty() {
         let hint = match (total, archived) {
             (0, false) => {
-                "no reviews yet. jeet review <pr> checks one out. \
+                "no reviews yet. plete review <pr> checks one out. \
                  A shows the archived ones."
             }
             (0, true) => "no archived reviews. A goes back to the active ones.",
@@ -1238,15 +1238,15 @@ fn snippet(row: &TaskRow) -> String {
         .unwrap_or_default()
 }
 
-/// What to do about the selected task's agent, when jeet refuses its
+/// What to do about the selected task's agent, when plete refuses its
 /// commands for want of a record of starting it.
 pub fn unanchored_hint(row: Option<&TaskRow>) -> Option<String> {
     let row = row.filter(|row| row.unanchored)?;
     let slug = &row.task.slug;
     Some(format!(
-        "{slug}'s agent is unanchored (an older jeet started it), so jeet refuses its \
-         commands: `jeet task restart {slug}` when idle, or `jeet task adopt {slug}` from a \
-         terminal outside jeet's tmux sessions"
+        "{slug}'s agent is unanchored (an older plete started it), so plete refuses its \
+         commands: `plete task restart {slug}` when idle, or `plete task adopt {slug}` from a \
+         terminal outside plete's tmux sessions"
     ))
 }
 
@@ -1507,7 +1507,7 @@ fn tree_line(ui: &TasksUi, line: &TreeLine, columns: &TreeColumns) -> Line<'stat
     let id = row.task.id.as_str();
     let node = ui.tree_info.as_ref().and_then(|info| info.nodes.get(id));
     let shown = ui.shown.get(id).copied().unwrap_or((Urgency::Idle, 0));
-    // A slug, which jeet made, never a name a manager wrote.
+    // A slug, which plete made, never a name a manager wrote.
     let name = match line.at {
         At::Root => "✦ assistant".to_string(),
         At::Row(_) => {
@@ -1985,7 +1985,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                     Line::from("no worktrees: the task is an empty canvas"),
                     Line::from(""),
                     Line::from(dim(
-                        "n adds one, or the agent does with `jeet worktree add <repo>`",
+                        "n adds one, or the agent does with `plete worktree add <repo>`",
                     )),
                 ];
                 render_text(frame, area, title, Color::Green, body);
@@ -2168,7 +2168,7 @@ fn draw_panel(frame: &mut Frame, ui: &TasksUi, panel: &Panel) -> Vec<Link> {
                     }),
                     Line::from(""),
                     Line::from(dim(
-                        "messages queued for the assistant, what `jeet watch` saw on GitHub",
+                        "messages queued for the assistant, what `plete watch` saw on GitHub",
                     )),
                     Line::from(dim("and what the assistant did show up here, newest first")),
                 ];
@@ -2707,8 +2707,8 @@ mod tests {
             status_text(&r)
         );
         let hint = unanchored_hint(Some(&r)).unwrap();
-        assert!(hint.contains("jeet task restart api"), "{hint}");
-        assert!(hint.contains("jeet task adopt api"), "{hint}");
+        assert!(hint.contains("plete task restart api"), "{hint}");
+        assert!(hint.contains("plete task adopt api"), "{hint}");
         assert_eq!(unanchored_hint(None), None);
     }
 
@@ -2728,7 +2728,7 @@ mod tests {
         assert_eq!(text(&i), " ✦ assistant  2 sessions · active ✕ triage name");
         i.sessions.truncate(1);
         assert_eq!(text(&i), " ✦ assistant  1 session · active ✕ triage name");
-        // Windows jeet did not start, only while there are any, in red.
+        // Windows plete did not start, only while there are any, in red.
         i.unanchored = 2;
         let line = assistant_line(Some(&i));
         assert_eq!(
@@ -3846,7 +3846,7 @@ mod tests {
         let mut ui = agents_ui();
         let screen = render(&mut ui, 120, 20);
         let all = screen.join("\n");
-        assert!(all.contains("jeet · agents"), "{all}");
+        assert!(all.contains("plete · agents"), "{all}");
         assert!(all.contains("live 5/8   needs you 1"), "{all}");
         assert!(!all.contains("queued"), "{all}");
         // The assistant is the root, not pinned above the list.

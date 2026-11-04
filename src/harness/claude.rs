@@ -1,12 +1,12 @@
 //! Claude Code.
 //!
-//! jeet picks each session's id (`--session-id`, `-n`), resumes with
+//! plete picks each session's id (`--session-id`, `-n`), resumes with
 //! `--resume`, and gives a first prompt after `--`. Its hooks arrive in a
 //! `--settings` file layered over the user's own, which also pre-approves
-//! the jeet commands the agent may run and denies what jeet forbids it
+//! the plete commands the agent may run and denies what plete forbids it
 //! (force-pushing, merging…). Claude checks deny rules before any allow
 //! rule from any settings scope, and a denied command cannot be approved at
-//! the prompt. Each hook runs `jeet task-hook --task <id> <Event>` with the
+//! the prompt. Each hook runs `plete task-hook --task <id> <Event>` with the
 //! event's JSON on stdin. Esc ends a running turn.
 //!
 //! Sessions are found by their transcripts, in
@@ -28,7 +28,7 @@ use crate::agent::{mtime_secs, AgentSession};
 use crate::status::{first_line, DETAIL_MAX};
 use crate::waiter::WakeEnv;
 
-/// Every hook event jeet installs.
+/// Every hook event plete installs.
 pub const HOOK_EVENTS: [&str; 7] = [
     "SessionStart",
     "UserPromptSubmit",
@@ -381,7 +381,7 @@ fn trust_selection(pane: &str) -> Option<&'static str> {
     selected.next().is_none().then_some(first)
 }
 
-/// The fields of a Claude Code hook payload that jeet reads; every event
+/// The fields of a Claude Code hook payload that plete reads; every event
 /// sends a different subset.
 #[derive(Debug, Default, Deserialize)]
 struct HookInput {
@@ -472,19 +472,19 @@ fn asks_the_user(input: &HookInput) -> bool {
     )
 }
 
-/// The `--settings` JSON: a hook per event running `jeet task-hook` for the
-/// task, with `wake` a second at session start running `jeet inbox watch`
+/// The `--settings` JSON: a hook per event running `plete task-hook` for the
+/// task, with `wake` a second at session start running `plete inbox watch`
 /// in the background (`async`, so the session does not wait on it),
 /// permission to run the commands `allow` names, as `Bash(…)` rules, and,
 /// when there are any, `Bash(…)` rules denying those `deny` names, each
 /// followed by the `extra_allow` and `extra_deny` rules as written; with
 /// `environment`, the auto-mode classifier's `autoMode.environment` too.
-/// `jeet` runs outside Claude's sandbox, should the user turn it on: jeet
+/// `plete` (and `jeet`, its old name) runs outside Claude's sandbox, should the user turn it on: plete
 /// knows its caller by the processes above it, which a sandbox with its own
 /// process ids (bubblewrap's, on Linux) hides, and on every platform it
-/// writes under `$JEET_HOME`, outside the writes a sandbox allows. The
+/// writes under `$PLETE_HOME`, outside the writes a sandbox allows. The
 /// cost, documented in the README: Claude decides per Bash command, so
-/// what a command chains with `jeet` may run unsandboxed too.
+/// what a command chains with `plete` may run unsandboxed too.
 fn settings_json(hooks: &HookSetup) -> String {
     let program = shell_quote(&hooks.exe.to_string_lossy());
     let mut groups = serde_json::Map::new();
@@ -511,7 +511,7 @@ fn settings_json(hooks: &HookSetup) -> String {
     let allow: Vec<String> = hooks
         .allow
         .iter()
-        .map(|command| format!("Bash({command}:*)"))
+        .flat_map(|command| allow_rules(command))
         .chain(hooks.extra_allow.iter().cloned())
         .collect();
     let mut permissions = serde_json::json!({ "allow": allow });
@@ -527,13 +527,23 @@ fn settings_json(hooks: &HookSetup) -> String {
     let mut settings = serde_json::json!({
         "hooks": groups,
         "permissions": permissions,
-        "sandbox": { "excludedCommands": ["jeet"] },
+        "sandbox": { "excludedCommands": ["plete", "jeet"] },
     });
     if let Some(environment) = &hooks.environment {
         // `$defaults` keeps Claude's own entries ahead of ours.
         settings["autoMode"] = serde_json::json!({ "environment": ["$defaults", environment] });
     }
     settings.to_string()
+}
+
+/// The `Bash(…)` rules for an allowed command: as `plete …` and, while old
+/// task skills still tell agents to type it, as `jeet …`.
+fn allow_rules(command: &str) -> Vec<String> {
+    let mut rules = vec![format!("Bash({command}:*)")];
+    if command == "plete" || command.starts_with("plete ") {
+        rules.push(format!("Bash(jeet{}:*)", &command["plete".len()..]));
+    }
+    rules
 }
 
 /// The `Bash(…)` rules for a deny pattern (see [`HookSetup::deny`]). A
@@ -551,7 +561,7 @@ pub(crate) fn deny_rules(pattern: &str) -> Vec<String> {
 }
 
 /// Root of Claude Code's per-project session store.
-fn projects_dir() -> Option<PathBuf> {
+pub(crate) fn projects_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir).join("projects"));
@@ -561,8 +571,8 @@ fn projects_dir() -> Option<PathBuf> {
 }
 
 /// Claude Code encodes a project path by replacing every non-alphanumeric
-/// character with `-`, e.g. `/home/me/.jeet/store` -> `-home-me--jeet-store`.
-fn project_slug(root: &Path) -> String {
+/// character with `-`, e.g. `/home/me/.plete/store` -> `-home-me--plete-store`.
+pub(crate) fn project_slug(root: &Path) -> String {
     root.to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -1077,11 +1087,11 @@ mod tests {
     }
 
     #[test]
-    fn settings_install_every_hook_and_the_jeet_permissions() {
+    fn settings_install_every_hook_and_the_plete_permissions() {
         let hooks = HookSetup {
-            exe: "/opt/it's here/jeet".into(),
+            exe: "/opt/it's here/plete".into(),
             task_id: "t-1".into(),
-            allow: vec!["jeet worktree".into(), "jeet ls".into()],
+            allow: vec!["plete worktree".into(), "plete ls".into()],
             wake: true,
             ..Default::default()
         };
@@ -1096,7 +1106,7 @@ mod tests {
             assert_eq!(hook["type"], "command");
             assert_eq!(
                 hook["command"],
-                format!(r"'/opt/it'\''s here/jeet' task-hook --task t-1 {event}")
+                format!(r"'/opt/it'\''s here/plete' task-hook --task t-1 {event}")
             );
             assert_eq!(hook["timeout"], HOOK_TIMEOUT_SECS, "{event}");
             assert!(hook.get("async").is_none(), "{event}");
@@ -1108,7 +1118,7 @@ mod tests {
         assert_eq!(watch["type"], "command");
         assert_eq!(
             watch["command"],
-            r"'/opt/it'\''s here/jeet' inbox watch --task t-1"
+            r"'/opt/it'\''s here/plete' inbox watch --task t-1"
         );
         assert_eq!(watch["async"], true);
         assert_eq!(watch["timeout"], WAKE_TIMEOUT_SECS);
@@ -1116,20 +1126,25 @@ mod tests {
         assert!(value["hooks"]["Stop"][0].get("matcher").is_none());
         assert_eq!(
             value["permissions"]["allow"],
-            serde_json::json!(["Bash(jeet worktree:*)", "Bash(jeet ls:*)"])
+            serde_json::json!([
+                "Bash(plete worktree:*)",
+                "Bash(jeet worktree:*)",
+                "Bash(plete ls:*)",
+                "Bash(jeet ls:*)"
+            ])
         );
         assert!(value["permissions"].get("deny").is_none());
-        // Inside Claude's sandbox jeet could not see the agent's process.
+        // Inside Claude's sandbox plete could not see the agent's process.
         assert_eq!(
             value["sandbox"]["excludedCommands"],
-            serde_json::json!(["jeet"])
+            serde_json::json!(["plete", "jeet"])
         );
     }
 
     #[test]
     fn settings_start_no_wake_channel_unless_asked() {
         let hooks = HookSetup {
-            exe: "/bin/jeet".into(),
+            exe: "/bin/plete".into(),
             task_id: "t".into(),
             ..Default::default()
         };
@@ -1141,7 +1156,7 @@ mod tests {
         assert_eq!(start.len(), 1);
         assert_eq!(
             start[0]["command"],
-            "'/bin/jeet' task-hook --task t SessionStart"
+            "'/bin/plete' task-hook --task t SessionStart"
         );
         assert!(!args[1].contains("inbox watch"));
     }
@@ -1149,9 +1164,9 @@ mod tests {
     #[test]
     fn settings_carry_deny_rules() {
         let hooks = HookSetup {
-            exe: "/bin/jeet".into(),
+            exe: "/bin/plete".into(),
             task_id: "t".into(),
-            allow: vec!["jeet ls".into()],
+            allow: vec!["plete ls".into()],
             deny: vec![
                 "gh pr merge".into(),
                 "git push --force".into(),
@@ -1176,16 +1191,16 @@ mod tests {
         );
         assert_eq!(
             value["permissions"]["allow"],
-            serde_json::json!(["Bash(jeet ls:*)"])
+            serde_json::json!(["Bash(plete ls:*)", "Bash(jeet ls:*)"])
         );
     }
 
     #[test]
-    fn settings_add_config_rules_after_jeets_and_the_classifier_context() {
+    fn settings_add_config_rules_after_pletes_and_the_classifier_context() {
         let hooks = HookSetup {
-            exe: "/bin/jeet".into(),
+            exe: "/bin/plete".into(),
             task_id: "t".into(),
-            allow: vec!["jeet ls".into()],
+            allow: vec!["plete ls".into()],
             deny: vec!["gh pr merge".into()],
             extra_allow: vec!["Read(~/notes/**)".into()],
             extra_deny: vec!["Bash(rm -rf:*)".into()],
@@ -1195,7 +1210,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
         assert_eq!(
             value["permissions"]["allow"],
-            serde_json::json!(["Bash(jeet ls:*)", "Read(~/notes/**)"])
+            serde_json::json!(["Bash(plete ls:*)", "Bash(jeet ls:*)", "Read(~/notes/**)"])
         );
         assert_eq!(
             value["permissions"]["deny"],
@@ -1256,7 +1271,7 @@ mod tests {
     fn a_draft_in_the_input_box_is_seen_but_not_the_placeholder() {
         assert!(ClaudeCode.has_draft(&pane("input-draft")));
         assert!(ClaudeCode.has_draft(&pane("input-draft-lines")));
-        // Named, as jeet starts it: the name is in the rule above the box,
+        // Named, as plete starts it: the name is in the rule above the box,
         // and a message sent before shows above it.
         assert!(ClaudeCode.has_draft(&pane("input-draft-named")));
         // Dimmed: Claude's suggestion, not typed.
@@ -1330,12 +1345,12 @@ mod tests {
     #[test]
     fn slug_matches_claude_layout() {
         assert_eq!(
-            project_slug(Path::new("/home/user/jeet")),
-            "-home-user-jeet"
+            project_slug(Path::new("/home/user/plete")),
+            "-home-user-plete"
         );
         assert_eq!(
-            project_slug(Path::new("/home/me/.jeet/worktrees/feat-x")),
-            "-home-me--jeet-worktrees-feat-x"
+            project_slug(Path::new("/home/me/.plete/worktrees/feat-x")),
+            "-home-me--plete-worktrees-feat-x"
         );
     }
 

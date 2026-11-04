@@ -1,4 +1,4 @@
-//! `jeet notify`: a notification, for the assistant to report what it has
+//! `plete notify`: a notification, for the assistant to report what it has
 //! done, or for any script; and the sender that sends them.
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -18,17 +18,17 @@ use crate::permissions;
 
 pub fn run(title: Option<&str>, body: Option<&str>, url: Option<&str>) -> Result<()> {
     let Some(title) = title else {
-        bail!("give the notification's title: `jeet notify <title>`");
+        bail!("give the notification's title: `plete notify <title>`");
     };
     if let Some(url) = url {
         if !notify::openable_url(url) {
             bail!("--url must be an http(s) address, not {url:?}");
         }
     }
-    let home = config::jeet_home()?;
+    let home = config::plete_home()?;
     let assistant = permissions::assistant_mode();
     if assistant && !config::load_or_create(&home)?.assistant.notify() {
-        eprintln!("jeet: notifications from the assistant are off (`[assistant] notify`)");
+        eprintln!("plete: notifications from the assistant are off (`[assistant] notify`)");
         return Ok(());
     }
     notify::event_in(
@@ -46,7 +46,7 @@ pub fn run(title: Option<&str>, body: Option<&str>, url: Option<&str>) -> Result
 }
 
 pub fn run_command(command: NotifyCommands) -> Result<()> {
-    let home = config::jeet_home()?;
+    let home = config::plete_home()?;
     match command {
         NotifyCommands::Serve => {
             let app = App::open()?;
@@ -70,19 +70,19 @@ pub fn run_command(command: NotifyCommands) -> Result<()> {
     }
 }
 
-/// `jeet notify setup slack`: the bot token into the OS keyring, and
+/// `plete notify setup slack`: the bot token into the OS keyring, and
 /// `[notify.slack] user`. The user's alone, at their own terminal: no
 /// agent ever handles the token.
 fn setup_slack(app: &App) -> Result<()> {
     if !permissions::at_terminal(app)? {
-        bail!("this asks for a Slack token: run it from your own terminal, not a jeet pane");
+        bail!("this asks for a Slack token: run it from your own terminal, not a plete pane");
     }
     if !std::io::stdin().is_terminal() {
         bail!("this asks for a Slack token: run it at a terminal");
     }
     eprintln!(
         "Paste the app's Bot User OAuth Token (xoxb-…; make the app from \
-         `jeet notify slack-manifest` and install it to your workspace first)."
+         `plete notify slack-manifest` and install it to your workspace first)."
     );
     let token = read_hidden("Bot token: ")?;
     let token = token.trim();
@@ -92,12 +92,12 @@ fn setup_slack(app: &App) -> Result<()> {
     secrets::OsKeyring
         .set(&secrets::account(slack::NAME, &app.home), token)
         .context("store the token in the OS keyring")?;
-    eprintln!("jeet: the Slack bot token is in the OS keyring");
+    eprintln!("plete: the Slack bot token is in the OS keyring");
 
     let path = config::config_path(&app.home);
     let notify = &app.config.notify;
     match notify.slack_user() {
-        Some(user) => eprintln!("jeet: [notify.slack] user is {user}"),
+        Some(user) => eprintln!("plete: [notify.slack] user is {user}"),
         None => {
             eprint!("Your Slack member id (in Slack: your profile, ⋮, Copy member ID): ");
             std::io::stderr().flush()?;
@@ -116,12 +116,12 @@ fn setup_slack(app: &App) -> Result<()> {
                     std::fs::write(&path, text)
                         .with_context(|| format!("write {}", path.display()))?;
                     eprintln!(
-                        "jeet: set [notify.slack] user = \"{user}\" in {}",
+                        "plete: set [notify.slack] user = \"{user}\" in {}",
                         path.display()
                     );
                 }
                 None => eprintln!(
-                    "jeet: set `user = \"{user}\"` under [notify.slack] in {}",
+                    "plete: set `user = \"{user}\"` under [notify.slack] in {}",
                     path.display()
                 ),
             }
@@ -129,14 +129,16 @@ fn setup_slack(app: &App) -> Result<()> {
     }
     if !notify.via().iter().any(|v| v == slack::NAME) {
         eprintln!(
-            "jeet: add \"slack\" to [notify] via in {}, e.g. via = [\"desktop\", \"slack\"]",
+            "plete: add \"slack\" to [notify] via in {}, e.g. via = [\"desktop\", \"slack\"]",
             path.display()
         );
     }
     if !notify::sender_running(&app.home) {
-        eprintln!("jeet: only the sender sends to Slack: `jeet notify install` keeps one running");
+        eprintln!(
+            "plete: only the sender sends to Slack: `plete notify install` keeps one running"
+        );
     }
-    eprintln!("jeet: then `jeet notify test`");
+    eprintln!("plete: then `plete notify test`");
     Ok(())
 }
 
@@ -160,12 +162,12 @@ fn with_slack_user(text: &str, user: &str) -> Result<Option<String>> {
     Ok((read.notify.slack_user() == Some(user)).then_some(text))
 }
 
-/// `jeet notify setup ntfy`: `[notify.ntfy]`'s server and topic, and an
+/// `plete notify setup ntfy`: `[notify.ntfy]`'s server and topic, and an
 /// access token, if the user gives one, into the OS keyring. The user's
 /// alone, at their own terminal, as for Slack.
 fn setup_ntfy(app: &App) -> Result<()> {
     if !permissions::at_terminal(app)? {
-        bail!("this asks for an ntfy token: run it from your own terminal, not a jeet pane");
+        bail!("this asks for an ntfy token: run it from your own terminal, not a plete pane");
     }
     if !std::io::stdin().is_terminal() {
         bail!("this asks for an ntfy token: run it at a terminal");
@@ -174,7 +176,7 @@ fn setup_ntfy(app: &App) -> Result<()> {
     let notify = &app.config.notify;
     match notify.ntfy_topic() {
         Some(topic) => eprintln!(
-            "jeet: [notify.ntfy] publishes to {topic} on {}",
+            "plete: [notify.ntfy] publishes to {topic} on {}",
             notify.ntfy_server()
         ),
         // Written by the user, so theirs to finish.
@@ -214,15 +216,15 @@ fn setup_ntfy(app: &App) -> Result<()> {
                 Some(text) => {
                     std::fs::write(&path, text)
                         .with_context(|| format!("write {}", path.display()))?;
-                    eprintln!("jeet: set [notify.ntfy] in {}", path.display());
+                    eprintln!("plete: set [notify.ntfy] in {}", path.display());
                 }
                 None => eprintln!(
-                    "jeet: set `server = \"{server}\"` and `topic = \"{topic}\"` under \
+                    "plete: set `server = \"{server}\"` and `topic = \"{topic}\"` under \
                      [notify.ntfy] in {}",
                     path.display()
                 ),
             }
-            eprintln!("jeet: subscribe to {server}/{topic} in the ntfy app");
+            eprintln!("plete: subscribe to {server}/{topic} in the ntfy app");
         }
     }
     eprintln!(
@@ -231,25 +233,25 @@ fn setup_ntfy(app: &App) -> Result<()> {
     );
     let token = read_hidden("Access token: ")?;
     match token.trim() {
-        "" => eprintln!("jeet: no new token stored"),
+        "" => eprintln!("plete: no new token stored"),
         token if ntfy::plausible_token(token) => {
             secrets::OsKeyring
                 .set(&secrets::account(ntfy::NAME, &app.home), token)
                 .context("store the token in the OS keyring")?;
-            eprintln!("jeet: the ntfy access token is in the OS keyring");
+            eprintln!("plete: the ntfy access token is in the OS keyring");
         }
         _ => bail!("that is not an access token; nothing was stored"),
     }
     if !notify.via().iter().any(|v| v == ntfy::NAME) {
         eprintln!(
-            "jeet: add \"ntfy\" to [notify] via in {}, e.g. via = [\"desktop\", \"ntfy\"]",
+            "plete: add \"ntfy\" to [notify] via in {}, e.g. via = [\"desktop\", \"ntfy\"]",
             path.display()
         );
     }
     if !notify::sender_running(&app.home) {
-        eprintln!("jeet: only the sender sends to ntfy: `jeet notify install` keeps one running");
+        eprintln!("plete: only the sender sends to ntfy: `plete notify install` keeps one running");
     }
-    eprintln!("jeet: then `jeet notify test`");
+    eprintln!("plete: then `plete notify test`");
     Ok(())
 }
 
@@ -306,7 +308,7 @@ fn read_hidden(prompt: &str) -> Result<String> {
     Ok(line)
 }
 
-/// `jeet notify test`: queue a notification, and say whether the sender
+/// `plete notify test`: queue a notification, and say whether the sender
 /// took it.
 fn test(app: &App) -> Result<()> {
     let link = app
@@ -318,17 +320,17 @@ fn test(app: &App) -> Result<()> {
         Event {
             why: Why::Info,
             kind: "test".into(),
-            title: "jeet: test notification".into(),
+            title: "plete: test notification".into(),
             body: "Notifications reach you here. Try its links.".into(),
             link,
             ..Event::default()
         },
     );
     let via = app.config.notify.via();
-    eprintln!("jeet: queued a test notification for {}", via.join(", "));
+    eprintln!("plete: queued a test notification for {}", via.join(", "));
     if !notify::sender_running(&app.home) {
         if let Some(notice) = notify::notice(&app.home, &app.config.notify) {
-            eprintln!("jeet: {notice}");
+            eprintln!("plete: {notice}");
         }
         return Ok(());
     }
@@ -338,11 +340,11 @@ fn test(app: &App) -> Result<()> {
     }
     match waits(&app.home) {
         true => eprintln!(
-            "jeet: the sender has not sent it yet; it tries again later, and {} says why",
+            "plete: the sender has not sent it yet; it tries again later, and {} says why",
             sender::log_hint(&app.home)
         ),
         false => eprintln!(
-            "jeet: the sender took it from the outbox (unless a [[notify.rules]] entry or \
+            "plete: the sender took it from the outbox (unless a [[notify.rules]] entry or \
              max_per_hour held it back); {} has any error",
             sender::log_hint(&app.home)
         ),
@@ -359,14 +361,14 @@ fn waits(home: &Path) -> bool {
     })
 }
 
-/// `jeet notify install-link`: make the system open `jeet://` links with
-/// `jeet open`. A change to the user's system, so theirs alone to make.
+/// `plete notify install-link`: make the system open `plete://` links with
+/// `plete open`. A change to the user's system, so theirs alone to make.
 pub fn install_link(app: &App) -> Result<()> {
     require_terminal(app)?;
     link::handler::install(&app.home)
 }
 
-/// `jeet notify uninstall-link`.
+/// `plete notify uninstall-link`.
 pub fn uninstall_link(app: &App) -> Result<()> {
     require_terminal(app)?;
     link::handler::uninstall()
@@ -374,7 +376,7 @@ pub fn uninstall_link(app: &App) -> Result<()> {
 
 fn require_terminal(app: &App) -> Result<()> {
     if !permissions::at_terminal(app)? {
-        bail!("this changes your system: run it from your own terminal, not a jeet pane");
+        bail!("this changes your system: run it from your own terminal, not a plete pane");
     }
     Ok(())
 }
@@ -403,13 +405,13 @@ mod tests {
     #[test]
     fn setup_adds_ntfy_only_where_none_is() {
         let text = "scan_roots = []\n[notify]\nvia = [\"ntfy\"]";
-        let added = with_ntfy(text, "https://ntfy.sh", "jeet-abc")
+        let added = with_ntfy(text, "https://ntfy.sh", "plete-abc")
             .unwrap()
             .unwrap();
         assert!(added.starts_with(text), "{added}");
         assert!(!added.contains("server"), "{added}");
         let config: config::Config = toml::from_str(&added).unwrap();
-        assert_eq!(config.notify.ntfy_topic(), Some("jeet-abc"));
+        assert_eq!(config.notify.ntfy_topic(), Some("plete-abc"));
         assert!(notify::check(&config.notify).is_ok());
 
         let own = with_ntfy("", "https://ntfy.example.com/x", "t")

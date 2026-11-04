@@ -1,4 +1,4 @@
-//! `jeet setup apply|status|discard`: the user's side of setup. Apply shows
+//! `plete setup apply|status|discard`: the user's side of setup. Apply shows
 //! each staged file as a diff and writes only what the user says yes to,
 //! after a backup.
 
@@ -38,7 +38,7 @@ pub struct Applied {
 }
 
 /// Apply the staged proposals, one diff and one question per file. Only
-/// the user, at a terminal: refused under any agent jeet started, and with
+/// the user, at a terminal: refused under any agent plete started, and with
 /// no terminal to answer from.
 pub fn apply(app: &App) -> Result<()> {
     let task_env = crate::env::var(TASK_ID_ENV).ok();
@@ -77,8 +77,8 @@ pub fn apply(app: &App) -> Result<()> {
     run.error.map_or(Ok(()), Err)
 }
 
-/// Why apply may not run here: under an agent jeet started (`task_env`,
-/// `$JEET_TASK_ID`, set), or with no terminal on stdin to answer from.
+/// Why apply may not run here: under an agent plete started (`task_env`,
+/// `$PLETE_TASK_ID`, set), or with no terminal on stdin to answer from.
 fn refusal(task_env: Option<&str>, stdin_terminal: bool) -> Option<String> {
     if task_env.is_some_and(|v| !v.trim().is_empty()) {
         return Some(format!(
@@ -363,7 +363,7 @@ fn read_staged(home: &Path, id: &str) -> Result<Vec<u8>> {
 }
 
 /// A unified diff of `old` (none: a new file) against `new`, by git, which
-/// jeet needs anyway.
+/// plete needs anyway.
 fn diff(old: Option<&Path>, new: &[u8], color: bool) -> Result<Vec<u8>> {
     let old = old.unwrap_or(Path::new("/dev/null"));
     let mut child = Command::new("git")
@@ -767,7 +767,9 @@ mod tests {
 
     #[test]
     fn refuses_agents_and_no_terminal() {
-        assert!(refusal(Some("abc"), true).unwrap().contains("JEET_TASK_ID"));
+        assert!(refusal(Some("abc"), true)
+            .unwrap()
+            .contains("PLETE_TASK_ID"));
         assert!(refusal(None, false).unwrap().contains("terminal"));
         assert_eq!(refusal(None, true), None);
         assert_eq!(refusal(Some(" "), true), None);

@@ -14,10 +14,10 @@ use crate::resolve;
 pub enum WorktreeKind {
     /// The canonical checkout in the store.
     Trunk,
-    /// One of a task's worktrees, under `~/.jeet/tasks`.
+    /// One of a task's worktrees, under `~/.plete/tasks`.
     Task,
     /// A worktree git knows about outside any task: one from before tasks,
-    /// or made by hand. `jeet import` brings these into tasks.
+    /// or made by hand. `plete import` brings these into tasks.
     External,
 }
 
@@ -70,7 +70,7 @@ pub struct WorktreeStatus {
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
-    /// Why jeet could not assess this worktree, if it could not.
+    /// Why plete could not assess this worktree, if it could not.
     pub unknown: Option<String>,
 }
 
@@ -307,7 +307,9 @@ pub fn refresh_pr_worktree(
 /// The file marking a worktree [`add_pr_worktree`] made. It lives in the
 /// worktree's own git directory, so it moves with the worktree and goes when
 /// git removes it.
-const PR_MARKER: &str = "jeet-pr";
+const PR_MARKER: &str = "plete-pr";
+/// The marker's name before the rename, which still marks.
+const LEGACY_PR_MARKER: &str = "jeet-pr";
 
 fn mark_pr_checkout(path: &Path, number: u64) -> Result<()> {
     let marker = git::git_dir(path)?.join(PR_MARKER);
@@ -318,12 +320,16 @@ fn mark_pr_checkout(path: &Path, number: u64) -> Result<()> {
 /// Whether the worktree at `path` is a pull request's, made by
 /// [`add_pr_worktree`]. Those are made in reviews now; one outside any
 /// task was made by the explorer of a build from before that, and is not
-/// the user's own work, so `jeet import` leaves it alone.
+/// the user's own work, so `plete import` leaves it alone.
 pub fn is_pr_checkout(path: &Path) -> bool {
-    git::git_dir(path).is_ok_and(|dir| dir.join(PR_MARKER).is_file())
+    git::git_dir(path).is_ok_and(|dir| {
+        [PR_MARKER, LEGACY_PR_MARKER]
+            .iter()
+            .any(|m| dir.join(m).is_file())
+    })
 }
 
-/// Delete now-empty directories left behind under a jeet-managed root.
+/// Delete now-empty directories left behind under a plete-managed root.
 pub fn prune_empty_parents(path: &Path, roots: &[PathBuf]) {
     let mut current = path;
     while let Some(parent) = current.parent() {

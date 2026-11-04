@@ -1,16 +1,16 @@
 //! Tasks: the unit of work.
 //!
-//! A task is a directory under `$JEET_HOME/tasks/<slug>` — a blank canvas the
+//! A task is a directory under `$PLETE_HOME/tasks/<slug>` — a blank canvas the
 //! agent works in — plus any number of git worktrees inside it, added and
 //! removed over the task's life from any repository in the store. The index
 //! records which worktrees a task holds; [`reconcile`] keeps that record
-//! honest when worktrees come and go behind jeet's back.
+//! honest when worktrees come and go behind plete's back.
 //!
 //! Archiving frees the disk but keeps what is needed to bring every worktree
-//! back as it was: its HEAD, held by `refs/jeet/head/<task-id>/<dir>` so it
+//! back as it was: its HEAD, held by `refs/plete/head/<task-id>/<dir>` so it
 //! survives gc, and its uncommitted changes, saved as a stash-shaped commit
-//! under `refs/jeet/stash/<task-id>/<dir>`. Whatever unarchive cannot put
-//! back is moved to `refs/jeet/kept/<task-id>/…`, which nothing reuses, and
+//! under `refs/plete/stash/<task-id>/<dir>`. Whatever unarchive cannot put
+//! back is moved to `refs/plete/kept/<task-id>/…`, which nothing reuses, and
 //! stays there until the task is deleted. The task directory itself stays,
 //! so the agent's sessions, which Claude keys by working directory, still
 //! resolve when the task comes back.
@@ -47,7 +47,7 @@ use crate::runtime;
 use crate::store;
 use crate::worktrees::{self, now_secs};
 
-/// The PR policy of `task`'s agent, most specific first: its own (`jeet
+/// The PR policy of `task`'s agent, most specific first: its own (`plete
 /// task new --pr`), its project's `[tasks] pr`, the global `[tasks] pr`, or
 /// [`DEFAULT_PR_MODE`]. Read at each start, so a change to the config
 /// reaches the task's next session. A project since deleted or broken is
@@ -78,80 +78,80 @@ pub fn pr_policy_line(mode: PrMode) -> String {
              only when your parent or the user asks"
         }
         PrMode::Ask => {
-            "open no PR yourself; ask first (`jeet report question \"open a PR for <branch>?\"`, \
+            "open no PR yourself; ask first (`plete report question \"open a PR for <branch>?\"`, \
              or the user at the pane in a top-level task)"
         }
     };
     format!("PR policy: {} — {what}.", mode.as_str())
 }
 
-/// Set in the agent's environment so `jeet worktree` knows its task without
+/// Set in the agent's environment so `plete worktree` knows its task without
 /// having to be run from inside the task directory.
-pub const TASK_ID_ENV: &str = "JEET_TASK_ID";
+pub const TASK_ID_ENV: &str = "PLETE_TASK_ID";
 
 /// `<task>/.plete/task-id` or `<task>/.jeet/task-id` marks a task directory,
 /// so the task can be found from anywhere beneath it.
 pub const NEW_MARKER_DIR: &str = ".plete";
 pub const LEGACY_MARKER_DIR: &str = ".jeet";
 /// The marker directory a task that has neither gets.
-const WRITE_MARKER_DIR: &str = ".jeet"; // flipped to plete in the rename PR
+const WRITE_MARKER_DIR: &str = NEW_MARKER_DIR;
 const MARKER_FILE: &str = "task-id";
 
 const SLUG_MAX: usize = 48;
 
-/// The built-in skill every task gets, at `.claude/skills/jeet/SKILL.md`: how
+/// The built-in skill every task gets, at `.claude/skills/plete/SKILL.md`: how
 /// the agent gets at code from inside a blank-canvas task.
 pub(crate) const SKILL: &str = r#"---
-name: jeet
-description: How to work in this jeet task workspace - check repositories out with `jeet worktree add`, list and remove worktrees, open pull requests, and report to the task's parent with `jeet report`. Use whenever you need code from a repository, or to say how the task is going.
+name: plete
+description: How to work in this plete task workspace - check repositories out with `plete worktree add`, list and remove worktrees, open pull requests, and report to the task's parent with `plete report`. Use whenever you need code from a repository, or to say how the task is going.
 ---
 
-# Working in a jeet task
+# Working in a plete task
 
 This directory is your task workspace. It starts as a blank canvas: keep notes
 and scratch files here freely. Repositories are checked out on demand, as git
 worktrees inside this directory.
 
-- Get a repository: `cd "$(jeet worktree add <repo>)"`. It prints the new
+- Get a repository: `cd "$(plete worktree add <repo>)"`. It prints the new
   worktree's path and nothing else. `<repo>` is a name such as `api`, an
-  `owner/repo`, or a clone URL; a repository jeet does not have yet is cloned
+  `owner/repo`, or a clone URL; a repository plete does not have yet is cloned
   first, if your task may clone (a task with a parent needs `repo.clone` in
-  its grant; without it, ask with `jeet report blocked "…"`). The worktree
+  its grant; without it, ask with `plete report blocked "…"`). The worktree
   starts detached at the freshly fetched default branch.
   - `--branch <name>` checks that branch out instead: an existing branch is
     reused, otherwise it is created from the default branch.
   - `--name <dir>` picks the directory name (default: the repository name).
   - Add as many as you need, including several of the same repository.
-- List the repositories jeet knows: `jeet ls`.
-- List this task's worktrees: `jeet worktree ls`.
-- Remove one you are done with: `jeet worktree rm <name>`. It refuses while the
+- List the repositories plete knows: `plete ls`.
+- List this task's worktrees: `plete worktree ls`.
+- Remove one you are done with: `plete worktree rm <name>`. It refuses while the
   worktree holds uncommitted or unpushed work.
 - Open pull requests from inside a worktree with `gh pr create`, as the
   task's PR policy says. The context shown as each session starts has a
   `PR policy:` line: `auto` opens a ready PR once the work is pushed and
   its checks pass locally; `draft` opens it with `gh pr create --draft` and
   marks it ready only when your parent or the user asks; `ask` opens none
-  and asks instead (`jeet report question "open a PR for <branch>?"`, or the
+  and asks instead (`plete report question "open a PR for <branch>?"`, or the
   user at the pane in a top-level task). Don't ask about what the policy
   already says.
-- Never touch `$JEET_HOME/store` (the canonical clones) directly. Prefer
-  `jeet worktree add` over running `git worktree add` yourself.
+- Never touch `$PLETE_HOME/store` (the canonical clones) directly. Prefer
+  `plete worktree add` over running `git worktree add` yourself.
 
 ## Reporting to your parent (when this task has one)
 
 A task made by the assistant reports to it; its brief, shown as each session
 starts, says so. Tell it how the task is going:
 
-- `jeet report done "…"` when the work is finished, saying where it is (a
+- `plete report done "…"` when the work is finished, saying where it is (a
   pull request, a file).
-- `jeet report blocked "…"` or `jeet report question "…"` when you are
+- `plete report blocked "…"` or `plete report question "…"` when you are
   stuck or need a decision, rather than waiting.
-- `jeet report progress "…"` for a milestone worth knowing about.
+- `plete report progress "…"` for a milestone worth knowing about.
 
 Keep reports short; put detail in the pull request or a file and say where.
-jeet tells the parent itself when you wait on a prompt, sit idle or end.
+plete tells the parent itself when you wait on a prompt, sit idle or end.
 
-The answer to your question comes as `<jeet-answer to="<id>" from="…">`.
+The answer to your question comes as `<plete-answer to="<id>" from="…">`.
 `from="user"` is the user; any other `from` is the manager or the
 assistant above you, to act on as its instruction. A question stays open
 while you report progress; asking again, or reporting done or blocked,
@@ -159,13 +159,13 @@ withdraws it.
 
 Such a task may run what the chain above it may, up to what the user allows
 the assistant, and only on itself and the tasks below it, unless its grant
-was narrowed. `jeet todo` and `jeet brief` are the assistant's: they are
+was narrowed. `plete todo` and `plete brief` are the assistant's: they are
 refused. When a command is refused, ask your parent instead.
 "#;
 
 /// Why the setup agent's home is no task to act on.
-const SETUP_NO_TASK: &str = "the setup agent's home is no task to work in; `jeet setup` \
-     opens it, and --task <name> picks a task (`jeet task ls` lists them)";
+const SETUP_NO_TASK: &str = "the setup agent's home is no task to work in; `plete setup` \
+     opens it, and --task <name> picks a task (`plete task ls` lists them)";
 
 /// A task's directory; the assistant's and the setup agent's are their
 /// homes, outside `tasks/`.
@@ -229,7 +229,7 @@ pub(crate) fn unique_slug(app: &App, base: &str) -> Result<String> {
     loop {
         let candidate = numbered(base, n);
         // Kept for the assistant and the setup agent, whose tmux sessions
-        // are `jeet-assistant` and `jeet-setup`.
+        // are `plete-assistant` and `plete-setup`.
         let reserved = candidate == crate::assistant::SLUG || candidate == crate::setup::SLUG;
         // A slug that spells another task's id would capture that id in
         // slug-first lookups (`find_exact`), so ids are kept too.
@@ -253,7 +253,7 @@ fn numbered(base: &str, n: usize) -> String {
     }
 }
 
-/// What `jeet task new` asks for.
+/// What `plete task new` asks for.
 pub struct NewTask<'a> {
     pub name: &'a str,
     /// Project to start from: its files are copied in, and a worktree of each
@@ -363,7 +363,7 @@ pub fn create(app: &App, spec: &NewTask) -> Result<Created> {
                     Ok(_) => e,
                     Err(undo) => e.context(format!(
                         "and the half-made task could not be removed ({undo:#}); \
-                         `jeet task delete {} --force` cleans it up",
+                         `plete task delete {} --force` cleans it up",
                         task.slug
                     )),
                 });
@@ -767,7 +767,7 @@ fn record_child_held(
     }
 }
 
-/// The marker, the project's files and the jeet skill, or for a manager
+/// The marker, the project's files and the plete skill, or for a manager
 /// its role's files ([`manager::ensure_files`]) in the skill's place: the
 /// worker's skill would tell it what a worker may do. Returns notes on
 /// project files that were not copied.
@@ -848,19 +848,19 @@ pub fn write_marker(dir: &Path, id: &str) -> Result<()> {
     std::fs::write(marker.join(MARKER_FILE), format!("{id}\n")).context("write the task marker")
 }
 
-/// Write the jeet skill into a task directory: the user's override at
+/// Write the plete skill into a task directory: the user's override at
 /// `worker/SKILL.md` in `templates` ([`crate::config::templates_dir`]) when
 /// there is one, else the built-in one.
 pub fn install_skill(task_dir: &Path, templates: &Path) -> Result<()> {
     let text = manager::template_override(templates, "worker", "SKILL.md")?;
-    let skill = Path::new(".claude").join("skills").join("jeet");
+    let skill = Path::new(".claude").join("skills").join("plete");
     if manager::has_legacy_counterpart(task_dir, &skill.to_string_lossy()) {
         return Ok(());
     }
     let dir = task_dir.join(skill);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("SKILL.md"), text.as_deref().unwrap_or(SKILL))
-        .context("write the jeet skill")
+        .context("write the plete skill")
 }
 
 /// The task a user means by `key`: its slug, its id, its name (any case), or
@@ -924,7 +924,7 @@ pub fn find_in(tasks: &[TaskRecord], key: &str, by_prefix: bool) -> Result<TaskR
         matches = prefixed;
     }
     match matches.as_slice() {
-        [] => bail!("no task named {key:?}; `jeet task ls` lists them"),
+        [] => bail!("no task named {key:?}; `plete task ls` lists them"),
         [task] => Ok((*task).clone()),
         many => {
             let slugs: Vec<&str> = many.iter().map(|t| t.slug.as_str()).collect();
@@ -934,8 +934,8 @@ pub fn find_in(tasks: &[TaskRecord], key: &str, by_prefix: bool) -> Result<TaskR
 }
 
 /// The task a command run here is about: the one named, else the one whose
-/// agent runs this jeet ([`identity::identify`]), else the one in
-/// `$JEET_TASK_ID` (set inside a task's agent session), else the task
+/// agent runs this plete ([`identity::identify`]), else the one in
+/// `$PLETE_TASK_ID` (set inside a task's agent session), else the task
 /// whose directory holds the current directory.
 pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
     if let Some(key) = explicit {
@@ -953,24 +953,24 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
         return match app.db.get_task(id)? {
             Some(task) if task.kind == TaskKind::Assistant => bail!(
                 "the assistant's home is no task to work in; pick one with --task <name> \
-                 (`jeet task ls` lists them)"
+                 (`plete task ls` lists them)"
             ),
             Some(task) if task.kind == TaskKind::Setup => bail!(SETUP_NO_TASK),
             Some(task) => Ok(task),
-            None => bail!("${TASK_ID_ENV} is {id}, which is no task jeet knows; was it deleted?"),
+            None => bail!("${TASK_ID_ENV} is {id}, which is no task plete knows; was it deleted?"),
         };
     }
     let cwd = std::env::current_dir().context("get cwd")?;
     match task_at(app, &cwd)? {
         Some(task) if task.kind == TaskKind::Assistant => bail!(
             "the assistant's home is no task to work in; pick one with --task <name> \
-             (`jeet task ls` lists them)"
+             (`plete task ls` lists them)"
         ),
         Some(task) if task.kind == TaskKind::Setup => bail!(SETUP_NO_TASK),
         Some(task) => Ok(task),
         None => bail!(
             "not inside a task: run this from a task's directory, or pick one with --task <name> \
-             (`jeet task ls` lists them, `jeet task new <name>` makes one)"
+             (`plete task ls` lists them, `plete task new <name>` makes one)"
         ),
     }
 }
@@ -985,7 +985,7 @@ pub fn task_at(app: &App, dir: &Path) -> Result<Option<TaskRecord>> {
         // A review's directory is no task's.
         None if app.db.get_review(&id)?.is_some() => Ok(None),
         None => bail!(
-            "{} is marked as task {id}, which is no task jeet knows",
+            "{} is marked as task {id}, which is no task plete knows",
             dir.display()
         ),
     }
@@ -1027,7 +1027,7 @@ pub fn worktree_summary(rows: &[TaskWorktreeRecord]) -> String {
 
 /// Why a manager may not take a branch: its worktrees are read-only.
 pub const MANAGER_READ_ONLY: &str =
-    "a manager holds read-only worktrees; delegate the change to a worker (`jeet task new`)";
+    "a manager holds read-only worktrees; delegate the change to a worker (`plete task new`)";
 
 /// A worktree just added to a task.
 pub struct AddedWorktree {
@@ -1060,7 +1060,7 @@ pub fn add_worktree(
     }
     if task.state == TaskState::Archived {
         bail!(
-            "task {0} is archived; `jeet task unarchive {0}` first",
+            "task {0} is archived; `plete task unarchive {0}` first",
             task.slug
         );
     }
@@ -1075,7 +1075,7 @@ pub fn add_worktree(
     let read_only = match task.kind {
         TaskKind::Manager if branch.is_some() => bail!("{MANAGER_READ_ONLY}"),
         TaskKind::Manager => true,
-        TaskKind::Setup => bail!("the setup agent works on jeet's own files, not in worktrees"),
+        TaskKind::Setup => bail!("the setup agent works on plete's own files, not in worktrees"),
         TaskKind::Work | TaskKind::Assistant => false,
     };
     if let Some(name) = name {
@@ -1149,7 +1149,7 @@ pub fn add_worktree(
         created_at: now_secs(),
         read_only,
     };
-    // A `jeet task ls` running meanwhile reconciles: it can see the new
+    // A `plete task ls` running meanwhile reconciles: it can see the new
     // worktree in `git worktree list` before its row is written, and adopt
     // it as one an agent made. The row is then ours to fill in, not a reason
     // to undo the worktree.
@@ -1320,7 +1320,7 @@ fn known_repo_id(app: &App, spec: &str) -> Option<String> {
 }
 
 /// Clone `url` into the store for a caller [`permissions::may_clone`]
-/// lets, logged as `jeet clone` would be.
+/// lets, logged as `plete clone` would be.
 fn clone_gated(app: &App, url: &str) -> Result<RepoRecord> {
     let authorized = permissions::may_clone(app, url)?;
     let cloned = crate::commands::clone::clone_into_store(app, url);
@@ -1370,37 +1370,37 @@ pub fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
     }
 }
 
-/// The ref namespaces jeet keeps its refs in, in the store repositories.
+/// The ref namespaces plete keeps its refs in, in the store repositories.
 const NEW_REF_NS: &str = "refs/plete";
 const LEGACY_REF_NS: &str = "refs/jeet";
 /// The namespace refs are written to; both are read and listed.
-pub(crate) const WRITE_REF_NS: &str = LEGACY_REF_NS; // flipped to plete in the rename PR
+pub(crate) const WRITE_REF_NS: &str = NEW_REF_NS;
 
-/// `refs/jeet/<kind>/<task-id>/<dir>`, with `dir` escaped into one ref
+/// `refs/plete/<kind>/<task-id>/<dir>`, with `dir` escaped into one ref
 /// component by [`ref_component`], so no two worktrees share a ref.
-pub(crate) fn jeet_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
+pub(crate) fn plete_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
     format!(
         "{WRITE_REF_NS}/{kind}/{task_id}/{}",
         ref_component(dir_name)
     )
 }
 
-/// [`jeet_ref`] under each namespace, new first.
+/// [`plete_ref`] under each namespace, new first.
 fn ref_names(kind: &str, task_id: &str, dir_name: &str) -> [String; 2] {
     let tail = format!("{kind}/{task_id}/{}", ref_component(dir_name));
     [NEW_REF_NS, LEGACY_REF_NS].map(|ns| format!("{ns}/{tail}"))
 }
 
-/// The ref [`jeet_ref`] names, as it stands in `trunk`: under whichever
+/// The ref [`plete_ref`] names, as it stands in `trunk`: under whichever
 /// namespace it exists in, else the one refs are written to.
 fn existing_ref(trunk: &Path, kind: &str, task_id: &str, dir_name: &str) -> String {
     ref_names(kind, task_id, dir_name)
         .into_iter()
         .find(|name| git::ref_exists(trunk, name).unwrap_or(false))
-        .unwrap_or_else(|| jeet_ref(kind, task_id, dir_name))
+        .unwrap_or_else(|| plete_ref(kind, task_id, dir_name))
 }
 
-/// Delete the ref [`jeet_ref`] names, under every namespace it is in.
+/// Delete the ref [`plete_ref`] names, under every namespace it is in.
 fn delete_ref_everywhere(trunk: &Path, kind: &str, task_id: &str, dir_name: &str) {
     for name in ref_names(kind, task_id, dir_name) {
         if git::ref_exists(trunk, &name).unwrap_or(false) {
@@ -1433,12 +1433,12 @@ fn ref_component(name: &str) -> String {
     out
 }
 
-/// Set `oid` aside under `refs/jeet/kept/<task-id>/<dir>/<kind>-<n>`: names
-/// neither archive nor unarchive ever reuse, for work jeet could not put
+/// Set `oid` aside under `refs/plete/kept/<task-id>/<dir>/<kind>-<n>`: names
+/// neither archive nor unarchive ever reuse, for work plete could not put
 /// back. It stays until the user deals with it or deletes the task, and
 /// [`losses`] lists it until then.
 pub fn keep(trunk: &Path, task_id: &str, dir_name: &str, kind: &str, oid: &str) -> Result<String> {
-    let base = jeet_ref("kept", task_id, dir_name);
+    let base = plete_ref("kept", task_id, dir_name);
     let mut n = 1;
     loop {
         let name = format!("{base}/{kind}-{n}");
@@ -1486,7 +1486,7 @@ fn same_changes(trunk: &Path, a: &str, b: &str) -> bool {
     first.0.is_some() && first == trees(b)
 }
 
-/// Before archive reuses a worktree's `refs/jeet/{head,stash}` names, set
+/// Before archive reuses a worktree's `refs/plete/{head,stash}` names, set
 /// aside whatever they hold that the worktree does not: left by an unarchive
 /// that stopped part-way, they may be the only copy of someone's work. A
 /// pinned HEAD the live one contains, or a snapshot of exactly what is in
@@ -1533,7 +1533,7 @@ pub fn remove_worktree(
 ) -> Result<Vec<String>> {
     if task.state == TaskState::Archived {
         bail!(
-            "task {0} is archived; `jeet task unarchive {0}` first",
+            "task {0} is archived; `plete task unarchive {0}` first",
             task.slug
         );
     }
@@ -1543,7 +1543,7 @@ pub fn remove_worktree(
     }
     let Some(row) = app.db.get_task_worktree(&task.id, name)? else {
         bail!(
-            "task {} has no worktree named {name}; `jeet worktree ls` lists them",
+            "task {} has no worktree named {name}; `plete worktree ls` lists them",
             task.slug
         );
     };
@@ -1613,7 +1613,7 @@ fn removal_blockers(repo: &RepoRecord, path: &Path) -> Vec<String> {
     match git::status_counts(path) {
         Ok((0, _)) => {}
         Ok((dirty, _)) => out.push(plural(dirty, "uncommitted change")),
-        Err(e) => out.push(format!("a status jeet could not read ({e})")),
+        Err(e) => out.push(format!("a status plete could not read ({e})")),
     }
     let (commits, what) = match git::head_branch(path) {
         Some(_) => (unpushed(path, repo, "HEAD"), "unpushed commit"),
@@ -1622,7 +1622,7 @@ fn removal_blockers(repo: &RepoRecord, path: &Path) -> Vec<String> {
     match commits {
         Some(0) => {}
         Some(n) => out.push(plural(n, what)),
-        None => out.push("commits jeet could not check".to_string()),
+        None => out.push("commits plete could not check".to_string()),
     }
     out
 }
@@ -1639,7 +1639,7 @@ pub(crate) fn plural(n: usize, what: &str) -> String {
 /// Archived tasks are left alone: their rows describe worktrees that are
 /// meant to be gone.
 ///
-/// A worktree adopted into a manager is marked read-only, as one jeet made
+/// A worktree adopted into a manager is marked read-only, as one plete made
 /// for it would be. Returns a warning for each read-only worktree found on
 /// a branch: a manager checked one out itself.
 pub fn reconcile(app: &App) -> Result<Vec<String>> {
@@ -1686,7 +1686,7 @@ pub fn reconcile(app: &App) -> Result<Vec<String>> {
             match row {
                 Some(mut row) if row.repo_id == repo.id && row.branch != entry.branch => {
                     // Someone switched branches in it. The branch it is on now
-                    // is not one this task made, so it is never jeet's to delete.
+                    // is not one this task made, so it is never plete's to delete.
                     row.branch = entry.branch.clone();
                     row.created_branch = false;
                     app.db.update_task_worktree(&row)?;
@@ -1769,7 +1769,7 @@ fn charge_before_end(app: &App, task: &TaskRecord, warnings: &mut Vec<String>) {
 /// keeping what is needed to bring each back as it was.
 ///
 /// For each worktree: uncommitted changes, untracked files included, are
-/// saved under `refs/jeet/stash/…`; HEAD is pinned under `refs/jeet/head/…`;
+/// saved under `refs/plete/stash/…`; HEAD is pinned under `refs/plete/head/…`;
 /// both are recorded on its row, and only then is the worktree removed. The
 /// task is marked archived first, so a failure part-way leaves an archived
 /// task with some worktrees still present, and running archive again
@@ -1842,8 +1842,8 @@ fn archive_one(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 
 /// Archive one worktree of the task or review `owner_id`, whose directory
 /// is `owner_root`: the worktree's uncommitted changes, untracked files
-/// included, are saved under `refs/jeet/stash/…`, HEAD is pinned under
-/// `refs/jeet/head/…`, both are recorded on `row`, which `save` writes
+/// included, are saved under `refs/plete/stash/…`, HEAD is pinned under
+/// `refs/plete/head/…`, both are recorded on `row`, which `save` writes
 /// before anything is removed, and only then is the worktree removed. One
 /// that is gone already is skipped. Returns what to warn of.
 pub(crate) fn archive_worktree(
@@ -1881,9 +1881,9 @@ pub(crate) fn archive_worktree(
     // write name is the only one left.
     delete_ref_everywhere(&trunk, "head", owner_id, what);
     delete_ref_everywhere(&trunk, "stash", owner_id, what);
-    let head_ref = jeet_ref("head", owner_id, what);
+    let head_ref = plete_ref("head", owner_id, what);
     git::update_ref(&trunk, &head_ref, &head).with_context(|| format!("{what}: pin HEAD"))?;
-    let stash_ref = jeet_ref("stash", owner_id, what);
+    let stash_ref = plete_ref("stash", owner_id, what);
     row.stash_ref = match snapshot {
         Some(oid) => {
             git::update_ref(&trunk, &stash_ref, &oid)
@@ -2262,7 +2262,7 @@ fn fan_out_of(app: &App, parent: &TaskRecord) -> Result<Option<u32>> {
 /// changes (live, or saved at archive time), and commits that would be left
 /// on no branch, tag or remote — a detached HEAD's, those of a branch the
 /// task made (delete removes it), a HEAD pinned at archive that the branch
-/// has since moved away from, and anything set aside under `refs/jeet/kept`.
+/// has since moved away from, and anything set aside under `refs/plete/kept`.
 /// A branch the task did not make keeps its commits, so it is not listed.
 /// Every git checkout on the canvas that is none of the task's worktrees —
 /// a clone, or a worktree of a repository outside the store — is listed,
@@ -2412,7 +2412,7 @@ pub(crate) fn losses_of(
 }
 
 /// Delete a task and everything it owns: its agent's tmux session, its
-/// worktrees, the branches it made, its `refs/jeet` refs, its directory —
+/// worktrees, the branches it made, its `refs/plete` refs, its directory —
 /// with whatever else is on its canvas, other git checkouts included — and
 /// its rows. Branches it did not make are left alone. The caller has already
 /// confirmed what [`losses`] lists.
@@ -2505,7 +2505,7 @@ fn remove_from_disk(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
 /// Remove everything on disk that the task or review `owner_id` owns,
 /// whose directory is `dir` and whose worktrees are `rows`: the worktrees,
 /// the branches it made (kept when checked out elsewhere), its
-/// `refs/jeet` refs, and the directory with whatever else is on its canvas.
+/// `refs/plete` refs, and the directory with whatever else is on its canvas.
 pub(crate) fn remove_owned(
     app: &App,
     owner_id: &str,
@@ -2586,8 +2586,8 @@ pub fn subtree_leaves_first(app: &App, task: &TaskRecord) -> Result<Vec<TaskReco
     Ok(nodes)
 }
 
-/// Refuse to `verb` `nodes` when this jeet runs inside the agent's session
-/// of any of them: ending it would end this jeet part-way through.
+/// Refuse to `verb` `nodes` when this plete runs inside the agent's session
+/// of any of them: ending it would end this plete part-way through.
 pub fn refuse_inside_any(nodes: &[TaskRecord], verb: &str) -> Result<()> {
     for node in nodes {
         runtime::refuse_inside_session(node, verb)?;
@@ -2815,7 +2815,7 @@ pub fn delete_reparenting(
 /// node's grant dropped; every active manager in the subtrees gets its
 /// `BRIEF.md` again (its path and who it reports to changed); a running
 /// mover is handed its new brief now, without starting one that is not;
-/// and each mover tells its new parent it moved there, in jeet's words,
+/// and each mover tells its new parent it moved there, in plete's words,
 /// naming its open question if it has one; then each open ask among the
 /// reports `kept` from a deleted task is delivered to the new parent
 /// that holds it now. Slugs only: a node may run this, and a manager
@@ -2917,7 +2917,7 @@ fn delivered_words(delivered: &Result<Delivered>) -> String {
         Ok(Delivered::Queued) => "queued; it gets it when it finishes or sits idle".to_string(),
         Ok(Delivered::Started) => "started a session with it".to_string(),
         Ok(Delivered::Held) => "it waits for its next session".to_string(),
-        Ok(Delivered::Stored) => "kept for its `jeet brief`".to_string(),
+        Ok(Delivered::Stored) => "kept for its `plete brief`".to_string(),
         Ok(Delivered::Paused) => "it waits until it is resumed".to_string(),
         Ok(Delivered::StartQueued { live, max }) => {
             format!("it waits for its start ({live}/{max} live)")
@@ -2980,8 +2980,8 @@ mod tests {
         git(&["commit", "-q", "--allow-empty", "-m", "m"]);
         let oid = git(&["rev-parse", "HEAD"]);
 
-        // Written under the write namespace, as `jeet_ref` names it.
-        let written = jeet_ref("head", "t1", "api");
+        // Written under the write namespace, as `plete_ref` names it.
+        let written = plete_ref("head", "t1", "api");
         assert!(written.starts_with(WRITE_REF_NS));
         let [new, legacy] = ref_names("head", "t1", "api");
         assert_eq!(new, "refs/plete/head/t1/api");
@@ -3026,7 +3026,7 @@ mod tests {
         mk("libs/tool/sub/.git");
         // Plain folders are not checkouts.
         mk("notes/drafts");
-        mk(".jeet/status");
+        mk(".plete/status");
         // Nor is a symlink to one.
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("libs/tool"), root.join("link")).unwrap();
@@ -3084,25 +3084,25 @@ mod tests {
             assert!(validate_dir_name(ok).is_ok(), "{ok}");
         }
         for bad in [
-            "", ".", "..", ".jeet", "a/b", "../up", "a b", "x.lock", "a..b",
+            "", ".", "..", ".plete", "a/b", "../up", "a b", "x.lock", "a..b",
         ] {
             assert!(validate_dir_name(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
-    fn jeet_refs_are_valid_ref_names() {
-        assert_eq!(jeet_ref("head", "t1", "api"), "refs/jeet/head/t1/api");
-        assert_eq!(jeet_ref("head", "t1", "api-2"), "refs/jeet/head/t1/api-2");
+    fn plete_refs_are_valid_ref_names() {
+        assert_eq!(plete_ref("head", "t1", "api"), "refs/plete/head/t1/api");
+        assert_eq!(plete_ref("head", "t1", "api-2"), "refs/plete/head/t1/api-2");
         assert_eq!(
-            jeet_ref("stash", "t1", "sub/my dir.v2"),
-            "refs/jeet/stash/t1/sub_2Fmy_20dir_2Ev2"
+            plete_ref("stash", "t1", "sub/my dir.v2"),
+            "refs/plete/stash/t1/sub_2Fmy_20dir_2Ev2"
         );
         assert_eq!(ref_component(".x.lock"), "_2Ex_2Elock");
     }
 
     #[test]
-    fn jeet_refs_never_share_a_name() {
+    fn plete_refs_never_share_a_name() {
         // Every pair here once mapped to one ref, or nested one under another.
         let names = [
             "docs.site",
@@ -3122,18 +3122,18 @@ mod tests {
 
     #[test]
     fn task_paths_split_into_slug_and_worktree() {
-        let root = Path::new("/home/.jeet/tasks");
+        let root = Path::new("/home/.plete/tasks");
         assert_eq!(
-            split_task_path(root, Path::new("/home/.jeet/tasks/fix/api")),
+            split_task_path(root, Path::new("/home/.plete/tasks/fix/api")),
             Some(("fix".into(), "api".into()))
         );
         assert_eq!(
-            split_task_path(root, Path::new("/home/.jeet/tasks/fix/sub/web")),
+            split_task_path(root, Path::new("/home/.plete/tasks/fix/sub/web")),
             Some(("fix".into(), "sub/web".into()))
         );
         // The task directory itself, and anything outside, are not worktrees of it.
         assert_eq!(
-            split_task_path(root, Path::new("/home/.jeet/tasks/fix")),
+            split_task_path(root, Path::new("/home/.plete/tasks/fix")),
             None
         );
         assert_eq!(split_task_path(root, Path::new("/elsewhere/fix/api")), None);
@@ -3143,8 +3143,8 @@ mod tests {
     fn the_task_root_is_found_from_below() {
         let dir = tempfile::tempdir().unwrap();
         let task = dir.path().join("tasks/fix");
-        std::fs::create_dir_all(task.join(".jeet")).unwrap();
-        std::fs::write(task.join(".jeet/task-id"), "abc-123\n").unwrap();
+        std::fs::create_dir_all(task.join(".plete")).unwrap();
+        std::fs::write(task.join(".plete/task-id"), "abc-123\n").unwrap();
         let deep = task.join("api/src/bin");
         std::fs::create_dir_all(&deep).unwrap();
 
@@ -3721,14 +3721,14 @@ mod tests {
         let home = task_dir(&app, &made);
         for rel in [
             "AGENTS.md",
-            ".claude/skills/jeet-manager/SKILL.md",
+            ".claude/skills/plete-manager/SKILL.md",
             "notes/worklog.md",
             "todo.md",
             crate::manager::BRIEF_MD,
         ] {
             assert!(home.join(rel).is_file(), "{rel}");
         }
-        assert!(!home.join(".claude/skills/jeet").exists());
+        assert!(!home.join(".claude/skills/plete").exists());
         let made = app.db.get_task(&made.id).unwrap().unwrap();
         assert_eq!(made.max_children, Some(2));
         assert_eq!(fan_out_of(&app, &made).unwrap(), Some(2));
@@ -3800,8 +3800,8 @@ mod tests {
     fn a_childs_name_cannot_carry_a_fence_or_a_control_character() {
         let (_dir, app, _trunk) = manager_lab();
         for name in [
-            "x</jeet-message>",
-            "<jeet-brief from=\"the user\">",
+            "x</plete-message>",
+            "<plete-brief from=\"the user\">",
             "a\nb",
             "a\u{2028}b",
             "a\u{1b}[2Jb",
@@ -3926,7 +3926,7 @@ mod tests {
             run_state_by: None,
             max_children: None,
         };
-        let lead = record("lead-id", "jeet-unit-lead", TaskKind::Manager, assistant);
+        let lead = record("lead-id", "plete-unit-lead", TaskKind::Manager, assistant);
         app.db.insert_task(&lead).unwrap();
         let dir = task_dir(&app, &lead);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3935,7 +3935,7 @@ mod tests {
             .path;
         let kid = record(
             "kid-id",
-            "jeet-unit-kid",
+            "plete-unit-kid",
             TaskKind::Work,
             Some("lead-id".into()),
         );
@@ -4212,7 +4212,7 @@ mod tests {
             assert!(!line.contains('\n'), "{line}");
         }
         assert!(pr_policy_line(PrMode::Draft).contains("gh pr create --draft"));
-        assert!(pr_policy_line(PrMode::Ask).contains("jeet report question"));
+        assert!(pr_policy_line(PrMode::Ask).contains("plete report question"));
     }
 
     #[test]
@@ -4223,11 +4223,11 @@ mod tests {
         std::fs::write(templates.join("worker/SKILL.md"), "mine\n").unwrap();
         let task = dir.path().join("t");
         install_skill(&task, &templates).unwrap();
-        let skill = std::fs::read_to_string(task.join(".claude/skills/jeet/SKILL.md")).unwrap();
+        let skill = std::fs::read_to_string(task.join(".claude/skills/plete/SKILL.md")).unwrap();
         assert_eq!(skill, "mine\n");
         std::fs::remove_file(templates.join("worker/SKILL.md")).unwrap();
         install_skill(&task, &templates).unwrap();
-        let skill = std::fs::read_to_string(task.join(".claude/skills/jeet/SKILL.md")).unwrap();
+        let skill = std::fs::read_to_string(task.join(".claude/skills/plete/SKILL.md")).unwrap();
         assert_eq!(skill, SKILL);
     }
 
@@ -4236,17 +4236,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         install_skill(dir.path(), Path::new("/nonexistent")).unwrap();
         let skill =
-            std::fs::read_to_string(dir.path().join(".claude/skills/jeet/SKILL.md")).unwrap();
-        assert!(skill.starts_with("---\nname: jeet\n"), "{skill}");
+            std::fs::read_to_string(dir.path().join(".claude/skills/plete/SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\nname: plete\n"), "{skill}");
         for needle in [
-            "jeet worktree add",
-            "jeet worktree ls",
-            "jeet worktree rm",
-            "jeet ls",
+            "plete worktree add",
+            "plete worktree ls",
+            "plete worktree rm",
+            "plete ls",
             "gh pr create",
-            "$JEET_HOME/store",
-            "jeet report done",
-            "jeet report question",
+            "$PLETE_HOME/store",
+            "plete report done",
+            "plete report question",
         ] {
             assert!(skill.contains(needle), "skill does not mention {needle}");
         }

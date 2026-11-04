@@ -1,10 +1,10 @@
 //! A task's agent at runtime: started in the task's tmux session with
-//! jeet's hooks, stopped with the task, and what it is doing now.
+//! plete's hooks, stopped with the task, and what it is doing now.
 //!
-//! An agent whose harness supports it gets a session id chosen by jeet, so
+//! An agent whose harness supports it gets a session id chosen by plete, so
 //! the session is recorded before the agent even runs, and hooks that report
-//! its status and let it run `jeet worktree` and `jeet ls` without asking
-//! (for Claude Code, a `--settings` file under `$JEET_HOME/run`, see
+//! its status and let it run `plete worktree` and `plete ls` without asking
+//! (for Claude Code, a `--settings` file under `$PLETE_HOME/run`, see
 //! [`hook_args`]). Nothing is written into the task or any repository for
 //! this. An agent whose harness supports none of it
 //! just runs in the session, with no status and no sessions.
@@ -34,8 +34,8 @@ use crate::tmux;
 use crate::worktrees::now_secs;
 
 /// What the agent may run without a permission prompt: the commands the
-/// built-in jeet skill tells it to use.
-const ALLOWED: [&str; 3] = ["jeet worktree", "jeet ls", "jeet report"];
+/// built-in plete skill tells it to use.
+const ALLOWED: [&str; 3] = ["plete worktree", "plete ls", "plete report"];
 
 /// The task's tmux session.
 pub fn session_name(task: &TaskRecord) -> String {
@@ -102,8 +102,8 @@ pub fn ensure_running(
     admission: Admission,
 ) -> Result<Running> {
     match task.kind {
-        TaskKind::Assistant => bail!("the assistant's sessions are opened with `jeet chat`"),
-        TaskKind::Setup => bail!("the setup agent is started with `jeet setup`"),
+        TaskKind::Assistant => bail!("the assistant's sessions are opened with `plete chat`"),
+        TaskKind::Setup => bail!("the setup agent is started with `plete setup`"),
         TaskKind::Work | TaskKind::Manager => {}
     }
     // Running already: nothing starts, so there is nothing to admit, and a
@@ -168,8 +168,8 @@ pub fn ensure_running_admitted(
     _guard: &StartGuard,
 ) -> Result<Running> {
     match task.kind {
-        TaskKind::Assistant => bail!("the assistant's sessions are opened with `jeet chat`"),
-        TaskKind::Setup => bail!("the setup agent is started with `jeet setup`"),
+        TaskKind::Assistant => bail!("the assistant's sessions are opened with `plete chat`"),
+        TaskKind::Setup => bail!("the setup agent is started with `plete setup`"),
         TaskKind::Work | TaskKind::Manager => {}
     }
     let running = placement::runtime_for(task)?.start(app, task, session, prompt)?;
@@ -183,7 +183,7 @@ pub fn ensure_running_admitted(
 
 /// Start `task`, admitted under `guard`, resuming `session` when given,
 /// with what waits for it in its locked `inbox` as its first prompt, as much of it as fits, or with none
-/// when nothing does, or when its harness takes no first prompt from jeet
+/// when nothing does, or when its harness takes no first prompt from plete
 /// (what waits is left for a delivery to type in once it runs).
 pub fn start_with_inbox(
     app: &App,
@@ -279,7 +279,7 @@ fn start_tmux(
     let session = session.or(current.as_deref());
     let hooks = match spec.supports_sessions() {
         true => {
-            let exe = std::env::current_exe().context("locate the jeet binary")?;
+            let exe = crate::paths::plete_exe()?;
             Some(task_hooks(app, task, spec.harness, exe)?)
         }
         false => None,
@@ -329,7 +329,7 @@ fn start_tmux(
 
 /// What [`launch_tmux`] needs of the one whose agent it starts.
 pub struct Launch {
-    /// Its id, as its hooks and `$JEET_TASK_ID` give it.
+    /// Its id, as its hooks and `$PLETE_TASK_ID` give it.
     pub id: String,
     /// Names its tmux session ([`session_name_for`]).
     pub slug: String,
@@ -343,7 +343,7 @@ pub struct Launch {
     pub spec: AgentSpec,
     /// The sessions the index has recorded for it.
     pub known_sessions: Vec<TaskSessionRecord>,
-    /// jeet's hooks for it; none for a harness that keeps no sessions.
+    /// plete's hooks for it; none for a harness that keeps no sessions.
     pub hooks: Option<HookSetup>,
     /// Warn when the harness has no deny rules: it has a parent.
     pub ungated_warning: bool,
@@ -381,7 +381,7 @@ pub fn launch_tmux(
     if launch.ungated_warning && spec.harness.enforcement() == harness::Enforcement::None {
         warnings.push(format!(
             "{} has no deny rules, so {}'s agent is not stopped from force-pushing or \
-             merging; only jeet's own commands are gated",
+             merging; only plete's own commands are gated",
             spec.harness.name(),
             launch.subject
         ));
@@ -393,11 +393,11 @@ pub fn launch_tmux(
     let home = app.home.to_string_lossy();
     let mut env = vec![
         (tasks::TASK_ID_ENV, launch.id.as_str()),
-        // The agent's own `jeet` calls and hooks must find this index, not
+        // The agent's own `plete` calls and hooks must find this index, not
         // whatever the tmux server's environment says.
-        ("JEET_HOME", home.as_ref()),
+        ("PLETE_HOME", home.as_ref()),
         // Blank, in case a server started elsewhere has one: an agent's
-        // `jeet worktree add` must not move the user's shell.
+        // `plete worktree add` must not move the user's shell.
         (cd::CD_FILE_ENV, ""),
     ];
     let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
@@ -430,15 +430,15 @@ fn already_running(
     session: Option<&str>,
 ) -> Result<Running> {
     let mut warnings = Vec::new();
-    // Only a pane jeet started is the task's agent: one made some other
-    // way, or by a jeet from before anchors, is never adopted as it.
+    // Only a pane plete started is the task's agent: one made some other
+    // way, or by a plete from before anchors, is never adopted as it.
     let anchors = app.db.task_anchors(&task.id, AnchorKind::Pane)?;
     if !anchors.iter().any(identity::live) {
         warnings.push(format!(
-            "tmux session {name} was started by an older jeet or outside jeet, so jeet \
-             cannot confirm its agent is task {}'s and refuses its jeet commands; `jeet task \
-             restart {}` resumes it in a new one, or from a terminal outside jeet's tmux \
-             sessions, `jeet task adopt {}` vouches for it",
+            "tmux session {name} was started by an older plete or outside plete, so plete \
+             cannot confirm its agent is task {}'s and refuses its plete commands; `plete task \
+             restart {}` resumes it in a new one, or from a terminal outside plete's tmux \
+             sessions, `plete task adopt {}` vouches for it",
             task.slug, task.slug, task.slug
         ));
     }
@@ -459,7 +459,7 @@ fn already_running(
 /// first prompt on `spec`.
 fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
     format!(
-        "{} takes no first prompt from jeet; start it with `jeet task open {}` and send \
+        "{} takes no first prompt from plete; start it with `plete task open {}` and send \
          the message once it is running",
         spec.display(),
         slug
@@ -467,7 +467,7 @@ fn no_first_prompt(spec: &AgentSpec, slug: &str) -> String {
 }
 
 /// Why `task`'s agent cannot be started with a first prompt, when its
-/// harness takes none from jeet: asked before a start with one is queued
+/// harness takes none from plete: asked before a start with one is queued
 /// or held, as well as made, so a brief or message is never left waiting
 /// for a start that would not give it.
 pub fn first_prompt_refusal(app: &App, task: &TaskRecord) -> Option<String> {
@@ -484,7 +484,7 @@ pub fn first_prompt_refusal_for(app: &App, slug: &str) -> Option<String> {
 }
 
 /// The agent's command line. When its harness supports it, it resumes or
-/// starts a recorded session, carries jeet's hooks and, given one, its
+/// starts a recorded session, carries plete's hooks and, given one, its
 /// first prompt.
 fn launch_argv(
     app: &App,
@@ -501,7 +501,7 @@ fn launch_argv(
     if !spec.supports_sessions() {
         if let Some(id) = session {
             bail!(
-                "{} keeps no sessions jeet knows of, so session {id} cannot be resumed",
+                "{} keeps no sessions plete knows of, so session {id} cannot be resumed",
                 spec.display()
             );
         }
@@ -542,7 +542,7 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
             }
             if !known.iter().any(|s| s.session_id == id) && !spec.harness.has_session(dir, id) {
                 bail!(
-                    "{} has no session {id} that jeet or {} knows of; `jeet task ls` \
+                    "{} has no session {id} that plete or {} knows of; `plete task ls` \
                      shows its tasks, and ctrl-s in a task's explorer its sessions",
                     launch.subject,
                     spec.harness.name()
@@ -592,7 +592,7 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
     harness.wake_hook() && app.config.wake()
 }
 
-/// jeet's hooks for a task's agent run by `harness`, with what it is denied
+/// plete's hooks for a task's agent run by `harness`, with what it is denied
 /// ([`permissions::task_deny`]: nothing, for a top-level task, unless
 /// `[permissions] guards`), the read-only `gh` commands pre-approved,
 /// the rules of its role in `[permissions]` ([`with_config_rules`]) and its
@@ -666,7 +666,7 @@ fn pr_rules(mode: PrMode) -> (&'static [&'static str], &'static [&'static str]) 
 }
 
 /// `hooks` with what `[permissions]` adds for an agent of `kind`: the rules
-/// of its role, after jeet's own, and the classifier's context when
+/// of its role, after plete's own, and the classifier's context when
 /// `classifier_context` is on.
 pub fn with_config_rules(
     hooks: HookSetup,
@@ -697,10 +697,10 @@ fn with_rules(mut hooks: HookSetup, config: &PermissionsConfig, rules: &RoleRule
     hooks
 }
 
-/// jeet's hooks for the assistant, pre-approving the read-only jeet and
+/// plete's hooks for the assistant, pre-approving the read-only plete and
 /// `gh` commands and those of each capability `[assistant] allow` lists, so
 /// allowed actions do not prompt, and, when `guards` (`[permissions]
-/// guards`), denying force-pushes, merges outside `jeet pr merge` and
+/// guards`), denying force-pushes, merges outside `plete pr merge` and
 /// pushes to any of `branches`; with its wake channel when `wake` (see
 /// [`wake`]).
 pub fn assistant_hooks(
@@ -730,13 +730,13 @@ pub fn assistant_hooks(
 }
 
 /// Where the settings files of task `task_id`'s launches go: under
-/// `$JEET_HOME/run`, outside the task and every worktree, so nothing is
+/// `$PLETE_HOME/run`, outside the task and every worktree, so nothing is
 /// written where the agent works.
 pub fn settings_dir(home: &Path, task_id: &str) -> PathBuf {
     home.join("run").join(task_id)
 }
 
-/// jeet's hooks as the arguments of a launch of `session`. A harness that
+/// plete's hooks as the arguments of a launch of `session`. A harness that
 /// reads them from a file ([`Harness::hook_file`]) gets one, readable by the
 /// user alone, at `<session>.json` in [`settings_dir`], and the arguments
 /// name it: on the command line they would share tmux's 16KB limit with
@@ -902,7 +902,7 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     }
     if is_own_session(task) {
         bail!(
-            "this jeet runs inside tmux session {}, task {}'s agent session; interrupt it \
+            "this plete runs inside tmux session {}, task {}'s agent session; interrupt it \
              from outside that session",
             session_name(task),
             task.name
@@ -911,8 +911,8 @@ pub fn interrupt(app: &App, task: &TaskRecord) -> Result<Interrupted> {
     placement::runtime_for(task)?.interrupt(app, task)
 }
 
-/// Whether this jeet runs inside the task's agent session: as the agent's
-/// own command (`$JEET_TASK_ID`), or in a window the user opened there.
+/// Whether this plete runs inside the task's agent session: as the agent's
+/// own command (`$PLETE_TASK_ID`), or in a window the user opened there.
 pub fn is_own_session(task: &TaskRecord) -> bool {
     is_own_agent_session(&task.id, &task.slug)
 }
@@ -987,9 +987,9 @@ fn at_startup(current: Option<&status::SessionStatus>, launched: Option<i64>) ->
     })
 }
 
-/// Fail when this jeet runs inside the task's agent session, whether as the
+/// Fail when this plete runs inside the task's agent session, whether as the
 /// agent's own command or in a window the user opened there: ending the
-/// session to `verb` the task would end this jeet with it, before it had
+/// session to `verb` the task would end this plete with it, before it had
 /// done anything.
 pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
     refuse_inside_agent_session(&task.id, &task.slug, &format!("task {}", task.name), verb)
@@ -1000,7 +1000,7 @@ pub fn refuse_inside_session(task: &TaskRecord, verb: &str) -> Result<()> {
 pub fn refuse_inside_agent_session(id: &str, slug: &str, subject: &str, verb: &str) -> Result<()> {
     if is_own_agent_session(id, slug) {
         bail!(
-            "this jeet runs inside tmux session {}, the agent's session for {subject}, \
+            "this plete runs inside tmux session {}, the agent's session for {subject}, \
              which ending the agent would end too; {verb} it from outside that session",
             session_name_for(slug),
         );
@@ -1008,10 +1008,10 @@ pub fn refuse_inside_agent_session(id: &str, slug: &str, subject: &str, verb: &s
     Ok(())
 }
 
-/// Whether the task's agent runs, in its tmux session, without jeet knowing
-/// its process: an older jeet started it, or something other than jeet.
-/// Its jeet commands that need to know who calls are refused, until it is
-/// restarted (`jeet task restart`) or adopted (`jeet task adopt`). Runs
+/// Whether the task's agent runs, in its tmux session, without plete knowing
+/// its process: an older plete started it, or something other than plete.
+/// Its plete commands that need to know who calls are refused, until it is
+/// restarted (`plete task restart`) or adopted (`plete task adopt`). Runs
 /// tmux, so it belongs where [`activity`] does.
 pub fn unanchored(app: &App, task: &TaskRecord) -> bool {
     unanchored_in(&app.db, &task.id, &session_name(task))
@@ -1062,13 +1062,13 @@ pub fn activity_at(dir: &Path, session: &str, tmux_ok: bool) -> Activity {
     )
 }
 
-/// When anything last happened in the task: jeet touching it, a hook
+/// When anything last happened in the task: plete touching it, a hook
 /// reporting, or a harness recording a session.
 pub fn last_activity(app: &App, task: &TaskRecord) -> i64 {
     last_activity_at(&tasks::task_dir(app, task), task.last_activity)
 }
 
-/// [`last_activity`] for the task in `dir` that jeet last touched at
+/// [`last_activity`] for the task in `dir` that plete last touched at
 /// `touched`.
 pub fn last_activity_at(dir: &Path, touched: i64) -> i64 {
     [
@@ -1123,7 +1123,7 @@ mod tests {
             push: None,
         };
         let hooks = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],
@@ -1131,22 +1131,22 @@ mod tests {
             true,
         );
         assert!(
-            hooks.allow.contains(&"jeet task send".into()),
+            hooks.allow.contains(&"plete task send".into()),
             "{:?}",
             hooks.allow
         );
         assert!(
-            hooks.allow.contains(&"jeet task ls".into()),
+            hooks.allow.contains(&"plete task ls".into()),
             "{:?}",
             hooks.allow
         );
         assert!(
-            !hooks.allow.contains(&"jeet task new".into()),
+            !hooks.allow.contains(&"plete task new".into()),
             "{:?}",
             hooks.allow
         );
         // A task with a parent reports to it without a prompt.
-        assert!(ALLOWED.contains(&"jeet report"));
+        assert!(ALLOWED.contains(&"plete report"));
     }
 
     #[test]
@@ -1182,13 +1182,13 @@ mod tests {
             app.db.set_grants(&task.id, &grant).unwrap();
         }
         let claude = harness::default_harness();
-        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &api, claude, "/bin/plete".into()).unwrap();
         assert!(hooks.wake);
         for allowed in [
-            "jeet task new",
-            "jeet manager new",
-            "jeet report",
-            "jeet manager show",
+            "plete task new",
+            "plete manager new",
+            "plete report",
+            "plete manager show",
         ] {
             assert!(
                 hooks.allow.contains(&allowed.to_string()),
@@ -1197,17 +1197,17 @@ mod tests {
             );
         }
         // Granted but cut by the assistant, or never granted.
-        for withheld in ["jeet task delete", "jeet task send"] {
+        for withheld in ["plete task delete", "plete task send"] {
             assert!(
                 !hooks.allow.contains(&withheld.to_string()),
                 "{:?}",
                 hooks.allow
             );
         }
-        assert!(!hooks.allow.iter().any(|a| a == "jeet" || a.ends_with('*')));
-        assert!(!hooks.allow.contains(&"jeet todo".to_string()));
+        assert!(!hooks.allow.iter().any(|a| a == "plete" || a.ends_with('*')));
+        assert!(!hooks.allow.contains(&"plete todo".to_string()));
         // A worker asks at the prompt, as before, but for reading PRs and runs.
-        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
         let mut reads: Vec<String> = ALLOWED
             .iter()
             .chain(permissions::GH_READ_ONLY)
@@ -1220,28 +1220,28 @@ mod tests {
         assert!(hooks.wake);
         // `push = "branches"` lets a worker push to origin, but not a manager.
         app.config.permissions.push = Some(PushPolicy::Branches);
-        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
         for push in permissions::PUSH_ALLOW {
             assert!(hooks.allow.contains(&push.to_string()), "{push}");
         }
-        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &api, claude, "/bin/plete".into()).unwrap();
         assert!(!hooks.allow.iter().any(|a| a.starts_with("git push")));
         // Nothing is denied it unless `guards` is on.
         assert!(!hooks.deny.contains(&"git push".to_string()));
         app.config.permissions.guards = Some(true);
-        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &api, claude, "/bin/plete".into()).unwrap();
         assert!(hooks.deny.contains(&"git push".to_string()));
-        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
         assert!(hooks.deny.contains(&"git push --force".to_string()));
         app.config.permissions.guards = None;
         app.config.permissions.push = None;
         // A manager is given neither.
-        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &api, claude, "/bin/plete".into()).unwrap();
         assert!(!hooks.allow.contains(&"gh pr create".to_string()));
         assert!(!hooks.deny.contains(&"gh pr ready".to_string()));
         // `auto` from the config: no deny on `gh pr ready`.
         app.config.tasks.pr = Some(PrMode::Auto);
-        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
         assert!(hooks.allow.contains(&"gh pr create".to_string()));
         assert!(!hooks
             .deny
@@ -1249,7 +1249,7 @@ mod tests {
             .any(|d| d.starts_with("gh pr") && (d.contains("ready") || d.contains("create"))));
         // The task's own `ask` wins: it may not open one.
         app.db.set_task_pr(&worker.id, Some(PrMode::Ask)).unwrap();
-        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
         assert!(!hooks.allow.contains(&"gh pr create".to_string()));
         assert!(hooks.deny.contains(&"gh pr create".to_string()));
         app.db.set_task_pr(&worker.id, None).unwrap();
@@ -1258,7 +1258,7 @@ mod tests {
         // `[harness] wake = false`.
         let generic = &harness::Generic;
         assert!(
-            !task_hooks(&app, &worker, generic, "/bin/jeet".into())
+            !task_hooks(&app, &worker, generic, "/bin/plete".into())
                 .unwrap()
                 .wake
         );
@@ -1272,7 +1272,7 @@ mod tests {
         });
         assert!(!wake(&app, claude));
         assert!(
-            !task_hooks(&app, &worker, claude, "/bin/jeet".into())
+            !task_hooks(&app, &worker, claude, "/bin/plete".into())
                 .unwrap()
                 .wake
         );
@@ -1282,7 +1282,7 @@ mod tests {
     fn the_assistant_is_denied_nothing_unless_guards() {
         let settings = AssistantConfig::default();
         let plain = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             false,
             &["main".into()],
@@ -1291,7 +1291,7 @@ mod tests {
         );
         assert!(plain.deny.is_empty(), "{:?}", plain.deny);
         let guarded = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],
@@ -1338,10 +1338,10 @@ mod tests {
             TaskKind::Work,
         );
         assert!(plain.environment.is_none() && plain.extra_allow.is_empty());
-        // jeet's own denies stay whatever the config adds.
+        // plete's own denies stay whatever the config adds.
         let settings = AssistantConfig::default();
         let hooks = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],
@@ -1364,7 +1364,7 @@ mod tests {
             push: None,
         };
         let hooks = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],
@@ -1402,7 +1402,7 @@ mod tests {
             rules: Vec::new(),
             push: None,
         };
-        let exe = format!("/{}/jeet", "d".repeat(200));
+        let exe = format!("/{}/plete", "d".repeat(200));
         let hooks = assistant_hooks(exe.into(), &settings, true, &branches, &task, true);
         let claude = &crate::harness::claude::ClaudeCode;
         let args = hook_args(home.path(), claude, &hooks, &session, &[]).unwrap();
@@ -1433,7 +1433,7 @@ mod tests {
         }
         // A relaunch replaces it whole, and leaves nothing else behind.
         let fewer = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],
@@ -1473,7 +1473,7 @@ mod tests {
             push: None,
         };
         let hooks = assistant_hooks(
-            "/bin/jeet".into(),
+            "/bin/plete".into(),
             &settings,
             true,
             &["main".into()],

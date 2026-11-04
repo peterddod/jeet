@@ -128,7 +128,7 @@ pub fn label(limits: Limits) -> String {
     }
 }
 
-/// `change` as `jeet manager budget` takes it: `+1h`, `=2h,40turns`.
+/// `change` as `plete manager budget` takes it: `+1h`, `=2h,40turns`.
 pub fn change_label(change: Change) -> String {
     match change {
         Change::Add(limits) => format!("+{}", label(limits)),
@@ -320,13 +320,13 @@ pub fn enforce(app: &App, node: &TaskRecord) -> Result<Threshold> {
             let usage = usage(row, used);
             tell_parent(app, task, &format!("budget {pct}% used ({usage})"));
             let note = format!(
-                "jeet: your budget is {pct}% used ({usage}). At 100% you are paused; wrap up, \
+                "plete: your budget is {pct}% used ({usage}). At 100% you are paused; wrap up, \
                  or report to ask for more."
             );
             let told = Inbox::lock(&tasks::task_dir(app, task))
                 .and_then(|inbox| inbox.push_to(&note, None, Sender::Agent));
             if let Err(e) = told {
-                eprintln!("jeet: could not tell task {} its budget: {e:#}", task.slug);
+                eprintln!("plete: could not tell task {} its budget: {e:#}", task.slug);
             }
         }
     }
@@ -375,14 +375,14 @@ pub fn enforce_review(app: &App, review: &ReviewRecord) -> Result<Threshold> {
     let usage = usage(&check.row, check.used);
     tell_asker(app, review, &format!("budget {pct}% used ({usage})"));
     let note = format!(
-        "jeet: this review is {pct}% of its [review] limits ({usage}). At 100% you are paused; \
+        "plete: this review is {pct}% of its [review] limits ({usage}). At 100% you are paused; \
          wrap up."
     );
     let told = Inbox::lock(&review::dir(app, review))
         .and_then(|inbox| inbox.push_to(&note, None, Sender::Agent));
     if let Err(e) = told {
         eprintln!(
-            "jeet: could not tell review {} its limits: {e:#}",
+            "plete: could not tell review {} its limits: {e:#}",
             review.slug
         );
     }
@@ -398,7 +398,7 @@ pub fn report_blocked_review(app: &App, review: &ReviewRecord) {
     let used = (fresh.used_secs, fresh.used_turns);
     let body = format!(
         "budget used up ({}); blocked: budget. Paused until it is asked for again \
-         (`jeet review --rerun`)",
+         (`plete review --rerun`)",
         usage(&fresh.budget(), used)
     );
     tell_asker(app, &fresh, &body);
@@ -410,7 +410,7 @@ fn tell_asker(app: &App, review: &ReviewRecord, body: &str) {
     if let Err(e) = reports::auto_status_review(app, review, StatusEvent::Budget, body, i64::MAX, 0)
     {
         eprintln!(
-            "jeet: could not report review {}'s limits: {e:#}",
+            "plete: could not report review {}'s limits: {e:#}",
             review.slug
         );
     }
@@ -428,7 +428,7 @@ fn stopped(app: &App, task: &TaskRecord) -> Result<bool> {
 pub fn report_blocked(app: &App, node: &TaskRecord) {
     match blocked_body(app, node) {
         Ok(body) => tell_parent(app, node, &body),
-        Err(e) => eprintln!("jeet: could not report task {}'s budget: {e:#}", node.slug),
+        Err(e) => eprintln!("plete: could not report task {}'s budget: {e:#}", node.slug),
     }
 }
 
@@ -450,7 +450,7 @@ fn blocked_body(app: &App, node: &TaskRecord) -> Result<String> {
     }
     Ok(format!(
         "budget used up{whose}; blocked: budget. Paused until the budget is raised \
-         (`jeet manager budget`) and it is resumed"
+         (`plete manager budget`) and it is resumed"
     ))
 }
 
@@ -483,7 +483,7 @@ pub fn usage(row: &BudgetRow, (secs, turns): (i64, i64)) -> String {
 /// `i64::MAX`.
 fn tell_parent(app: &App, task: &TaskRecord, body: &str) {
     if let Err(e) = reports::auto_status(app, task, StatusEvent::Budget, body, i64::MAX, 0) {
-        eprintln!("jeet: could not report task {}'s budget: {e:#}", task.slug);
+        eprintln!("plete: could not report task {}'s budget: {e:#}", task.slug);
     }
 }
 
@@ -500,7 +500,7 @@ fn tell_stuck(
     let origin = match origin {
         Ok(origin) => origin,
         Err(e) => {
-            eprintln!("jeet: could not tell the user {label}'s budget is used up: {e:#}");
+            eprintln!("plete: could not tell the user {label}'s budget is used up: {e:#}");
             return;
         }
     };
@@ -508,7 +508,7 @@ fn tell_stuck(
         raised: scope::Raised::Stuck,
         kind: "stuck",
         reference: None,
-        title: format!("jeet: {label} is stuck: budget used up"),
+        title: format!("plete: {label} is stuck: budget used up"),
         subtitle: Some(path.to_string()),
         body: format!("budget used up ({usage}); paused"),
         link: Some(link),
@@ -572,7 +572,7 @@ mod tests {
         app.db.get_task(id).unwrap().unwrap()
     }
 
-    /// The bodies of jeet's budget reports about `id`.
+    /// The bodies of plete's budget reports about `id`.
     fn budget_reports(app: &App, id: &str) -> Vec<String> {
         let conn = rusqlite::Connection::open(config::index_path(&app.home)).unwrap();
         let mut stmt = conn
@@ -612,7 +612,7 @@ mod tests {
         let note = inbox(&app, "m");
         assert_eq!(note.len(), 1);
         assert!(
-            note[0].starts_with("jeet: your budget is 80% used"),
+            note[0].starts_with("plete: your budget is 80% used"),
             "{note:?}"
         );
         assert_eq!(app.db.budget("m").unwrap().unwrap().warned, 80);
@@ -643,9 +643,9 @@ mod tests {
         let told = crate::notify::queued(&app.home);
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0].why, crate::notify::Why::Stuck);
-        assert_eq!(told[0].title, "jeet: manager m is stuck: budget used up");
+        assert_eq!(told[0].title, "plete: manager m is stuck: budget used up");
         assert_eq!(told[0].task.as_deref(), Some("m"));
-        assert_eq!(told[0].link.as_deref(), Some("jeet://task/m"));
+        assert_eq!(told[0].link.as_deref(), Some("plete://task/m"));
         assert_eq!(get(&app, "w").run_state, RunState::Run);
         // Told once.
         app.db.charge("w", 0, 1).unwrap();

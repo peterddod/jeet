@@ -270,8 +270,8 @@ fn draw_header(frame: &mut Frame, area: Rect, explorer: &Explorer) -> (Option<u1
     };
 
     let heading = match &explorer.repo {
-        Some(repo) => format!(" jeet · {} ", repo.id),
-        None => format!(" jeet · task {} ", explorer.root_label),
+        Some(repo) => format!(" plete · {} ", repo.id),
+        None => format!(" plete · task {} ", explorer.root_label),
     };
     let mut block = Block::default().borders(Borders::ALL).title(Span::styled(
         heading.clone(),
@@ -1038,7 +1038,7 @@ const HELP: [(&str, &str); 27] = [
     ),
     ("⏎", "folder: enter · file: open in your editor"),
     ("click", "a row to enter or select it, a path crumb to jump"),
-    ("shift-drag", "select text — jeet has the mouse otherwise"),
+    ("shift-drag", "select text — plete has the mouse otherwise"),
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
     ("ctrl-a", "this task's agent, in tmux: started if need be"),
@@ -1635,7 +1635,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("jeet · task Fix login"), "{screen}");
+        assert!(screen.contains("plete · task Fix login"), "{screen}");
         assert!(screen.contains("[task canvas]"), "{screen}");
         assert!(!screen.contains(" vs "), "{screen}");
         assert!(screen.contains("notes/"), "{screen}");

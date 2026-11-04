@@ -2,8 +2,8 @@
 //!
 //! A harness may stop at a prompt before its session starts — Claude Code
 //! asks once per folder whether to trust it — and no hook says so: the task
-//! would sit there looking busy. So when jeet launches an agent whose
-//! harness has hooks, it also launches `jeet task-startup` in the
+//! would sit there looking busy. So when plete launches an agent whose
+//! harness has hooks, it also launches `plete task-startup` in the
 //! background, which watches the agent's pane until a hook reports, the
 //! agent exits, or [`WATCH_SECS`] pass. On a trust prompt it:
 //!
@@ -50,9 +50,9 @@ pub const WATCH_SECS: u64 = 30;
 const HOOK_WAIT_SECS: u64 = 15;
 
 /// Set to `0` to launch no watcher.
-pub const WATCH_ENV: &str = "JEET_STARTUP_WATCH";
+pub const WATCH_ENV: &str = "PLETE_STARTUP_WATCH";
 
-/// What a watcher's log file is called, in the task's `.jeet`.
+/// What a watcher's log file is called, in the task's `.plete`.
 const LOG_FILE: &str = "startup.log";
 
 /// Whose agent's trust prompt may be accepted: a task's, by its kind, or a
@@ -63,8 +63,8 @@ pub enum Trust {
     Review,
 }
 
-/// Whether jeet may accept the trust prompt by itself for `who`, in
-/// `dir`: only with `auto_trust` on, only under `$JEET_HOME/tasks`, and for
+/// Whether plete may accept the trust prompt by itself for `who`, in
+/// `dir`: only with `auto_trust` on, only under `$PLETE_HOME/tasks`, and for
 /// a review only with `auto_trust_reviews` on too. A manager follows
 /// `auto_trust` as a worker does: its parent starts it with nobody at its
 /// pane. Never the assistant's or the setup agent's.
@@ -151,7 +151,7 @@ pub enum Outcome {
     Started,
     /// It exited.
     Gone,
-    /// Nothing reported, and no prompt jeet knows was seen.
+    /// Nothing reported, and no prompt plete knows was seen.
     NoPrompt,
     /// A trust prompt is waiting for the user.
     NeedsUser,
@@ -159,9 +159,9 @@ pub enum Outcome {
     Accepted,
     /// The trust prompt was accepted, but no hook reported after.
     AcceptedNoHook,
-    /// The trust prompt was not in a state jeet knows how to accept.
+    /// The trust prompt was not in a state plete knows how to accept.
     CouldNotAccept,
-    /// It exited after jeet pressed keys at its trust prompt, before any
+    /// It exited after plete pressed keys at its trust prompt, before any
     /// hook reported.
     Ended,
 }
@@ -204,7 +204,7 @@ pub fn watch(
 enum Look {
     /// No trust prompt.
     Gone,
-    /// The prompt, but not exactly one option jeet knows selected: a frame
+    /// The prompt, but not exactly one option plete knows selected: a frame
     /// caught mid-redraw, say.
     Unsure,
     /// Not on accepting: the keys that move towards it.
@@ -324,7 +324,7 @@ fn accept(
                     screen,
                 } => (outcome, why, screen),
             };
-        // Answered some other way while jeet looked: not jeet's to report.
+        // Answered some other way while plete looked: not plete's to report.
         if reported() {
             return Ok(started(confirmed));
         }
@@ -342,7 +342,7 @@ fn accept(
     }
 }
 
-/// What a hook reporting means: accepted, if jeet confirmed.
+/// What a hook reporting means: accepted, if plete confirmed.
 fn started(confirmed: bool) -> Outcome {
     match confirmed {
         true => Outcome::Accepted,
@@ -431,7 +431,7 @@ fn attempt(
     }
 }
 
-/// What the agent exiting means: it ended at startup if jeet pressed keys.
+/// What the agent exiting means: it ended at startup if plete pressed keys.
 fn ended(pressed: Pressed, confirmed: bool) -> Outcome {
     match pressed != Pressed::Nothing || confirmed {
         true => Outcome::Ended,
@@ -495,7 +495,7 @@ fn wait_for_hook(
                     why: format!("no hook reported in {}s", limits.hook_wait.as_secs()),
                     screen,
                 },
-                // Answered, but not by jeet: not jeet's to report.
+                // Answered, but not by plete: not plete's to report.
                 false => Tried::Done(Outcome::NoPrompt),
             });
         }
@@ -516,8 +516,8 @@ enum Watched {
     Review(Box<ReviewRecord>),
 }
 
-/// `jeet task-startup <task>`: watch the start of the agent of task (or
-/// review) `task_id`, which runs session `session` when jeet picked its id.
+/// `plete task-startup <task>`: watch the start of the agent of task (or
+/// review) `task_id`, which runs session `session` when plete picked its id.
 pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
     let watched = match app.db.get_task(task_id)? {
         Some(task) => Watched::Task(task),
@@ -571,9 +571,9 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         &reported,
         &auto,
         Limits::default(),
-        &|line| eprintln!("jeet task-startup {slug}: {line}"),
+        &|line| eprintln!("plete task-startup {slug}: {line}"),
     )?;
-    eprintln!("jeet task-startup {slug}: {outcome:?}");
+    eprintln!("plete task-startup {slug}: {outcome:?}");
     let level = match &watched {
         Watched::Task(task) => notify::level(task.kind),
         Watched::Review(_) => NotifyLevel::Review,
@@ -587,7 +587,7 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
                     kind: "startup-prompt".into(),
                     level: Some(level),
                     task: Some(slug.clone()),
-                    title: "jeet".into(),
+                    title: "plete".into(),
                     subtitle: Some(subtitle.clone()),
                     body: body.into(),
                     ..Event::default()
@@ -609,7 +609,7 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             }
         };
         if let Err(e) = told {
-            eprintln!("jeet task-startup {slug}: warning: {e:#}");
+            eprintln!("plete task-startup {slug}: warning: {e:#}");
         }
     };
     let harness = spec.harness.name();
@@ -632,20 +632,20 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
             tell(
                 Why::NeedsUser,
                 &format!(
-                    "{harness} asks whether to trust the folder; `jeet task open {slug}` to answer",
+                    "{harness} asks whether to trust the folder; `plete task open {slug}` to answer",
                 ),
             );
         }
         Outcome::AcceptedNoHook => {
             report(
                 StatusEvent::StartFailed,
-                "start failed: jeet trusted the folder, but no hook has reported since",
+                "start failed: plete trusted the folder, but no hook has reported since",
             );
             tell(
                 Why::Info,
                 &format!(
-                    "jeet trusted the folder for {harness}, but no hook has reported since; \
-                     `jeet task open {slug}` to look",
+                    "plete trusted the folder for {harness}, but no hook has reported since; \
+                     `plete task open {slug}` to look",
                 ),
             );
         }
@@ -664,9 +664,9 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Start `jeet task-startup` for agent `id`, just launched in `dir`, in the
+/// Start `plete task-startup` for agent `id`, just launched in `dir`, in the
 /// background: detached the way `store::launch` is, its output in
-/// `dir`'s `.jeet/startup.log`.
+/// `dir`'s `.plete/startup.log`.
 pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<()> {
     if crate::env::var(WATCH_ENV).is_ok_and(|v| v.trim() == "0") {
         return Ok(());
@@ -675,7 +675,7 @@ pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let log = dir.join(LOG_FILE);
     let out = std::fs::File::create(&log).with_context(|| format!("create {}", log.display()))?;
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     let mut cmd = Command::new("nohup");
     cmd.arg(exe).args(["task-startup", id]);
     if let Some(session) = session {
@@ -691,7 +691,7 @@ pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn().context("start jeet task-startup")?;
+    cmd.spawn().context("start plete task-startup")?;
     Ok(())
 }
 

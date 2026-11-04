@@ -16,7 +16,7 @@ pub enum CompletionShell {
     Zsh,
 }
 
-/// Dynamic shell registration (`COMPLETE=$shell jeet`) with index-backed candidates.
+/// Dynamic shell registration (`COMPLETE=$shell plete`) with index-backed candidates.
 pub fn generate_script(shell: CompletionShell) -> Result<String> {
     let mut cmd = Cli::command();
     cmd.build();

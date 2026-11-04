@@ -1,4 +1,4 @@
-//! Which of jeet's own events in the tree tell the user (`[notify] events`):
+//! Which of plete's own events in the tree tell the user (`[notify] events`):
 //! the questions, blocks and dones of tasks the user would see from the
 //! assistant's level, and anything escalated or stuck at any depth.
 //!
@@ -103,7 +103,7 @@ impl Origin {
 }
 
 /// The PR of task `id` a notification links to: its open one updated
-/// last, as jeet last saw them.
+/// last, as plete last saw them.
 fn task_pr(app: &App, id: &str) -> Result<Option<String>> {
     Ok(app
         .db

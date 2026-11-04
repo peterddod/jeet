@@ -33,7 +33,7 @@ use super::label;
 /// fake in tests.
 pub type RuntimeFor<'a> = &'a dyn Fn(&TaskRecord) -> Result<&'a dyn NodeRuntime>;
 
-/// Whether this jeet runs in a node's own session, which it may not
+/// Whether this plete runs in a node's own session, which it may not
 /// interrupt or end: [`runtime::is_own_session`], or a stand-in in tests.
 pub type OwnSession<'a> = &'a dyn Fn(&TaskRecord) -> bool;
 
@@ -69,7 +69,7 @@ pub fn setter_of(by: &Caller) -> Setter {
         Caller::User => Setter::User,
         Caller::Root => Setter::Root,
         Caller::Node(node) => Setter::Node(node.id.clone()),
-        // A review's agent runs no `jeet manager` verb; were it to, it
+        // A review's agent runs no `plete manager` verb; were it to, it
         // would hold nothing above a budget's pause.
         Caller::Review(_) => Setter::Budget,
     }
@@ -116,7 +116,7 @@ pub fn pause(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOutc
 /// Pause `target` (M17): write its row, with `by` as the setter, then
 /// interrupt the turn of each node in its subtree, leaves first, through
 /// `rt`. What a node refuses, or fails at, is a line of the outcome and the
-/// walk goes on. The assistant and the node whose session this jeet runs in
+/// walk goes on. The assistant and the node whose session this plete runs in
 /// are skipped. An interrupted node is marked idle, paused.
 pub fn pause_with(
     app: &App,
@@ -149,7 +149,7 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
         return "archived; nothing to interrupt".to_string();
     }
     if own(node) {
-        return "this jeet runs in its session; not interrupted".to_string();
+        return "this plete runs in its session; not interrupted".to_string();
     }
     let dir = tasks::task_dir(app, node);
     let interrupted = loop {
@@ -196,7 +196,7 @@ fn interrupt_line(app: &App, node: &TaskRecord, rt: RuntimeFor, own: OwnSession)
     }
 }
 
-/// Charge `node` the turn jeet just interrupted: it ends with no Stop hook
+/// Charge `node` the turn plete just interrupted: it ends with no Stop hook
 /// to charge it, or to report a charge that uses its budget up, so that is
 /// done and told here. Its status is the caller's to close. Only for an
 /// interrupt `Sent`, which needs the agent's own pane alive.
@@ -204,7 +204,7 @@ pub fn charge_interrupted(app: &App, node: &TaskRecord) {
     match status::fold_busy(app, node, true, now_secs()) {
         Ok(Threshold::Hit100) => budget::report_blocked(app, node),
         Ok(_) => {}
-        Err(e) => eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug),
+        Err(e) => eprintln!("plete: could not charge task {}'s budget: {e:#}", node.slug),
     }
 }
 
@@ -231,7 +231,7 @@ pub fn check_resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<()> {
             || row.max_turns.is_some_and(|max| turns >= max);
         if spent {
             bail!(
-                "{} has used its budget; raise it with `jeet manager budget` first",
+                "{} has used its budget; raise it with `plete manager budget` first",
                 label(target)
             );
         }
@@ -267,7 +267,7 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         if !app.db.resume_run_state(&target.id, checked)? {
             bail!(
                 "{} was paused or stopped again meanwhile, or used its budget; look with \
-                 `jeet manager show {}`",
+                 `plete manager show {}`",
                 label(target),
                 target.slug
             );
@@ -332,7 +332,7 @@ pub fn stop(app: &App, by: &Caller, target: Option<&TaskRecord>) -> Result<Vec<N
 /// Stop `target` for `by`, or with `None` (`--all`, the user's alone) every
 /// active child of the assistant as the user (M18): write each row, then end
 /// the agent of every node below, leaves first, through `end`, and forget
-/// its pane. The assistant and the node whose session this jeet runs in are
+/// its pane. The assistant and the node whose session this plete runs in are
 /// skipped. `--all` also ends the agents and jobs of the reviews the
 /// assistant asked for, which are in no tree. A stopped node is never started again until resumed. Then
 /// start what waits on `max_live`.
@@ -393,7 +393,7 @@ pub fn stop_with(
     for line in lines {
         match targets.first() {
             Some(first) => outcomes.push(NodeOutcome::new(first, line)),
-            None => eprintln!("jeet: {line}"),
+            None => eprintln!("plete: {line}"),
         }
     }
     Ok(outcomes)
@@ -432,13 +432,13 @@ fn end_line(app: &App, node: &TaskRecord, live: bool, end: EndAgent, own: OwnSes
         return "the assistant; not stopped".to_string();
     }
     if own(node) {
-        return "this jeet runs in its session; stop it from outside".to_string();
+        return "this plete runs in its session; stop it from outside".to_string();
     }
     // Before its session ends, whether or not its `Ended` hook gets to; a
     // stale status of an agent already gone is no busy time. A charge that
     // uses its budget up is not reported: a stopped node's end is not.
     if let Err(e) = status::fold_busy(app, node, live, now_secs()) {
-        eprintln!("jeet: could not charge task {}'s budget: {e:#}", node.slug);
+        eprintln!("plete: could not charge task {}'s budget: {e:#}", node.slug);
     }
     let ended = match end(app, node) {
         Ok(ended) => ended,
@@ -636,7 +636,7 @@ pub fn report_review_queued(
         Ok(told) => told.is_some(),
         Err(e) => {
             eprintln!(
-                "jeet: could not report review {}'s queued start: {e:#}",
+                "plete: could not report review {}'s queued start: {e:#}",
                 review.slug
             );
             false
@@ -662,7 +662,7 @@ pub fn held_refusal(task: &TaskRecord, holder: &TaskRecord) -> String {
         false => format!(" under {}", label(holder)),
     };
     format!(
-        "{} is {}{under}; `jeet manager resume {}` first",
+        "{} is {}{under}; `plete manager resume {}` first",
         label(task),
         holder.run_state.as_str(),
         holder.slug
@@ -704,7 +704,7 @@ pub fn report_queued(app: &App, task: &TaskRecord, live: u32, max: u32, since: i
         Ok(told) => told.is_some(),
         Err(e) => {
             eprintln!(
-                "jeet: could not report task {}'s queued start: {e:#}",
+                "plete: could not report task {}'s queued start: {e:#}",
                 task.slug
             );
             false
@@ -1020,7 +1020,7 @@ mod tests {
         Ok(String::new())
     }
 
-    /// `jeet manager stop --all` ends the job of a review the assistant
+    /// `plete manager stop --all` ends the job of a review the assistant
     /// asked for, and not that of one the user did.
     #[cfg(unix)]
     #[test]
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pause_skips_the_assistant_and_this_jeets_own_session() {
+    fn a_pause_skips_the_assistant_and_this_pletes_own_session() {
         let (_dir, app) = lab();
         let rt = fake(&app, |_| Ok(Interrupted::Sent));
         let lookup = |_: &TaskRecord| Ok(&rt as &dyn NodeRuntime);
@@ -1469,7 +1469,7 @@ mod tests {
         let own = |t: &TaskRecord| t.slug == "w1";
         let m = get(&app, "m");
         let outcomes = stop_with(&app, &Caller::Root, Some(&m), &end, &own).unwrap();
-        // Each was held already when it was ended; w1 runs this jeet.
+        // Each was held already when it was ended; w1 runs this plete.
         let stopped = |s: &str| (s.to_string(), RunState::Stopped);
         assert_eq!(
             *ended.borrow(),
@@ -1484,7 +1484,7 @@ mod tests {
             [
                 ("w2", "not running"),
                 ("m2", "could not end its agent: no session here"),
-                ("w1", "this jeet runs in its session; stop it from outside"),
+                ("w1", "this plete runs in its session; stop it from outside"),
                 ("m", "not running"),
             ]
         );
@@ -1712,7 +1712,7 @@ mod tests {
             let started = runtime::ensure_running(&app, &w2, None, Some("go"), admission);
             assert_eq!(
                 started.err().unwrap().to_string(),
-                "task w2 is paused under manager m; `jeet manager resume m` first"
+                "task w2 is paused under manager m; `plete manager resume m` first"
             );
         }
         // Held is not queued.

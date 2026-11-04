@@ -1,8 +1,8 @@
-//! `jeet review <pr>`: find or make the PR's review, check the PR out in
+//! `plete review <pr>`: find or make the PR's review, check the PR out in
 //! it and have its agent review it, opening nothing unless `--open` (then
-//! the review viewer, and a shell in the worktree). `jeet review
+//! the review viewer, and a shell in the worktree). `plete review
 //! open|diff|explore <review>` go to a review that exists. Also what
-//! `jeet task open|archive|unarchive|delete` do with the name of a review,
+//! `plete task open|archive|unarchive|delete` do with the name of a review,
 //! which is no task.
 
 use std::io::{self, IsTerminal};
@@ -40,13 +40,13 @@ pub fn run(
     let repo = repo_from_filter_or_cwd(app, repo_filter)?;
     let trunk = std::path::Path::new(&repo.trunk_path);
 
-    eprintln!("jeet: looking up #{number}");
+    eprintln!("plete: looking up #{number}");
     let found = github::pr_history(trunk, number)?;
     let pr = found.pr.clone();
     // The title is whoever opened the PR's: an agent gets it fenced.
     let caller = permissions::caller(app)?;
     eprintln!(
-        "jeet: #{} {} ({})",
+        "plete: #{} {} ({})",
         pr.number,
         super::task::shown_github(&caller, &pr.title),
         pr.state_label()
@@ -54,13 +54,13 @@ pub fn run(
 
     // What the assistant asks for reports to it: the review agent's done
     // and blocked go to the task that asked. A task with a parent never
-    // gets here: `jeet review` is refused to it (`permissions::node_scope`
+    // gets here: `plete review` is refused to it (`permissions::node_scope`
     // has no rule for it), nor does a review's agent.
     let requested_by = match caller {
         Caller::Root => Some(super::task::assistant_parent(app)?.id),
         Caller::User => None,
-        Caller::Node(node) => bail!("task {} may not run `jeet review`", node.slug),
-        Caller::Review(review) => bail!("review {} may not run `jeet review`", review.label()),
+        Caller::Node(node) => bail!("task {} may not run `plete review`", node.slug),
+        Caller::Review(review) => bail!("review {} may not run `plete review`", review.label()),
     };
     let checkout = review::review_for(app, &repo, &pr, requested_by.as_deref())?;
     let review = &checkout.review;
@@ -69,7 +69,7 @@ pub fn run(
     // running, but there is no need to start one in its way.
     crate::store::maybe_sync_background(app);
     for warning in &checkout.warnings {
-        eprintln!("jeet: {warning}");
+        eprintln!("plete: {warning}");
     }
     let verb = if checkout.created {
         "new review"
@@ -77,7 +77,7 @@ pub fn run(
         "review"
     };
     eprintln!(
-        "jeet: {verb} {} -> {}",
+        "plete: {verb} {} -> {}",
         review.slug,
         checkout.path.display()
     );
@@ -88,13 +88,13 @@ pub fn run(
         let has_agent = review::asked(&review::folded(app, review)).is_some();
         if app.config.review.command().is_some() && has_agent {
             eprintln!(
-                "jeet: warning: [review] command is deprecated, and not run for a review its \
+                "plete: warning: [review] command is deprecated, and not run for a review its \
                  agent has started; the agent is asked instead"
             );
         }
         if app.config.review.command().is_some() && !has_agent {
             eprintln!(
-                "jeet: warning: [review] command is deprecated: it runs headless, outside the \
+                "plete: warning: [review] command is deprecated: it runs headless, outside the \
                  review's agent; remove it to have the agent review in its tmux pane, \
                  asked with [review] prompt"
             );
@@ -110,8 +110,8 @@ pub fn run(
                 requested_by.as_deref(),
             );
             match asked {
-                Ok(line) => eprintln!("jeet: {line}"),
-                Err(e) => eprintln!("jeet: warning: the review agent did not start: {e:#}"),
+                Ok(line) => eprintln!("plete: {line}"),
+                Err(e) => eprintln!("plete: warning: the review agent did not start: {e:#}"),
             }
         }
     }
@@ -120,10 +120,10 @@ pub fn run(
     // to unless asked.
     if !open {
         let slug = &review.slug;
-        eprintln!("jeet: to go to review {slug}:");
-        eprintln!("jeet:   jeet review explore {slug}   # the explorer, in its worktree");
-        eprintln!("jeet:   jeet review diff {slug}      # the PR's diff in jeet");
-        eprintln!("jeet:   jeet review open {slug}      # its agent's session");
+        eprintln!("plete: to go to review {slug}:");
+        eprintln!("plete:   plete review explore {slug}   # the explorer, in its worktree");
+        eprintln!("plete:   plete review diff {slug}      # the PR's diff in plete");
+        eprintln!("plete:   plete review open {slug}      # its agent's session");
         println!("{}", checkout.path.display());
         return Ok(());
     }
@@ -132,32 +132,32 @@ pub fn run(
         crate::tui::review::run(&checkout.path, &pr)?;
         return crate::commands::explore::hand_off(&checkout.path);
     }
-    // Scripted: behave like `jeet worktree`, printing the path to consume.
+    // Scripted: behave like `plete worktree`, printing the path to consume.
     println!("{}", checkout.path.display());
     cd::request(&checkout.path)
 }
 
-/// The review `name` names, for `jeet review open|diff|explore`; a task's
-/// name is pointed at `jeet task`.
+/// The review `name` names, for `plete review open|diff|explore`; a task's
+/// name is pointed at `plete task`.
 fn named_review(app: &App, name: &str) -> Result<ReviewRecord> {
     let found = match named(app, permissions::Verb::TaskOpen, name, false) {
         Ok(found) => found,
         // Neither a task nor a review: say so as a review command would.
         Err(_) if review_exact(app, name)?.is_none() && review_by_prefix(app, name)?.is_none() => {
-            bail!("no review named {name:?}; `jeet task ls` lists them")
+            bail!("no review named {name:?}; `plete task ls` lists them")
         }
         Err(e) => return Err(e),
     };
     match found {
         Named::Review(review) => Ok(*review),
         Named::Task(task) => bail!(
-            "{name} is a task, not a review; `jeet task open {}` opens it",
+            "{name} is a task, not a review; `plete task open {}` opens it",
             task.slug
         ),
     }
 }
 
-/// `jeet review open <review>`: what `jeet task open <review>` does.
+/// `plete review open <review>`: what `plete task open <review>` does.
 pub fn open_named(app: &App, name: &str, session: Option<&str>) -> Result<()> {
     let review = named_review(app, name)?;
     open(app, &review, session)
@@ -168,19 +168,19 @@ fn live_review(app: &App, name: &str) -> Result<ReviewRecord> {
     let review = named_review(app, name)?;
     if review.state == TaskState::Archived {
         bail!(
-            "review {0} is archived; `jeet task unarchive {0}` first",
+            "review {0} is archived; `plete task unarchive {0}` first",
             review.slug
         );
     }
     Ok(review)
 }
 
-/// `jeet review diff <review>`: the PR's diff in the review viewer, on the
+/// `plete review diff <review>`: the PR's diff in the review viewer, on the
 /// review's worktree. Changes nothing, and leaves the shell where it is.
 pub fn diff(app: &App, name: &str) -> Result<()> {
     let review = live_review(app, name)?;
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
-        bail!("the review viewer needs an interactive terminal; try `jeet review open {name}`");
+        bail!("the review viewer needs an interactive terminal; try `plete review open {name}`");
     }
     let Some(worktree) = review::worktree_path(app, &review) else {
         bail!("review {} has no worktree", review.slug);
@@ -193,21 +193,21 @@ pub fn diff(app: &App, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `jeet review explore <review>`: the explorer in the review's worktree.
+/// `plete review explore <review>`: the explorer in the review's worktree.
 pub fn explore(app: &App, name: &str) -> Result<()> {
     let review = live_review(app, name)?;
     let dir = review::worktree_path(app, &review).unwrap_or_else(|| review::dir(app, &review));
     crate::commands::explore::run_at(app, &dir)
 }
 
-/// `R` in the reviews tab: `jeet review <pr> --rerun` for `review`, without
+/// `R` in the reviews tab: `plete review <pr> --rerun` for `review`, without
 /// the viewer or the `cd`. Returns what to tell the user; the TUI owns the
 /// terminal, so nothing is printed.
 pub fn rerun(app: &App, review: &ReviewRecord) -> Result<String> {
     if app.config.review.command().is_some()
         && review::asked(&review::folded(app, review)).is_none()
     {
-        bail!("[review] command is deprecated and runs from `jeet review --rerun`, not here");
+        bail!("[review] command is deprecated and runs from `plete review --rerun`, not here");
     }
     let Some(repo) = app.db.get_repo(&review.repo_id)? else {
         bail!("{} is no longer in the store", review.repo_id);
@@ -246,7 +246,7 @@ fn legacy_review(
     if let Some(job) = &existing {
         if rerun && job.state() == review::JobState::Running {
             eprintln!(
-                "jeet: a review of #{} is still running; not starting another",
+                "plete: a review of #{} is still running; not starting another",
                 pr.number
             );
             return Ok(());
@@ -254,20 +254,20 @@ fn legacy_review(
     }
     if !rerun {
         if let Some(why) = review::reason_to_skip(existing.as_ref(), &pr.head_ref_oid) {
-            eprintln!("jeet: {why}");
+            eprintln!("plete: {why}");
             return Ok(());
         }
     }
     let job = review::start(
         app, repo, pr, worktree, config, template, as_task, runner_for,
     )?;
-    eprintln!("jeet: reviewing in the background: {}", job.command);
-    eprintln!("jeet: output -> {}", job.log.display());
+    eprintln!("plete: reviewing in the background: {}", job.command);
+    eprintln!("plete: output -> {}", job.log.display());
     if as_task.is_some() {
         // No harness launches it, so no deny rules reach it.
         eprintln!(
-            "jeet: warning: the review command runs outside a harness launch, so it has no \
-             deny rules and is not stopped from force-pushing or merging; only jeet's own \
+            "plete: warning: the review command runs outside a harness launch, so it has no \
+             deny rules and is not stopped from force-pushing or merging; only plete's own \
              commands are gated"
         );
     }
@@ -275,10 +275,10 @@ fn legacy_review(
 }
 
 // ---------------------------------------------------------------------------
-// `jeet task open|archive|unarchive|delete <review>`
+// `plete task open|archive|unarchive|delete <review>`
 // ---------------------------------------------------------------------------
 
-/// What a name given to `jeet task open|archive|unarchive|delete` is: a task,
+/// What a name given to `plete task open|archive|unarchive|delete` is: a task,
 /// or a review, which those verbs reach by its slug so the paths they have
 /// always documented keep working.
 pub enum Named {
@@ -335,8 +335,8 @@ pub fn named(app: &App, verb: permissions::Verb, name: &str, exact: bool) -> Res
     };
     if let Caller::Node(node) = permissions::caller(app)? {
         bail!(
-            "task {} may not run `jeet {}` on review {}: it may run it only on the tasks \
-             below it; ask with `jeet report blocked|question \"…\"`",
+            "task {} may not run `plete {}` on review {}: it may run it only on the tasks \
+             below it; ask with `plete report blocked|question \"…\"`",
             node.slug,
             verb.name(),
             review.label()
@@ -360,7 +360,7 @@ pub fn named_agent(app: &App, verb: permissions::Verb, name: &str) -> Result<Nam
         };
         if !asked {
             bail!(
-                "`jeet {}` reaches review {}'s agent only for the user, or for the task that \
+                "`plete {}` reaches review {}'s agent only for the user, or for the task that \
                  asked for the review",
                 verb.name(),
                 review.label()
@@ -376,7 +376,7 @@ pub fn send(app: &App, review: &ReviewRecord, message: &str) -> Result<()> {
     let called = review.slug.as_str();
     if review.state == TaskState::Archived {
         bail!(
-            "review {0} is archived; `jeet task unarchive {0}` first",
+            "review {0} is archived; `plete task unarchive {0}` first",
             review.slug
         );
     }
@@ -385,48 +385,48 @@ pub fn send(app: &App, review: &ReviewRecord, message: &str) -> Result<()> {
     let delivered = messages::deliver(&review::dir(app, review), &agent, &message, from, None)?;
     let _ = app.db.touch_review(&review.id, now_secs());
     match delivered {
-        Delivered::Typed => eprintln!("jeet: sent to {called}'s agent"),
+        Delivered::Typed => eprintln!("plete: sent to {called}'s agent"),
         Delivered::Queued => eprintln!(
-            "jeet: {called}'s agent is busy, waiting on you, or has text you have not sent in \
+            "plete: {called}'s agent is busy, waiting on you, or has text you have not sent in \
              its prompt, so the message is queued; it gets it when it finishes or sits idle"
         ),
         Delivered::Started => eprintln!(
-            "jeet: started {called}'s agent with the message in tmux session {}",
+            "plete: started {called}'s agent with the message in tmux session {}",
             review::session_name(review)
         ),
         Delivered::Held => eprintln!(
-            "jeet: {called}'s agent is not running and cannot be started from here, so the \
+            "plete: {called}'s agent is not running and cannot be started from here, so the \
              message is queued; it gets it when it next runs"
         ),
         Delivered::Paused => eprintln!(
-            "jeet: review {called} is paused at its [review] caps, so the message is queued; \
+            "plete: review {called} is paused at its [review] caps, so the message is queued; \
              it gets it once the review is asked for again"
         ),
         Delivered::StartQueued { live, max } => {
             let (cap, frees) = run::REVIEW_MAX_LIVE;
             eprintln!(
-                "jeet: review {called}'s start waits on {cap} ({live}/{max} live), so the \
+                "plete: review {called}'s start waits on {cap} ({live}/{max} live), so the \
                  message is queued; it starts with it when {frees}"
             )
         }
         Delivered::Wake => {
-            eprintln!("jeet: sent to {called}'s agent; it gets it now, through its wake channel")
+            eprintln!("plete: sent to {called}'s agent; it gets it now, through its wake channel")
         }
         // Only the assistant's are stored.
-        Delivered::Stored => eprintln!("jeet: the message is queued for {called}'s agent"),
+        Delivered::Stored => eprintln!("plete: the message is queued for {called}'s agent"),
     }
     Ok(())
 }
 
 /// End the review's agent and resume its session in a new one in the same
-/// tmux session, as `jeet task restart` does a task's: refused for an agent
+/// tmux session, as `plete task restart` does a task's: refused for an agent
 /// mid-turn, waiting on someone, starting, or holding text that was not
 /// sent, unless `force`.
 pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     let called = review.slug.as_str();
     if review.state == TaskState::Archived {
         bail!(
-            "review {0} is archived; `jeet task unarchive {0}` first",
+            "review {0} is archived; `plete task unarchive {0}` first",
             review.slug
         );
     }
@@ -439,14 +439,14 @@ pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     let spec = AgentSpec::from_config(&app.config)?;
     if !spec.supports_sessions() {
         bail!(
-            "{} keeps no sessions jeet can resume, so a restart would lose review {called}'s \
-             conversation; stop it and `jeet task open {called}` if you want a fresh one",
+            "{} keeps no sessions plete can resume, so a restart would lose review {called}'s \
+             conversation; stop it and `plete task open {called}` if you want a fresh one",
             spec.display(),
         );
     }
     let tmux_session = review::session_name(review);
     if !(tmux::available() && tmux::agent_alive(&tmux_session)) {
-        bail!("review {called}'s agent is not running; `jeet task open {called}` starts it");
+        bail!("review {called}'s agent is not running; `plete task open {called}` starts it");
     }
     // Ended now, it would not start again until it is asked for again.
     if review.paused {
@@ -474,13 +474,13 @@ pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
         .unwrap_or_else(|| review.clone());
     let Some(session) = review.session_id.clone() else {
         bail!(
-            "review {called} has no session jeet knows of to resume; stop it and `jeet task \
+            "review {called} has no session plete knows of to resume; stop it and `plete task \
              open {called}`"
         );
     };
     // Its busy time so far, before its session ends, as a stop charges it.
     if let Err(e) = status::fold_busy_review(app, review, true, now_secs()) {
-        eprintln!("jeet: could not charge review {called}'s limits: {e:#}");
+        eprintln!("plete: could not charge review {called}'s limits: {e:#}");
     }
     runtime::stop_session(&review.slug)?;
     app.db.delete_task_anchors(&review.id, AnchorKind::Pane)?;
@@ -491,24 +491,24 @@ pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     let running = review::ensure_running(app, review, Some(&session), None, admission)
         .with_context(|| {
             format!(
-                "ended review {called}'s agent, but could not start it again; `jeet task open \
+                "ended review {called}'s agent, but could not start it again; `plete task open \
                  {called} --session {session}` resumes it"
             )
         })?;
     warn_all(&running.warnings);
     match running.started {
         Started::Now => eprintln!(
-            "jeet: restarted review {called}'s agent in tmux session {}, resuming session \
+            "plete: restarted review {called}'s agent in tmux session {}, resuming session \
              {session}",
             running.tmux_session
         ),
         Started::AlreadyRunning => eprintln!(
-            "jeet: ended review {called}'s agent, but another was started meanwhile in tmux \
+            "plete: ended review {called}'s agent, but another was started meanwhile in tmux \
              session {}",
             running.tmux_session
         ),
         Started::Queued { live, max, .. } => eprintln!(
-            "jeet: ended review {called}'s agent; it waits on {} ({live}/{max} live) to start \
+            "plete: ended review {called}'s agent; it waits on {} ({live}/{max} live) to start \
              again, resuming its session",
             run::REVIEW_MAX_LIVE.0
         ),
@@ -517,11 +517,11 @@ pub fn restart(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
 }
 
 /// Attach to the review's agent in its tmux session, starting it first if
-/// it is not running, as `jeet task open` does a task's.
+/// it is not running, as `plete task open` does a task's.
 pub fn open(app: &App, review: &ReviewRecord, session: Option<&str>) -> Result<()> {
     if review.state == TaskState::Archived {
         bail!(
-            "review {0} is archived; `jeet task unarchive {0}` first",
+            "review {0} is archived; `plete task unarchive {0}` first",
             review.slug
         );
     }
@@ -543,18 +543,18 @@ pub fn open(app: &App, review: &ReviewRecord, session: Option<&str>) -> Result<(
     let tmux_session = &running.tmux_session;
     match running.started {
         Started::Now => eprintln!(
-            "jeet: started {} in tmux session {tmux_session}",
+            "plete: started {} in tmux session {tmux_session}",
             AgentSpec::from_config(&app.config)?.display()
         ),
         Started::AlreadyRunning => {}
         Started::Queued { live, max, .. } => {
             let (cap, frees) = run::REVIEW_MAX_LIVE;
-            eprintln!("jeet: queued ({live}/{max} live, {cap}); its agent starts when {frees}");
+            eprintln!("plete: queued ({live}/{max} live, {cap}); its agent starts when {frees}");
             return Ok(());
         }
     }
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
-        eprintln!("jeet: `tmux attach -t {tmux_session}` to talk to the agent");
+        eprintln!("plete: `tmux attach -t {tmux_session}` to talk to the agent");
         println!("{}", dir.display());
         return Ok(());
     }
@@ -571,7 +571,7 @@ pub fn open(app: &App, review: &ReviewRecord, session: Option<&str>) -> Result<(
 /// with its worktree and agreed — or passed --force.
 pub fn archive(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     if review.state == TaskState::Archived {
-        eprintln!("jeet: review {} is archived already", review.slug);
+        eprintln!("plete: review {} is archived already", review.slug);
         return Ok(());
     }
     crate::runtime::refuse_inside_agent_session(
@@ -600,20 +600,20 @@ pub fn archive(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     }
     let warnings = review::archive(app, review)?;
     warn_all(&warnings);
-    eprintln!("jeet: archived review {}", review.slug);
+    eprintln!("plete: archived review {}", review.slug);
     Ok(())
 }
 
 /// Bring an archived review back.
 pub fn unarchive(app: &App, review: &ReviewRecord) -> Result<()> {
     if review.state != TaskState::Archived {
-        eprintln!("jeet: review {} is not archived", review.slug);
+        eprintln!("plete: review {} is not archived", review.slug);
         return Ok(());
     }
     let warnings = review::unarchive(app, review)?;
     warn_all(&warnings);
     eprintln!(
-        "jeet: review {} is back at {}",
+        "plete: review {} is back at {}",
         review.slug,
         review::dir(app, review).display()
     );
@@ -657,6 +657,6 @@ pub fn delete(app: &App, review: &ReviewRecord, force: bool) -> Result<()> {
     }
     let warnings = review::delete(app, review)?;
     warn_all(&warnings);
-    eprintln!("jeet: deleted review {}", review.slug);
+    eprintln!("plete: deleted review {}", review.slug);
     Ok(())
 }

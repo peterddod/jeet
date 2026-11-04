@@ -253,7 +253,7 @@ pub struct Explorer {
     pub pr_updates: Option<Receiver<(PathBuf, PrLookup)>>,
     /// Where the PR number was drawn in the header, so a click can open it.
     pub pr_area: Option<Rect>,
-    /// The `jeet review` job for this worktree's PR, if one was started.
+    /// The `plete review` job for this worktree's PR, if one was started.
     pub review_job: Option<Job>,
     /// The screen esc returns to, when the explorer was opened from one.
     pub back: Option<String>,
@@ -711,7 +711,7 @@ impl Explorer {
     }
 
     /// Esc with nothing left to clear: back to the screen that opened the
-    /// explorer, if one did, else out of jeet without moving the shell.
+    /// explorer, if one did, else out of plete without moving the shell.
     pub fn leave(&mut self) {
         if self.back.is_some() {
             self.exit = Exit::Back;

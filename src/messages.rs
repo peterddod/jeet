@@ -1,4 +1,4 @@
-//! Messages for a task's agent: `jeet task send`.
+//! Messages for a task's agent: `plete task send`.
 //!
 //! How a message gets there depends on what the agent is doing:
 //! - idle: it is typed into the agent's tmux pane, as if by the user, and
@@ -6,7 +6,7 @@
 //!   typed something there and not sent it, which the message would be
 //!   joined to: then it is queued, for the turn the user's text starts;
 //! - busy, or waiting on the user: it is queued in
-//!   `<task>/.jeet/inbox.jsonl`, and the agent's Stop hook hands the queue
+//!   `<task>/.plete/inbox.jsonl`, and the agent's Stop hook hands the queue
 //!   over when it finishes, so it carries straight on. Typed into a
 //!   permission prompt, a message would answer it — `1` and Enter is yes —
 //!   and that answer is the user's to give. A turn the user interrupts ends
@@ -22,7 +22,7 @@
 //! - paused or stopped, itself or above it: it waits in the inbox, whatever
 //!   the agent is doing, until it is resumed.
 //!
-//! An agent whose session has a wake channel (a `jeet inbox watch` holding
+//! An agent whose session has a wake channel (a `plete inbox watch` holding
 //! its wait lock; see [`crate::waiter`]) gets it queued, idle, busy or
 //! waiting on a prompt, and the watcher hands it over: nothing is typed,
 //! and its Stop and idle typing leave the queue to the watcher. Not one to
@@ -82,11 +82,11 @@ pub struct Queued {
     /// The session it is for; none for whichever takes it first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
-    /// Who queued it. A line queued before jeet recorded this reads as
+    /// Who queued it. A line queued before plete recorded this reads as
     /// [`Sender::Agent`], which never passes for the user.
     #[serde(default)]
     pub from: Sender,
-    /// What jeet knows of it to render it by (see [`render`]); none for a
+    /// What plete knows of it to render it by (see [`render`]); none for a
     /// line queued before it kept any, which renders whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Meta>,
@@ -98,10 +98,10 @@ pub struct Queued {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sender {
-    /// The user, with `jeet task send` at their own terminal
+    /// The user, with `plete task send` at their own terminal
     /// ([`crate::permissions::at_terminal`]).
     User,
-    /// Anyone else: an agent's `jeet task send`, or jeet itself with a
+    /// Anyone else: an agent's `plete task send`, or plete itself with a
     /// report, an answer or its copies, an escalation or a watch event.
     #[default]
     Agent,
@@ -118,13 +118,13 @@ pub fn inbox_path(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("inbox.jsonl")
 }
 
-/// `<task>/.jeet/inbox.rejected.jsonl`: the lines [`Inbox::read`] could not
+/// `<task>/.plete/inbox.rejected.jsonl`: the lines [`Inbox::read`] could not
 /// take, moved out of the inbox.
 pub fn rejected_path(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("inbox.rejected.jsonl")
 }
 
-/// `<task>/.jeet/inbox.rejected.seen`: how many rejected lines the task's
+/// `<task>/.plete/inbox.rejected.seen`: how many rejected lines the task's
 /// parent has been told of.
 fn rejected_seen_path(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("inbox.rejected.seen")
@@ -136,7 +136,7 @@ fn rejected_seen_path(task_dir: &Path) -> PathBuf {
 /// holding the task's inbox lock, which the report's delivery may want.
 pub fn sweep_rejected(app: &App, task: &TaskRecord) {
     if let Err(e) = tell_rejected(app, task) {
-        eprintln!("jeet: warning: {e:#}");
+        eprintln!("plete: warning: {e:#}");
     }
 }
 
@@ -204,8 +204,8 @@ fn tell_rejected(app: &App, task: &TaskRecord) -> Result<()> {
     told
 }
 
-/// `<task>/.jeet/delivered.jsonl`: the whole text of each message that went
-/// to the task as a line or a digest entry, for `jeet show m<id>`.
+/// `<task>/.plete/delivered.jsonl`: the whole text of each message that went
+/// to the task as a line or a digest entry, for `plete show m<id>`.
 pub fn delivered_path(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("delivered.jsonl")
 }
@@ -216,14 +216,14 @@ const DELIVERED_KEEP_SECS: i64 = 30 * 86_400;
 /// A line of `delivered.jsonl`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
-    /// The `m` in `m45`: unique across all of jeet's tasks.
+    /// The `m` in `m45`: unique across all of plete's tasks.
     pub id: i64,
     pub at: i64,
     pub kind: String,
     pub from: String,
     pub message: String,
-    /// Kept for the assistant's `jeet brief` instead of being pushed to it
-    /// (`[assistant] push = false`), not only for `jeet show`.
+    /// Kept for the assistant's `plete brief` instead of being pushed to it
+    /// (`[assistant] push = false`), not only for `plete show`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stored: bool,
     /// What it is besides `m<id>`: `r12` for a report.
@@ -250,7 +250,7 @@ pub fn read_delivered(task_dir: &Path) -> Vec<Delivery> {
 
 /// Give `meta`, of a message to the task in `task_dir`, the ref `m<id>`, and
 /// keep `message` whole in the task's `delivered.jsonl` under it. The id is
-/// the next of the counter in `$JEET_HOME/run/messages.seq`, taken under its
+/// the next of the counter in `$PLETE_HOME/run/messages.seq`, taken under its
 /// lock, which also keeps the file's pruning from racing another append.
 pub fn number(home: &Path, task_dir: &Path, meta: Meta, message: &str) -> Result<Meta> {
     number_at(home, task_dir, meta, message, now_secs())
@@ -265,7 +265,7 @@ fn number_at(home: &Path, task_dir: &Path, meta: Meta, message: &str, now: i64) 
 }
 
 /// Keep `message`, with `meta`, in the `delivered.jsonl` of the task in
-/// `task_dir` as stored for `jeet brief`, rather than delivered: under a
+/// `task_dir` as stored for `plete brief`, rather than delivered: under a
 /// new `m<id>`, returned, as [`number`] keeps one, and with `meta`'s own
 /// ref, a report's, if it has one.
 pub fn store(home: &Path, task_dir: &Path, meta: &Meta, message: &str, now: i64) -> Result<i64> {
@@ -371,7 +371,7 @@ pub fn number_if_quiet(
             match number(&app.home, dir, meta.clone(), text) {
                 Ok(numbered) => Ok(Some(numbered)),
                 Err(e) => {
-                    eprintln!("jeet: warning: could not keep the message for `jeet show`: {e:#}");
+                    eprintln!("plete: warning: could not keep the message for `plete show`: {e:#}");
                     Ok(Some(meta))
                 }
             }
@@ -432,7 +432,7 @@ pub fn try_peek(task_dir: &Path) -> Option<Vec<Queued>> {
 }
 
 /// `path` opened for reading, if it is a regular file. The agent writes where
-/// jeet reads, so a FIFO or a device there, or a link to one, must not make
+/// plete reads, so a FIFO or a device there, or a link to one, must not make
 /// the open wait for a writer: it is refused, and a link is not followed.
 pub fn open_regular(path: &Path) -> std::io::Result<File> {
     if !std::fs::symlink_metadata(path)?.is_file() {
@@ -518,7 +518,7 @@ impl Inbox {
         self.push_meta(message, to, from, None)
     }
 
-    /// [`Inbox::push_to`], with what jeet knows of `message` to render it by.
+    /// [`Inbox::push_to`], with what plete knows of `message` to render it by.
     pub fn push_meta(
         &self,
         message: &str,
@@ -570,7 +570,7 @@ impl Inbox {
             // nothing, and a failed rewrite is not kept twice on the retry.
             let moved = self.reject(&rejected).and_then(|()| self.replace(&queued));
             if let Err(e) = moved {
-                eprintln!("jeet: warning: could not move rejected inbox lines: {e:#}");
+                eprintln!("plete: warning: could not move rejected inbox lines: {e:#}");
             }
         }
         Ok(queued)
@@ -709,7 +709,7 @@ impl Inbox {
 pub fn queued_reason(queued: &[Queued]) -> String {
     let messages: Vec<&str> = queued.iter().map(|q| q.message.as_str()).collect();
     format!(
-        "Messages and reports were sent to you (with `jeet task send` or `jeet report`) \
+        "Messages and reports were sent to you (with `plete task send` or `plete report`) \
          while you were working. Deal with them now:\n\n{}",
         messages.join(QUEUE_SEPARATOR)
     )
@@ -810,7 +810,7 @@ pub enum Route {
     Start,
 }
 
-/// `hooks`: the agent's harness reports its status through jeet's hooks.
+/// `hooks`: the agent's harness reports its status through plete's hooks.
 pub fn route(activity: &Activity, hooks: bool) -> Route {
     match activity {
         Activity::Idle { .. } => Route::Type,
@@ -831,7 +831,7 @@ pub fn route(activity: &Activity, hooks: bool) -> Route {
 pub trait Agent {
     /// Whether its tmux pane has anything running in it.
     fn alive(&self) -> bool;
-    /// Whether it reports its status through jeet's hooks.
+    /// Whether it reports its status through plete's hooks.
     fn has_hooks(&self) -> bool;
     /// Type `text` into its pane and press Enter.
     fn type_in(&self, text: &str) -> Result<()>;
@@ -913,7 +913,7 @@ pub enum Delivered {
     },
     /// Queued for the agent's wake channel, which hands it over now.
     Wake,
-    /// Kept for the assistant's `jeet brief`, not pushed to it
+    /// Kept for the assistant's `plete brief`, not pushed to it
     /// (`[assistant] push = false`); its user's next prompt says it came.
     Stored,
 }
@@ -1077,7 +1077,7 @@ pub fn deliver(
     if sent.is_err() {
         // Not delivered, so not taken either.
         if let Err(e) = inbox.replace_for(me, &earlier) {
-            eprintln!("jeet: warning: could not put queued messages back: {e:#}");
+            eprintln!("plete: warning: could not put queued messages back: {e:#}");
         }
     }
     sent
@@ -1098,7 +1098,7 @@ pub fn hand_over_queue(inbox: &Inbox, agent: &dyn Agent) -> Result<bool> {
     }
     if let Err(e) = hand_over(inbox, agent, &queue, Route::Type, None) {
         if let Err(e) = inbox.replace_for(agent.session(), &queue) {
-            eprintln!("jeet: warning: could not put queued messages back: {e:#}");
+            eprintln!("plete: warning: could not put queued messages back: {e:#}");
         }
         return Err(e);
     }
@@ -1121,7 +1121,7 @@ pub fn start_with_queue(
     let sent = hand_over(inbox, agent, &queue, Route::Start, guard);
     if sent.is_err() {
         if let Err(e) = inbox.replace_for(agent.session(), &queue) {
-            eprintln!("jeet: warning: could not put queued messages back: {e:#}");
+            eprintln!("plete: warning: could not put queued messages back: {e:#}");
         }
     }
     sent
@@ -1300,14 +1300,14 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn type_in(&self, text: &str) -> Result<()> {
-        // A live session under the name of a task jeet may not run here is
+        // A live session under the name of a task plete may not run here is
         // not its agent: what starting it would refuse, typing into it does
         // too.
         placement::runtime_for(self.task)?;
         // Before it is typed: a pause that finds it idle in between waits
         // for the turn this starts, which no hook has reported yet.
         if let Err(e) = status::mark_typed(&tasks::task_dir(self.app, self.task)) {
-            eprintln!("jeet: warning: could not note the message typed in: {e:#}");
+            eprintln!("plete: warning: could not note the message typed in: {e:#}");
         }
         tmux::send_text(&runtime::session_name(self.task), text)
     }
@@ -1346,7 +1346,7 @@ impl Agent for TmuxAgent<'_> {
     }
 
     fn queue_held_start(&self) -> Result<()> {
-        // The assistant's sessions are opened with `jeet chat`, not started.
+        // The assistant's sessions are opened with `plete chat`, not started.
         // Nor is a start queued on a harness that takes no first prompt (a
         // message held while its agent runs): it would start the agent with
         // none, the message left untyped. Running at the resume, it is
@@ -1380,7 +1380,7 @@ impl Agent for TmuxAgent<'_> {
             Some(kept) => kept.borrow_mut().extend(running.warnings),
             None => {
                 for warning in &running.warnings {
-                    eprintln!("jeet: {warning}");
+                    eprintln!("plete: {warning}");
                 }
             }
         }
@@ -2478,7 +2478,7 @@ mod tests {
     #[test]
     fn peeking_only_looks_and_never_waits_on_the_lock() {
         let dir = tempfile::tempdir().unwrap();
-        // No inbox: nothing, and no `.jeet/` made for it.
+        // No inbox: nothing, and no `.plete/` made for it.
         assert!(peek(dir.path()).is_empty());
         assert_eq!(try_peek(dir.path()), Some(Vec::new()));
         assert!(!tasks::marker_dir(dir.path()).exists());

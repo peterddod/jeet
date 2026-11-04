@@ -8,7 +8,7 @@ description: How to run {name}'s setup conversation - the sections to go through
 ## How each section goes
 
 1. Explain the concept in a few sentences, in plain words.
-2. Show the current setting: read `$JEET_HOME/config.toml` and the files
+2. Show the current setting: read `$PLETE_HOME/config.toml` and the files
    involved, and quote what is set (or say it is the default).
 3. Ask the section's questions. Wait for the answers.
 4. If something should change, stage it (below) and tell the user to press
@@ -23,8 +23,8 @@ section; note that in `answers.md` too.
 
 ## Staging a change
 
-Write the whole new file to `$JEET_HOME/setup/proposed/<target-id>`, and an
-entry for it in `$JEET_HOME/setup/proposed/manifest.toml`:
+Write the whole new file to `$PLETE_HOME/setup/proposed/<target-id>`, and an
+entry for it in `$PLETE_HOME/setup/proposed/manifest.toml`:
 
 ```toml
 ["config.toml"]
@@ -39,9 +39,9 @@ The target ids apply accepts, and nothing else:
 
 | Target id | File |
 |---|---|
-| `config.toml` | `$JEET_HOME/config.toml` |
+| `config.toml` | `$PLETE_HOME/config.toml` |
 | `assistant/AGENTS.md` | the assistant's instructions |
-| `assistant/.claude/skills/<name>/SKILL.md` | the assistant's skills (`jeet-assistant`, `jeet-managers`) |
+| `assistant/.claude/skills/<name>/SKILL.md` | the assistant's skills (`plete-assistant`, `plete-managers`) |
 | `templates/root/…`, `templates/manager/…` (`.md` only) | overrides for new assistant and manager homes, laid out as the home is |
 | `templates/worker/SKILL.md` | override for the skill every new task gets |
 
@@ -158,8 +158,8 @@ and how often they want to be interrupted.
   - `desktop`: `terminal-notifier` on macOS when it is installed (a click
     opens the link), else Notification Center; `notify-send` on Linux.
   - `command`: runs `[notify] command`, a program of the user's, with the
-    notification in `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`,
-    `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`, e.g. a script that posts to
+    notification in `PLETE_NOTIFY_TITLE`, `PLETE_NOTIFY_SUBTITLE`,
+    `PLETE_NOTIFY_BODY` and `PLETE_NOTIFY_URL`, e.g. a script that posts to
     their phone or chat. `via` may list both.
   - `slack`: a direct message from the user's own Slack app, sent only by
     the sender (`{name} notify install`), with the bot token in the OS
@@ -201,7 +201,7 @@ and how often they want to be interrupted.
 - Offer, for the user to run: `{name} notify install`, which keeps a sender
   running in the background, and `{name} notify install-link`, so that a
   click on a notification opens the task.
-- `JEET_NOTIFY_CMD` in the environment replaces `desktop` for one process. If
+- `PLETE_NOTIFY_CMD` in the environment replaces `desktop` for one process. If
   the user already sets it in their shell's rc, suggest moving it to
   `via = ["command"]`, as advice for them to act on. Don't add it.
 
