@@ -1247,6 +1247,29 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_is_denied_nothing_unless_guards() {
+        let settings = AssistantConfig::default();
+        let plain = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            false,
+            &["main".into()],
+            "a",
+            true,
+        );
+        assert!(plain.deny.is_empty(), "{:?}", plain.deny);
+        let guarded = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            "a",
+            true,
+        );
+        assert!(guarded.deny.contains(&"git push * main".to_string()));
+    }
+
+    #[test]
     fn config_rules_go_to_their_role_and_the_classifier_context_is_opt_in() {
         let config: crate::config::Config = toml::from_str(
             "[permissions]\nclassifier_context = true\n\

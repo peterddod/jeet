@@ -437,7 +437,8 @@ from the PR's worktree), and so does the review agent if you later remove the
 command. Running `jeet review` again for the same commit does not start a
 second review; new commits do (and `--rerun` forces one). Run for your own
 review, the command runs as you, ungated, as it always has; only the assistant's
-reviews are held to the review agent's gate (`[assistant] allow`).
+reviews are held to the review agent's gate (`[assistant] allow`, or the
+read-only gate under `[review] read_only`).
 
 The job is part of the review: its command, the commit it reviewed, when it
 started and ended, its exit status and its runner are columns of the review's
@@ -1810,9 +1811,10 @@ the index.
   given afresh each time a review is asked ([Review limits](#review-limits)).
 - **Who a review reports to.** A review the assistant asked for reports to
   the assistant (not as its child); one you asked for reports to no one.
-- **One gate for every review agent**: read-only jeet, the worker deny rules
-  (no push, merge, approval or PR comment), and `jeet report` only when a
-  task asked for the review ([The review agent](#the-review-agent)).
+- **One gate for every review agent** (now only under `[review] read_only =
+  true`): read-only jeet, the worker deny rules (no push, merge, approval or
+  PR comment), and `jeet report` only when a task asked for the review
+  ([The review agent](#the-review-agent)).
 - **`jeet task send` and `jeet task restart` reach a review's agent**, for you
   and for the task that asked for the review; nobody else may.
 
@@ -2936,7 +2938,7 @@ agent](#restarting-or-adopting-an-agent)). `jeet task open` on such a task
 warns instead of adopting it. After
 upgrading, an older jeet refuses the index.
 
-On a harness with deny rules (Claude Code), nothing is denied by default
+On a harness with deny rules (Claude Code), nothing is denied by default (bar the `[tasks] pr` policy rules)
 beyond what a task with a parent does not hold (below). Under `[permissions]
 guards = true`, the assistant, every task and every review are denied, even
 with your approval at the prompt:
@@ -3019,7 +3021,10 @@ under `[review] read_only`. Under `"ask"`
 
 By default tasks, managers and reviews get no restrictions beyond the bound
 of `[assistant] allow` (a child never does what the chain above it may not)
-and their subtree, and no command is denied to any agent. To restrict:
+and their subtree, and no command is denied to any agent. The one exception
+is the PR policy: `[tasks] pr = "draft"` denies `gh pr ready` and `"ask"`
+denies `gh pr create`, as that is your policy, not a default restriction. To
+restrict:
 
 - `[managers] worker_default` and `manager_default`, or `--allow` on `jeet
   task new` / `jeet manager new` and `jeet manager grant`, narrow what a new
@@ -3047,8 +3052,9 @@ max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
 max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
-worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none (default: every capability)
-manager_default = ["task.create"]   # a new manager's (default: every capability)
+# Unset, both default to every capability. Setting them restricts, e.g.:
+worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
+manager_default = ["task.create"]   # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete: logged and notified when a grant names them
 ```
 

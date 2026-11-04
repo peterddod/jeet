@@ -1141,20 +1141,28 @@ pub fn review_deny(app: &App, review: &ReviewRecord) -> Result<Vec<String>> {
     } else {
         Vec::new()
     };
-    let held = match requester(app, review)? {
-        Some(task) => effective(app, &task)?,
-        None => root_list(app),
+    let held = match requester_caller(app, review)? {
+        Some(Caller::Node(task)) => effective(app, &task)?,
+        Some(Caller::Root) => root_list(app),
+        Some(Caller::User) => every_capability(),
+        // Asked for by a task that is gone: nothing is held.
+        Some(Caller::Review(_)) | None => Vec::new(),
     };
     add_withheld(&mut deny, &held);
     Ok(deny)
 }
 
-/// The task that asked for `review`, when it still exists.
-fn requester(app: &App, review: &ReviewRecord) -> Result<Option<TaskRecord>> {
-    match &review.requested_by {
-        Some(id) => app.db.get_task(id),
-        None => Ok(None),
-    }
+fn every_capability() -> Vec<&'static str> {
+    CAPABILITIES.iter().map(|c| c.name).collect()
+}
+
+/// Who a non-read-only review's agent is gated as: the assistant when no
+/// task asked, else the task that did. `None`: a task asked and is gone.
+fn requester_caller(app: &App, review: &ReviewRecord) -> Result<Option<Caller>> {
+    let Some(id) = &review.requested_by else {
+        return Ok(Some(Caller::Root));
+    };
+    Ok(app.db.get_task(id)?.map(|task| classify(Some(&task))))
 }
 
 fn node_deny(held: &[&str], branches: &[String]) -> Vec<String> {
@@ -1334,9 +1342,17 @@ fn review_as_requester(
             review.label()
         );
     }
-    let caller = match requester(app, review)? {
-        Some(task) => classify(Some(&task)),
-        None => Caller::Root,
+    let Some(caller) = requester_caller(app, review)? else {
+        // Fails closed: what is gated has no one to be gated as.
+        if gate(command, terminal) == Gate::Free
+            && matches!(node_scope(command), Some(Scope::NoTarget | Scope::Listed))
+        {
+            return Ok(None);
+        }
+        bail!(
+            "the task that asked for review {} is gone, so its agent may not run that",
+            review.label()
+        );
     };
     authorize_as(app, &caller, command, terminal)
 }
@@ -3715,33 +3731,39 @@ mod tests {
         assert!(e.to_string().contains("no one to report to"), "{e}");
     }
 
-    /// Unless `[review] read_only`, a review's agent is gated like the task
-    /// that asked for it, or the assistant when none did.
+    /// Unless `[review] read_only`, a review's agent is gated like whoever
+    /// asked for it: the assistant when no one did, a top-level task not at
+    /// all, and fails closed when the task is gone.
     #[test]
     fn a_review_agent_is_gated_like_whoever_asked_for_it() {
         let (_dir, mut app, w) = tree();
         let new = ["worktree", "add", "api"];
-        let asked = review_of(Some("w-id"));
-        let user_asked = review_of(None);
-        // Nothing allowed by the root, nor held by the task.
-        let e = run_as(&app, &user_asked, &new, false).unwrap_err();
+        let none = review_of(None);
+        let top = review_of(Some("top-id"));
+        let node = review_of(Some("w-id"));
+        let gone = review_of(Some("gone-id"));
+        // As the assistant: `[assistant] allow` decides.
+        let e = run_as(&app, &none, &new, false).unwrap_err();
         assert!(e.to_string().contains("[assistant] allow"), "{e}");
-        let e = run_as(&app, &asked, &new, false).unwrap_err();
-        assert!(e.to_string().contains("task w"), "{e}");
-        // The root allows it: the assistant's reviews may, and a task's
-        // only when its own grant holds it.
         app.config.assistant.allow = vec!["worktree.add".into()];
-        run_as(&app, &user_asked, &new, false).unwrap();
-        run_as(&app, &asked, &new, false).unwrap_err();
+        run_as(&app, &none, &new, false).unwrap();
+        // A top-level task's agent is ungated in jeet, so is its review's.
+        run_as(&app, &top, &new, false).unwrap();
+        // A node's: only when its own grant holds it too.
+        run_as(&app, &node, &new, false).unwrap_err();
         app.db.set_grants(&w.id, &["worktree.add"]).unwrap();
-        run_as(&app, &asked, &new, false).unwrap();
+        run_as(&app, &node, &new, false).unwrap();
+        // The task is gone: gated commands are refused, plain reads stay.
+        let e = run_as(&app, &gone, &new, false).unwrap_err();
+        assert!(e.to_string().contains("is gone"), "{e}");
+        run_as(&app, &gone, &["ls"], false).unwrap();
         // What only the root may stays refused, and a report needs a task.
-        for caller in [&asked, &user_asked] {
+        for caller in [&none, &top, &node, &gone] {
             let e = run_as(&app, caller, &["todo"], false).unwrap_err();
             assert!(e.to_string().contains("may not"), "{e}");
         }
-        run_as(&app, &asked, &["report", "done", "ok"], false).unwrap();
-        let e = run_as(&app, &user_asked, &["report", "done", "ok"], false).unwrap_err();
+        run_as(&app, &node, &["report", "done", "ok"], false).unwrap();
+        let e = run_as(&app, &none, &["report", "done", "ok"], false).unwrap_err();
         assert!(e.to_string().contains("no one to report to"), "{e}");
     }
 
@@ -3765,6 +3787,13 @@ mod tests {
         // The requester's chain, not the root's list alone.
         app.db.set_grants(&w.id, &[]).unwrap();
         let deny = review_deny(&app, &review(Some("w-id"))).unwrap();
+        assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
+        // A top-level task is not gated, so nothing is withheld.
+        assert!(review_deny(&app, &review(Some("top-id")))
+            .unwrap()
+            .is_empty());
+        // A task that is gone holds nothing, whatever the root allows.
+        let deny = review_deny(&app, &review(Some("gone-id"))).unwrap();
         assert!(deny.contains(&"gh pr comment".to_string()), "{deny:?}");
         // `guards` adds the shared deny.
         app.config.permissions.guards = Some(true);
