@@ -2,8 +2,24 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Drop every `JEET_*` and `PLETE_*` the suite inherited. jeet reads either
+/// name, `PLETE_` first, so a `PLETE_HOME` from the session running the suite
+/// would win over the `JEET_HOME` a test sets, and a `JEET_HOME` would
+/// survive a test's `env_remove("PLETE_HOME")`: either way jeet reaches the
+/// developer's real index (and once migrated it, schema and all).
+fn scrub_jeet_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if name.starts_with("JEET_") || name.starts_with("PLETE_") {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
 fn jeet_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_jeet"));
+    scrub_jeet_env(&mut cmd);
     // Whatever it leaves running is ended with the test.
     #[cfg(unix)]
     reaper::own_session(&mut cmd);
@@ -362,6 +378,20 @@ fn a_dev_build_does_not_migrate_the_default_index() {
             .unwrap(),
     );
     succeeded(&ls(true));
+    // Naming the index itself lets it through too.
+    let other = TempDir::new().unwrap();
+    succeeded(
+        &jeet_bin()
+            .arg("ls")
+            .env("HOME", other.path())
+            .env_remove("JEET_HOME")
+            .env(
+                "JEET_ALLOW_DEV_MIGRATE",
+                other.path().join(".jeet/index.db"),
+            )
+            .output()
+            .unwrap(),
+    );
 }
 
 #[test]
@@ -1228,6 +1258,7 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
         env!("CARGO_BIN_EXE_jeet")
     );
     let mut cmd = Command::new("script");
+    scrub_jeet_env(&mut cmd);
     reaper::own_session(&mut cmd);
     if cfg!(target_os = "linux") {
         cmd.args(["-q", "-e", "-c", &inner, "/dev/null"]);
@@ -2340,6 +2371,7 @@ pwd"#,
         lab.home().display(),
     );
     let mut cmd = Command::new("bash");
+    scrub_jeet_env(&mut cmd);
     hermetic_git(&mut cmd);
     reaper::own_session(&mut cmd);
     let output = cmd
@@ -4167,6 +4199,7 @@ impl Pty {
             env!("CARGO_BIN_EXE_jeet")
         );
         let mut cmd = Command::new("script");
+        scrub_jeet_env(&mut cmd);
         reaper::own_session(&mut cmd);
         if cfg!(target_os = "linux") {
             cmd.args(["-q", "-f", "-e", "-c", &inner]).arg(&log);
