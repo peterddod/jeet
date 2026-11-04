@@ -385,7 +385,7 @@ mod tests {
         let path = dir.path().join(UNIT);
         std::fs::write(
             &path,
-            systemd_unit(Path::new("/bin/true"), dir.path(), "/usr/bin"),
+            systemd_unit(Path::new("/bin/true"), dir.path(), None, "/usr/bin"),
         )
         .unwrap();
         let Ok(output) = Command::new("systemd-analyze")
