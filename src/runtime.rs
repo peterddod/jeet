@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentSpec;
 use crate::cd;
-use crate::config::{AssistantConfig, PermissionsConfig, PrMode, PushPolicy};
+use crate::config::{AssistantConfig, PermissionsConfig, PrMode, PushPolicy, RoleRules};
 use crate::context::App;
 use crate::db::anchors::AnchorKind;
 use crate::db::tasks::{TaskKind, TaskRecord, TaskSessionRecord};
@@ -583,7 +583,8 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 }
 
 /// jeet's hooks for a task's agent run by `harness`, with what it is denied
-/// ([`permissions::task_deny`]), the read-only `gh` commands pre-approved,
+/// ([`permissions::task_deny`]: nothing, for a top-level task, unless
+/// `[permissions] guards`), the read-only `gh` commands pre-approved,
 /// the rules of its role in `[permissions]` ([`with_config_rules`]) and its
 /// wake channel ([`wake`]). A manager, started with nobody at its pane, also
 /// has the commands of what it holds pre-approved, read at each start, as
@@ -658,7 +659,7 @@ fn pr_rules(mode: PrMode) -> (&'static [&'static str], &'static [&'static str]) 
 /// of its role, after jeet's own, and the classifier's context when
 /// `classifier_context` is on.
 pub fn with_config_rules(
-    mut hooks: HookSetup,
+    hooks: HookSetup,
     config: &PermissionsConfig,
     kind: TaskKind,
 ) -> HookSetup {
@@ -669,6 +670,15 @@ pub fn with_config_rules(
         // Its rules are its own ([`crate::setup::hooks`]), whatever config says.
         TaskKind::Setup => return hooks,
     };
+    with_rules(hooks, config, rules)
+}
+
+/// [`with_config_rules`] for a review's agent: `[permissions.review]`.
+pub fn with_review_rules(hooks: HookSetup, config: &PermissionsConfig) -> HookSetup {
+    with_rules(hooks, config, &config.review)
+}
+
+fn with_rules(mut hooks: HookSetup, config: &PermissionsConfig, rules: &RoleRules) -> HookSetup {
     hooks.extra_allow = rules.allow.clone();
     hooks.extra_deny = rules.deny.clone();
     hooks.environment = config
@@ -679,12 +689,14 @@ pub fn with_config_rules(
 
 /// jeet's hooks for the assistant, pre-approving the read-only jeet and
 /// `gh` commands and those of each capability `[assistant] allow` lists, so
-/// allowed actions do not prompt, and denying force-pushes, merges outside
-/// `jeet pr merge` and pushes to any of `branches`; with its wake channel
-/// when `wake` (see [`wake`]).
+/// allowed actions do not prompt, and, when `guards` (`[permissions]
+/// guards`), denying force-pushes, merges outside `jeet pr merge` and
+/// pushes to any of `branches`; with its wake channel when `wake` (see
+/// [`wake`]).
 pub fn assistant_hooks(
     exe: std::path::PathBuf,
     settings: &AssistantConfig,
+    guards: bool,
     branches: &[String],
     task_id: &str,
     wake: bool,
@@ -695,7 +707,11 @@ pub fn assistant_hooks(
         exe,
         task_id: task_id.to_string(),
         allow,
-        deny: permissions::denied_commands(branches),
+        deny: if guards {
+            permissions::denied_commands(branches)
+        } else {
+            Vec::new()
+        },
         extra_allow: Vec::new(),
         extra_deny: Vec::new(),
         environment: None,
@@ -1096,7 +1112,14 @@ mod tests {
             rules: Vec::new(),
             push: None,
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
+        let hooks = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            "a",
+            true,
+        );
         assert!(
             hooks.allow.contains(&"jeet task send".into()),
             "{:?}",
@@ -1192,7 +1215,14 @@ mod tests {
         }
         let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
         assert!(!hooks.allow.iter().any(|a| a.starts_with("git push")));
+        // Nothing is denied it unless `guards` is on.
+        assert!(!hooks.deny.contains(&"git push".to_string()));
+        app.config.permissions.guards = Some(true);
+        let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
         assert!(hooks.deny.contains(&"git push".to_string()));
+        let hooks = task_hooks(&app, &worker, claude, "/bin/jeet".into()).unwrap();
+        assert!(hooks.deny.contains(&"git push --force".to_string()));
+        app.config.permissions.guards = None;
         app.config.permissions.push = None;
         // A manager is given neither.
         let hooks = task_hooks(&app, &api, claude, "/bin/jeet".into()).unwrap();
@@ -1238,6 +1268,29 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_is_denied_nothing_unless_guards() {
+        let settings = AssistantConfig::default();
+        let plain = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            false,
+            &["main".into()],
+            "a",
+            true,
+        );
+        assert!(plain.deny.is_empty(), "{:?}", plain.deny);
+        let guarded = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            "a",
+            true,
+        );
+        assert!(guarded.deny.contains(&"git push * main".to_string()));
+    }
+
+    #[test]
     fn config_rules_go_to_their_role_and_the_classifier_context_is_opt_in() {
         let config: crate::config::Config = toml::from_str(
             "[permissions]\nclassifier_context = true\n\
@@ -1257,6 +1310,16 @@ mod tests {
         assert_eq!(rules(TaskKind::Manager).extra_allow, ["Bash(make:*)"]);
         assert!(rules(TaskKind::Manager).extra_deny.is_empty());
         assert_eq!(rules(TaskKind::Assistant).extra_deny, ["WebFetch"]);
+        let review = with_review_rules(
+            HookSetup::default(),
+            &toml::from_str::<crate::config::Config>(
+                "[permissions.review]\nallow = [\"Bash(gh pr view:*)\"]\ndeny = [\"Bash(git push:*)\"]\n",
+            )
+            .unwrap()
+            .permissions,
+        );
+        assert_eq!(review.extra_allow, ["Bash(gh pr view:*)"]);
+        assert_eq!(review.extra_deny, ["Bash(git push:*)"]);
         // Off by default, and nothing added.
         let plain = with_config_rules(
             HookSetup::default(),
@@ -1266,7 +1329,14 @@ mod tests {
         assert!(plain.environment.is_none() && plain.extra_allow.is_empty());
         // jeet's own denies stay whatever the config adds.
         let settings = AssistantConfig::default();
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
+        let hooks = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            "a",
+            true,
+        );
         let hooks = with_config_rules(hooks, &config.permissions, TaskKind::Assistant);
         assert!(hooks.deny.contains(&"git push --force".to_string()));
         for read in permissions::GH_READ_ONLY {
@@ -1282,7 +1352,14 @@ mod tests {
             rules: Vec::new(),
             push: None,
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], "a", true);
+        let hooks = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            "a",
+            true,
+        );
         for denied in ["gh pr merge", "git push --force", "git push * main"] {
             assert!(hooks.deny.contains(&denied.into()), "{:?}", hooks.deny);
         }
@@ -1315,7 +1392,7 @@ mod tests {
             push: None,
         };
         let exe = format!("/{}/jeet", "d".repeat(200));
-        let hooks = assistant_hooks(exe.into(), &settings, &branches, &task, true);
+        let hooks = assistant_hooks(exe.into(), &settings, true, &branches, &task, true);
         let claude = &crate::harness::claude::ClaudeCode;
         let args = hook_args(home.path(), claude, &hooks, &session, &[]).unwrap();
         let path = settings_dir(home.path(), &task).join(format!("{session}.json"));
@@ -1344,7 +1421,14 @@ mod tests {
             assert!(deny.as_array().unwrap().contains(&rule), "{branch}");
         }
         // A relaunch replaces it whole, and leaves nothing else behind.
-        let fewer = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task, true);
+        let fewer = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            &task,
+            true,
+        );
         hook_args(home.path(), claude, &fewer, &session, &[]).unwrap();
         assert!(!read().to_string().contains(&long));
         assert_eq!(mode(&path), 0o600);
@@ -1377,7 +1461,14 @@ mod tests {
             rules: Vec::new(),
             push: None,
         };
-        let hooks = assistant_hooks("/bin/jeet".into(), &settings, &["main".into()], &task, true);
+        let hooks = assistant_hooks(
+            "/bin/jeet".into(),
+            &settings,
+            true,
+            &["main".into()],
+            &task,
+            true,
+        );
         let claude = &crate::harness::claude::ClaudeCode;
         let dir = settings_dir(home.path(), &task);
         let launch = |session: &str, running: &[String]| {

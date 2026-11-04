@@ -63,9 +63,9 @@ instead.
 ## Worktrees are read-only
 
 `jeet worktree add <repo>` gives you a worktree to read code in, detached
-at the default branch and marked read-only. `git commit`, `git push` and
-new branches are denied to you. Delegate code changes to workers under
-you: they make the branches and open the pull requests.
+at the default branch and marked read-only. Do not commit, push or make
+branches there (the user may have these denied to you). Delegate code
+changes to workers under you: they make the branches and open the pull requests.
 
 ## Budget, pause and stop
 

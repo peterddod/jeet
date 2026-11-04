@@ -363,15 +363,25 @@ ran `jeet review`, and that holds until the review is deleted. You running
 it again, even for the same commit, never clears it; only a later request by
 the assistant sets it (to the assistant, still).
 
-Every review agent has the same fixed gate, whoever asked for the review. It
-reads: `jeet ls`, `jeet path` and `jeet prs`, and nothing else in jeet. It has
-the worker deny rules: no push, force-push, merge, `gh pr review` or
-approval, or `gh pr comment`, nor their API equivalents. And it may
+A review agent is held to whoever asked for it: its jeet commands are gated
+as that task's would be (its grant, cut by every list above it, and its
+subtree), or, when the assistant or you asked, as the assistant's are
+(`[assistant] allow`). `jeet todo`, `jeet brief` and `jeet notify` stay
+the assistant's and the user's, so they are refused to it. It is denied
+`gh pr comment`, `gh issue comment` and `gh pr review` unless whoever asked
+holds `pr.comment`/`pr.review`, and nothing else unless you set
+`[permissions] guards` or `[permissions.review]`. It may
 `jeet report progress|done|blocked|question` only when a task asked for the
 review: a review the assistant asked for reports to the assistant (as a
 sender labelled `review <repo>#<number>`), and a review you asked for reports
 to no one. The assistant is not its parent: the review is in no tree, takes
 no manager's budget or `max_live` slot, and nothing is delegated to it.
+
+To limit every review agent to reading instead, set `[review] read_only =
+true`: it then runs only `jeet ls`, `jeet path` and `jeet prs` (and `jeet
+report` when a task asked), whoever asked, and has the worker deny rules: no
+push, force-push, merge, `gh pr review` or approval, or `gh pr comment`, nor
+their API equivalents.
 
 #### Review limits
 
@@ -425,7 +435,8 @@ from the PR's worktree), and so does the review agent if you later remove the
 command. Running `jeet review` again for the same commit does not start a
 second review; new commits do (and `--rerun` forces one). Run for your own
 review, the command runs as you, ungated, as it always has; only the assistant's
-reviews are held to the review agent's gate.
+reviews are held to the review agent's gate (`[assistant] allow`, or the
+read-only gate under `[review] read_only`).
 
 The job is part of the review: its command, the commit it reviewed, when it
 started and ended, its exit status and its runner are columns of the review's
@@ -1081,7 +1092,7 @@ reporting done. These never start an assistant session. `--goal` and `--done`
 on `jeet task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
-worker_default`, refused unless its parent holds each one, and `--budget
+worker_default` (every capability unless set), refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
@@ -1121,7 +1132,7 @@ jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
 It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
-`[managers] manager_default` and an unasked budget `[managers]
+`[managers] manager_default` (every capability unless set) and an unasked budget `[managers]
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
@@ -1726,7 +1737,10 @@ v0.14.0: #105, #107–#129.
 | `[harness] wake_repair` | `"auto"` | `"off"` for no repairs |
 | `[permissions] push` | `"ask"` | `"branches"` |
 | `[permissions] classifier_context` | `false` | |
-| `[permissions.task\|manager\|assistant] allow`, `deny` | `[]` | Claude Code rules |
+| `[permissions] guards` | `false` | `true` denies force-pushes, merges and default-branch pushes |
+| `[review] read_only` | `false` | `true` limits reviews to reading |
+| `[managers] worker_default`, `manager_default` | every capability | a narrower grant |
+| `[permissions.task\|manager\|review\|assistant] allow`, `deny` | `[]` | Claude Code rules |
 | `[tasks] pr` | `"draft"` | `"auto"`, `"ask"`; also per project |
 | `[models] assistant`, `manager`, `task`, `review` | the agent's own | |
 | `[assistant] push` | `false` | `true` pushes as before |
@@ -1796,9 +1810,10 @@ the index.
   given afresh each time a review is asked ([Review limits](#review-limits)).
 - **Who a review reports to.** A review the assistant asked for reports to
   the assistant (not as its child); one you asked for reports to no one.
-- **One gate for every review agent**: read-only jeet, the worker deny rules
-  (no push, merge, approval or PR comment), and `jeet report` only when a
-  task asked for the review ([The review agent](#the-review-agent)).
+- **One gate for every review agent** (now only under `[review] read_only =
+  true`): read-only jeet, the worker deny rules (no push, merge, approval or
+  PR comment), and `jeet report` only when a task asked for the review
+  ([The review agent](#the-review-agent)).
 - **`jeet task send` and `jeet task restart` reach a review's agent**, for you
   and for the task that asked for the review; nobody else may.
 
@@ -2462,8 +2477,9 @@ agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
 first prompt, no assistant, no deny rules, no interrupt, no wake channel).
-Without deny rules, tasks with a parent are not stopped from force-pushing,
-pushing to a default branch or merging (see the deny rules under the
+Without deny rules, `[permissions] guards` and `[permissions.*] deny` do
+nothing, and tasks with a parent are not stopped from running `gh pr comment`
+or `gh pr review` (see the deny rules under the
 assistant's permissions below, and
 [docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
 interrupt` refuses.
@@ -2854,23 +2870,23 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 `~/.jeet/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
-assistant`; `--parent` also takes a manager by its exact name) is gated
-more narrowly. It is granted `worktree.add`
-when made (`[managers] worker_default`, or what `--allow` names), and may
-use what its grant names only while the assistant may too: add
-`worktree.add` to `[assistant] allow` to let such tasks add worktrees.
-Granting a held capability (`pr.merge`, `pr.comment`, `pr.review`,
-`task.delete` and `[managers] held`) is written to `actions.log` and
-announced, whatever `[assistant] notify` says, unless you grant it
-yourself. It reaches only itself: it may run `jeet report`, add
-worktrees to itself and read itself (`jeet task last`, `task path`, `task
-prs`, `worktree ls`/`path`), and `jeet task ls` lists only it. The reads
-that name no task (`jeet ls`, `jeet prs`, …) are free. Anything else is
-refused, whatever the assistant holds, `project.read` (`jeet projects ls`)
-included, as are `jeet notify`, `jeet todo` and review jobs; the refusal
-tells it to ask with `jeet report`.
+assistant`; `--parent` also takes a manager by its exact name) is bounded by
+the chain above it. It is granted every capability when made, held ones
+included (`[managers] worker_default`, or what `--allow` names, narrows
+that), and may use what its grant names only while every list above it,
+ending at `[assistant] allow`, holds it too: a task can never do what the
+assistant may not. Granting a held capability by name (`pr.merge`,
+`pr.comment`, `pr.review`, `task.delete` and `[managers] held`) is written to
+`actions.log` and announced, whatever `[assistant] notify` says, unless you
+grant it yourself. It reaches only itself: it acts only on itself and the
+tasks below it, reads included, and `jeet task ls` lists only those. The
+reads that name no task (`jeet ls`, `jeet prs`, …) and `jeet notify` are
+free. `jeet todo`, `jeet brief`, review jobs and `project.read` (`jeet
+projects ls`) stay refused, whatever the assistant holds; the refusal
+tells it to ask with `jeet report`. A task made before this keeps the grant
+it was made with: change it with `jeet manager grant`.
 
-A manager (`jeet manager new`) is gated the same way, by its own grant
+A manager (`jeet manager new`) is bounded the same way, by its own grant
 (`--allow`, or `[managers] manager_default`) cut by every list above it,
 but it reaches its subtree rather than only itself: it makes tasks and
 managers under itself (`--parent` names itself or a manager below it), and
@@ -2878,7 +2894,7 @@ the `jeet task` and `jeet manager` commands its grant allows act on tasks
 below it, never on its parent, a sibling or another subtree. `jeet manager
 stop --all` is yours alone. Its settings pre-approve the `jeet` commands of
 what it holds, read at each start, since nobody sits at its pane. Its
-worktrees are read-only, and on a harness with deny rules it is also denied
+worktrees are read-only, and under `[permissions] guards` it is also denied
 `git commit`, `git push`, `git checkout -b` and `git switch -c`: it hands
 code changes to a worker. When the assistant reads what a task
 said with `jeet task last`, it gets it fenced as untrusted, as it gets
@@ -2886,7 +2902,7 @@ reports, and the status beside it (which the task's agent can write) unable
 to close or open a fence. The assistant's own
 reach is unchanged: all tasks, yours included. Reviews it starts with
 `jeet review` report to it too, though they are not under it: their review
-agent has the fixed gate every review agent has ([The review
+agent is gated as the assistant is ([The review
 agent](#the-review-agent)), plus `jeet report` to the assistant. A legacy
 `[review] command` runs as the review too, and jeet tells the assistant when
 it exits without reporting done.
@@ -2921,8 +2937,10 @@ agent](#restarting-or-adopting-an-agent)). `jeet task open` on such a task
 warns instead of adopting it. After
 upgrading, an older jeet refuses the index.
 
-On a harness with deny rules (Claude Code), the assistant and every task
-are also denied, even with your approval at the prompt:
+On a harness with deny rules (Claude Code), nothing is denied by default (bar the `[tasks] pr` policy rules)
+beyond what a task with a parent does not hold (below). Under `[permissions]
+guards = true`, the assistant, every task and every review are denied, even
+with your approval at the prompt:
 force-pushes (`git push --force` as a word, `-f`, `+branch`, `--mirror`;
 `--force-with-lease` and `--force-if-includes` still run), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
@@ -2932,11 +2950,12 @@ the branch then checked out, so that branch name is denied everywhere), and merg
 other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them),
 `gh repo edit`, `gh secret` and `gh api -X DELETE` (or `--method
-DELETE`). A task with a parent is also denied `gh pr
+DELETE`). With or without `guards`, a task with a parent (and a review, by
+whoever asked for it) is denied `gh pr
 comment`, `gh issue comment` and `gh pr review` unless it holds
 `pr.comment`/`pr.review` (only those commands: the same through `gh api`
 still reaches your prompt); the assistant holding them runs them without a
-prompt. Top-level tasks get only the rules above, not the capability ones.
+prompt. Top-level tasks get no capability rules.
 Tasks, managers and the assistant may run `gh pr view`, `gh pr checks`,
 `gh pr diff`, `gh run view` and `gh run list` without a prompt. The rules match the start of a
 command only (`git -C . push -f` or `sh -c '…'` get past them), and a push
@@ -2960,11 +2979,15 @@ agents get new rules when they restart (`jeet task restart`).
 [permissions]
 push = "branches"           # "branches" | "ask" (default "ask")
 classifier_context = true   # default false
+guards = true               # default false: deny force-pushes, merges, default-branch pushes
 
 [permissions.task]          # Claude Code rules, added as written
 allow = ["Bash(cargo test:*)"]
 deny  = []
 [permissions.manager]
+allow = []
+deny  = []
+[permissions.review]
 allow = []
 deny  = []
 [permissions.assistant]
@@ -2976,16 +2999,45 @@ deny  = []
   `git push origin …`, `git push -u origin …`, `git push --set-upstream
   origin …` and `git push --force-with-lease …`. Pushes to a default branch
   and plain force-pushes stay denied, and pushes to other remotes still
-  prompt. Managers and reviews are still denied `git push`. Under `"ask"`
+  prompt. With `guards`, managers are still denied `git push`; so are reviews
+under `[review] read_only`. Under `"ask"`
   pushes are left to Claude Code, which asks or, in auto mode, classifies
   them.
 - **`classifier_context = true`** gives Claude Code's auto-mode classifier
   a short description of a task's routine work (`autoMode.environment`,
   after its own defaults), so it stops flagging pushes of the task's own
   branch and pull requests that no rule covers.
-- **`[permissions.task]`, `[permissions.manager]`, `[permissions.assistant]`**:
-  extra `allow` and `deny` rules in Claude Code's syntax, appended for work
-  tasks, managers and the assistant.
+- **`guards = true`** puts back the rules jeet used to write for every agent:
+  `ALWAYS_DENY` (force-pushes, merges outside `jeet pr merge`, `gh repo edit`,
+  `gh secret`, `gh api` DELETE) and pushes to default branches, for the
+  assistant, every task, every review and the setup agent; and `git commit`,
+  `git push`, `git checkout -b` and `git switch -c` for managers.
+- **`[permissions.task]`, `[permissions.manager]`, `[permissions.review]`,
+  `[permissions.assistant]`**: extra `allow` and `deny` rules in Claude Code's
+  syntax, appended for work tasks, managers, reviews' agents and the assistant.
+
+#### Restrictions are opt-in
+
+By default tasks, managers and reviews get no restrictions beyond the bound
+of `[assistant] allow` (a child never does what the chain above it may not)
+and their subtree, and no command is denied to any agent. The one exception
+is the PR policy: `[tasks] pr = "draft"` denies `gh pr ready` and `"ask"`
+denies `gh pr create`, as that is your policy, not a default restriction. To
+restrict:
+
+- `[managers] worker_default` and `manager_default`, or `--allow` on `jeet
+  task new` / `jeet manager new` and `jeet manager grant`, narrow what a new
+  task or manager may do (for example `["worktree.add"]`).
+- `[permissions] guards = true` denies force-pushes, merges outside `jeet pr
+  merge`, default-branch pushes and the like to every agent, and commits and
+  pushes to managers.
+- `[review] read_only = true` limits reviews to reading, and denies them every
+  push.
+- `[permissions.task]`, `[permissions.manager]`, `[permissions.review]` or
+  `[permissions.assistant]` `deny = [...]` adds your own rules for one role.
+
+An existing task keeps the grant it was made with; change it with `jeet
+manager grant`.
 
 Allow rules match each part of a compound command on its own, so run a
 jeet command bare: `for t in a b; do jeet task archive $t --force; done` or
@@ -2999,14 +3051,14 @@ max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
 max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
-worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none, less what `held` names
-manager_default = []    # a new manager's
-held = []               # added to pr.merge, pr.comment, pr.review, task.delete
+# Unset, both default to every capability. Setting them restricts, e.g.:
+worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
+manager_default = ["task.create"]   # a new manager's
+held = []               # added to pr.merge, pr.comment, pr.review, task.delete: logged and notified when a grant names them
 ```
 
 The tree's settings are checked when they are used, not when config.toml
-is read: a mistake in them (an unknown capability, a held one in a default
-you set, a limit of 0, a `$` budget) refuses making tasks under the
+is read: a mistake in them (an unknown capability, a limit of 0, a `$` budget) refuses making tasks under the
 assistant, starting one, `jeet manager grant` and unarchiving a task under
 a manager, and nothing else.
 
