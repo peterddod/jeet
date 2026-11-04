@@ -23,7 +23,7 @@ jeet does without that feature:
 | `new_session_args(id, name)` | starts a session under an id jeet picks | no recorded sessions, no resume, no assistant |
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt` (the task is still made), and `task send` to an agent that is not running, fail with a clear message, also when the start would wait on a pause, stop or `max_live`, so nothing waits for a start that could not give it; a message held for a paused task whose agent runs waits for the resume to type it in, or, if the agent is gone by then, for the next delivery |
-| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (for a task: `jeet worktree`, `jeet ls`, `jeet report`; for a manager, also the read-only jeet commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
+| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (pre-approved without a prompt, not a limit; for a task: `jeet worktree`, `jeet ls`, `jeet report`; for a manager, also the read-only jeet commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
 | `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
 | `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and `jeet manager new` refuses the harness, naming "deny rules" |
 | `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and `jeet manager pause` says it could not interrupt the task and leaves its turn to end, after which it is handed nothing until resumed (with no hooks, what waited is then typed in, as `task send` would) |
@@ -196,17 +196,21 @@ another session, which cannot approve anything). See
 
 ## Deny rules
 
-`HookSetup::deny` lists commands the agent must not run. jeet fills it for
-the assistant, for every task with a parent and for every review's agent,
-whoever asked for the review (which also may not push at all, or comment on
-or review the pull request through the API); top-level tasks the user made
-get none, so a user's own `git push --force-with-lease` keeps working.
+`HookSetup::deny` lists commands the agent must not run. By default jeet
+fills it only for a task with a parent, and for a review's agent, with the
+commands of each capability whoever asked does not hold (the last item
+below). The rest of the list below is opt-in: with `[permissions] guards =
+true` it goes to the assistant, every task and every review's agent, so a
+user's own `git push --force-with-lease` keeps working only without it. With
+`[review] read_only = true` a review's agent is also denied every push, and
+commenting on or reviewing the pull request through the API. `[permissions.<role>]
+deny` adds rules of your own.
 The legacy, deprecated `[review] command` of a review the assistant asked
 for is the exception (the review agent that replaces it is launched like
 any other, deny rules and all): it is the user's own command, run by `jeet
 review-job` rather than launched through a harness, so it gets no deny rules,
 and `jeet review` warns when it starts one.
-The list is:
+The list under `guards` is:
 
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
@@ -223,7 +227,8 @@ The list is:
   `enablePullRequestAutoMerge`, `mergeBranch` and `enqueuePullRequest`
   mutations (any `gh api` or `curl` command naming one, flags before
   `graphql` included);
-- for a parented task only, the commands of each capability it does not
+- for a parented task (and a review, by whoever asked for it) only, with or
+  without `guards`, the commands of each capability it does not
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are
   not denied, but still go to the user's permission prompt (a worker's
@@ -233,14 +238,14 @@ The list is:
   default, and at worst the user approves them at the prompt. Only these
   commands are denied, not the same through `gh api` or `curl` (see
   below);
-- for a manager (phase 2) only, `git commit`, `git push`, `git checkout -b`
+- for a manager (phase 2) only, under `guards`, `git commit`, `git push`, `git checkout -b`
   and `git switch -c`: its worktrees are read-only, and workers make the
   changes. `git branch` is not denied, so `git branch -a` still reads.
 
 A repo's default branch is what jeet recorded when it cloned or imported
 it: `origin/HEAD`, or, without one, the branch checked out then, which may
 be a feature branch. That name is then denied as a push destination in
-every repo, to the assistant and every parented task; a push the agent
+every repo, to every agent under `guards`; a push the agent
 cannot make, say so, and push it yourself.
 
 `jeet pr merge` runs `gh` from jeet's own process, so the merge denies do
