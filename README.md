@@ -1102,7 +1102,7 @@ reporting done. These never start an assistant session. `--goal` and `--done`
 on `plete task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
-worker_default` (every capability unless set), refused unless its parent holds each one, and `--budget
+worker_default` (every capability but `assistant.interrupt` unless set), refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
@@ -1142,7 +1142,7 @@ plete manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
 It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
-`[managers] manager_default` (every capability unless set) and an unasked budget `[managers]
+`[managers] manager_default` (every capability but `assistant.interrupt` unless set) and an unasked budget `[managers]
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
@@ -2759,6 +2759,45 @@ can answer tells you too (kind `waiting`, held back by the quiet flag as an
 ask is), and so does a `plete watch` event a rule hands to the assistant, as
 one did before when no session of the assistant's could take it.
 
+### Letting a task interrupt the assistant
+
+The inbox stays the default. A task or manager you choose may push a
+message straight into the assistant's session instead, when it holds
+`assistant.interrupt` and asks for it per message:
+
+```bash
+plete report blocked --interrupt "the deploy is down; I need a decision"
+plete task send assistant --interrupt "…"   # the same, as a message
+```
+
+`assistant.interrupt` is never in a default grant: give it by name, like
+any capability, and list it in `[assistant] allow` first, as each list
+above a task cuts its grant:
+
+```bash
+plete task new fix-x --allow worktree.add,assistant.interrupt
+plete manager grant backend task.create,worktree.add,assistant.interrupt
+```
+
+It can also go in `[managers] worker_default` or `manager_default`, if you
+want every new task to have it. A manager can pass it down only if it holds
+it.
+
+An interrupt goes through the wake channel of the assistant's session. At an
+idle prompt it is posted at once. During a turn it is handed over when that
+turn ends; it never cuts the turn short, because only you interrupt the
+assistant. With no session running, it is kept for `plete brief` like
+anything else, and no session is started for it. It is fenced like any report or message,
+marked `interrupt="true"`, and still `untrusted="true"`. A report's
+`--interrupt` counts only for a report to the assistant; a manager gets its
+reports pushed already.
+
+Each use is written to the sender's `actions.log`, or to the assistant's
+for a top-level task or your terminal, which are not gated. Refusals are
+logged too. Without the capability, the command fails saying why and not
+to send it again: the report has gone as any report does, and the message
+has been kept for `plete brief`, whatever `[assistant] push` says.
+
 A `[review]` section sets the review agent's first prompt and its limits —
 see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
@@ -2967,7 +3006,10 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`plete pr merge`), `manager.grant`
 (`plete manager grant` and `budget`), `manager.create` (`plete manager new`)
-and `manager.stop` (`plete manager pause`, `resume` and `stop`). Nothing is
+`manager.stop` (`plete manager pause`, `resume` and `stop`) and
+`assistant.interrupt` (`--interrupt` on `plete report` and `plete task send
+assistant`, for the tasks under the assistant; see [Letting a task
+interrupt the assistant](#letting-a-task-interrupt-the-assistant)). Nothing is
 allowed until listed. The assistant's Claude settings
 pre-approve exactly the matching `plete` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
@@ -2976,7 +3018,7 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` also takes a manager by its exact name) is bounded by
-the chain above it. It is granted every capability when made, held ones
+the chain above it. It is granted every capability but `assistant.interrupt` when made, held ones
 included (`[managers] worker_default`, or what `--allow` names, narrows
 that), and may use what its grant names only while every list above it,
 ending at `[assistant] allow`, holds it too: a task can never do what the
@@ -3156,7 +3198,7 @@ max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
 max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
-# Unset, both default to every capability. Setting them restricts, e.g.:
+# Unset, both default to every capability but assistant.interrupt. Setting them restricts, e.g.:
 worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
 manager_default = ["task.create"]   # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete: logged and notified when a grant names them
