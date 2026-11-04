@@ -69,7 +69,7 @@ use super::reviews::{self, PrKey, PrReview, ReviewLine, ReviewRow};
 use super::state::{rank_matches, Exit};
 use super::tasks_ui;
 use super::term::{self, Tui};
-use crate::agent::{self, age_label, AgentSpec};
+use crate::agent::{self, age_label};
 use crate::assistant::{self, Open};
 use crate::cli::Delegation;
 use crate::commands::{self, task::printable, task::printable_text};
@@ -92,7 +92,7 @@ use crate::pr_history;
 use crate::projects;
 use crate::reports;
 use crate::runtime::{self, Admission};
-use crate::status::{self, Activity};
+use crate::status::Activity;
 use crate::tasks::{self, NewTask};
 use crate::tmux;
 use crate::todo::ItemView;
@@ -679,16 +679,6 @@ pub enum AddField {
     Branch,
 }
 
-/// One session of a task's agent, for the session picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionChoice {
-    pub id: String,
-    pub name: String,
-    /// What it last reported, e.g. `idle` or `ended`.
-    pub state: String,
-    pub last: i64,
-}
-
 /// Somewhere the explorer can open in a task: the canvas or a worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
@@ -755,11 +745,6 @@ pub enum Panel {
         title: String,
         lines: Vec<String>,
         action: Pending,
-    },
-    Sessions {
-        task_id: String,
-        sessions: Vec<SessionChoice>,
-        selected: usize,
     },
     Places {
         task_id: String,
@@ -836,7 +821,7 @@ pub enum ChatSession {
 /// tmux, or the terminal. [`run`] carries it out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// ⏎: attach to the agent, starting it — or asking which session — first.
+    /// ⏎: attach to the agent, starting it first if need be.
     Open {
         task_id: String,
         session: Option<String>,
@@ -2561,26 +2546,6 @@ impl TasksUi {
                     }
                 }
             }
-            Panel::Sessions {
-                task_id,
-                sessions,
-                mut selected,
-            } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => None,
-                KeyCode::Enter => sessions.get(selected).map(|s| Action::Open {
-                    task_id: task_id.clone(),
-                    session: Some(s.id.clone()),
-                }),
-                code => {
-                    selected = list_move(code, selected, sessions.len());
-                    self.panel = Some(Panel::Sessions {
-                        task_id,
-                        sessions,
-                        selected,
-                    });
-                    None
-                }
-            },
             Panel::Places {
                 task_id,
                 places,
@@ -3284,11 +3249,6 @@ fn plural(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
-/// Sessions newest first, by what the index recorded and the hooks reported.
-pub fn sort_sessions(sessions: &mut [SessionChoice]) {
-    sessions.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.id.cmp(&b.id)));
-}
-
 // ---------------------------------------------------------------------------
 // Background
 // ---------------------------------------------------------------------------
@@ -3389,7 +3349,12 @@ fn tree_wanted(was: View, now: View) -> Option<bool> {
 }
 
 impl Background {
+    #[cfg(test)]
     fn start(home: &Path, config: &Config) -> Self {
+        Self::start_in(home, None, config)
+    }
+
+    fn start_in(home: &Path, new_home: Option<&Path>, config: &Config) -> Self {
         let (tx, rx) = mpsc::channel();
         let backlog = Arc::new(AtomicUsize::new(0));
         let updates = Updates {
@@ -3409,7 +3374,10 @@ impl Background {
         let assistant_tx = tx.clone();
         let tree_tx = tx.clone();
         let (status_home, assistant_home) = (home.to_path_buf(), home.to_path_buf());
-        let (tree_home, tree_config) = (home.to_path_buf(), config.clone());
+        let (tree_home, tree_config) = (
+            (home.to_path_buf(), new_home.map(Path::to_path_buf)),
+            config.clone(),
+        );
         std::thread::spawn(move || poll_statuses(probe_rx, status_tx, &status_home));
         std::thread::spawn(move || walk_sizes(size_rx, size_tx));
         std::thread::spawn(move || poll_assistant(assistant_rx, assistant_tx, &assistant_home));
@@ -3450,10 +3418,12 @@ impl Background {
 
     /// Have the status poller read every task's and review's status now.
     fn probe(&self, rows: &[TaskRow], reviews: &[ReviewRow]) {
+        // One listing for every row.
+        let sessions = tmux::list_sessions();
         let tasks = rows.iter().map(|row| Probe {
             id: row.task.id.clone(),
             dir: row.dir.clone(),
-            session: runtime::session_name(&row.task),
+            session: runtime::session_name_in(&sessions, &row.task),
             touched: row.task.last_activity,
             active: row.task.state == TaskState::Active,
             review: false,
@@ -3461,7 +3431,7 @@ impl Background {
         let reviews = reviews.iter().map(|row| Probe {
             id: row.id().to_string(),
             dir: row.dir.clone(),
-            session: crate::review::session_name(&row.review),
+            session: crate::review::session_name_in(&sessions, &row.review),
             touched: row.review.last_activity,
             active: !row.archived(),
             review: true,
@@ -3534,7 +3504,7 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Outbox, home: &Pa
     loop {
         if let Some(probe) = current.as_ref().filter(|_| !tx.stalled()) {
             let windows = match tmux_ok {
-                true => tmux::windows(assistant::TMUX_SESSION),
+                true => tmux::windows(&assistant::tmux_session()),
                 false => Vec::new(),
             };
             let mut info = assistant_info::gather(probe, &windows);
@@ -3557,7 +3527,12 @@ fn poll_assistant(probes: Receiver<assistant_info::Probe>, tx: Outbox, home: &Pa
 /// [`POLL_EVERY`] after, until told to stop: only while the agents view is
 /// shown. Its own connection, opened as the other threads open theirs; a
 /// home with no index yet is looked at again on the next ask.
-fn poll_tree(asks: Receiver<TreeAsk>, tx: Outbox, home: PathBuf, config: Config) {
+fn poll_tree(
+    asks: Receiver<TreeAsk>,
+    tx: Outbox,
+    (home, new_home): (PathBuf, Option<PathBuf>),
+    config: Config,
+) {
     let tmux_ok = tmux::available();
     let mut app: Option<App> = None;
     let mut running: Option<u64> = None;
@@ -3587,6 +3562,7 @@ fn poll_tree(asks: Receiver<TreeAsk>, tx: Outbox, home: PathBuf, config: Config)
         if app.is_none() {
             app = open_index(&home).map(|db| App {
                 home: home.clone(),
+                new_home: new_home.clone(),
                 config: config.clone(),
                 db,
             });
@@ -3756,7 +3732,7 @@ pub fn run(app: &App, start: Start) -> Result<Exit> {
         app,
         terminal: &mut terminal,
         ui,
-        bg: Background::start(&app.home, &app.config),
+        bg: Background::start_in(&app.home, app.new_home.as_deref(), &app.config),
         reviews_asked: None,
         kept_reviews: HashSet::new(),
         pending_link: None,
@@ -5426,9 +5402,8 @@ impl Screen<'_> {
         Ok(())
     }
 
-    /// ⏎: attach to the task's agent. A running agent is attached to as it
-    /// is — there is one per task — so the session picker only comes up when
-    /// one has to be started and there is more than one session to resume.
+    /// ⏎: attach to the task's agent, started first if need be: it resumes
+    /// the task's one session.
     fn open(&mut self, task_id: &str, session: Option<String>) -> Result<()> {
         let app = self.app;
         if let Some(review) = self.review(task_id) {
@@ -5443,28 +5418,11 @@ impl Screen<'_> {
                 .set_status(format!("{} is archived — a brings it back", task.name));
             return Ok(());
         }
-        // Before any picker: without tmux there is nothing to pick for.
         tmux::require()?;
-        let name = runtime::session_name(&task);
-        let live = tmux::has_session(&name) && tmux::pane_alive(&name);
-        if session.is_none() && !live {
-            let spec = AgentSpec::from_config(&app.config)?;
-            if spec.supports_sessions() {
-                let sessions = session_choices(app, &task, &row.dir)?;
-                if sessions.len() > 1 {
-                    self.ui.panel = Some(Panel::Sessions {
-                        task_id: task_id.to_string(),
-                        sessions,
-                        selected: 0,
-                    });
-                    return Ok(());
-                }
-            }
-        }
         // The user at the terminal asked for it: past `max_live` too (M22).
         let running = self
             .progress(&format!("starting {}'s agent", task.name), || {
-                runtime::ensure_running(app, &task, session.as_deref(), None, Admission::Bypass)
+                runtime::ensure_running(app, &task, None, None, Admission::Bypass)
             })
             .and_then(|inner| inner)?;
         let attached = term::suspended(self.terminal, || tmux::attach(&running.tmux_session))?;
@@ -5961,34 +5919,6 @@ fn pr_to_view(prs: &[TaskPrRecord]) -> PrToView<'_> {
         (None, _, []) => PrToView::None,
         _ => PrToView::Pick,
     }
-}
-
-/// The task's sessions for the picker, newest first.
-pub(crate) fn session_choices(
-    app: &App,
-    task: &TaskRecord,
-    dir: &Path,
-) -> Result<Vec<SessionChoice>> {
-    let mut choices: Vec<SessionChoice> = app
-        .db
-        .list_task_sessions(&task.id)?
-        .into_iter()
-        .map(|s| {
-            let reported = status::read_status(dir, &s.session_id);
-            let state = match &reported {
-                Some(st) => format!("{:?}", st.state).to_lowercase(),
-                None => "no status".to_string(),
-            };
-            SessionChoice {
-                last: s.last_activity.max(reported.map_or(0, |st| st.at)),
-                id: s.session_id,
-                name: s.name,
-                state,
-            }
-        })
-        .collect();
-    sort_sessions(&mut choices);
-    Ok(choices)
 }
 
 /// Each of the task's worktrees with its branch, divergence and diff.
@@ -7991,20 +7921,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_are_offered_newest_first() {
-        let choice = |id: &str, last| SessionChoice {
-            id: id.into(),
-            name: "n".into(),
-            state: "idle".into(),
-            last,
-        };
-        let mut sessions = vec![choice("a", 5), choice("b", 9), choice("c", 7)];
-        sort_sessions(&mut sessions);
-        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["b", "c", "a"]);
-    }
-
-    #[test]
     fn sizes_count_files_but_never_follow_links() {
         let dir = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
@@ -8812,6 +8728,7 @@ mod tests {
         App {
             config: config::load_or_create(home).unwrap(),
             db: Database::open(&config::index_path(home)).unwrap(),
+            new_home: None,
             home: home.to_path_buf(),
         }
     }

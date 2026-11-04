@@ -10,7 +10,6 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
         println!("no repositories found");
         return Ok(());
     }
-    let store = app.store_root();
     let mut outside = 0;
     println!("{:<45} TRUNK", "REPO ID");
     println!("{}", "-".repeat(100));
@@ -21,7 +20,7 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
             format!("default: {}", repo.default_branch),
             format!("{in_tasks} in tasks"),
         ];
-        if !Path::new(&repo.trunk_path).starts_with(&store) {
+        if !app.in_store(Path::new(&repo.trunk_path)) {
             notes.push("outside the store".to_string());
             outside += 1;
         }

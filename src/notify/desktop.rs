@@ -276,6 +276,8 @@ mod tests {
         };
         assert!(opens("jeet://task/fix-login"));
         assert!(opens("jeet://report/41"));
+        assert!(opens("plete://task/fix-login"));
+        assert!(!opens("plete://task/a b"));
         for bad in [
             "jeet://task/a b",
             "jeet://task/x?y",

@@ -41,7 +41,7 @@ pub struct Applied {
 /// the user, at a terminal: refused under any agent jeet started, and with
 /// no terminal to answer from.
 pub fn apply(app: &App) -> Result<()> {
-    let task_env = std::env::var(TASK_ID_ENV).ok();
+    let task_env = crate::env::var(TASK_ID_ENV).ok();
     if let Some(why) = refusal(task_env.as_deref(), std::io::stdin().is_terminal()) {
         bail!(why);
     }

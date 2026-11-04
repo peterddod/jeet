@@ -151,15 +151,18 @@ pub fn list(app: &App, repo: &RepoRecord) -> Result<Vec<WorktreeEntry>> {
         bail!("trunk path does not exist: {}", repo.trunk_path);
     }
     // `git worktree list` reports symlink-resolved paths.
-    let tasks_root = app.tasks_root();
-    let tasks_root = tasks_root.canonicalize().unwrap_or(tasks_root);
+    let tasks_roots: Vec<PathBuf> = app
+        .roots(crate::config::tasks_root)
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect();
 
     let mut entries = Vec::new();
     for entry in git::worktree_list(&trunk)? {
         let is_trunk = resolve::same_path(&entry.path, &trunk);
         let kind = if is_trunk {
             WorktreeKind::Trunk
-        } else if entry.path.starts_with(&tasks_root) {
+        } else if tasks_roots.iter().any(|root| entry.path.starts_with(root)) {
             WorktreeKind::Task
         } else {
             WorktreeKind::External

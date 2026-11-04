@@ -419,9 +419,6 @@ pub enum TaskCommands {
     Open {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
-        /// Resume this agent session instead of the task's latest one
-        #[arg(long, value_name = "ID")]
-        session: Option<String>,
     },
 
     /// Send the task's agent a message: typed in when it is idle, queued
@@ -965,6 +962,8 @@ mod tests {
         };
         assert!(pr.is_none());
         assert!(matches!(command, Some(ReviewCommands::Diff { review }) if review == "foo"));
+        // A task's agent has one session: there is none to name.
+        assert!(Cli::try_parse_from(["jeet", "task", "open", "foo", "--session", "s"]).is_err());
         assert!(matches!(
             parse(&["review", "open", "foo", "--session", "s"]).command,
             Some(Commands::Review {

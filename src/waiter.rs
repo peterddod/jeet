@@ -142,7 +142,7 @@ pub struct Start {
 
 /// `<task>/.jeet/wait`.
 pub(crate) fn wait_dir(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("wait")
+    tasks::marker_dir(task_dir).join("wait")
 }
 
 fn wait_file(task_dir: &Path, session: &str, ext: &str) -> PathBuf {
@@ -1296,6 +1296,7 @@ mod tests {
             let app = App {
                 config: config::load_or_create(&path).unwrap(),
                 db: Database::open(&config::index_path(&path)).unwrap(),
+                new_home: None,
                 home: path,
             };
             let root = crate::manager::root(&app).unwrap();
@@ -1597,6 +1598,18 @@ mod tests {
         let said = format!("{e:#}");
         assert!(said.contains("s.sock"), "{said}");
         assert!(!said.contains(SECRET));
+    }
+
+    #[test]
+    fn a_nonce_is_found_whatever_name_its_line_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let nonce = "0123456789abcdef";
+        for prefix in ["jeet delivery ", "plete delivery "] {
+            std::fs::write(&path, format!("x {prefix}{nonce}")).unwrap();
+            assert!(seen(&path, &mut 0, nonce).unwrap(), "{prefix}");
+        }
+        assert!(NONCE_PREFIX.ends_with(" delivery "));
     }
 
     #[test]

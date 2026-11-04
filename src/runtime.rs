@@ -42,9 +42,14 @@ pub fn session_name(task: &TaskRecord) -> String {
     session_name_for(&task.slug)
 }
 
-/// The tmux session of whatever has `slug`.
+/// [`session_name`] among `sessions`, listed once for a loop over many tasks.
+pub fn session_name_in(sessions: &[String], task: &TaskRecord) -> String {
+    tmux::pick_session(sessions, &task.slug)
+}
+
+/// The tmux session of whatever has `slug`: see [`tmux::find_session`].
 pub fn session_name_for(slug: &str) -> String {
-    format!("{}{}", crate::tmux::SESSION_PREFIX, slug)
+    tmux::find_session(slug)
 }
 
 /// The outcome of [`ensure_running`].
@@ -386,7 +391,7 @@ pub fn launch_tmux(
         warnings.push(format!("could not note the agent's launch: {e:#}"));
     }
     let home = app.home.to_string_lossy();
-    let env = [
+    let mut env = vec![
         (tasks::TASK_ID_ENV, launch.id.as_str()),
         // The agent's own `jeet` calls and hooks must find this index, not
         // whatever the tmux server's environment says.
@@ -395,6 +400,10 @@ pub fn launch_tmux(
         // `jeet worktree add` must not move the user's shell.
         (cd::CD_FILE_ENV, ""),
     ];
+    let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
+    if let Some(new_home) = &new_home {
+        env.push((crate::env::NEW_HOME_VAR, new_home.as_ref()));
+    }
     let pane = tmux::new_session(&name, &launch.dir, &env, &argv)?;
     if let Err(e) = record_anchor(&pane) {
         warnings.push(identity::unidentified(&launch.slug, &e));
@@ -533,8 +542,7 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
             }
             if !known.iter().any(|s| s.session_id == id) && !spec.harness.has_session(dir, id) {
                 bail!(
-                    "{} has no session {id} that jeet or {} knows of; `jeet task ls` \
-                     shows its tasks, and ctrl-s in a task's explorer its sessions",
+                    "{} has no session {id} that jeet or {} knows of",
                     launch.subject,
                     spec.harness.name()
                 );
@@ -910,8 +918,8 @@ pub fn is_own_session(task: &TaskRecord) -> bool {
 
 /// [`is_own_session`] for the task or review with `id` and `slug`.
 pub fn is_own_agent_session(id: &str, slug: &str) -> bool {
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| v.trim() == id);
-    in_task || tmux::current_session().is_some_and(|s| s == session_name_for(slug))
+    let in_task = crate::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| v.trim() == id);
+    in_task || tmux::current_session().is_some_and(|s| tmux::is_session_of(&s, slug))
 }
 
 /// [`interrupt`] in the task's tmux session.
@@ -1147,6 +1155,7 @@ mod tests {
         let mut app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         app.config.assistant.allow = vec![

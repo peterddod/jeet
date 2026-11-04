@@ -116,7 +116,9 @@ pub fn open_argv(exe: &Path, home: &Path, path: &str, url: &str) -> Vec<String> 
         "/usr/bin/env".to_string(),
         format!("PATH={path}"),
         format!("JEET_HOME={}", home.display()),
+        format!("PLETE_HOME={}", home.display()),
         format!("{STARTED_ENV}=1"),
+        "PLETE_LINK_TERMINAL=1".to_string(),
         exe.display().to_string(),
         "open".to_string(),
         url.to_string(),
@@ -284,7 +286,9 @@ mod tests {
                 "/usr/bin/env",
                 "PATH=/usr/bin:/bin",
                 "JEET_HOME=/home/me/.jeet",
+                "PLETE_HOME=/home/me/.jeet",
                 "JEET_LINK_TERMINAL=1",
+                "PLETE_LINK_TERMINAL=1",
                 "/opt/bin/jeet",
                 "open",
                 "jeet://task/fix"
@@ -371,7 +375,8 @@ mod tests {
         assert_eq!(
             text,
             "#!/bin/sh\nrm -f \"$0\"\nexec '/usr/bin/env' 'PATH=/usr/bin:/bin' \
-             'JEET_HOME=/home/it'\\''s me/.jeet' 'JEET_LINK_TERMINAL=1' '/opt/bin/jeet' \
+             'JEET_HOME=/home/it'\\''s me/.jeet' 'PLETE_HOME=/home/me/.jeet' \
+             'JEET_LINK_TERMINAL=1' 'PLETE_LINK_TERMINAL=1' '/opt/bin/jeet' \
              'open' 'jeet://task/fix'\n"
         );
     }

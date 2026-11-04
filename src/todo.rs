@@ -424,7 +424,7 @@ pub fn read(dir: &Path, template: &str) -> Result<TodoList> {
 
 /// Held while the list is read, changed and written.
 fn lock(dir: &Path) -> Result<std::fs::File> {
-    let marker = dir.join(crate::tasks::MARKER_DIR);
+    let marker = crate::tasks::marker_dir(dir);
     std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
     let path = marker.join("todo.lock");
     let file = OpenOptions::new()

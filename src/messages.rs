@@ -115,21 +115,19 @@ impl Queued {
 }
 
 pub fn inbox_path(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("inbox.jsonl")
+    tasks::marker_dir(task_dir).join("inbox.jsonl")
 }
 
 /// `<task>/.jeet/inbox.rejected.jsonl`: the lines [`Inbox::read`] could not
 /// take, moved out of the inbox.
 pub fn rejected_path(task_dir: &Path) -> PathBuf {
-    task_dir
-        .join(tasks::MARKER_DIR)
-        .join("inbox.rejected.jsonl")
+    tasks::marker_dir(task_dir).join("inbox.rejected.jsonl")
 }
 
 /// `<task>/.jeet/inbox.rejected.seen`: how many rejected lines the task's
 /// parent has been told of.
 fn rejected_seen_path(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("inbox.rejected.seen")
+    tasks::marker_dir(task_dir).join("inbox.rejected.seen")
 }
 
 /// Tell whoever should know of the lines moved to the task's rejected file
@@ -209,7 +207,7 @@ fn tell_rejected(app: &App, task: &TaskRecord) -> Result<()> {
 /// `<task>/.jeet/delivered.jsonl`: the whole text of each message that went
 /// to the task as a line or a digest entry, for `jeet show m<id>`.
 pub fn delivered_path(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("delivered.jsonl")
+    tasks::marker_dir(task_dir).join("delivered.jsonl")
 }
 
 /// How long `delivered.jsonl` keeps a message.
@@ -484,7 +482,7 @@ impl Inbox {
 
     /// The file the lock is taken on, made with its directory if need be.
     fn lock_file(task_dir: &Path) -> Result<(File, PathBuf)> {
-        let dir = task_dir.join(tasks::MARKER_DIR);
+        let dir = tasks::marker_dir(task_dir);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let path = dir.join("inbox.lock");
         // The agent writes in this directory: a FIFO there, or a link to one,
@@ -2483,7 +2481,7 @@ mod tests {
         // No inbox: nothing, and no `.jeet/` made for it.
         assert!(peek(dir.path()).is_empty());
         assert_eq!(try_peek(dir.path()), Some(Vec::new()));
-        assert!(!dir.path().join(tasks::MARKER_DIR).exists());
+        assert!(!tasks::marker_dir(dir.path()).exists());
 
         enqueue(dir.path(), "news").unwrap();
         let said = |q: Vec<Queued>| q.into_iter().map(|q| q.message).collect::<Vec<_>>();
@@ -2512,7 +2510,7 @@ mod tests {
     #[test]
     fn a_fifo_or_link_for_the_lock_is_refused_not_waited_on() {
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join(tasks::MARKER_DIR);
+        let marker = tasks::marker_dir(dir.path());
         std::fs::create_dir_all(&marker).unwrap();
         std::fs::write(inbox_path(dir.path()), "").unwrap();
         let lock = marker.join("inbox.lock");
@@ -2541,6 +2539,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&path).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            new_home: None,
             home: path,
         };
         let root = crate::manager::root(&app).unwrap();
@@ -2609,7 +2608,7 @@ mod tests {
     fn a_rejected_line_is_told_to_the_parent_once_and_counted() {
         let (_home, app, w) = app_with_worker();
         let dir = tasks::task_dir(&app, &w);
-        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(&dir)).unwrap();
         sweep_rejected(&app, &w);
         assert!(app.db.last_status_report("w").unwrap().is_none());
         std::fs::write(inbox_path(&dir), format!("junk\n{}\n", line(1, "ok"))).unwrap();
@@ -2642,7 +2641,7 @@ mod tests {
         let (_home, app, _w) = app_with_worker();
         let root = crate::manager::root(&app).unwrap();
         let dir = tasks::task_dir(&app, &root);
-        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(&dir)).unwrap();
         std::fs::write(inbox_path(&dir), "junk\n").unwrap();
         assert!(peek(&dir).is_empty());
         sweep_rejected(&app, &root);
@@ -2700,7 +2699,7 @@ mod tests {
         let meta = || Meta::new(render::Class::Line, "message", "task x", "hi", None);
         // Lost, it starts after the highest id the tasks' files hold.
         let other = home.path().join("tasks").join("o");
-        std::fs::create_dir_all(other.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(&other)).unwrap();
         let old = Delivery {
             id: 41,
             at: 1,
@@ -2743,7 +2742,7 @@ mod tests {
             .iter()
             .map(|d| format!("{}\n", serde_json::to_string(d).unwrap()))
             .collect();
-        std::fs::create_dir_all(task.path().join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(task.path())).unwrap();
         std::fs::write(delivered_path(task.path()), text).unwrap();
         let meta = Meta::new(render::Class::Line, "message", "task x", "hi", None);
         number(home.path(), task.path(), meta, "new").unwrap();
@@ -2777,7 +2776,7 @@ mod tests {
     fn the_count_is_written_before_the_report_is_filed() {
         let (_home, app, w) = app_with_worker();
         let dir = tasks::task_dir(&app, &w);
-        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(&dir)).unwrap();
         std::fs::write(inbox_path(&dir), "junk\nmore\n").unwrap();
         assert!(peek(&dir).is_empty());
         sweep_rejected(&app, &w);
@@ -2811,7 +2810,7 @@ mod tests {
     fn the_seen_count_is_not_opened_through_a_link_or_a_fifo() {
         let (_home, app, w) = app_with_worker();
         let dir = tasks::task_dir(&app, &w);
-        std::fs::create_dir_all(dir.join(tasks::MARKER_DIR)).unwrap();
+        std::fs::create_dir_all(tasks::marker_dir(&dir)).unwrap();
         std::fs::write(inbox_path(&dir), "junk\n").unwrap();
         assert!(peek(&dir).is_empty());
         let seen = rejected_seen_path(&dir);

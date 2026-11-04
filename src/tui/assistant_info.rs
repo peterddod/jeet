@@ -501,6 +501,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home: home.clone(),
         };
         // No assistant yet: its home, with nothing in it.

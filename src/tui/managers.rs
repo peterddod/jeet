@@ -958,6 +958,7 @@ mod tests {
         App {
             config: config::load_or_create(home).unwrap(),
             db: Database::open(&config::index_path(home)).unwrap(),
+            new_home: None,
             home: home.to_path_buf(),
         }
     }

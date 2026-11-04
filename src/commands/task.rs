@@ -585,11 +585,11 @@ fn restart_assistant(app: &App, force: bool) -> Result<()> {
         bail!("only the user restarts the assistant");
     }
     if permissions::assistant_mode()
-        || tmux::current_session().is_some_and(|s| s == assistant::TMUX_SESSION)
+        || tmux::current_session().is_some_and(|s| tmux::is_session_of(&s, assistant::SLUG))
     {
         bail!(
             "this jeet runs in tmux session {}, which a restart would end; run it from outside",
-            assistant::TMUX_SESSION
+            assistant::tmux_session()
         );
     }
     let Some(task) = app.db.get_assistant_task()? else {
@@ -711,7 +711,7 @@ fn adopt_assistant(app: &App, jeet_panes: &[u32]) -> Result<()> {
     let Some(task) = app.db.get_assistant_task()? else {
         bail!("the assistant has never run; `jeet chat` starts it");
     };
-    let windows = tmux::windows(assistant::TMUX_SESSION);
+    let windows = tmux::windows(&assistant::tmux_session());
     let unknown = assistant::unanchored_windows(&app.db, &task.id, &windows);
     let panes: Vec<tmux::LivePane> = unknown
         .iter()
@@ -738,7 +738,7 @@ fn adopt_assistant(app: &App, jeet_panes: &[u32]) -> Result<()> {
              confirm they are the assistant:\n{}\nAdopted, their jeet commands run as the \
              assistant, with what `[assistant] allow` lets it do. Adopt them only if you know \
              they are the assistant, started by an older jeet.",
-            assistant::TMUX_SESSION,
+            assistant::tmux_session(),
             list.join("\n")
         ),
         assistant::SLUG,
@@ -814,7 +814,7 @@ fn send_to_assistant(app: &App, message: &str, how: assistant::How) -> Result<()
         ),
         Delivered::Started => eprintln!(
             "jeet: started a session of the assistant's with the message in tmux session {}",
-            assistant::TMUX_SESSION
+            assistant::tmux_session()
         ),
         Delivered::Held => eprintln!(
             "jeet: no session of the assistant's is running and none can be started from here, \
@@ -846,7 +846,7 @@ fn sender(app: &App) -> String {
     if permissions::assistant_mode() {
         return "the assistant".to_string();
     }
-    let by_env = std::env::var(tasks::TASK_ID_ENV)
+    let by_env = crate::env::var(tasks::TASK_ID_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
@@ -940,7 +940,7 @@ pub fn ls(app: &App, archived: bool) -> Result<()> {
         (Caller::User | Caller::Root, true, Some(root)) => assistant::unanchored_windows(
             &app.db,
             &root.id,
-            &tmux::windows(assistant::TMUX_SESSION),
+            &tmux::windows(&assistant::tmux_session()),
         )
         .len(),
         _ => 0,
@@ -983,10 +983,10 @@ pub fn unanchored_advice(slugs: &[String], assistant_windows: usize) -> Vec<Stri
 /// Attach to the task's agent in its tmux session, starting the agent first
 /// if it is not running. Without a terminal there is nobody to attach, so
 /// the agent is left running detached and the directory is printed instead.
-pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
+pub fn open(app: &App, name: &str) -> Result<()> {
     let task = match super::review::named(app, Verb::TaskOpen, name, false)? {
         super::review::Named::Task(task) => task,
-        super::review::Named::Review(review) => return super::review::open(app, &review, session),
+        super::review::Named::Review(review) => return super::review::open(app, &review, None),
     };
     if task.state == TaskState::Archived {
         bail!(
@@ -1002,7 +1002,7 @@ pub fn open(app: &App, name: &str, session: Option<&str>) -> Result<()> {
         Caller::User => Admission::Bypass,
         Caller::Root | Caller::Node(_) | Caller::Review(_) => Admission::Gate,
     };
-    let running = runtime::ensure_running(app, &task, session, None, admission)?;
+    let running = runtime::ensure_running(app, &task, None, None, admission)?;
     warn_all(&running.warnings);
     let tmux_session = &running.tmux_session;
     match running.started {
@@ -1774,6 +1774,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let root = assistant::ensure(&app).unwrap();
@@ -1825,6 +1826,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let root = assistant::ensure(&app).unwrap();
