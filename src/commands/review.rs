@@ -140,7 +140,15 @@ pub fn run(
 /// The review `name` names, for `jeet review open|diff|explore`; a task's
 /// name is pointed at `jeet task`.
 fn named_review(app: &App, name: &str) -> Result<ReviewRecord> {
-    match named(app, permissions::Verb::TaskOpen, name, false)? {
+    let found = match named(app, permissions::Verb::TaskOpen, name, false) {
+        Ok(found) => found,
+        // Neither a task nor a review: say so as a review command would.
+        Err(_) if review_exact(app, name)?.is_none() && review_by_prefix(app, name)?.is_none() => {
+            bail!("no review named {name:?}; `jeet task ls` lists them")
+        }
+        Err(e) => return Err(e),
+    };
+    match found {
         Named::Review(review) => Ok(*review),
         Named::Task(task) => bail!(
             "{name} is a task, not a review; `jeet task open {}` opens it",

@@ -3918,6 +3918,20 @@ impl Screen<'_> {
             });
             return;
         };
+        // The diff and the explorer are of a live review's worktree.
+        let archived = match link {
+            Link::ReviewDiff(slug) | Link::ReviewExplore(slug) => self
+                .ui
+                .review_rows
+                .iter()
+                .any(|row| row.review.slug == *slug && row.review.state == TaskState::Archived),
+            _ => false,
+        };
+        if archived {
+            self.ui
+                .set_status(format!("{name} is archived; unarchive it to look at it"));
+            return;
+        }
         match (report, self.ui.user) {
             (Some(report), true) => self.perform(Action::Reports {
                 task_id: report.task_id,
