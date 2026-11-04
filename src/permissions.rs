@@ -29,8 +29,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    Commands, ManagerCommands, PrCommands, ProjectCommands, SetupCommands, TaskCommands,
-    WatchCommands, WorktreeArgs, WorktreeCommands,
+    Commands, ManagerCommands, PrCommands, ProjectCommands, ReviewCommands, SetupCommands,
+    TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::NotifyLevel;
 use crate::config::{self, ManagerPolicy};
@@ -725,9 +725,23 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
                 None => "fetched the store".into(),
             },
         ),
+        Commands::Review {
+            command: Some(command),
+            ..
+        } => match command {
+            // As `jeet task open <review>`.
+            ReviewCommands::Open { review, .. } => {
+                needs("task.open", format!("opened review {review}"))
+            }
+            // Screens for the user, as `jeet explore` is.
+            ReviewCommands::Diff { .. } | ReviewCommands::Explore { .. } => Gate::Interactive,
+        },
         Commands::Review { pr, repo, .. } => needs(
             "review.start",
-            format!("checked out {} for review", pr_label(pr, repo.as_deref())),
+            format!(
+                "checked out {} for review",
+                pr_label(pr.as_deref().unwrap_or_default(), repo.as_deref())
+            ),
         ),
         Commands::Pr { command } => match command {
             PrCommands::Merge { pr, repo, .. } => {
@@ -1996,6 +2010,11 @@ mod tests {
                 "checked out #42 of acme/api for review",
             ),
             (
+                &["review", "open", "api-42"],
+                "task.open",
+                "opened review api-42",
+            ),
+            (
                 &[
                     "pr", "merge", "42", "--repo", "acme/api", "--method", "squash",
                 ],
@@ -2952,6 +2971,9 @@ mod tests {
             (&["explore"], true),
             (&["prs"], true),
             (&["review", "1"], false),
+            (&["review", "open", "x"], false),
+            (&["review", "diff", "x"], false),
+            (&["review", "explore", "x"], false),
             (&["pr", "merge", "1"], true),
             (&["review-job", "s"], true),
             (&["sync"], false),

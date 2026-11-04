@@ -34,6 +34,19 @@ pub fn task_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// Reviews, for the `jeet review` subcommands.
+pub fn review_candidates() -> Vec<CompletionCandidate> {
+    let Ok(app) = App::open() else {
+        return Vec::new();
+    };
+    app.db
+        .list_reviews(None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| CompletionCandidate::new(r.slug))
+        .collect()
+}
+
 /// Tasks under the assistant, for the `jeet manager` verbs.
 pub fn manager_candidates() -> Vec<CompletionCandidate> {
     tree_candidates(|_| true)

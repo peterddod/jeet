@@ -270,6 +270,11 @@ jeet review 123             # or #123, or https://github.com/acme/widget/pull/12
 jeet review 123 --repo acme/widget
 jeet review 123 --no-agent  # only check it out (or --no-command)
 jeet review 123 --rerun
+jeet review 123 --open      # also go to it now: the viewer, then a shell in the worktree
+
+jeet review explore <review>  # the explorer, in the review's worktree
+jeet review diff <review>     # the PR's diff in the review viewer
+jeet review open <review>     # attach to the review's agent (as `jeet task open`)
 ```
 
 `jeet prs` lists the open PRs with their size and review status, and marks the
@@ -287,8 +292,12 @@ github.com/acme/widget: 3 open pull requests
 From anywhere inside a repository, `jeet review` finds or makes the PR's
 **review**, `review-<repo>-<number>`, checks the PR out in it (or, when it
 has the PR already, brings that checkout up to date if it is clean, and
-brings an archived review back), has the review's agent review it, opens it
-in the review viewer, and `cd`s you into the worktree when you leave. A
+brings an archived review back), has the review's agent review it, and prints
+the worktree's path. It opens nothing: on stderr it says which commands go to
+the review (`jeet review explore|diff|open <review>`, each taking the review's
+name, a unique start of it, or its id; `explore` and `diff` also need a
+terminal). `--open` goes there at once: in a terminal the review viewer, then
+a shell in the worktree when you leave it; otherwise the path and a `cd`. A
 review is not a task: it is its own thing, one per pull request (a
 repository and a PR number), with exactly one worktree and one session, and
 flat, with no parent and nothing under it. It is shown in the tasks list's
@@ -1628,7 +1637,7 @@ setup chat that walks you through jeet's config.
   and escalated asks still notify); `[notify] events = false` turns them
   all off.
 - **Deep links.** `jeet open jeet://task/<slug>` (also `review/<slug>`,
-  `report/<id>`) brings up the tasks screen on it, switching tmux or
+  `review/<slug>/diff|explore`, `report/<id>`) brings up the tasks screen on it, switching tmux or
   starting a terminal (`[notify] terminal`). `jeet notify install-link`
   makes the system open `jeet://` links, so a click in a notification,
   browser or Slack works ([Links](#links)).
@@ -2780,6 +2789,8 @@ A notification about the same thing for the same reason (a question's
 ```
 jeet://task/<slug>      a task
 jeet://review/<slug>    a review
+jeet://review/<slug>/diff     a review's PR diff, in the review viewer
+jeet://review/<slug>/explore  a review's worktree, in the explorer
 jeet://report/<id>      a report (r123 works too): its task's inbox & reports
 ```
 

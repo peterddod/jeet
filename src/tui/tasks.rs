@@ -1733,7 +1733,7 @@ impl TasksUi {
                 .iter()
                 .find(|row| row.task.slug == *slug)
                 .map(|row| (row.task.id.clone(), row.task.name.clone()))?,
-            Link::Review(slug) => self
+            Link::Review(slug) | Link::ReviewDiff(slug) | Link::ReviewExplore(slug) => self
                 .review_rows
                 .iter()
                 .find(|row| row.review.slug == *slug)
@@ -3911,7 +3911,9 @@ impl Screen<'_> {
         let Some(name) = found else {
             self.ui.set_status(match link {
                 Link::Task(slug) => format!("no task {slug}"),
-                Link::Review(slug) => format!("no review {slug}"),
+                Link::Review(slug) | Link::ReviewDiff(slug) | Link::ReviewExplore(slug) => {
+                    format!("no review {slug}")
+                }
                 Link::Report(id) => format!("report r{id} is of a task that is gone"),
             });
             return;
@@ -3920,10 +3922,20 @@ impl Screen<'_> {
             (Some(report), true) => self.perform(Action::Reports {
                 task_id: report.task_id,
             }),
+            (None, true) if matches!(link, Link::ReviewDiff(_)) => {
+                if let Some(action) = self.ui.review_diff() {
+                    self.perform(action);
+                }
+            }
+            (None, true) if matches!(link, Link::ReviewExplore(_)) => {
+                if let Some(task_id) = self.ui.selected_id().map(str::to_string) {
+                    self.perform(Action::Explore { task_id });
+                }
+            }
             _ => self.ui.set_status(format!(
                 "{name}, from a link · ⏎ opens its {}",
                 match link {
-                    Link::Review(_) => "review",
+                    Link::Review(_) | Link::ReviewDiff(_) | Link::ReviewExplore(_) => "review",
                     _ => "agent",
                 }
             )),
