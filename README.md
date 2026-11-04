@@ -1,140 +1,150 @@
 <p align="center">
-  <img src="assets/banner.png" alt="jeet — global git repository index and worktree manager" width="800">
+  <img src="assets/banner.png" alt="plete — global git repository index and worktree manager" width="800">
 </p>
 
-# jeet
+# plete
 
 Global git repository index and worktree manager.
 
-`jeet` keeps a canonical store of repository trunks, organises work into **tasks** — a directory per piece of work, with as many git worktrees inside it as the work needs — and maintains a SQLite index so you can list, find, and jump into repos quickly. The only checkouts on disk are the store's trunks and the tasks' worktrees.
+`plete` keeps a canonical store of repository trunks, organises work into **tasks** — a directory per piece of work, with as many git worktrees inside it as the work needs — and maintains a SQLite index so you can list, find, and jump into repos quickly. The only checkouts on disk are the store's trunks and the tasks' worktrees.
 
-Run `jeet` with no arguments and you get your tasks: one row per piece of work, with what its coding agent is doing, the worktrees it holds and when anything last happened in it, and one keystroke to attach to the agent, browse the task, or archive it. `jeet explore` inside a repo gives you a file explorer: one level of the tree at a time, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
+Run `plete` with no arguments and you get your tasks: one row per piece of work, with what its coding agent is doing, the worktrees it holds and when anything last happened in it, and one keystroke to attach to the agent, browse the task, or archive it. `plete explore` inside a repo gives you a file explorer: one level of the tree at a time, type-to-filter with shell-style `⇥` completion, and one keystroke to switch worktree, open a file, or hand the tree to a coding agent.
 
-Beyond this, `jeet` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
+Beyond this, `plete` is also very AI friendly and will help your agents juggle multiple workflows at once seamlessly.
+
+## Renamed from jeet
+
+plete was called jeet. The `jeet` command still works as an alias of the same binary, and everything that was set up under the old name keeps running: agents' hooks, launchd jobs, `source <(jeet init-shell)` in your shell rc, links in notifications already sent.
+
+- Existing data stays in `~/.jeet`; new tasks, projects, reviews and clones go to `~/.plete`. `plete migrate-home` moves the rest (it says what may break, needs `--yes`, and refuses while agent sessions are alive unless `--force`; `~/.jeet` is left as a link to `~/.plete`).
+- `plete alias install` makes `pt` a short name for plete, in `~/.local/bin` or `~/bin`. Nothing creates it on its own, and it never replaces another `pt`.
+- `plete doctor` lists what is still under the old name (old launchd jobs, `jeet-*` tmux sessions, `.jeet/` markers, the line in your shell rc).
+- `JEET_*` environment variables are read as `PLETE_*` still, and plete sets both for the processes it starts.
 
 ## Install
 
 ### Homebrew
 
 ```bash
-brew tap peterddod/jeet
-brew install jeet
+brew install peterddod/plete/plete
 ```
 
 ### apt (Debian / Ubuntu)
 
 ```bash
-curl -fsSL https://peterddod.github.io/jeet/deb-install.sh | bash
+curl -fsSL https://peterddod.github.io/plete/deb-install.sh | bash
 ```
 
 Or manually:
 
 ```bash
-echo "deb [trusted=yes] https://peterddod.github.io/jeet stable main" \
-  | sudo tee /etc/apt/sources.list.d/jeet.list
+echo "deb [trusted=yes] https://peterddod.github.io/plete stable main" \
+  | sudo tee /etc/apt/sources.list.d/plete.list
 sudo apt update
-sudo apt install jeet
+sudo apt install plete
 ```
 
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.14.0
+cargo install plete
+# or from source
+cargo install --git https://github.com/peterddod/plete
 ```
 
 ## Quick start
 
 ```bash
-# Shell integration (required for `jeet cd`)
-eval "$(jeet init-shell)"
+# Shell integration (required for `plete cd`)
+eval "$(plete init-shell)"
 
 # Clone into the canonical store
-jeet clone https://github.com/acme/widget.git
+plete clone https://github.com/acme/widget.git
 
 # Fetch every indexed repo now (this also happens on its own; see below)
-jeet sync
-jeet sync --repo acme/widget
+plete sync
+plete sync --repo acme/widget
 
-# Bring repositories and work from outside jeet into the store and tasks
-jeet import                              # scans scan_roots (see config)
-jeet import ~/Projects/exceed            # or just these
+# Bring repositories and work from outside plete into the store and tasks
+plete import                              # scans scan_roots (see config)
+plete import ~/Projects/exceed            # or just these
 
 # List the store's repos
-jeet ls
-jeet ls acme
+plete ls
+plete ls acme
 
 # The tasks list (this is the main event)
-jeet                                     # or `jeet tasks`
+plete                                     # or `plete tasks`
 
 # Explore
-jeet cd acme/widget                      # jump to the trunk
-jeet explore                             # open the file explorer there
+plete cd acme/widget                      # jump to the trunk
+plete explore                             # open the file explorer there
 
 # Tasks — a workspace directory per piece of work, worktrees added on demand
-jeet task new "Fix login"                # empty canvas; prints ~/.jeet/tasks/fix-login
-jeet task new api-v2 --repo api --branch v2   # or start with a worktree in it
-jeet task ls [--archived]                # with what each task's agent is doing
-jeet task open fix-login                 # the task's agent, in tmux (started if need be)
-jeet task new fix-x --prompt "Fix X"     # …and start its agent on a brief
-jeet task new fix-y --pr ask             # its PR policy: auto, draft or ask (see [tasks] pr)
-jeet task send fix-login "add tests too" # message the task's agent
-jeet task interrupt fix-login            # end the agent's current turn, keeping its session
-jeet task restart fix-login [--force]    # end the agent and resume its conversation in a new one
-jeet task adopt fix-login                # vouch for an agent an older jeet started (you, at a terminal)
-jeet task last fix-login [-n 3] [--json] # what the task's agent last said, and how its turn ended
-jeet task archive fix-login              # free the disk, keep the work
-jeet task unarchive fix-login
-jeet task delete fix-login [--force]
-jeet task delete api --recursive         # a task and every task under it (also archive, unarchive)
-jeet task delete api --reparent          # api alone; the tasks under it move to its parent
-jeet task prs fix-login                  # the PRs that came out of the task
+plete task new "Fix login"                # empty canvas; prints ~/.plete/tasks/fix-login
+plete task new api-v2 --repo api --branch v2   # or start with a worktree in it
+plete task ls [--archived]                # with what each task's agent is doing
+plete task open fix-login                 # the task's agent, in tmux (started if need be)
+plete task new fix-x --prompt "Fix X"     # …and start its agent on a brief
+plete task new fix-y --pr ask             # its PR policy: auto, draft or ask (see [tasks] pr)
+plete task send fix-login "add tests too" # message the task's agent
+plete task interrupt fix-login            # end the agent's current turn, keeping its session
+plete task restart fix-login [--force]    # end the agent and resume its conversation in a new one
+plete task adopt fix-login                # vouch for an agent an older plete started (you, at a terminal)
+plete task last fix-login [-n 3] [--json] # what the task's agent last said, and how its turn ended
+plete task archive fix-login              # free the disk, keep the work
+plete task unarchive fix-login
+plete task delete fix-login [--force]
+plete task delete api --recursive         # a task and every task under it (also archive, unarchive)
+plete task delete api --reparent          # api alone; the tasks under it move to its parent
+plete task prs fix-login                  # the PRs that came out of the task
 
 # The assistant — one organiser for everything, in tmux
-jeet chat                                # resume its latest session (set up on first run)
-jeet chat --new "plan the week"          # a fresh session beside the others
-jeet chat --pick                         # choose, rename, end or mark one primary
-jeet todo add "ship the fix" -p 1 --task fix-login
-jeet todo                                # its todo list; done, rm, --json
-jeet task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
-jeet manager new api --goal "Ship the v2 API" --budget 4h  # a manager under it, started
-jeet manager ls                          # the tree under it; show, grant, budget <task> …
-jeet manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
-jeet report done "PR #12 is up"          # from inside such a task: tell the assistant
-jeet watch install                       # poll GitHub in the background (launchd)
-jeet notify install                      # send notifications from a background sender
-jeet notify setup slack                  # notifications in Slack too (see Notifications)
-jeet notify setup ntfy                   # or on your phone, through ntfy
+plete chat                                # resume its latest session (set up on first run)
+plete chat --new "plan the week"          # a fresh session beside the others
+plete chat --pick                         # choose, rename, end or mark one primary
+plete todo add "ship the fix" -p 1 --task fix-login
+plete todo                                # its todo list; done, rm, --json
+plete task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
+plete manager new api --goal "Ship the v2 API" --budget 4h  # a manager under it, started
+plete manager ls                          # the tree under it; show, grant, budget <task> …
+plete manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
+plete report done "PR #12 is up"          # from inside such a task: tell the assistant
+plete watch install                       # poll GitHub in the background (launchd)
+plete notify install                      # send notifications from a background sender
+plete notify setup slack                  # notifications in Slack too (see Notifications)
+plete notify setup ntfy                   # or on your phone, through ntfy
 
 # Worktrees — of the task you are in (or --task <name>)
-jeet worktree add api                    # detached at origin's default branch; prints the path
-jeet worktree add api --branch feat-x    # existing branch, origin's, or a new one
-jeet worktree ls                         # with dirty + diff counters
-jeet worktree rm api [--force]
-jeet worktree path api
+plete worktree add api                    # detached at origin's default branch; prints the path
+plete worktree add api --branch feat-x    # existing branch, origin's, or a new one
+plete worktree ls                         # with dirty + diff counters
+plete worktree rm api [--force]
+plete worktree path api
 
 # Navigation
-jeet path acme/widget                    # print the trunk's path (scripting)
-jeet cd acme/widget                      # native cd (requires init-shell)
-jeet exec acme/widget                    # subshell in the trunk
+plete path acme/widget                    # print the trunk's path (scripting)
+plete cd acme/widget                      # native cd (requires init-shell)
+plete exec acme/widget                    # subshell in the trunk
 
 # Reviewing pull requests — from anywhere inside the repo
-jeet prs                                 # the open PRs, and which you have checked out
-jeet review 123                          # or #123, or the PR's URL
-jeet prs acme/widget                     # or name the repo, from anywhere
-jeet review 123 --repo acme/widget
-jeet pr merge 123                        # merge it, once it is ready (see Merging)
+plete prs                                 # the open PRs, and which you have checked out
+plete review 123                          # or #123, or the PR's URL
+plete prs acme/widget                     # or name the repo, from anywhere
+plete review 123 --repo acme/widget
+plete pr merge 123                        # merge it, once it is ready (see Merging)
 ```
 
 ## The explorer
 
 ```bash
-jeet explore  # inside a store repo, trunk or task worktree — or a task's directory
+plete explore  # inside a store repo, trunk or task worktree — or a task's directory
 ```
 
 From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 
 ```text
-┌ jeet · github.com/acme/widget ────────────────────────────────┐
+┌ plete · github.com/acme/widget ────────────────────────────────┐
 │worktree feature-x  [task]  1 uncommitted  +2/-0 in 1 file     │
 │path     /src                                                  │
 │filter   co█  1 of 2                                           │
@@ -189,7 +199,7 @@ match sorts to the top whatever else the filter caught.
 While the explorer is up it has the mouse, which means your terminal's own
 click-drag text selection is off for as long as it runs. Hold **shift** while
 dragging to select as you normally would — every terminal that reports mouse
-events supports that escape hatch. jeet gives the mouse back whenever it steps
+events supports that escape hatch. plete gives the mouse back whenever it steps
 aside for an editor or an agent, and on the way out however it leaves.
 
 ### Everything else
@@ -208,10 +218,10 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `ctrl-r` | refresh the listing and the counters |
 | `ctrl-q` | quit, leaving your shell in the directory you were browsing |
 | `esc` | quit without moving your shell (unless it moved out from under you) |
-| `F1` or `ctrl-g` | the key list, in jeet |
+| `F1` or `ctrl-g` | the key list, in plete |
 
 In the worktree panel: `r` refreshes and `esc` closes. Worktrees are added to
-and removed from tasks — `jeet worktree`, or `w` in the tasks list — not here.
+and removed from tasks — `plete worktree`, or `w` in the tasks list — not here.
 The panels are keyboard-driven, so single letters still work inside them, and
 the key that opened one closes it again.
 
@@ -220,7 +230,7 @@ runs in the background with a progress indicator, so the explorer keeps
 drawing instead of freezing on the network.
 
 Leaving your shell in the right directory needs the shell wrapper
-(`eval "$(jeet init-shell)"`); without it jeet prints the path instead.
+(`eval "$(plete init-shell)"`); without it plete prints the path instead.
 
 The editor defaults to `$VISUAL`/`$EDITOR` and falls back to `vim`; the coding
 agent defaults to `claude`. Both are configurable (see below). `ctrl-a` and
@@ -252,9 +262,9 @@ comments waiting to be submitted — the verdict submits that review, comments
 and all, rather than posting a second one.
 
 `ctrl-o` lists every open PR in the repository — the same list as
-`jeet prs` — and `⏎` switches the explorer to it in a task: the task whose
+`plete prs` — and `⏎` switches the explorer to it in a task: the task whose
 worktree has the PR's branch already, or else the PR's review, which it
-makes just as `jeet review` would. It is a way in, not `jeet review`: no
+makes just as `plete review` would. It is a way in, not `plete review`: no
 review agent is asked to review it.
 
 PR support goes through the [GitHub CLI](https://cli.github.com): install
@@ -264,20 +274,20 @@ explorer never waits on the network.
 ## Reviewing
 
 ```bash
-jeet prs                    # open PRs in the repo you are in
-jeet prs acme/widget        # or in any indexed repo
-jeet review 123             # or #123, or https://github.com/acme/widget/pull/123
-jeet review 123 --repo acme/widget
-jeet review 123 --no-agent  # only check it out (or --no-command)
-jeet review 123 --rerun
-jeet review 123 --open      # also go to it now: the viewer, then a shell in the worktree
+plete prs                    # open PRs in the repo you are in
+plete prs acme/widget        # or in any indexed repo
+plete review 123             # or #123, or https://github.com/acme/widget/pull/123
+plete review 123 --repo acme/widget
+plete review 123 --no-agent  # only check it out (or --no-command)
+plete review 123 --rerun
+plete review 123 --open      # also go to it now: the viewer, then a shell in the worktree
 
-jeet review explore <review>  # the explorer, in the review's worktree
-jeet review diff <review>     # the PR's diff in the review viewer
-jeet review open <review>     # attach to the review's agent (as `jeet task open`)
+plete review explore <review>  # the explorer, in the review's worktree
+plete review diff <review>     # the PR's diff in the review viewer
+plete review open <review>     # attach to the review's agent (as `plete task open`)
 ```
 
-`jeet prs` lists the open PRs with their size and review status, and marks the
+`plete prs` lists the open PRs with their size and review status, and marks the
 ones asking for your review, the ones you already have checked out, and how
 any background review of them went (run by an agent, the list comes fenced
 as `<github-data untrusted="true">`, since titles are anyone's to write):
@@ -289,12 +299,12 @@ github.com/acme/widget: 3 open pull requests
   #121  Rework the config loader        linus    +901 -377 draft
 ```
 
-From anywhere inside a repository, `jeet review` finds or makes the PR's
+From anywhere inside a repository, `plete review` finds or makes the PR's
 **review**, `review-<repo>-<number>`, checks the PR out in it (or, when it
 has the PR already, brings that checkout up to date if it is clean, and
 brings an archived review back), has the review's agent review it, and prints
 the worktree's path. It opens nothing: on stderr it says which commands go to
-the review (`jeet review explore|diff|open <review>`, each taking the review's
+the review (`plete review explore|diff|open <review>`, each taking the review's
 name, a unique start of it, or its id; `explore` and `diff` also need a
 terminal). `--open` goes there at once: in a terminal the review viewer, then
 a shell in the worktree when you leave it; otherwise the path and a `cd`. A
@@ -302,11 +312,11 @@ review is not a task: it is its own thing, one per pull request (a
 repository and a PR number), with exactly one worktree and one session, and
 flat, with no parent and nothing under it. It is shown in the tasks list's
 [reviews tab](#the-reviews-tab) alone — never among the active or archived
-tasks, in the agents tab, in the projects tab, or in `jeet task ls` — and
+tasks, in the agents tab, in the projects tab, or in `plete task ls` — and
 there `v` opens the viewer again, `a` archives it and brings it back, and
-`D` deletes it. `jeet task open|archive|unarchive|delete|path|send|restart
+`D` deletes it. `plete task open|archive|unarchive|delete|path|send|restart
 review-<repo>-<number>` take its name too. Archiving or deleting it frees the
-disk and ends its agent, and once the PR is merged or closed jeet archives it
+disk and ends its agent, and once the PR is merged or closed plete archives it
 itself. A PR from a fork is checked out as `pr/<number>`,
 so it can never land on a branch of yours with the same name; and when the
 PR's branch is checked out already — in your own task, say — the review is
@@ -333,8 +343,8 @@ it was on.
 
 The review is done by the review's own agent — your harness (Claude Code),
 started in the review's tmux pane like a task's agent — so `⏎` on the review
-(or `jeet task open review-<repo>-<number>`) shows it at work, and you can
-talk to it there (`jeet task send` and `jeet task restart` reach it too, for
+(or `plete task open review-<repo>-<number>`) shows it at work, and you can
+talk to it there (`plete task send` and `plete task restart` reach it too, for
 you and for the assistant when it asked for the review). It starts with this
 prompt:
 
@@ -349,7 +359,7 @@ them — so the agent reads them with `gh`. The prompt is sent as a message is:
 one starting with `/`, `!` or `#` is marked so Claude does not run it as a
 command.
 
-One review is one worktree and one session. Running `jeet review`
+One review is one worktree and one session. Running `plete review`
 again for the same commit asks nothing; a new head commit, or `--rerun`,
 brings the worktree up to the PR's head (when it is clean) and sends the
 prompt again into the same session: typed in when the agent is idle, queued
@@ -361,26 +371,26 @@ later. A review paused at its [limits](#review-limits) keeps the prompt until
 the review is asked for again. `--no-agent` only checks the PR out.
 
 A review remembers who asked for it: the assistant's id when the assistant
-ran `jeet review`, and that holds until the review is deleted. You running
+ran `plete review`, and that holds until the review is deleted. You running
 it again, even for the same commit, never clears it; only a later request by
 the assistant sets it (to the assistant, still).
 
-A review agent is held to whoever asked for it: its jeet commands are gated
+A review agent is held to whoever asked for it: its plete commands are gated
 as that task's would be (its grant, cut by every list above it, and its
 subtree), or, when the assistant or you asked, as the assistant's are
-(`[assistant] allow`). `jeet todo`, `jeet brief` and `jeet notify` stay
+(`[assistant] allow`). `plete todo`, `plete brief` and `plete notify` stay
 the assistant's and the user's, so they are refused to it. It is denied
 `gh pr comment`, `gh issue comment` and `gh pr review` unless whoever asked
 holds `pr.comment`/`pr.review`, and nothing else unless you set
 `[permissions] guards` or `[permissions.review]`. It may
-`jeet report progress|done|blocked|question` only when a task asked for the
+`plete report progress|done|blocked|question` only when a task asked for the
 review: a review the assistant asked for reports to the assistant (as a
 sender labelled `review <repo>#<number>`), and a review you asked for reports
 to no one. The assistant is not its parent: the review is in no tree, takes
 no manager's budget or `max_live` slot, and nothing is delegated to it.
 
 To limit every review agent to reading instead, set `[review] read_only =
-true`: it then runs only `jeet ls`, `jeet path` and `jeet prs` (and `jeet
+true`: it then runs only `plete ls`, `plete path` and `plete prs` (and `plete
 report` when a task asked), whoever asked, and has the worker deny rules: no
 push, force-push, merge, `gh pr review` or approval, or `gh pr comment`, nor
 their API equivalents.
@@ -400,7 +410,7 @@ turns = 20      # turns each review may take
 ```
 
 `max_live` counts every review agent, yours included: a review past it is
-queued, and starts when a review agent's session ends (`jeet task open`
+queued, and starts when a review agent's session ends (`plete task open`
 from your terminal starts it anyway, with a warning). `time` and `turns`
 apply to every review: each time a review is asked of the agent (a first
 one, a new head commit or `--rerun`) it gets them afresh, on top of what it
@@ -408,7 +418,7 @@ has used. At 80% the review's agent is told, and so is the assistant when it
 asked for the review; at 100% the review is paused until the next review is
 asked, and the assistant is told it is blocked. A review you asked for
 reports to no one: the reviews tab shows it `paused at its caps`. A task
-with a parent may not run `jeet review` at all, so no agent's review escapes
+with a parent may not run `plete review` at all, so no agent's review escapes
 these caps that way. The defaults keep
 reviews from crowding out other work (2 at once) and stop a stuck one
 (an hour of busy time, or 20 turns, a turn being one prompt answered: a
@@ -417,9 +427,9 @@ or a `time` that is not a time, refuses starting a review.
 
 #### Legacy `[review] command`
 
-Before the review agent, `jeet review` could start a command of your own in
+Before the review agent, `plete review` could start a command of your own in
 the background instead. It still works, but is **deprecated**: set, it runs
-in place of the review agent, and `jeet review` warns.
+in place of the review agent, and `plete review` warns.
 
 ```toml
 [review]
@@ -432,9 +442,9 @@ closing the window does not stop it. When it finishes you get a notification,
 the header's `review running` turns to `review ready`, and `v` in the PR panel
 opens its output. While it runs the review reads `running – review of #<number>`,
 and opening it is refused — headless, there is nothing to attach to; once it
-has finished, opening the review resumes the session it left (jeet picks it up
+has finished, opening the review resumes the session it left (plete picks it up
 from the PR's worktree), and so does the review agent if you later remove the
-command. Running `jeet review` again for the same commit does not start a
+command. Running `plete review` again for the same commit does not start a
 second review; new commits do (and `--rerun` forces one). Run for your own
 review, the command runs as you, ungated, as it always has; only the assistant's
 reviews are held to the review agent's gate (`[assistant] allow`, or the
@@ -442,28 +452,28 @@ read-only gate under `[review] read_only`).
 
 The job is part of the review: its command, the commit it reviewed, when it
 started and ended, its exit status and its runner are columns of the review's
-row in the index (the hidden `jeet review-job <review id>` that runs it only
-runs a job jeet recorded there, once). Only the log is a file. Job files an
-older jeet left under `~/.jeet/reviews` are adopted as reviews on upgrade
+row in the index (the hidden `plete review-job <review id>` that runs it only
+runs a job plete recorded there, once). Only the log is a file. Job files an
+older plete left under `~/.plete/reviews` are adopted as reviews on upgrade
 ([What's new in v0.13](#whats-new-in-v013)).
 
 `{pr}` and `{url}` are substituted into the command. The PR's branch, base and
 title are not — whoever opened the PR chose those, and pasted into a shell they
-would run as code — so they arrive as `$JEET_PR_BRANCH`, `$JEET_PR_BASE` and
-`$JEET_PR_TITLE` instead, alongside `$JEET_PR`, `$JEET_PR_URL` and
-`$JEET_REVIEW_LOG`. A job's log is `~/.jeet/reviews/<host>/<owner>/<repo>/<number>.log`; nothing
+would run as code — so they arrive as `$PLETE_PR_BRANCH`, `$PLETE_PR_BASE` and
+`$PLETE_PR_TITLE` instead, alongside `$PLETE_PR`, `$PLETE_PR_URL` and
+`$PLETE_REVIEW_LOG`. A job's log is `~/.plete/reviews/<host>/<owner>/<repo>/<number>.log`; nothing
 reads that directory to find reviews.
 
 ### Merging
 
 ```bash
-jeet pr merge 123                   # or #123, or the PR's URL
-jeet pr merge 123 --repo acme/widget
-jeet pr merge 123 --method squash   # merge, squash or rebase
-jeet pr merge 123 --keep-branch
+plete pr merge 123                   # or #123, or the PR's URL
+plete pr merge 123 --repo acme/widget
+plete pr merge 123 --method squash   # merge, squash or rebase
+plete pr merge 123 --keep-branch
 ```
 
-`jeet pr merge` merges only a PR that is open, not a draft, free of
+`plete pr merge` merges only a PR that is open, not a draft, free of
 conflicts, with every check passed (none pending or failed), no changes
 requested or approving review missing, and that GitHub does not block or
 want brought up to date. Anything else is refused, saying why; it never
@@ -476,7 +486,7 @@ then deleted on GitHub (not locally: a task may have it checked out), unless
 `--keep-branch` or the repository deletes merged branches itself. Tasks
 holding the PR record it as merged in their PR history. Run by an agent, the
 PR's title, branch and check names come inside
-`<github-data untrusted="true">…</github-data>`, as `jeet review`'s title
+`<github-data untrusted="true">…</github-data>`, as `plete review`'s title
 does; the user gets them without control characters.
 
 ```toml
@@ -486,29 +496,29 @@ method = "squash"
 
 ## Tasks
 
-A task is a directory under `~/.jeet/tasks/<slug>`: a blank canvas for one
+A task is a directory under `~/.plete/tasks/<slug>`: a blank canvas for one
 piece of work, with any number of git worktrees inside it, added and removed as
 the work needs them — several repositories, or several checkouts of one.
 
 ```bash
-cd "$(jeet task new "Fix login")"   # prints the task directory (and cds there with the wrapper)
-jeet worktree add api               # -> ~/.jeet/tasks/fix-login/api, detached at origin/main
-jeet worktree add web --branch fix-login
-jeet worktree add api               # a second checkout: api-2
-jeet worktree ls
+cd "$(plete task new "Fix login")"   # prints the task directory (and cds there with the wrapper)
+plete worktree add api               # -> ~/.plete/tasks/fix-login/api, detached at origin/main
+plete worktree add web --branch fix-login
+plete worktree add api               # a second checkout: api-2
+plete worktree ls
 ```
 
-`jeet worktree` works on the task you are in — anywhere below its directory,
-including inside one of its worktrees — or on the one in `$JEET_TASK_ID`, or on
+`plete worktree` works on the task you are in — anywhere below its directory,
+including inside one of its worktrees — or on the one in `$PLETE_TASK_ID`, or on
 `--task <name>`. Outside a task it says so rather than guessing. `add` and
 `path` print the worktree's path and nothing else, so a script or a coding
-agent can `cd "$(jeet worktree add api)"`.
+agent can `cd "$(plete worktree add api)"`.
 
 `add` fetches the repository first, so a worktree starts from what origin has
 now; offline, it starts from the last fetch and says so. The repository can be
-a name (`api`), `owner/repo`, an id, or a clone URL — one jeet does not have yet
+a name (`api`), `owner/repo`, an id, or a clone URL — one plete does not have yet
 is cloned into the store, which the assistant and a task with a parent may do
-only holding `repo.clone` (as for `jeet clone`; so too `jeet task new --repo`).
+only holding `repo.clone` (as for `plete clone`; so too `plete task new --repo`).
 A URL whose path has a `..` or `.` segment, or a control or invisible
 character, is refused, so a clone always lands under the store. Without `--branch` the worktree is detached at the
 default branch. With it, an existing local branch is checked out, a branch that
@@ -516,47 +526,47 @@ exists only on origin is tracked, and anything else is created from the default
 branch. A branch already checked out elsewhere is refused, naming the task that
 has it.
 
-Every task gets a jeet skill (`.claude/skills/jeet/SKILL.md`) that tells a
+Every task gets a plete skill (`.claude/skills/plete/SKILL.md`) that tells a
 coding agent how to do all of this itself. A worktree made with plain
 `git worktree add` inside a task directory is adopted into the task the next
-time jeet looks, and one whose directory was deleted is forgotten.
+time plete looks, and one whose directory was deleted is forgotten.
 
 ```bash
-jeet worktree rm api        # refuses while it has uncommitted or unpushed work
-jeet worktree rm api -f     # removes it anyway
+plete worktree rm api        # refuses while it has uncommitted or unpushed work
+plete worktree rm api -f     # removes it anyway
 ```
 
 A branch the task created is deleted with its worktree only when its commits are
-on origin or on the default branch; otherwise it is kept, and jeet says so.
+on origin or on the default branch; otherwise it is kept, and plete says so.
 
 ### Projects
 
-A project is a template for tasks, in `~/.jeet/projects/<name>`: a
+A project is a template for tasks, in `~/.plete/projects/<name>`: a
 `project.toml` naming the repositories each task starts with a worktree of, an
-`AGENTS.md` with instructions for the agent, and `skills/`. `jeet task new
+`AGENTS.md` with instructions for the agent, and `skills/`. `plete task new
 --project <name>` copies the instructions and skills into the new task — a
-snapshot — and `jeet task resync` brings them up to date later, keeping any file
-the task changed. `jeet manager new --project <name>` starts a manager from one
+snapshot — and `plete task resync` brings them up to date later, keeping any file
+the task changed. `plete manager new --project <name>` starts a manager from one
 too, with the project's skills and its `AGENTS.md` as `PROJECT.md`, imported
 from the end of the manager's own `AGENTS.md`, never replacing it; it adds no
 worktrees, and tasks made under it default to the same project.
 
 ```bash
-jeet projects new web --repo api --repo web   # prints ~/.jeet/projects/web
-jeet task new "Launch" --project web
-jeet task resync launch                       # --force replaces the task's edits too
-jeet manager new web --goal "Own the web app" --project web   # its tasks start from web too
+plete projects new web --repo api --repo web   # prints ~/.plete/projects/web
+plete task new "Launch" --project web
+plete task resync launch                       # --force replaces the task's edits too
+plete manager new web --goal "Own the web app" --project web   # its tasks start from web too
 ```
 
 `AGENTS.md` is the file Codex, Cursor, Amp, Gemini CLI and most other coding
-agents read, so a project works whichever agent you run. Next to it, jeet writes
+agents read, so a project works whichever agent you run. Next to it, plete writes
 a `CLAUDE.md` holding only `@AGENTS.md`, an import: Claude Code reads
 `AGENTS.md` itself only when there is no `CLAUDE.md`, and some of its sessions
 (older versions, the first session after an upgrade) read `CLAUDE.md` alone.
 Claude-only instructions can go below the import.
 
-A project made before jeet wrote `AGENTS.md` has only a `CLAUDE.md`. The next
-time a task is made or resynced from it, jeet moves it to `AGENTS.md` and leaves
+A project made before plete wrote `AGENTS.md` has only a `CLAUDE.md`. The next
+time a task is made or resynced from it, plete moves it to `AGENTS.md` and leaves
 the import in its place, and says so. A project with both files is left as it
 is, and if the move fails, its `CLAUDE.md` is copied as it is. Tasks already
 made keep their `CLAUDE.md` until they are resynced: one the task never changed
@@ -565,11 +575,11 @@ becomes the import, next to the project's `AGENTS.md`; one it changed is kept.
 ### The tasks list
 
 ```bash
-jeet          # or `jeet tasks`
+plete          # or `plete tasks`
 ```
 
 ```text
-┌ jeet · tasks ─────────────────────────────────────────────────────────────┐
+┌ plete · tasks ─────────────────────────────────────────────────────────────┐
 │ active 5   agents 6   reviews 2   projects 3    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
  ✦ assistant  2 sessions  ● *plan the week · inbox 1 · todo 4 open
@@ -611,8 +621,8 @@ both lists end with a dim reminder of it.
 
 The [assistant](#the-assistant) is pinned above the list: how many sessions it
 has, and the active one, the session `c` opens, with what it is doing. While
-any of its tmux windows were not started by jeet, a red `N unanchored` follows
-(`jeet task restart assistant` resumes them in windows jeet started). It is
+any of its tmux windows were not started by plete, a red `N unanchored` follows
+(`plete task restart assistant` resumes them in windows plete started). It is
 read from its files on a thread of its own, like the statuses.
 
 | Key | |
@@ -633,24 +643,24 @@ read from its files on a thread of its own, like the statuses.
 | `c` | talk to the assistant: attach to its most recently active session, starting one if need be |
 | `C` | the assistant's sessions: `⏎` attach, `n` new, `R` rename, `x` end, `*` primary |
 | `t` | the todo list: `space` ticks an item off (or back), `⏎` goes to the task it links, `a` adds one |
-| `i` | the assistant's inbox and activity, newest first: what is queued for it, what `jeet watch` saw on GitHub and what it did, from `actions.log`. `⏎` opens an event's page |
+| `i` | the assistant's inbox and activity, newest first: what is queued for it, what `plete watch` saw on GitHub and what it did, from `actions.log`. `⏎` opens an event's page |
 | `o` | sort by todo priority: tasks the open items link first, by their best item; again for latest activity |
 | `r` | refresh, re-reading the worktrees on disk |
 | `?` | every key |
 | `q` / `esc` | quit; `ctrl-q` quits into the selected task's directory |
 
 Launching the list also starts a background fetch of the store, when one is
-due. `jeet projects` on a terminal opens it on the projects tab.
+due. `plete projects` on a terminal opens it on the projects tab.
 
 ### The agents tab
 
 The second tab shows the tree under the [assistant](#the-assistant): the
-assistant at the root, then its managers and tasks and theirs, as `jeet manager
+assistant at the root, then its managers and tasks and theirs, as `plete manager
 ls` orders them (top-level tasks stay in *active*, archived ones in the
 archived list).
 
 ```text
-┌ jeet · agents ──────────────────────────────────────────────────────────────┐
+┌ plete · agents ──────────────────────────────────────────────────────────────┐
 │ active 6   agents 7   reviews 0   projects 2    live 5/8   needs you 1      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ┌ 6 of 7 agents shown ────────────────────────────────────────────────────────┐
@@ -686,22 +696,22 @@ index every two seconds while the tab is shown.
 | `→` / `←` / `⌫` | open / close a manager (everything starts open); else to the first task under it / to its parent |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
 | `I` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
-| `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `jeet manager show` |
-| `z` / `Z` | pause the node and everything below it / let it run again, as `jeet manager pause` / `resume` |
-| `x` | stop the node and everything below it, as `jeet manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
-| `n` | a new task or manager under the assistant or a manager, as `jeet task new --parent` / `jeet manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
-| `y` | answer the open question at the node or nearest below it, one passed to you first, as `jeet report answer` does: type the answer, `⏎` sends it, `esc` cancels |
+| `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `plete manager show` |
+| `z` / `Z` | pause the node and everything below it / let it run again, as `plete manager pause` / `resume` |
+| `x` | stop the node and everything below it, as `plete manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
+| `n` | a new task or manager under the assistant or a manager, as `plete task new --parent` / `plete manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
+| `y` | answer the open question at the node or nearest below it, one passed to you first, as `plete report answer` does: type the answer, `⏎` sends it, `esc` cancels |
 | `c` `C` `t` `i` | the assistant, as in the active tab: `i` is its inbox, not the node's reports (`I`) |
 
 What each node made of a pause, resume or stop is shown when it is done. A
 manager made with `n` starts at once, with its brief, and the status line
 says whether it started, was queued on `max_live` or is held by a paused
 manager above it; a task made with `n` is not started (`⏎` starts it), as
-in the active tab. What jeet refuses (a manager with no goal, a capability
+in the active tab. What plete refuses (a manager with no goal, a capability
 the parent does not hold) is shown on the form. `l`, `I` and `b` show what
 agents wrote, unfenced, and `z`, `Z`, `x`, `n` and `y` act as you, so they
-work only when you run jeet from your own terminal: not inside an agent's or
-a top-level task's pane, nor any window of jeet's tmux sessions. An answer
+work only when you run plete from your own terminal: not inside an agent's or
+a top-level task's pane, nor any window of plete's tmux sessions. An answer
 goes to the task that asked, with a copy to each manager it passed through;
 how each went is shown when it is done, and a refusal (answered meanwhile,
 say) stays on the form. The worktree, PR, archive and delete keys are the
@@ -709,8 +719,8 @@ active tab's: `⇥` back to it.
 
 ### The projects tab
 
-The fourth tab groups the active tasks and managers by project: the jeet
-project a task was started from (`jeet task new --project`, `n` in the form).
+The fourth tab groups the active tasks and managers by project: the plete
+project a task was started from (`plete task new --project`, `n` in the form).
 These are the projects this tab manages (see below); it also shows the work in
 them. A manager is listed under every project that a task below it,
 through any tasks in between, was started from, and under its own project if it
@@ -718,7 +728,7 @@ has one. Tasks and managers with no project are not listed here (the active
 tab has them).
 
 ```text
-┌ jeet · projects ──────────────────────────────────────────────────────────┐
+┌ plete · projects ──────────────────────────────────────────────────────────┐
 │ active 5   agents 6   reviews 2   projects 2    / filter  ⇥ switch        │
 └───────────────────────────────────────────────────────────────────────────┘
 ┌ 2 projects ───────────────────────────────────────────────────────────────┐
@@ -752,7 +762,7 @@ brings one back. Both lists end with a dim reminder of it.
 
 ### The reviews tab
 
-The third tab lists the reviews: each active review (what `jeet review`
+The third tab lists the reviews: each active review (what `plete review`
 makes). Reviews are shown here alone, never in the other tabs. `A` switches
 the tab to the archived reviews (`▪ archived`), and back, as it does the
 tasks list: they stay in the reviews tab rather than joining the archived
@@ -760,7 +770,7 @@ tasks, so a review is always found in the one place. Every review can be
 archived, brought back and deleted here.
 
 ```text
-┌ jeet · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
+┌ plete · reviews ────────────────────────────────────────────────────────────────────────────────────────┐
 │ active 6   agents 7   reviews 2   projects 3    / filter  ⇥ switch                                     │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ 2 reviews ─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -786,7 +796,7 @@ keeps what it said before. PR titles are shown as text, never run.
 | `⏎` | open the review's session: attach to the review's agent, or resume or start it, as `⏎` does in the active tab |
 | `v` | the review's PR in the review viewer, read from the review's checkout when it has one, else the repository's trunk |
 | `e` | explore the review's worktree |
-| `R` | ask an active review's agent to review again, as `jeet review <pr> --rerun` does (without opening the viewer); on an archived review, `a` brings it back first |
+| `R` | ask an active review's agent to review again, as `plete review <pr> --rerun` does (without opening the viewer); on an archived review, `a` brings it back first |
 | `a` | archive the review, after listing the ignored files that would go; on an archived one, bring it back |
 | `D` | delete the review, after listing any work that would be lost |
 | `A` | show the archived reviews instead of the active ones, and back |
@@ -796,12 +806,12 @@ A review has one worktree and one pull request, so the task keys `w`, `p`, `S`,
 `n` and `o` do nothing here.
 
 A review whose PR is merged or closed is archived for you, the way `a` (or
-`jeet task archive`) archives it: its agent is ended, its worktree removed,
+`plete task archive`) archives it: its agent is ended, its worktree removed,
 and its uncommitted work kept to come back if the PR is reviewed again. It is
-done by each `jeet watch --once` poll and when the reviews tab hears from
+done by each `plete watch --once` poll and when the reviews tab hears from
 GitHub, and never while the review's agent is mid-turn — running, asking you
 something, or with no hooks to say — so it waits for the agent to go idle. A
-review you bring back (`a`, or `jeet review`) after its PR was done stays
+review you bring back (`a`, or `plete review`) after its PR was done stays
 until you archive it; one that is merged or closed again later is archived
 again.
 Archiving deletes the files git ignores; unattended, that is allowed only for
@@ -821,9 +831,9 @@ outlives the branches — a merged PR still shows long after its worktree is
 gone.
 
 ```bash
-jeet task prs              # the current task's PRs, after asking GitHub for news
-jeet task prs fix-login    # another task's
-jeet task prs --offline    # only what is recorded
+plete task prs              # the current task's PRs, after asking GitHub for news
+plete task prs fix-login    # another task's
+plete task prs --offline    # only what is recorded
 ```
 
 ```text
@@ -840,65 +850,65 @@ title shown as `‹` and `›`: a title is whatever its author typed.
 ### The agent
 
 ```bash
-jeet task open fix-login                 # attach to the task's agent, starting it if needed
-jeet task open fix-login --session <id>  # resume that session instead of the latest
+plete task open fix-login                 # attach to the task's agent, starting it if needed
+plete task open fix-login --session <id>  # resume that session instead of the latest
 ```
 
-Each task's coding agent runs in its own tmux session, `jeet-<slug>`, in the
+Each task's coding agent runs in its own tmux session, `plete-<slug>`, in the
 task directory, so it keeps working when you detach (`Ctrl-Q`, or tmux's own `C-b d`) or close the
 terminal. tmux is required (`brew install tmux`, `apt install tmux`); without
-it `jeet task open` says so. Opening a task attaches to its session, starting
+it `plete task open` says so. Opening a task attaches to its session, starting
 the agent first if it is not running: Claude Code resumes the task's one
 session, or starts a new one. A task or manager has one session, as a review
 has: a `/clear` or a compact starts a new one, which replaces it from then on
 (the old one stays on record). Without a terminal, `open` leaves the agent
 running detached and prints the task directory.
 
-jeet starts Claude Code with hooks (passed with `--settings`, as a file
-only you can read under `~/.jeet/run/<task id>/<session>.json`, replaced at
+plete starts Claude Code with hooks (passed with `--settings`, as a file
+only you can read under `~/.plete/run/<task id>/<session>.json`, replaced at
 each launch, removed by a later launch once its session is no longer running,
 and removed with the rest when the task is archived or deleted; nothing is written into the
 task or a repository) that record what the agent is doing in
-`.jeet/status/<session>.json`, and with permission to run `jeet worktree`,
-`jeet ls` and `jeet report` without asking. Those settings also exclude
-`jeet` from Claude Code's sandbox, should you turn it on: jeet writes under
-`~/.jeet`, which the sandbox does not allow, and on Linux the sandbox hides
-the processes jeet identifies its caller by. So jeet runs unconfined, and a
-Bash command that chains other commands with `jeet` may run them unconfined
-too. `jeet task ls` shows what the agent is doing: `starting`,
+`.plete/status/<session>.json`, and with permission to run `plete worktree`,
+`plete ls` and `plete report` without asking. Those settings also exclude
+`plete` from Claude Code's sandbox, should you turn it on: plete writes under
+`~/.plete`, which the sandbox does not allow, and on Linux the sandbox hides
+the processes plete identifies its caller by. So plete runs unconfined, and a
+Bash command that chains other commands with `plete` may run them unconfined
+too. `plete task ls` shows what the agent is doing: `starting`,
 `running – <tool>`, `needs input – <question>`, `idle 5m`, or `not running`
 once the tmux session is gone. An agent with hooks that has said nothing 15
 seconds after starting is most likely held up at a startup prompt, and shows
 `needs input – startup prompt?`. Tasks are listed most recently active first,
-counting the agent's activity. An agent jeet has no harness for
+counting the agent's activity. An agent plete has no harness for
 (`agent = "aider"`) runs in tmux the same way, with no status: just
 `running`. Archiving or deleting a task ends its tmux session.
 
 Shift+Enter starts a new line in Claude Code instead of sending the message.
 Inside tmux that needs tmux's `extended-keys`, which is off by default, so
-jeet turns it on (with `set -s extended-keys on` and
+plete turns it on (with `set -s extended-keys on` and
 `set -as terminal-features 'xterm*:extkeys'`) as it starts an agent. The
-setting covers the whole tmux server, so jeet changes it only while it is at
+setting covers the whole tmux server, so plete changes it only while it is at
 tmux's default, and only once per server. If you switch it off again, it stays
-off. If your `tmux.conf` sets `extended-keys` itself, jeet leaves it alone.
-tmux older than 3.2 has no such setting, and jeet skips it. Agents that were
-already running when jeet turned it on, and terminals that were already
+off. If your `tmux.conf` sets `extended-keys` itself, plete leaves it alone.
+tmux older than 3.2 has no such setting, and plete skips it. Agents that were
+already running when plete turned it on, and terminals that were already
 attached, need a restart or a detach and reattach. A terminal that cannot
 send Shift+Enter differently from Enter still sends the message on
 Shift+Enter. In that case, use `Ctrl+J`, or type `\` and then press Enter, to
 start a new line.
 
 ```bash
-jeet task last fix-login         # the agent's last message, how its turn ended and when
-jeet task last fix-login -n 3    # its last three messages, oldest first
-jeet task last fix-login --json  # the same, for scripts
+plete task last fix-login         # the agent's last message, how its turn ended and when
+plete task last fix-login -n 3    # its last three messages, oldest first
+plete task last fix-login --json  # the same, for scripts
 ```
 
-`jeet task last` reads the task's session from the agent's own record
+`plete task last` reads the task's session from the agent's own record
 of it (Claude Code's transcript), not from its tmux pane, and says how the
 last turn ended: `finished`, `interrupted`, `API error: <what it said>`, or
-`still running`, beside the task's status as `jeet task ls` shows it. An
-agent jeet cannot read the record of says so.
+`still running`, beside the task's status as `plete task ls` shows it. An
+agent plete cannot read the record of says so.
 
 ```text
 task:      fix-login (idle 4m)
@@ -911,36 +921,36 @@ Pushed fix/login-cookie; opening the PR next.
 Claude Code asks once per folder whether you trust it, before any hook runs,
 and a task's agent waits at that question until you answer it. Trusting a
 folder covers the folders inside it (checked with Claude Code 2.1.296), so
-trusting `~/.jeet/tasks` once, by running `claude` there, covers every task
-to come. Until then, jeet watches each agent it starts for the question for
+trusting `~/.plete/tasks` once, by running `claude` there, covers every task
+to come. Until then, plete watches each agent it starts for the question for
 about 30 seconds: the task shows `needs input – trust folder`, with a
 notification unless you are attached to it, or, with
-[`auto_trust`](#the-coding-agents-harness) on, jeet answers yes for you
+[`auto_trust`](#the-coding-agents-harness) on, plete answers yes for you
 (never for a task paused or stopped).
 
 ### Messaging an agent
 
 ```bash
-jeet task send fix-login "also add tests"
-jeet task new fix-x --repo api --prompt "Fix X; add a test for it"
+plete task send fix-login "also add tests"
+plete task new fix-x --repo api --prompt "Fix X; add a test for it"
 ```
 
-`jeet task send` gets a message to the task's agent however it is doing. An
+`plete task send` gets a message to the task's agent however it is doing. An
 idle agent has it pasted in, as one bracketed paste (`tmux paste-buffer -p`),
 and submitted. A message typed in key by key could arrive cut off: Claude Code
 reads a long burst of keys as several pastes and keeps only the end. A busy
 agent, one waiting on you, or one with text in its prompt that you have not
-sent (the message would be joined to it) has it queued in `.jeet/inbox.jsonl`; when the agent
+sent (the message would be joined to it) has it queued in `.plete/inbox.jsonl`; when the agent
 finishes, its Stop hook hands the queue over and it carries straight on. A
 turn you interrupt with Esc has no Stop, so the queue is also typed in once
 Claude reports it has sat idle at its prompt (after about a minute). A message
 is never typed into a permission prompt, or into the dialogs Claude shows
 before its first hook runs, which it would answer. An agent that is not
-running is started with the message as its first prompt. `jeet task new
+running is started with the message as its first prompt. `plete task new
 --prompt` starts the new task's agent on a brief the same way.
 
 With Claude Code, each agent also has a *wake channel*: a small background
-process (`jeet inbox watch`, started by the agent's own session-start hook)
+process (`plete inbox watch`, started by the agent's own session-start hook)
 that hands it what is queued for it as soon as it is queued, through Claude
 Code's messaging socket, rather than waiting for its turn to end or typing
 into its pane. An idle agent wakes and reads it; a busy one gets it at its
@@ -952,22 +962,22 @@ through the channel as a message from another session, not over your text.
 Everything else (messages from the assistant or a manager, reports,
 answers, watch events, and what you send to an agent that is busy) arrives
 as a message from another session, which Claude Code tells the agent cannot
-approve anything, and `jeet task send` says "it gets it now, through its
+approve anything, and `plete task send` says "it gets it now, through its
 wake channel". If Claude Code refuses the message (a repo's
-`crossSessionInbound: "refuse"`, say), jeet notices it never arrived and
+`crossSessionInbound: "refuse"`, say), plete notices it never arrived and
 falls back to the queue and typing for that session, and tries the channel
 again after 10 minutes, then after an hour. A third refusal ends that
-session's watcher, and the next `jeet watch --once` poll repairs it: once the
+session's watcher, and the next `plete watch --once` poll repairs it: once the
 agent is idle, has no unsent text and nobody has typed in its window for two
-minutes, jeet ends it and resumes the same session in the same place (the
+minutes, plete ends it and resumes the same session in the same place (the
 conversation is kept; the cost is one prompt-cache write), which starts a new
 watcher. This is also how an agent started before the channel existed, or
 whose watcher died, gets one. It happens at most once per session per day and
 is logged in the assistant's `actions.log`; a refusal after a repair turns the
 channel off for that session for good, and tells its parent. A Stop leaves
 the queue to a working watcher; without one it hands over at most 2 KB at a
-time. Like `jeet task restart`, a repair ends the session's process, so background
-work it left running (background shells, subagents) ends with it. `jeet doctor wake` shows each running session's channel. `[harness]
+time. Like `plete task restart`, a repair ends the session's process, so background
+work it left running (background shells, subagents) ends with it. `plete doctor wake` shows each running session's channel. `[harness]
 wake = false` turns the channel off, and `wake_repair = "off"` keeps the
 repair, the back-off and the Stop's cap from happening ([The coding agent's
 harness](#the-coding-agents-harness)).
@@ -981,13 +991,13 @@ as a shell command, a slash command or a memory, is sent as `Message: …`; a
 ### Interrupting an agent
 
 ```bash
-jeet task interrupt fix-login
+plete task interrupt fix-login
 ```
 
-`jeet task interrupt` ends the turn the task's agent is running, as Esc in
+`plete task interrupt` ends the turn the task's agent is running, as Esc in
 its window would, and leaves its session open for the next message. The key
 goes to the agent's own pane, never to a pane you split off its window or a
-window you opened in its session (as `jeet task send` types into it). It presses the key
+window you opened in its session (as `plete task send` types into it). It presses the key
 once, and only while the agent is working or waiting on you
 (at a permission prompt, Esc refuses the pending tool call): an idle agent,
 one starting up or held at a startup prompt such as the trust dialog, one
@@ -1002,56 +1012,56 @@ status reads idle (`Interrupted`), and the turn's time so far is charged to
 its budget then; a turn you end with Esc yourself may read `running`, and be
 charged, for about a minute, until Claude reports it sits idle. The assistant is yours to interrupt in its own window, and a
 harness that cannot be interrupted is refused. Under the assistant it needs
-`task.send` (which pre-approves it, as it does `jeet task send`), and an
+`task.send` (which pre-approves it, as it does `plete task send`), and an
 interrupt that sent nothing is logged as `skipped`, with why, and not
 announced; a task with a parent may not interrupt another.
 To hold a task under the assistant and everything below it rather than end
-one turn, use `jeet manager pause`, `resume` and `stop` ([Reporting to the
+one turn, use `plete manager pause`, `resume` and `stop` ([Reporting to the
 parent](#reporting-to-the-parent)): a pause interrupts every working agent in
 the subtree and hands them nothing until it is resumed.
 
 ### Restarting or adopting an agent
 
 ```bash
-jeet task restart fix-login [--force]   # `assistant`: each of the assistant's windows
-jeet task adopt fix-login               # `assistant`: its windows jeet has no record of
+plete task restart fix-login [--force]   # `assistant`: each of the assistant's windows
+plete task adopt fix-login               # `assistant`: its windows plete has no record of
 ```
 
-`jeet task restart` ends the task's agent and starts it again in the same
+`plete task restart` ends the task's agent and starts it again in the same
 tmux session, resuming its latest session, so its conversation carries on
-with this jeet's hooks and settings. It is refused while the agent is
+with this plete's hooks and settings. It is refused while the agent is
 mid-turn, waiting on you, starting up, or has text in its prompt you have
 not sent, unless you pass `--force`; and while the task is paused or
 stopped. Anything the agent left running in the background (subagents,
-workflows, `/loop` schedules) ends with it. `jeet task restart assistant`
+workflows, `/loop` schedules) ends with it. `plete task restart assistant`
 restarts each running assistant window, leaving busy ones alone (and
 failing, so you know) without `--force`; only you can restart the
 assistant. Under the assistant it needs `task.open`.
 
-jeet knows an agent by the process it launched for it ([who is
-calling](#the-assistants-permissions)). An agent started by an older jeet,
-or outside jeet, has no such record: `jeet task ls` marks it `(unanchored)`
+plete knows an agent by the process it launched for it ([who is
+calling](#the-assistants-permissions)). An agent started by an older plete,
+or outside plete, has no such record: `plete task ls` marks it `(unanchored)`
 and says how to fix it, the tasks list shows `unanchored` beside its status
-(and the fix on the status line when it is selected), and its `jeet report`,
-`jeet worktree add` and the like are refused. Restart it when it is idle, or,
-to keep work in progress running, adopt it: `jeet task adopt <task>` shows
+(and the fix on the status line when it is selected), and its `plete report`,
+`plete worktree add` and the like are refused. Restart it when it is idle, or,
+to keep work in progress running, adopt it: `plete task adopt <task>` shows
 you the process running in the task's agent pane and records it as the
 task's once you type the task's name back. Only you can adopt, from a
 terminal of your own: it is refused to the assistant and every task, and
-to anything running in a pane of jeet's tmux sessions, so an agent cannot
+to anything running in a pane of plete's tmux sessions, so an agent cannot
 vouch for itself or another. An adopted agent keeps the hooks it was started
 with, so its status reports to its parent may not work until it restarts.
 
 ### Reporting to the parent
 
 ```bash
-jeet report progress|done|blocked|question "…"
+plete report progress|done|blocked|question "…"
 ```
 
 A task the assistant makes (or one made with `--parent assistant`) reports to
 it, and that is its only way up: tasks never message each other sideways. A
 report is kept in the index and reaches the assistant fenced as the task's
-claim, `<jeet-report … untrusted="true">`; the assistant's session context
+claim, `<plete-report … untrusted="true">`; the assistant's session context
 lists each such task with its last report. Reports hold at most 2,000 bytes:
 put detail in the pull request or a file and say where. By default a
 report to the assistant is kept for it, not pushed (see [The assistant
@@ -1064,35 +1074,35 @@ into its pane when it sits idle and queued while it is busy), and held in
 its inbox when it is not running, unless the report is one that starts it.
 
 ```bash
-jeet report ls                 # the open questions you hold
-jeet report answer <id> "…"    # answer one
-jeet report escalate <id>      # pass one up
-jeet show r123                 # a report, whole (m45: a message)
+plete report ls                 # the open questions you hold
+plete report answer <id> "…"    # answer one
+plete report escalate <id>      # pass one up
+plete show r123                 # a report, whole (m45: a message)
 ```
 
 A `question` or `blocked` report stays open until it is answered or the
 task reports done, blocked or another question (a `progress` report, or
-jeet's own `status` report, does not close it). Its parent holds it, and
+plete's own `status` report, does not close it). Its parent holds it, and
 either answers it or passes it to its own parent, which gets it fenced
 with `via="manager …"` and may be started by it. Only
 the holder answers or passes it on. Once the assistant passes one up it is
-yours: jeet raises one desktop notification (`jeet: task w asks you
+yours: plete raises one desktop notification (`plete: task w asks you
 (#42)`), even with `[assistant] notify = false`. You may answer any open
 question in the tree, from a terminal of your own (not a task's pane, nor
-any pane of jeet's tmux sessions); `jeet report ls` there lists every one,
+any pane of plete's tmux sessions); `plete report ls` there lists every one,
 those with you first. The answer reaches the task that asked as
-`<jeet-answer to="42" from="user">`, as a message does, and may start it;
+`<plete-answer to="42" from="user">`, as a message does, and may start it;
 each manager the question passed through, up to the one holding it, gets a
 copy with the question. An answer is kept even if it is not delivered, and
 is not sent again: the TUI's `i` shows it. No agent can pass its words off
-as an answer: `jeet task send` and `jeet task new --prompt` from anyone but
-you turn the `<` of a `<jeet-…` tag into `‹`.
+as an answer: `plete task send` and `plete task new --prompt` from anyone but
+you turn the `<` of a `<plete-…` tag into `‹`.
 
-jeet reports for the task too, as `status`: when its agent waits on a prompt
+plete reports for the task too, as `status`: when its agent waits on a prompt
 only you can answer, sits idle longer than `[managers] idle_report_mins`
-(default 10; `jeet watch` and the assistant's own turns look), or ends without
+(default 10; `plete watch` and the assistant's own turns look), or ends without
 reporting done. These never start an assistant session. `--goal` and `--done`
-on `jeet task new` give the task a definition of done, shown to its agent at
+on `plete task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
 worker_default` (every capability unless set), refused unless its parent holds each one, and `--budget
@@ -1110,16 +1120,16 @@ own `[review]` budget: [Review limits](#review-limits)): a
 start past it is queued and the task's parent told, and it starts when a
 running one's agent ends (a window you opened in its session does not hold
 the slot) (its session's end hook starts it; on a harness without
-that hook, the next `jeet watch` poll or TUI refresh does). `jeet task open`
+that hook, the next `plete watch` poll or TUI refresh does). `plete task open`
 from your terminal (or the TUI's open) starts it anyway, with a warning, and
-with its brief and whatever waited for it, in the session you picked if any (an agent jeet cannot give a first prompt starts
+with its brief and whatever waited for it, in the session you picked if any (an agent plete cannot give a first prompt starts
 without it, and what waited is typed in with the next message). A queued
 task whose directory has gone is dropped from the queue with a warning.
-`jeet manager ls [--json]` shows the tree under the assistant, `jeet manager
+`plete manager ls [--json]` shows the tree under the assistant, `plete manager
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
-state and children, and `jeet manager grant <task> <caps>|--none` replaces
+state and children, and `plete manager grant <task> <caps>|--none` replaces
 its grant (`manager.grant`); what a task loses, the tasks below it lose too.
-`jeet manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
+`plete manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
 sets one (`manager.grant`), within what is left above it (a unit kept or
 lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
@@ -1127,11 +1137,11 @@ pauses it at once. Both write a manager's `BRIEF.md` again, as does each
 of its sessions starting.
 
 ```bash
-jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
+plete manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
   --brief-file brief.md --allow task.create,task.send --budget 6h --max-children 4
 ```
 
-`jeet manager new` (`manager.create`) makes a manager and starts its agent.
+`plete manager new` (`manager.create`) makes a manager and starts its agent.
 It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
@@ -1144,7 +1154,7 @@ starts it from a [project](#projects): its skills are copied in and its
 `AGENTS.md` becomes `PROJECT.md`, imported from the end of the manager's own
 `AGENTS.md` (which stays as it is); no worktrees are added, as a manager holds
 them read-only and asks for them when it wants one. The project is stored with
-the manager, and a task or manager made under it (`jeet task new` from its
+the manager, and a task or manager made under it (`plete task new` from its
 agent, `--parent`, or `n` on its node in the agents tab) starts from the same
 project unless given `--project` of its own (and so with that project's
 repositories as worktrees, a `--repo` for one of them with no `--branch` adding
@@ -1166,32 +1176,32 @@ a line break, a bidirectional, zero-width or other invisible format
 character (such as Unicode tag characters or variation selectors), `<` or `>` in its
 name, nor more than 100 characters: other agents read it, and the user sees
 it. The assistant's session summary lists a task a manager
-made by its slug alone, since its name is that manager's text; `jeet task
-ls` and `jeet task last --json`, run by an agent, show only the names of
+made by its slug alone, since its name is that manager's text; `plete task
+ls` and `plete task last --json`, run by an agent, show only the names of
 tasks with no parent, made under the assistant, or made under itself
-(others get `-` and `null`), and the other `jeet task` commands name such
+(others get `-` and `null`), and the other `plete task` commands name such
 a task by its slug in what they print.
 
 A manager's home is a task directory with a manager's role in place of
 the worker's skill: `AGENTS.md` (plan, delegate, report; stay in your
 subtree; worktrees are read-only; the limits are cooperative), the
-`jeet-manager` skill, `notes/worklog.md`, `todo.md`, which it edits by
-hand (`jeet todo` stays the assistant's list), and `BRIEF.md`: its goal,
+`plete-manager` skill, `notes/worklog.md`, `todo.md`, which it edits by
+hand (`plete todo` stays the assistant's list), and `BRIEF.md`: its goal,
 done-when, budget and what it may do, fenced as its parent's brief and
 read-only. Each of its sessions starts with that brief, the tasks below it
 and their last reports, its budget, its todo list and what is queued for
-it. The assistant learns of managers from its `jeet-managers` skill.
+it. The assistant learns of managers from its `plete-managers` skill.
 
 ```bash
-jeet manager pause fix-x       # interrupt its turn, and every task's below it
-jeet manager resume fix-x      # hand over what waited, and let it start again
-jeet manager stop fix-x        # end its agent and every one below it
-jeet manager stop --all        # every task under the assistant, and its reviews (only you)
+plete manager pause fix-x       # interrupt its turn, and every task's below it
+plete manager resume fix-x      # hand over what waited, and let it start again
+plete manager stop fix-x        # end its agent and every one below it
+plete manager stop --all        # every task under the assistant, and its reviews (only you)
 ```
 
 These need `manager.stop`. A paused or stopped task, and every task below
 it, is handed nothing: messages and reports to it wait in its inbox, its
-turn's end hands it nothing, and nothing starts it; `jeet task open`
+turn's end hands it nothing, and nothing starts it; `plete task open`
 attaches to it while its agent still runs, and otherwise says to resume it.
 Pause interrupts the turn of each of their agents that is working (one
 Escape, never over what you typed), and says, task by task, what it did; an
@@ -1219,23 +1229,23 @@ brief for then.
 ### Archiving and deleting
 
 ```bash
-jeet task archive fix-login          # -f: without asking about ignored files
-jeet task unarchive fix-login
-jeet task delete fix-login           # -f: without asking about what is lost
-jeet task delete api -r              # -r: every task under it too (archive, unarchive as well)
-jeet task delete api --reparent      # api alone: the tasks under it go to its parent
+plete task archive fix-login          # -f: without asking about ignored files
+plete task unarchive fix-login
+plete task delete fix-login           # -f: without asking about what is lost
+plete task delete api -r              # -r: every task under it too (archive, unarchive as well)
+plete task delete api --reparent      # api alone: the tasks under it go to its parent
 ```
 
 **Archive** frees the disk and keeps the work: each worktree's uncommitted
 changes — staged, unstaged and untracked — are saved under
-`refs/jeet/stash/<task-id>/<dir>`, its HEAD is pinned under
-`refs/jeet/head/<task-id>/<dir>` so not even a commit on a detached HEAD is lost
+`refs/plete/stash/<task-id>/<dir>`, its HEAD is pinned under
+`refs/plete/head/<task-id>/<dir>` so not even a commit on a detached HEAD is lost
 to gc, and only then is the worktree removed. Files git ignores (build output,
 `.env`, local config) are not kept: removing the worktree deletes them. So
 archive names them first and asks — the tasks list in its confirm, the CLI on
 the terminal — and without a terminal it needs `--force`. The task directory itself
 stays, so an agent's sessions still find it. Archive first ends the task's
-agent and any review job running for it or in its worktrees (a `jeet review`
+agent and any review job running for it or in its worktrees (a `plete review`
 still running is stopped, its result never written), and is refused from
 inside such a job. **Unarchive** puts every worktree
 back on its branch (or detached at its commit) with its changes reapplied, then
@@ -1243,7 +1253,7 @@ drops the refs.
 
 **Delete** removes everything the task owns: its agent and any review job
 running for it or in its worktrees, its worktrees, the branches it
-created (never ones that existed before), its `refs/jeet` refs and its
+created (never ones that existed before), its `refs/plete` refs and its
 directory, with everything else on its canvas. It first lists what would be
 lost — uncommitted changes, commits that would be left on no branch or remote,
 and any git checkout on the canvas that is none of the task's worktrees (a
@@ -1278,8 +1288,8 @@ keeps only what it could use where it was and its new parent lets
 through, so nothing it may do changes, and a capability its grant drops is
 named. The reports sent to the manager are kept, as sent to its parent;
 what it used still counts toward every budget above it. The new parent is
-told of each task, in jeet's words, with the open question it now holds,
-and is handed each question the manager held, as passed on by jeet;
+told of each task, in plete's words, with the open question it now holds,
+and is handed each question the manager held, as passed on by plete;
 a running task is handed its new brief, and every manager moved gets its
 `BRIEF.md` again. If the move is refused after the files are gone, the
 row is kept, and running the delete again once the cause is gone finishes
@@ -1288,17 +1298,17 @@ the job. It is CLI only.
 ## The assistant
 
 ```bash
-jeet chat                          # resume its most recently active session
-jeet chat --new [name]             # start a fresh one
-jeet chat --pick                   # ⏎ attach  n new  R rename  x end  * primary
-jeet task send assistant "…"       # message it, as you would a task's agent
+plete chat                          # resume its most recently active session
+plete chat --new [name]             # start a fresh one
+plete chat --pick                   # ⏎ attach  n new  R rename  x end  * primary
+plete task send assistant "…"       # message it, as you would a task's agent
 ```
 
 The assistant is one Claude Code organiser for all your work: it keeps a
 running worklog and your todo list, and sets up, steers and tidies away tasks
-through the jeet CLI, within the permissions you give it (below). Its home is
-`~/.jeet/assistant`, set up by the first `jeet chat`: an `AGENTS.md` on its
-role (with a `CLAUDE.md` importing it, as in a project), a `jeet-assistant`
+through the plete CLI, within the permissions you give it (below). Its home is
+`~/.plete/assistant`, set up by the first `plete chat`: an `AGENTS.md` on its
+role (with a `CLAUDE.md` importing it, as in a project), a `plete-assistant`
 skill with the commands it uses, `notes/worklog.md` and `todo.md`. They are
 written only when missing, so your edits and its own survive. A home from
 before `AGENTS.md` has its `CLAUDE.md`, edited or not, moved to `AGENTS.md`
@@ -1308,9 +1318,9 @@ One home, any number of sessions. Continuity lives in those files rather than
 in any one conversation, so a fresh session or a `/clear` loses nothing that
 matters, and two can run at once — one planning your week, one triaging
 reviews. Each runs in a window of its own in the tmux session
-`jeet-assistant`, with the same hooks and status as a task's agent, and with
-`JEET_ASSISTANT=1`. Every session starts with a summary of the active tasks,
-their open pull requests and your own that `jeet watch` follows, with their
+`plete-assistant`, with the same hooks and status as a task's agent, and with
+`PLETE_ASSISTANT=1`. Every session starts with a summary of the active tasks,
+their open pull requests and your own that `plete watch` follows, with their
 checks, the GitHub events the watcher saw in the last week, such as review
 requests (all fenced as data written by others), the tasks it made with their
 last report (fenced as their claims), the todo list and any messages and
@@ -1322,14 +1332,14 @@ picker) while it runs, else to the most recently active running one, by the
 same idle/busy/not-running rules as a task's agent; with none running, a
 session called `events <date>` starts with them. One queued for a busy session
 waits for that session, not whichever finishes first. Any task's agent can
-send one, so each reaches the assistant fenced as untrusted, with who jeet
+send one, so each reaches the assistant fenced as untrusted, with who plete
 thinks sent it (`task <slug>`, or `the command line`), and the assistant is
 told to read it as a request to weigh, never as your instructions. To tell it
 something as yourself, talk to it in its window.
 
 A `/clear`, a fork or a resume inside a session's window carries on in a new
 session, which follows on from the one before it in that window, keeps its
-name and its queued messages, and is the one `jeet chat` finds there.
+name and its queued messages, and is the one `plete chat` finds there.
 
 The assistant is not a task: it is not listed, opened, archived or deleted
 like one, and no task can be called `assistant`. The tasks list pins it above
@@ -1339,15 +1349,15 @@ todo list and `i` its inbox and activity.
 ### Todo
 
 ```bash
-jeet todo add "fix the cookie" -p 1 --task fix-login   # in priority order
-jeet todo ls [--json]                                  # numbered; also plain `jeet todo`
-jeet todo done cookie [--undo]                         # by its text, or a part only it has
-jeet todo rm 3                                         # or by number
+plete todo add "fix the cookie" -p 1 --task fix-login   # in priority order
+plete todo ls [--json]                                  # numbered; also plain `plete todo`
+plete todo done cookie [--undo]                         # by its text, or a part only it has
+plete todo rm 3                                         # or by number
 ```
 
-`~/.jeet/assistant/todo.md` is the list: markdown, one checkbox per item, most
+`~/.plete/assistant/todo.md` is the list: markdown, one checkbox per item, most
 important first, with an optional `!p1`/`!p2`… priority and `@task-slug` links.
-Everything else in it is kept as written. `jeet todo` changes it under a lock
+Everything else in it is kept as written. `plete todo` changes it under a lock
 and writes it whole, so the assistant's sessions never lose each other's
 edits. An item is best named by its text: a number is where it was when
 listed, and an item added above it since moves it down. The assistant needs
@@ -1356,13 +1366,13 @@ no permission for its own list.
 ### Watching GitHub
 
 ```bash
-jeet watch --once        # poll now: what launchd and the tasks list run
-jeet watch install       # every `interval_secs`, with launchd (macOS)
-jeet watch uninstall
-jeet watch status        # installed? last poll, what it follows
+plete watch --once        # poll now: what launchd and the tasks list run
+plete watch install       # every `interval_secs`, with launchd (macOS)
+plete watch uninstall
+plete watch status        # installed? last poll, what it follows
 ```
 
-`jeet watch --once` asks GitHub, through `gh`, for your unread notifications
+`plete watch --once` asks GitHub, through `gh`, for your unread notifications
 (with `If-Modified-Since`, so a poll with nothing new costs nothing), the
 checks on your open pull requests, and the items of the GitHub Projects you
 name. What is new since the last poll becomes an event: `review_requested`,
@@ -1377,7 +1387,7 @@ none matches is a desktop notification:
 
 ```toml
 [watch]
-repos = ["acme/*", "me/jeet"]                 # only these (default: all)
+repos = ["acme/*", "me/plete"]                 # only these (default: all)
 projects = [{ owner = "acme", number = 3 }]   # needs `gh auth refresh -s read:project`
 interval_secs = 120
 
@@ -1403,23 +1413,23 @@ action = "notify"      # just a notification
 `on` and `repos` may be left out to match anything. Events for the assistant
 go to its sessions by the rules above (primary, else most recent, else a new
 `events <date>` session), several to a message; an event for a task goes to
-its agent the way `jeet task send` would send it (never to a manager, which
+its agent the way `plete task send` would send it (never to a manager, which
 may have a worker's PR in its history from reading it). A `manager:<slug>`
 rule hands its events to the active manager with exactly that slug (not its
-name), several to a message under a line in jeet's words, and may start it
+name), several to a message under a line in plete's words, and may start it
 through the start gate, as an event for a task may; the slug is looked up at
 each poll, and one with no active manager of that slug sends its events to
 the assistant, with a warning in the watch log. Either way the event is
 fenced as `<github-event untrusted="true">`, since titles and comments are
 written by other people: data to weigh, never instructions. One a task or a
 manager cannot be given goes to the assistant; one the assistant cannot be
-given is notified, as is one held for an agent jeet could not start. Each
+given is notified, as is one held for an agent plete could not start. Each
 event, and where it went, is appended to
-`~/.jeet/watch-events.jsonl`.
+`~/.plete/watch-events.jsonl`.
 
-`jeet watch install` writes `~/Library/LaunchAgents/dev.jeet.watch.plist`,
-which runs `jeet watch --once` every `interval_secs` with the `PATH` you
-installed it from, logging to `~/.jeet/watch.log`, and loads it with
+`plete watch install` writes `~/Library/LaunchAgents/dev.plete.watch.plist`,
+which runs `plete watch --once` every `interval_secs` with the `PATH` you
+installed it from, logging to `~/.plete/watch.log`, and loads it with
 `launchctl bootstrap`. Elsewhere it installs nothing, and prints a systemd user
 service and timer to set up instead. The job never starts a tmux server: one
 started there would hand launchd's bare environment to every pane it ever
@@ -1431,33 +1441,33 @@ assistant the `watch.install` capability; polling takes none.
 ## Setup
 
 ```bash
-jeet setup                         # start or resume the setup chat (tmux, attached)
-jeet setup --new                   # start a fresh setup session
-jeet setup status                  # what is staged, each target's hash, the last applied run
-jeet setup apply                   # one diff and one y/N/q per staged file
-jeet setup discard                 # drop everything staged
+plete setup                         # start or resume the setup chat (tmux, attached)
+plete setup --new                   # start a fresh setup session
+plete setup status                  # what is staged, each target's hash, the last applied run
+plete setup apply                   # one diff and one y/N/q per staged file
+plete setup discard                 # drop everything staged
 ```
 
-`jeet setup` opens a chat with the setup agent in the tmux session
-`jeet-setup`, resuming its last session. It goes through jeet one topic at a
+`plete setup` opens a chat with the setup agent in the tmux session
+`plete-setup`, resuming its last session. It goes through plete one topic at a
 time (repos, the harness, permissions, PR policy, the assistant, managers and
 reviews, watching GitHub, notifications, instructions), shows what is set,
 asks what you want and stages the changes. It applies nothing itself:
-`jeet setup apply` runs in a pane beside it, where you take or refuse each
-change. Its home is `~/.jeet/setup/`: an `AGENTS.md` and a `setup` skill
+`plete setup apply` runs in a pane beside it, where you take or refuse each
+change. Its home is `~/.plete/setup/`: an `AGENTS.md` and a `setup` skill
 (written only when missing, so your edits survive), `answers.md`, its notes on
 what you chose, which a later run starts from, and `builtin/`, the templates
-this jeet ships (the assistant's `AGENTS.md` and skills and those of new
+this plete ships (the assistant's `AGENTS.md` and skills and those of new
 homes), rewritten at each launch for the agent to show you what changed
-upstream. Its settings let it read anything under `~/.jeet` and `~/.claude`
-and write only in its home, run jeet's read-only commands and `jeet setup
-status` without asking, and deny it `jeet setup apply`, `git push`, `gh` and
+upstream. Its settings let it read anything under `~/.plete` and `~/.claude`
+and write only in its home, run plete's read-only commands and `plete setup
+status` without asking, and deny it `plete setup apply`, `git push`, `gh` and
 edits to `~/.claude`, git and shell files. It never edits
 `~/.claude/settings.json`; it prints advice for that instead. It is not a
 task: it is not listed, opened, archived or deleted like one, and no task
 can be called `setup`.
 
-Changes to jeet's own files are staged in `~/.jeet/setup/proposed/`, each at
+Changes to plete's own files are staged in `~/.plete/setup/proposed/`, each at
 its target id (`config.toml`, `assistant/AGENTS.md`,
 `assistant/.claude/skills/<name>/SKILL.md`, Markdown files under
 `templates/{root,manager,worker}/`),
@@ -1465,50 +1475,50 @@ with a `manifest.toml` beside them:
 
 ```toml
 ["assistant/AGENTS.md"]
-path = "~/.jeet/assistant/AGENTS.md"   # optional; must be where the id points
+path = "~/.plete/assistant/AGENTS.md"   # optional; must be where the id points
 reason = "shorter role section"
 hash = "af63dc4c8601ec8c"              # the target's hash when staged; omit for a new file
 ```
 
-`jeet setup apply` writes only those targets and refuses anything else in the
+`plete setup apply` writes only those targets and refuses anything else in the
 manifest, a staged file reached through a symlink, and a target that is one.
 For each file it prints a coloured unified diff (or "new file") and
 asks `Apply this change? [y/N/q]`. A staged `config.toml` is first loaded as
-jeet would load it, with the `[managers]` and `[review]` policies, the
+plete would load it, with the `[managers]` and `[review]` policies, the
 `[assistant] allow` capabilities and the `[notify] via` backends (`command`
 needs `[notify] command`) checked, and refused if any fails. The diff
 shows exactly the bytes that would be written. A file
 whose target changed since it was staged (its hash no longer matches, as
-`jeet setup status` shows) is refused too: stage it again. On `y`, the old
-file is copied to `~/.jeet/backups/setup-<UTC stamp>/<target id>`, the new
+`plete setup status` shows) is refused too: stage it again. On `y`, the old
+file is copied to `~/.plete/backups/setup-<UTC stamp>/<target id>`, the new
 one is written through a temp file and a rename, it leaves `proposed/`, and a
-line goes to `~/.jeet/setup/applied.log`. At the end apply prints the backup
+line goes to `~/.plete/setup/applied.log`. At the end apply prints the backup
 directory and the command that restores it, and lists the running agents
-that keep their old settings until `jeet task restart <slug>`; it restarts
+that keep their old settings until `plete task restart <slug>`; it restarts
 none itself.
 
 Apply runs only at your own terminal: it refuses with no terminal on stdin,
-and under any agent jeet started (`JEET_TASK_ID` set).
+and under any agent plete started (`PLETE_TASK_ID` set).
 
 ## Importing
 
 ```bash
-jeet import                          # scan_roots, jeet's old directories, every indexed trunk
-jeet import ~/Projects/api ~/src     # just these
-jeet import --yes                    # everything found, one task each, no questions
-jeet import --remove-originals       # and remove each original once its task has a copy
+plete import                          # scan_roots, plete's old directories, every indexed trunk
+plete import ~/Projects/api ~/src     # just these
+plete import --yes                    # everything found, one task each, no questions
+plete import --remove-originals       # and remove each original once its task has a copy
 ```
 
-`jeet import` is the way in for work that lives outside jeet. It looks for git
+`plete import` is the way in for work that lives outside plete. It looks for git
 checkouts and lists what it would do:
 
 ```text
-jeet: into the store, cloned from origin:
+plete: into the store, cloned from origin:
   github.com/acme/api                      git@github.com:acme/api.git
-jeet: to import, one task each unless grouped:
+plete: to import, one task each unless grouped:
   1  github.com/acme/api   feat/login · 2 unpushed commits, 3 uncommitted changes · copied from ~/Projects/api
   2  github.com/acme/api   parked · 1 unpushed commit · copied from (branch)
-  3  github.com/acme/web   old-feature · moved from ~/.jeet/worktrees/github.com/acme/web/old-feature
+  3  github.com/acme/web   old-feature · moved from ~/.plete/worktrees/github.com/acme/web/old-feature
 Import which? ⏎ all, one task each · `1+3` puts 1 and 3 in one task, `1+3=name` names it · …
 ```
 
@@ -1519,12 +1529,12 @@ Import which? ⏎ all, one task each · `1+3` puts 1 and 3 in one task, `1+3=nam
   changes (staged, unstaged and untracked; not ignored files) are reapplied on
   top. Work on the default branch comes across detached at the same commit,
   since the store's trunk has that branch. Branches with nothing origin lacks
-  are left out: `jeet worktree add <repo> --branch <name>` gets those.
-- **A worktree of a store trunk outside any task** — what `jeet checkout` and
-  `jeet exec --ephemeral` made before tasks — is jeet's own, so it is moved
+  are left out: `plete worktree add <repo> --branch <name>` gets those.
+- **A worktree of a store trunk outside any task** — what `plete checkout` and
+  `plete exec --ephemeral` made before tasks — is plete's own, so it is moved
   into a task as it is with `git worktree move`.
 - **Claude Code sessions** started in a checkout are copied to its task, so
-  `jeet task open` can resume them.
+  `plete task open` can resume them.
 
 The originals are only read. `--remove-originals` removes, after asking (or
 with `--yes`), each linked worktree and parked branch whose task holds an
@@ -1533,144 +1543,144 @@ stays, since those were not copied, and a repository's main working tree is
 never removed. Running import
 again skips work already in a task. Everything it says goes to stderr.
 
-`jeet cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `jeet exec` for subshells or `jeet path` in scripts.
+`plete cd` is **not** a binary subcommand — it only works via the `init-shell` wrapper. Use `plete exec` for subshells or `plete path` in scripts.
 
 ## Tab completion
 
 ### Homebrew and apt
 
-`brew install jeet` and `apt install jeet` ship **dynamic** completion scripts that call back into `jeet` at tab time, so repo filters, task and worktree names, and `--branch` values come from your index (not directory listing).
+`brew install plete` and `apt install plete` ship **dynamic** completion scripts that call back into `plete` at tab time, so repo filters, task and worktree names, and `--branch` values come from your index (not directory listing).
 
 - **bash (Linux):** requires the `bash-completion` package (recommended by the `.deb`).
 - **bash (macOS):** install Homebrew `bash-completion@2` and load it in your profile.
 - **zsh:** needs `compinit` (default on interactive zsh). Homebrew users should have `eval "$(brew shellenv)"` in `~/.zprofile` / `~/.zshrc`.
 
-### `jeet cd` wrapper
+### `plete cd` wrapper
 
-The `jeet cd` command is a shell function, not a binary subcommand. Add **one line** to `~/.zshrc` or `~/.bashrc` for native `cd` plus wrapper tab completion:
+The `plete cd` command is a shell function, not a binary subcommand. Add **one line** to `~/.zshrc` or `~/.bashrc` for native `cd` plus wrapper tab completion:
 
 ```bash
-eval "$(jeet init-shell)"
+eval "$(plete init-shell)"
 ```
 
-Or let jeet write that line for you:
+Or let plete write that line for you:
 
 ```bash
-jeet install-shell
+plete install-shell
 ```
 
 Manual install for other shells:
 
 ```bash
-jeet completions fish > ~/.config/fish/completions/jeet.fish
+plete completions fish > ~/.config/fish/completions/plete.fish
 ```
 
 Shell scripts can query candidates directly:
 
 ```bash
-jeet complete repos
-jeet complete branches acme/widget
+plete complete repos
+plete complete branches acme/widget
 ```
 
 ## Moving to tasks
 
 Every checkout now belongs to a task, and the commands that made or registered
-checkouts anywhere else are gone. Run `jeet import` once: it brings repositories
+checkouts anywhere else are gone. Run `plete import` once: it brings repositories
 you registered with `adopt` or `scan` into the store, and moves what `checkout`
-and `exec --ephemeral` left under `~/.jeet/worktrees` and `~/.jeet/ephemeral`
+and `exec --ephemeral` left under `~/.plete/worktrees` and `~/.plete/ephemeral`
 into tasks.
 
 | before | now |
 |--------|-----|
-| `jeet adopt <path>`, `jeet scan` | `jeet import [path]` |
-| `jeet checkout <branch>` | `jeet worktree add <repo> --branch <branch>` in a task |
-| `jeet exec <repo> --branch <b>`, `jeet path <repo> --branch <b>` | `jeet worktree path <name>` |
-| `jeet exec <repo> --ephemeral` | `jeet task new <name> --repo <repo>`, then `jeet task delete` |
-| `jeet sessions` | `jeet task open <task> --session <id>`; `ctrl-s` in the explorer, inside a task |
-| `jeet worktree clean`, `jeet worktree rename` | `jeet worktree rm`, `jeet task delete` |
+| `plete adopt <path>`, `plete scan` | `plete import [path]` |
+| `plete checkout <branch>` | `plete worktree add <repo> --branch <branch>` in a task |
+| `plete exec <repo> --branch <b>`, `plete path <repo> --branch <b>` | `plete worktree path <name>` |
+| `plete exec <repo> --ephemeral` | `plete task new <name> --repo <repo>`, then `plete task delete` |
+| `plete sessions` | `plete task open <task> --session <id>`; `ctrl-s` in the explorer, inside a task |
+| `plete worktree clean`, `plete worktree rename` | `plete worktree rm`, `plete task delete` |
 
 ## Migration from v0.1.x
 
 | v0.1.x | v0.2.0 |
 |--------|--------|
-| `jeet list` | `jeet ls` |
-| `jeet worktree list` | `jeet worktree ls` |
-| `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
-| `jeet cd --print` | `jeet path` |
+| `plete list` | `plete ls` |
+| `plete worktree list` | `plete worktree ls` |
+| `plete cd` | `plete exec` (subshell) or `plete cd` via init-shell |
+| `plete cd --print` | `plete path` |
 
 ## What's new in v0.14
 
 Quieter messaging, notifications that reach you wherever you are, and a
-setup chat that walks you through jeet's config.
+setup chat that walks you through plete's config.
 
 ### Messaging
 
 - **Wake repair.** An agent whose wake channel is gone (started before the
   channel existed, its watcher died, or Claude Code refused it three times)
-  is repaired by the next `jeet watch --once` poll: once it is idle, has no
-  unsent text and nobody has typed in its window for two minutes, jeet ends
+  is repaired by the next `plete watch --once` poll: once it is idle, has no
+  unsent text and nobody has typed in its window for two minutes, plete ends
   it and resumes the same session in place. At most once per session per
-  day, logged in the assistant's `actions.log`; `jeet doctor wake` shows
+  day, logged in the assistant's `actions.log`; `plete doctor wake` shows
   each session's channel. A Stop now leaves the queue to a live watcher, and
   a refused channel backs off (10 minutes, then an hour) before it is tried
   again. `[harness] wake_repair = "off"` turns all of that off
   ([Messaging an agent](#messaging-an-agent)).
 - **Quiet rendering.** What is queued for the assistant and managers is
-  posted by class: questions, blocks and answers whole; a `done`, a `jeet
-  task send` and a `jeet watch` batch as one line each; `progress` and
-  `status` folded into a digest that waits up to `digest_mins`. `jeet show
-  r123` / `jeet show m45` print any of them whole. Work tasks still get
+  posted by class: questions, blocks and answers whole; a `done`, a `plete
+  task send` and a `plete watch` batch as one line each; `progress` and
+  `status` folded into a digest that waits up to `digest_mins`. `plete show
+  r123` / `plete show m45` print any of them whole. Work tasks still get
   everything in full ([Quiet messages](#quiet-messages-for-the-assistant-and-managers)).
 - **No question is lost.** An ask left unanswered for `reask_mins` is posted
   again, whole, to whoever holds it; after `escalate_mins` you are notified.
 - **The assistant is off the push path.** Reports, sends, watch events and
   asks addressed to the assistant are kept, not pushed into its sessions.
   When you next prompt it, its hook adds one line, unseen by you, saying
-  what is new; `jeet brief` prints it (`--all` for the last 30 days).
+  what is new; `plete brief` prints it (`--all` for the last 30 days).
   `[assistant] push = true` brings back the old behaviour
   ([The assistant off the push path](#the-assistant-off-the-push-path)).
 
 ### Notifications
 
 - **The notifier.** Every notification is queued in
-  `$JEET_HOME/run/notify/outbox.jsonl` and sent by `jeet notify serve`,
-  which `jeet notify install` keeps running (launchd `dev.jeet.notify` on
-  macOS, systemd `jeet-notify.service` elsewhere). Backends: `desktop`
+  `$PLETE_HOME/run/notify/outbox.jsonl` and sent by `plete notify serve`,
+  which `plete notify install` keeps running (launchd `dev.plete.notify` on
+  macOS, systemd `plete-notify.service` elsewhere). Backends: `desktop`
   (the default), `command`, `slack` and `ntfy`. `[[notify.rules]]` pick
   what is sent by kind, level and task; past `max_per_hour` (6) the rest of
   the hour folds into one "N more"; the same thing for the same reason is
   sent once ([Notifications](#notifications)).
-- **Core events.** jeet itself tells you of a question, block or done from
-  a task directly under the assistant, or one started for you (`jeet task
+- **Core events.** plete itself tells you of a question, block or done from
+  a task directly under the assistant, or one started for you (`plete task
   new --for-user`), anything stuck (a
   block open past `stuck_blocked_mins`, CI failing `stuck_ci_failures` times
   in a row, a budget used up, an agent that ended without `done`, an agent
   that failed to start) and every ask still open after `escalate_mins`.
-  `jeet task new --quiet` holds back a task's questions and done (stuck
+  `plete task new --quiet` holds back a task's questions and done (stuck
   and escalated asks still notify); `[notify] events = false` turns them
   all off.
-- **Deep links.** `jeet open jeet://task/<slug>` (also `review/<slug>`,
+- **Deep links.** `plete open plete://task/<slug>` (also `review/<slug>`,
   `review/<slug>/diff|explore`, `report/<id>`) brings up the tasks screen on it, switching tmux or
-  starting a terminal (`[notify] terminal`). `jeet notify install-link`
-  makes the system open `jeet://` links, so a click in a notification,
+  starting a terminal (`[notify] terminal`). `plete notify install-link`
+  makes the system open `plete://` links, so a click in a notification,
   browser or Slack works ([Links](#links)).
 - **Slack**: a direct message from your own Slack app, with buttons for the
-  PR and its checks and the command that answers it. `jeet notify
-  slack-manifest`, then `jeet notify setup slack`; the bot token lives in
+  PR and its checks and the command that answers it. `plete notify
+  slack-manifest`, then `plete notify setup slack`; the bot token lives in
   the OS keyring ([Slack](#slack)).
 - **ntfy**: a push to an ntfy topic for your phone, questions and stuck work
-  at high priority. `jeet notify setup ntfy` suggests a random topic: on
+  at high priority. `plete notify setup ntfy` suggests a random topic: on
   ntfy.sh a topic is public to whoever knows its name, so keep it
   unguessable or use an access token ([ntfy](#ntfy)).
 
-### `jeet setup`
+### `plete setup`
 
-- **The setup chat.** `jeet setup` opens a setup agent (tmux session
-  `jeet-setup`) that goes through jeet a topic at a time (repos, harness,
+- **The setup chat.** `plete setup` opens a setup agent (tmux session
+  `plete-setup`) that goes through plete a topic at a time (repos, harness,
   permissions, PR policy, the assistant, managers, reviews, watching,
-  notifications, instructions) and stages changes. `jeet setup apply` shows
+  notifications, instructions) and stages changes. `plete setup apply` shows
   each one as a diff and asks y/N/q, backing up what it replaces under
-  `~/.jeet/backups/setup-<stamp>/`; `jeet setup status` and `discard` too
+  `~/.plete/backups/setup-<stamp>/`; `plete setup status` and `discard` too
   ([Setup](#setup)).
 - **Permissions.** `[permissions] push = "branches"` lets work tasks push
   their branches (`git push origin …`, `-u`, `--force-with-lease`) without
@@ -1681,12 +1691,12 @@ setup chat that walks you through jeet's config.
   `[permissions.task|manager|assistant]` add your own Claude Code rules
   ([Permission rules for agents](#permission-rules-for-agents)).
 - **PR policy.** `[tasks] pr = "auto" | "draft" | "ask"` (default `draft`),
-  per project in `project.toml`, or per task with `jeet task new --pr`
+  per project in `project.toml`, or per task with `plete task new --pr`
   ([Pull requests from tasks](#pull-requests-from-tasks)).
 - **`[models]`** sets the model for the assistant, managers, tasks and
   reviews ([Models](#models)).
-- **Template overrides.** A file under `~/.jeet/templates/{root,manager,worker}/`
-  replaces the template jeet ships for new homes and task skills
+- **Template overrides.** A file under `~/.plete/templates/{root,manager,worker}/`
+  replaces the template plete ships for new homes and task skills
   ([Template overrides](#template-overrides)).
 
 ### TUI keys
@@ -1694,7 +1704,7 @@ setup chat that walks you through jeet's config.
 - Reviews: `⏎` opens the review's session, `R` reruns it; the review menu
   is gone.
 - Projects: on a project row `n` starts a task in it, `N` makes a project,
-  `E` edits, `D` deletes; the `P` panel is gone, and `jeet projects` opens
+  `E` edits, `D` deletes; the `P` panel is gone, and `plete projects` opens
   the projects tab.
 - Agents: `y` answers the open question, `I` reads the node's reports,
   `z`/`Z` pause and resume, `i` is the assistant's inbox as elsewhere, `⌫`
@@ -1707,11 +1717,11 @@ setup chat that walks you through jeet's config.
 
 - **Index migrate guard.** A development build (a debug build, or one run
   from a cargo `target/` directory) refuses to migrate the default
-  `~/.jeet` index, which the installed jeet could then no longer open. Use
-  `JEET_HOME=$(mktemp -d)`, or `JEET_ALLOW_DEV_MIGRATE=1`.
+  `~/.plete` index, which the installed plete could then no longer open. Use
+  `PLETE_HOME=$(mktemp -d)`, or `PLETE_ALLOW_DEV_MIGRATE=1`.
 - **Startup trust race.** With `[harness] auto_trust`, Claude Code redrew
-  the trust prompt back to "No" just after jeet pressed Down, and the Enter
-  was lost. jeet now waits for a steady "Yes" before Enter, retries once,
+  the trust prompt back to "No" just after plete pressed Down, and the Enter
+  was lost. plete now waits for a steady "Yes" before Enter, retries once,
   and otherwise files a `start failed` report to the parent and leaves the
   prompt to you. Accepting takes about 0.6s longer.
 - Flaky tests: the waiter, notify and status lock tests, the explorer's PR
@@ -1731,10 +1741,10 @@ v0.14.0: #105, #107–#129.
 | `[notify] command` | | for `via = ["command"]` |
 | `[[notify.rules]]` kind, level, task, action | | first match decides |
 | `[notify] max_per_hour` | 6 | 0 never folds |
-| `[notify] events` | `true` | jeet's own question/block/stuck notifications |
+| `[notify] events` | `true` | plete's own question/block/stuck notifications |
 | `[notify] stuck_blocked_mins` | 30 | a block open this long is stuck |
 | `[notify] stuck_ci_failures` | 2 | failed CI runs in a row that are stuck |
-| `[notify] terminal` | platform's | for `jeet open`; `none` never starts one |
+| `[notify] terminal` | platform's | for `plete open`; `none` never starts one |
 | `[notify.slack] user` | | your Slack member id |
 | `[notify.ntfy] server`, `topic` | `https://ntfy.sh`; no topic | |
 | `[harness] wake_repair` | `"auto"` | `"off"` for no repairs |
@@ -1750,25 +1760,25 @@ v0.14.0: #105, #107–#129.
 
 **Upgrading to v0.14.0:** the index moves from **schema v9 to v13** the first
 time any v0.14 command opens it, in four additive steps: **v10** a task's own
-PR policy (`jeet task new --pr`), **v11** who started a task, its quiet flag
+PR policy (`plete task new --pr`), **v11** who started a task, its quiet flag
 and whether a block was told of as stuck (for `[notify] events`), **v12** the
 `setup` kind for the setup agent, and **v13** what the ask sweep has done
 with each open ask (every ask from before counts as done both ways, so an
 upgrade sends nothing at once). Before anything changes the index is copied
-to `$JEET_HOME/backups/index-v9-<unix time>.db`, and the migration is refused
+to `$PLETE_HOME/backups/index-v9-<unix time>.db`, and the migration is refused
 if the copy cannot be made. **v0.13 and older refuse the index afterwards**,
-so upgrade every jeet you run at once, the one `jeet watch` runs included.
+so upgrade every plete you run at once, the one `plete watch` runs included.
 
 What changes by default:
 
 - The assistant's sessions are no longer pushed to (`[assistant] push =
-  false`); the hidden line and `jeet brief` replace it. The assistant's
-  existing `AGENTS.md` is not rewritten: add a line about `jeet brief` by
+  false`); the hidden line and `plete brief` replace it. The assistant's
+  existing `AGENTS.md` is not rewritten: add a line about `plete brief` by
   hand if you want one.
 - The assistant and managers get quiet rendering.
 - **Wake repair resumes unwatched sessions once after upgrading.** Agents
-  started by an older jeet, the assistant's included, are resumed in place
-  by `jeet watch` once each is idle and you have been away from its window
+  started by an older plete, the assistant's included, are resumed in place
+  by `plete watch` once each is idle and you have been away from its window
   two minutes. The conversation is kept; background shells and subagents
   it left running end.
 - Past 6 notifications an hour, the rest fold into one.
@@ -1776,24 +1786,24 @@ What changes by default:
 
 After upgrading:
 
-1. **`brew upgrade jeet`** (on macOS; it updates the binary `jeet watch`
-   runs). Every jeet at once.
-2. **`jeet notify install`**, so the sender runs. Desktop and `command`
+1. **`brew upgrade plete`** (on macOS; it updates the binary `plete watch`
+   runs). Every plete at once.
+2. **`plete notify install`**, so the sender runs. Desktop and `command`
    work without it; Slack and ntfy need it.
-3. Optionally **`jeet notify setup slack`** (after creating the app from
-   `jeet notify slack-manifest`) or **`jeet notify setup ntfy`**, add it to
-   `[notify] via`, then **`jeet notify test`**.
-4. **`jeet setup`**, to turn on `[permissions] push = "branches"`, which is
-   off by default, and anything else you want; `jeet setup apply` writes it.
-5. **Restart agents** with `jeet task restart <slug>`, the assistant
+3. Optionally **`plete notify setup slack`** (after creating the app from
+   `plete notify slack-manifest`) or **`plete notify setup ntfy`**, add it to
+   `[notify] via`, then **`plete notify test`**.
+4. **`plete setup`**, to turn on `[permissions] push = "branches"`, which is
+   off by default, and anything else you want; `plete setup apply` writes it.
+5. **Restart agents** with `plete task restart <slug>`, the assistant
    included, so they get the new settings, rules and hooks.
-6. Optionally **`jeet notify install-link`**, for clickable `jeet://`
-   links. Run it again if the jeet binary moves.
+6. Optionally **`plete notify install-link`**, for clickable `plete://`
+   links. Run it again if the plete binary moves.
 
 Not yet verified: whether desktop notifications sent from the launchd sender
-show on macOS (check with `jeet notify test` after step 2), and whether
-Slack lets a `jeet://` link be clicked (if it refuses the message, jeet
-sends it again without the link, keeping the `jeet open` line).
+show on macOS (check with `plete notify test` after step 2), and whether
+Slack lets a `plete://` link be clicked (if it refuses the message, plete
+sends it again without the link, keeping the `plete open` line).
 
 ## What's new in v0.13
 
@@ -1802,8 +1812,8 @@ the index.
 
 - **A review is not a task.** One per pull request (a repository and a PR
   number), with exactly one worktree and one session, flat: no parent, no
-  tasks under it, no brief, grants or project. `jeet review` finds or makes
-  it as before, and `jeet task open|archive|unarchive|delete|path|send|
+  tasks under it, no brief, grants or project. `plete review` finds or makes
+  it as before, and `plete task open|archive|unarchive|delete|path|send|
   restart review-<repo>-<number>` still take its name. It is in no task
   list, tree, manager or project; the [reviews tab](#the-reviews-tab) lists
   it, and there `a` archives it and brings it back (`A` toggles the archived
@@ -1814,10 +1824,10 @@ the index.
 - **Who a review reports to.** A review the assistant asked for reports to
   the assistant (not as its child); one you asked for reports to no one.
 - **One gate for every review agent** (now only under `[review] read_only =
-  true`): read-only jeet, the worker deny rules (no push, merge, approval or
-  PR comment), and `jeet report` only when a task asked for the review
+  true`): read-only plete, the worker deny rules (no push, merge, approval or
+  PR comment), and `plete report` only when a task asked for the review
   ([The review agent](#the-review-agent)).
-- **`jeet task send` and `jeet task restart` reach a review's agent**, for you
+- **`plete task send` and `plete task restart` reach a review's agent**, for you
   and for the task that asked for the review; nobody else may.
 
 v0.13.0: reviews leave the tasks table (#99, #102, #103).
@@ -1825,41 +1835,41 @@ v0.13.0: reviews leave the tasks table (#99, #102, #103).
 **Upgrading to v0.13.0:** the index moves to **schema v9** the first time any
 v0.13 command opens it (from v7, two steps run one after the other: v8 moves
 reviews out of the tasks, v9 puts a review's `[review] command` job on its
-row), and v0.12 and older refuse the index after that, so upgrade every jeet
-you run at once, the one `jeet watch` runs included. Before anything changes,
-the index is copied to `$JEET_HOME/backups/index-v7-<unix time>.db`
-(`~/.jeet/backups/` by default; a second copy the same second gets `-2`), and
+row), and v0.12 and older refuse the index after that, so upgrade every plete
+you run at once, the one `plete watch` runs included. Before anything changes,
+the index is copied to `$PLETE_HOME/backups/index-v7-<unix time>.db`
+(`~/.plete/backups/` by default; a second copy the same second gets `-2`), and
 the migration is refused if the copy cannot be made. The copy
-is a whole index of the old schema: it is what an older jeet opens, if you go
+is a whole index of the old schema: it is what an older plete opens, if you go
 back.
 
 - Each review task becomes a review, keeping its slug (so its tmux session
-  `jeet-<slug>`, its hooks and its `$JEET_TASK_ID` carry on), its worktree,
+  `plete-<slug>`, its hooks and its `$PLETE_TASK_ID` carry on), its worktree,
   its session, its limits and use, its place in a `max_live` queue, and its
   archived or active state. A review under the assistant becomes one the
   assistant asked for.
 - **Reports of a kept review are kept**: its `done`, `blocked` and other
-  reports to the assistant stay in `jeet report ls`. Only those of review
+  reports to the assistant stay in `plete report ls`. Only those of review
   tasks that were superseded or dropped go, and any that were sent to a
   review task.
 - **Only one review per pull request survives.** Where several review tasks
   were for one PR, the newest active one is kept (the newest, when all are
   archived). The others' worktrees are archived the
-  way `jeet task archive` does it, into `refs/jeet/head/<old-task-id>/…` and
-  `refs/jeet/stash/<old-task-id>/…` in the repository's trunk (the old task id
+  way `plete task archive` does it, into `refs/plete/head/<old-task-id>/…` and
+  `refs/plete/stash/<old-task-id>/…` in the repository's trunk (the old task id
   is in the log), or, when one holds ignored files that are not build caches (a
   `.env`, local config), left in place on disk untouched. Their task
-  directories stay on disk; jeet deletes nothing. A review task with no PR
+  directories stay on disk; plete deletes nothing. A review task with no PR
   recorded gets no review, and its worktrees are handled the same way.
 - Archiving those worktrees happens at the first command you run from your
   own terminal after the upgrade (not from a hook or an agent's shell), and
   says so on stderr in one line. What it did, a line each, is in
-  `$JEET_HOME/logs/migrate-v8.log`; a worktree it could not archive then is
+  `$PLETE_HOME/logs/migrate-v8.log`; a worktree it could not archive then is
   tried again at the next command, up to three times, then left in place.
-- **Review jobs an older `jeet review` left under `~/.jeet/reviews`
+- **Review jobs an older `plete review` left under `~/.plete/reviews`
   (`<host>/<owner>/<repo>/<number>.json`, the state of a `[review] command`
   run) become reviews**, at the first commands you run after the upgrade
-  (in a task's shell too, not from hooks or jeet's own background commands),
+  (in a task's shell too, not from hooks or plete's own background commands),
   and are no longer shown read-only in the reviews tab. Each job
   whose pull request has no review gets one: **archived** when the job
   finished or was lost (its process is gone), **active** only while the job
@@ -1868,50 +1878,50 @@ back.
   that already has a review keeps it, and gets the file's job only if it has
   none. A job that is not running is stored as ended, so nothing can run it
   again. These reviews can be brought back, archived and deleted like any
-  other. **The files are left where they are, untouched; jeet deletes none of
+  other. **The files are left where they are, untouched; plete deletes none of
   them.** Each file is looked at once: its outcome is recorded in the index,
   so a review you delete later is not made again from its file. A file that
   cannot be read is left and logged; one whose review cannot be made is tried
   up to three times, then left. Each file's outcome is a line of
-  `$JEET_HOME/logs/migrate-v9.log` (adopted, put on a review, skipped, or
+  `$PLETE_HOME/logs/migrate-v9.log` (adopted, put on a review, skipped, or
   left), and a one-line summary goes to stderr only by a run that adopted or
   gave up on something. A job still running during the upgrade is adopted as
   active, but an older runner records its end in the old file, which is not
   read again: its row shows "stopped without finishing" once the process
   exits. Archiving or deleting such a review warns that its job keeps
-  running; jeet did not start it, so it does not stop it.
-- The `<task>/.jeet/review.json` and `brought-back` files are folded into the
+  running; plete did not start it, so it does not stop it.
+- The `<task>/.plete/review.json` and `brought-back` files are folded into the
   review and no longer read.
 - In the reviews tab, `⏎` opens the review's session and `R` reruns it; `w`,
   `p`, `S`, `n` and `o` do nothing (a review has one worktree and one PR),
   and a review is no longer "paused by hand" or
-  "stopped" from a tree: it is paused only at its caps. `jeet manager stop
+  "stopped" from a tree: it is paused only at its caps. `plete manager stop
   --all` still ends the agents (and legacy jobs) of the reviews the
   assistant asked for, and drops them from the `max_live` queue.
 
 After upgrading:
 
-1. **Upgrade every jeet at once**, including the one `jeet watch` runs (on
-   macOS, `brew upgrade jeet` updates the `/opt/homebrew/bin/jeet` launchd
+1. **Upgrade every plete at once**, including the one `plete watch` runs (on
+   macOS, `brew upgrade plete` updates the `/opt/homebrew/bin/plete` launchd
    runs): an older one refuses the index once it is at v9.
-2. **Run any jeet command from your own terminal**, `jeet ls` say, so the
+2. **Run any plete command from your own terminal**, `plete ls` say, so the
    migration and both post-steps run there and print their one-line
    summaries.
-3. **Read `$JEET_HOME/logs/migrate-v8.log` and `migrate-v9.log`** for what
+3. **Read `$PLETE_HOME/logs/migrate-v8.log` and `migrate-v9.log`** for what
    moved, what was archived and what was left in place; the index as it was
-   is in `$JEET_HOME/backups/`.
+   is in `$PLETE_HOME/backups/`.
 4. No config change and nothing to regenerate.
 
 ## What's new in v0.12
 
-Reviews become agents: `jeet review` hands the PR to the review task's own
+Reviews become agents: `plete review` hands the PR to the review task's own
 agent, working in its tmux pane, with limits of its own and a tab of its own
 in the tasks list.
 
-- **The review agent**: `jeet review <pr>` starts the review task's agent
+- **The review agent**: `plete review <pr>` starts the review task's agent
   (your harness, Claude Code) in the task's tmux pane with a first prompt,
   `[review] prompt`, instead of a headless background job. `⏎` on the task,
-  or `jeet task open review-<repo>-<number>`, shows it at work, and you can
+  or `plete task open review-<repo>-<number>`, shows it at work, and you can
   talk to it there. One review is one task, one worktree and one session:
   a new head commit or `--rerun` sends the prompt again into that session,
   and the same commit is not asked twice ([The review
@@ -1935,18 +1945,18 @@ in the tasks list.
 
 **Upgrading to v0.12.0:** the index stays at schema v6, so there is no
 migration and v0.11.0 still opens it. The one new piece of state is a small
-file per review task, `<task>/.jeet/review.json`, recording the last head
-its agent was asked to review. Review jobs recorded under `~/.jeet/reviews`
-by an older `jeet review` still load, show in the tasks list and the new
+file per review task, `<task>/.plete/review.json`, recording the last head
+its agent was asked to review. Review jobs recorded under `~/.plete/reviews`
+by an older `plete review` still load, show in the tasks list and the new
 reviews tab, and their sessions are picked up as before.
 
-- **`jeet review` now starts an agent even with no `[review]` config.**
+- **`plete review` now starts an agent even with no `[review]` config.**
   Before, with no `[review] command`, it only checked the PR out and opened
   the viewer; pass `--no-agent` (or `--no-command`) for that.
 - **`[review] command` is deprecated.** It still works: set, it runs
-  headless in place of the review agent, as before, and `jeet review` warns.
+  headless in place of the review agent, as before, and `plete review` warns.
   Once a review's agent has been asked, the command is no longer run for
-  that review (`jeet review` says so) and the agent is asked instead.
+  that review (`plete review` says so) and the agent is asked instead.
   Remove the command to switch to the agent.
 - **New keys in `[review]`**, all optional:
 
@@ -1967,18 +1977,18 @@ reviews tab, and their sessions are picked up as before.
 - **Reviews have their own limits now.** They no longer use `[managers]
   max_live` slots or manager budgets: a review below a manager spends
   nothing of its budget. At most 2 review agents run at once, **including
-  your own `jeet review`**; a third waits until one ends. To keep the old
-  behaviour of no review cap, raise `[review] max_live`. `jeet task open`
+  your own `plete review`**; a third waits until one ends. To keep the old
+  behaviour of no review cap, raise `[review] max_live`. `plete task open`
   from your terminal still starts one past the cap, with a warning.
 - **Time and turn caps apply to reviews in the tree** (the ones the
   assistant starts; a review task already made at the top level stays
   there, uncapped): each review asked gets `[review] time` and `turns`
   afresh, is warned at 80% and paused at 100%. A review task's budget is
-  `[review]`'s: `--budget` on one is refused, and one set with `jeet
+  `[review]`'s: `--budget` on one is refused, and one set with `plete
   manager budget` is replaced at its next review. **Your own top-level
-  `jeet review` is held by `[review] max_live` only**: like any top-level
+  `plete review` is held by `[review] max_live` only**: like any top-level
   task it has no budget, so `time` and `turns` never pause it. A task with
-  a parent may not run `jeet review`.
+  a parent may not run `plete review`.
 - **Queue messages name the cap that held a start**, e.g. `waits on
   [review] max_live (2/2 review agents live)` or `queued on [managers]
   max_live, 1/1 live` (a `status: queued` report body). Scripts matching
@@ -2034,7 +2044,7 @@ tab](#the-reviews-tab)).
 - **Archived reviews leave the main list**: the reviews tab lists the
   active reviews (and any review job with no task); `A` switches it to the
   archived reviews (`▪ archived`) and back.
-- **Merged or closed PRs archive their review**: each `jeet watch --once`
+- **Merged or closed PRs archive their review**: each `plete watch --once`
   poll, and the reviews tab, while it is shown, when it hears from GitHub,
   archives a review whose PR is merged or closed, as `a` does: agent
   ended, worktree removed, uncommitted work kept for when it is brought
@@ -2048,25 +2058,25 @@ tab](#the-reviews-tab)).
   number in columns of their own** (`api` · `#131`, no longer `api#131`).
 - **Reviews show in the reviews tab alone**: never in the active or
   archived tabs or their counts, the filter's results, the agents tab (nor
-  its roll-ups), or `jeet task ls` (with or without `--archived`). The
+  its roll-ups), or `plete task ls` (with or without `--archived`). The
   reviews count is of active reviews. Selecting a review from elsewhere
   opens the reviews tab on it.
 
-**Upgrading to v0.12.2:** jeet migrates the index to schema v7 the first
-time it runs, and an older jeet refuses it after that (copy
-`$JEET_HOME/index.db` first if you may go back). The migration only marks
+**Upgrading to v0.12.2:** plete migrates the index to schema v7 the first
+time it runs, and an older plete refuses it after that (copy
+`$PLETE_HOME/index.db` first if you may go back). The migration only marks
 as reviews the tasks that hold a PR checkout (only a review makes one) but
 were recorded as plain tasks; nothing else changes. No config change,
 nothing to regenerate.
 
 - **Reviews are gone from the active, archived and agents tabs and from
-  `jeet task ls`**: find them in the reviews tab (`A` for archived ones).
+  `plete task ls`**: find them in the reviews tab (`A` for archived ones).
   A manager with only reviews under it can no longer be gone into.
 - **Reviews of PRs already merged or closed are archived at the next
-  `jeet watch --once` or reviews-tab refresh** once their agent is idle,
+  `plete watch --once` or reviews-tab refresh** once their agent is idle,
   so expect a batch of them to go the first time. Keep one by bringing it
   back (`a` in the archived reviews).
-- `jeet watch --once` now asks GitHub about each active review's PR on
+- `plete watch --once` now asks GitHub about each active review's PR on
   every poll, one `gh` call each.
 
 v0.12.3: `⏎` on a manager opens its agent, and the assistant's line says
@@ -2080,7 +2090,7 @@ less ([The tasks list](#the-tasks-list)).
   one**, the session `c` opens, with what it is doing. The running
   sessions, the inbox and todo counts and the key hints are gone from it
   (`i`, `t` and `C` still open them); a red `N unanchored` follows only
-  while any of its windows were not started by jeet.
+  while any of its windows were not started by plete.
 - **Dim text stays readable on the selected row**: a task's snippet, and
   the dim cells of the agents, reviews, explorer and session-picker rows,
   turn light grey under the highlight instead of vanishing into it.
@@ -2114,36 +2124,36 @@ nothing to regenerate.
 - **The archived tab is gone**: press `A` in the tasks list instead of
   `⇥`-ing to it.
 
-v0.12.5: projects are jeet's own projects again, managers can start from
-one, and agents started by `jeet watch` are anchored
+v0.12.5: projects are plete's own projects again, managers can start from
+one, and agents started by `plete watch` are anchored
 ([Projects](#projects), [The projects tab](#the-projects-tab)).
 
-- **The projects tab groups by jeet project** (the one a task was started
+- **The projects tab groups by plete project** (the one a task was started
   from with `--project`), not by repository. A manager is listed under its own
   project and under each project an active task below it was started from.
   Tasks with no project are left out. `A` shows the other projects: those
   with only archived tasks, and those with no tasks at all.
 - **The project column shows the task's project**, or nothing when it has
   none, instead of the repository.
-- **`jeet manager new --project <name>`** stores the project on the manager,
+- **`plete manager new --project <name>`** stores the project on the manager,
   copies its skills, and copies its AGENTS.md in as `PROJECT.md`, linked from
   the manager's own AGENTS.md. Tasks and managers made under it default to
   its project. An explicit `--project` names another. The agents tab's `n`
   form preselects the parent's project. Managers get no worktrees of the
   project's repositories and none of its `[agent] args`.
-- **Agents that `jeet watch` starts are anchored.** From launchd or systemd,
-  with no UTF-8 locale, tmux garbled the ids jeet reads back. The window
-  started, but jeet never recorded it, so it showed as unanchored and its
-  jeet commands were refused. Every tmux call now passes `-u`.
+- **Agents that `plete watch` starts are anchored.** From launchd or systemd,
+  with no UTF-8 locale, tmux garbled the ids plete reads back. The window
+  started, but plete never recorded it, so it showed as unanchored and its
+  plete commands were refused. Every tmux call now passes `-u`.
 
 **Upgrading to v0.12.5:** no schema change (stays v7), no config change,
 nothing to regenerate.
 
 - **Upgrade the binary the watch job runs.** On macOS that is
-  `brew upgrade jeet`, which updates the `/opt/homebrew/bin/jeet` that
+  `brew upgrade plete`, which updates the `/opt/homebrew/bin/plete` that
   launchd runs.
-- **Then `jeet task restart <task>` each unanchored window**, the
-  assistant's included (`jeet task restart assistant`). This keeps the
+- **Then `plete task restart <task>` each unanchored window**, the
+  assistant's included (`plete task restart assistant`). This keeps the
   conversation. Windows that were already unanchored stay that way until
   restarted.
 
@@ -2154,19 +2164,19 @@ agents](docs/design/agent-hierarchy.md). Messages reach an agent while it
 works, or wake it when idle, instead of waiting for its turn to end.
 
 - **The wake channel** (Claude Code): each agent session starts a
-  background watcher, `jeet inbox watch`, from its own session-start hook.
+  background watcher, `plete inbox watch`, from its own session-start hook.
   It hands the agent what is queued for it through Claude Code's messaging
   socket as soon as it is queued: an idle agent wakes, a busy one gets it
   at its next tool call, one waiting on a prompt gets it once the prompt
   is answered. Such messages arrive from another session, which Claude
   Code tells the agent cannot approve anything ([Messaging an
   agent](#messaging-an-agent)).
-- **Routing by sender**: only what you send yourself, with `jeet task
+- **Routing by sender**: only what you send yourself, with `plete task
   send` from your own terminal, to an idle agent is still typed in as your
   turn (unless its input box holds unsent text; then it goes through the
   channel, and the CLI says so). Messages from the assistant and managers,
   reports, answers, escalations, watch events and briefs go through the
-  channel. If Claude Code refuses or drops a message, jeet falls back to
+  channel. If Claude Code refuses or drops a message, plete falls back to
   the queue and typing for that session.
 - **`[harness] wake = false`** turns the channel off, from each agent's
   next start ([The coding agent's harness](#the-coding-agents-harness)).
@@ -2178,25 +2188,25 @@ works, or wake it when idle, instead of waiting for its turn to end.
 **Upgrading to v0.11.0:** the index stays at schema v6, so there is no
 migration and v0.10.0 still opens it. The one new config key is
 `[harness] wake` (default true), which v0.10.0 refuses, so leave it out of
-config.toml until every jeet you run is v0.11.
+config.toml until every plete you run is v0.11.
 
 - Running agents keep working, with messages delivered as before. An
   agent gets its watcher hook at its next start: restart each once it is
-  idle with `jeet task restart <task>` and `jeet task restart assistant`;
-  both keep the conversation. An agent `jeet task ls` marks `(unanchored)`
-  needs `jeet task restart`, or `jeet task adopt` from a terminal outside
-  jeet's tmux sessions, as before.
+  idle with `plete task restart <task>` and `plete task restart assistant`;
+  both keep the conversation. An agent `plete task ls` marks `(unanchored)`
+  needs `plete task restart`, or `plete task adopt` from a terminal outside
+  plete's tmux sessions, as before.
 - The channel was built and checked on Claude Code 2.1.296, the harness's
   tested version. It needs the session's messaging socket
   (`CLAUDE_CODE_MESSAGING_SOCKET`); a session without one, such as
   `claude --bare`, gets no watcher and messages are queued and typed as
-  before. A repo's `crossSessionInbound: "refuse"` makes jeet fall back the
+  before. A repo's `crossSessionInbound: "refuse"` makes plete fall back the
   same way, after about 20 seconds.
 - A question a task asked and then followed with only `progress` reports
-  is open again, and its parent holds it: `jeet report ls` lists the ones
+  is open again, and its parent holds it: `plete report ls` lists the ones
   you hold.
 - The assistant's and managers' `AGENTS.md` and skills, and a task's own
-  skill, changed only in how they word when a question closes; jeet never
+  skill, changed only in how they word when a question closes; plete never
   rewrites them, and nothing needs regenerating for the wake channel. To
   get the new wording, delete the unedited files as for v0.10.
 
@@ -2218,17 +2228,17 @@ phases of [hierarchical agents](docs/design/agent-hierarchy.md).
 - **Questions go up the tree and get answered**: a `question` or `blocked`
   report stays open until it is answered or the task reports done, blocked
   or another question; `progress` does not close it. Its parent holds it
-  and either answers it, `jeet report answer <id> "…"`, or passes it up,
-  `jeet report escalate <id>`; `jeet report ls` lists the ones you hold. One the assistant passes up is yours, with a desktop
-  notification. The task that asked gets the answer as `<jeet-answer>`,
+  and either answers it, `plete report answer <id> "…"`, or passes it up,
+  `plete report escalate <id>`; `plete report ls` lists the ones you hold. One the assistant passes up is yours, with a desktop
+  notification. The task that asked gets the answer as `<plete-answer>`,
   and each manager in between a copy ([Reporting to the
   parent](#reporting-to-the-parent)).
 - **`a` in the agents tab** answers the open question at a node or nearest
   below it, those passed to you first; the needs-you counts include them.
-- **`jeet watch` rules can hand events to a manager**: `action =
+- **`plete watch` rules can hand events to a manager**: `action =
   "manager:<slug>"` sends a rule's GitHub events to the active manager with
   that slug, else to the assistant ([Watching GitHub](#watching-github)).
-- **`jeet task delete <manager> --reparent`** deletes a manager alone and
+- **`plete task delete <manager> --reparent`** deletes a manager alone and
   moves the tasks under it, with their own, to its parent, keeping what
   each may do; the parent is told and takes over the questions it held
   ([Archiving and deleting](#archiving-and-deleting)).
@@ -2236,189 +2246,189 @@ phases of [hierarchical agents](docs/design/agent-hierarchy.md).
 **Upgrading to v0.10.0:** the index stays at schema v6, so there is no
 migration and v0.9.0 still opens it. There are no new config keys; the one
 new config value is a rule's `action = "manager:<slug>"`, which v0.9.0
-refuses, so keep such rules out of config.toml until every jeet you run is
+refuses, so keep such rules out of config.toml until every plete you run is
 v0.10.
 
 - A task's last `question` or `blocked` report from before the upgrade, if
   it has not reported done, blocked or another question since, is now an
-  open question its parent holds. `jeet report ls` at your terminal lists
+  open question its parent holds. `plete report ls` at your terminal lists
   them; answer each, or leave it until the task reports done, blocked or
   another question.
-- jeet never writes over a file in the assistant's or a manager's home, so
+- plete never writes over a file in the assistant's or a manager's home, so
   they keep the `AGENTS.md` and skills they were first given, which do not
-  know about `jeet report answer`, `escalate` and `ls`, `<jeet-answer>`, or
+  know about `plete report answer`, `escalate` and `ls`, `<plete-answer>`, or
   watch events sent to a manager. If you have not edited them, delete
-  `$JEET_HOME/assistant/AGENTS.md`,
-  `$JEET_HOME/assistant/.claude/skills/jeet-assistant/` and
-  `$JEET_HOME/assistant/.claude/skills/jeet-managers/`, and in each
-  manager's home (`$JEET_HOME/tasks/<slug>/`) `AGENTS.md` and
-  `.claude/skills/jeet-manager/`; the next
+  `$PLETE_HOME/assistant/AGENTS.md`,
+  `$PLETE_HOME/assistant/.claude/skills/plete-assistant/` and
+  `$PLETE_HOME/assistant/.claude/skills/plete-managers/`, and in each
+  manager's home (`$PLETE_HOME/tasks/<slug>/`) `AGENTS.md` and
+  `.claude/skills/plete-manager/`; the next
   start writes the current ones. A task's own skill is unchanged.
 - Running agents keep working. To give them the new files, restart each
-  once it is idle with `jeet task restart <task>` and `jeet task restart
-  assistant`; both keep the conversation. An agent `jeet task ls` marks
-  `(unanchored)` needs `jeet task restart`, or `jeet task adopt` from a
-  terminal outside jeet's tmux sessions, as in v0.9.
+  once it is idle with `plete task restart <task>` and `plete task restart
+  assistant`; both keep the conversation. An agent `plete task ls` marks
+  `(unanchored)` needs `plete task restart`, or `plete task adopt` from a
+  terminal outside plete's tmux sessions, as in v0.9.
 
 ## What's new in v0.9
 
 Managers, the second phase of [hierarchical
 agents](docs/design/agent-hierarchy.md).
 
-- **`jeet manager new`** makes a manager, an agent that takes an area of
+- **`plete manager new`** makes a manager, an agent that takes an area of
   work, plans it and hands it to tasks (and managers) of its own under it,
   which report to it as tasks report to the assistant. It gets a home with
   its role, a read-only `BRIEF.md`, a worklog and a todo list, and starts at
-  once. `jeet task new --parent <manager>`, `--allow` and `--budget` place
-  and limit a task; `jeet manager ls`, `show`, `grant` and `budget` read
+  once. `plete task new --parent <manager>`, `--allow` and `--budget` place
+  and limit a task; `plete manager ls`, `show`, `grant` and `budget` read
   and steer the tree ([Reporting to the parent](#reporting-to-the-parent)).
 - **Managers run locally in tmux, as you, unconfined**, as every task
   does. Their limits (what they may reach, what they are granted, their
   budgets, `max_live`, read-only worktrees and the git denies) are
   cooperative: they stop honest mistakes, not an agent that sets out to get
-  around jeet. A confined placement may come later.
+  around plete. A confined placement may come later.
 - **Budgets, pause and stop** for every task under the assistant: a budget
-  of busy time and turns (no cost yet), `jeet manager pause`, `resume` and
-  `stop` on a task and everything below it, and `jeet manager stop --all`,
+  of busy time and turns (no cost yet), `plete manager pause`, `resume` and
+  `stop` on a task and everything below it, and `plete manager stop --all`,
   whose stops only you can undo.
 - **`[managers] max_live` (default 8) now applies to the assistant's own
   tasks:** at most that many tasks under the assistant run at once, and a
   start past it is queued, with the parent told, until one ends. The
   assistant's ninth running task used to start; now it waits. Raise
-  `max_live` to keep the old behaviour. Your own `jeet task open` starts
+  `max_live` to keep the old behaviour. Your own `plete task open` starts
   one anyway, with a warning.
-- **Cloning into the store needs `repo.clone`:** `jeet worktree add` and
-  `jeet task new --repo` naming a repository jeet does not have clone it,
+- **Cloning into the store needs `repo.clone`:** `plete worktree add` and
+  `plete task new --repo` naming a repository plete does not have clone it,
   for the assistant and a task with a parent, only when they hold
-  `repo.clone`, as `jeet clone` does. Add it to `[assistant] allow` if the
+  `repo.clone`, as `plete clone` does. Add it to `[assistant] allow` if the
   assistant should keep cloning that way. A clone URL that would land
   outside the store is refused for everyone.
-- `--recursive` (`-r`) on `jeet task archive`, `unarchive` and `delete` takes
+- `--recursive` (`-r`) on `plete task archive`, `unarchive` and `delete` takes
   a task and every task under it, with one confirm.
-- `jeet task restart <task>` ends a task's agent and resumes its latest
+- `plete task restart <task>` ends a task's agent and resumes its latest
   session in a new one, keeping its conversation; refused while it is busy
-  unless `--force`. `jeet task restart assistant` does the same for the
+  unless `--force`. `plete task restart assistant` does the same for the
   assistant's windows.
-- `jeet task adopt <task>` lets you vouch, at a terminal, for an agent an
-  older jeet started, so its jeet commands work without a restart.
-- `jeet task ls` and the tasks list mark agents jeet has no record of as
+- `plete task adopt <task>` lets you vouch, at a terminal, for an agent an
+  older plete started, so its plete commands work without a restart.
+- `plete task ls` and the tasks list mark agents plete has no record of as
   unanchored, with the command that fixes it.
 - **Reviews**: opening a review task resumes the review's session instead of
   starting a blank one, review tasks show as `review <repo>#<n>` in the
-  tasks list and `jeet task ls`, and `v` opens any task's pull request in
+  tasks list and `plete task ls`, and `v` opens any task's pull request in
   the review viewer.
 
 **Upgrading to v0.9.0:** the index stays at schema v6, so there is no
 migration and v0.8.1 still opens it. `[managers]` is checked when it is
-used, so a mistake there refuses work under the assistant, not jeet.
+used, so a mistake there refuses work under the assistant, not plete.
 
 - If the assistant should keep cloning repositories it does not have through
-  `jeet worktree add` or `jeet task new --repo`, add `repo.clone` to
+  `plete worktree add` or `plete task new --repo`, add `repo.clone` to
   `[assistant] allow`.
 - If the assistant may run more than 8 tasks at once, raise `[managers]
   max_live`, or starts past it are queued.
-- jeet never writes over a file in the assistant's home, so the assistant
-  keeps the `jeet-assistant` skill it was first given. If you have not
-  edited it, delete `$JEET_HOME/assistant/.claude/skills/jeet-assistant/`
+- plete never writes over a file in the assistant's home, so the assistant
+  keeps the `plete-assistant` skill it was first given. If you have not
+  edited it, delete `$PLETE_HOME/assistant/.claude/skills/plete-assistant/`
   and the next start writes the current one, which knows about reports,
-  reviews and managers. The new `jeet-managers` skill is added on its own.
+  reviews and managers. The new `plete-managers` skill is added on its own.
 - Running agents keep working. To give them v0.9's agent settings and
-  skills, restart each once it is idle with `jeet task restart <task>` and
-  `jeet task restart assistant`; both keep the conversation. An agent `jeet task ls` marks `(unanchored)`, started by a
-  jeet older than v0.8.1, needs `jeet task restart`, or `jeet task adopt`
-  from a terminal outside jeet's tmux sessions, before its `jeet report`
-  and `jeet worktree add` work.
+  skills, restart each once it is idle with `plete task restart <task>` and
+  `plete task restart assistant`; both keep the conversation. An agent `plete task ls` marks `(unanchored)`, started by a
+  plete older than v0.8.1, needs `plete task restart`, or `plete task adopt`
+  from a terminal outside plete's tmux sessions, before its `plete report`
+  and `plete worktree add` work.
 
 ## What's new in v0.8
 
 - **Harnesses**: the coding agent now runs behind a harness interface, so
   agents other than Claude Code can be supported. `harness` picks it
-  (`claude-code` by default, or `generic`). jeet detects the agent's
+  (`claude-code` by default, or `generic`). plete detects the agent's
   folder-trust prompt, and with `auto_trust` on, answers it for you.
 - **AGENTS.md**: projects and the assistant keep agent instructions in
   `AGENTS.md`, with a `CLAUDE.md` that imports it.
 - **Projects form**: the new-project form picks repos, and the task and
   project pickers can add repos the store does not have yet.
-- `jeet pr merge` and the assistant's `pr.merge` capability merge a PR once
+- `plete pr merge` and the assistant's `pr.merge` capability merge a PR once
   it is ready.
-- `jeet task last` shows what a task's agent last said and how its turn
+- `plete task last` shows what a task's agent last said and how its turn
   ended.
 - **tmux**: Shift+Enter reaches agents running in tmux, and
-  `jeet task send` pastes long messages whole, never onto a draft.
+  `plete task send` pastes long messages whole, never onto a draft.
 
 v0.8.1: the first steps toward [hierarchical agents](docs/design/agent-hierarchy.md).
 
-- **Tasks report to the assistant that made them.** `jeet report
+- **Tasks report to the assistant that made them.** `plete report
   progress|done|blocked|question`, automatic status reports when a task
   waits on you, idles or ends, and a "Your tasks" section in the
   assistant's context. Tasks with a parent are gated to what their parent
   allows ([Reporting to the parent](#reporting-to-the-parent)).
-- `jeet task interrupt` ends an agent's current turn and keeps its session.
+- `plete task interrupt` ends an agent's current turn and keeps its session.
   The assistant and tasks under it are denied force-pushes, pushes to a
   default branch and PR merges.
-- jeet knows which agent is calling by the process it launched, not by
-  `$JEET_TASK_ID` alone. Claude Code's settings now go in a private file
-  under `$JEET_HOME/run/`.
+- plete knows which agent is calling by the process it launched, not by
+  `$PLETE_TASK_ID` alone. Claude Code's settings now go in a private file
+  under `$PLETE_HOME/run/`.
 - Deleting a task with children, or archiving one with active children, is
   refused.
 - `auto_trust` waits for the trust prompt to redraw before pressing Enter.
 
-**Upgrading to v0.8.1:** jeet migrates the index to schema v6 the first
-time it runs, and an older jeet refuses it after that (copy
-`$JEET_HOME/index.db` first if you may go back). Agents started by an older
-jeet were never recorded, so their `jeet report` and `jeet worktree add` are
-refused; `jeet task ls` marks them `(unanchored)`. Bring each onto the new
-jeet without losing its conversation: `jeet task restart <task>` once it is
-idle (and `jeet task restart assistant` for the assistant's windows), or,
-to leave work in progress running, `jeet task adopt <task>` (and `jeet task
-adopt assistant`) from a terminal outside jeet's tmux sessions, then restart
+**Upgrading to v0.8.1:** plete migrates the index to schema v6 the first
+time it runs, and an older plete refuses it after that (copy
+`$PLETE_HOME/index.db` first if you may go back). Agents started by an older
+plete were never recorded, so their `plete report` and `plete worktree add` are
+refused; `plete task ls` marks them `(unanchored)`. Bring each onto the new
+plete without losing its conversation: `plete task restart <task>` once it is
+idle (and `plete task restart assistant` for the assistant's windows), or,
+to leave work in progress running, `plete task adopt <task>` (and `plete task
+adopt assistant`) from a terminal outside plete's tmux sessions, then restart
 it later for the new hooks.
 
 ## What's new in v0.7
 
-jeet is now built around **tasks**. This is a breaking release: run
-`jeet import` to bring existing repos, branches and worktrees across.
+plete is now built around **tasks**. This is a breaking release: run
+`plete import` to bring existing repos, branches and worktrees across.
 
-- **Tasks** (`jeet`, `jeet tasks`): a task is a folder that holds any number
-  of worktrees from any repo, added as needed with `jeet worktree add`. Each
+- **Tasks** (`plete`, `plete tasks`): a task is a folder that holds any number
+  of worktrees from any repo, added as needed with `plete worktree add`. Each
   task's agent runs in tmux, and the tasks list shows its live status, size
   on disk, worktrees and PR history. Archiving a task frees its disk space
   and keeps its state; deleting it removes everything it owns.
 - **Projects**: templates with repos, a CLAUDE.md and skills, applied when a
   task is created.
 - **Store sync**: trunks live only in the store and stay current in the
-  background. `jeet sync` does the same on demand.
+  background. `plete sync` does the same on demand.
 - **Review viewer**: a GitHub-dark diff viewer with syntax highlighting,
-  inline comments, replies, reactions and verdicts. `jeet review <pr>` now
+  inline comments, replies, reactions and verdicts. `plete review <pr>` now
   opens a review task.
 - **Explorer commands**: type `:mv`, `:cp`, `:mkdir`, `:rm` or `:touch` into
   the filter.
-- **Assistant** (`jeet chat`): a global organiser with its own sessions,
-  `jeet todo`, and task steering with `jeet task send`. It acts only within
-  `[assistant] allow` and notifies you of what it did. `jeet watch` routes
+- **Assistant** (`plete chat`): a global organiser with its own sessions,
+  `plete todo`, and task steering with `plete task send`. It acts only within
+  `[assistant] allow` and notifies you of what it did. `plete watch` routes
   GitHub events to it.
 - **Removed**: `adopt`, `scan`, `checkout`, `sessions` and
-  `exec --ephemeral`. `jeet worktree` now works only inside a task.
+  `exec --ephemeral`. `plete worktree` now works only inside a task.
 
-v0.7.1: notifications never hold jeet up. `terminal-notifier` waits until
-macOS grants it permission, which stalled `jeet notify`, the assistant's
-actions and `jeet watch`; jeet now gives it two seconds and moves on.
+v0.7.1: notifications never hold plete up. `terminal-notifier` waits until
+macOS grants it permission, which stalled `plete notify`, the assistant's
+actions and `plete watch`; plete now gives it two seconds and moves on.
 
-v0.7.2: **Ctrl-Q** goes back to jeet from a task's agent and leaves it
+v0.7.2: **Ctrl-Q** goes back to plete from a task's agent and leaves it
 running (quitting Claude ends it). The tmux status line now says so.
 
 ## What's new in v0.6
 
-- `jeet prs [repo]` lists a repository's open pull requests — size, review
+- `plete prs [repo]` lists a repository's open pull requests — size, review
   status, and which ones want your review, are checked out, or have been
   reviewed in the background.
 - `ctrl-o` in the explorer shows the same list; `⏎` checks a PR out and
   switches to it (without starting the review command).
-- `jeet review --repo` checks a PR out from outside its repository.
+- `plete review --repo` checks a PR out from outside its repository.
 
 ## What's new in v0.5
 
-- `jeet review <pr>` checks a pull request out into its own review task, opens
+- `plete review <pr>` checks a pull request out into its own review task, opens
   the review viewer there, and can start a review command (Claude Code, say) in the
   background with a desktop notification when it finishes. See
   [Reviewing](#reviewing).
@@ -2442,25 +2452,25 @@ running (quitting Claude ends it). The tmux status line now says so.
 
 ## What's new in v0.3
 
-- `jeet` with no arguments opens the file explorer (`jeet explore`).
-- `jeet worktree [name]` creates a worktree from anywhere in a repo; a name
+- `plete` with no arguments opens the file explorer (`plete explore`).
+- `plete worktree [name]` creates a worktree from anywhere in a repo; a name
   publishes the branch to `origin`, no name gives you a detached checkout.
-- `jeet worktree rename [old] <new>` renames a worktree's branch, and turns a
+- `plete worktree rename [old] <new>` renames a worktree's branch, and turns a
   detached scratchpad into a named branch without disturbing your work.
-- `jeet worktree clean` and the explorer's worktree panel delete worktrees,
+- `plete worktree clean` and the explorer's worktree panel delete worktrees,
   showing uncommitted work and a diff counter against the default branch first.
-- `jeet sessions` lists the coding-agent sessions recorded for a worktree.
+- `plete sessions` lists the coding-agent sessions recorded for a worktree.
 - The `init-shell` wrapper now follows a `cd` hand-off, so the explorer and
-  `jeet worktree` can leave your shell in the right directory.
-- `jeet exec --branch <name>` works (the flag was previously documented but
+  `plete worktree` can leave your shell in the right directory.
+- `plete exec --branch <name>` works (the flag was previously documented but
   never wired up).
 
 ## Configuration
 
-On first run, `jeet` creates `~/.jeet/config.toml`:
+On first run, `plete` creates `~/.plete/config.toml`:
 
 ```toml
-scan_roots = ["~/Projects", "~/code"]   # where `jeet import` looks by default
+scan_roots = ["~/Projects", "~/code"]   # where `plete import` looks by default
 ```
 
 Two optional keys are not written by default; add them yourself to override:
@@ -2471,11 +2481,11 @@ harness = "claude-code"   # the coding agent; see below
 ```
 
 `editor` accepts arguments (`editor = "code --wait"`) and is overridden by
-`JEET_EDITOR`.
+`PLETE_EDITOR`.
 
 ### The coding agent's harness
 
-jeet runs your coding agent through a *harness*: what it knows about that
+plete runs your coding agent through a *harness*: what it knows about that
 agent, from how to start and resume its sessions to what its hooks report.
 Claude Code (`claude-code`) is the default, and for now the only one;
 `generic` runs any other command with none of that (no status, no resume, no
@@ -2484,14 +2494,14 @@ Without deny rules, `[permissions] guards` and `[permissions.*] deny` do
 nothing, and tasks with a parent are not stopped from running `gh pr comment`
 or `gh pr review` (see the deny rules under the
 assistant's permissions below, and
-[docs/harnesses.md](docs/harnesses.md#deny-rules)), and `jeet task
+[docs/harnesses.md](docs/harnesses.md#deny-rules)), and `plete task
 interrupt` refuses.
 
 ```toml
 harness = "claude-code"
 ```
 
-or, to run something other than the harness's own binary, or to have jeet
+or, to run something other than the harness's own binary, or to have plete
 answer the folder-trust prompt:
 
 ```toml
@@ -2504,19 +2514,19 @@ wake = true                                # default: true
 wake_repair = "auto"                       # default: "auto"; "off" for no repairs
 ```
 
-The command is taken from `$JEET_AGENT` first, then `[harness] command`, then
+The command is taken from `$PLETE_AGENT` first, then `[harness] command`, then
 the older `agent = "…"` key, which keeps working; without a `name`, the
 harness is told by the program (`claude` is Claude Code, anything else
 `generic`).
 
-jeet supports each harness's latest version only. The first time a run of
-jeet starts an agent, it checks `<command> --version` against the version
-jeet was last tested with (Claude Code 2.1.296) and warns, without
-refusing, when yours is older. `JEET_HARNESS_VERSION_CHECK=0` skips the
+plete supports each harness's latest version only. The first time a run of
+plete starts an agent, it checks `<command> --version` against the version
+plete was last tested with (Claude Code 2.1.296) and warns, without
+refusing, when yours is older. `PLETE_HARNESS_VERSION_CHECK=0` skips the
 check.
 
-**`auto_trust`** has jeet accept Claude Code's "Is this a project you created
-or one you trust?" for task directories under `~/.jeet/tasks`, so a new task
+**`auto_trust`** has plete accept Claude Code's "Is this a project you created
+or one you trust?" for task directories under `~/.plete/tasks`, so a new task
 starts straight into its brief. It selects "Yes, I trust this folder", checks
 that it shows selected, and only then presses Enter (Enter on the default
 "No, exit" would quit). Trusting a folder lets Claude Code act on what is in
@@ -2528,9 +2538,9 @@ well. Some per-folder settings, such as `.claude/settings.local.json` and
 The assistant's session is never answered for.
 
 **`wake`** gives each agent its wake channel ([Messaging an
-agent](#messaging-an-agent)): a background `jeet inbox watch` started by
+agent](#messaging-an-agent)): a background `plete inbox watch` started by
 its session-start hook. `wake = false` installs none, from each agent's
-next start (`jeet task restart` one that is running), and messages are
+next start (`plete task restart` one that is running), and messages are
 queued and typed in as without one.
 
 To add a harness, see [docs/harnesses.md](docs/harnesses.md).
@@ -2562,10 +2572,10 @@ What a work task does once its work is pushed:
 - **`auto`**: opens a ready pull request once its checks pass locally.
 - **`draft`**: opens it as a draft (`gh pr create --draft`), and marks it
   ready only when its parent or you ask.
-- **`ask`**: opens none. A task with a parent asks it with `jeet report
+- **`ask`**: opens none. A task with a parent asks it with `plete report
   question`; a top-level task asks you at its pane.
 
-The most specific setting wins: `jeet task new --pr <mode>`, then the
+The most specific setting wins: `plete task new --pr <mode>`, then the
 project's `[tasks] pr` in its `project.toml`, then the global one. The
 task is told the mode in one line as each session starts. On Claude Code
 its settings also allow `gh pr create` under `auto` and `draft`, deny `gh
@@ -2585,13 +2595,13 @@ escalate_mins = 60                                    # default: 60; 0 never
 
 What is queued for the assistant, and for every manager, is posted by class, from the kind of each
 item, never from who sent it. A one-line header comes first
-(`jeet: 1 question, 2 updates (jeet show <ref> for any)`), then:
+(`plete: 1 question, 2 updates (plete show <ref> for any)`), then:
 
-- **full**: `question` and `blocked` reports, answers, and anything jeet has
+- **full**: `question` and `blocked` reports, answers, and anything plete has
   no kind for (your own words) in their whole fenced text;
-- **line**: a `done` report, an agent's `jeet task send` to the assistant and
-  a `jeet watch` batch, one line each with the start of its text and a reference;
-- **digest**: `progress` and `status` reports, and a note that jeet resumed a
+- **line**: a `done` report, an agent's `plete task send` to the assistant and
+  a `plete watch` batch, one line each with the start of its text and a reference;
+- **digest**: `progress` and `status` reports, and a note that plete resumed a
   session to repair its wake channel, one line per task. A queue of nothing
   else is held for `digest_mins`; a full or line item sends it with it.
 
@@ -2601,7 +2611,7 @@ Work tasks always get the full text, as does the assistant with
 all managers). What a manager's parent or you send it stays whole. Typing into
 an idle pane stays full text.
 
-No question is lost: `jeet watch` looks at each open ask (a `question` or
+No question is lost: `plete watch` looks at each open ask (a `question` or
 `blocked` report not answered, and its task's latest) on every poll. After
 `reask_mins` from when it was asked, it posts the ask again, whole, to the
 manager holding it then, once
@@ -2612,12 +2622,12 @@ whoever holds it, with the ask's id. The quiet flag does not hold that back;
 (`question` or `blocked`) as any other. Asks from before an upgrade to this
 count as done both ways.
 
-`jeet show r123` prints report 123 and `jeet show m45` a message, whole;
-`m` messages are kept 30 days in the task's `.jeet/delivered.jsonl`. It only
+`plete show r123` prints report 123 and `plete show m45` a message, whole;
+`m` messages are kept 30 days in the task's `.plete/delivered.jsonl`. It only
 reads, and shows you what you reach: everything for you and the assistant, and
 for a task with a parent only the reports and messages of itself and the tasks
 below it. A line in a task's inbox that cannot be read is moved to
-`.jeet/inbox.rejected.jsonl` rather than dropped, and the task's parent gets
+`.plete/inbox.rejected.jsonl` rather than dropped, and the task's parent gets
 a `status` report about it (the assistant's log says so).
 
 ### The assistant off the push path
@@ -2627,21 +2637,21 @@ a `status` report about it (the assistant's log says so).
 push = false   # the default; true pushes into its sessions, as before
 ```
 
-Nothing jeet's agents or events address to the assistant is pushed into its
-sessions: not reports of any kind, not an agent's `jeet task send
-assistant`, not `jeet watch` events a rule hands to it, not answers or asks
-passed up to it. Each is kept in the assistant's `.jeet/delivered.jsonl`
+Nothing plete's agents or events address to the assistant is pushed into its
+sessions: not reports of any kind, not an agent's `plete task send
+assistant`, not `plete watch` events a rule hands to it, not answers or asks
+passed up to it. Each is kept in the assistant's `.plete/delivered.jsonl`
 under an `m` reference (a report keeps its `r` one too), and no session is
-started for it. What you type into its chat, and your own `jeet task send
+started for it. What you type into its chat, and your own `plete task send
 assistant` at your terminal, reach it as ever.
 
 When you next prompt the assistant, its UserPromptSubmit hook adds one line
 the model sees and your screen does not, only when something is new:
-`jeet: 3 new reports (1 question, 2 done), 1 message, 2 watch events since
-your last `jeet brief`; run `jeet brief` for details`. It never starts a
-turn. `jeet brief` prints what came since your last one (kind, sender, the
-start of its text and its reference, for `jeet show`), then the open asks
-you hold, and moves your cursor past what it printed; `jeet brief --all`
+`plete: 3 new reports (1 question, 2 done), 1 message, 2 watch events since
+your last `plete brief`; run `plete brief` for details`. It never starts a
+turn. `plete brief` prints what came since your last one (kind, sender, the
+start of its text and its reference, for `plete show`), then the open asks
+you hold, and moves your cursor past what it printed; `plete brief --all`
 prints everything kept, the last 30 days, and moves nothing. Each assistant
 session has its own cursor (a new one starts from the furthest any other has
 read), and you have one at your terminal. Only the assistant and you may run
@@ -2650,11 +2660,11 @@ it.
 What needs you still reaches you, by notification ([`[notify]
 events`](#notifications)): a question or a block from a task directly under
 the assistant, or one you started, the moment it is asked; an ask passed up
-to the assistant, or moved onto it by `jeet task delete --reparent`;
+to the assistant, or moved onto it by `plete task delete --reparent`;
 anything stuck; and every ask still open after `escalate_mins`. Off the push
 path, a task directly under the assistant that waits on a prompt only you
 can answer tells you too (kind `waiting`, held back by the quiet flag as an
-ask is), and so does a `jeet watch` event a rule hands to the assistant, as
+ask is), and so does a `plete watch` event a rule hands to the assistant, as
 one did before when no session of the assistant's could take it.
 
 A `[review]` section sets the review agent's first prompt and its limits —
@@ -2662,19 +2672,19 @@ see [The review agent](#the-review-agent) and [Review limits](#review-limits).
 
 ### Notifications
 
-`jeet notify "<title>" [--body B] [--url U]` notifies you, as jeet itself
+`plete notify "<title>" [--body B] [--url U]` notifies you, as plete itself
 does when a review is ready, a question reaches you, an agent waits on a
-startup prompt, the assistant acts, or `jeet watch` has events for you.
+startup prompt, the assistant acts, or `plete watch` has events for you.
 
-Each notification is queued, owner-only, in `$JEET_HOME/run/notify/outbox.jsonl`.
-`jeet notify serve` sends what is queued as it comes; `jeet notify install`
-keeps it running (a launchd agent, `dev.jeet.notify`, on macOS; a systemd user
-unit, `jeet-notify.service`, elsewhere) and `jeet notify uninstall` removes it.
+Each notification is queued, owner-only, in `$PLETE_HOME/run/notify/outbox.jsonl`.
+`plete notify serve` sends what is queued as it comes; `plete notify install`
+keeps it running (a launchd agent, `dev.plete.notify`, on macOS; a systemd user
+unit, `plete-notify.service`, elsewhere) and `plete notify uninstall` removes it.
 Nothing installs it but that command. Without it, the process that queued a
 notification sends it itself through every backend that needs no token, so
 `desktop` and `command` work as they always have; a backend that needs a
 token (`slack`, and `ntfy`, whose token is optional) waits for the sender,
-and `jeet task ls` and the tasks screen say so. A send through such a
+and `plete task ls` and the tasks screen say so. A send through such a
 backend that fails (Slack or ntfy refuses it, or cannot be reached) stays in the outbox and is tried again after 30
 seconds, then twice as long after each failure, up to an hour, and is
 dropped after 30 tries (about a day); the sender logs why. When Slack or
@@ -2687,7 +2697,7 @@ that round waits as long, untried, rather than each failing in turn.
 via = ["desktop"]   # the default; [] sends nothing
 command = "/usr/local/bin/page-me"   # for via = ["command"]
 max_per_hour = 6    # the default; the rest of the hour folds into one "N more"; 0 never folds
-events = true       # the default; jeet's own question, blocked, done and stuck notifications
+events = true       # the default; plete's own question, blocked, done and stuck notifications
 stuck_blocked_mins = 30   # the default; a block open this long is stuck
 stuck_ci_failures = 2     # the default; failed CI runs in a row on a PR that are stuck
 
@@ -2702,8 +2712,8 @@ action = "ignore"   # or "notify"
   the link), else Notification Center via `osascript`, and `notify-send`
   elsewhere.
 - `command`: `[notify] command`, run directly, with the notification in
-  `JEET_NOTIFY_TITLE`, `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and
-  `JEET_NOTIFY_URL`. `JEET_NOTIFY_CMD`, in the environment of the process that
+  `PLETE_NOTIFY_TITLE`, `PLETE_NOTIFY_SUBTITLE`, `PLETE_NOTIFY_BODY` and
+  `PLETE_NOTIFY_URL`. `PLETE_NOTIFY_CMD`, in the environment of the process that
   sends, runs a command the same way in place of `desktop`.
 - `slack`: a direct message from your own Slack app (below).
 - `ntfy`: a push to an [ntfy](https://ntfy.sh) topic, for the ntfy app on
@@ -2713,26 +2723,26 @@ action = "ignore"   # or "notify"
 
 Notifications come as a direct message from a Slack app of your own: a
 header ("Question #41 from task x"), the text, the task, kind, CI status
-(as `jeet watch` last saw it) and age, buttons for the PR and its checks,
-and the command that acts on it (`jeet report answer 41 "…"`). Only the
+(as `plete watch` last saw it) and age, buttons for the PR and its checks,
+and the command that acts on it (`plete report answer 41 "…"`). Only the
 sender sends them, with a bot token it reads from the OS keyring (the
 Keychain on macOS, the Secret Service elsewhere); agents only queue, and
-jeet reads no token in a process it takes for an agent's.
+plete reads no token in a process it takes for an agent's.
 
-1. `jeet notify slack-manifest` prints the app's manifest: a bot with the
+1. `plete notify slack-manifest` prints the app's manifest: a bot with the
    `chat:write` and `im:write` scopes, no events, no Socket Mode. At
    <https://api.slack.com/apps>, choose **Create New App**, **From a
    manifest**, pick your workspace and paste it.
 2. **Install to Workspace**, then copy the **Bot User OAuth Token**
    (`xoxb-…`) from **OAuth & Permissions**.
 3. In Slack, open your profile, then **⋮**, **Copy member ID** (`U…`).
-4. At your own terminal (not a jeet pane), `jeet notify setup slack`: paste
+4. At your own terminal (not a plete pane), `plete notify setup slack`: paste
    the token (it is not echoed, and goes into the keyring, not a file), then
    your member id, which it writes as `[notify.slack] user` in config.toml
    unless that table is there already.
 5. Add `"slack"` to `[notify] via`, e.g. `via = ["desktop", "slack"]`.
-6. `jeet notify install`, so a sender runs (or restart it, if it does).
-7. `jeet notify test` queues a test notification and says whether the
+6. `plete notify install`, so a sender runs (or restart it, if it does).
+7. `plete notify test` queues a test notification and says whether the
    sender took it.
 
 ```toml
@@ -2743,44 +2753,44 @@ via = ["desktop", "slack"]
 user = "U012AB3CD"   # your Slack member id
 ```
 
-A message also carries its `jeet://` link, as a button, as a link and as a
-`jeet open jeet://…` line; with `jeet notify install-link`, a click opens
-it. Whether Slack takes a `jeet://` link is not known: if it refuses the
-message for it, jeet sends it again without the button and the link (the
-`jeet open` line stays) and leaves them out from then on. Check with
-`jeet notify test` after setup. A token Slack refuses, or none stored, is
-logged once until a send goes through; run `jeet notify setup slack` again.
+A message also carries its `plete://` link, as a button, as a link and as a
+`plete open plete://…` line; with `plete notify install-link`, a click opens
+it. Whether Slack takes a `plete://` link is not known: if it refuses the
+message for it, plete sends it again without the button and the link (the
+`plete open` line stays) and leaves them out from then on. Check with
+`plete notify test` after setup. A token Slack refuses, or none stored, is
+logged once until a send goes through; run `plete notify setup slack` again.
 Each message's channel and timestamp are kept in
-`$JEET_HOME/run/notify/slack-sent.jsonl`.
+`$PLETE_HOME/run/notify/slack-sent.jsonl`.
 
 #### ntfy
 
 Notifications are published to a topic on an ntfy server (`https://ntfy.sh`
 unless you name your own), through its JSON API. The title is the header
 ("Question #41 from task x"); the message has the text, the task, kind, CI
-status and age, the command that acts on it and a `jeet open jeet://…`
+status and age, the command that acts on it and a `plete open plete://…`
 line. Questions and stuck work are sent at high priority, finished work at
 ntfy's default and the rest at low. A click opens the PR when there is
-one, else the `jeet://` link; buttons open the PR, any other page it links
-to, and the `jeet://` link. If the server refuses a message for its
-`jeet://` link, jeet sends it again without (the `jeet open` line stays)
+one, else the `plete://` link; buttons open the PR, any other page it links
+to, and the `plete://` link. If the server refuses a message for its
+`plete://` link, plete sends it again without (the `plete open` line stays)
 and leaves those links out from then on.
 
 **Pick an unguessable topic, or use a token.** On ntfy.sh, and any server
 that lets anyone in, a topic is public: whoever knows or guesses its name
 can read every notification published to it (task names, questions, PR
-links) and publish to it too. `jeet notify setup ntfy` suggests a random
-topic (`jeet-` and 32 hex digits). For more, reserve the topic or run your
-own server, and give jeet an access token (`tk_…`).
+links) and publish to it too. `plete notify setup ntfy` suggests a random
+topic (`plete-` and 32 hex digits). For more, reserve the topic or run your
+own server, and give plete an access token (`tk_…`).
 
-1. At your own terminal (not a jeet pane), `jeet notify setup ntfy`: it asks
+1. At your own terminal (not a plete pane), `plete notify setup ntfy`: it asks
    for the server and topic, which it writes as `[notify.ntfy]` in
    config.toml unless that table is there already, then for an optional
    access token (not echoed; it goes into the OS keyring, not a file).
 2. Subscribe to the topic in the ntfy app.
 3. Add `"ntfy"` to `[notify] via`, e.g. `via = ["desktop", "ntfy"]`.
-4. `jeet notify install`, so a sender runs (or restart it, if it does).
-5. `jeet notify test`.
+4. `plete notify install`, so a sender runs (or restart it, if it does).
+5. `plete notify test`.
 
 ```toml
 [notify]
@@ -2788,13 +2798,13 @@ via = ["desktop", "ntfy"]
 
 [notify.ntfy]
 server = "https://ntfy.sh"   # the default
-topic = "jeet-3f6c9b1e0a8d4c27b5e1f09d6a4c8e21"
+topic = "plete-3f6c9b1e0a8d4c27b5e1f09d6a4c8e21"
 ```
 
 Only the sender publishes to ntfy, even with no token: it alone may read
-the keyring to know whether one is stored. Without a token, jeet publishes
+the keyring to know whether one is stored. Without a token, plete publishes
 anonymously. A token the server refuses (or a protected topic with none
-stored) is logged once until a send goes through; run `jeet notify setup
+stored) is logged once until a send goes through; run `plete notify setup
 ntfy` again.
 
 A notification about the same thing for the same reason (a question's
@@ -2802,42 +2812,42 @@ A notification about the same thing for the same reason (a question's
 
 ### Links
 
-`jeet open <url>` takes you to what a link names:
+`plete open <url>` takes you to what a link names:
 
 ```
-jeet://task/<slug>      a task
-jeet://review/<slug>    a review
-jeet://review/<slug>/diff     a review's PR diff, in the review viewer
-jeet://review/<slug>/explore  a review's worktree, in the explorer
-jeet://report/<id>      a report (r123 works too): its task's inbox & reports
+plete://task/<slug>      a task
+plete://review/<slug>    a review
+plete://review/<slug>/diff     a review's PR diff, in the review viewer
+plete://review/<slug>/explore  a review's worktree, in the explorer
+plete://report/<id>      a report (r123 works too): its task's inbox & reports
 ```
 
-It sends a jeet screen that is open there and brings it forward (switching
+It sends a plete screen that is open there and brings it forward (switching
 tmux to its pane, or detaching a `tmux attach` it is suspended under, and
 raising the terminal on macOS); else switches the tmux client attached to
-jeet's sessions to the task's or review's session; else runs the screen in
+plete's sessions to the task's or review's session; else runs the screen in
 the terminal it was run from; else starts a terminal to run it in. It acts on
 your screen, so it is refused from an agent's pane. That check covers only
-running `jeet open` directly: once `install-link` has been run, anything that
-can open a URL (`open jeet://...`, a browser, a chat message) reaches
-`jeet open` through the handler. It only navigates: it never changes a task
+running `plete open` directly: once `install-link` has been run, anything that
+can open a URL (`open plete://...`, a browser, a chat message) reaches
+`plete open` through the handler. It only navigates: it never changes a task
 or answers anything.
 
-`jeet notify install-link` makes the system open `jeet://` links with it (a
-small signed-ad-hoc app in `~/Library/Application Support/jeet` on macOS, a
+`plete notify install-link` makes the system open `plete://` links with it (a
+small signed-ad-hoc app in `~/Library/Application Support/plete` on macOS, a
 `.desktop` file and an `xdg-mime` default on Linux), so a notification, a
-browser or Slack can open one; a browser asks once before the first. The handler holds the path of the jeet
+browser or Slack can open one; a browser asks once before the first. The handler holds the path of the plete
 binary that ran `install-link`; run it again after moving or reinstalling
-jeet.
-`jeet notify uninstall-link` removes it. Nothing installs it by itself.
+plete.
+`plete notify uninstall-link` removes it. Nothing installs it by itself.
 
 ```toml
 [notify]
-terminal = "ghostty"   # which terminal `jeet open` starts when no jeet screen is open
+terminal = "ghostty"   # which terminal `plete open` starts when no plete screen is open
 ```
 
-`terminal` is `none` (never start one: `jeet open` then only switches to a
-screen that is open), a name jeet knows, or a command that jeet's command
+`terminal` is `none` (never start one: `plete open` then only switches to a
+screen that is open), a name plete knows, or a command that plete's command
 line is appended to, such as `"wezterm start --"`. Names: on macOS `ghostty`
 and `terminal` (Terminal.app); on Linux `ghostty`, `x-terminal-emulator`,
 `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `wezterm` and `xterm`.
@@ -2846,31 +2856,31 @@ Linux the first of those it finds.
 
 ### The assistant's permissions
 
-jeet commands run by the assistant's agent may only do what `[assistant]
+plete commands run by the assistant's agent may only do what `[assistant]
 allow` lists; anything else fails with a message saying
-what is missing. Reads (`jeet ls`, `jeet task ls`, `jeet task last`, `jeet prs`, …),
-`jeet notify`, `jeet todo` and `jeet brief` are always allowed; screens and shells (`jeet`,
-`jeet explore`, `jeet exec`, `jeet chat`) need a person at a terminal.
+what is missing. Reads (`plete ls`, `plete task ls`, `plete task last`, `plete prs`, …),
+`plete notify`, `plete todo` and `plete brief` are always allowed; screens and shells (`plete`,
+`plete explore`, `plete exec`, `plete chat`) need a person at a terminal.
 
 ```toml
 [assistant]
 allow = ["task.create", "task.send", "task.archive", "review.start", "worktree.add", "project.read"]
 notify = true   # a notification for each action it takes
-push = false    # keep what is sent to it for `jeet brief` (the default)
+push = false    # keep what is sent to it for `plete brief` (the default)
 ```
 
 The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
-`pr.comment`, `pr.review`, `pr.merge` (`jeet pr merge`), `manager.grant`
-(`jeet manager grant` and `budget`), `manager.create` (`jeet manager new`)
-and `manager.stop` (`jeet manager pause`, `resume` and `stop`). Nothing is
+`pr.comment`, `pr.review`, `pr.merge` (`plete pr merge`), `manager.grant`
+(`plete manager grant` and `budget`), `manager.create` (`plete manager new`)
+and `manager.stop` (`plete manager pause`, `resume` and `stop`). Nothing is
 allowed until listed. The assistant's Claude settings
-pre-approve exactly the matching `jeet` commands, plus the `gh` commands of
+pre-approve exactly the matching `plete` commands, plus the `gh` commands of
 `pr.comment` (`gh pr comment`, `gh issue comment`) and `pr.review` (`gh pr
 review`), so allowed actions do not prompt. Every action it takes, and every one refused, is appended to
-`~/.jeet/assistant/actions.log`.
+`~/.plete/assistant/actions.log`.
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` also takes a manager by its exact name) is bounded by
@@ -2882,63 +2892,63 @@ assistant may not. Granting a held capability by name (`pr.merge`,
 `pr.comment`, `pr.review`, `task.delete` and `[managers] held`) is written to
 `actions.log` and announced, whatever `[assistant] notify` says, unless you
 grant it yourself. It reaches only itself: it acts only on itself and the
-tasks below it, reads included, and `jeet task ls` lists only those. The
-reads that name no task (`jeet ls`, `jeet prs`, …) and `jeet notify` are
-free. `jeet todo`, `jeet brief`, review jobs and `project.read` (`jeet
+tasks below it, reads included, and `plete task ls` lists only those. The
+reads that name no task (`plete ls`, `plete prs`, …) and `plete notify` are
+free. `plete todo`, `plete brief`, review jobs and `project.read` (`plete
 projects ls`) stay refused, whatever the assistant holds; the refusal
-tells it to ask with `jeet report`. A task made before this keeps the grant
-it was made with: change it with `jeet manager grant`.
+tells it to ask with `plete report`. A task made before this keeps the grant
+it was made with: change it with `plete manager grant`.
 
-A manager (`jeet manager new`) is bounded the same way, by its own grant
+A manager (`plete manager new`) is bounded the same way, by its own grant
 (`--allow`, or `[managers] manager_default`) cut by every list above it,
 but it reaches its subtree rather than only itself: it makes tasks and
 managers under itself (`--parent` names itself or a manager below it), and
-the `jeet task` and `jeet manager` commands its grant allows act on tasks
-below it, never on its parent, a sibling or another subtree. `jeet manager
-stop --all` is yours alone. Its settings pre-approve the `jeet` commands of
+the `plete task` and `plete manager` commands its grant allows act on tasks
+below it, never on its parent, a sibling or another subtree. `plete manager
+stop --all` is yours alone. Its settings pre-approve the `plete` commands of
 what it holds, read at each start, since nobody sits at its pane. Its
 worktrees are read-only, and under `[permissions] guards` it is also denied
 `git commit`, `git push`, `git checkout -b` and `git switch -c`: it hands
 code changes to a worker. When the assistant reads what a task
-said with `jeet task last`, it gets it fenced as untrusted, as it gets
+said with `plete task last`, it gets it fenced as untrusted, as it gets
 reports, and the status beside it (which the task's agent can write) unable
 to close or open a fence. The assistant's own
 reach is unchanged: all tasks, yours included. Reviews it starts with
-`jeet review` report to it too, though they are not under it: their review
+`plete review` report to it too, though they are not under it: their review
 agent is gated as the assistant is ([The review
-agent](#the-review-agent)), plus `jeet report` to the assistant. A legacy
-`[review] command` runs as the review too, and jeet tells the assistant when
+agent](#the-review-agent)), plus `plete report` to the assistant. A legacy
+`[review] command` runs as the review too, and plete tells the assistant when
 it exits without reporting done.
 No harness launches that command, so it gets none of
-the settings jeet gives Claude Code: if it runs Claude Code with its sandbox
-on, exclude `jeet` from the sandbox yourself (`--settings
-'{"sandbox":{"excludedCommands":["jeet"]}}'`), or its `jeet report` and
-`jeet worktree add` are refused as unconfirmed.
+the settings plete gives Claude Code: if it runs Claude Code with its sandbox
+on, exclude `plete` from the sandbox yourself (`--settings
+'{"sandbox":{"excludedCommands":["plete","jeet"]}}'`), or its `plete report` and
+`plete worktree add` are refused as unconfirmed.
 
-jeet knows which agent is calling by the process it launched: each task's
-agent, each assistant window and each review job is recorded when jeet
-starts it, and a jeet command is that agent's when it runs below that
-process. `$JEET_TASK_ID` and `JEET_ASSISTANT=1` are only hints: one that
+plete knows which agent is calling by the process it launched: each task's
+agent, each assistant window and each review job is recorded when plete
+starts it, and a plete command is that agent's when it runs below that
+process. `$PLETE_TASK_ID` and `PLETE_ASSISTANT=1` are only hints: one that
 disagrees is refused and written to `actions.log`, and one that claims a task
 with a parent, or the assistant, with no recorded agent behind it is refused
 as unconfirmed. So a shell you open inside such a task's or the assistant's
 tmux session is refused for commands that need a capability or name a
-task (`jeet task last`, `jeet worktree ls` and the like); use one outside
+task (`plete task last`, `plete worktree ls` and the like); use one outside
 it. This stops mistakes and casual forging, not an agent that sets
 out to escape. Every agent, managers below the assistant included, runs
 locally in tmux as you, cooperative and unconfined: nothing sandboxes it.
 
-**Upgrading to this version:** agents started by an older jeet were never
-recorded, so their `jeet report` and `jeet worktree add` are refused, and
+**Upgrading to this version:** agents started by an older plete were never
+recorded, so their `plete report` and `plete worktree add` are refused, and
 their hooks still write status but no longer report to the assistant.
-`jeet task ls` marks them `(unanchored)`. Restart each once it is idle with
-`jeet task restart <task>` (`assistant` for the assistant's windows), which
-resumes its conversation; or adopt it with `jeet task adopt <task>` from a
-terminal outside jeet's tmux sessions to keep work in progress running, and
+`plete task ls` marks them `(unanchored)`. Restart each once it is idle with
+`plete task restart <task>` (`assistant` for the assistant's windows), which
+resumes its conversation; or adopt it with `plete task adopt <task>` from a
+terminal outside plete's tmux sessions to keep work in progress running, and
 restart it later for the new hooks ([Restarting or adopting an
-agent](#restarting-or-adopting-an-agent)). `jeet task open` on such a task
+agent](#restarting-or-adopting-an-agent)). `plete task open` on such a task
 warns instead of adopting it. After
-upgrading, an older jeet refuses the index.
+upgrading, an older plete refuses the index.
 
 On a harness with deny rules (Claude Code), nothing is denied by default (bar the `[tasks] pr` policy rules)
 beyond what a task with a parent does not hold (below). Under `[permissions]
@@ -2948,9 +2958,9 @@ force-pushes (`git push --force` as a word, `-f`, `+branch`, `--mirror`;
 `--force-with-lease` and `--force-if-includes` still run), `git push
 --all` (and its synonym `--branches`), pushes naming a default branch
 (`main`, `master` and those of your indexed repositories, the eight in all
-most of them use; a repo's is `origin/HEAD` when jeet indexed it, or else
+most of them use; a repo's is `origin/HEAD` when plete indexed it, or else
 the branch then checked out, so that branch name is denied everywhere), and merging
-other than through `jeet pr merge` (`gh pr merge`, and the REST and GraphQL
+other than through `plete pr merge` (`gh pr merge`, and the REST and GraphQL
 merge endpoints through `gh api` and `curl`, when the command names them),
 `gh repo edit`, `gh secret` and `gh api -X DELETE` (or `--method
 DELETE`). With or without `guards`, a task with a parent (and a review, by
@@ -2972,11 +2982,11 @@ launches it, so it gets no deny rules.
 
 ### Permission rules for agents
 
-`[permissions]` adds to the Claude Code rules jeet writes into each
-agent's settings at launch (`$JEET_HOME/run/<task>/<session>.json`). It
-never changes `~/.claude/settings.json`, and it cannot lift a rule jeet
+`[permissions]` adds to the Claude Code rules plete writes into each
+agent's settings at launch (`$PLETE_HOME/run/<task>/<session>.json`). It
+never changes `~/.claude/settings.json`, and it cannot lift a rule plete
 denies: in Claude Code a deny wins over an allow from any scope. Running
-agents get new rules when they restart (`jeet task restart`).
+agents get new rules when they restart (`plete task restart`).
 
 ```toml
 [permissions]
@@ -3010,8 +3020,8 @@ under `[review] read_only`. Under `"ask"`
   a short description of a task's routine work (`autoMode.environment`,
   after its own defaults), so it stops flagging pushes of the task's own
   branch and pull requests that no rule covers.
-- **`guards = true`** puts back the rules jeet used to write for every agent:
-  `ALWAYS_DENY` (force-pushes, merges outside `jeet pr merge`, `gh repo edit`,
+- **`guards = true`** puts back the rules plete used to write for every agent:
+  `ALWAYS_DENY` (force-pushes, merges outside `plete pr merge`, `gh repo edit`,
   `gh secret`, `gh api` DELETE) and pushes to default branches, for the
   assistant, every task, every review and the setup agent; and `git commit`,
   `git push`, `git checkout -b` and `git switch -c` for managers.
@@ -3028,10 +3038,10 @@ is the PR policy: `[tasks] pr = "draft"` denies `gh pr ready` and `"ask"`
 denies `gh pr create`, as that is your policy, not a default restriction. To
 restrict:
 
-- `[managers] worker_default` and `manager_default`, or `--allow` on `jeet
-  task new` / `jeet manager new` and `jeet manager grant`, narrow what a new
+- `[managers] worker_default` and `manager_default`, or `--allow` on `plete
+  task new` / `plete manager new` and `plete manager grant`, narrow what a new
   task or manager may do (for example `["worktree.add"]`).
-- `[permissions] guards = true` denies force-pushes, merges outside `jeet pr
+- `[permissions] guards = true` denies force-pushes, merges outside `plete pr
   merge`, default-branch pushes and the like to every agent, and commits and
   pushes to managers.
 - `[review] read_only = true` limits reviews to reading, and denies them every
@@ -3039,13 +3049,13 @@ restrict:
 - `[permissions.task]`, `[permissions.manager]`, `[permissions.review]` or
   `[permissions.assistant]` `deny = [...]` adds your own rules for one role.
 
-An existing task keeps the grant it was made with; change it with `jeet
+An existing task keeps the grant it was made with; change it with `plete
 manager grant`.
 
 Allow rules match each part of a compound command on its own, so run a
-jeet command bare: `for t in a b; do jeet task archive $t --force; done` or
-`cd … && jeet …` can still reach a prompt or the classifier even with
-`Bash(jeet task archive:*)` allowed.
+plete command bare: `for t in a b; do plete task archive $t --force; done` or
+`cd … && plete …` can still reach a prompt or the classifier even with
+`Bash(plete task archive:*)` allowed.
 
 ```toml
 [managers]
@@ -3062,93 +3072,93 @@ held = []               # added to pr.merge, pr.comment, pr.review, task.delete:
 
 The tree's settings are checked when they are used, not when config.toml
 is read: a mistake in them (an unknown capability, a limit of 0, a `$` budget) refuses making tasks under the
-assistant, starting one, `jeet manager grant` and unarchiving a task under
+assistant, starting one, `plete manager grant` and unarchiving a task under
 a manager, and nothing else.
 
 ### Template overrides
 
-New homes start from the templates jeet ships: the assistant's `AGENTS.md`,
-skills, worklog and todo list, a manager's, and the `jeet` skill every task
-gets. A file of yours under `~/.jeet/templates/` is used in its place:
+New homes start from the templates plete ships: the assistant's `AGENTS.md`,
+skills, worklog and todo list, a manager's, and the `plete` skill every task
+gets. A file of yours under `~/.plete/templates/` is used in its place:
 
 ```
-~/.jeet/templates/root/AGENTS.md                              # the assistant's home, laid out as it is
-~/.jeet/templates/root/.claude/skills/jeet-assistant/SKILL.md
-~/.jeet/templates/manager/AGENTS.md                           # each new manager's home
-~/.jeet/templates/manager/.claude/skills/jeet-manager/SKILL.md
-~/.jeet/templates/worker/SKILL.md                             # .claude/skills/jeet/SKILL.md in each task
+~/.plete/templates/root/AGENTS.md                              # the assistant's home, laid out as it is
+~/.plete/templates/root/.claude/skills/plete-assistant/SKILL.md
+~/.plete/templates/manager/AGENTS.md                           # each new manager's home
+~/.plete/templates/manager/.claude/skills/plete-manager/SKILL.md
+~/.plete/templates/worker/SKILL.md                             # .claude/skills/plete/SKILL.md in each task
 ```
 
-An override applies only where jeet writes a template: a file missing from
+An override applies only where plete writes a template: a file missing from
 the assistant's or a new manager's home (existing files are never written
-over), and a task's `jeet` skill, which is written when the task is made
-and on `jeet projects resync`. `CLAUDE.md`, the import of `AGENTS.md`, is
-always jeet's, and so are reviews' homes. A path that is not a file is
+over), and a task's `plete` skill, which is written when the task is made
+and on `plete projects resync`. `CLAUDE.md`, the import of `AGENTS.md`, is
+always plete's, and so are reviews' homes. A path that is not a file is
 ignored; an override that cannot be read stops the home being made, with
 its path in the error. Overrides are used as written: no placeholder in
-them is filled in. `jeet setup` stages
-overrides for `jeet setup apply` like any other change.
+them is filled in. `plete setup` stages
+overrides for `plete setup apply` like any other change.
 
 ### Keeping the store fetched
 
-Commands that go to the network anyway (`jeet clone`, `jeet prs`,
-`jeet review`), and the tasks list and the explorer on launch, start a background fetch of every
+Commands that go to the network anyway (`plete clone`, `plete prs`,
+`plete review`), and the tasks list and the explorer on launch, start a background fetch of every
 indexed repo, at most once every five minutes. A trunk in the store that is
 clean and on its default branch is fast-forwarded to origin; one with local
 changes or another branch checked out is fetched but left alone, and repos
 outside the store are only ever fetched. Its output goes to
-`~/.jeet/.sync.log`. `jeet sync` does the same in the foreground.
+`~/.plete/.sync.log`. `plete sync` does the same in the foreground.
 
 ```toml
 sync_interval_secs = 300   # 0 turns background syncing off
 ```
 
-`JEET_SYNC_INTERVAL_SECS` overrides it.
+`PLETE_SYNC_INTERVAL_SECS` overrides it.
 
 Override the home directory for testing:
 
 ```bash
-export JEET_HOME=/tmp/jeet-test
+export PLETE_HOME=/tmp/plete-test
 ```
 
 ## Layout
 
 ```
-~/.jeet/
+~/.plete/
   config.toml
   index.db
   .last-sync, .sync.lock, .sync.log  # background store sync
-  watch.json, watch.log              # `jeet watch`: what it has seen, what it said
+  watch.json, watch.log              # `plete watch`: what it has seen, what it said
   watch-events.jsonl                 # recent GitHub events and where each went
   store/
     github.com/acme/widget/          # trunk (default branch)
   tasks/
     fix-login/                       # a task: the agent's working directory
-      .jeet/task-id                  # marks it, so jeet finds the task from below
-      .jeet/inbox.jsonl              # messages queued for its busy agent
-      .jeet/wait/                    # its wake channel's lock and the batch in flight
-      .claude/skills/jeet/SKILL.md   # how an agent adds worktrees
+      .plete/task-id                  # marks it, so plete finds the task from below
+      .plete/inbox.jsonl              # messages queued for its busy agent
+      .plete/wait/                    # its wake channel's lock and the batch in flight
+      .claude/skills/plete/SKILL.md   # how an agent adds worktrees
       widget/  widget-2/             # its worktrees, added on demand
     backend/                         # a manager: AGENTS.md, notes/, todo.md,
-      BRIEF.md                       #   its brief, read-only, written by jeet
-      .claude/skills/jeet-manager/   #   the jeet commands it uses
+      BRIEF.md                       #   its brief, read-only, written by plete
+      .claude/skills/plete-manager/   #   the plete commands it uses
   projects/<name>/                   # templates: AGENTS.md and skills/ copied into new tasks
     project.toml                     # its repositories and agent arguments
     AGENTS.md                        # instructions for the agent
     CLAUDE.md                        # `@AGENTS.md`: the same, for Claude Code
     skills/                          # copied to the task's .claude/skills/
-  assistant/                         # the assistant's home (`jeet chat`)
+  assistant/                         # the assistant's home (`plete chat`)
     AGENTS.md                        # its role; yours to edit
     CLAUDE.md                        # `@AGENTS.md`
-    .claude/skills/jeet-assistant/   # the jeet commands it uses
-    .claude/skills/jeet-managers/    # how it hands an area of work to a manager
+    .claude/skills/plete-assistant/   # the plete commands it uses
+    .claude/skills/plete-managers/    # how it hands an area of work to a manager
     notes/worklog.md                 # its running memory
-    todo.md                          # the todo list (`jeet todo`)
+    todo.md                          # the todo list (`plete todo`)
     actions.log                      # what it did, one JSON object per line
-    .jeet/                           # its status files and inbox, as a task's
+    .plete/                           # its status files and inbox, as a task's
 ```
 
-Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `jeet import`
+Before tasks, worktrees lived under `worktrees/` and `ephemeral/`; `plete import`
 moves anything left there into tasks.
 
 Repo ids look like `github.com/acme/widget`. Filters accept full ids or unique suffixes such as `acme/widget`.
@@ -3166,9 +3176,9 @@ cargo fmt --check
 ```
 
 A development build (a debug build, or one run from a cargo `target/`
-directory) refuses to migrate the index at the default home, `~/.jeet`: it
+directory) refuses to migrate the index at the default home, `~/.plete`: it
 would leave it at a schema the installed release cannot open. Run it with
-`JEET_HOME=$(mktemp -d)`, or set `JEET_ALLOW_DEV_MIGRATE=1` to migrate the
+`PLETE_HOME=$(mktemp -d)`, or set `PLETE_ALLOW_DEV_MIGRATE=1` to migrate the
 default index on purpose.
 
 [docs/harnesses.md](docs/harnesses.md) says how to add support for another
@@ -3176,12 +3186,12 @@ coding agent.
 
 ### Maintainer: Homebrew tap auto-update (CI)
 
-Release workflows push an updated formula to [`homebrew-jeet`](https://github.com/peterddod/homebrew-jeet). The default `GITHUB_TOKEN` cannot write to other repos — you **must** add a PAT:
+Release workflows push an updated formula to [`homebrew-plete`](https://github.com/peterddod/homebrew-plete). The default `GITHUB_TOKEN` cannot write to other repos — you **must** add a PAT:
 
 1. GitHub → **Settings → Developer settings → Personal access tokens → Fine-grained tokens**
-2. **Repository access:** only `peterddod/homebrew-jeet` (not the main `jeet` repo)
+2. **Repository access:** only `peterddod/homebrew-plete` (not the main `plete` repo)
 3. **Permissions → Repository → Contents:** Read and write
-4. On repo **peterddod/jeet** → **Settings → Secrets and variables → Actions**
+4. On repo **peterddod/plete** → **Settings → Secrets and variables → Actions**
 5. **New repository secret:** name `HOMEBREW_TAP_TOKEN`, value = the PAT
 6. Re-run the failed **homebrew-tap** job or tag a new release
 
