@@ -261,6 +261,31 @@ pub enum Commands {
         reference: String,
     },
 
+    /// Find the notes, briefs, reports, plans and READMEs that answer a
+    /// question or request in plain language
+    Search {
+        /// What you want to know or find, in your own words
+        #[arg(required_unless_present_any = ["status", "reset"])]
+        query: Vec<String>,
+        /// Only search these kinds of documents: assistant, tasks, projects,
+        /// repos (repeatable)
+        #[arg(long = "in", value_name = "KIND", value_enum)]
+        kinds: Vec<SearchKind>,
+        /// How many documents to show (at most 20)
+        #[arg(short = 'n', long, default_value_t = 5)]
+        limit: usize,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Show what is indexed for you instead
+        #[arg(long, conflicts_with = "reset")]
+        status: bool,
+        /// Delete the search index; it is rebuilt on the next search (user
+        /// and assistant only)
+        #[arg(long)]
+        reset: bool,
+    },
+
     /// Print what was kept for the assistant since you last ran this
     /// (reports, messages, watch events), then the open asks you hold
     Brief {
@@ -284,6 +309,15 @@ pub enum Commands {
 
     /// Query & list completion candidates (repos, branches)
     Complete { what: String },
+}
+
+/// A kind of document `jeet search --in` narrows to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SearchKind {
+    Assistant,
+    Tasks,
+    Projects,
+    Repos,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]

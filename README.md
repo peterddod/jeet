@@ -1415,6 +1415,55 @@ waits in its inbox until the agent next runs, and is notified now. With a
 `[watch]` section, the tasks list also polls while it is open. Installing or removing the watcher takes the
 assistant the `watch.install` capability; polling takes none.
 
+## Search
+
+`jeet search` finds the documents that answer a question or request put in
+plain language: notes, briefs, reports, plans, design docs and READMEs. It
+does not search code.
+
+```bash
+jeet search what did we decide about retries    # the 5 best documents
+jeet search -n 10 how a task reports it is blocked
+jeet search --in repos --in projects deploy rollback
+jeet search --json retries                      # for scripts and agents
+jeet search --status                            # what is indexed for you
+jeet search --reset                             # delete the index (user and assistant)
+```
+
+Each document comes with up to three of its best passages: the heading path
+they sit under, their line range and a short excerpt, so the right part can
+be read at once. Documents are ranked by BM25 over passages (a section of a
+Markdown file, cut to between about 120 and 400 words) with common question
+words dropped, and a document's score is its best passage plus half the
+second and a quarter of the third. The score shown is relative to the best
+hit, which is 1.00.
+
+What a caller may search depends on who it is:
+
+- the user at a shell and the assistant: the assistant's home, every work and
+  manager task's folder, every project, and every repository in the store;
+- any other task: its own folder, the folders of the tasks below it, their
+  projects, and the repositories those hold worktrees of or list in their
+  `project.toml`. Never the assistant's notes, nor the folder of a task above;
+- a review's agent: the repository under review;
+- everyone: the repositories holding jeet's and plete's own docs, when they
+  are in the store.
+
+`--in assistant|tasks|projects|repos` narrows that; it never adds to it.
+
+The documents are `.md`, `.markdown`, `.mdx`, `.txt`, `.rst` and `.adoc` files
+and extension-less `README`, `CHANGELOG` and `CONTRIBUTING`. A task's folder
+contributes its top-level files (not the generated `AGENTS.md` and
+`CLAUDE.md`) and everything under `notes/` and `docs/`; a repository, the
+files git tracks at its trunk. Files over 2 MB, binaries, and the directories
+`.git`, `.claude`, `.jeet`, `node_modules`, `target`, `vendor`,
+`third_party`, `dist`, `build`, `out` and `*-backup` are skipped.
+
+The index is one SQLite file, `~/.jeet/search/index.db`. It is a cache:
+every search first brings the sources it covers up to date (reading only
+files that changed; a repository is skipped outright while its HEAD is
+unchanged), and `jeet search --reset` deletes it.
+
 ## Setup
 
 ```bash
@@ -3010,6 +3059,19 @@ is read: a mistake in them (an unknown capability, a held one in a default
 you set, a limit of 0, a `$` budget) refuses making tasks under the
 assistant, starting one, `jeet manager grant` and unarchiving a task under
 a manager, and nothing else.
+
+### Searching documents
+
+`jeet search` has two optional settings, both in a `[search]` table:
+
+```toml
+[search]
+exclude = ["~/.jeet/assistant/private"]   # path prefixes never indexed or shown
+exclude_repos = ["acme/legacy"]           # repositories left out of every scope
+```
+
+`exclude_repos` takes the filters `jeet ls` takes; one that matches no
+repository, or more than one, leaves nothing out.
 
 ### Template overrides
 

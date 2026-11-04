@@ -28,6 +28,7 @@ mod reports;
 mod resolve;
 mod review;
 mod runtime;
+mod search;
 mod setup;
 mod startup;
 mod status;
@@ -162,6 +163,17 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Show { reference } => {
             let app = context::App::open()?;
             commands::show::run(&app, &reference)?
+        }
+        Commands::Search {
+            query,
+            kinds,
+            limit,
+            json,
+            status,
+            reset,
+        } => {
+            let app = context::App::open()?;
+            commands::search::run(&app, &query, &kinds, limit, json, status, reset)?
         }
         Commands::Brief { all } => {
             let app = context::App::open()?;
