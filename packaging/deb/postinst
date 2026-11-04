@@ -1,0 +1,11 @@
+#!/bin/sh
+# Renamed from jeet: running agents' hooks and launchd or systemd jobs call
+# /usr/bin/jeet, so it stays as a link to plete. Anything else already there
+# is left alone. pt is never installed here; see `plete alias install`.
+set -e
+
+if [ "$1" = "configure" ] && [ ! -e /usr/bin/jeet ] && [ ! -L /usr/bin/jeet ]; then
+  ln -s plete /usr/bin/jeet
+fi
+
+#DEBHELPER#

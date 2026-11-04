@@ -17,40 +17,40 @@ sha_for() {
   shasum -a 256 "${file}" | awk '{print $1}'
 }
 
-MAC_ARM_SHA="$(sha_for "jeet-v${VERSION}-aarch64-apple-darwin.tar.gz")"
-MAC_INTEL_SHA="$(sha_for "jeet-v${VERSION}-x86_64-apple-darwin.tar.gz")"
-LINUX_ARM_SHA="$(sha_for "jeet-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz")"
-LINUX_INTEL_SHA="$(sha_for "jeet-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz")"
+MAC_ARM_SHA="$(sha_for "plete-v${VERSION}-aarch64-apple-darwin.tar.gz")"
+MAC_INTEL_SHA="$(sha_for "plete-v${VERSION}-x86_64-apple-darwin.tar.gz")"
+LINUX_ARM_SHA="$(sha_for "plete-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz")"
+LINUX_INTEL_SHA="$(sha_for "plete-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz")"
 
 cat > "${OUT}" <<RUBY
 # typed: false
 # frozen_string_literal: true
 
-class Jeet < Formula
+class Plete < Formula
   desc "Global git repo index and worktree manager"
-  homepage "https://github.com/peterddod/jeet"
+  homepage "https://github.com/peterddod/plete"
   version "${VERSION}"
   license "MIT"
-  head "https://github.com/peterddod/jeet.git", branch: "main"
+  head "https://github.com/peterddod/plete.git", branch: "main"
 
   on_macos do
     on_arm do
-      url "https://github.com/peterddod/jeet/releases/download/v${VERSION}/jeet-v${VERSION}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/peterddod/plete/releases/download/v${VERSION}/plete-v${VERSION}-aarch64-apple-darwin.tar.gz"
       sha256 "${MAC_ARM_SHA}"
     end
     on_intel do
-      url "https://github.com/peterddod/jeet/releases/download/v${VERSION}/jeet-v${VERSION}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/peterddod/plete/releases/download/v${VERSION}/plete-v${VERSION}-x86_64-apple-darwin.tar.gz"
       sha256 "${MAC_INTEL_SHA}"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/peterddod/jeet/releases/download/v${VERSION}/jeet-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/peterddod/plete/releases/download/v${VERSION}/plete-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "${LINUX_ARM_SHA}"
     end
     on_intel do
-      url "https://github.com/peterddod/jeet/releases/download/v${VERSION}/jeet-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/peterddod/plete/releases/download/v${VERSION}/plete-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "${LINUX_INTEL_SHA}"
     end
   end
@@ -58,11 +58,16 @@ class Jeet < Formula
   depends_on "git"
 
   def install
-    bin.install "jeet"
-    generate_completions_from_executable(bin/"jeet", "completions")
+    bin.install "plete"
+    # Renamed from jeet: running agents' hooks and launchd jobs call
+    # bin/jeet, so it stays as a link. pt is never installed here; see
+    # \`plete alias install\`.
+    bin.install_symlink bin/"plete" => "jeet"
+    generate_completions_from_executable(bin/"plete", "completions")
   end
 
   test do
+    assert_match version.to_s, shell_output("#{bin}/plete --version")
     assert_match version.to_s, shell_output("#{bin}/jeet --version")
   end
 end

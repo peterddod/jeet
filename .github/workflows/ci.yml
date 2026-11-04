@@ -49,3 +49,10 @@ jobs:
           grep -q 'usr/share/bash-completion/completions/plete' /tmp/plete-deb-contents.txt
           grep -q 'usr/share/zsh/vendor-completions/_plete' /tmp/plete-deb-contents.txt
           grep -q 'usr/share/fish/vendor_completions.d/plete.fish' /tmp/plete-deb-contents.txt
+          # Renamed from jeet: the package keeps a jeet link, never a pt.
+          ! grep -q 'usr/bin/pt$' /tmp/plete-deb-contents.txt
+          sudo apt-get install -y ./target/debian/plete_*.deb
+          test "$(readlink /usr/bin/jeet)" = plete
+          /usr/bin/jeet --version | grep -q '^plete '
+          sudo dpkg -r plete
+          test ! -e /usr/bin/jeet && test ! -L /usr/bin/jeet

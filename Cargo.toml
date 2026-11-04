@@ -5,6 +5,7 @@ edition = "2021"
 description = "Global git repo index and worktree manager"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/peterddod/plete"
 
 [dependencies]
 anyhow = "1"
@@ -47,6 +48,7 @@ conflicts = "jeet"
 recommends = "bash-completion"
 section = "utility"
 priority = "optional"
+maintainer-scripts = "packaging/deb/"
 assets = [
     ["target/release/plete", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/plete/README", "644"],
