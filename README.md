@@ -39,7 +39,7 @@ sudo apt install jeet
 ### cargo
 
 ```bash
-cargo install --git https://github.com/peterddod/jeet --tag v0.14.0
+cargo install --git https://github.com/peterddod/jeet --tag v0.15.0
 ```
 
 ## Quick start
@@ -1595,6 +1595,104 @@ into tasks.
 | `jeet cd` | `jeet exec` (subshell) or `jeet cd` via init-shell |
 | `jeet cd --print` | `jeet path` |
 
+## What's new in v0.15
+
+Reviews that wait to be opened, one session per task, and no restrictions
+you did not ask for.
+
+### Reviews
+
+- **Starting a review opens nothing.** `jeet review <pr>` prints the review's
+  worktree path on stdout and, on stderr, the commands that reach it; it no
+  longer opens the diff viewer or a shell. `jeet review <pr> --open` brings
+  back the old behaviour ([Reviewing](#reviewing)).
+- **`jeet review open|diff|explore <review>`**: `open` resumes the review
+  agent's session (as `jeet task open <review>` does; `--session` picks one),
+  `diff` shows the PR's diff in jeet and `explore` opens the explorer in its
+  worktree. The review argument completes from review slugs; an unknown name
+  says there is no such review, and `diff`/`explore` refuse an archived one.
+- **Deep links** `jeet://review/<slug>/diff` and `jeet://review/<slug>/explore`
+  open the tasks screen on the review, then its diff or explorer.
+
+### Sessions
+
+- **One session per work task and manager**, as a review already had. jeet
+  keeps the session a task resumes, set when it starts and moved on by
+  `/clear` or a compact; older sessions stay as history. `jeet task open`,
+  `jeet task restart` and `jeet task last` use it.
+- **No session picker.** `⏎` on a task in the tasks tab resumes its one
+  session; the tasks tab's session picker, the explorer's `ctrl-s` sessions
+  overlay and `jeet task open --session` are gone. `jeet review open
+  --session` and the assistant's sessions (`C`, `jeet chat --new`) are
+  unchanged.
+
+### Permissions
+
+- **Restrictions are opt-in** ([Restrictions are opt-in](#restrictions-are-opt-in)).
+  - A new task or manager is granted every capability, held ones included
+    (`pr.merge`, `pr.comment`, `pr.review`, `task.delete`); before, a task
+    got `worktree.add` and a manager nothing. What a task may do is still
+    bounded by every task above it, ending at `[assistant] allow`, and by its
+    subtree. A held capability may now be named in a default you set.
+  - No agent gets deny rules in its harness settings by default: the
+    assistant, tasks, managers, reviews and the setup agent. The one
+    exception: a task with a parent is still denied the `gh` commands of
+    capabilities the tasks above it lack. The PR policy's denies (`gh pr
+    ready` under `draft`, `gh pr create` under `ask`) stay.
+  - A review's jeet commands are checked as if run by whoever asked for the
+    review (the requesting task, or the assistant); before, reviews were
+    read-only.
+  - A task with a parent may run `jeet notify`.
+- **To restrict again:** `[managers] worker_default` / `manager_default`,
+  `--allow` or `jeet manager grant` narrow a grant; `[permissions] guards =
+  true` puts back the old denies for every agent (force-pushes, merges
+  outside `jeet pr merge`, default-branch pushes, `gh repo edit`, `gh
+  secret`, `gh api` DELETE, and commits and pushes for managers); `[review]
+  read_only = true` puts back read-only reviews; `[permissions.review]` adds
+  rules for review agents.
+- Fixes: a review whose requester is gone is refused rather than allowed; a
+  forgotten session is not resumed as a task's one.
+
+v0.15.0: #134–#136, #138.
+
+### New and changed config keys
+
+| Key | Default | |
+|-----|---------|---|
+| `[permissions] guards` | `false` | new; `true` denies force-pushes, merges, default-branch pushes and the like |
+| `[review] read_only` | `false` | new; `true` limits reviews to reading and denies them pushes |
+| `[permissions.review] allow`, `deny` | `[]` | new; Claude Code rules for review agents |
+| `[managers] worker_default` | every capability (was `["worktree.add"]`) | set it to restrict |
+| `[managers] manager_default` | every capability (was `[]`) | set it to restrict |
+| `[managers] held` | `[]` | held capabilities may now appear in a default; granting one is still logged and announced |
+
+**Upgrading to v0.15.0:** the index moves from **schema v13 to v14** the
+first time any v0.15 command opens it, one additive step: **v14** a task's
+own session (`tasks.session_id`). A task from before v14 resumes its latest
+session until its next start. Before anything changes the index is copied to
+`$JEET_HOME/backups/index-v13-<unix time>.db`, and the migration is refused
+if the copy cannot be made. **v0.14 and older refuse the index afterwards**,
+so upgrade every jeet you run at once, the one `jeet watch` runs included.
+
+What changes by default:
+
+- Agents lose the deny rules jeet used to write for them once they restart.
+  Set `[permissions] guards = true` (and `[review] read_only = true`) first
+  if you want them kept.
+- Existing tasks and managers keep the grant they were made with; new ones
+  get every capability unless `[managers] worker_default` /
+  `manager_default` say otherwise.
+- `jeet review <pr>` no longer opens anything; scripts that relied on it
+  `cd`ing should use the printed path or `--open`.
+
+After upgrading:
+
+1. **`brew upgrade jeet`** (on macOS; `sudo apt upgrade jeet` on Debian and
+   Ubuntu), so every jeet, the one `jeet watch` runs included, is v0.15.
+2. Optionally set `guards`, `read_only` or the grant defaults (`jeet setup`).
+3. **Restart agents** with `jeet task restart <slug>`, the assistant
+   included, so they get the new settings and rules.
+
 ## What's new in v0.14
 
 Quieter messaging, notifications that reach you wherever you are, and a
@@ -1737,10 +1835,7 @@ v0.14.0: #105, #107–#129.
 | `[harness] wake_repair` | `"auto"` | `"off"` for no repairs |
 | `[permissions] push` | `"ask"` | `"branches"` |
 | `[permissions] classifier_context` | `false` | |
-| `[permissions] guards` | `false` | `true` denies force-pushes, merges and default-branch pushes |
-| `[review] read_only` | `false` | `true` limits reviews to reading |
-| `[managers] worker_default`, `manager_default` | every capability | a narrower grant |
-| `[permissions.task\|manager\|review\|assistant] allow`, `deny` | `[]` | Claude Code rules |
+| `[permissions.task\|manager\|assistant] allow`, `deny` | `[]` | Claude Code rules |
 | `[tasks] pr` | `"draft"` | `"auto"`, `"ask"`; also per project |
 | `[models] assistant`, `manager`, `task`, `review` | the agent's own | |
 | `[assistant] push` | `false` | `true` pushes as before |
