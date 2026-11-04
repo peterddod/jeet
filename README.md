@@ -1607,7 +1607,7 @@ you did not ask for.
   longer opens the diff viewer or a shell. `jeet review <pr> --open` brings
   back the old behaviour ([Reviewing](#reviewing)).
 - **`jeet review open|diff|explore <review>`**: `open` resumes the review
-  agent's session (as `jeet task open <review>` does, `--session` included),
+  agent's session (as `jeet task open <review>` does; `--session` picks one),
   `diff` shows the PR's diff in jeet and `explore` opens the explorer in its
   worktree. The review argument completes from review slugs; an unknown name
   says there is no such review, and `diff`/`explore` refuse an archived one.
