@@ -33,7 +33,7 @@ pub fn run(app: &App, url: &str) -> Result<()> {
     }
     // Read once and not passed on: what the screen run here starts is not
     // a terminal jeet started.
-    let started = std::env::var_os(STARTED_ENV).is_some();
+    let started = crate::env::var_os(STARTED_ENV).is_some();
     std::env::remove_var(STARTED_ENV);
     let link = link::parse(url)?;
     let mut screens = registry::live(&app.home);

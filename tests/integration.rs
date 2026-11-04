@@ -3346,7 +3346,7 @@ fn task_open_runs_claude_in_tmux_with_jeet_hooks() {
             "C-q",
             "if-shell",
             "-F",
-            "#{m:jeet-*,#{session_name}}",
+            "#{||:#{m:plete-*,#{session_name}},#{m:jeet-*,#{session_name}}}",
             "detach-client",
             "send-keys C-q"
         ]
@@ -4011,7 +4011,7 @@ fn tmux_passes_shift_enter_unless_the_user_says_otherwise() {
         [
             "if-shell",
             "-F",
-            "#{==:#{extended-keys}#{@jeet-extended-keys},off}",
+            "#{==:#{extended-keys}#{@jeet-extended-keys}#{@plete-extended-keys},off}",
             "set-option -s extended-keys on ; \
              set-option -as terminal-features 'xterm*:extkeys' ; \
              set-option -s @jeet-extended-keys on",

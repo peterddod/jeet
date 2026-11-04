@@ -551,7 +551,9 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
         };
         latest.is_some_and(|s| s.at >= since)
     };
-    let in_scope = may_auto_trust(&app.config, &app.home, trust, &dir);
+    let in_scope = std::iter::once(&app.home)
+        .chain(&app.new_home)
+        .any(|home| may_auto_trust(&app.config, home, trust, &dir));
     let auto = || match &watched {
         Watched::Task(task) => may_accept_now(app, task, in_scope),
         // Not while paused: accepting would let its prompt run.
@@ -666,10 +668,10 @@ pub fn run(app: &App, task_id: &str, session: Option<&str>) -> Result<()> {
 /// background: detached the way `store::launch` is, its output in
 /// `dir`'s `.jeet/startup.log`.
 pub fn launch(app: &App, id: &str, dir: &Path, session: Option<&str>) -> Result<()> {
-    if std::env::var(WATCH_ENV).is_ok_and(|v| v.trim() == "0") {
+    if crate::env::var(WATCH_ENV).is_ok_and(|v| v.trim() == "0") {
         return Ok(());
     }
-    let dir = dir.join(tasks::MARKER_DIR);
+    let dir = tasks::marker_dir(dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let log = dir.join(LOG_FILE);
     let out = std::fs::File::create(&log).with_context(|| format!("create {}", log.display()))?;
@@ -1070,6 +1072,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let root = crate::manager::root(&app).unwrap();

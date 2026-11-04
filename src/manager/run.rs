@@ -910,6 +910,7 @@ mod tests {
         let app = App {
             config: config::load_or_create(&home).unwrap(),
             db: Database::open(&config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let root = super::super::root(&app).unwrap();
@@ -1510,6 +1511,7 @@ mod tests {
             let app = App {
                 config: config::load_or_create(&home).unwrap(),
                 db: Database::open(&config::index_path(&home)).unwrap(),
+                new_home: None,
                 home,
             };
             f(&app);
@@ -1607,6 +1609,7 @@ mod tests {
             let app = App {
                 config: config::load_or_create(&home).unwrap(),
                 db: Database::open(&config::index_path(&home)).unwrap(),
+                new_home: None,
                 home,
             };
             walk(&app);

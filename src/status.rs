@@ -136,7 +136,7 @@ pub fn valid_session_id(id: &str) -> bool {
 }
 
 pub fn status_dir(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("status")
+    tasks::marker_dir(task_dir).join("status")
 }
 
 /// Seconds an agent with hooks is "starting" before its first hook, after
@@ -146,7 +146,7 @@ pub const STARTING_SECS: i64 = 15;
 /// Touched when an agent whose harness has hooks is launched, so that one
 /// with no status yet reads as starting rather than running.
 fn launched_path(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("launched")
+    tasks::marker_dir(task_dir).join("launched")
 }
 
 /// What the launch marker holds for a launch given a first prompt.
@@ -163,7 +163,7 @@ pub fn mark_launched(task_dir: &Path, hooks: bool, prompted: bool) -> Result<()>
             _ => Ok(()),
         };
     }
-    std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
+    std::fs::create_dir_all(tasks::marker_dir(task_dir))?;
     let content = if prompted { LAUNCHED_WITH_PROMPT } else { b"" };
     std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))
 }
@@ -176,13 +176,13 @@ pub fn launched_at(task_dir: &Path) -> Option<i64> {
 /// Touched when jeet types a message into the task's agent, so a pause can
 /// tell a turn about to start from an idle agent.
 fn typed_path(task_dir: &Path) -> PathBuf {
-    task_dir.join(tasks::MARKER_DIR).join("typed")
+    tasks::marker_dir(task_dir).join("typed")
 }
 
 /// Note that a message was just typed into the task's agent.
 pub fn mark_typed(task_dir: &Path) -> Result<()> {
     let path = typed_path(task_dir);
-    std::fs::create_dir_all(task_dir.join(tasks::MARKER_DIR))?;
+    std::fs::create_dir_all(tasks::marker_dir(task_dir))?;
     std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))
 }
 
@@ -1245,7 +1245,7 @@ fn locate_task(
         *app = Some(opened);
         return Ok(found);
     }
-    let env_id = std::env::var(tasks::TASK_ID_ENV)
+    let env_id = crate::env::var(tasks::TASK_ID_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
@@ -1528,6 +1528,7 @@ mod tests {
         App {
             config: config::load_or_create(home).unwrap(),
             db: Database::open(&config::index_path(home)).unwrap(),
+            new_home: None,
             home: home.to_path_buf(),
         }
     }

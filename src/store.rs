@@ -96,7 +96,7 @@ pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
     }
     let _repo_lock = lock_repo(&app.home, &repo.id)?;
     git::fetch_prune(trunk)?;
-    if !in_store(&app.store_root(), trunk) {
+    if !app.in_store(trunk) {
         return Ok(Outcome::Fetched);
     }
 
@@ -144,7 +144,7 @@ pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
 
 /// Paths compare as given: both come from the index and the canonicalized
 /// home, so a trunk in the store always shares the store root's spelling.
-fn in_store(store_root: &Path, trunk: &Path) -> bool {
+pub(crate) fn in_store(store_root: &Path, trunk: &Path) -> bool {
     trunk.starts_with(store_root)
 }
 

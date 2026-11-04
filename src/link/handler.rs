@@ -26,7 +26,8 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Fram
                           LaunchServices.framework/Support/lsregister";
 
 const DESKTOP_FILE: &str = "jeet-link.desktop";
-const MIME_TYPE: &str = "x-scheme-handler/jeet";
+/// The schemes the handler opens: the new name and the old.
+const MIME_TYPES: [&str; 2] = ["x-scheme-handler/plete", "x-scheme-handler/jeet"];
 
 /// `jeet notify install-link`.
 pub fn install(home: &Path) -> Result<()> {
@@ -164,7 +165,7 @@ fn build_bundle(source: &Path, bundle: &Path) -> Result<()> {
             "-replace",
             "CFBundleURLTypes",
             "-json",
-            r#"[{"CFBundleURLName":"jeet link","CFBundleURLSchemes":["jeet"]}]"#,
+            r#"[{"CFBundleURLName":"jeet link","CFBundleURLSchemes":["plete","jeet"]}]"#,
             &plist,
         ],
     )?;
@@ -226,12 +227,13 @@ fn desktop_entry(path: &str, home: &Path, exe: &Path) -> Result<String> {
          Type=Application\n\
          Name=jeet link\n\
          Exec=/usr/bin/env {} {} {} open %u\n\
-         MimeType={MIME_TYPE};\n\
+         MimeType={mimes};\n\
          NoDisplay=true\n\
          Terminal=false\n",
         desktop_quote(&format!("PATH={path}"))?,
         desktop_quote(&format!("JEET_HOME={}", home.display()))?,
         desktop_quote(&exe.to_string_lossy())?,
+        mimes = MIME_TYPES.join(";"),
     ))
 }
 
@@ -242,7 +244,10 @@ fn install_linux(home: &Path, exe: &Path, path: &str) -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::write(&file, entry).with_context(|| format!("write {}", file.display()))?;
     println!("wrote {}", file.display());
-    match run("xdg-mime", &["default", DESKTOP_FILE, MIME_TYPE]) {
+    let registered = MIME_TYPES
+        .iter()
+        .try_for_each(|mime| run("xdg-mime", &["default", DESKTOP_FILE, mime]));
+    match registered {
         Ok(()) => {
             if which("update-desktop-database") {
                 let _ = run("update-desktop-database", &[&dir.to_string_lossy()]);
@@ -250,7 +255,8 @@ fn install_linux(home: &Path, exe: &Path, path: &str) -> Result<()> {
             println!("jeet:// links now open with it; test with: xdg-open jeet://task/<name>");
         }
         Err(_) if !which("xdg-mime") => println!(
-            "xdg-mime was not found: register {DESKTOP_FILE} as the handler of {MIME_TYPE} yourself"
+            "xdg-mime was not found: register {DESKTOP_FILE} as the handler of {} yourself",
+            MIME_TYPES.join(" and ")
         ),
         Err(e) => bail!("could not register the handler: {e:#}"),
     }
@@ -260,7 +266,13 @@ fn install_linux(home: &Path, exe: &Path, path: &str) -> Result<()> {
 /// `mimeapps.list` without jeet's own entry on its `x-scheme-handler/jeet=`
 /// lines: another app's stays, and a line left empty goes.
 fn without_jeet_handler(list: &str) -> String {
-    let key = format!("{MIME_TYPE}=");
+    MIME_TYPES
+        .iter()
+        .fold(list.to_string(), |list, mime| without_handler(&list, mime))
+}
+
+fn without_handler(list: &str, mime: &str) -> String {
+    let key = format!("{mime}=");
     let mut out: String = list
         .lines()
         .filter_map(|line| {
@@ -395,7 +407,7 @@ mod tests {
              Type=Application\n\
              Name=jeet link\n\
              Exec=/usr/bin/env \"PATH=/usr/bin:/bin\" \"JEET_HOME=/h/.jeet\" \"/opt/my jeet\" open %u\n\
-             MimeType=x-scheme-handler/jeet;\n\
+             MimeType=x-scheme-handler/plete;x-scheme-handler/jeet;\n\
              NoDisplay=true\n\
              Terminal=false\n"
         );

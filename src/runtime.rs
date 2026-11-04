@@ -42,9 +42,9 @@ pub fn session_name(task: &TaskRecord) -> String {
     session_name_for(&task.slug)
 }
 
-/// The tmux session of whatever has `slug`.
+/// The tmux session of whatever has `slug`: see [`tmux::find_session`].
 pub fn session_name_for(slug: &str) -> String {
-    format!("{}{}", crate::tmux::SESSION_PREFIX, slug)
+    tmux::find_session(slug)
 }
 
 /// The outcome of [`ensure_running`].
@@ -872,8 +872,8 @@ pub fn is_own_session(task: &TaskRecord) -> bool {
 
 /// [`is_own_session`] for the task or review with `id` and `slug`.
 pub fn is_own_agent_session(id: &str, slug: &str) -> bool {
-    let in_task = std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| v.trim() == id);
-    in_task || tmux::current_session().is_some_and(|s| s == session_name_for(slug))
+    let in_task = crate::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| v.trim() == id);
+    in_task || tmux::current_session().is_some_and(|s| tmux::is_session_of(&s, slug))
 }
 
 /// [`interrupt`] in the task's tmux session.
@@ -1102,6 +1102,7 @@ mod tests {
         let mut app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         app.config.assistant.allow = vec![

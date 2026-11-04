@@ -1142,7 +1142,7 @@ fn first_set(candidates: impl IntoIterator<Item = Option<String>>, default: &str
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+    crate::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// Split a configured command line into program + args, honouring simple quoting.
@@ -1175,13 +1175,84 @@ pub fn split_command(cmd: &str) -> Vec<String> {
     parts
 }
 
-pub fn jeet_home() -> Result<PathBuf> {
-    if let Ok(home) = std::env::var("JEET_HOME") {
-        return Ok(PathBuf::from(home));
+/// Directory name of the home under the old name.
+pub const LEGACY_HOME_DIR: &str = ".jeet";
+/// Directory name of the home under the new name.
+pub const NEW_HOME_DIR: &str = ".plete";
+
+/// Whether a default home holding only `~/.jeet` data is split: the index
+/// stays there, and new item directories go to `~/.plete`. Off until the
+/// rename; see [`default_homes`].
+const SPLIT_HOMES: bool = false; // flipped to true in the rename PR
+
+/// The default homes under `user_home`: the index home, and the directory new
+/// item directories (tasks, projects, reviews, clones) go to when that
+/// differs from it.
+///
+/// Unsplit: `~/.jeet` alone. Split: an existing `~/.jeet` index stays the
+/// index home with new items in `~/.plete`; anything else is `~/.plete`.
+pub fn default_homes(user_home: &Path) -> (PathBuf, Option<PathBuf>) {
+    default_homes_with(SPLIT_HOMES, user_home)
+}
+
+fn default_homes_with(split: bool, user_home: &Path) -> (PathBuf, Option<PathBuf>) {
+    let legacy = user_home.join(LEGACY_HOME_DIR);
+    if !split {
+        return (legacy, None);
     }
-    dirs::home_dir()
-        .map(|h| h.join(".jeet"))
-        .context("could not determine home directory")
+    let new = user_home.join(NEW_HOME_DIR);
+    if index_path(&legacy).exists() && !index_path(&new).exists() {
+        (legacy, Some(new))
+    } else {
+        (new, None)
+    }
+}
+
+/// Both default homes under `user_home`, for checks that must treat either
+/// as the user's own.
+pub fn default_home_candidates(user_home: &Path) -> [PathBuf; 2] {
+    [
+        user_home.join(LEGACY_HOME_DIR),
+        user_home.join(NEW_HOME_DIR),
+    ]
+}
+
+/// Pick the homes from the environment: `$PLETE_HOME`, then `$JEET_HOME`,
+/// then the defaults. An explicit home is the only one, except that a
+/// `$JEET_HOME` naming the default `~/.jeet` (as old sessions and launchd
+/// jobs set it) with an index in it is still the default, so it stays split.
+fn resolve_homes(
+    plete_home: Option<PathBuf>,
+    jeet_home: Option<PathBuf>,
+    user_home: &Path,
+) -> (PathBuf, Option<PathBuf>) {
+    if let Some(home) = plete_home {
+        return (home, None);
+    }
+    match jeet_home {
+        Some(home) if home == user_home.join(LEGACY_HOME_DIR) && index_path(&home).exists() => {
+            default_homes(user_home)
+        }
+        Some(home) => (home, None),
+        None => default_homes(user_home),
+    }
+}
+
+/// The index home, and where new item directories go if elsewhere.
+pub fn jeet_homes() -> Result<(PathBuf, Option<PathBuf>)> {
+    let env_home = |name| std::env::var_os(name).map(PathBuf::from);
+    let (plete, jeet) = (env_home("PLETE_HOME"), env_home("JEET_HOME"));
+    let user_home = dirs::home_dir();
+    if plete.is_some() || jeet.is_some() {
+        let user_home = user_home.unwrap_or_default();
+        return Ok(resolve_homes(plete, jeet, &user_home));
+    }
+    let user_home = user_home.context("could not determine home directory")?;
+    Ok(default_homes(&user_home))
+}
+
+pub fn jeet_home() -> Result<PathBuf> {
+    Ok(jeet_homes()?.0)
 }
 
 pub fn config_path(home: &Path) -> PathBuf {
@@ -1261,6 +1332,47 @@ pub fn expand_path(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_homes_unsplit_is_the_legacy_home() {
+        let u = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(u.path().join(".plete")).unwrap();
+        std::fs::write(u.path().join(".plete/index.db"), "").unwrap();
+        let (home, new) = default_homes_with(false, u.path());
+        assert_eq!(home, u.path().join(".jeet"));
+        assert_eq!(new, None);
+    }
+
+    #[test]
+    fn default_homes_split() {
+        let u = tempfile::tempdir().unwrap();
+        let (jeet, plete) = (u.path().join(".jeet"), u.path().join(".plete"));
+        // Nothing yet: a new install.
+        assert_eq!(default_homes_with(true, u.path()), (plete.clone(), None));
+        // An existing jeet index stays the index home.
+        std::fs::create_dir_all(&jeet).unwrap();
+        std::fs::write(jeet.join("index.db"), "").unwrap();
+        assert_eq!(
+            default_homes_with(true, u.path()),
+            (jeet.clone(), Some(plete.clone()))
+        );
+        // Once plete has its own index, that wins.
+        std::fs::create_dir_all(&plete).unwrap();
+        std::fs::write(plete.join("index.db"), "").unwrap();
+        assert_eq!(default_homes_with(true, u.path()), (plete, None));
+    }
+
+    #[test]
+    fn explicit_homes_win_in_order() {
+        let u = tempfile::tempdir().unwrap();
+        let (a, b) = (PathBuf::from("/x/a"), PathBuf::from("/x/b"));
+        assert_eq!(
+            resolve_homes(Some(a.clone()), Some(b.clone()), u.path()),
+            (a, None)
+        );
+        assert_eq!(resolve_homes(None, Some(b.clone()), u.path()), (b, None));
+        assert_eq!(resolve_homes(None, None, u.path()), default_homes(u.path()));
+    }
+
     use super::*;
 
     #[test]

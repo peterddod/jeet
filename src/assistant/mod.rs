@@ -62,8 +62,10 @@ pub use crate::manager::{date, TODO};
 /// The assistant's task slug, which no other task may take.
 pub const SLUG: &str = "assistant";
 
-/// The tmux session its windows live in.
-pub const TMUX_SESSION: &str = "jeet-assistant";
+/// The tmux session its windows live in: see [`tmux::find_session`].
+pub fn tmux_session() -> String {
+    tmux::find_session(SLUG)
+}
 
 const NAME: &str = "assistant";
 
@@ -161,7 +163,7 @@ pub fn sessions(app: &App, task: &TaskRecord) -> Result<Vec<Session>> {
     let dir = tasks::task_dir(app, task);
     let primary = app.db.primary_session(&task.id)?;
     let windows = match tmux::available() {
-        true => tmux::windows(TMUX_SESSION),
+        true => tmux::windows(&tmux_session()),
         false => Vec::new(),
     };
     let records = app.db.list_task_sessions(&task.id)?;
@@ -249,7 +251,7 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         );
     }
     let dir = tasks::task_dir(app, task);
-    let windows = tmux::windows(TMUX_SESSION);
+    let windows = tmux::windows(&tmux_session());
     // Windows whose agent has exited are no use to anyone.
     for window in windows.iter().filter(|w| !w.alive) {
         let _ = tmux::kill_window(&window.id);
@@ -329,7 +331,7 @@ pub fn open(app: &App, task: &TaskRecord, how: Open) -> Result<Opened> {
         (permissions::ASSISTANT_ENV, "1"),
         (cd::CD_FILE_ENV, ""),
     ];
-    let (window, pane) = tmux::new_window(TMUX_SESSION, &id, &title(&name), &dir, &env, &argv)?;
+    let (window, pane) = tmux::new_window(&tmux_session(), &id, &title(&name), &dir, &env, &argv)?;
     let mut warnings: Vec<String> = spec.version_warning().into_iter().collect();
     if let Err(e) = identity::record(
         &app.db,
@@ -416,7 +418,7 @@ fn launch_argv(
 /// Attach the terminal to `window`, until the user detaches.
 pub fn attach(window: &str) -> Result<i32> {
     tmux::select_window(window)?;
-    tmux::attach(TMUX_SESSION)
+    tmux::attach(&tmux_session())
 }
 
 /// End a session's window, if it is running. Its record stays, so it can be
@@ -448,7 +450,7 @@ fn title(name: &str) -> String {
 
 /// The session ids of the assistant's windows that are running.
 pub fn running_sessions() -> Vec<String> {
-    tmux::windows(TMUX_SESSION)
+    tmux::windows(&tmux_session())
         .into_iter()
         .filter(|w| w.alive)
         .filter_map(|w| w.key)
@@ -462,7 +464,7 @@ pub fn running_sessions() -> Vec<String> {
 /// window was keyed by before, if it was another: the one this follows on
 /// from.
 pub fn adopt_window(session_id: &str) -> Option<String> {
-    let (window, key) = tmux::current_window(TMUX_SESSION)?;
+    let (window, key) = tmux::current_window(&tmux_session())?;
     if key.as_deref() == Some(session_id) {
         return None;
     }
@@ -604,7 +606,7 @@ pub struct SessionAgent<'a> {
 impl<'a> SessionAgent<'a> {
     /// The agent of session `session_id`, in whichever window it runs.
     pub fn for_session(app: &'a App, task: &'a TaskRecord, session_id: &str) -> Self {
-        let window = tmux::windows(TMUX_SESSION)
+        let window = tmux::windows(&tmux_session())
             .into_iter()
             .find(|w| w.alive && w.key.as_deref() == Some(session_id))
             .map(|w| w.id);
@@ -1004,6 +1006,7 @@ mod tests {
         let app = App {
             config: toml::from_str(config).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            new_home: None,
             home: path,
         };
         (home, app)
@@ -1089,6 +1092,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&path).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&path)).unwrap(),
+            new_home: None,
             home: path,
         };
         let task = create_record(&app).unwrap();

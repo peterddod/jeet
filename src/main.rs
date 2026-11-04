@@ -8,6 +8,7 @@ mod completion_candidates;
 mod config;
 mod context;
 mod db;
+mod env;
 mod git;
 mod github;
 mod harness;
@@ -97,7 +98,7 @@ fn main() -> Result<()> {
 /// of the tasks after an upgrade ([`review::migrate_leftovers`]) waits for
 /// one. Nor from inside an agent's session.
 fn moves_reviews(command: Option<&Commands>) -> bool {
-    if std::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+    if crate::env::var(tasks::TASK_ID_ENV).is_ok_and(|v| !v.trim().is_empty()) {
         return false;
     }
     runs_by_a_person(command)

@@ -1941,6 +1941,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let mut state = WatchState::default();
@@ -2563,6 +2564,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let task = |slug: &str, kind, last_activity| TaskRecord {
@@ -2641,6 +2643,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let task = |slug: &str, name: &str, kind| TaskRecord {

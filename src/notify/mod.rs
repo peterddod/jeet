@@ -304,7 +304,7 @@ fn backends(config: &NotifyConfig, home: &Path) -> Vec<Box<dyn Notifier>> {
 }
 
 fn override_command() -> Option<String> {
-    std::env::var(COMMAND_ENV)
+    crate::env::var(COMMAND_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
 }

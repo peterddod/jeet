@@ -89,9 +89,12 @@ pub fn pr_policy_line(mode: PrMode) -> String {
 /// having to be run from inside the task directory.
 pub const TASK_ID_ENV: &str = "JEET_TASK_ID";
 
-/// `<task>/.jeet/task-id` marks a task directory, so the task can be found
-/// from anywhere beneath it.
-pub const MARKER_DIR: &str = ".jeet";
+/// `<task>/.plete/task-id` or `<task>/.jeet/task-id` marks a task directory,
+/// so the task can be found from anywhere beneath it.
+pub const NEW_MARKER_DIR: &str = ".plete";
+pub const LEGACY_MARKER_DIR: &str = ".jeet";
+/// The marker directory a task that has neither gets.
+const WRITE_MARKER_DIR: &str = ".jeet"; // flipped to plete in the rename PR
 const MARKER_FILE: &str = "task-id";
 
 const SLUG_MAX: usize = 48;
@@ -169,13 +172,26 @@ pub fn task_dir(app: &App, task: &TaskRecord) -> PathBuf {
     match task.kind {
         TaskKind::Assistant => crate::config::assistant_dir(&app.home),
         TaskKind::Setup => crate::setup::setup_dir(&app.home),
-        TaskKind::Work | TaskKind::Manager => app.tasks_root().join(&task.slug),
+        TaskKind::Work | TaskKind::Manager => app.item_dir(crate::config::tasks_root, &task.slug),
     }
 }
 
 /// The file marking `dir` as the directory of the task whose id it holds.
 pub fn marker_path(dir: &Path) -> PathBuf {
-    dir.join(MARKER_DIR).join(MARKER_FILE)
+    marker_dir(dir).join(MARKER_FILE)
+}
+
+/// `dir`'s marker directory: `.plete` if it has one, else `.jeet`, else the
+/// one a new task gets. Existing tasks keep theirs for life: running hooks
+/// and watchers write there.
+pub fn marker_dir(dir: &Path) -> PathBuf {
+    for name in [NEW_MARKER_DIR, LEGACY_MARKER_DIR] {
+        let marker = dir.join(name);
+        if marker.exists() {
+            return marker;
+        }
+    }
+    dir.join(WRITE_MARKER_DIR)
 }
 
 pub fn worktree_dir(app: &App, task: &TaskRecord, dir_name: &str) -> PathBuf {
@@ -207,7 +223,7 @@ pub fn slugify(name: &str) -> String {
 /// `base`, or `base-2`, `base-3`… — the first that neither another task or
 /// review nor a stray directory already has.
 pub(crate) fn unique_slug(app: &App, base: &str) -> Result<String> {
-    let root = app.tasks_root();
+    let roots = app.roots(crate::config::tasks_root);
     let mut n = 1;
     loop {
         let candidate = numbered(base, n);
@@ -221,7 +237,7 @@ pub(crate) fn unique_slug(app: &App, base: &str) -> Result<String> {
             && app.db.get_task_by_slug(&candidate)?.is_none()
             && app.db.get_review(&candidate)?.is_none()
             && app.db.find_review_by_slug(&candidate)?.is_none()
-            && !root.join(&candidate).exists()
+            && !roots.iter().any(|root| root.join(&candidate).exists())
         {
             return Ok(candidate);
         }
@@ -412,7 +428,8 @@ fn write_task(
     insert: impl FnOnce() -> Result<()>,
 ) -> Result<Vec<String>> {
     let dir = task_dir(app, task);
-    std::fs::create_dir_all(app.tasks_root()).context("create the tasks directory")?;
+    std::fs::create_dir_all(app.new_root(crate::config::tasks_root))
+        .context("create the tasks directory")?;
     std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     let templates = crate::config::templates_dir(&app.home);
     match scaffold(&dir, task, project, &templates).and_then(|notes| insert().map(|_| notes)) {
@@ -825,7 +842,7 @@ pub fn link_project_instructions(dir: &Path, project: &str) -> Result<()> {
 
 /// Mark `dir` as task `id`'s directory.
 pub fn write_marker(dir: &Path, id: &str) -> Result<()> {
-    let marker = dir.join(MARKER_DIR);
+    let marker = marker_dir(dir);
     std::fs::create_dir_all(&marker).with_context(|| format!("create {}", marker.display()))?;
     std::fs::write(marker.join(MARKER_FILE), format!("{id}\n")).context("write the task marker")
 }
@@ -835,7 +852,11 @@ pub fn write_marker(dir: &Path, id: &str) -> Result<()> {
 /// there is one, else the built-in one.
 pub fn install_skill(task_dir: &Path, templates: &Path) -> Result<()> {
     let text = manager::template_override(templates, "worker", "SKILL.md")?;
-    let dir = task_dir.join(".claude").join("skills").join("jeet");
+    let skill = Path::new(".claude").join("skills").join("jeet");
+    if manager::has_legacy_counterpart(task_dir, &skill.to_string_lossy()) {
+        return Ok(());
+    }
+    let dir = task_dir.join(skill);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("SKILL.md"), text.as_deref().unwrap_or(SKILL))
         .context("write the jeet skill")
@@ -921,7 +942,7 @@ pub fn current(app: &App, explicit: Option<&str>) -> Result<TaskRecord> {
     }
     let own = identity::identify(app)?.task.map(|task| task.id);
     let hinted = || {
-        std::env::var(TASK_ID_ENV)
+        crate::env::var(TASK_ID_ENV)
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
@@ -972,10 +993,13 @@ pub fn task_at(app: &App, dir: &Path) -> Result<Option<TaskRecord>> {
 /// Walk up from `dir` to the nearest task directory: its path and task id.
 pub fn find_task_root(dir: &Path) -> Option<(PathBuf, String)> {
     for candidate in dir.ancestors() {
-        let marker = candidate.join(MARKER_DIR).join(MARKER_FILE);
-        if !marker.is_file() {
+        let Some(marker) = [NEW_MARKER_DIR, LEGACY_MARKER_DIR]
+            .map(|name| candidate.join(name).join(MARKER_FILE))
+            .into_iter()
+            .find(|m| m.is_file())
+        else {
             continue;
-        }
+        };
         let id = std::fs::read_to_string(&marker).ok()?.trim().to_string();
         if id.is_empty() {
             return None;
@@ -1216,8 +1240,9 @@ pub(crate) fn branch_holder(app: &App, trunk: &Path, branch: &str) -> Result<Opt
 /// The slug of the task or review directory a worktree path is in, judged
 /// by path alone.
 fn owner_slug(app: &App, path: &Path) -> Option<String> {
-    let root = canonical_tasks_root(app);
-    let rel = path.strip_prefix(&root).ok()?;
+    let rel = canonical_tasks_roots(app)
+        .iter()
+        .find_map(|root| path.strip_prefix(root).ok())?;
     let slug = rel.components().next()?;
     Some(slug.as_os_str().to_string_lossy().to_string())
 }
@@ -1243,9 +1268,11 @@ pub(crate) fn review_owning(
 
 /// `git worktree list` reports symlink-resolved paths; compare against a
 /// root resolved the same way.
-fn canonical_tasks_root(app: &App) -> PathBuf {
-    let root = app.tasks_root();
-    root.canonicalize().unwrap_or(root)
+fn canonical_tasks_roots(app: &App) -> Vec<PathBuf> {
+    app.roots(crate::config::tasks_root)
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect()
 }
 
 /// The repository `spec` names: a URL (cloned into the store if it is not
@@ -1342,10 +1369,52 @@ pub fn pick_dir_name(task_dir: &Path, taken: &[String], base: &str) -> String {
     }
 }
 
+/// The ref namespaces jeet keeps its refs in, in the store repositories.
+const NEW_REF_NS: &str = "refs/plete";
+const LEGACY_REF_NS: &str = "refs/jeet";
+/// The namespace refs are written to; both are read and listed.
+pub(crate) const WRITE_REF_NS: &str = LEGACY_REF_NS; // flipped to plete in the rename PR
+
 /// `refs/jeet/<kind>/<task-id>/<dir>`, with `dir` escaped into one ref
 /// component by [`ref_component`], so no two worktrees share a ref.
 pub(crate) fn jeet_ref(kind: &str, task_id: &str, dir_name: &str) -> String {
-    format!("refs/jeet/{kind}/{task_id}/{}", ref_component(dir_name))
+    format!(
+        "{WRITE_REF_NS}/{kind}/{task_id}/{}",
+        ref_component(dir_name)
+    )
+}
+
+/// [`jeet_ref`] under each namespace, new first.
+fn ref_names(kind: &str, task_id: &str, dir_name: &str) -> [String; 2] {
+    let tail = format!("{kind}/{task_id}/{}", ref_component(dir_name));
+    [NEW_REF_NS, LEGACY_REF_NS].map(|ns| format!("{ns}/{tail}"))
+}
+
+/// The ref [`jeet_ref`] names, as it stands in `trunk`: under whichever
+/// namespace it exists in, else the one refs are written to.
+fn existing_ref(trunk: &Path, kind: &str, task_id: &str, dir_name: &str) -> String {
+    ref_names(kind, task_id, dir_name)
+        .into_iter()
+        .find(|name| git::ref_exists(trunk, name).unwrap_or(false))
+        .unwrap_or_else(|| jeet_ref(kind, task_id, dir_name))
+}
+
+/// Delete the ref [`jeet_ref`] names, under every namespace it is in.
+fn delete_ref_everywhere(trunk: &Path, kind: &str, task_id: &str, dir_name: &str) {
+    for name in ref_names(kind, task_id, dir_name) {
+        if git::ref_exists(trunk, &name).unwrap_or(false) {
+            let _ = git::delete_ref(trunk, &name);
+        }
+    }
+}
+
+/// Every ref under `<namespace>/<tail>` in either namespace.
+fn refs_under_both(trunk: &Path, tail: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for ns in [NEW_REF_NS, LEGACY_REF_NS] {
+        names.extend(git::refs_under(trunk, &format!("{ns}/{tail}"))?);
+    }
+    Ok(names)
 }
 
 /// `name` as a single ref component, one-to-one: ASCII letters, digits and
@@ -1393,7 +1462,7 @@ fn kept_refs(app: &App, owner_id: &str) -> Result<Vec<(PathBuf, String)>> {
         if !trunk.is_dir() {
             continue;
         }
-        let Ok(names) = git::refs_under(&trunk, &format!("refs/jeet/kept/{owner_id}/")) else {
+        let Ok(names) = refs_under_both(&trunk, &format!("kept/{owner_id}/")) else {
             continue;
         };
         for name in names {
@@ -1429,7 +1498,7 @@ fn set_aside_leftovers(
     snapshot: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut kept = Vec::new();
-    if let Some(old) = git::rev_parse(trunk, &jeet_ref("head", task_id, dir_name)) {
+    if let Some(old) = git::rev_parse(trunk, &existing_ref(trunk, "head", task_id, dir_name)) {
         if old != head
             && !git::is_ancestor(trunk, &old, head)
             && unreachable(trunk, &old) != Some(0)
@@ -1437,7 +1506,7 @@ fn set_aside_leftovers(
             kept.push(keep(trunk, task_id, dir_name, "head", &old)?);
         }
     }
-    if let Some(old) = git::rev_parse(trunk, &jeet_ref("stash", task_id, dir_name)) {
+    if let Some(old) = git::rev_parse(trunk, &existing_ref(trunk, "stash", task_id, dir_name)) {
         if !snapshot.is_some_and(|new| same_changes(trunk, &old, new)) {
             kept.push(keep(trunk, task_id, dir_name, "stash", &old)?);
         }
@@ -1568,7 +1637,7 @@ pub(crate) fn plural(n: usize, what: &str) -> String {
 /// for it would be. Returns a warning for each read-only worktree found on
 /// a branch: a manager checked one out itself.
 pub fn reconcile(app: &App) -> Result<Vec<String>> {
-    let root = canonical_tasks_root(app);
+    let roots = canonical_tasks_roots(app);
     let tasks = app.db.list_tasks(Some(TaskState::Active))?;
     let by_slug: HashMap<&str, &TaskRecord> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     let mut prune = BTreeSet::new();
@@ -1583,7 +1652,10 @@ pub fn reconcile(app: &App) -> Result<Vec<String>> {
             continue;
         };
         for entry in entries {
-            let Some((slug, dir_name)) = split_task_path(&root, &entry.path) else {
+            let Some((slug, dir_name)) = roots
+                .iter()
+                .find_map(|root| split_task_path(root, &entry.path))
+            else {
                 continue;
             };
             let Some(task) = by_slug.get(slug.as_str()) else {
@@ -1635,7 +1707,7 @@ pub fn reconcile(app: &App) -> Result<Vec<String>> {
 
     for task in &tasks {
         for row in app.db.list_task_worktrees(&task.id)? {
-            if root.join(&task.slug).join(&row.dir_name).exists() {
+            if worktree_dir(app, task, &row.dir_name).exists() {
                 continue;
             }
             // An archive that stopped part-way leaves rows holding what is
@@ -1811,7 +1883,7 @@ pub(crate) fn archive_worktree(
         None => {
             // Left by an earlier attempt, and stale now there is nothing;
             // anything else it held was set aside above.
-            let _ = git::delete_ref(&trunk, &stash_ref);
+            delete_ref_everywhere(&trunk, "stash", owner_id, what);
             None
         }
     };
@@ -2069,7 +2141,7 @@ pub(crate) fn restore_worktree(
     };
     let repo = repo_of(app, row)?;
     let trunk = PathBuf::from(&repo.trunk_path);
-    let head_ref = jeet_ref("head", owner_id, &what);
+    let head_ref = existing_ref(&trunk, "head", owner_id, &what);
     let mut keep_head_ref = false;
 
     match row.branch.clone() {
@@ -2141,7 +2213,7 @@ pub(crate) fn restore_worktree(
         }
     }
     if !keep_head_ref {
-        let _ = git::delete_ref(&trunk, &head_ref);
+        delete_ref_everywhere(&trunk, "head", owner_id, &what);
         row.head_oid = None;
     }
     save(row)?;
@@ -2228,7 +2300,7 @@ pub(crate) fn losses_of(
         let stash = row
             .stash_ref
             .clone()
-            .unwrap_or_else(|| jeet_ref("stash", owner_id, &row.dir_name));
+            .unwrap_or_else(|| existing_ref(&trunk, "stash", owner_id, &row.dir_name));
         if git::ref_exists(&trunk, &stash).unwrap_or(false) {
             out.push(format!(
                 "{what}: uncommitted changes saved at archive ({stash})"
@@ -2283,7 +2355,7 @@ pub(crate) fn losses_of(
         // HEAD as pinned at archive. Normally its branch or the commits just
         // counted hold it, but not if the branch moved while the task was
         // archived, or an unarchive stopped before releasing it.
-        let head_ref = jeet_ref("head", owner_id, &row.dir_name);
+        let head_ref = existing_ref(&trunk, "head", owner_id, &row.dir_name);
         if git::ref_exists(&trunk, &head_ref).unwrap_or(false) {
             let mut exclude = vec!["--remotes", "--tags", "--branches"];
             exclude.extend(counted.iter().map(String::as_str));
@@ -2461,7 +2533,7 @@ pub(crate) fn remove_owned(
 
     for trunk in &trunks {
         for kind in ["stash", "head"] {
-            for name in git::refs_under(trunk, &format!("refs/jeet/{kind}/{owner_id}/"))? {
+            for name in refs_under_both(trunk, &format!("{kind}/{owner_id}/"))? {
                 git::delete_ref(trunk, &name).with_context(|| format!("delete {name}"))?;
             }
         }
@@ -2849,6 +2921,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_marker_dir_is_whichever_there_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        assert_eq!(marker_dir(d), d.join(WRITE_MARKER_DIR));
+        std::fs::create_dir(d.join(".jeet")).unwrap();
+        assert_eq!(marker_dir(d), d.join(".jeet"));
+        std::fs::create_dir(d.join(".plete")).unwrap();
+        assert_eq!(marker_dir(d), d.join(".plete"));
+    }
+
+    #[test]
+    fn a_task_root_is_found_by_either_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, id) in [(".plete", "new-1"), (".jeet", "old-1")] {
+            let task = dir.path().join(id);
+            std::fs::create_dir_all(task.join(name)).unwrap();
+            std::fs::write(task.join(name).join("task-id"), format!("{id}\n")).unwrap();
+            let deep = task.join("api/src");
+            std::fs::create_dir_all(&deep).unwrap();
+            assert_eq!(find_task_root(&deep), Some((task, id.to_string())));
+        }
+    }
+
+    #[test]
+    fn refs_are_read_and_deleted_under_either_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "m"]);
+        let oid = git(&["rev-parse", "HEAD"]);
+
+        // Written under the write namespace, as `jeet_ref` names it.
+        let written = jeet_ref("head", "t1", "api");
+        assert!(written.starts_with(WRITE_REF_NS));
+        let [new, legacy] = ref_names("head", "t1", "api");
+        assert_eq!(new, "refs/plete/head/t1/api");
+        assert_eq!(legacy, "refs/jeet/head/t1/api");
+        // Neither: the name to write.
+        assert_eq!(existing_ref(repo, "head", "t1", "api"), written);
+        // Only an old one: found.
+        git::update_ref(repo, &legacy, &oid).unwrap();
+        assert_eq!(existing_ref(repo, "head", "t1", "api"), legacy);
+        // Both: the new one first.
+        git::update_ref(repo, &new, &oid).unwrap();
+        assert_eq!(existing_ref(repo, "head", "t1", "api"), new);
+
+        git::update_ref(repo, "refs/plete/kept/t1/a/head-1", &oid).unwrap();
+        git::update_ref(repo, "refs/jeet/kept/t1/b/stash-1", &oid).unwrap();
+        let mut kept = refs_under_both(repo, "kept/t1/").unwrap();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["refs/jeet/kept/t1/b/stash-1", "refs/plete/kept/t1/a/head-1"]
+        );
+
+        delete_ref_everywhere(repo, "head", "t1", "api");
+        assert!(!git::ref_exists(repo, &new).unwrap());
+        assert!(!git::ref_exists(repo, &legacy).unwrap());
+    }
+
+    #[test]
     fn foreign_checkouts_are_the_outermost_ones_the_task_does_not_hold() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -3030,6 +3181,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let origin = root.join("origin");
@@ -3489,6 +3641,7 @@ mod tests {
         let app = App {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
+            new_home: None,
             home,
         };
         let user = Caller::User;

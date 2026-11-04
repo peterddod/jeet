@@ -123,7 +123,11 @@ impl Http for Offline {
 pub struct State {
     /// `false` once the service refused a message for its `jeet://` link:
     /// until then messages go with one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "plete_links"
+    )]
     pub jeet_links: Option<bool>,
     /// A missing or refused token has been logged, and is not again until
     /// a send goes through.
@@ -193,6 +197,14 @@ pub fn refuse_jeet_links(home: &Path, backend: &str) {
 
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn the_links_field_is_read_under_its_new_name_too() {
+        let new: State = serde_json::from_str(r#"{"plete_links":false}"#).unwrap();
+        assert_eq!(new.jeet_links, Some(false));
+        let old: State = serde_json::from_str(r#"{"jeet_links":false}"#).unwrap();
+        assert_eq!(old.jeet_links, Some(false));
+    }
+
     use super::*;
     use serde_json::json;
     use std::io::BufRead;

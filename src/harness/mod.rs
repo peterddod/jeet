@@ -492,7 +492,7 @@ pub const VERSION_CHECK_ENV: &str = "JEET_HARNESS_VERSION_CHECK";
 pub fn version_warning(harness: &dyn Harness, program: &str) -> Option<String> {
     static CHECKED: OnceLock<Option<String>> = OnceLock::new();
     let tested = harness.tested_version()?;
-    if std::env::var(VERSION_CHECK_ENV).is_ok_and(|v| v.trim() == "0") {
+    if crate::env::var(VERSION_CHECK_ENV).is_ok_and(|v| v.trim() == "0") {
         return None;
     }
     CHECKED
