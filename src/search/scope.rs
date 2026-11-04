@@ -220,6 +220,7 @@ mod tests {
             config: crate::config::load_or_create(&home).unwrap(),
             db: crate::db::Database::open(&crate::config::index_path(&home)).unwrap(),
             home,
+            new_home: None,
         };
         (dir, app)
     }
@@ -265,7 +266,7 @@ mod tests {
         repo(&app, "github.com/acme/api");
         repo(&app, "github.com/acme/other");
         repo(&app, "github.com/peterddod/plete");
-        std::fs::create_dir_all(app.projects_root().join("proj")).unwrap();
+        std::fs::create_dir_all(crate::config::projects_root(&app.home).join("proj")).unwrap();
         task(&app, "root", TaskKind::Assistant, None, None);
         task(&app, "mgr", TaskKind::Manager, Some("root"), None);
         task(&app, "w1", TaskKind::Work, Some("mgr"), Some("proj"));
@@ -313,7 +314,7 @@ mod tests {
     fn the_user_and_the_assistant_see_everything() {
         let (_dir, app) = lab();
         repo(&app, "github.com/acme/api");
-        std::fs::create_dir_all(app.projects_root().join("proj")).unwrap();
+        std::fs::create_dir_all(crate::config::projects_root(&app.home).join("proj")).unwrap();
         task(&app, "root", TaskKind::Assistant, None, None);
         task(&app, "w1", TaskKind::Work, Some("root"), None);
         let got = keys(&everything(&app).unwrap());
