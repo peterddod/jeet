@@ -551,7 +551,8 @@ fn pick_session(launch: &Launch, session: Option<&str>) -> Result<(String, bool)
 }
 
 /// The one session of a work task or manager, the one it resumes: the one
-/// set for it, else (for a task from before there was one) its latest.
+/// set for it, else (for a task from before there was one, or one set to a
+/// session since forgotten) its latest.
 pub fn task_session(
     app: &App,
     task: &TaskRecord,
@@ -559,8 +560,8 @@ pub fn task_session(
     known: &[TaskSessionRecord],
 ) -> Result<Option<String>> {
     Ok(match app.db.task_session(&task.id)? {
-        Some(id) => Some(id),
-        None => latest_session(dir, known),
+        Some(id) if known.iter().any(|s| s.session_id == id) => Some(id),
+        _ => latest_session(dir, known),
     })
 }
 
