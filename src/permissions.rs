@@ -2409,6 +2409,15 @@ mod tests {
         CAPABILITIES.iter().map(|c| c.name).collect()
     }
 
+    /// What a default grant holds: every capability but those given by
+    /// name only.
+    fn defaults() -> Vec<&'static str> {
+        every()
+            .into_iter()
+            .filter(|c| !config::NAMED_ONLY.contains(c))
+            .collect()
+    }
+
     fn sorted(mut list: Vec<&'static str>) -> Vec<&'static str> {
         list.sort();
         list
@@ -2430,7 +2439,7 @@ mod tests {
         let (_dir, mut app, _w) = tree();
         let policy = app.config.manager_policy().unwrap();
         for kind in [TaskKind::Work, TaskKind::Manager] {
-            assert_eq!(default_grant(kind, &policy).unwrap(), every());
+            assert_eq!(default_grant(kind, &policy).unwrap(), defaults());
         }
         app.config.assistant.allow = vec!["task.create".into(), "pr.merge".into()];
         let root = crate::assistant::ensure(&app).unwrap();
@@ -2588,10 +2597,10 @@ mod tests {
         // Nothing asked: the kind's default, uncut, which its ancestors cut
         // at every check.
         let default = grant(&app, &Caller::Root, &root, TaskKind::Work, None).unwrap();
-        assert_eq!(default.caps, every());
+        assert_eq!(default.caps, defaults());
         assert!(default.held.is_empty());
         let default = grant(&app, &Caller::Root, &root, TaskKind::Manager, None).unwrap();
-        assert_eq!(default.caps, every());
+        assert_eq!(default.caps, defaults());
         app.config.managers = Some(config::ManagersConfig {
             manager_default: Some(vec!["task.create".into()]),
             ..Default::default()

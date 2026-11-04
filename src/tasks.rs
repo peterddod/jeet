@@ -3288,7 +3288,11 @@ mod tests {
         };
         let plan = plan_child(&app, &Caller::User, TaskKind::Work, "kid", &d, None).unwrap();
         let child = make("kid", Some((&Caller::User, &plan)));
-        let mut every: Vec<&str> = permissions::CAPABILITIES.iter().map(|c| c.name).collect();
+        let mut every: Vec<&str> = permissions::CAPABILITIES
+            .iter()
+            .map(|c| c.name)
+            .filter(|name| !crate::config::NAMED_ONLY.contains(name))
+            .collect();
         every.sort();
         assert_eq!(app.db.grants(&child.id).unwrap(), every);
         assert_eq!(

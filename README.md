@@ -1095,7 +1095,7 @@ reporting done. These never start an assistant session. `--goal` and `--done`
 on `jeet task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
 task.create,worktree.add` names what it may do instead of `[managers]
-worker_default` (every capability unless set), refused unless its parent holds each one, and `--budget
+worker_default` (every capability but `assistant.interrupt` unless set), refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
@@ -1135,7 +1135,7 @@ jeet manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
 It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
-`[managers] manager_default` (every capability unless set) and an unasked budget `[managers]
+`[managers] manager_default` (every capability but `assistant.interrupt` unless set) and an unasked budget `[managers]
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
@@ -1742,7 +1742,7 @@ v0.14.0: #105, #107–#129.
 | `[permissions] classifier_context` | `false` | |
 | `[permissions] guards` | `false` | `true` denies force-pushes, merges and default-branch pushes |
 | `[review] read_only` | `false` | `true` limits reviews to reading |
-| `[managers] worker_default`, `manager_default` | every capability | a narrower grant |
+| `[managers] worker_default`, `manager_default` | every capability but `assistant.interrupt` | a narrower grant |
 | `[permissions.task\|manager\|review\|assistant] allow`, `deny` | `[]` | Claude Code rules |
 | `[tasks] pr` | `"draft"` | `"auto"`, `"ask"`; also per project |
 | `[models] assistant`, `manager`, `task`, `review` | the agent's own | |
@@ -2916,7 +2916,7 @@ review`), so allowed actions do not prompt. Every action it takes, and every one
 
 A task with a parent (one the assistant made, or one made with `--parent
 assistant`; `--parent` also takes a manager by its exact name) is bounded by
-the chain above it. It is granted every capability when made, held ones
+the chain above it. It is granted every capability but `assistant.interrupt` when made, held ones
 included (`[managers] worker_default`, or what `--allow` names, narrows
 that), and may use what its grant names only while every list above it,
 ending at `[assistant] allow`, holds it too: a task can never do what the
@@ -3096,7 +3096,7 @@ max_depth = 3           # a task at most 3 below the assistant, a manager 2
 max_children = 6        # active tasks under one manager (the assistant has no limit)
 default_budget = "4h"   # for a manager's task when `--budget` names none
 max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
-# Unset, both default to every capability. Setting them restricts, e.g.:
+# Unset, both default to every capability but assistant.interrupt. Setting them restricts, e.g.:
 worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
 manager_default = ["task.create"]   # a new manager's
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete: logged and notified when a grant names them
