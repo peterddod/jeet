@@ -3,7 +3,8 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::completion_candidates::{
     all_branch_candidates, capability_candidates, manager_candidates, parent_candidates,
-    project_candidates, repo_filter_candidates, task_candidates, task_worktree_candidates,
+    project_candidates, repo_filter_candidates, review_candidates, task_candidates,
+    task_worktree_candidates,
 };
 use crate::manager::budget::{BudgetPart, Change};
 use crate::permissions::parse_capability;
@@ -55,13 +56,17 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Check a pull request out into its review, have the review's agent
-    /// review it, and open the review viewer (a review is one per pull
-    /// request, with a worktree and a session of its own; open, archive and
-    /// delete it with `jeet task open|archive|delete <review>`)
+    /// Check a pull request out into its review and have the review's agent
+    /// review it, opening nothing (a review is one per pull request, with a
+    /// worktree and a session of its own). Prints the review's worktree path,
+    /// and on stderr the commands to go to it: `jeet review explore|diff|open
+    /// <review>`; `--open` goes there now. Archive and delete a review with
+    /// `jeet task archive|delete <review>`
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Review {
         /// PR number, with or without a leading #, or the PR's URL
-        pr: String,
+        #[arg(required = true)]
+        pr: Option<String>,
         /// Repository the PR belongs to; defaults to the one containing the current directory
         #[arg(long, add = ArgValueCandidates::new(repo_filter_candidates))]
         repo: Option<String>,
@@ -71,6 +76,12 @@ pub enum Commands {
         /// Ask for the review again even if this commit was reviewed already
         #[arg(long, conflicts_with = "no_command")]
         rerun: bool,
+        /// Go to the review now: its diff viewer, then a shell in its worktree
+        /// (the path and a `cd`, when not interactive)
+        #[arg(long)]
+        open: bool,
+        #[command(subcommand)]
+        command: Option<ReviewCommands>,
     },
 
     /// Pull requests: merge one
@@ -633,6 +644,32 @@ pub enum ManagerCommands {
     },
 }
 
+/// What `jeet review` reaches in a review that exists.
+#[derive(Subcommand)]
+pub enum ReviewCommands {
+    /// Attach to the review's agent in tmux, starting it if needed: what
+    /// `jeet task open <review>` does
+    Open {
+        #[arg(add = ArgValueCandidates::new(review_candidates))]
+        review: String,
+        /// Resume this agent session instead of the review's latest one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+
+    /// Show the PR's diff in the review viewer, on the review's worktree
+    Diff {
+        #[arg(add = ArgValueCandidates::new(review_candidates))]
+        review: String,
+    },
+
+    /// Open the file explorer in the review's worktree
+    Explore {
+        #[arg(add = ArgValueCandidates::new(review_candidates))]
+        review: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum PrCommands {
     /// Merge a pull request, only when it is open, not a draft, free of
@@ -860,4 +897,56 @@ pub enum WorktreeCommands {
         #[arg(add = ArgValueCandidates::new(task_worktree_candidates))]
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn review_takes_a_pr_or_a_subcommand() {
+        let Some(Commands::Review { pr, command, .. }) = parse(&["review", "55"]).command else {
+            panic!("expected review");
+        };
+        assert_eq!(pr.as_deref(), Some("55"));
+        assert!(command.is_none());
+        let Some(Commands::Review { pr, repo, open, .. }) =
+            parse(&["review", "#55", "--repo", "x", "--open"]).command
+        else {
+            panic!("expected review");
+        };
+        assert_eq!(
+            (pr.as_deref(), repo.as_deref(), open),
+            (Some("#55"), Some("x"), true)
+        );
+        let Some(Commands::Review { pr, command, .. }) = parse(&["review", "diff", "foo"]).command
+        else {
+            panic!("expected review");
+        };
+        assert!(pr.is_none());
+        assert!(matches!(command, Some(ReviewCommands::Diff { review }) if review == "foo"));
+        assert!(matches!(
+            parse(&["review", "open", "foo", "--session", "s"]).command,
+            Some(Commands::Review {
+                command: Some(ReviewCommands::Open {
+                    session: Some(_),
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["review", "explore", "foo"]).command,
+            Some(Commands::Review {
+                command: Some(ReviewCommands::Explore { .. }),
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["jeet", "review"]).is_err());
+    }
 }

@@ -151,7 +151,8 @@ fn plan(
     }
     let slug = match link {
         Link::Task(slug) | Link::Review(slug) => Some(slug),
-        Link::Report(_) => None,
+        // The agent's session is not what these name.
+        Link::ReviewDiff(_) | Link::ReviewExplore(_) | Link::Report(_) => None,
     };
     if let Some(slug) = slug {
         let session = runtime::session_name_for(slug);
@@ -335,6 +336,13 @@ mod tests {
             plan(&Link::Report(3), &[], &clients, |_| true, true),
             Plan::Here
         );
+        // Nor does a diff or explorer link go to the review's session.
+        for link in [
+            Link::ReviewDiff("fix".into()),
+            Link::ReviewExplore("fix".into()),
+        ] {
+            assert_eq!(plan(&link, &[], &clients, |_| true, true), Plan::Here);
+        }
         assert_eq!(
             plan(&task(), &[], &clients, |_| false, false),
             Plan::Terminal

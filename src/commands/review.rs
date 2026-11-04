@@ -1,5 +1,7 @@
 //! `jeet review <pr>`: find or make the PR's review, check the PR out in
-//! it, have its agent review it, and open the review viewer. Also what
+//! it and have its agent review it, opening nothing unless `--open` (then
+//! the review viewer, and a shell in the worktree). `jeet review
+//! open|diff|explore <review>` go to a review that exists. Also what
 //! `jeet task open|archive|unarchive|delete` do with the name of a review,
 //! which is no task.
 
@@ -32,6 +34,7 @@ pub fn run(
     repo_filter: Option<&str>,
     start_review: bool,
     rerun: bool,
+    open: bool,
 ) -> Result<()> {
     let number = github::parse_pr_number(pr)?;
     let repo = repo_from_filter_or_cwd(app, repo_filter)?;
@@ -113,6 +116,17 @@ pub fn run(
         }
     }
 
+    // The path is what a script consumes; nothing is opened or changed
+    // to unless asked.
+    if !open {
+        let slug = &review.slug;
+        eprintln!("jeet: to go to review {slug}:");
+        eprintln!("jeet:   jeet review explore {slug}   # the explorer, in its worktree");
+        eprintln!("jeet:   jeet review diff {slug}      # the PR's diff in jeet");
+        eprintln!("jeet:   jeet review open {slug}      # its agent's session");
+        println!("{}", checkout.path.display());
+        return Ok(());
+    }
     if io::stdout().is_terminal() {
         // The review itself, then the shell lands in the worktree to work on it.
         crate::tui::review::run(&checkout.path, &pr)?;
@@ -121,6 +135,69 @@ pub fn run(
     // Scripted: behave like `jeet worktree`, printing the path to consume.
     println!("{}", checkout.path.display());
     cd::request(&checkout.path)
+}
+
+/// The review `name` names, for `jeet review open|diff|explore`; a task's
+/// name is pointed at `jeet task`.
+fn named_review(app: &App, name: &str) -> Result<ReviewRecord> {
+    let found = match named(app, permissions::Verb::TaskOpen, name, false) {
+        Ok(found) => found,
+        // Neither a task nor a review: say so as a review command would.
+        Err(_) if review_exact(app, name)?.is_none() && review_by_prefix(app, name)?.is_none() => {
+            bail!("no review named {name:?}; `jeet task ls` lists them")
+        }
+        Err(e) => return Err(e),
+    };
+    match found {
+        Named::Review(review) => Ok(*review),
+        Named::Task(task) => bail!(
+            "{name} is a task, not a review; `jeet task open {}` opens it",
+            task.slug
+        ),
+    }
+}
+
+/// `jeet review open <review>`: what `jeet task open <review>` does.
+pub fn open_named(app: &App, name: &str, session: Option<&str>) -> Result<()> {
+    let review = named_review(app, name)?;
+    open(app, &review, session)
+}
+
+/// A review that is not archived, for the commands that look at its worktree.
+fn live_review(app: &App, name: &str) -> Result<ReviewRecord> {
+    let review = named_review(app, name)?;
+    if review.state == TaskState::Archived {
+        bail!(
+            "review {0} is archived; `jeet task unarchive {0}` first",
+            review.slug
+        );
+    }
+    Ok(review)
+}
+
+/// `jeet review diff <review>`: the PR's diff in the review viewer, on the
+/// review's worktree. Changes nothing, and leaves the shell where it is.
+pub fn diff(app: &App, name: &str) -> Result<()> {
+    let review = live_review(app, name)?;
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        bail!("the review viewer needs an interactive terminal; try `jeet review open {name}`");
+    }
+    let Some(worktree) = review::worktree_path(app, &review) else {
+        bail!("review {} has no worktree", review.slug);
+    };
+    let Some(repo) = app.db.get_repo(&review.repo_id)? else {
+        bail!("{} is no longer in the store", review.repo_id);
+    };
+    let pr = github::pr_view(std::path::Path::new(&repo.trunk_path), review.pr_number)?;
+    crate::tui::review::run(&worktree, &pr)?;
+    Ok(())
+}
+
+/// `jeet review explore <review>`: the explorer in the review's worktree.
+pub fn explore(app: &App, name: &str) -> Result<()> {
+    let review = live_review(app, name)?;
+    let dir = review::worktree_path(app, &review).unwrap_or_else(|| review::dir(app, &review));
+    crate::commands::explore::run_at(app, &dir)
 }
 
 /// `R` in the reviews tab: `jeet review <pr> --rerun` for `review`, without

@@ -41,13 +41,14 @@ mod wake;
 mod watch;
 mod worktrees;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 
 use cli::{
     Cli, Commands, DoctorCommands, InboxCommands, ManagerCommands, PrCommands, ProjectCommands,
-    SetupCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    ReviewCommands, SetupCommands, TaskCommands, TodoCommands, WatchCommands, WorktreeArgs,
+    WorktreeCommands,
 };
 
 fn main() -> Result<()> {
@@ -252,9 +253,25 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             repo,
             no_command,
             rerun,
+            open,
+            command,
         } => {
             let app = context::App::open()?;
-            commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun)?;
+            match (command, pr) {
+                (Some(ReviewCommands::Open { review, session }), _) => {
+                    commands::review::open_named(&app, &review, session.as_deref())?
+                }
+                (Some(ReviewCommands::Diff { review }), _) => {
+                    commands::review::diff(&app, &review)?
+                }
+                (Some(ReviewCommands::Explore { review }), _) => {
+                    commands::review::explore(&app, &review)?
+                }
+                (None, Some(pr)) => {
+                    commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun, open)?
+                }
+                (None, None) => bail!("jeet review needs a PR or a subcommand"),
+            }
         }
         Commands::Pr { command } => {
             let app = context::App::open()?;

@@ -4,6 +4,8 @@
 //! ```text
 //! jeet://task/<slug>      a task
 //! jeet://review/<slug>    a review
+//! jeet://review/<slug>/diff     a review's PR diff, in jeet
+//! jeet://review/<slug>/explore  a review's worktree, in the explorer
 //! jeet://report/<id>      a report (`r123` works too)
 //! ```
 //!
@@ -32,6 +34,10 @@ pub enum Link {
     Task(String),
     /// A review, by `ReviewRecord.slug`.
     Review(String),
+    /// A review's PR diff in the review viewer, by `ReviewRecord.slug`.
+    ReviewDiff(String),
+    /// A review's worktree in the explorer, by `ReviewRecord.slug`.
+    ReviewExplore(String),
     /// A report, by `task_reports.id`.
     Report(i64),
 }
@@ -53,6 +59,8 @@ impl fmt::Display for Link {
         match self {
             Link::Task(slug) => write!(f, "{SCHEME}task/{slug}"),
             Link::Review(slug) => write!(f, "{SCHEME}review/{slug}"),
+            Link::ReviewDiff(slug) => write!(f, "{SCHEME}review/{slug}/diff"),
+            Link::ReviewExplore(slug) => write!(f, "{SCHEME}review/{slug}/explore"),
             Link::Report(id) => write!(f, "{SCHEME}report/{id}"),
         }
     }
@@ -75,13 +83,23 @@ pub fn parse(url: &str) -> Result<Link> {
     }
     let rest = &url[SCHEME.len()..];
     let rest = rest.strip_suffix('/').unwrap_or(rest);
-    let mut parts = rest.split('/');
-    let (Some(kind), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-        bail!("a jeet link is {SCHEME}task/<slug>, review/<slug> or report/<id>: {url:?}");
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (kind, name, view) = match parts[..] {
+        [kind, name] => (kind, name, None),
+        [kind, name, view] if kind.eq_ignore_ascii_case("review") => (kind, name, Some(view)),
+        _ => bail!(
+            "a jeet link is {SCHEME}task/<slug>, review/<slug>, review/<slug>/diff, \
+             review/<slug>/explore or report/<id>: {url:?}"
+        ),
     };
     match kind.to_ascii_lowercase().as_str() {
         "task" => Ok(Link::Task(slug(name)?)),
-        "review" => Ok(Link::Review(slug(name)?)),
+        "review" => match view.map(str::to_ascii_lowercase).as_deref() {
+            None => Ok(Link::Review(slug(name)?)),
+            Some("diff") => Ok(Link::ReviewDiff(slug(name)?)),
+            Some("explore") => Ok(Link::ReviewExplore(slug(name)?)),
+            Some(_) => bail!("a review link goes on to diff or explore: {url:?}"),
+        },
         "report" => Ok(Link::Report(report_id(name)?)),
         _ => bail!("unknown kind {kind:?} in a jeet link (task, review or report): {url:?}"),
     }
@@ -121,11 +139,17 @@ mod tests {
             Link::task("fix-login"),
             Link::review("jeet-55"),
             Link::task("a.b_c-9"),
+            Link::ReviewDiff("jeet-55".into()),
+            Link::ReviewExplore("jeet-55".into()),
             Link::Report(123),
         ] {
             assert_eq!(parse(&link_for(&link)).unwrap(), link);
         }
         assert_eq!(Link::Report(7).to_string(), "jeet://report/7");
+        assert_eq!(
+            Link::ReviewDiff("jeet-55".into()).to_string(),
+            "jeet://review/jeet-55/diff"
+        );
     }
 
     #[test]
@@ -134,6 +158,14 @@ mod tests {
         assert_eq!(parse("jeet://task/fix/").unwrap(), Link::task("fix"));
         assert_eq!(parse("jeet://report/r123").unwrap(), Link::Report(123));
         assert_eq!(parse("jeet://report/123/").unwrap(), Link::Report(123));
+        assert_eq!(
+            parse("JEET://Review/x/Diff/").unwrap(),
+            Link::ReviewDiff("x".into())
+        );
+        assert_eq!(
+            parse("jeet://review/x/explore").unwrap(),
+            Link::ReviewExplore("x".into())
+        );
     }
 
     #[test]
@@ -148,6 +180,12 @@ mod tests {
             "jeet://task//",
             "jeet://task/x//",
             "jeet://task/x/y",
+            "jeet://task/x/diff",
+            "jeet://review/x/y",
+            "jeet://review/x/diff/y",
+            "jeet://review//diff",
+            "jeet://review/.hidden/diff",
+            "jeet://report/1/diff",
             "jeet://task/x?a=b",
             "jeet://task/x#y",
             "jeet://task/x%20y",

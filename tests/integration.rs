@@ -1032,8 +1032,9 @@ esac
     bin
 }
 
-/// Without a terminal `jeet review` opens no viewer: it is scripted, so it
-/// prints the PR's worktree and nothing else on stdout.
+/// `jeet review` opens nothing by default, terminal or not: it prints the
+/// PR's worktree and nothing else on stdout, and the commands to go to the
+/// review on stderr.
 #[test]
 fn review_without_a_terminal_prints_only_the_worktree_path() {
     let lab = lab("review");
@@ -1061,6 +1062,9 @@ fn review_without_a_terminal_prints_only_the_worktree_path() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "wide-store");
     assert!(stderr.contains("#7 Widen the store"), "{stderr}");
+    assert!(stderr.contains("jeet review explore "), "{stderr}");
+    assert!(stderr.contains("jeet review diff "), "{stderr}");
+    assert!(stderr.contains("jeet review open "), "{stderr}");
 
     // Only the lookups a checkout needs: the viewer's diff and threads are
     // fetched by the viewer, which needs a terminal.
@@ -1191,7 +1195,7 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
     );
     // A terminal of a known size, then the viewer in it.
     let inner = format!(
-        "{}stty rows 40 cols 120 && exec '{}' review 7",
+        "{}stty rows 40 cols 120 && exec '{}' review 7 --open",
         reaper::note_shell(),
         env!("CARGO_BIN_EXE_jeet")
     );
