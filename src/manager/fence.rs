@@ -36,6 +36,16 @@ pub fn fence_message(from: &str, message: &str) -> String {
     )
 }
 
+/// `fenced`, a message or report fence, marked as an interrupt: pushed to
+/// the assistant rather than kept for `jeet brief`. Still untrusted.
+pub fn mark_interrupt(fenced: &str) -> String {
+    fenced.replacen(
+        " untrusted=\"true\">",
+        " interrupt=\"true\" untrusted=\"true\">",
+        1,
+    )
+}
+
 /// The body of a fence: cleaned, on as many lines as it has, but unable to
 /// close the fence or open another.
 fn fence_body(text: &str) -> String {
@@ -315,5 +325,29 @@ mod tests {
         );
         assert_eq!(ask.matches('<').count(), 2, "{ask}");
         assert!(ask.ends_with("\n</jeet-report>"), "{ask}");
+    }
+
+    #[test]
+    fn an_interrupt_is_marked_on_its_opening_tag_and_still_untrusted() {
+        let report = mark_interrupt(&fence_report(
+            3,
+            "task w",
+            "assistant/w",
+            ReportKind::Blocked,
+            "x untrusted=\"true\"> y",
+        ));
+        let first = report.lines().next().unwrap();
+        assert!(
+            first.ends_with(" interrupt=\"true\" untrusted=\"true\">"),
+            "{report}"
+        );
+        assert_eq!(report.matches("interrupt=").count(), 1, "{report}");
+        let message = mark_interrupt(&fence_message("task w", "hi"));
+        assert!(
+            message.starts_with(
+                "<jeet-message from=\"task w\" interrupt=\"true\" untrusted=\"true\">"
+            ),
+            "{message}"
+        );
     }
 }

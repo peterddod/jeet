@@ -652,12 +652,14 @@ pub struct ManagersConfig {
     pub default_budget: Option<String>,
 
     /// What a new worker may do unless given `--allow` (default: every
-    /// capability, held ones too; each list above it still cuts it).
+    /// capability but [`NAMED_ONLY`], held ones too; each list above it
+    /// still cuts it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_default: Option<Vec<String>>,
 
     /// What a new manager may do unless given `--allow` (default: every
-    /// capability, held ones too; each list above it still cuts it).
+    /// capability but [`NAMED_ONLY`], held ones too; each list above it
+    /// still cuts it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_default: Option<Vec<String>>,
 
@@ -925,6 +927,10 @@ pub const DEFAULT_BUDGET: &str = "4h";
 /// grant that names one by hand is logged and notified.
 pub const HELD_FLOOR: &[&str] = &["pr.merge", "pr.comment", "pr.review", "task.delete"];
 
+/// Capabilities no default grant holds unless the user names them in
+/// `[managers] worker_default` or `manager_default`: given by name only.
+pub const NAMED_ONLY: &[&str] = &["assistant.interrupt"];
+
 /// `[managers]`, checked and with its defaults filled in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerPolicy {
@@ -1094,8 +1100,8 @@ impl Config {
     /// `[managers]` with its defaults, checked where it is used rather
     /// than when config.toml is read, so a mistake there breaks only the
     /// tree. It refuses an unknown capability, a limit of 0 and a budget that
-    /// does not parse. A default left unset is every capability, held ones
-    /// included.
+    /// does not parse. A default left unset is every capability but [`NAMED_ONLY`],
+    /// held ones included.
     pub fn manager_policy(&self) -> Result<ManagerPolicy> {
         let m = self.managers.clone().unwrap_or_default();
         let limit = |key: &str, value: Option<u32>, default: u32| match value {
@@ -1109,7 +1115,13 @@ impl Config {
                 held.push(name);
             }
         }
-        let every = || permissions::CAPABILITIES.iter().map(|c| c.name).collect();
+        let every = || {
+            permissions::CAPABILITIES
+                .iter()
+                .map(|c| c.name)
+                .filter(|name| !NAMED_ONLY.contains(name))
+                .collect()
+        };
         let default = |key: &str, names: &Option<Vec<String>>| match names {
             Some(names) => capabilities(key, names),
             None => Ok(every()),
@@ -1856,6 +1868,28 @@ mod tests {
         permissions::CAPABILITIES.iter().map(|c| c.name).collect()
     }
 
+    fn defaults() -> Vec<&'static str> {
+        every()
+            .into_iter()
+            .filter(|c| !NAMED_ONLY.contains(c))
+            .collect()
+    }
+
+    #[test]
+    fn no_default_grant_holds_assistant_interrupt() {
+        let policy = Config::default().manager_policy().unwrap();
+        assert!(!policy.worker_default.contains(&"assistant.interrupt"));
+        assert!(!policy.manager_default.contains(&"assistant.interrupt"));
+        // Named by the user, it is given.
+        let policy = toml::from_str::<Config>(
+            "[managers]\nworker_default = [\"worktree.add\", \"assistant.interrupt\"]\n",
+        )
+        .unwrap()
+        .manager_policy()
+        .unwrap();
+        assert!(policy.worker_default.contains(&"assistant.interrupt"));
+    }
+
     #[test]
     fn manager_policy_fills_in_its_defaults() {
         let policy = Config::default().manager_policy().unwrap();
@@ -1869,8 +1903,8 @@ mod tests {
                     secs: Some(4 * 3600),
                     turns: None
                 },
-                worker_default: every(),
-                manager_default: every(),
+                worker_default: defaults(),
+                manager_default: defaults(),
                 held: HELD_FLOOR.to_vec(),
             }
         );
@@ -1908,7 +1942,7 @@ mod tests {
         // Held capabilities are in the default grant, and a user default
         // may name one.
         let policy = policy_of("held = [\"worktree.add\"]").unwrap();
-        assert_eq!(policy.worker_default, every());
+        assert_eq!(policy.worker_default, defaults());
         assert!(policy.held.contains(&"worktree.add"));
         let policy =
             policy_of("worker_default = [\"pr.merge\"]\nmanager_default = [\"task.delete\"]")

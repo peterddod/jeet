@@ -382,9 +382,11 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                         delegation: &delegation,
                     },
                 )?,
-                TaskCommands::Send { name, message } => {
-                    commands::task::send(&app, &name, &message)?
-                }
+                TaskCommands::Send {
+                    name,
+                    message,
+                    interrupt,
+                } => commands::task::send(&app, &name, &message, interrupt)?,
                 TaskCommands::Interrupt { name } => commands::task::interrupt(&app, &name)?,
                 TaskCommands::Restart { name, force } => {
                     commands::task::restart(&app, &name, force)?
