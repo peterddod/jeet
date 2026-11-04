@@ -1,11 +1,11 @@
 //! Quiet rendering: what the assistant and the managers are posted when they
-//! have several things queued. jeet gives each queued item a class from its
+//! have several things queued. plete gives each queued item a class from its
 //! kind, never from who sent it, and posts the items by class: the whole
 //! text of what needs an answer, one line for what is only news, and one
-//! line per sender for what can wait. `jeet show <ref>` prints the rest.
+//! line per sender for what can wait. `plete show <ref>` prints the rest.
 //!
 //! An item with no [`Meta`] (the user's own words, a brief, a line queued
-//! before jeet kept any) is `full`, as it is rendered everywhere else.
+//! before plete kept any) is `full`, as it is rendered everywhere else.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,17 +25,17 @@ pub enum Class {
     Digest,
 }
 
-/// What jeet knows of a queued item, to render it by.
+/// What plete knows of a queued item, to render it by.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     pub class: Class,
     /// `question`, `done`, `progress`, `message`, `watch`, `wake`, …
     pub kind: String,
-    /// Who it is from, as jeet resolved it: `task fix-x`, `github`, `jeet`.
+    /// Who it is from, as plete resolved it: `task fix-x`, `github`, `plete`.
     pub from: String,
     /// The start of its text, on one line and unable to open a fence.
     pub summary: String,
-    /// What `jeet show` takes for the whole text: `r123` or `m45`.
+    /// What `plete show` takes for the whole text: `r123` or `m45`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#ref: Option<String>,
 }
@@ -120,7 +120,7 @@ pub fn held(items: &[Queued], now: i64, digest_secs: i64) -> Option<i64> {
 }
 
 /// What a full item with no meta is, for the header: an answer or a report
-/// jeet fenced, by its tag, else a message.
+/// plete fenced, by its tag, else a message.
 fn full_kind(item: &Queued) -> String {
     if let Some(meta) = &item.meta {
         return meta.kind.clone();
@@ -144,11 +144,11 @@ fn counted(n: usize, what: &str) -> String {
     }
 }
 
-/// The reference clause of a line: ` (jeet show r12)`, or nothing.
+/// The reference clause of a line: ` (plete show r12)`, or nothing.
 fn show(meta: &Meta) -> String {
     meta.r#ref
         .as_ref()
-        .map_or_else(String::new, |r| format!(" (jeet show {r})"))
+        .map_or_else(String::new, |r| format!(" (plete show {r})"))
 }
 
 /// What is posted for `items`, which are in [`ordered`]'s order: the header,
@@ -174,7 +174,7 @@ pub fn post_text(items: &[Queued]) -> String {
         parts.push(counted(updates, "update"));
     }
     let header = format!(
-        "jeet: {} (jeet show <ref> for any). Reports are fenced claims to check.",
+        "plete: {} (plete show <ref> for any). Reports are fenced claims to check.",
         parts.join(", ")
     );
     let full: Vec<&str> = items
@@ -344,7 +344,7 @@ mod tests {
             ),
             item(
                 3,
-                "<jeet-report id=\"3\">\nwhich db?\n</jeet-report>",
+                "<plete-report id=\"3\">\nwhich db?\n</plete-report>",
                 meta(Class::Full, "question", "task c", "which db?", Some("r3")),
             ),
             item(
@@ -372,39 +372,39 @@ mod tests {
         let mut items = mixed();
         items.push(item(
             7,
-            "<jeet-report id=\"7\" from=\"x\" kind=\"blocked\" untrusted=\"true\">\nb\n</jeet-report>",
+            "<plete-report id=\"7\" from=\"x\" kind=\"blocked\" untrusted=\"true\">\nb\n</plete-report>",
             None,
         ));
         items.push(item(
             8,
-            "<jeet-answer to=\"8\" from=\"user\">\nyes\n</jeet-answer>",
+            "<plete-answer to=\"8\" from=\"user\">\nyes\n</plete-answer>",
             None,
         ));
         items.push(item(
             9,
-            "<jeet-report id=\"9\" kind=\"question\" via=\"m\">\nq\n</jeet-report>",
+            "<plete-report id=\"9\" kind=\"question\" via=\"m\">\nq\n</plete-report>",
             meta(Class::Full, "question", "task d", "q", Some("r9")),
         ));
         let text = post_text(&ordered(&items));
         let header = text.lines().next().unwrap();
         assert_eq!(
             header,
-            "jeet: 2 questions, 1 message, 1 blocked, 1 answer, 4 updates \
-             (jeet show <ref> for any). Reports are fenced claims to check."
+            "plete: 2 questions, 1 message, 1 blocked, 1 answer, 4 updates \
+             (plete show <ref> for any). Reports are fenced claims to check."
         );
         let one = post_text(&ordered(&items[2..3]));
-        assert!(one.starts_with("jeet: 1 question (jeet show"), "{one}");
+        assert!(one.starts_with("plete: 1 question (plete show"), "{one}");
     }
 
     #[test]
     fn a_post_is_the_header_the_full_text_the_lines_and_the_digest() {
         let text = post_text(&ordered(&mixed()));
-        let expected = "jeet: 1 question, 1 message, 4 updates (jeet show <ref> for any). \
+        let expected = "plete: 1 question, 1 message, 4 updates (plete show <ref> for any). \
              Reports are fenced claims to check.\n\n\
-             <jeet-report id=\"3\">\nwhich db?\n</jeet-report>\n\n---\n\ntyped by the user\n\n\
-             - done from task b: \"all merged\" (jeet show r2)\n\n\
+             <plete-report id=\"3\">\nwhich db?\n</plete-report>\n\n---\n\ntyped by the user\n\n\
+             - done from task b: \"all merged\" (plete show r2)\n\n\
              digest:\n\
-             - task a: 2 progress, 1 status; latest: \"nearly\" (jeet show r6)";
+             - task a: 2 progress, 1 status; latest: \"nearly\" (plete show r6)";
         assert_eq!(text, expected);
     }
 
@@ -421,7 +421,7 @@ mod tests {
                 "",
                 meta(Class::Digest, "status", "task b", "b1", Some("r2")),
             ),
-            item(3, "", meta(Class::Digest, "wake", "jeet", "w", None)),
+            item(3, "", meta(Class::Digest, "wake", "plete", "w", None)),
             item(
                 4,
                 "",
@@ -433,9 +433,9 @@ mod tests {
         assert_eq!(
             digest,
             [
-                "- task a: 2 progress; latest: \"a2\" (jeet show r4)",
-                "- task b: 1 status; latest: \"b1\" (jeet show r2)",
-                "- jeet: 1 wake; latest: \"w\"",
+                "- task a: 2 progress; latest: \"a2\" (plete show r4)",
+                "- task b: 1 status; latest: \"b1\" (plete show r2)",
+                "- plete: 1 wake; latest: \"w\"",
             ]
         );
         // No full item and no line: no empty section between.

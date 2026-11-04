@@ -44,7 +44,7 @@ pub fn clone_into_store(app: &App, url: &str) -> Result<RepoRecord> {
     // shell in that trunk would pick up its files. Refuse a trunk inside or
     // above another's; case-folded, as the store may be case-insensitive.
     // Only store trunks count: one registered before tasks sits wherever it
-    // was found (maybe $HOME, above the store), and `jeet import` moves it
+    // was found (maybe $HOME, above the store), and `plete import` moves it
     // in by this very clone.
     let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
     let folded = fold(&trunk);

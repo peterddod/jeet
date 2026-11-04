@@ -97,7 +97,7 @@ impl State {
             why: Why::Info,
             kind: "folded".into(),
             title: format!(
-                "jeet: {n} more notification{}",
+                "plete: {n} more notification{}",
                 if n == 1 { "" } else { "s" }
             ),
             body,
@@ -207,7 +207,7 @@ action = "ignore"
         assert!(state.unfold(&config, 100).is_none());
         // An hour after the first, one goes: all three folded, in one.
         let more = state.unfold(&config, 10 + HOUR_SECS).unwrap();
-        assert_eq!(more.title, "jeet: 3 more notifications");
+        assert_eq!(more.title, "plete: 3 more notifications");
         assert_eq!(more.body, "k2 title; k3 title; k4 title");
         assert!(state.folded.is_empty());
         assert!(state.unfold(&config, 10 + HOUR_SECS).is_none());
@@ -231,7 +231,7 @@ action = "ignore"
         }
         assert_eq!((state.folded.len(), state.more), (5, 2));
         let more = state.unfold(&config, HOUR_SECS).unwrap();
-        assert_eq!(more.title, "jeet: 7 more notifications");
+        assert_eq!(more.title, "plete: 7 more notifications");
         assert_eq!(state.more, 0);
         assert!(
             more.body.ends_with("k5 title; and 2 others"),

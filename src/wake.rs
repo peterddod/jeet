@@ -4,8 +4,8 @@
 //! three times) gets one by being resumed: its agent ended and started
 //! again in the same place, resuming the session with today's settings.
 //!
-//! [`sweep_wake`] looks at every live session, from `jeet watch`'s poll
-//! with leave to repair, and from `jeet doctor wake` without. A session is
+//! [`sweep_wake`] looks at every live session, from `plete watch`'s poll
+//! with leave to repair, and from `plete doctor wake` without. A session is
 //! only resumed when it is idle, has no draft and nobody has typed in its
 //! window for a while, and at most once a day.
 
@@ -110,7 +110,7 @@ pub fn sweep_wake(app: &App, now: i64, repair: bool) -> Result<Vec<WakeRow>> {
                         row.repaired = Some(Repaired { at: now, why });
                         row.due = None;
                     }
-                    Err(e) => eprintln!("jeet: warning: could not resume {}: {e:#}", row.slug),
+                    Err(e) => eprintln!("plete: warning: could not resume {}: {e:#}", row.slug),
                 }
             }
         }
@@ -258,10 +258,10 @@ fn resume(app: &App, live: &Live, why: RepairWhy, now: i64) -> Result<()> {
         live.session, live.task.slug
     );
     if let Err(e) = permissions::log_wake(&app.home, &action, permissions::Outcome::Done) {
-        eprintln!("jeet: warning: {e:#}");
+        eprintln!("plete: warning: {e:#}");
     }
     if let Err(e) = note_in_digest(app, &action) {
-        eprintln!("jeet: warning: could not note the repair for the assistant: {e:#}");
+        eprintln!("plete: warning: could not note the repair for the assistant: {e:#}");
     }
     Ok(())
 }
@@ -275,7 +275,7 @@ fn note_in_digest(app: &App, action: &str) -> Result<()> {
     let Some(task) = app.db.get_assistant_task()? else {
         return Ok(());
     };
-    let meta = Meta::new(Class::Digest, "wake", "jeet", action, None);
+    let meta = Meta::new(Class::Digest, "wake", "plete", action, None);
     messages::Inbox::lock(&tasks::task_dir(app, &task))?.push_meta(
         action,
         None,
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!((item.message.as_str(), item.to.as_deref()), (action, None));
         let meta = item.meta.as_ref().unwrap();
         assert_eq!(meta.class, Class::Digest);
-        assert_eq!((meta.kind.as_str(), meta.from.as_str()), ("wake", "jeet"));
+        assert_eq!((meta.kind.as_str(), meta.from.as_str()), ("wake", "plete"));
         assert_eq!(meta.summary, action);
         assert_eq!(meta.r#ref, None);
         // It is held to ride the next post, not posted by itself.

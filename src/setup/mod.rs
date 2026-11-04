@@ -1,5 +1,5 @@
-//! `jeet setup`: the setup agent ([`agent`]), what it stages in
-//! `$JEET_HOME/setup/proposed/`, and what applies it. The agent only writes
+//! `plete setup`: the setup agent ([`agent`]), what it stages in
+//! `$PLETE_HOME/setup/proposed/`, and what applies it. The agent only writes
 //! proposals; the user applies each one at their own terminal ([`apply`]).
 
 pub mod agent;
@@ -18,9 +18,9 @@ use crate::permissions;
 
 /// The product's name, for new user-facing text: one place to change when
 /// it is renamed.
-pub const PRODUCT: &str = "jeet";
+pub const PRODUCT: &str = "plete";
 
-/// The setup agent's home, `$JEET_HOME/setup`.
+/// The setup agent's home, `$PLETE_HOME/setup`.
 pub fn setup_dir(home: &Path) -> PathBuf {
     home.join("setup")
 }
@@ -133,7 +133,7 @@ pub fn target_path(home: &Path, id: &str) -> Result<PathBuf> {
     Ok(home.join(id))
 }
 
-/// Check a staged `config.toml` as jeet would read it: its deserializer,
+/// Check a staged `config.toml` as plete would read it: its deserializer,
 /// then the `[managers]` and `[review]` policies, the capabilities in
 /// `[assistant] allow` and the backends of `[notify] via`, which are
 /// otherwise checked only where used.
@@ -205,7 +205,7 @@ mod tests {
         for ok in [
             "config.toml",
             "assistant/AGENTS.md",
-            "assistant/.claude/skills/jeet-assistant/SKILL.md",
+            "assistant/.claude/skills/plete-assistant/SKILL.md",
             "templates/root/AGENTS.md",
             "templates/worker/SKILL.md",
             "templates/manager/.claude/skills/x/SKILL.md",
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn checks_a_config_as_jeet_reads_it() {
+    fn checks_a_config_as_plete_reads_it() {
         assert!(check_config("scan_roots = [\"~/src\"]\n").is_ok());
         assert!(check_config("scan_roots = 3\n").is_err());
         assert!(check_config("[managers]\nmax_depth = 0\n").is_err());
@@ -287,7 +287,7 @@ mod tests {
         manifest.insert(
             "assistant/AGENTS.md".into(),
             Entry {
-                path: Some("~/.jeet/assistant/AGENTS.md".into()),
+                path: Some("~/.plete/assistant/AGENTS.md".into()),
                 reason: "shorter".into(),
                 hash: Some(hash(b"old")),
             },

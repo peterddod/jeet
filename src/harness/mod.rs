@@ -1,15 +1,15 @@
-//! Coding-agent harnesses: what jeet knows about the agent it runs in a
+//! Coding-agent harnesses: what plete knows about the agent it runs in a
 //! task's tmux session.
 //!
-//! A [`Harness`] is everything jeet needs from one agent: how to launch it
-//! (a new session under an id jeet picks, a resumed one, a first prompt),
-//! how to install jeet's hooks, what its hook payloads mean as a
+//! A [`Harness`] is everything plete needs from one agent: how to launch it
+//! (a new session under an id plete picks, a resumed one, a first prompt),
+//! how to install plete's hooks, what its hook payloads mean as a
 //! [`HookEvent`], which sessions it has recorded for a directory, and the
 //! instruction file it reads. Each harness is one module here; the rest of
-//! jeet sees only the trait and the neutral events.
+//! plete sees only the trait and the neutral events.
 //!
 //! Whatever a harness cannot do it answers with `None` (or nothing), and
-//! jeet does without: no status, no resume, no first prompt. [`Generic`] is
+//! plete does without: no status, no resume, no first prompt. [`Generic`] is
 //! the harness that can do none of it, for any other command.
 //!
 //! `docs/harnesses.md` says how to add one.
@@ -27,7 +27,7 @@ use serde::Serialize;
 use crate::agent::AgentSession;
 use crate::waiter::WakeEnv;
 
-/// Every harness jeet knows, the default first.
+/// Every harness plete knows, the default first.
 pub static HARNESSES: &[&dyn Harness] = &[&claude::ClaudeCode, &Generic];
 
 /// The harness used when nothing says otherwise.
@@ -54,7 +54,7 @@ pub fn detect(program: &str) -> &'static dyn Harness {
         .unwrap_or(&Generic)
 }
 
-/// Whether `harness` installs jeet's hooks, either way (see
+/// Whether `harness` installs plete's hooks, either way (see
 /// `runtime::hook_args`).
 pub fn has_hooks(harness: &dyn Harness) -> bool {
     let hooks = HookSetup::default();
@@ -100,7 +100,7 @@ pub fn ids() -> String {
         .join(", ")
 }
 
-/// A coding agent jeet can run. Every method but the first few has a
+/// A coding agent plete can run. Every method but the first few has a
 /// default that says "not supported".
 pub trait Harness: Sync {
     /// What `harness` in config.toml calls it, e.g. `claude-code`.
@@ -119,14 +119,14 @@ pub trait Harness: Sync {
         false
     }
 
-    /// The version jeet was last tested with. Only the latest is supported:
+    /// The version plete was last tested with. Only the latest is supported:
     /// an older one is warned about, never refused.
     fn tested_version(&self) -> Option<&'static str> {
         None
     }
 
     /// Arguments that start a new session with id `id` and display name
-    /// `name`, so jeet can record the session before the agent runs.
+    /// `name`, so plete can record the session before the agent runs.
     fn new_session_args(&self, _id: &str, _name: &str) -> Option<Vec<String>> {
         None
     }
@@ -142,14 +142,14 @@ pub trait Harness: Sync {
         None
     }
 
-    /// Arguments that install jeet's hooks for this launch only, without
+    /// Arguments that install plete's hooks for this launch only, without
     /// writing anything to disk.
     fn hook_args(&self, _hooks: &HookSetup) -> Option<Vec<String>> {
         None
     }
 
     /// [`Harness::hook_args`] read from a file at `path` instead: what to
-    /// write there, and the arguments naming it. jeet launches with this when
+    /// write there, and the arguments naming it. plete launches with this when
     /// the harness has it, so the hooks and rules, however many, cost the
     /// command line only the path (see `runtime::hook_args`). A harness may
     /// have this alone; either counts as having hooks. The file is
@@ -165,10 +165,10 @@ pub trait Harness: Sync {
     }
 
     /// The tmux key names that end the turn it is running, keeping the
-    /// session; jeet presses them once, only while it is working or waiting
+    /// session; plete presses them once, only while it is working or waiting
     /// on the user. `None`: it cannot be interrupted. A harness returning
     /// keys needs [`Harness::hook_args`] or [`Harness::hook_file`] too,
-    /// since jeet presses nothing
+    /// since plete presses nothing
     /// until a hook has reported since the launch, and
     /// [`Harness::has_draft`], or the keys are pressed over unsent text.
     fn interrupt_keys(&self) -> Option<&'static [&'static str]> {
@@ -182,7 +182,7 @@ pub trait Harness: Sync {
     }
 
     /// Whether it can have a wake channel: a background hook at session
-    /// start running `jeet inbox watch`, which hands it what is queued
+    /// start running `plete inbox watch`, which hands it what is queued
     /// as soon as it is queued (see `src/waiter.rs`). Optional: without it,
     /// what is queued waits for its Stop or is typed in once it is idle.
     /// Installed when [`HookSetup::wake`] asks for it.
@@ -190,7 +190,7 @@ pub trait Harness: Sync {
         false
     }
 
-    /// The wake channel (`jeet inbox watch`) of the session whose hook this
+    /// The wake channel (`plete inbox watch`) of the session whose hook this
     /// runs in, from the hook's environment, which loses it so nothing this
     /// starts inherits it. `None` when the harness has none, or the hook
     /// was told of none. Called first thing, before anything starts a thread.
@@ -236,7 +236,7 @@ pub trait Harness: Sync {
 
     /// What session `id`, started in `dir`, last said: its last `n`
     /// messages with text, oldest first, and how its last turn ended.
-    /// `None` when it keeps no record jeet can read.
+    /// `None` when it keeps no record plete can read.
     fn last_messages(&self, _dir: &Path, _id: &str, _n: usize) -> Option<Result<LastTurn>> {
         None
     }
@@ -253,7 +253,7 @@ pub trait Harness: Sync {
     }
 
     /// The next keys towards accepting the trust prompt the pane shows.
-    /// `None` when it shows none, or not in a state jeet knows: then no key
+    /// `None` when it shows none, or not in a state plete knows: then no key
     /// is sent.
     fn accept_trust(&self, _pane: &str) -> Option<TrustStep> {
         None
@@ -283,7 +283,7 @@ pub trait Harness: Sync {
     }
 
     /// What its [`Harness::instructions_file`] holds, when that is not
-    /// `AGENTS.md`, for it to read `AGENTS.md` instead. jeet writes it next
+    /// `AGENTS.md`, for it to read `AGENTS.md` instead. plete writes it next
     /// to every `AGENTS.md` of its own; see `src/instructions.rs`.
     fn instructions_import(&self) -> Option<&'static str> {
         None
@@ -296,7 +296,7 @@ impl std::fmt::Debug for dyn Harness {
     }
 }
 
-/// Any other command: it just runs, with none of jeet's integration.
+/// Any other command: it just runs, with none of plete's integration.
 #[derive(Debug)]
 pub struct Generic;
 
@@ -314,7 +314,7 @@ impl Harness for Generic {
     }
 }
 
-/// How a harness keeps its agent from running what jeet denies it, weakest
+/// How a harness keeps its agent from running what plete denies it, weakest
 /// first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Enforcement {
@@ -325,16 +325,16 @@ pub enum Enforcement {
     Rules,
 }
 
-/// What jeet's hooks need to know, for [`Harness::hook_args`].
+/// What plete's hooks need to know, for [`Harness::hook_args`].
 #[derive(Debug, Clone, Default)]
 pub struct HookSetup {
-    /// The jeet binary the hooks run, as `jeet task-hook`.
+    /// The plete binary the hooks run, as `plete task-hook`.
     pub exe: PathBuf,
     /// The task the agent is launched for, which each hook names with
     /// `--task`.
     pub task_id: String,
     /// Command prefixes the agent may run without asking, e.g.
-    /// `jeet worktree`.
+    /// `plete worktree`.
     pub allow: Vec<String>,
     /// Commands the agent may not run, even with the user's approval: words
     /// from the start of the command, where `*` matches any run of
@@ -357,7 +357,7 @@ pub struct HookSetup {
     pub wake: bool,
 }
 
-/// One hook report, in jeet's terms.
+/// One hook report, in plete's terms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookEvent {
     /// The harness's own name for the event, kept in the status file.
@@ -365,7 +365,7 @@ pub struct HookEvent {
     pub session_id: Option<String>,
     /// The session's working directory.
     pub cwd: Option<String>,
-    /// `None` for an event that says nothing jeet uses.
+    /// `None` for an event that says nothing plete uses.
     pub kind: Option<EventKind>,
     /// Where the harness records the session's conversation, when it says:
     /// the wake channel looks there for what it posted.
@@ -484,10 +484,10 @@ pub fn latest_activity(dir: &Path) -> Option<i64> {
 }
 
 /// Set to `0` to skip [`version_warning`]'s `--version` run.
-pub const VERSION_CHECK_ENV: &str = "JEET_HARNESS_VERSION_CHECK";
+pub const VERSION_CHECK_ENV: &str = "PLETE_HARNESS_VERSION_CHECK";
 
 /// A warning when `program --version` reports an older version of
-/// `harness` than jeet was tested with. Runs it at most once per run; one
+/// `harness` than plete was tested with. Runs it at most once per run; one
 /// that will not run or says nothing parseable is not warned about.
 pub fn version_warning(harness: &dyn Harness, program: &str) -> Option<String> {
     static CHECKED: OnceLock<Option<String>> = OnceLock::new();
@@ -501,7 +501,7 @@ pub fn version_warning(harness: &dyn Harness, program: &str) -> Option<String> {
             older_than(&found, tested).then(|| {
                 format!(
                     "`{program} --version` says {found}, older than {} {tested}, the version \
-                     jeet is tested with; update it if anything misbehaves",
+                     plete is tested with; update it if anything misbehaves",
                     harness.name()
                 )
             })
@@ -575,7 +575,7 @@ mod tests {
         assert!(h.resume_args("x").is_none());
         assert!(h.prompt_args("go").is_none());
         let hooks = HookSetup {
-            exe: "/bin/jeet".into(),
+            exe: "/bin/plete".into(),
             ..Default::default()
         };
         assert!(h.hook_args(&hooks).is_none());

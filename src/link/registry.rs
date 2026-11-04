@@ -1,8 +1,8 @@
-//! The jeet screens that are open, so `jeet open` can find one.
+//! The plete screens that are open, so `plete open` can find one.
 //!
 //! A tasks screen the user runs at their own terminal notes itself in
-//! `<JEET_HOME>/tui/<pid>.json` and takes it back out when it ends. To send
-//! one to a link, `jeet open` writes `<pid>.goto`, which the screen reads on
+//! `<PLETE_HOME>/tui/<pid>.json` and takes it back out when it ends. To send
+//! one to a link, `plete open` writes `<pid>.goto`, which the screen reads on
 //! its next wake-up. Nothing here is trusted beyond that: a record whose
 //! process has gone is swept, and a request is only a link, read as one.
 
@@ -269,7 +269,7 @@ mod tests {
         request(home.path(), 5, &Link::task("fix")).unwrap();
         assert_eq!(
             take_request(home.path(), 5).as_deref(),
-            Some("jeet://task/fix")
+            Some("plete://task/fix")
         );
         assert_eq!(take_request(home.path(), 5), None);
     }

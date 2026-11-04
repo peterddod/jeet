@@ -1,9 +1,9 @@
-//! `jeet worktree …`: the worktrees of one task.
+//! `plete worktree …`: the worktrees of one task.
 //!
-//! The task is the one named with `--task`, else `$JEET_TASK_ID` (set in a
+//! The task is the one named with `--task`, else `$PLETE_TASK_ID` (set in a
 //! task's agent session), else the task whose directory holds the current
 //! directory. `add` and `path` print the worktree's path and nothing else on
-//! stdout, so an agent can `cd "$(jeet worktree add api)"`.
+//! stdout, so an agent can `cd "$(plete worktree add api)"`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ pub fn add(
     )?;
     let added = tasks::add_worktree(app, &task, repo, branch, name)?;
     for warning in &added.warnings {
-        eprintln!("jeet: {warning}");
+        eprintln!("plete: {warning}");
     }
     let on = match (&added.record.branch, added.record.read_only) {
         (Some(branch), _) => format!("on {branch}"),
@@ -41,7 +41,7 @@ pub fn add(
         (None, false) => "detached".to_string(),
     };
     eprintln!(
-        "jeet: {} ({}, {on}) -> {}",
+        "plete: {} ({}, {on}) -> {}",
         added.record.dir_name,
         added.record.repo_id,
         added.path.display()
@@ -60,16 +60,16 @@ pub fn ls(app: &App, task: Option<&str>) -> Result<()> {
         match tasks::reconcile(app) {
             Ok(warnings) => {
                 for warning in warnings {
-                    eprintln!("jeet: warning: {warning}");
+                    eprintln!("plete: warning: {warning}");
                 }
             }
-            Err(e) => eprintln!("jeet: warning: could not reconcile worktrees: {e:#}"),
+            Err(e) => eprintln!("plete: warning: could not reconcile worktrees: {e:#}"),
         }
     }
     let rows = app.db.list_task_worktrees(&task.id)?;
     if rows.is_empty() {
         eprintln!(
-            "jeet: task {} has no worktrees; `jeet worktree add <repo>` adds one",
+            "plete: task {} has no worktrees; `plete worktree add <repo>` adds one",
             called(app, &task)
         );
         return Ok(());
@@ -144,9 +144,9 @@ pub fn rm(app: &App, task: Option<&str>, name: &str, force: bool) -> Result<()> 
     }
     let warnings = tasks::remove_worktree(app, &task, name, force)?;
     for warning in &warnings {
-        eprintln!("jeet: {warning}");
+        eprintln!("plete: {warning}");
     }
-    eprintln!("jeet: removed {name} from task {}", called(app, &task));
+    eprintln!("plete: removed {name} from task {}", called(app, &task));
     Ok(())
 }
 
@@ -158,7 +158,7 @@ pub fn path(app: &App, task: Option<&str>, name: &str) -> Result<()> {
     )?;
     if app.db.get_task_worktree(&task.id, name)?.is_none() {
         bail!(
-            "task {} has no worktree named {name}; `jeet worktree ls` lists them",
+            "task {} has no worktree named {name}; `plete worktree ls` lists them",
             called(app, &task)
         );
     }
@@ -168,7 +168,7 @@ pub fn path(app: &App, task: Option<&str>, name: &str) -> Result<()> {
             "{name} is not on disk{}",
             match task.state {
                 TaskState::Archived =>
-                    format!("; `jeet task unarchive {}` brings it back", task.slug),
+                    format!("; `plete task unarchive {}` brings it back", task.slug),
                 TaskState::Active => String::new(),
             }
         );

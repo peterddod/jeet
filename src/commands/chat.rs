@@ -1,10 +1,10 @@
-//! `jeet chat`: talk to the assistant. Its home is set up the first time;
+//! `plete chat`: talk to the assistant. Its home is set up the first time;
 //! after that it resumes the most recently active session, starts a new one
 //! with `--new`, or offers them all with `--pick`.
 //!
 //! On a terminal it attaches to the session's tmux window. Without one the
 //! session is left running detached and the assistant's home is printed,
-//! the way `jeet task open` does.
+//! the way `plete task open` does.
 
 use std::io::IsTerminal;
 
@@ -42,11 +42,11 @@ pub fn run(app: &App, new: Option<Option<String>>, pick: bool) -> Result<()> {
         Choice::Session(id) => assistant::open(app, &task, Open::Session(id))?,
     };
     for warning in &opened.warnings {
-        eprintln!("jeet: {warning}");
+        eprintln!("plete: {warning}");
     }
     if opened.started {
         eprintln!(
-            "jeet: started the assistant's session {} in tmux session {}",
+            "plete: started the assistant's session {} in tmux session {}",
             printable(&opened.name),
             assistant::tmux_session()
         );
@@ -54,7 +54,7 @@ pub fn run(app: &App, new: Option<Option<String>>, pick: bool) -> Result<()> {
     let dir = assistant::home_dir(&app.home);
     if !terminal {
         eprintln!(
-            "jeet: `tmux attach -t {}` to talk to the assistant",
+            "plete: `tmux attach -t {}` to talk to the assistant",
             assistant::tmux_session()
         );
         println!("{}", dir.display());
@@ -77,7 +77,7 @@ enum Choice {
 fn list(app: &App, task: &crate::db::tasks::TaskRecord) -> Result<()> {
     let sessions = assistant::sessions(app, task)?;
     if sessions.is_empty() {
-        eprintln!("jeet: the assistant has no sessions yet; `jeet chat` starts one");
+        eprintln!("plete: the assistant has no sessions yet; `plete chat` starts one");
         return Ok(());
     }
     println!(

@@ -19,7 +19,7 @@ use super::Database;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRecord {
     /// A uuid; a migrated review keeps its old task's id, which its hooks
-    /// and `$JEET_TASK_ID` name.
+    /// and `$PLETE_TASK_ID` name.
     pub id: String,
     /// The directory under `tasks/` and the tmux session's name. Never
     /// changes.
@@ -73,7 +73,7 @@ pub struct ReviewRecord {
 
 /// A review's deprecated `[review] command` job, kept in the `job_*`
 /// columns of its row (schema v9). Before that it was a JSON file of this
-/// shape under `$JEET_HOME/reviews`, which [`crate::review::adopt_jobs`]
+/// shape under `$PLETE_HOME/reviews`, which [`crate::review::adopt_jobs`]
 /// reads once to make a record of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
@@ -81,7 +81,7 @@ pub struct Job {
     pub pr: u64,
     pub title: String,
     /// The PR head commit the review was started against, so a second
-    /// `jeet review` can tell a finished review from a stale one.
+    /// `plete review` can tell a finished review from a stale one.
     pub head: String,
     pub worktree: PathBuf,
     /// The command as run, placeholders already substituted.
@@ -163,7 +163,7 @@ impl ReviewRecord {
         })
     }
 
-    /// `repo#n`, as it is shown in lists: `jeet#55`.
+    /// `repo#n`, as it is shown in lists: `plete#55`.
     pub fn label(&self) -> String {
         let repo = self.repo_id.rsplit('/').next().unwrap_or(&self.repo_id);
         format!("{repo}#{}", self.pr_number)
@@ -194,7 +194,7 @@ pub struct Leftover {
     pub created_branch: bool,
     pub head_oid: Option<String>,
     pub stash_ref: Option<String>,
-    /// Its task was archived: its work is in `refs/jeet` already.
+    /// Its task was archived: its work is in `refs/plete` already.
     pub was_archived: bool,
 }
 
@@ -484,7 +484,7 @@ impl Database {
 
     /// Set (or, with `None`, clear) a review's one worktree. A compare and
     /// swap: false, and nothing changed, when the review has a worktree
-    /// already that is not `wt`'s (another `jeet review` made it first).
+    /// already that is not `wt`'s (another `plete review` made it first).
     pub fn set_review_worktree(&self, id: &str, wt: Option<&TaskWorktreeRecord>) -> Result<bool> {
         let changed = self.conn().execute(
             "UPDATE reviews
@@ -972,7 +972,7 @@ mod tests {
             head: "abc".into(),
             worktree: "/w/api".into(),
             command: "true".into(),
-            env: vec![("JEET_PR".into(), "7".into())],
+            env: vec![("PLETE_PR".into(), "7".into())],
             notify: true,
             log: "/l/7.log".into(),
             started_at: 5,

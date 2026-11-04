@@ -1,14 +1,14 @@
-//! `jeet setup`: the setup agent, in a home of its own
-//! (`$JEET_HOME/setup/`) and a tmux session of its own, with
-//! `jeet setup apply` running in a pane beside it. It is stored as a task
+//! `plete setup`: the setup agent, in a home of its own
+//! (`$PLETE_HOME/setup/`) and a tmux session of its own, with
+//! `plete setup apply` running in a pane beside it. It is stored as a task
 //! of kind `setup` with the slug `setup`, kept out of the tasks list as the
 //! assistant is, and launched as a task's agent is
 //! ([`runtime::launch_tmux`]), with settings of its own ([`hooks`]): it
 //! reads, and writes only its home.
 //!
-//! Having no parent, its jeet commands run as the user's, as a top-level
+//! Having no parent, its plete commands run as the user's, as a top-level
 //! task's do: what keeps it from applying is its settings, and that
-//! `jeet setup apply` refuses any agent's session.
+//! `plete setup apply` refuses any agent's session.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ use crate::tmux;
 use crate::worktrees::now_secs;
 
 /// The setup agent's task slug, which no other task may take; its tmux
-/// session is `jeet-setup`.
+/// session is `plete-setup`.
 pub const SLUG: &str = "setup";
 
 const NAME: &str = "setup";
@@ -45,7 +45,7 @@ const SKILL: &str = include_str!("templates/SKILL.md");
 /// Where the skill goes in the home.
 const SKILL_PATH: &str = ".claude/skills/setup/SKILL.md";
 
-/// Where the templates this jeet ships are copied, for the agent to diff
+/// Where the templates this plete ships are copied, for the agent to diff
 /// the user's files against.
 const BUILTIN: &str = "builtin";
 
@@ -76,7 +76,7 @@ pub fn ensure_files(dir: &Path) -> Result<Vec<&'static str>> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        // `create_new`: another jeet writing it meanwhile wins.
+        // `create_new`: another plete writing it meanwhile wins.
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -119,8 +119,8 @@ fn builtin_files() -> Vec<(String, &'static str)> {
     out
 }
 
-/// Write this jeet's built-in templates to `builtin/` in the setup home,
-/// afresh: they are jeet's copy, never the user's.
+/// Write this plete's built-in templates to `builtin/` in the setup home,
+/// afresh: they are plete's copy, never the user's.
 fn write_builtin(dir: &Path) -> Result<()> {
     let root = dir.join(BUILTIN);
     match std::fs::remove_dir_all(&root) {
@@ -185,19 +185,19 @@ fn create_record(app: &App) -> Result<TaskRecord> {
     };
     match app.db.insert_task(&task) {
         Ok(()) => Ok(task),
-        // Another jeet made it first: there is only ever one.
+        // Another plete made it first: there is only ever one.
         Err(e) => app.db.get_setup_task()?.ok_or(e),
     }
 }
 
-/// The setup agent's settings: it may read anything under the jeet home
+/// The setup agent's settings: it may read anything under the plete home
 /// and `~/.claude`, write only in its own home (`home_entries` are the
-/// jeet home's other entries at launch, each denied; one made later is
-/// not allowed either, so it prompts), and run jeet's read-only
-/// commands and `jeet setup status` without asking. It may not run
-/// `jeet setup apply`, push or use `gh`, nor edit the user's global
+/// plete home's other entries at launch, each denied; one made later is
+/// not allowed either, so it prompts), and run plete's read-only
+/// commands and `plete setup status` without asking. It may not run
+/// `plete setup apply`, push or use `gh`, nor edit the user's global
 /// harness, git and shell files. It is denied `denied_commands` too under
-/// `[permissions] guards`. Like all of jeet's rules, a lint: the
+/// `[permissions] guards`. Like all of plete's rules, a lint: the
 /// real control is that only the user's terminal applies.
 pub fn hooks(
     exe: PathBuf,
@@ -280,7 +280,7 @@ pub fn hooks(
     }
 }
 
-/// The jeet home's entries the setup agent may not write, by name: what is
+/// The plete home's entries the setup agent may not write, by name: what is
 /// there now, and the targets of apply whether there or not.
 fn home_entries(home: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["config.toml", "assistant", "templates", "backups"]
@@ -299,7 +299,7 @@ fn home_entries(home: &Path) -> Vec<String> {
 }
 
 /// Start or resume the setup agent and attach to it: its latest session,
-/// or with `new` a fresh one. A start opens `jeet setup apply` in a pane
+/// or with `new` a fresh one. A start opens `plete setup apply` in a pane
 /// beside it.
 pub fn run(app: &App, new: bool) -> Result<()> {
     tmux::require()?;
@@ -383,7 +383,7 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
         None => runtime::latest_session(&dir, &known)
             .is_some_and(|id| spec.harness.has_session(&dir, &id)),
     };
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     let hooks = hooks(
         exe.clone(),
         &task.id,
@@ -425,7 +425,8 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
     let _ = app.db.touch_task(&task.id, now);
     let mut running = running;
     let home = app.home.to_string_lossy();
-    let env = apply_env(&home);
+    let new_home = app.new_home.as_deref().map(|h| h.to_string_lossy());
+    let env = apply_env(&home, new_home.as_deref());
     if let Err(e) = tmux::split_window(&running.tmux_session, &dir, &env, &apply_argv(&exe)) {
         running.warnings.push(format!(
             "could not open the apply pane: {e:#}; run `{PRODUCT} setup apply` in a terminal"
@@ -434,21 +435,25 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
     Ok(running)
 }
 
-/// The apply pane's environment: this jeet home, and blank where the
+/// The apply pane's environment: this plete home, and blank where the
 /// agent's session sets who it runs for, as apply refuses any agent's
 /// session.
-fn apply_env(home: &str) -> [(&str, &str); 4] {
-    [
+fn apply_env<'a>(home: &'a str, new_home: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![
         // Named, not left to whatever the tmux server's environment says:
         // apply must change this home's files, and open this index.
-        ("JEET_HOME", home),
+        ("PLETE_HOME", home),
         (tasks::TASK_ID_ENV, ""),
         (permissions::ASSISTANT_ENV, ""),
         (cd::CD_FILE_ENV, ""),
-    ]
+    ];
+    if let Some(new_home) = new_home {
+        env.push((crate::env::NEW_HOME_VAR, new_home));
+    }
+    env
 }
 
-/// `jeet setup apply`, run again each time the user presses Enter.
+/// `plete setup apply`, run again each time the user presses Enter.
 fn apply_argv(exe: &Path) -> Vec<String> {
     let script = "while :; do \"$1\" setup apply; printf '\\nPress Enter to look for staged \
                   changes again (ctrl-c to close this pane) '; read _ || exit; done";
@@ -539,8 +544,8 @@ mod tests {
         let ids: Vec<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
         for id in [
             "assistant/AGENTS.md",
-            "assistant/.claude/skills/jeet-assistant/SKILL.md",
-            "assistant/.claude/skills/jeet-managers/SKILL.md",
+            "assistant/.claude/skills/plete-assistant/SKILL.md",
+            "assistant/.claude/skills/plete-managers/SKILL.md",
             "templates/root/AGENTS.md",
             "templates/manager/AGENTS.md",
             "templates/worker/SKILL.md",
@@ -555,10 +560,10 @@ mod tests {
 
     #[test]
     fn the_settings_read_widely_and_write_only_the_home() {
-        let home = Path::new("/u/.jeet");
+        let home = Path::new("/u/.plete");
         let entries = home_entries(Path::new("/nonexistent"));
         let hooks = hooks(
-            PathBuf::from("/bin/jeet"),
+            PathBuf::from("/bin/plete"),
             "t1",
             home,
             &entries,
@@ -568,7 +573,7 @@ mod tests {
         );
         // Without `guards`, only its own rules deny.
         let plain = self::hooks(
-            PathBuf::from("/bin/jeet"),
+            PathBuf::from("/bin/plete"),
             "t1",
             home,
             &entries,
@@ -591,44 +596,48 @@ mod tests {
         let allow = rules("allow");
         let deny = rules("deny");
         for rule in [
-            "Read(//u/.jeet/**)",
+            "Read(//u/.plete/**)",
             "Read(~/.claude/**)",
-            "Edit(//u/.jeet/setup/**)",
-            "Write(//u/.jeet/setup/**)",
-            "Bash(jeet setup status:*)",
-            "Bash(jeet ls:*)",
-            "Bash(jeet task ls:*)",
+            "Edit(//u/.plete/setup/**)",
+            "Write(//u/.plete/setup/**)",
+            "Bash(plete setup status:*)",
+            "Bash(plete ls:*)",
+            "Bash(plete task ls:*)",
         ] {
             assert!(allow.contains(&rule.to_string()), "{rule}: {allow:?}");
         }
         for rule in [
-            "Bash(jeet setup apply*)",
-            "Bash(jeet setup apply *)",
+            "Bash(plete setup apply*)",
+            "Bash(plete setup apply *)",
             "Bash(git push *)",
             "Bash(gh *)",
-            "Edit(//u/.jeet/config.toml)",
-            "Edit(//u/.jeet/assistant/**)",
-            "Write(//u/.jeet/templates/**)",
+            "Edit(//u/.plete/config.toml)",
+            "Edit(//u/.plete/assistant/**)",
+            "Write(//u/.plete/templates/**)",
             "Edit(~/.claude/**)",
             "Edit(~/.zshrc)",
         ] {
             assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");
         }
         assert!(
-            !deny.iter().any(|d| d.contains("/u/.jeet/setup")),
+            !deny.iter().any(|d| d.contains("/u/.plete/setup")),
             "{deny:?}"
         );
-        assert!(!allow.iter().any(|a| a.contains("jeet setup apply")));
+        assert!(!allow.iter().any(|a| a.contains("plete setup apply")));
     }
 
     #[test]
     fn the_apply_pane_runs_apply_without_the_agents_id() {
-        let argv = apply_argv(Path::new("/opt/my jeet"));
+        let argv = apply_argv(Path::new("/opt/my plete"));
         assert_eq!(argv[..2], ["sh", "-c"]);
         assert!(argv[2].contains("\"$1\" setup apply"));
-        assert_eq!(argv[4], "/opt/my jeet");
-        let env = apply_env("/tmp/h");
-        assert!(env.contains(&("JEET_HOME", "/tmp/h")), "{env:?}");
+        assert_eq!(argv[4], "/opt/my plete");
+        let env = apply_env("/tmp/h", Some("/tmp/n"));
+        assert!(env.contains(&("PLETE_HOME", "/tmp/h")), "{env:?}");
+        assert!(env.contains(&("PLETE_NEW_HOME", "/tmp/n")));
+        assert!(!apply_env("/tmp/h", None)
+            .iter()
+            .any(|(k, _)| *k == "PLETE_NEW_HOME"));
         assert!(env.contains(&(tasks::TASK_ID_ENV, "")));
         assert!(env.contains(&(permissions::ASSISTANT_ENV, "")));
     }

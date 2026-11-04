@@ -56,6 +56,8 @@ fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
+    commands::alias::old_name_note();
+    let offers_pt = commands::alias::offers_pt(cli.command.as_ref());
 
     // The wake channel's token leaves the environment before anything runs
     // that could pass it on.
@@ -66,7 +68,7 @@ fn main() -> Result<()> {
         _ => None,
     };
 
-    // Only once `jeet review` has recorded the runner as its task's does the
+    // Only once `plete review` has recorded the runner as its task's does the
     // runner go on to find out who it is. One that never gets it, its
     // launcher gone first, ends its job too.
     if let Some(Commands::ReviewJob { review }) = &cli.command {
@@ -87,13 +89,16 @@ fn main() -> Result<()> {
         }
     };
     let result = run(cli.command, wake);
+    if result.is_ok() && offers_pt {
+        commands::alias::pt_hint();
+    }
     if let Some(action) = authorized {
         action.finish(&result);
     }
     result
 }
 
-/// Whether `command` is one a person runs, as against jeet's own plumbing
+/// Whether `command` is one a person runs, as against plete's own plumbing
 /// (hooks, background jobs, completions): what finishes moving reviews out
 /// of the tasks after an upgrade ([`review::migrate_leftovers`]) waits for
 /// one. Nor from inside an agent's session.
@@ -124,7 +129,7 @@ fn runs_by_a_person(command: Option<&Commands>) -> bool {
 }
 
 fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
-    // Adopting the job files older jeets left destroys nothing, so it runs
+    // Adopting the job files older pletes left destroys nothing, so it runs
     // for a user who works in task shells too; moving reviews does not.
     if runs_by_a_person(command.as_ref()) {
         if let Ok(app) = context::App::open() {
@@ -181,9 +186,12 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
         Commands::Doctor { command } => {
             let app = context::App::open()?;
             match command {
-                DoctorCommands::Wake => commands::doctor::wake(&app)?,
+                Some(DoctorCommands::Wake) => commands::doctor::wake(&app)?,
+                None | Some(DoctorCommands::Rename) => commands::doctor::rename(&app)?,
             }
         }
+        Commands::Alias { command } => commands::alias::run(command)?,
+        Commands::MigrateHome { yes, force } => commands::migrate::run(yes, force)?,
         Commands::Clone { url } => {
             let app = context::App::open()?;
             commands::clone::run(&app, &url)?;
@@ -271,7 +279,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                 (None, Some(pr)) => {
                     commands::review::run(&app, &pr, repo.as_deref(), !no_command, rerun, open)?
                 }
-                (None, None) => bail!("jeet review needs a PR or a subcommand"),
+                (None, None) => bail!("plete review needs a PR or a subcommand"),
             }
         }
         Commands::Pr { command } => {
@@ -314,7 +322,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
             };
             let watch = std::panic::AssertUnwindSafe(|| waiter::run(found, &task, env));
             if let Ok(Err(e)) = std::panic::catch_unwind(watch) {
-                eprintln!("jeet inbox watch: {e:#}");
+                eprintln!("plete inbox watch: {e:#}");
             }
         }
         // Launched in the background with a task's agent; says nothing.

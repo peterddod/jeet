@@ -31,7 +31,7 @@ impl Placement {
         }
     }
 
-    /// The placement stored as `s`, or `None` for one this jeet does not
+    /// The placement stored as `s`, or `None` for one this plete does not
     /// know, which is then never run.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -57,8 +57,8 @@ pub trait NodeRuntime {
 }
 
 /// The runtime for `task`'s placement: the one way a node is started or
-/// interrupted. A placement this jeet does not know never reaches here: the
-/// index's `CHECK` stores only known ones, a later jeet's placement comes
+/// interrupted. A placement this plete does not know never reaches here: the
+/// index's `CHECK` stores only known ones, a later plete's placement comes
 /// with a newer schema that `Database::migrate` refuses whole, and a row
 /// hand-edited past the `CHECK` fails to read.
 pub fn runtime_for(task: &TaskRecord) -> Result<&'static dyn NodeRuntime> {
