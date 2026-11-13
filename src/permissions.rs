@@ -1340,7 +1340,7 @@ pub fn authorize_as(
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
-            "only the user stops every task under the assistant; `plete manager stop <task>` \
+            "only the user stops every task under the assistant; `plete task stop <task>` \
              stops one"
         );
     }
