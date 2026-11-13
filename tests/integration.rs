@@ -11925,6 +11925,7 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "plete manager ls",
         "plete manager show",
         "plete notify",
+        "plete search",
         "plete task new",
         "plete task open",
         "plete task send",
@@ -17800,6 +17801,137 @@ action = "assistant"
     assert_eq!(told(), line);
     let all = stdout_of(&lab.plete_at(&["brief", "--all"], &lab.home(), &[]));
     assert!(all.contains("- r1 question from task x"), "{all}");
+}
+
+/// `text` written to `path`, making its directory.
+fn write_doc(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// A document of 150 words about `topic`, long enough to stand alone as a
+/// passage.
+fn doc_about(topic: &str) -> String {
+    format!("# Notes on {topic}\n\n{}\n", vec![topic; 150].join(" "))
+}
+
+#[test]
+fn search_finds_the_assistants_notes_for_the_user_and_lists_them_in_status() {
+    let lab = StoreLab::new();
+    write_doc(
+        &lab.home().join("assistant/notes/x.md"),
+        &doc_about("zeppelin"),
+    );
+    write_doc(
+        &lab.home().join("assistant/CLAUDE.md"),
+        &doc_about("zeppelin"),
+    );
+
+    let output = lab.plete_at(&["search", "what", "about", "zeppelin?"], &lab.home(), &[]);
+    succeeded(&output);
+    let out = stdout_of(&output);
+    assert!(out.starts_with("1. Notes on zeppelin  (1.00)  "), "{out}");
+    assert!(out.contains("notes/x.md"), "{out}");
+    // The generated CLAUDE.md is not a document.
+    assert!(!out.contains("CLAUDE.md"), "{out}");
+    assert!(
+        out.contains("(top)") || out.contains("Notes on zeppelin   L"),
+        "{out}"
+    );
+
+    let output = lab.plete_at(&["search", "zeppelin", "--json"], &lab.home(), &[]);
+    succeeded(&output);
+    let hits: serde_json::Value = serde_json::from_str(&stdout_of(&output)).unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["source"], "assistant");
+    assert_eq!(hits[0]["title"], "Notes on zeppelin");
+    assert_eq!(hits[0]["passages"][0]["start_line"], 1);
+
+    let output = lab.plete_at(&["search", "--status"], &lab.home(), &[]);
+    succeeded(&output);
+    let out = stdout_of(&output);
+    assert!(out.lines().any(|l| l.starts_with("assistant ")), "{out}");
+    assert!(out.contains("1 docs, 1 passages; index "), "{out}");
+
+    let output = lab.plete_at(&["search", "no-such-word-anywhere"], &lab.home(), &[]);
+    succeeded(&output);
+    assert_eq!(stdout_of(&output), "No documents match.\n");
+
+    // Narrowing by kind never adds: no repos are cloned.
+    let output = lab.plete_at(&["search", "zeppelin", "--in", "repos"], &lab.home(), &[]);
+    succeeded(&output);
+    assert!(stdout_of(&output).starts_with("No documents match.\n"));
+
+    // Reset empties the index; the next search builds it again.
+    succeeded(&lab.plete_at(&["search", "--reset"], &lab.home(), &[]));
+    let output = lab.plete_at(&["search", "zeppelin"], &lab.home(), &[]);
+    assert!(stdout_of(&output).starts_with("1. "));
+}
+
+#[test]
+fn search_finds_a_repos_readme_under_in_repos() {
+    let lab = StoreLab::new();
+    lab.origin("widget");
+    let seed = lab.seed("widget");
+    write_doc(&seed.join("README.md"), &doc_about("gearbox"));
+    write_doc(&seed.join("src/main.rs"), "fn gearbox() {}\n");
+    git(&["add", "."], &seed);
+    git(&["commit", "-q", "-m", "docs"], &seed);
+    git(&["push", "-q", "origin", "main"], &seed);
+    let output = lab.clone_with_interval("widget", "0");
+    succeeded(&output);
+
+    let output = lab.plete_at(
+        &["search", "gearbox", "--in", "repos", "--json"],
+        &lab.home(),
+        &[],
+    );
+    succeeded(&output);
+    let hits: serde_json::Value = serde_json::from_str(&stdout_of(&output)).unwrap();
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 1, "code is not searched: {hits:?}");
+    assert_eq!(hits[0]["source"], "repo:github.com/acme/widget");
+    assert!(hits[0]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("widget/README.md"));
+
+    // Asking for the assistant alone leaves the repo out.
+    let output = lab.plete_at(
+        &["search", "gearbox", "--in", "assistant"],
+        &lab.home(),
+        &[],
+    );
+    assert_eq!(stdout_of(&output), "No documents match.\n");
+}
+
+#[test]
+fn a_task_searches_its_own_folder_and_not_the_assistant_or_another_task() {
+    let lab = StoreLab::new();
+    write_doc(
+        &lab.home().join("assistant/notes/secret.md"),
+        &doc_about("walrus"),
+    );
+    // A task with a parent is held to its subtree; a top-level one runs as
+    // the user.
+    let id = lab.new_task_with("mine", &["--parent", "assistant"]);
+    let mine = lab.home().join("tasks/mine");
+    let other = lab.new_task("other");
+    write_doc(&mine.join("REPORT.md"), &doc_about("walrus"));
+    write_doc(&other.join("REPORT.md"), &doc_about("walrus"));
+    let mut pane = lab.task_pane("mine");
+
+    let output = pane.plete(&["search", "walrus", "--json"], &mine, &[]);
+    succeeded(&output);
+    let hits: serde_json::Value = serde_json::from_str(&stdout_of(&output)).unwrap();
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0]["source"], format!("task:{id}"));
+
+    // It may not wipe the index shared by all.
+    let output = pane.plete(&["search", "--reset"], &mine, &[]);
+    assert!(!output.status.success());
+    assert!(lab.home().join("search/index.db").is_file());
 }
 
 /// The binary, linked as `name` in a new directory (as the packages do for

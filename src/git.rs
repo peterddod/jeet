@@ -499,6 +499,18 @@ pub fn head_short_sha(path: &Path) -> Option<String> {
     }
 }
 
+/// The files git tracks in `path`, as paths relative to it. A path that is
+/// not valid UTF-8 comes back mangled and so names no file; callers skip what
+/// they cannot open.
+pub fn tracked_files(path: &Path) -> Result<Vec<String>> {
+    let out = git_output(path, &["ls-files", "-z"], &[], None)?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// `(uncommitted, ignored)` entry counts for a worktree.
 ///
 /// `--untracked-files=normal` overrides a repo or user `status.showUntrackedFiles=no`,
