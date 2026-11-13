@@ -8,7 +8,7 @@ use crate::assistant;
 use crate::cli::ReportCommands;
 use crate::commands::task::printable_text;
 use crate::context::App;
-use crate::db::tasks::{ReportKind, TaskReportRecord};
+use crate::db::tasks::{ReportKind, TaskKind, TaskReportRecord};
 use crate::manager;
 use crate::messages::Delivered;
 use crate::permissions::{self, Caller};
@@ -17,20 +17,28 @@ use crate::tasks::TASK_ID_ENV;
 
 pub fn run(app: &App, what: ReportCommands) -> Result<()> {
     match what {
-        ReportCommands::Progress { message } => send_kind(app, ReportKind::Progress, &message),
-        ReportCommands::Done { message } => send_kind(app, ReportKind::Done, &message),
-        ReportCommands::Blocked { message } => send_kind(app, ReportKind::Blocked, &message),
-        ReportCommands::Question { message } => send_kind(app, ReportKind::Question, &message),
+        ReportCommands::Progress { message, interrupt } => {
+            send_kind(app, ReportKind::Progress, &message, interrupt)
+        }
+        ReportCommands::Done { message, interrupt } => {
+            send_kind(app, ReportKind::Done, &message, interrupt)
+        }
+        ReportCommands::Blocked { message, interrupt } => {
+            send_kind(app, ReportKind::Blocked, &message, interrupt)
+        }
+        ReportCommands::Question { message, interrupt } => {
+            send_kind(app, ReportKind::Question, &message, interrupt)
+        }
         ReportCommands::Answer { id, message } => answer(app, id, &message),
         ReportCommands::Escalate { id } => escalate(app, id),
         ReportCommands::Ls => ls(app),
     }
 }
 
-fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
+fn send_kind(app: &App, kind: ReportKind, message: &str, interrupt: bool) -> Result<()> {
     let task = match permissions::caller(app)? {
         Caller::Node(task) => task,
-        Caller::Review(review) => return send_review(app, &review, kind, message),
+        Caller::Review(review) => return send_review(app, &review, kind, message, interrupt),
         Caller::Root => bail!("the assistant has no parent; `jeet notify` tells the user"),
         Caller::User => match crate::env::var(TASK_ID_ENV)
             .ok()
@@ -49,13 +57,40 @@ fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
             None => bail!("`jeet report` runs inside a task's agent (${TASK_ID_ENV} is not set)"),
         },
     };
+    let parent = match task.parent_id.as_deref() {
+        Some(p) => app.db.get_task(p)?,
+        None => None,
+    };
+    let refusal = match (interrupt, &parent) {
+        (false, _) => None,
+        (true, Some(p)) if p.kind == TaskKind::Assistant => {
+            let action = format!(
+                "interrupted the assistant with a {} report: {}",
+                kind.as_str(),
+                crate::render::summary(message)
+            );
+            permissions::may_interrupt(app, &Caller::Node(task.clone()), &action)?
+        }
+        (true, _) => Some(
+            "only a report to the assistant interrupts it; one to a manager reaches it as any \
+             report does"
+                .to_string(),
+        ),
+    };
     // Progress is not worth a session of the parent's own: `send` says
     // which kinds are.
-    let (id, delivered) = reports::send(app, &task, kind, message, true)?;
+    let (id, delivered) = reports::send(
+        app,
+        &task,
+        kind,
+        message,
+        true,
+        interrupt && refusal.is_none(),
+    )?;
     // `send` found the parent, so it is there.
-    let to = match task.parent_id.as_deref().map(|p| app.db.get_task(p)) {
-        Some(Ok(Some(parent))) => manager::label(&parent),
-        _ => "its parent".to_string(),
+    let to = match &parent {
+        Some(parent) => manager::label(parent),
+        None => "its parent".to_string(),
     };
     eprintln!("jeet: reported {} to {to} (#{id})", kind.as_str());
     eprintln!(
@@ -67,7 +102,19 @@ fn send_kind(app: &App, kind: ReportKind, message: &str) -> Result<()> {
             &delivered
         )
     );
-    Ok(())
+    not_an_interrupt(refusal, id)
+}
+
+/// The refusal of a report's `--interrupt`, if it was refused: report `id`
+/// went all the same, so its sender must not send it again.
+fn not_an_interrupt(refusal: Option<String>, id: i64) -> Result<()> {
+    match refusal {
+        None => Ok(()),
+        Some(why) => bail!(
+            "not an interrupt: {why}. Report #{id} went all the same, as any report does; do not \
+             send it again"
+        ),
+    }
 }
 
 /// A review's agent reports to the task that asked for the review.
@@ -76,12 +123,20 @@ fn send_review(
     review: &crate::db::reviews::ReviewRecord,
     kind: ReportKind,
     message: &str,
+    interrupt: bool,
 ) -> Result<()> {
     let Some(asker) = review.requested_by.as_deref() else {
         bail!(
             "review {} was not asked for by a task, so there is no one to report to",
             review.label()
         );
+    };
+    let refusal = match interrupt {
+        true => {
+            let action = format!("interrupted the assistant with a {} report", kind.as_str());
+            permissions::may_interrupt(app, &Caller::Review(Box::new(review.clone())), &action)?
+        }
+        false => None,
     };
     let (id, delivered) = reports::send_review(app, review, kind, message, true)?;
     let to = match app.db.get_task(asker)? {
@@ -98,7 +153,7 @@ fn send_review(
             &delivered
         )
     );
-    Ok(())
+    not_an_interrupt(refusal, id)
 }
 
 /// Who runs this, refused when it is the user's word and this is not the
@@ -286,7 +341,8 @@ mod tests {
         assert_eq!(
             parsed(&["report", "done", "-x"]),
             ReportCommands::Done {
-                message: "-x".into()
+                message: "-x".into(),
+                interrupt: false,
             }
         );
         assert_eq!(

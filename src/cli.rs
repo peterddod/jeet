@@ -326,21 +326,49 @@ pub enum ReportCommands {
     Progress {
         #[arg(allow_hyphen_values = true)]
         message: String,
+        /// Push it to the assistant now, if this task holds
+        /// `assistant.interrupt` and reports to the assistant: posted at
+        /// once at an idle prompt, at the end of a running turn. For what
+        /// cannot wait, never progress. Without it, it is kept for the
+        /// assistant as ever, and this fails
+        #[arg(long)]
+        interrupt: bool,
     },
     /// The work is finished: say where it is
     Done {
         #[arg(allow_hyphen_values = true)]
         message: String,
+        /// Push it to the assistant now, if this task holds
+        /// `assistant.interrupt` and reports to the assistant: posted at
+        /// once at an idle prompt, at the end of a running turn. For what
+        /// cannot wait, never progress. Without it, it is kept for the
+        /// assistant as ever, and this fails
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Stuck: say on what
     Blocked {
         #[arg(allow_hyphen_values = true)]
         message: String,
+        /// Push it to the assistant now, if this task holds
+        /// `assistant.interrupt` and reports to the assistant: posted at
+        /// once at an idle prompt, at the end of a running turn. For what
+        /// cannot wait, never progress. Without it, it is kept for the
+        /// assistant as ever, and this fails
+        #[arg(long)]
+        interrupt: bool,
     },
     /// A decision this task needs from above
     Question {
         #[arg(allow_hyphen_values = true)]
         message: String,
+        /// Push it to the assistant now, if this task holds
+        /// `assistant.interrupt` and reports to the assistant: posted at
+        /// once at an idle prompt, at the end of a running turn. For what
+        /// cannot wait, never progress. Without it, it is kept for the
+        /// assistant as ever, and this fails
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Answer an open question you hold (any in the tree, at your own
     /// terminal); the task that asked gets it, each manager in between a copy
@@ -436,6 +464,13 @@ pub enum TaskCommands {
         name: String,
         #[arg(allow_hyphen_values = true)]
         message: String,
+        /// To `assistant` only: push it to the assistant now, if the sender
+        /// holds `assistant.interrupt` (a task under the assistant), or is
+        /// not gated. Posted at once at an idle prompt, at the end of a
+        /// running turn. Without it, it is kept for the assistant, and this
+        /// fails
+        #[arg(long)]
+        interrupt: bool,
     },
 
     /// End the task agent's current turn, keeping its session: only while

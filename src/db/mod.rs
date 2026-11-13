@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
@@ -709,37 +709,78 @@ impl Database {
     }
 }
 
-/// Set to `1` to let a development build migrate the index at the default
-/// home anyway.
+/// Set to `1` to let a development build migrate the index at a default
+/// home under `$HOME` anyway, or to the index's own path to let it migrate
+/// that one, even in the account's real home.
 const ALLOW_DEV_MIGRATE: &str = "JEET_ALLOW_DEV_MIGRATE";
 
 /// Refuse to migrate the index at a default home (`~/.jeet` or `~/.plete`) from a
 /// development build: one built from an unreleased main would take it to a
 /// schema the installed release cannot open, and every jeet command would
 /// fail until it was restored from the backup.
+///
+/// The account's real home is looked up from the user database as well as
+/// `$HOME`, and `=1` does not cover it: a test that fakes `$HOME` and sets
+/// `=1`, run where a session's `JEET_HOME` leaks through, would otherwise
+/// migrate the real index.
 fn refuse_dev_migration(index: &Path, current: i64, latest: i64) -> Result<()> {
     let Some(exe) = dev_build() else {
         return Ok(());
     };
-    if crate::env::var(ALLOW_DEV_MIGRATE).as_deref() == Ok("1") {
+    let allow = crate::env::var(ALLOW_DEV_MIGRATE).unwrap_or_default();
+    if !allow.is_empty() && same_file(index, Path::new(&allow)) {
         return Ok(());
     }
-    let Some(user_home) = dirs::home_dir() else {
-        return Ok(());
+    let is_default_under = |home: Option<PathBuf>| {
+        home.is_some_and(|home| {
+            crate::config::default_home_candidates(&home)
+                .iter()
+                .any(|d| same_file(index, &crate::config::index_path(d)))
+        })
     };
-    let is_default = crate::config::default_home_candidates(&user_home)
-        .iter()
-        .any(|home| same_file(index, &crate::config::index_path(home)));
-    if !is_default {
+    if !is_default_under(account_home()) && (allow == "1" || !is_default_under(dirs::home_dir())) {
         return Ok(());
     }
     bail!(
         "this is a development build of jeet ({exe}); it will not migrate the index at {} \
          from schema v{current} to v{latest}, which the installed jeet could not then open. \
          Set JEET_HOME to a scratch directory (e.g. JEET_HOME=$(mktemp -d)), or \
-         {ALLOW_DEV_MIGRATE}=1 to migrate it anyway",
+         {ALLOW_DEV_MIGRATE}={} to migrate it anyway",
+        index.display(),
         index.display()
     )
+}
+
+/// The account's home directory from the user database, whatever `$HOME`
+/// says.
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: zeroed is a valid passwd; getpwuid_r writes only into it and
+    // `buf`, and `out` is non-null only when it filled them.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut out = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut out,
+        )
+    };
+    if rc != 0 || out.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into `buf`, NUL-terminated by getpwuid_r.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+    None
 }
 
 /// What makes this binary a development build, if it is one: a debug build,
