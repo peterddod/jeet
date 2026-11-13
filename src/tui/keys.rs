@@ -39,7 +39,6 @@ pub fn explorer_hints(explorer: &Explorer) -> Vec<Hint> {
         hints.extend([
             hint("⏎", "run"),
             hint("esc", "drop"),
-            hint("⇥", "complete"),
             hint("⌫", "delete"),
             hint("^u", "clear"),
             hint("↑↓", "move"),
@@ -69,8 +68,9 @@ pub fn explorer_hints(explorer: &Explorer) -> Vec<Hint> {
     }
     // esc leaves the shell where it was; ^q moves it here.
     hints.push(hint("^q", "quit here"));
-    // ⇥ with no filter and nothing listed has nothing to complete.
-    if !explorer.in_command_mode() && (filtering || explorer.visible_len() > 0) {
+    // ⇥ often has nothing to add: an empty filter only fills in what every
+    // name shares, and a filter that matches nothing has nothing to grow into.
+    if explorer.can_complete() {
         hints.push(hint("⇥", "complete"));
     }
     if !explorer.in_command_mode() {
@@ -234,13 +234,30 @@ mod tests {
     fn a_command_line_runs_and_does_not_navigate() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path(), true);
-        explorer.push_filter(':');
+        for c in ":to".chars() {
+            explorer.push_filter(c);
+        }
         assert!(has(&explorer, "⏎", "run") && has(&explorer, "esc", "drop"));
         assert!(has(&explorer, "⇥", "complete") && has(&explorer, "⌫", "delete"));
         let keys = keys(&explorer);
         for key in ["→", "←", "/", "← ⌫"] {
             assert!(!keys.contains(&key), "{key}");
         }
+    }
+
+    /// ⇥ is offered only when pressing it would change the filter.
+    #[test]
+    fn tab_is_offered_only_when_it_completes() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path(), true);
+        // `src` and `README.md` share nothing to fill in.
+        assert!(!has(&explorer, "⇥", "complete"));
+        explorer.push_filter('s');
+        assert!(has(&explorer, "⇥", "complete"));
+        assert!(explorer.complete());
+        assert!(!has(&explorer, "⇥", "complete"), "{:?}", explorer.filter);
+        explorer.set_filter("zzz".into());
+        assert!(!has(&explorer, "⇥", "complete"));
     }
 
     fn sample() -> Vec<Hint> {
@@ -304,14 +321,16 @@ mod tests {
             .iter()
             .map(Line::to_string)
             .collect();
-        assert!(text[0].starts_with("here"), "{:?}", text[0]);
-        for (i, h) in hints.iter().enumerate() {
-            let line = &text[1 + i];
-            assert!(line.starts_with(h.key) && line.contains(h.label), "{line}");
+        assert!(text[0].starts_with("now"), "{:?}", text[0]);
+        // The keys that work now come first, before the blank line that
+        // starts the reference, each with its key and label kept together.
+        let gap = text.iter().position(|l| l.trim().is_empty()).unwrap();
+        let now = text[..gap].join(" ");
+        for h in &hints {
+            let whole = format!("{} {}", h.key, h.label).replace(' ', "\u{a0}");
+            assert!(now.contains(&whole), "{whole:?} not in {now:?}");
         }
-        assert!(text[1 + hints.len()].trim().is_empty());
-        assert!(text[2 + hints.len()..]
-            .iter()
-            .any(|l| l.contains("this list")));
+        assert!(gap <= 4, "{gap} lines for the keys that work now");
+        assert!(text[gap..].iter().any(|l| l.contains("this list")));
     }
 }

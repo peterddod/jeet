@@ -223,8 +223,9 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `esc` | quit without moving your shell (unless it moved out from under you) |
 | `F1` or `ctrl-g` | the key list, in plete |
 
-In the worktree panel: `↑` / `↓` move, `r` refreshes and `esc` closes. Worktrees are added to
-and removed from tasks — `plete worktree`, or `w` in the tasks list — not here.
+In the worktree panel: `↑` / `↓` move, `r` refreshes and `esc` closes.
+Worktrees are added to and removed from tasks — `plete worktree`, or `w` in
+the tasks list — not here.
 The panels are keyboard-driven, so single letters still work inside them, and
 the key that opened one closes it again.
 

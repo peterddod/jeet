@@ -569,8 +569,10 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" worktrees · ↑↓ move  ⏎ switch  o open PR  r refresh  esc close ")
-                        .title_style(Style::default().fg(Color::Green)),
+                        .title(" worktrees ")
+                        .title_style(Style::default().fg(Color::Green))
+                        // Below, where a narrow panel has the room the title lacks.
+                        .title_bottom(" ↑↓ move  ⏎ switch  o open PR  r refresh  esc close "),
                 )
                 .highlight_style(
                     Style::default()
@@ -813,11 +815,9 @@ fn draw_overlay(frame: &mut Frame, explorer: &Explorer, overlay: &Overlay) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(
-                            " {} open pull requests · ↑↓ move  ⏎ check out and switch  o browser  r refresh  esc close ",
-                            rows.len()
-                        ))
-                        .title_style(Style::default().fg(Color::Green)),
+                        .title(format!(" {} open pull requests ", rows.len()))
+                        .title_style(Style::default().fg(Color::Green))
+                        .title_bottom(" ↑↓ move  ⏎ check out  o browser  r refresh  esc close "),
                 )
                 .highlight_style(
                     Style::default()
@@ -974,7 +974,7 @@ const HELP: [(&str, &str); 26] = [
     ("ctrl-q", "quit, leaving the shell in this directory"),
     (
         "F1 / ctrl-g",
-        "this list, all of it: the bottom line shows F1 +N more",
+        "this list; the bottom line says F1 +N more when keys are left out",
     ),
     ("esc", "clear the filter, or quit without moving the shell"),
     ("", ""),
@@ -983,13 +983,18 @@ const HELP: [(&str, &str); 26] = [
 /// What the panel lists: the keys that work in the explorer right now, then
 /// the whole reference. Both the layout and the geometry start from this, so
 /// they cannot count different rows.
+///
+/// The keys that work now go in one row, wrapped like any description, so
+/// they cost a few lines rather than one each on top of the reference. Each
+/// hint's own spaces are non-breaking: a line may end between hints, never
+/// between a key and what it does.
 fn help_rows(here: &[Hint]) -> Vec<(String, String)> {
-    let mut rows = vec![("here".to_string(), "what works right now".to_string())];
-    rows.extend(
-        here.iter()
-            .map(|h| (h.key.to_string(), h.label.to_string())),
-    );
-    rows.push((String::new(), String::new()));
+    let now = here
+        .iter()
+        .map(|h| format!("{} {}", h.key, h.label).replace(' ', "\u{a0}"))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let mut rows = vec![("now".to_string(), now), (String::new(), String::new())];
     rows.extend(HELP.iter().map(|(k, d)| (k.to_string(), d.to_string())));
     rows
 }
@@ -1454,7 +1459,7 @@ mod tests {
     /// Where there is room for the table, it is not scrollable and not clipped.
     #[test]
     fn the_help_panel_fits_a_normal_terminal_outright() {
-        let (area, max_scroll) = help_geometry(Rect::new(0, 0, 80, 60), &here());
+        let (area, max_scroll) = help_geometry(Rect::new(0, 0, 80, 40), &here());
         assert_eq!(max_scroll, 0);
         let widest = HELP
             .iter()
