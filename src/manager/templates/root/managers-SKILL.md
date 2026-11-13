@@ -21,7 +21,7 @@ time; a single change is a plain `plete task new`.
     `[managers] manager_default`, else everything you may.
   - `--budget` (`4h`, `30m`, `20turns`, comma-separated) caps the busy
     time and turns of it and everything below it. Without it, it gets
-    `[managers] default_budget`.
+    `[tasks] default_budget`.
   - `--max-children` caps how many tasks it keeps under it at once.
   - `--project <name>` (see `plete projects ls`) starts it from a project:
     the project's skills and AGENTS.md (as `PROJECT.md`, imported beside
@@ -68,7 +68,7 @@ time; a single change is a plain `plete task new`.
 ## What it can and cannot do
 
 A manager runs locally in tmux, as the user, like any task. plete keeps it
-to its subtree, its grant, its budget, `[managers] max_live` running agents
+to its subtree, its grant, its budget, `[tasks] max_live` running agents
 and read-only worktrees (and, if the user set `[permissions] guards`, denies
 it `git commit` and `git push`). These
 limits are cooperative: they stop honest mistakes, not an agent set on

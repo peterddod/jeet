@@ -437,13 +437,15 @@ fn known<'a>(names: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
 }
 
 /// What `node` holds itself, before its ancestors cut it: the root's list
-/// for the assistant, its grant for a manager, and nothing for a worker,
-/// which passes nothing on.
+/// for the assistant, and its grant for any other task, which passes it on
+/// to the tasks under it.
 fn own_list(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
     Ok(match node.kind {
         TaskKind::Assistant => root_list(app),
-        TaskKind::Manager => known(app.db.grants(&node.id)?.iter().map(String::as_str)),
-        TaskKind::Work | TaskKind::Setup => Vec::new(),
+        TaskKind::Manager | TaskKind::Work => {
+            known(app.db.grants(&node.id)?.iter().map(String::as_str))
+        }
+        TaskKind::Setup => Vec::new(),
     })
 }
 
@@ -1607,7 +1609,7 @@ pub enum Reach {
     OwnOrBelow,
     /// A task below it.
     Below,
-    /// The parent of a new task: itself or a task below it, a manager.
+    /// The parent of a new task: itself or a task below it.
     Parent,
     /// A task below it; and for anyone, a task under the assistant.
     Tree,
@@ -1829,19 +1831,6 @@ pub fn in_scope(app: &App, caller: &Caller, verb: Verb, target: &TaskRecord) -> 
         Reach::Own => own,
         Reach::OwnOrBelow => own || below,
         Reach::Below | Reach::Tree => below,
-        Reach::Parent if own && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `plete {}`: a task with a parent cannot make tasks \
-             unless it is a manager; {ASK}",
-            node.slug,
-            verb.name()
-        ),
-        Reach::Parent if below && target.kind != TaskKind::Manager => bail!(
-            "task {} may not run `plete {}` under task {}: only a manager has tasks \
-             under it; {ASK}",
-            node.slug,
-            verb.name(),
-            target.slug
-        ),
         Reach::Parent => own || below,
     };
     match reached {
@@ -1860,7 +1849,7 @@ fn out_of_reach(slug: &str, verb: Verb, what: &str) -> String {
         Reach::Own => "itself",
         Reach::OwnOrBelow => "itself and the tasks below it",
         Reach::Below | Reach::Tree => "the tasks below it",
-        Reach::Parent => "itself and the managers below it",
+        Reach::Parent => "itself and the tasks below it",
     };
     let sideways = match verb {
         Verb::TaskSend | Verb::TaskInterrupt => "; tasks never message each other otherwise",
@@ -2526,12 +2515,13 @@ mod tests {
             .unwrap();
         assert_eq!(effective(&app, &m1).unwrap(), ["task.create"]);
 
-        // A worker passes nothing on, whatever it was granted.
-        let w = add(&app, "wk", TaskKind::Work, Some(&root), &every());
+        // A worker passes on what it holds, as a manager does.
+        let w = add(&app, "wk", TaskKind::Work, Some(&root), &["task.send"]);
         let under = add(&app, "under", TaskKind::Work, Some(&w), &every());
-        assert!(effective(&app, &under).unwrap().is_empty());
+        assert_eq!(effective(&app, &under).unwrap(), ["task.send"]);
+        assert_eq!(cut_by(&app, &under, "task.send").unwrap(), None);
         assert_eq!(
-            cut_by(&app, &under, "task.send").unwrap().as_deref(),
+            cut_by(&app, &under, "task.create").unwrap().as_deref(),
             Some("task wk")
         );
         // Nor is a task outside the tree anything.
@@ -2799,7 +2789,6 @@ mod tests {
             "s" => target == "fix-b",
             _ => false,
         };
-        let manager = |slug: &str| ["m", "m2", "s"].contains(&slug);
         // `fix` is the start of `fix-a` and `fix-b`, one in each subtree.
         let targets = [
             "m",
@@ -2842,7 +2831,7 @@ mod tests {
                 | Verb::ManagerPause
                 | Verb::ManagerResume
                 | Verb::ManagerStop => below,
-                Verb::TaskNew | Verb::ManagerNew => (own || below) && manager(target),
+                Verb::TaskNew | Verb::ManagerNew => own || below,
             }
         };
         for caller in ["m", "wk", "s"] {
@@ -2880,12 +2869,8 @@ mod tests {
         // Sideways messages say why.
         let e = node_of(&app, &row("wk"), &["task", "send", "fix-b", "hi"], false).unwrap_err();
         assert!(e.to_string().contains("never message each other"), "{e}");
-        let e = node_of(&app, &row("wk"), &["task", "new", "x"], false).unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("a task with a parent cannot make tasks"),
-            "{e}"
-        );
+        // A worker makes tasks under itself, as a manager does.
+        node_of(&app, &row("wk"), &["task", "new", "x"], false).unwrap();
         node_of(&app, &row("m"), &["task", "new", "x"], false).unwrap();
 
         // The user and the assistant reach any task, but the `plete manager`
@@ -3059,7 +3044,7 @@ mod tests {
             &["task", "prs", "sib"],
             &["worktree", "ls", "--task", "sib"],
             &["worktree", "path", "r", "--task", "sib"],
-            &["task", "new", "x"],
+            &["task", "new", "x", "--parent", "sib"],
             &["sync"],
             &["review", "42"],
             &["projects", "new", "p"],

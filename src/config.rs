@@ -66,9 +66,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_empty")]
     pub permissions: PermissionsConfig,
 
-    /// What work tasks do about pull requests (`[tasks]`).
-    #[serde(default, skip_serializing_if = "TasksConfig::is_empty")]
-    pub tasks: TasksConfig,
+    /// What tasks do about pull requests, and how the tree of tasks under
+    /// the assistant is kept in bounds (`[tasks]`).
+    #[serde(default, skip_serializing_if = "GlobalTasksConfig::is_empty")]
+    pub tasks: GlobalTasksConfig,
 
     /// The model each kind of agent runs (`[models]`).
     #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
@@ -624,7 +625,8 @@ impl WatchConfig {
     }
 }
 
-/// `[managers]` in config.toml.
+/// `[managers]` in config.toml: where the tree's keys lived before
+/// `[tasks]`, still read for each key `[tasks]` does not set.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ManagersConfig {
     /// Minutes a task with a parent may sit idle before its parent is told
@@ -632,8 +634,8 @@ pub struct ManagersConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_report_mins: Option<u64>,
 
-    /// How deep the tree under the assistant goes, the assistant being 0: a
-    /// worker sits at most this deep, a manager one less (default: 3).
+    /// How deep the tree under the assistant goes, the assistant being 0
+    /// (default: no limit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<u32>,
 
@@ -837,7 +839,52 @@ pub struct TasksConfig {
     pub pr: Option<PrMode>,
 }
 
-impl TasksConfig {
+/// `[tasks]` in config.toml: a project's [`TasksConfig`], and the tree's
+/// limits and defaults. Each tree key, unset here, is read from
+/// `[managers]`, where it used to live.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalTasksConfig {
+    /// As [`TasksConfig::pr`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrMode>,
+
+    /// Minutes a task with a parent may sit idle before its parent is told
+    /// (default: 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_report_mins: Option<u64>,
+
+    /// How deep the tree under the assistant goes, the assistant being 0
+    /// (default: no limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+
+    /// Active tasks a task may have under it, unless it was given fewer
+    /// (default: 6). The assistant has no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+
+    /// Tasks under the assistant whose agents may run at once (default: 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_live: Option<u32>,
+
+    /// The budget a task under another task gets unless given one, e.g.
+    /// `"4h"` or `"2h,40turns"` (default: `"4h"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_budget: Option<String>,
+
+    /// What a new task may do unless given `--allow` (default: every
+    /// capability but [`NAMED_ONLY`]); `[managers] worker_default` before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_allow: Option<Vec<String>>,
+
+    /// Capabilities, besides [`HELD_FLOOR`], that pass down only when named
+    /// and are logged and notified when granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Vec<String>>,
+}
+
+impl GlobalTasksConfig {
     fn is_empty(&self) -> bool {
         *self == Self::default()
     }
@@ -918,7 +965,6 @@ impl ModelsConfig {
 }
 
 pub const DEFAULT_IDLE_REPORT_MINS: u64 = 10;
-pub const DEFAULT_MAX_DEPTH: u32 = 3;
 pub const DEFAULT_MAX_CHILDREN: u32 = 6;
 pub const DEFAULT_MAX_LIVE: u32 = 8;
 pub const DEFAULT_BUDGET: &str = "4h";
@@ -931,10 +977,12 @@ pub const HELD_FLOOR: &[&str] = &["pr.merge", "pr.comment", "pr.review", "task.d
 /// `[managers] worker_default` or `manager_default`: given by name only.
 pub const NAMED_ONLY: &[&str] = &["assistant.interrupt"];
 
-/// `[managers]`, checked and with its defaults filled in.
+/// The tree's keys in `[tasks]` (or `[managers]`), checked and with their
+/// defaults filled in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerPolicy {
-    pub max_depth: u32,
+    /// `None`: no limit.
+    pub max_depth: Option<u32>,
     pub max_children: u32,
     pub max_live: u32,
     pub default_budget: Limits,
@@ -971,7 +1019,7 @@ impl Default for Config {
             messages: MessagesConfig::default(),
             notify: NotifyConfig::default(),
             permissions: PermissionsConfig::default(),
-            tasks: TasksConfig::default(),
+            tasks: GlobalTasksConfig::default(),
             models: ModelsConfig::default(),
         }
     }
@@ -1089,28 +1137,43 @@ impl Config {
             .unwrap_or(DEFAULT_SYNC_INTERVAL_SECS)
     }
 
-    /// `[managers] idle_report_mins`, else the default.
+    /// `[tasks] idle_report_mins`, else `[managers]`'s, else the default.
     pub fn idle_report_mins(&self) -> u64 {
-        self.managers
-            .as_ref()
-            .and_then(|m| m.idle_report_mins)
+        self.tasks
+            .idle_report_mins
+            .or(self.managers.as_ref().and_then(|m| m.idle_report_mins))
             .unwrap_or(DEFAULT_IDLE_REPORT_MINS)
     }
 
-    /// `[managers]` with its defaults, checked where it is used rather
+    /// The tree's keys, from `[tasks]` or else `[managers]`, with their
+    /// defaults, checked where they are used rather
     /// than when config.toml is read, so a mistake there breaks only the
     /// tree. It refuses an unknown capability, a limit of 0 and a budget that
     /// does not parse. A default left unset is every capability but [`NAMED_ONLY`],
     /// held ones included.
     pub fn manager_policy(&self) -> Result<ManagerPolicy> {
         let m = self.managers.clone().unwrap_or_default();
-        let limit = |key: &str, value: Option<u32>, default: u32| match value {
-            Some(0) => bail!("[managers] {key} = 0 allows nothing; give at least 1"),
-            Some(n) => Ok(n),
-            None => Ok(default),
+        let t = &self.tasks;
+        // Each key from `[tasks]`, else `[managers]`, named as where it was read.
+        fn pick<T: Clone>(
+            key: &'static str,
+            old: &'static str,
+            new: &Option<T>,
+            was: &Option<T>,
+        ) -> (String, Option<T>) {
+            match (new, was) {
+                (Some(v), _) => (format!("[tasks] {key}"), Some(v.clone())),
+                (None, Some(v)) => (format!("[managers] {old}"), Some(v.clone())),
+                (None, None) => (format!("[tasks] {key}"), None),
+            }
+        }
+        let limit = |(key, value): (String, Option<u32>)| match value {
+            Some(0) => bail!("{key} = 0 allows nothing; give at least 1"),
+            other => Ok(other),
         };
         let mut held = HELD_FLOOR.to_vec();
-        for name in capabilities("held", m.held.as_deref().unwrap_or_default())? {
+        let (key, names) = pick("held", "held", &t.held, &m.held);
+        for name in capabilities(&key, names.as_deref().unwrap_or_default())? {
             if !held.contains(&name) {
                 held.push(name);
             }
@@ -1122,19 +1185,36 @@ impl Config {
                 .filter(|name| !NAMED_ONLY.contains(name))
                 .collect()
         };
-        let default = |key: &str, names: &Option<Vec<String>>| match names {
-            Some(names) => capabilities(key, names),
+        let default = |(key, names): (String, Option<Vec<String>>)| match names {
+            Some(names) => capabilities(&key, &names),
             None => Ok(every()),
         };
-        let worker_default = default("worker_default", &m.worker_default)?;
-        let manager_default = default("manager_default", &m.manager_default)?;
-        let budget = m.default_budget.as_deref().unwrap_or(DEFAULT_BUDGET);
-        let default_budget =
-            budget::parse_limits(budget).map_err(|e| anyhow!("[managers] default_budget: {e}"))?;
+        let worker_default = default(pick(
+            "default_allow",
+            "worker_default",
+            &t.default_allow,
+            &m.worker_default,
+        ))?;
+        let manager_default = default(("[managers] manager_default".into(), m.manager_default))?;
+        let (key, budget) = pick(
+            "default_budget",
+            "default_budget",
+            &t.default_budget,
+            &m.default_budget,
+        );
+        let budget = budget.unwrap_or_else(|| DEFAULT_BUDGET.to_string());
+        let default_budget = budget::parse_limits(&budget).map_err(|e| anyhow!("{key}: {e}"))?;
         Ok(ManagerPolicy {
-            max_depth: limit("max_depth", m.max_depth, DEFAULT_MAX_DEPTH)?,
-            max_children: limit("max_children", m.max_children, DEFAULT_MAX_CHILDREN)?,
-            max_live: limit("max_live", m.max_live, DEFAULT_MAX_LIVE)?,
+            max_depth: limit(pick("max_depth", "max_depth", &t.max_depth, &m.max_depth))?,
+            max_children: limit(pick(
+                "max_children",
+                "max_children",
+                &t.max_children,
+                &m.max_children,
+            ))?
+            .unwrap_or(DEFAULT_MAX_CHILDREN),
+            max_live: limit(pick("max_live", "max_live", &t.max_live, &m.max_live))?
+                .unwrap_or(DEFAULT_MAX_LIVE),
             default_budget,
             worker_default,
             manager_default,
@@ -1149,7 +1229,7 @@ fn capabilities(key: &str, names: &[String]) -> Result<Vec<&'static str>> {
         .iter()
         .map(|name| match permissions::capability(name.trim()) {
             Some(c) => Ok(c.name),
-            None => bail!("[managers] {key}: {name} is not a capability"),
+            None => bail!("{key}: {name} is not a capability"),
         })
         .collect()
 }
@@ -1897,7 +1977,7 @@ mod tests {
         assert_eq!(
             policy,
             ManagerPolicy {
-                max_depth: 3,
+                max_depth: None,
                 max_children: 6,
                 max_live: 8,
                 default_budget: Limits {
@@ -1917,7 +1997,7 @@ mod tests {
         let policy = policy_of(text).unwrap();
         assert_eq!(
             (policy.max_depth, policy.max_children, policy.max_live),
-            (2, 3, 4)
+            (Some(2), 3, 4)
         );
         assert_eq!(
             policy.default_budget,
@@ -1958,6 +2038,38 @@ mod tests {
             toml::from_str::<Config>(&out).unwrap().managers,
             config.managers
         );
+    }
+
+    /// `[tasks]` holds the tree's keys now; `[managers]` is read for each
+    /// key `[tasks]` leaves unset, under its old name for the default grant,
+    /// and an error names where the key was read.
+    #[test]
+    fn the_tree_keys_come_from_tasks_then_managers() {
+        let config: Config = toml::from_str(
+            "[tasks]\nmax_live = 3\ndefault_allow = [\"worktree.add\"]\n\
+             [managers]\nmax_live = 20\nmax_children = 2\nworker_default = [\"task.create\"]\n",
+        )
+        .unwrap();
+        let policy = config.manager_policy().unwrap();
+        assert_eq!((policy.max_live, policy.max_children), (3, 2));
+        assert_eq!(policy.worker_default, ["worktree.add"]);
+        let config: Config = toml::from_str("[managers]\nmax_live = 20\n").unwrap();
+        assert_eq!(config.manager_policy().unwrap().max_live, 20);
+        let config: Config = toml::from_str("[tasks]\nidle_report_mins = 7\n").unwrap();
+        assert_eq!(config.idle_report_mins(), 7);
+        let err = |text: &str| {
+            toml::from_str::<Config>(text)
+                .unwrap()
+                .manager_policy()
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(err("[tasks]\nmax_depth = 0\n").contains("[tasks] max_depth = 0"));
+        assert!(err("[managers]\nmax_live = 0\n").contains("[managers] max_live = 0"));
+        assert!(err("[tasks]\ndefault_allow = [\"nope\"]\n")
+            .contains("[tasks] default_allow: nope is not"));
+        // A project's `[tasks]` takes no tree key.
+        assert!(toml::from_str::<TasksConfig>("max_live = 3\n").is_err());
     }
 
     #[test]

@@ -231,9 +231,12 @@ fn checked(app: &App, src: &Source, body: &str) -> Result<(TaskRecord, String)> 
     };
     match parent.kind {
         TaskKind::Assistant | TaskKind::Manager => {}
-        TaskKind::Work | TaskKind::Setup => {
-            bail!("only the assistant and managers take reports")
-        }
+        TaskKind::Work if parent.parent_id.is_some() => {}
+        TaskKind::Work => bail!(
+            "task {} is not under the assistant: only the tasks under it take reports",
+            parent.slug
+        ),
+        TaskKind::Setup => bail!("the setup agent takes no reports"),
     }
     let body = messages::clean(body);
     let body = body.trim();
@@ -734,9 +737,13 @@ pub fn held(app: &App, by: &Caller) -> Result<Vec<TaskReportRecord>> {
         Caller::Root => app.db.open_asks(Some(&manager::root(app)?.id)),
         Caller::Node(task) => match task.kind {
             TaskKind::Assistant | TaskKind::Manager => app.db.open_asks(Some(&task.id)),
-            TaskKind::Work | TaskKind::Setup => {
-                Ok(manager::open_ask(app, task)?.into_iter().collect())
+            // Its own open ask, and those it holds from tasks under it.
+            TaskKind::Work => {
+                let mut asks: Vec<_> = manager::open_ask(app, task)?.into_iter().collect();
+                asks.extend(app.db.open_asks(Some(&task.id))?);
+                Ok(asks)
             }
+            TaskKind::Setup => Ok(manager::open_ask(app, task)?.into_iter().collect()),
         },
         Caller::Review(review) => Ok(app
             .db
@@ -904,7 +911,8 @@ fn open_ask_row(app: &App, id: i64) -> Result<(TaskReportRecord, Asker)> {
 /// Refuse unless `holder` holds ask `row` and has not passed it to the
 /// user.
 fn refuse_unless_held(app: &App, row: &TaskReportRecord, holder: &TaskRecord) -> Result<()> {
-    if holder.kind == TaskKind::Work {
+    // Its own question is never one it holds.
+    if holder.kind == TaskKind::Setup || row.task_id == holder.id {
         bail!("you hold no question #{}", row.id);
     }
     if row.needs_user {
@@ -1177,10 +1185,10 @@ fn reask_ask(
         return Ok(());
     };
     match holder.kind {
-        TaskKind::Manager => {}
-        // The assistant's asks told the user when they reached it; nothing
-        // else holds one.
-        TaskKind::Assistant | TaskKind::Work | TaskKind::Setup => return Ok(()),
+        TaskKind::Manager | TaskKind::Work => {}
+        // The assistant's asks told the user when they reached it; the
+        // setup agent holds none.
+        TaskKind::Assistant | TaskKind::Setup => return Ok(()),
     }
     if !app.db.claim_reask(row.id, &holder.id)? {
         return Ok(());
@@ -1369,9 +1377,10 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     may.push("report");
     lines.push(format!("You may: {}", may.join(", ")));
     let to = manager::label(&parent);
-    let own = match task.kind {
-        TaskKind::Manager => "the tasks below you",
-        TaskKind::Work | TaskKind::Assistant | TaskKind::Setup => "this task",
+    let parents = task.kind == TaskKind::Manager || may.contains(&"task.create");
+    let own = match parents {
+        true => "the tasks below you",
+        false => "this task",
     };
     lines.push(format!(
         "Report to {to} with `plete report done|progress|blocked|question \"…\"`; it is the \
@@ -1387,7 +1396,7 @@ pub fn brief_context(app: &App, task: &TaskRecord) -> Result<String> {
     }
     // Said here, every session, as no template reaches an existing home.
     // In plete's words inside the fence, so no tag is spelled out.
-    if task.kind == TaskKind::Manager {
+    if parents {
         lines.push(
             "Answer a question you hold with `plete report answer` and its id, or pass it up \
              with `plete report escalate` and its id; `plete report ls` lists them."
@@ -1502,14 +1511,12 @@ mod tests {
         assert_eq!(messages::peek(&home).len(), 1);
         assert_eq!(messages::read_delivered(&home).len(), 1);
 
-        // A parent that is neither the assistant nor a manager takes none.
+        // A parent outside the tree under the assistant takes none.
         let under_top = task("u", Some("top".into()));
         app.db.insert_task(&under_top).unwrap();
         let refused = send(&app, &under_top, ReportKind::Done, "x", false, false).unwrap_err();
         assert!(
-            refused
-                .to_string()
-                .contains("only the assistant and managers"),
+            refused.to_string().contains("not under the assistant"),
             "{refused}"
         );
     }
@@ -2925,6 +2932,7 @@ mod tests {
         assert_eq!(refused(&node(&app, "sub")), (held.clone(), held.clone()));
         assert_eq!(refused(&node(&app, "fe")), (held.clone(), held.clone()));
         assert_eq!(refused(&Caller::Root), (held.clone(), held));
+        // Nor does the asker hold its own.
         let none = format!("you hold no question #{id}");
         assert_eq!(refused(&node(&app, "ww")).0, none);
 

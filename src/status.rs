@@ -430,7 +430,12 @@ fn handle_hook(
                         }
                         manager::context::session_context(app, task, session_id, now).map(Some)
                     }
-                    (true, TaskKind::Work | TaskKind::Assistant | TaskKind::Setup) => {
+                    // A work task with tasks under it hears how they go.
+                    (true, TaskKind::Work) => reports::brief_context(app, task).and_then(|brief| {
+                        let below = manager::context::work_sections(app, task)?;
+                        Ok(Some(format!("{brief}{below}")))
+                    }),
+                    (true, TaskKind::Assistant | TaskKind::Setup) => {
                         reports::brief_context(app, task).map(Some)
                     }
                 };

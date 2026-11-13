@@ -131,12 +131,16 @@ each agent at launch).
 
 ### 7. Managers and reviews
 
-- `[managers]`: `default_budget`, `max_depth`, `max_children`, `max_live`,
-  `worker_default`, `manager_default`, `held`, `idle_report_mins`. Unset, a
-  new task or manager is granted every capability, held ones included (each
-  list above it still cuts it); setting `worker_default` or `manager_default`
+- `[tasks]`: `default_budget`, `max_depth` (unset: no limit),
+  `max_children`, `max_live`, `default_allow`, `held`, `idle_report_mins`,
+  beside `pr`. Unset, a new task is granted every capability, held ones
+  included (each list above it still cuts it); setting `default_allow`
   restricts that, as does `--allow`. `held` capabilities are logged and
-  notified when a grant names them.
+  notified when a grant names them. Any task under the assistant holding
+  `task.create` may have tasks under it.
+- `[managers]`: the old home of those keys (`worker_default` for
+  `default_allow`), still read for each key `[tasks]` leaves unset; offer to
+  move them to `[tasks]`. `manager_default` stays here.
 - `[review]` caps: `max_live`, `time`, `turns`. A review is gated like whoever
   asked for it; `read_only = true` limits it to reading and `{name} report`
   and denies it every push.
