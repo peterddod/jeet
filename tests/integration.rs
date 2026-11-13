@@ -2,8 +2,24 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Drop every `PLETE_*` and `JEET_*` the suite inherited. plete reads either
+/// name, `PLETE_` first, so a `PLETE_HOME` from the session running the suite
+/// would win over the one a test sets, and a `JEET_HOME` would survive a
+/// test's `env_remove("PLETE_HOME")`: either way plete reaches the
+/// developer's real index (and once migrated it, schema and all).
+fn scrub_plete_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if name.starts_with("JEET_") || name.starts_with("PLETE_") {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
 fn plete_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_plete"));
+    scrub_plete_env(&mut cmd);
     // Whatever it leaves running is ended with the test.
     #[cfg(unix)]
     reaper::own_session(&mut cmd);
@@ -20,15 +36,6 @@ fn plete_bin() -> Command {
     // Running the suite from inside a task's agent session must not point
     // `plete worktree` at that real task, or the shell wrapper's cd file.
     cmd.env_remove("PLETE_TASK_ID").env_remove("PLETE_CD_FILE");
-    // Nor under the old names, which are read when the new ones are not set.
-    for name in [
-        "JEET_HOME",
-        "JEET_TASK_ID",
-        "JEET_CD_FILE",
-        "JEET_ASSISTANT",
-    ] {
-        cmd.env_remove(name);
-    }
     // No test may reach the developer's tmux server or Claude sessions: tmux
     // is missing unless a test supplies one, and Claude's store is empty.
     cmd.env("PLETE_TMUX", "/nonexistent/plete-test-tmux")
@@ -371,6 +378,20 @@ fn a_dev_build_does_not_migrate_the_default_index() {
             .unwrap(),
     );
     succeeded(&ls(true));
+    // Naming the index itself lets it through too.
+    let other = TempDir::new().unwrap();
+    succeeded(
+        &plete_bin()
+            .arg("ls")
+            .env("HOME", other.path())
+            .env_remove("PLETE_HOME")
+            .env(
+                "PLETE_ALLOW_DEV_MIGRATE",
+                other.path().join(".plete/index.db"),
+            )
+            .output()
+            .unwrap(),
+    );
 }
 
 #[test]
@@ -1237,6 +1258,7 @@ fn the_review_viewer_reacts_replies_and_comments_through_gh() {
         env!("CARGO_BIN_EXE_plete")
     );
     let mut cmd = Command::new("script");
+    scrub_plete_env(&mut cmd);
     reaper::own_session(&mut cmd);
     if cfg!(target_os = "linux") {
         cmd.args(["-q", "-e", "-c", &inner, "/dev/null"]);
@@ -2349,6 +2371,7 @@ pwd"#,
         lab.home().display(),
     );
     let mut cmd = Command::new("bash");
+    scrub_plete_env(&mut cmd);
     hermetic_git(&mut cmd);
     reaper::own_session(&mut cmd);
     let output = cmd
@@ -4179,6 +4202,7 @@ impl Pty {
             env!("CARGO_BIN_EXE_plete")
         );
         let mut cmd = Command::new("script");
+        scrub_plete_env(&mut cmd);
         reaper::own_session(&mut cmd);
         if cfg!(target_os = "linux") {
             cmd.args(["-q", "-f", "-e", "-c", &inner]).arg(&log);
