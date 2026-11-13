@@ -659,6 +659,13 @@ impl Explorer {
         Some(dir)
     }
 
+    /// Whether [`Explorer::ascend`] would go anywhere, without saying so in
+    /// the status line when it would not — the key legend asks this on every
+    /// draw. It tests exactly what `ascend` does.
+    pub fn can_ascend(&self) -> bool {
+        self.cwd != self.root && self.cwd.parent().is_some()
+    }
+
     /// Go to the parent directory, never above the worktree root.
     ///
     /// The comparison is deliberately lexical: a symlink that resolves back to

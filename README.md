@@ -154,6 +154,10 @@ From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 └───────────────────────────────────────────────────────────────┘
 ```
 
+The bottom line shows the keys that apply right now — a file offers `⏎ edit`,
+a folder `→ in`, a command line `⏎ run` — and ends in `F1 +N more` when they do
+not all fit. `F1` opens the key list with those keys first.
+
 ### Type to find things
 
 The filter is live the moment the window opens — no key to press first. Type
@@ -219,7 +223,7 @@ Because a bare letter belongs to the filter, the commands carry a `ctrl`:
 | `esc` | quit without moving your shell (unless it moved out from under you) |
 | `F1` or `ctrl-g` | the key list, in plete |
 
-In the worktree panel: `r` refreshes and `esc` closes. Worktrees are added to
+In the worktree panel: `↑` / `↓` move, `r` refreshes and `esc` closes. Worktrees are added to
 and removed from tasks — `plete worktree`, or `w` in the tasks list — not here.
 The panels are keyboard-driven, so single letters still work inside them, and
 the key that opened one closes it again.
