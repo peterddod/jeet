@@ -1,0 +1,11 @@
+#!/bin/sh
+# Remove the jeet link postinst made, and only that.
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  if [ -L /usr/bin/jeet ] && [ "$(readlink /usr/bin/jeet)" = "plete" ]; then
+    rm -f /usr/bin/jeet
+  fi
+fi
+
+#DEBHELPER#
