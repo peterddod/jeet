@@ -79,6 +79,8 @@ const NOT_A_DIRECTORY: &str = "not a directory — press ⏎ to open it";
 fn report_step(explorer: &mut Explorer, step: Step) {
     match step {
         Step::Entered(name) => explorer.set_status(format!("entered {name}/")),
+        Step::Opened(name) => explorer.set_status(format!("opened {name}/")),
+        Step::Empty(name) => explorer.set_status(format!("{name}/ is empty")),
         Step::NotADirectory => explorer.set_status(NOT_A_DIRECTORY),
         // Nothing is highlighted, so there was nothing it could have meant:
         // the same two reasons ⇥ and ⏎ give.
@@ -347,12 +349,15 @@ fn handle_browse_key(
             explorer.set_status("⏎ runs the command · esc drops it");
         }
         KeyCode::Right => {
-            let step = explorer.descend_typed()?;
+            let step = explorer.expand()?;
             report_step(explorer, step);
         }
-        KeyCode::Left if explorer.ascend()? => explorer.set_status(""),
+        // An open folder closes first; only then does ← go up a level.
+        KeyCode::Left if explorer.close_selected() || explorer.ascend() => explorer.set_status(""),
         // With the filter empty (so not in a command line), ⌫ backs out like ←.
-        KeyCode::Backspace if explorer.ascend()? => explorer.set_status(""),
+        KeyCode::Backspace if explorer.close_selected() || explorer.ascend() => {
+            explorer.set_status("")
+        }
         KeyCode::Enter if explorer.in_command_mode() => run_command(app, terminal, explorer)?,
         KeyCode::Enter => enter_selected(app, terminal, explorer)?,
 
@@ -442,14 +447,15 @@ fn execute_command(
     Ok(())
 }
 
-/// ⏎ and a click on the highlighted row: folders open, files go to the editor.
+/// ⏎ on the highlighted row: folders open or close in place, files go to the
+/// editor.
 fn enter_selected(app: &App, terminal: &mut Tui, explorer: &mut Explorer) -> Result<()> {
     let Some(entry) = explorer.selected_entry().cloned() else {
         explorer.set_status(nothing_to_act_on(explorer));
         return Ok(());
     };
     if entry.is_dir {
-        explorer.descend()?;
+        explorer.toggle_selected()?;
         explorer.set_status("");
     } else {
         open_editor(app, terminal, explorer, &entry.path)?;
@@ -475,10 +481,9 @@ fn handle_mouse(terminal: &mut Tui, explorer: &mut Explorer, mouse: MouseEvent) 
         MouseEventKind::ScrollUp => explorer.move_cursor(-1),
         MouseEventKind::ScrollDown => explorer.move_cursor(1),
         MouseEventKind::Down(MouseButton::Left) => {
-            // A double-click is two presses. Without this the first enters the
-            // folder and the second enters whatever the child listing put back
-            // under the pointer — which, directories sorting first, is usually
-            // another folder.
+            // A double-click is two presses. Without this the first opens the
+            // folder and the second closes it again (or, on a crumb, acts on
+            // whatever the new level put back under the pointer).
             if explorer.is_double_click(mouse.column, mouse.row) {
                 return Ok(());
             }
@@ -486,22 +491,18 @@ fn handle_mouse(terminal: &mut Tui, explorer: &mut Explorer, mouse: MouseEvent) 
                 // Lexical, like `ascend`: a symlink that resolves back to a
                 // parent (`ln -s . loop`) is a directory you can be inside,
                 // and canonicalising here would refuse to let you climb out.
-                if dir != explorer.cwd {
-                    // Land on the folder we came out of, the way ← does, so a
-                    // crumb click can be undone by pressing → straight back.
-                    let came_from = descendant_of(&dir, &explorer.cwd);
-                    explorer.show(dir, came_from.as_deref())?;
-                    explorer.note_navigating_click(mouse.column, mouse.row);
-                    explorer.set_status("");
-                }
+                // The cursor lands on that folder's row, so a crumb click can be
+                // undone by pressing → straight back.
+                explorer.go_to_folder(&dir)?;
+                explorer.note_navigating_click(mouse.column, mouse.row);
+                explorer.set_status("");
             } else if let Some(row) = clicked_row(explorer, mouse.column, mouse.row) {
-                if explorer.select_visible(row) {
-                    // A folder opens on a single click — that is what clicking
-                    // a folder means everywhere else. Files only get selected;
-                    // handing a file to an editor is too much for a stray click.
-                    let is_dir = explorer.selected_entry().map(|e| e.is_dir) == Some(true);
-                    if is_dir {
-                        explorer.descend()?;
+                if explorer.select_row(row) {
+                    // A folder opens or closes on a single click — that is what
+                    // clicking a folder means everywhere else. Files only get
+                    // selected; handing a file to an editor is too much for a
+                    // stray click.
+                    if explorer.toggle_selected()? {
                         explorer.note_navigating_click(mouse.column, mouse.row);
                     }
                     explorer.set_status("");
@@ -925,12 +926,11 @@ fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
 /// Move the explorer to another worktree, leaving it where it was if the new
 /// root cannot be listed (it may have been removed since the panel was built).
 fn switch_worktree(app: &App, explorer: &mut Explorer, path: &Path) -> Result<()> {
-    // Listing first, and through `show` rather than by hand: it bails before
-    // touching anything if the new root cannot be read, and it is the only
-    // thing that keeps the filter and the visible rows in step with `entries`.
-    explorer.show(path.to_path_buf(), None)?;
+    // Listing first, and through `set_root` rather than by hand: it bails
+    // before touching anything if the new root cannot be read, and it is the
+    // only thing that keeps the tree, the filter and the rows in step.
+    explorer.set_root(path.to_path_buf())?;
     let (label, kind, status) = describe_root(app, explorer.repo.as_ref(), path);
-    explorer.root = path.to_path_buf();
     explorer.root_label = label;
     explorer.root_kind = kind;
     explorer.root_status = status;

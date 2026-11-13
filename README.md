@@ -147,16 +147,26 @@ From the tasks list, `e` opens it on a task, and `esc` goes back to the list.
 ┌ plete · github.com/acme/widget ────────────────────────────────┐
 │worktree feature-x  [task]  1 uncommitted  +2/-0 in 1 file     │
 │path     /src                                                  │
-│filter   co█  1 of 2                                           │
+│filter   com█  1 of 2                                          │
 └───────────────────────────────────────────────────────────────┘
 ┌ 1 of 2 items ─────────────────────────────────────────────────┐
-│▸ commands/                                                    │
+│▾ src/                                                  +40 -3 │
+│  ▸ commands/                                                  │
+│▸ tests/                                                       │
+│  README.md                                              110 K │
 └───────────────────────────────────────────────────────────────┘
 ```
 
+Folders open and close where they stand, so every folder above the one you are
+in stays on screen. Only open folders are read, and they stay open when you
+refresh. The filter narrows the level the cursor is in — `com` above has hidden
+`src/`'s other entries — and leaves the rest of the tree whole; the count in the
+title is for that level.
+
 The bottom line shows the keys that apply right now — a file offers `⏎ edit`,
-a folder `→ in`, a command line `⏎ run` — and ends in `F1 +N more` when they do
-not all fit. `F1` opens the key list with those keys first.
+a closed folder `⏎ open` and `→ open`, an open one `⏎ close` and `← close`, a
+command line `⏎ run` — and ends in `F1 +N more` when they do not all fit. `F1`
+opens the key list with those keys first.
 
 ### Type to find things
 
@@ -169,9 +179,9 @@ merely contain it.
 |-----|--------|
 | any letter, digit or symbol | filter this level |
 | `⇥` | complete the filter as far as the matches agree; again takes the highlighted row |
-| `/` or `\` | step into the highlighted folder, and start a fresh filter |
+| `/` or `\` | open the highlighted folder, step into it, and start a fresh filter |
 | | (`\` is also a legal filename character, so it types whenever there is still a name it could be part of) |
-| `⌫` | delete a character — or, with nothing typed, leave the folder, as `←` |
+| `⌫` | delete a character — or, with nothing typed, close the folder or go out, as `←` |
 | `ctrl-u` | clear the filter |
 | `esc` | clear the filter — or, with nothing typed, quit |
 
@@ -182,7 +192,7 @@ towards that row, and the cursor stays on it. With nothing typed it only fills
 in what every name shares, as a shell does. `/` then walks in, so `sr⇥/` gets
 you into `src/` without leaving the keyboard, exactly as typing a path does.
 
-`/` steps into the highlighted folder — the same row `⏎` and `→` act on, and
+`/` opens the highlighted folder and steps into it — the same row `⏎` and `→` act on, and
 the one you can see. Typing a folder's name out in full puts it there: an exact
 match sorts to the top whatever else the filter caught.
 
@@ -190,11 +200,11 @@ match sorts to the top whatever else the filter caught.
 
 | key | action |
 |-----|--------|
-| `↑` / `↓` | move within the current level |
-| `→` | expand: step into the highlighted folder |
-| `←` | back: leave the folder (never above the worktree root) |
-| `⏎` | folder: step in · file: open it in your editor |
-| click | a folder to step into it, a file to select it, a path crumb to jump up |
+| `↑` / `↓` | move through the tree (with a filter typed, among that level's matches) |
+| `→` | a closed folder: open it · an open one: go to its first entry |
+| `←` | an open folder: close it · otherwise go to the folder you are in (never above the worktree root) |
+| `⏎` | folder: open or close it where it stands · file: open it in your editor |
+| click | a folder to open or close it, a file to select it, a path crumb to jump to that folder |
 | scroll | move the cursor |
 | shift-drag | select text (see below) |
 | `Home` / `End` | jump to the top / bottom |

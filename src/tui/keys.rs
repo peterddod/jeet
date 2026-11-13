@@ -47,18 +47,30 @@ pub fn explorer_hints(explorer: &Explorer) -> Vec<Hint> {
         if !filtering {
             hints.push(hint("type", "to filter"));
         }
+        // The folder under the cursor decides what ⏎, → and ← do to it.
+        let folder = explorer.selected_entry().filter(|e| e.is_dir);
+        let open = folder.is_some_and(|e| explorer.is_open(&e.path));
         match explorer.selected_entry() {
+            Some(_) if open => hints.push(hint("⏎", "close")),
             Some(entry) if entry.is_dir => hints.push(hint("⏎", "open")),
             Some(_) => hints.push(hint("⏎", "edit")),
             None => {}
         }
         hints.push(hint("↑↓", "move"));
-        if explorer.selected_entry().is_some_and(|e| e.is_dir) {
-            hints.push(hint("→", "in"));
+        if let Some(folder) = folder {
+            if !open {
+                hints.push(hint("→", "open"));
+            } else if explorer.has_children(&folder.path) {
+                hints.push(hint("→", "in"));
+            }
         }
-        if explorer.can_ascend() {
-            // ⌫ only backs out while there is nothing to delete.
-            hints.push(hint(if filtering { "←" } else { "← ⌫" }, "out"));
+        // ← closes an open folder, else goes up; ⌫ does the same, but only
+        // while there is nothing to delete.
+        let left = if filtering { "←" } else { "← ⌫" };
+        if open {
+            hints.push(hint(left, "close"));
+        } else if explorer.can_ascend() {
+            hints.push(hint(left, "out"));
         }
         if filtering {
             hints.extend([hint("⌫", "delete"), hint("esc", "clear")]);
@@ -192,7 +204,7 @@ mod tests {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path(), true);
         assert_eq!(explorer.selected_entry().unwrap().name, "src");
-        assert!(has(&explorer, "⏎", "open") && has(&explorer, "→", "in"));
+        assert!(has(&explorer, "⏎", "open") && has(&explorer, "→", "open"));
         assert!(has(&explorer, "/", "in"));
 
         explorer.select_last();
@@ -207,11 +219,31 @@ mod tests {
     }
 
     #[test]
+    fn an_open_folder_closes_and_goes_in() {
+        let dir = fixture();
+        let mut explorer = explorer_at(dir.path(), true);
+        explorer.toggle_selected().unwrap();
+        assert!(has(&explorer, "⏎", "close") && has(&explorer, "← ⌫", "close"));
+        assert!(has(&explorer, "→", "in") && !has(&explorer, "→", "open"));
+        explorer.push_filter('s');
+        assert!(has(&explorer, "←", "close"));
+
+        // `inner` is the only thing in `src`; an empty folder has no "in".
+        explorer.clear_filter();
+        explorer.select_last();
+        explorer.move_cursor(-1);
+        assert_eq!(explorer.selected_entry().unwrap().name, "inner");
+        explorer.toggle_selected().unwrap();
+        assert!(has(&explorer, "⏎", "close") && !keys(&explorer).contains(&"→"));
+    }
+
+    #[test]
     fn out_only_inside_a_subfolder() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path(), true);
         assert!(!keys(&explorer).iter().any(|k| k.contains('←')));
-        assert!(explorer.descend().unwrap());
+        explorer.descend_typed().unwrap();
+        // The cursor is on `inner`, a closed folder: ← goes out to `src`.
         assert!(has(&explorer, "← ⌫", "out"));
         explorer.push_filter('i');
         assert!(has(&explorer, "←", "out"));

@@ -8,7 +8,9 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::keys::{self, Hint};
-use super::state::{human_size, DiffCount, DiffMap, Explorer, Overlay, PendingAction, PrLookup};
+use super::state::{
+    human_size, DiffCount, DiffMap, Explorer, Overlay, PendingAction, PrLookup, Row,
+};
 use crate::github::{PendingReview, PullRequest, Verdict};
 use crate::review::JobState;
 use crate::worktrees::WorktreeStatus;
@@ -56,27 +58,27 @@ pub fn draw(frame: &mut Frame, explorer: &mut Explorer) {
         let needle = explorer.needle();
         // Split the borrow: the list widget needs its scroll state mutably
         // while the entries it renders are borrowed immutably.
+        let cursor = explorer.cursor_row();
         let Explorer {
             entries,
             hidden,
             matches,
-            selected,
+            rows,
             list,
             diffs,
             root,
             ..
         } = &mut *explorer;
-        let rows: Vec<&super::state::FsEntry> =
-            matches.iter().filter_map(|&i| entries.get(i)).collect();
         draw_listing(
             frame,
             chunks[1],
             Listing {
-                rows: &rows,
+                rows,
+                shown: matches.len(),
                 total: entries.len(),
                 hidden: *hidden,
                 filter: &needle,
-                selected: *selected,
+                cursor,
                 diffs,
                 root,
             },
@@ -352,13 +354,17 @@ pub fn status_span(status: &WorktreeStatus) -> Span<'static> {
 /// What the file list needs in order to draw itself, gathered up rather than
 /// spread across half a dozen positional arguments.
 struct Listing<'a> {
-    rows: &'a [&'a super::state::FsEntry],
-    /// Everything in the directory, so a filtered listing can say "3 of 9".
+    /// The whole tree, as flattened.
+    rows: &'a [Row],
+    /// The cursor level's matches and its whole listing, so a filtered level
+    /// can say "3 of 9" — the count is for that folder, not the tree.
+    shown: usize,
     total: usize,
     /// Dotfiles left out, so an empty-looking pane can say which kind it is.
     hidden: usize,
     filter: &'a str,
-    selected: usize,
+    /// Index into `rows`; none when the filter left the level with nothing.
+    cursor: Option<usize>,
     diffs: &'a DiffMap,
     root: &'a std::path::Path,
 }
@@ -403,20 +409,21 @@ fn diff_spans(count: Option<DiffCount>, width: usize) -> Vec<Span<'static>> {
 
 fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mut ListState) {
     let Listing {
-        rows: entries,
+        rows,
+        shown,
         total,
         hidden,
         filter,
-        selected,
+        cursor,
         diffs,
         root,
     } = listing;
     let width = area.width.saturating_sub(4) as usize;
     // Sizes and diffs both line up in columns, so each is as wide as its widest
     // entry on screen; a directory with no changes has no diff column at all.
-    let counts: Vec<Option<DiffCount>> = entries
+    let counts: Vec<Option<DiffCount>> = rows
         .iter()
-        .map(|entry| diffs.get(root, &entry.path))
+        .map(|row| diffs.get(root, &row.entry.path))
         .collect();
     let diff_width = counts
         .iter()
@@ -424,20 +431,24 @@ fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mu
         .map(|c| diff_label(*c).width())
         .max()
         .unwrap_or(0);
-    let size_width = entries
+    let size_width = rows
         .iter()
-        .filter(|e| !e.is_dir)
-        .map(|e| human_size(e.size).width())
+        .filter(|row| !row.entry.is_dir)
+        .map(|row| human_size(row.entry.size).width())
         .max()
         .unwrap_or(0);
-    let items: Vec<ListItem> = entries
+    let items: Vec<ListItem> = rows
         .iter()
         .zip(counts)
-        .map(|(entry, count)| {
-            let (marker, style) = if entry.is_dir {
-                ("▸ ", Style::default().fg(Color::Cyan))
-            } else {
-                ("  ", Style::default())
+        .map(|(row, count)| {
+            let entry = &row.entry;
+            // Two columns a level, then the fold marker, which files keep the
+            // room for so names line up within a level.
+            let indent = "  ".repeat(row.depth);
+            let (marker, style) = match (entry.is_dir, row.open) {
+                (true, true) => ("▾ ", Style::default().fg(Color::Cyan)),
+                (true, false) => ("▸ ", Style::default().fg(Color::Cyan)),
+                (false, _) => ("  ", Style::default()),
             };
             let name = entry.display_name();
             let size = if entry.is_dir {
@@ -449,9 +460,10 @@ fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mu
             // per character and padding it by count pushes the size off the
             // right edge of the pane.
             let diff_col = if diff_width > 0 { diff_width + 2 } else { 0 };
-            let used = marker.width() + name.width() + diff_col + size_width;
+            let used = indent.width() + marker.width() + name.width() + diff_col + size_width;
             let pad = width.saturating_sub(used).max(1);
             let mut spans = vec![
+                Span::raw(indent),
                 Span::styled(marker, style),
                 Span::styled(name, style),
                 Span::raw(" ".repeat(pad)),
@@ -468,13 +480,9 @@ fn draw_listing(frame: &mut Frame, area: Rect, listing: Listing, list_state: &mu
         })
         .collect();
 
-    let title = listing_title(entries.len(), total, hidden, filter, area.width);
+    let title = listing_title(shown, total, hidden, filter, area.width);
 
-    list_state.select(if entries.is_empty() {
-        None
-    } else {
-        Some(selected.min(entries.len() - 1))
-    });
+    list_state.select(cursor);
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -939,18 +947,24 @@ const HELP: [(&str, &str); 26] = [
         "type to filter this level (live, no key needed)",
     ),
     ("⇥", "complete the filter, as far as the matches agree"),
-    ("/ or \\", "enter the highlighted folder, filtering afresh"),
+    (
+        "/ or \\",
+        "open the highlighted folder and go in, filtering afresh",
+    ),
     ("⌫ / ctrl-u", "delete a character / clear the filter"),
     (":", "command: mv, cp [-r], mkdir [-p], rm [-r], touch"),
     ("", ""),
     ("↑ ↓", "move up and down · PgUp/PgDn ten rows"),
-    ("→", "expand: enter the highlighted folder"),
+    ("→", "open a closed folder · on an open one, go in"),
     (
         "← / ⌫",
-        "back: leave the folder (⌫ once the filter is empty)",
+        "close an open folder, else go out (⌫ once the filter is empty)",
     ),
-    ("⏎", "folder: enter · file: open in your editor"),
-    ("click", "a row to enter or select it, a path crumb to jump"),
+    ("⏎", "folder: open or close it · file: open in your editor"),
+    (
+        "click",
+        "a folder to open or close it, a path crumb to jump",
+    ),
     ("shift-drag", "select text — plete has the mouse otherwise"),
     ("Home / End", "jump to the top / bottom"),
     ("", ""),
@@ -1562,6 +1576,44 @@ mod tests {
         assert!(screen.contains("[task canvas]"), "{screen}");
         assert!(!screen.contains(" vs "), "{screen}");
         assert!(screen.contains("notes/"), "{screen}");
+    }
+
+    /// Open folders draw `▾`, closed ones `▸`, and children sit two columns in
+    /// beneath the folder they belong to.
+    #[test]
+    fn the_tree_is_indented_under_open_folders() {
+        use super::super::state::Explorer;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/inner")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("tests")).unwrap();
+        let mut explorer = Explorer::new(
+            None,
+            dir.path().to_path_buf(),
+            "t".into(),
+            "task canvas".into(),
+            WorktreeStatus::default(),
+            dir.path().to_path_buf(),
+        )
+        .unwrap();
+        explorer.toggle_selected().unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut explorer)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: Vec<String> = (0..14)
+            .map(|y| {
+                (0..60)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let row = |text: &str| screen.iter().find(|l| l.contains(text)).unwrap().clone();
+        assert!(row("src/").contains("│▾ src/"), "{screen:#?}");
+        assert!(row("inner/").contains("│  ▸ inner/"), "{screen:#?}");
+        assert!(row("lib.rs").contains("│    lib.rs"), "{screen:#?}");
+        assert!(row("tests/").contains("│▸ tests/"), "{screen:#?}");
     }
 
     /// A command line is labelled as one, shown without its colon, and the

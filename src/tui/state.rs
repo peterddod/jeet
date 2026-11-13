@@ -3,7 +3,7 @@
 //! Everything in here is pure enough to unit test — the terminal only ever
 //! renders what these types describe.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -172,8 +172,12 @@ pub enum Overlay {
 /// having to work out why for itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Stepped into this folder.
+    /// Stepped into this folder: the cursor is on its first row now.
     Entered(String),
+    /// `→` on a closed folder: it opened where it stands.
+    Opened(String),
+    /// `→` on an open folder with nothing in it, so there is no first row.
+    Empty(String),
     /// The filter or the cursor settled on something, but it is a file.
     NotADirectory,
     /// Neither settled on anything.
@@ -191,6 +195,15 @@ pub enum Exit {
     Back,
 }
 
+/// One line of the tree: an entry and how deep it sits under the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub depth: usize,
+    pub entry: FsEntry,
+    /// A folder that is expanded, so its children follow it.
+    pub open: bool,
+}
+
 pub struct Explorer {
     /// None while browsing a task's canvas, which is no repository.
     pub repo: Option<RepoRecord>,
@@ -199,8 +212,19 @@ pub struct Explorer {
     pub root_label: String,
     pub root_kind: String,
     pub root_status: WorktreeStatus,
-    /// Directory currently listed.
+    /// The cursor's level: the folder whose children the cursor is on. It is
+    /// the root or an open folder, and everything relative — `:` commands, the
+    /// filter, ctrl-q — means relative to it.
     pub cwd: PathBuf,
+    /// Folders that are expanded in the tree. The root is always shown
+    /// expanded and is not in here.
+    pub open: BTreeSet<PathBuf>,
+    /// What was read from the root and from each open folder, with its count
+    /// of hidden dotfiles. Typing re-flattens the tree; it must not re-read it.
+    listings: HashMap<PathBuf, (Vec<FsEntry>, usize)>,
+    /// The tree flattened depth-first, as it is drawn. `cwd`'s children are
+    /// the filtered ones, in match order; every other level is shown whole.
+    pub rows: Vec<Row>,
     /// Everything in `cwd`, unfiltered.
     pub entries: Vec<FsEntry>,
     /// Dotfiles in `cwd` that `show_hidden` is leaving out, so a directory
@@ -209,9 +233,10 @@ pub struct Explorer {
     /// What the user has typed to narrow the listing down.
     pub filter: String,
     /// Indices into [`Explorer::entries`] that `filter` keeps, in display
-    /// order. Everything the user sees and selects goes through this.
+    /// order. The cursor level's rows go through this.
     pub matches: Vec<usize>,
-    /// Cursor position within [`Explorer::matches`], not `entries`.
+    /// Cursor position within [`Explorer::matches`], not `entries` — the
+    /// cursor row is `cwd`'s match at this index.
     pub selected: usize,
     pub show_hidden: bool,
     pub overlay: Option<Overlay>,
@@ -269,7 +294,10 @@ impl Explorer {
             root_kind,
             root_status,
             origin: cwd.clone(),
-            cwd,
+            cwd: PathBuf::new(),
+            open: BTreeSet::new(),
+            listings: HashMap::new(),
+            rows: Vec::new(),
             entries: Vec::new(),
             hidden: 0,
             filter: String::new(),
@@ -293,25 +321,62 @@ impl Explorer {
             review_job: None,
             back: None,
         };
-        explorer.reload(None)?;
+        explorer.set_root(explorer.root.clone())?;
+        if cwd != explorer.root {
+            explorer.show(cwd, None)?;
+        }
         Ok(explorer)
     }
 
-    /// Re-read the current directory, keeping the filter and, where it can,
-    /// the cursor on `keep`.
+    /// Start over at `root`: nothing open, the cursor on its first row. The
+    /// old tree stays if the new root cannot be read.
+    pub fn set_root(&mut self, root: PathBuf) -> Result<()> {
+        let listing = read_dir(&root, self.show_hidden)?;
+        self.open.clear();
+        self.listings.clear();
+        self.listings.insert(root.clone(), listing);
+        self.root = root.clone();
+        self.enter_level(root);
+        self.filter.clear();
+        self.refocus(None);
+        Ok(())
+    }
+
+    /// Re-read the root and every open folder, keeping the filter, the open
+    /// folders and, where it can, the cursor on `keep`.
     ///
     /// This is the refresh path — after an editor or an agent has run — so
     /// unlike [`Explorer::show`] it must not throw away what the user typed.
+    /// A folder that has gone is closed rather than failing the refresh; only
+    /// an unreadable root does, leaving everything as it was.
     pub fn reload(&mut self, keep: Option<&Path>) -> Result<()> {
-        let cwd = self.cwd.clone();
-        // Put the filter back whether or not the listing worked: bailing out
-        // with it cleared but the rows still filtered shows a subset of the
-        // directory with nothing on screen to say why.
-        let filter = std::mem::take(&mut self.filter);
-        let listed = self.show(cwd, keep);
-        self.filter = filter;
+        let mut listings = HashMap::new();
+        listings.insert(self.root.clone(), read_dir(&self.root, self.show_hidden)?);
+        let mut open = BTreeSet::new();
+        // A folder sorts after its parent, so one that was dropped has already
+        // kept its children from being read.
+        for dir in &self.open {
+            let parent_kept = dir.parent().is_some_and(|p| listings.contains_key(p));
+            if !parent_kept {
+                continue;
+            }
+            if let Ok(listing) = read_dir(dir, self.show_hidden) {
+                listings.insert(dir.clone(), listing);
+                open.insert(dir.clone());
+            }
+        }
+        self.listings = listings;
+        self.open = open;
+        // The cursor's folder may be one of those that went: the nearest one
+        // still there takes over, and the filter was typed against the old.
+        let mut level = self.cwd.clone();
+        while !self.listings.contains_key(&level) && level.pop() {}
+        if level != self.cwd {
+            self.filter.clear();
+        }
+        self.enter_level(level);
         self.refocus(keep);
-        listed
+        Ok(())
     }
 
     /// Show or hide dotfiles, putting the flag back if the re-listing fails.
@@ -360,25 +425,46 @@ impl Explorer {
         self.last_navigating_click = Some((Instant::now(), column, row));
     }
 
-    /// List `dir` and move there, leaving state untouched if it cannot be read.
+    /// Make `dir` the cursor's level — opening every folder on the way down
+    /// from the root — leaving state untouched if one cannot be read.
     ///
     /// Committing the path before the listing succeeds is how you end up with a
     /// header describing one directory and a file list showing another — which
     /// then opens the wrong file.
     ///
-    /// Moving directories clears the filter: it was typed against the level you
+    /// Moving levels clears the filter: it was typed against the level you
     /// just left, and carrying it over hides most of the one you arrived in.
     pub fn show(&mut self, dir: PathBuf, keep: Option<&Path>) -> Result<()> {
-        let (entries, hidden) = read_dir(&dir, self.show_hidden)?;
+        let Ok(rest) = dir.strip_prefix(&self.root) else {
+            anyhow::bail!("{} is outside {}", dir.display(), self.root.display());
+        };
+        let mut fresh = Vec::new();
+        let mut at = self.root.clone();
+        for component in rest.components() {
+            at.push(component.as_os_str());
+            if !self.open.contains(&at) {
+                fresh.push((at.clone(), read_dir(&at, self.show_hidden)?));
+            }
+        }
+        for (path, listing) in fresh {
+            self.open.insert(path.clone());
+            self.listings.insert(path, listing);
+        }
+        self.enter_level(dir);
+        self.filter.clear();
+        self.refocus(keep);
+        Ok(())
+    }
+
+    /// Point `cwd`, `entries` and `hidden` at `dir`, which must be listed.
+    fn enter_level(&mut self, dir: PathBuf) {
+        let (entries, hidden) = self.listings.get(&dir).cloned().unwrap_or_default();
         self.cwd = dir;
         self.entries = entries;
         self.hidden = hidden;
-        self.filter.clear();
         // Whatever moved us, it was not the click the guard is watching for —
         // arriving here by ← or → must not discard the next click.
         self.last_navigating_click = None;
-        self.refocus(keep);
-        Ok(())
     }
 
     /// Recompute the visible rows for the current filter, keeping the cursor on
@@ -392,6 +478,172 @@ impl Explorer {
                     .position(|&i| self.entries[i].path == path)
             })
             .unwrap_or(0);
+        self.rebuild();
+    }
+
+    /// Flatten the open folders into [`Explorer::rows`].
+    fn rebuild(&mut self) {
+        let mut rows = Vec::new();
+        self.flatten(&self.root, 0, &mut rows);
+        self.rows = rows;
+    }
+
+    fn flatten(&self, dir: &Path, depth: usize, out: &mut Vec<Row>) {
+        let Some((children, _)) = self.listings.get(dir) else {
+            return;
+        };
+        // The filter narrows the cursor's level only; every other folder is
+        // shown whole, so the way back up never disappears while typing.
+        let shown: Vec<&FsEntry> = if dir == self.cwd {
+            self.matches
+                .iter()
+                .filter_map(|&i| self.entries.get(i))
+                .collect()
+        } else {
+            children.iter().collect()
+        };
+        for entry in shown {
+            let open = entry.is_dir && self.open.contains(&entry.path);
+            out.push(Row {
+                depth,
+                entry: entry.clone(),
+                open,
+            });
+            if open {
+                self.flatten(&entry.path, depth + 1, out);
+            }
+        }
+    }
+
+    /// Where the cursor is in [`Explorer::rows`]; none when the filter has
+    /// left the cursor's level with nothing to stand on.
+    pub fn cursor_row(&self) -> Option<usize> {
+        let path = &self.selected_entry()?.path;
+        self.rows.iter().position(|row| row.entry.path == *path)
+    }
+
+    pub fn is_open(&self, path: &Path) -> bool {
+        self.open.contains(path)
+    }
+
+    /// Whether the open folder `path` has a first row for → to go to.
+    pub fn has_children(&self, path: &Path) -> bool {
+        self.listings
+            .get(path)
+            .is_some_and(|(children, _)| !children.is_empty())
+    }
+
+    /// Put the cursor on the row for `path`, which must be on screen. Its
+    /// folder becomes the cursor's level, and a level change clears the filter.
+    fn focus(&mut self, path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if parent != self.cwd {
+            if !self.listings.contains_key(parent) {
+                return;
+            }
+            self.enter_level(parent.to_path_buf());
+            self.filter.clear();
+        }
+        self.refocus(Some(path));
+    }
+
+    /// Expand `path` where it stands, leaving the cursor alone.
+    fn open_dir(&mut self, path: &Path) -> Result<()> {
+        if self.open.contains(path) {
+            return Ok(());
+        }
+        let listing = read_dir(path, self.show_hidden)?;
+        self.listings.insert(path.to_path_buf(), listing);
+        self.open.insert(path.to_path_buf());
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Collapse `path` and everything open beneath it. A cursor inside moves
+    /// to the folder, which is the row that is left to stand on.
+    fn close_dir(&mut self, path: &Path) {
+        self.open.retain(|p| !p.starts_with(path));
+        self.listings
+            .retain(|p, _| p == &self.root || !p.starts_with(path));
+        if self.cwd.starts_with(path) {
+            self.focus(path);
+        } else {
+            self.rebuild();
+        }
+    }
+
+    /// ⏎ on a folder: open it or close it in place. False for a file or no row.
+    pub fn toggle_selected(&mut self) -> Result<bool> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Ok(false);
+        };
+        if !entry.is_dir {
+            return Ok(false);
+        }
+        match self.is_open(&entry.path) {
+            true => self.close_dir(&entry.path),
+            false => self.open_dir(&entry.path)?,
+        }
+        Ok(true)
+    }
+
+    /// ← on an open folder: close it. False when the cursor is not on one.
+    pub fn close_selected(&mut self) -> bool {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return false;
+        };
+        if !entry.is_dir || !self.is_open(&entry.path) {
+            return false;
+        }
+        self.close_dir(&entry.path);
+        true
+    }
+
+    /// → : open a closed folder where it stands; on an open one, go to its
+    /// first child.
+    pub fn expand(&mut self) -> Result<Step> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Ok(Step::Unresolved);
+        };
+        if !entry.is_dir {
+            return Ok(Step::NotADirectory);
+        }
+        if !self.is_open(&entry.path) {
+            self.open_dir(&entry.path)?;
+            return Ok(Step::Opened(entry.name));
+        }
+        let first = self
+            .listings
+            .get(&entry.path)
+            .and_then(|(children, _)| children.first())
+            .map(|child| child.path.clone());
+        let Some(first) = first else {
+            return Ok(Step::Empty(entry.name));
+        };
+        self.focus(&first);
+        Ok(Step::Entered(entry.name))
+    }
+
+    /// A click on the path line: the cursor goes to that folder's row. The
+    /// root has no row, so it is the level instead, with the cursor on the way
+    /// back down.
+    pub fn go_to_folder(&mut self, dir: &Path) -> Result<()> {
+        if dir != self.root {
+            self.focus(dir);
+            return Ok(());
+        }
+        if self.cwd == self.root {
+            return Ok(());
+        }
+        let came_from = self
+            .cwd
+            .strip_prefix(dir)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map(|first| dir.join(first.as_os_str()));
+        self.show(dir.to_path_buf(), came_from.as_deref())
     }
 
     /// Whether the filter is a command line rather than a filter: it starts
@@ -415,7 +667,7 @@ impl Explorer {
         }
     }
 
-    /// The rows on screen, in the order they are drawn.
+    /// The cursor level's rows, in the order they are drawn.
     pub fn visible(&self) -> impl Iterator<Item = &FsEntry> {
         self.matches.iter().filter_map(|&i| self.entries.get(i))
     }
@@ -556,7 +808,14 @@ impl Explorer {
             .and_then(|&i| self.entries.get(i))
     }
 
+    /// Move the cursor. While a filter is typed it stays among the cursor
+    /// level's matches; otherwise it walks the whole tree, and the level
+    /// follows it.
     pub fn move_cursor(&mut self, delta: isize) {
+        if self.filter.is_empty() {
+            self.move_rows(delta);
+            return;
+        }
         if self.matches.is_empty() {
             self.selected = 0;
             return;
@@ -566,33 +825,45 @@ impl Explorer {
         self.selected = next.clamp(0, len - 1) as usize;
     }
 
+    fn move_rows(&mut self, delta: isize) {
+        // An empty folder has no row to stand on; its own row is where the
+        // cursor would be if it had one.
+        let here = self
+            .cursor_row()
+            .or_else(|| self.rows.iter().position(|row| row.entry.path == self.cwd));
+        let Some(last) = self.rows.len().checked_sub(1) else {
+            return;
+        };
+        let target = match here {
+            Some(i) => (i as isize + delta).clamp(0, last as isize) as usize,
+            None => 0,
+        };
+        let path = self.rows[target].entry.path.clone();
+        self.focus(&path);
+    }
+
     pub fn select_first(&mut self) {
-        self.selected = 0;
+        match self.filter.is_empty() {
+            true => self.move_rows(isize::MIN / 2),
+            false => self.selected = 0,
+        }
     }
 
     pub fn select_last(&mut self) {
-        self.selected = self.matches.len().saturating_sub(1);
+        match self.filter.is_empty() {
+            true => self.move_rows(isize::MAX / 2),
+            false => self.selected = self.matches.len().saturating_sub(1),
+        }
     }
 
-    /// Put the cursor on a visible row, ignoring one that is not there.
-    pub fn select_visible(&mut self, index: usize) -> bool {
-        if index >= self.matches.len() {
+    /// Put the cursor on a row of the tree, ignoring one that is not there.
+    pub fn select_row(&mut self, index: usize) -> bool {
+        let Some(row) = self.rows.get(index) else {
             return false;
-        }
-        self.selected = index;
-        true
-    }
-
-    /// Descend into the highlighted directory. Returns false when it is a file.
-    pub fn descend(&mut self) -> Result<bool> {
-        let Some(entry) = self.selected_entry().cloned() else {
-            return Ok(false);
         };
-        if !entry.is_dir {
-            return Ok(false);
-        }
-        self.show(entry.path, None)?;
-        Ok(true)
+        let path = row.entry.path.clone();
+        self.focus(&path);
+        true
     }
 
     /// Whether adding `c` to the filter would still match something here.
@@ -662,25 +933,23 @@ impl Explorer {
     /// the status line when it would not — the key legend asks this on every
     /// draw. It tests exactly what `ascend` does.
     pub fn can_ascend(&self) -> bool {
-        self.cwd != self.root && self.cwd.parent().is_some()
+        self.cwd != self.root
     }
 
-    /// Go to the parent directory, never above the worktree root.
+    /// Put the cursor on the folder it is in, so the level becomes that
+    /// folder's parent. Never above the worktree root.
     ///
     /// The comparison is deliberately lexical: a symlink that resolves back to
     /// the root (`ln -s . loop`) is a directory you can descend into, and
     /// canonicalising here would refuse to let you back out of it.
-    pub fn ascend(&mut self) -> Result<bool> {
+    pub fn ascend(&mut self) -> bool {
         if self.cwd == self.root {
             self.status_line = "at the worktree root".to_string();
-            return Ok(false);
+            return false;
         }
-        let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
-            return Ok(false);
-        };
-        let previous = self.cwd.clone();
-        self.show(parent, Some(&previous))?;
-        Ok(true)
+        let folder = self.cwd.clone();
+        self.focus(&folder);
+        true
     }
 
     /// Path shown in the header, relative to the worktree root.
@@ -1001,11 +1270,11 @@ mod tests {
         let mut explorer = explorer_at(dir.path());
         assert_eq!(explorer.breadcrumb(), "/");
 
-        assert!(explorer.descend().unwrap());
+        explorer.descend_typed().unwrap();
         assert_eq!(explorer.cwd, dir.path().join("src"));
         assert_eq!(explorer.breadcrumb(), "/src");
 
-        assert!(explorer.ascend().unwrap());
+        assert!(explorer.ascend());
         assert_eq!(explorer.cwd, dir.path());
         assert_eq!(explorer.selected_entry().unwrap().name, "src");
     }
@@ -1014,12 +1283,12 @@ mod tests {
     fn backspace_backs_out_only_once_the_filter_is_empty() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
-        assert!(explorer.descend().unwrap());
+        explorer.descend_typed().unwrap();
         explorer.push_filter('a');
         // ⌫ deletes a character first, then ascends, as `handle_browse_key`.
         assert!(explorer.pop_filter());
         assert!(!explorer.pop_filter());
-        assert!(explorer.ascend().unwrap());
+        assert!(explorer.ascend());
         assert_eq!(explorer.cwd, dir.path());
     }
 
@@ -1027,7 +1296,7 @@ mod tests {
     fn ascend_stops_at_the_root() {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
-        assert!(!explorer.ascend().unwrap());
+        assert!(!explorer.ascend());
         assert_eq!(explorer.cwd, dir.path());
     }
 
@@ -1037,7 +1306,7 @@ mod tests {
         let mut explorer = explorer_at(dir.path());
         explorer.select_last();
         assert_eq!(explorer.selected_entry().unwrap().name, "README.md");
-        assert!(!explorer.descend().unwrap());
+        assert_eq!(explorer.descend_typed().unwrap(), Step::NotADirectory);
         assert_eq!(explorer.cwd, dir.path());
     }
 
@@ -1104,7 +1373,7 @@ mod tests {
         .unwrap();
         assert!(explorer.visible_len() > 0);
         assert_eq!(explorer.trunk(), dir.path());
-        explorer.descend().unwrap();
+        explorer.descend_typed().unwrap();
         assert_ne!(explorer.cwd, dir.path());
     }
 
@@ -1535,11 +1804,11 @@ mod tests {
         let dir = fixture();
         let mut explorer = explorer_at(dir.path());
         explorer.set_filter("src".into());
-        assert!(explorer.descend().unwrap());
+        explorer.descend_typed().unwrap();
         assert!(explorer.filter.is_empty());
 
         explorer.set_filter("zzz".into());
-        assert!(explorer.ascend().unwrap());
+        assert!(explorer.ascend());
         assert!(explorer.filter.is_empty());
         assert_eq!(explorer.visible_len(), 3);
     }
@@ -1587,7 +1856,7 @@ mod tests {
         // the guard watches for, so it must not discard the next one. Erring
         // this way only ever acts on a click; it never swallows one wrongly.
         explorer.note_navigating_click(4, 7);
-        explorer.descend().unwrap();
+        explorer.descend_typed().unwrap();
         assert!(!explorer.is_double_click(4, 7));
 
         explorer.note_navigating_click(4, 7);
@@ -1860,8 +2129,268 @@ mod tests {
         assert_eq!(explorer.exit, Exit::Stay);
 
         let mut explorer = explorer_at(dir.path());
-        explorer.descend().unwrap();
+        explorer.descend_typed().unwrap();
         explorer.quit_here();
         assert_eq!(explorer.exit, Exit::ChangeDir(dir.path().join("src")));
+    }
+
+    /// root: a/ (a/b/ (deep.txt), one.txt), z/ (empty), top.txt
+    fn tree() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::create_dir(dir.path().join("z")).unwrap();
+        std::fs::write(dir.path().join("a/b/deep.txt"), "d").unwrap();
+        std::fs::write(dir.path().join("a/one.txt"), "o").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "t").unwrap();
+        dir
+    }
+
+    fn names(explorer: &Explorer) -> Vec<String> {
+        explorer
+            .rows
+            .iter()
+            .map(|r| format!("{}{}", "  ".repeat(r.depth), r.entry.name))
+            .collect()
+    }
+
+    fn cursor(explorer: &Explorer) -> String {
+        explorer.selected_entry().unwrap().name.clone()
+    }
+
+    #[test]
+    fn folders_open_and_close_in_place() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        assert_eq!(names(&explorer), ["a", "z", "top.txt"]);
+        assert!(explorer.toggle_selected().unwrap());
+        assert_eq!(names(&explorer), ["a", "  b", "  one.txt", "z", "top.txt"]);
+        assert_eq!(cursor(&explorer), "a", "the cursor stays on the folder");
+        assert!(explorer.rows[0].open);
+
+        // Go to a/b and open it: every ancestor stays on screen.
+        explorer.move_cursor(1);
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        explorer.toggle_selected().unwrap();
+        assert_eq!(
+            names(&explorer),
+            ["a", "  b", "    deep.txt", "  one.txt", "z", "top.txt"]
+        );
+
+        // A file is no folder.
+        explorer.select_last();
+        assert!(!explorer.toggle_selected().unwrap());
+
+        explorer.select_first();
+        assert!(explorer.toggle_selected().unwrap());
+        assert_eq!(names(&explorer), ["a", "z", "top.txt"]);
+    }
+
+    #[test]
+    fn right_opens_then_goes_in() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        assert_eq!(explorer.expand().unwrap(), Step::Opened("a".into()));
+        assert_eq!(explorer.cwd, dir.path(), "opening leaves the cursor put");
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.expand().unwrap(), Step::Entered("a".into()));
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        assert_eq!(cursor(&explorer), "b");
+
+        // The last row of the whole tree is the file at the root.
+        explorer.select_last();
+        assert_eq!(cursor(&explorer), "top.txt");
+        assert_eq!(explorer.expand().unwrap(), Step::NotADirectory);
+
+        // An open folder with nothing in it has no first row to go to.
+        explorer.move_cursor(-1);
+        assert_eq!(cursor(&explorer), "z");
+        assert_eq!(explorer.expand().unwrap(), Step::Opened("z".into()));
+        assert_eq!(explorer.expand().unwrap(), Step::Empty("z".into()));
+        assert_eq!(explorer.cwd, dir.path());
+    }
+
+    #[test]
+    fn left_closes_then_goes_to_the_parent_and_stops_at_the_root() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        assert_eq!(cursor(&explorer), "deep.txt");
+        assert_eq!(explorer.cwd, dir.path().join("a/b"));
+
+        // On a file: up to the folder it is in.
+        assert!(!explorer.close_selected());
+        assert!(explorer.ascend());
+        assert_eq!(cursor(&explorer), "b");
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        // On an open folder: close it, and stay.
+        assert!(explorer.close_selected());
+        assert_eq!(cursor(&explorer), "b");
+        assert!(!explorer.is_open(&dir.path().join("a/b")));
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        // Closed now, so ← goes to the parent folder's row.
+        assert!(!explorer.close_selected());
+        assert!(explorer.ascend());
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.cwd, dir.path());
+        assert!(explorer.close_selected());
+        assert!(!explorer.ascend(), "nothing above the root");
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.status_line, "at the worktree root");
+    }
+
+    #[test]
+    fn the_filter_narrows_only_the_cursor_level() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.expand().unwrap();
+        explorer.expand().unwrap(); // in a/, on b
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        explorer.push_filter('o');
+        assert_eq!(explorer.visible_len(), 1);
+        // a/ keeps only what matches; the root's level is whole.
+        assert_eq!(names(&explorer), ["a", "  one.txt", "z", "top.txt"]);
+        assert_eq!(cursor(&explorer), "one.txt");
+
+        // With a filter the arrows stay among a/'s matches.
+        explorer.move_cursor(5);
+        assert_eq!(cursor(&explorer), "one.txt");
+        explorer.move_cursor(-5);
+        assert_eq!(cursor(&explorer), "one.txt");
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+
+        // Widening brings the level back with the cursor where it was.
+        assert!(explorer.pop_filter());
+        assert_eq!(names(&explorer), ["a", "  b", "  one.txt", "z", "top.txt"]);
+        assert_eq!(cursor(&explorer), "one.txt");
+    }
+
+    #[test]
+    fn the_arrows_cross_levels_and_the_level_follows() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.toggle_selected().unwrap(); // a
+        explorer.move_cursor(1);
+        assert_eq!(
+            (cursor(&explorer), explorer.cwd.clone()),
+            ("b".into(), dir.path().join("a"))
+        );
+        explorer.move_cursor(1);
+        assert_eq!(cursor(&explorer), "one.txt");
+        explorer.move_cursor(1);
+        assert_eq!(
+            (cursor(&explorer), explorer.cwd.clone()),
+            ("z".into(), dir.path().to_path_buf())
+        );
+        explorer.move_cursor(-2);
+        assert_eq!(
+            (cursor(&explorer), explorer.cwd.clone()),
+            ("b".into(), dir.path().join("a"))
+        );
+        explorer.select_first();
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.cwd, dir.path());
+        explorer.move_cursor(-1);
+        assert_eq!(cursor(&explorer), "a", "clamps at the top");
+    }
+
+    #[test]
+    fn the_cursor_and_the_open_folders_survive_a_reload() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        explorer.toggle_selected().unwrap(); // a/b open, on it
+        std::fs::write(dir.path().join("a/new.txt"), "n").unwrap();
+        let keep = explorer.selected_entry().map(|e| e.path.clone());
+        explorer.reload(keep.as_deref()).unwrap();
+        assert_eq!(cursor(&explorer), "b");
+        assert!(explorer.is_open(&dir.path().join("a/b")));
+        assert!(names(&explorer).contains(&"  new.txt".to_string()));
+
+        // A folder that vanished is dropped; the level falls back to one that
+        // is still there.
+        explorer.move_cursor(1);
+        assert_eq!(cursor(&explorer), "deep.txt");
+        std::fs::remove_dir_all(dir.path().join("a/b")).unwrap();
+        explorer.reload(None).unwrap();
+        assert!(!explorer.is_open(&dir.path().join("a/b")));
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+    }
+
+    #[test]
+    fn closing_an_ancestor_of_the_cursor_moves_the_cursor_to_it() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        explorer.expand().unwrap(); // b opened
+        explorer.expand().unwrap(); // in b, on deep.txt
+        assert_eq!(cursor(&explorer), "deep.txt");
+        explorer.select_first(); // a
+        explorer.push_filter('z');
+        // Close a from a row beneath it, via the level it is in.
+        explorer.clear_filter();
+        explorer.select_row(3);
+        assert_eq!(cursor(&explorer), "one.txt");
+        explorer.select_row(0);
+        assert!(explorer.close_selected());
+        assert_eq!(names(&explorer), ["a", "z", "top.txt"]);
+        assert!(
+            !explorer.is_open(&dir.path().join("a/b")),
+            "descendants close too"
+        );
+
+        // And with the cursor inside it.
+        explorer.expand().unwrap();
+        explorer.expand().unwrap();
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        explorer.close_dir(&dir.path().join("a"));
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.cwd, dir.path());
+    }
+
+    #[test]
+    fn slash_opens_the_folder_and_goes_in_with_a_fresh_filter() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.push_filter('a');
+        assert_eq!(explorer.descend_typed().unwrap(), Step::Entered("a".into()));
+        assert!(explorer.is_open(&dir.path().join("a")));
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        assert!(explorer.filter.is_empty());
+        assert_eq!(cursor(&explorer), "b");
+        assert_eq!(names(&explorer)[0], "a", "the ancestor is still on screen");
+    }
+
+    #[test]
+    fn a_crumb_click_puts_the_cursor_on_the_folder() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.show(dir.path().join("a/b"), None).unwrap();
+        assert_eq!(explorer.cwd, dir.path().join("a/b"));
+        explorer.go_to_folder(&dir.path().join("a")).unwrap();
+        assert_eq!(cursor(&explorer), "a");
+        assert_eq!(explorer.cwd, dir.path());
+        explorer.show(dir.path().join("a/b"), None).unwrap();
+        explorer.go_to_folder(dir.path()).unwrap();
+        assert_eq!(cursor(&explorer), "a", "the row that leads back down");
+        assert_eq!(explorer.cwd, dir.path());
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_wherever_it_is() {
+        let dir = tree();
+        let mut explorer = explorer_at(dir.path());
+        explorer.toggle_selected().unwrap();
+        assert!(explorer.select_row(2));
+        assert_eq!(cursor(&explorer), "one.txt");
+        assert_eq!(explorer.cwd, dir.path().join("a"));
+        assert!(!explorer.select_row(99));
+        assert!(explorer.select_row(3));
+        assert_eq!(cursor(&explorer), "z");
+        assert_eq!(explorer.cwd, dir.path());
     }
 }
