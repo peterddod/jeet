@@ -231,7 +231,7 @@ pub fn check_resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<()> {
             || row.max_turns.is_some_and(|max| turns >= max);
         if spent {
             bail!(
-                "{} has used its budget; raise it with `plete manager budget` first",
+                "{} has used its budget; raise it with `plete task budget` first",
                 label(target)
             );
         }
@@ -267,7 +267,7 @@ pub fn resume(app: &App, by: &Caller, target: &TaskRecord) -> Result<Vec<NodeOut
         if !app.db.resume_run_state(&target.id, checked)? {
             bail!(
                 "{} was paused or stopped again meanwhile, or used its budget; look with \
-                 `plete manager show {}`",
+                 `plete task show {}`",
                 label(target),
                 target.slug
             );
@@ -662,7 +662,7 @@ pub fn held_refusal(task: &TaskRecord, holder: &TaskRecord) -> String {
         false => format!(" under {}", label(holder)),
     };
     format!(
-        "{} is {}{under}; `plete manager resume {}` first",
+        "{} is {}{under}; `plete task resume {}` first",
         label(task),
         holder.run_state.as_str(),
         holder.slug
@@ -1020,7 +1020,7 @@ mod tests {
         Ok(String::new())
     }
 
-    /// `plete manager stop --all` ends the job of a review the assistant
+    /// `plete task stop --all` ends the job of a review the assistant
     /// asked for, and not that of one the user did.
     #[cfg(unix)]
     #[test]
@@ -1712,7 +1712,7 @@ mod tests {
             let started = runtime::ensure_running(&app, &w2, None, Some("go"), admission);
             assert_eq!(
                 started.err().unwrap().to_string(),
-                "task w2 is paused under manager m; `plete manager resume m` first"
+                "task w2 is paused under manager m; `plete task resume m` first"
             );
         }
         // Held is not queued.

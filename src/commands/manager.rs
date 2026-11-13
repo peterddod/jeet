@@ -42,6 +42,20 @@ pub struct NewManager<'a> {
 /// on `[managers] max_live` or held by a paused parent. Its brief is its
 /// `BRIEF.md` and its session context; its first prompt only points there.
 /// A start that fails leaves it made and is an error.
+/// Run a tree verb (`plete task show|grant|…`, or the same under `plete
+/// manager`).
+pub fn run_tree(app: &App, command: crate::cli::TreeCommands) -> Result<()> {
+    use crate::cli::TreeCommands;
+    match command {
+        TreeCommands::Show { name, json } => show(app, &name, json),
+        TreeCommands::Grant { name, caps, none } => grant(app, &name, &caps, none),
+        TreeCommands::Budget { name, change } => set_budget(app, &name, change),
+        TreeCommands::Pause { name } => pause(app, &name),
+        TreeCommands::Resume { name } => resume(app, &name),
+        TreeCommands::Stop { name, all } => stop(app, name.as_deref(), all),
+    }
+}
+
 pub fn new(app: &App, args: &NewManager) -> Result<()> {
     let mut d = args.delegation.clone();
     let caller = permissions::caller(app)?;
@@ -278,7 +292,7 @@ fn tree(app: &App, top: &TaskRecord) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-/// Everything `plete manager show` says about a task (M29).
+/// Everything `plete task show` says about a task (M29).
 #[derive(Debug, Serialize)]
 pub struct Shown {
     pub task: String,
@@ -390,7 +404,7 @@ pub fn show(app: &App, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// What `plete manager show` says about `task`, to `caller`: what other
+/// What `plete task show` says about `task`, to `caller`: what other
 /// tasks wrote is fenced for any caller but the user. No scope is checked
 /// here.
 pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
@@ -544,7 +558,7 @@ pub fn shown(app: &App, caller: &Caller, task: &TaskRecord) -> Result<Shown> {
     })
 }
 
-/// [`Shown`] as `plete manager show` prints it.
+/// [`Shown`] as `plete task show` prints it.
 pub fn shown_text(s: &Shown) -> String {
     let list = |items: &[String]| match items.is_empty() {
         true => "nothing".to_string(),
@@ -753,7 +767,7 @@ pub fn set_budget(app: &App, name: &str, change: Change) -> Result<()> {
     let task = app.db.get_task(&task.id)?.unwrap_or(task);
     if task.run_state_by == Some(Setter::Budget) {
         eprintln!(
-            "plete: its budget paused it; `plete manager resume {}` lets it run again",
+            "plete: its budget paused it; `plete task resume {}` lets it run again",
             task.slug
         );
     }

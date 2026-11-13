@@ -42,7 +42,7 @@ The `plete-manager` skill lists the commands. In short:
   brief. Write briefs a newcomer could act on.
 - `plete task send <task> "<message>"` tells a task below you something;
   `plete task last <task>` shows what its agent last said.
-- `plete manager show <task>`, and `grant`, `budget`, `pause`, `resume` and
+- `plete task show <task>`, and `grant`, `budget`, `pause`, `resume` and
   `stop` when you may, look at and steer the tasks below you.
 - `plete report done|progress|blocked|question "…"` tells your parent how
   your area is going.
