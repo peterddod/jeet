@@ -752,9 +752,15 @@ fn move_refusal_in(conn: &Connection, rows: &MoveRows) -> Result<Option<String>>
     if to.state != TaskState::Active {
         return Ok(Some(format!("{} is archived; it takes no tasks", to.slug)));
     }
-    if !matches!(to.kind, TaskKind::Assistant | TaskKind::Manager) {
+    let takes = match to.kind {
+        TaskKind::Assistant | TaskKind::Manager => true,
+        TaskKind::Work => to.parent_id.is_some(),
+        TaskKind::Setup => false,
+    };
+    if !takes {
         return Ok(Some(format!(
-            "{} is no manager; only the assistant and managers have tasks under them",
+            "{} is not under the assistant; only the assistant and the tasks under it have \
+             tasks under them",
             to.slug
         )));
     }
@@ -3299,6 +3305,7 @@ mod tests {
         let (_dir, db) = open();
         tree(&db);
         node(&db, "top", TaskKind::Manager, None);
+        node(&db, "solo", TaskKind::Work, None);
         node(&db, "fe", TaskKind::Manager, Some("a"));
         node(&db, "old", TaskKind::Manager, Some("a"));
         db.set_task_state("old", TaskState::Archived).unwrap();
@@ -3325,7 +3332,10 @@ mod tests {
             &move_rows(&db, &["top"], "fe", None),
             "task top has no parent",
         );
-        refused(&move_rows(&db, &["w2"], "w1", None), "w1 is no manager");
+        refused(
+            &move_rows(&db, &["w2"], "solo", None),
+            "solo is not under the assistant",
+        );
         refused(&move_rows(&db, &["w2"], "old", None), "old is archived");
         let mut full = move_rows(&db, &["w2", "n"], "fe", None);
         full.fan_out = Some(1);

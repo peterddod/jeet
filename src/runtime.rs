@@ -595,9 +595,10 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 /// ([`permissions::task_deny`]: nothing, for a top-level task, unless
 /// `[permissions] guards`), the read-only `gh` commands pre-approved,
 /// the rules of its role in `[permissions]` ([`with_config_rules`]) and its
-/// wake channel ([`wake`]). A task with a parent, often started with nobody
-/// at its pane, also has the commands of what it holds pre-approved, read at
-/// each start, as the assistant has those of `[assistant] allow`. A work task has
+/// wake channel ([`wake`]). A manager, started with nobody at its pane, also
+/// has the commands of what it holds pre-approved, read at each start, as
+/// the assistant has those of `[assistant] allow`; a work task with a parent
+/// has those of plete's own when it holds `task.create`. A work task has
 /// [`permissions::PUSH_ALLOW`] too under `[permissions] push = "branches"`.
 /// A work task also has the rules of its PR policy ([`pr_rules`]).
 fn task_hooks(
@@ -608,17 +609,23 @@ fn task_hooks(
 ) -> Result<HookSetup> {
     let mut allow = ALLOWED.map(str::to_string).to_vec();
     allow.extend(permissions::GH_READ_ONLY.iter().map(|c| c.to_string()));
-    let in_tree =
-        task.kind == TaskKind::Manager || (task.kind == TaskKind::Work && task.parent_id.is_some());
-    if in_tree {
-        let held: Vec<String> = permissions::effective(app, task)?
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+    let held: Vec<String> = match task.kind {
+        TaskKind::Manager => permissions::effective(app, task)?,
+        TaskKind::Work if task.parent_id.is_some() => permissions::effective(app, task)?,
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    // A work task only once it may have tasks under it, and only plete's
+    // own commands: it is asked at the prompt for the rest, as before.
+    let work = task.kind == TaskKind::Work;
+    if !work || held.iter().any(|c| c == "task.create") {
         for command in permissions::allowed_commands(&held) {
             // The assistant's todo list, which a task keeps by hand.
             let own = permissions::OWN.contains(&command.as_str());
-            if !own && !allow.contains(&command) {
+            let outside = work && !command.starts_with("plete ");
+            if !own && !outside && !allow.contains(&command) {
                 allow.push(command);
             }
         }
@@ -1216,6 +1223,12 @@ mod tests {
         assert_eq!(
             hooks.allow.contains(&"plete task new".to_string()),
             held.contains(&"task.create"),
+            "{:?}",
+            hooks.allow
+        );
+        // Only plete's own: `gh pr comment` and the like it is asked about.
+        assert!(
+            !hooks.allow.contains(&"gh pr comment".to_string()),
             "{:?}",
             hooks.allow
         );

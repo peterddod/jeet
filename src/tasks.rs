@@ -518,7 +518,7 @@ pub fn plan_child(
     let policy = app.config.manager_policy()?;
     if let Some(n) = max_children.filter(|n| *n > policy.max_children) {
         bail!(
-            "--max-children {n} is above `[managers] max_children` ({})",
+            "--max-children {n} is above `[tasks] max_children` ({})",
             policy.max_children
         );
     }
@@ -3764,7 +3764,7 @@ mod tests {
         let err = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(above)).unwrap_err();
         let err = err.to_string();
         assert!(err.contains(&format!("--max-children {above}")), "{err}");
-        assert!(err.contains("`[managers] max_children`"), "{err}");
+        assert!(err.contains("`[tasks] max_children`"), "{err}");
 
         let plan = plan_child(&app, &user, TaskKind::Manager, "x", &d, Some(2)).unwrap();
         assert_eq!(plan.record.max_children, Some(2));
