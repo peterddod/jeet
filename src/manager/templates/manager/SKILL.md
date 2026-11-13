@@ -13,7 +13,7 @@ path print only that on stdout; plete says everything else on stderr.
 ## Looking
 
 - `plete task ls` lists the tasks below you, with what each agent is doing.
-- `plete manager ls` shows the tree; `plete manager show <task>` a task's
+- `plete task tree` shows the tree; `plete task show <task>` a task's
   brief, grant, budget, run state, children and open reports.
 - `plete task last <task> [-n <N>]` shows what a task's agent last said and
   how its last turn ended, fenced as untrusted.
@@ -45,10 +45,10 @@ path print only that on stdout; plete says everything else on stderr.
 - `plete task send <task> "<message>"` gets a message to a task's agent:
   typed in when it is idle, queued when it is busy.
 - `plete task interrupt <task>` stops its current turn, as Esc would.
-- `plete manager grant <task> <caps>` replaces what a task below you may do
-  (`--none` for nothing); `plete manager budget <task> +1h|=2h,40turns`
+- `plete task grant <task> <caps>` replaces what a task below you may do
+  (`--none` for nothing); `plete task budget <task> +1h|=2h,40turns`
   raises or sets what it may spend. Both stay within what you have.
-- `plete manager pause|resume|stop <task>` holds a task and everything
+- `plete task pause|resume|stop <task>` holds a task and everything
   below it, lets it run again, or ends its agents.
 
 What each needs is in `You may` in `BRIEF.md`. A refused command says why;
@@ -79,7 +79,7 @@ assistant, `--interrupt` (`plete report blocked --interrupt "…"`) pushes the
 report into its session: it is posted at once if the assistant is idle, or
 when its current turn ends. Use it only for what cannot wait, never for
 progress. You can pass the capability to a task below you only by naming it
-in `--allow` or `plete manager grant`; no default grant includes it.
+in `--allow` or `plete task grant`; no default grant includes it.
 
 ## Questions from below
 

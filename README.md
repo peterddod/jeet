@@ -107,8 +107,8 @@ plete todo add "ship the fix" -p 1 --task fix-login
 plete todo                                # its todo list; done, rm, --json
 plete task new fix-x --parent assistant --goal "Fix X" --done "tests pass"  # a task that reports to it
 plete manager new api --goal "Ship the v2 API" --budget 4h  # a manager under it, started
-plete manager ls                          # the tree under it; show, grant, budget <task> …
-plete manager pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
+plete task tree                          # the tree under it; show, grant, budget <task> …
+plete task pause fix-x                 # interrupt it and hand it nothing; resume, stop (--all)
 plete report done "PR #12 is up"          # from inside such a task: tell the assistant
 plete watch install                       # poll GitHub in the background (launchd)
 plete notify install                      # send notifications from a background sender
@@ -694,9 +694,9 @@ index every two seconds while the tab is shown.
 | `→` / `←` / `⌫` | open / close a manager (everything starts open); else to the first task under it / to its parent |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, scrollable: `↑↓`, `PgUp`/`PgDn`, `g`/`G` |
 | `I` | the node's open question, what is queued in its inbox and the reports by and to it, newest first; `⏎` its pull requests |
-| `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `plete manager show` |
-| `z` / `Z` | pause the node and everything below it / let it run again, as `plete manager pause` / `resume` |
-| `x` | stop the node and everything below it, as `plete manager stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
+| `b` | its brief, grant, what it may do (and who cut the rest), budget, run state and the tasks under it, as `plete task show` |
+| `z` / `Z` | pause the node and everything below it / let it run again, as `plete task pause` / `resume` |
+| `x` | stop the node and everything below it, as `plete task stop`, after a confirm listing what runs; on the assistant, every task under it (`--all`) |
 | `n` | a new task or manager under the assistant or a manager, as `plete task new --parent` / `plete manager new --parent`: its kind (`space`), name, goal, done, budget (`2h,40turns`) and allow (capabilities, comma-separated); a manager also takes a project; a task takes a project, repositories and a branch (left on "no project", a task under a manager with a project gets the manager's) |
 | `y` | answer the open question at the node or nearest below it, one passed to you first, as `plete report answer` does: type the answer, `⏎` sends it, `esc` cancels |
 | `c` `C` `t` `i` | the assistant, as in the active tab: `i` is its inbox, not the node's reports (`I`) |
@@ -1013,7 +1013,7 @@ harness that cannot be interrupted is refused. Under the assistant it needs
 interrupt that sent nothing is logged as `skipped`, with why, and not
 announced; a task with a parent may not interrupt another.
 To hold a task under the assistant and everything below it rather than end
-one turn, use `plete manager pause`, `resume` and `stop` ([Reporting to the
+one turn, use `plete task pause`, `resume` and `stop` ([Reporting to the
 parent](#reporting-to-the-parent)): a pause interrupts every working agent in
 the subtree and hands them nothing until it is resumed.
 
@@ -1122,12 +1122,15 @@ from your terminal (or the TUI's open) starts it anyway, with a warning, and
 with its brief and whatever waited for it, in the session you picked if any (an agent plete cannot give a first prompt starts
 without it, and what waited is typed in with the next message). A queued
 task whose directory has gone is dropped from the queue with a warning.
-`plete manager ls [--json]` shows the tree under the assistant, `plete manager
+`plete task tree [--json]` shows the tree under the assistant, `plete task
 show <task> [--json]` a task's brief, grant (and what cut it), budget, run
-state and children, and `plete manager grant <task> <caps>|--none` replaces
-its grant (`manager.grant`); what a task loses, the tasks below it lose too.
-`plete manager budget <task> +1h` raises a limit it has, and `=2h,40turns`
-sets one (`manager.grant`), within what is left above it (a unit kept or
+state and children, and `plete task grant <task> <caps>|--none` replaces
+its grant (`task.grant`); what a task loses, the tasks below it lose too.
+(`plete manager ls|show|grant|budget|pause|resume|stop` do the same as
+before, and `manager.grant` and `manager.stop`, in config or a grant, are
+read as `task.grant` and `task.stop`.)
+`plete task budget <task> +1h` raises a limit it has, and `=2h,40turns`
+sets one (`task.grant`), within what is left above it (a unit kept or
 lowered is not checked); the 80% and 100%
 reports start over, and a limit set at or below what the task has used
 pauses it at once. Both write a manager's `BRIEF.md` again, as does each
@@ -1190,13 +1193,13 @@ and their last reports, its budget, its todo list and what is queued for
 it. The assistant learns of managers from its `plete-managers` skill.
 
 ```bash
-plete manager pause fix-x       # interrupt its turn, and every task's below it
-plete manager resume fix-x      # hand over what waited, and let it start again
-plete manager stop fix-x        # end its agent and every one below it
-plete manager stop --all        # every task under the assistant, and its reviews (only you)
+plete task pause fix-x       # interrupt its turn, and every task's below it
+plete task resume fix-x      # hand over what waited, and let it start again
+plete task stop fix-x        # end its agent and every one below it
+plete task stop --all        # every task under the assistant, and its reviews (only you)
 ```
 
-These need `manager.stop`. A paused or stopped task, and every task below
+These need `task.stop`. A paused or stopped task, and every task below
 it, is handed nothing: messages and reports to it wait in its inbox, its
 turn's end hands it nothing, and nothing starts it; `plete task open`
 attaches to it while its agent still runs, and otherwise says to resume it.
@@ -2776,7 +2779,7 @@ above a task cuts its grant:
 
 ```bash
 plete task new fix-x --allow worktree.add,assistant.interrupt
-plete manager grant backend task.create,worktree.add,assistant.interrupt
+plete task grant backend task.create,worktree.add,assistant.interrupt
 ```
 
 It can also go in `[managers] worker_default` or `manager_default`, if you
@@ -3004,9 +3007,9 @@ The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
 `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
-`pr.comment`, `pr.review`, `pr.merge` (`plete pr merge`), `manager.grant`
-(`plete manager grant` and `budget`), `manager.create` (`plete manager new`)
-`manager.stop` (`plete manager pause`, `resume` and `stop`) and
+`pr.comment`, `pr.review`, `pr.merge` (`plete pr merge`), `task.grant`
+(`plete task grant` and `budget`), `manager.create` (`plete manager new`)
+`task.stop` (`plete task pause`, `resume` and `stop`) and
 `assistant.interrupt` (`--interrupt` on `plete report` and `plete task send
 assistant`, for the tasks under the assistant; see [Letting a task
 interrupt the assistant](#letting-a-task-interrupt-the-assistant)). Nothing is
@@ -3031,7 +3034,7 @@ reads that name no task (`plete ls`, `plete prs`, …) and `plete notify` are
 free. `plete todo`, `plete brief`, review jobs and `project.read` (`plete
 projects ls`) stay refused, whatever the assistant holds; the refusal
 tells it to ask with `plete report`. A task made before this keeps the grant
-it was made with: change it with `plete manager grant`.
+it was made with: change it with `plete task grant`.
 
 A manager (`plete manager new`) is bounded the same way, by its own grant
 (`--allow`, or `[managers] manager_default`) cut by every list above it,
@@ -3173,7 +3176,7 @@ denies `gh pr create`, as that is your policy, not a default restriction. To
 restrict:
 
 - `[managers] worker_default` and `manager_default`, or `--allow` on `plete
-  task new` / `plete manager new` and `plete manager grant`, narrow what a new
+  task new` / `plete manager new` and `plete task grant`, narrow what a new
   task or manager may do (for example `["worktree.add"]`).
 - `[permissions] guards = true` denies force-pushes, merges outside `plete pr
   merge`, default-branch pushes and the like to every agent, and commits and
@@ -3206,7 +3209,7 @@ held = []               # added to pr.merge, pr.comment, pr.review, task.delete:
 
 The tree's settings are checked when they are used, not when config.toml
 is read: a mistake in them (an unknown capability, a limit of 0, a `$` budget) refuses making tasks under the
-assistant, starting one, `plete manager grant` and unarchiving a task under
+assistant, starting one, `plete task grant` and unarchiving a task under
 a manager, and nothing else.
 
 ### Template overrides

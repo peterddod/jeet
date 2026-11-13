@@ -73,7 +73,7 @@ own when the agent waits on a prompt only the user can answer, sits idle a
 while, or ends without reporting done. Reports reach you fenced in
 `<plete-report>`, and your session context lists each task's last one. Such
 a task may do what you may (it is never given more) on itself and the tasks
-below it, unless you narrow it with `--allow` or `plete manager grant`; your
+below it, unless you narrow it with `--allow` or `plete task grant`; your
 todo list stays yours. A review is held to what whoever asked for it may do.
 Answer it with `plete task send <task> "<message>"`; a `question` or
 `blocked` report, with `plete report answer <id> "…"`, or pass that to the

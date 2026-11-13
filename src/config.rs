@@ -664,7 +664,7 @@ pub struct ManagersConfig {
     pub manager_default: Option<Vec<String>>,
 
     /// Capabilities, besides [`HELD_FLOOR`], that are logged and notified
-    /// when a grant names them (`--allow`, `plete manager grant`). The
+    /// when a grant names them (`--allow`, `plete task grant`). The
     /// default grant holds them too and records nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Vec<String>>,

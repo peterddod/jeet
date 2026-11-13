@@ -592,8 +592,6 @@ fn path_from(output: &std::process::Output) -> std::path::PathBuf {
 /// What a child is granted unless something narrows it, by name.
 const EVERY_CAPABILITY: [&str; 24] = [
     "manager.create",
-    "manager.grant",
-    "manager.stop",
     "pr.comment",
     "pr.merge",
     "pr.review",
@@ -608,9 +606,11 @@ const EVERY_CAPABILITY: [&str; 24] = [
     "task.archive",
     "task.create",
     "task.delete",
+    "task.grant",
     "task.open",
     "task.resync",
     "task.send",
+    "task.stop",
     "task.unarchive",
     "watch.install",
     "worktree.add",
@@ -10737,10 +10737,10 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
         (&["task", "send", "sib", "hi"], "never message each other"),
         (&["task", "last", "sib"], "plete task last"),
         (&["task", "archive", "sib", "--force"], "plete task archive"),
-        (&["manager", "show", "sib"], "plete manager show"),
+        (&["manager", "show", "sib"], "plete task show"),
         (
             &["manager", "grant", "sib", "worktree.add"],
-            "plete manager grant",
+            "plete task grant",
         ),
         (&["manager", "grant", "w", "task.send"], "`task.send`"),
     ] {
@@ -11051,7 +11051,7 @@ fn a_root_worker_reaches_only_itself_reads_included() {
         (&["task", "send", "sib", "hi"], "never message each other"),
         (
             &["manager", "grant", "sib", "task.send"],
-            "plete manager grant",
+            "plete task grant",
         ),
         (&["task", "last", "sib"], "plete task last"),
         (&["task", "path", "top"], "plete task path"),
@@ -11920,6 +11920,8 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "plete task path",
         "plete task prs",
         "plete task last",
+        "plete task tree",
+        "plete task show",
         "plete worktree ls",
         "plete worktree path",
         "plete manager ls",
@@ -11936,8 +11938,13 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "gh pr comment",
         "gh issue comment",
         "plete manager new",
+        "plete task grant",
+        "plete task budget",
         "plete manager grant",
         "plete manager budget",
+        "plete task pause",
+        "plete task resume",
+        "plete task stop",
         "plete manager pause",
         "plete manager resume",
         "plete manager stop",
@@ -12546,7 +12553,7 @@ fn a_managers_run_state_holds_its_whole_subtree() {
     let output = lab.plete_at(&["task", "open", "w"], &lab.home(), &env);
     assert!(!output.status.success());
     assert!(
-        stderr_of(&output).contains("`plete manager resume api` first"),
+        stderr_of(&output).contains("`plete task resume api` first"),
         "{}",
         stderr_of(&output)
     );
@@ -14779,7 +14786,7 @@ fn the_user_pauses_resumes_and_stops_workers_under_the_assistant() {
     assert!(lab.reports_of(&w).is_empty(), "{:?}", lab.reports_of(&w));
     refused(
         lab.plete_at(&["task", "open", "w"], &lab.home(), &env),
-        "`plete manager resume w` first",
+        "`plete task resume w` first",
     );
     // A message for it while stopped waits, and starts it once resumed.
     let said = plete(&["task", "send", "w", "after the stop"]);
@@ -15019,7 +15026,7 @@ fn agents_tab_stops_after_a_confirm() {
     screen.type_keys(b"j");
     std::thread::sleep(std::time::Duration::from_millis(300));
     screen.type_keys(b"\r");
-    screen.wait_for_words("task w is stopped under manager api; `plete manager resume api` first");
+    screen.wait_for_words("task w is stopped under manager api; `plete task resume api` first");
     assert!(!stub.join("alive/plete-w").exists());
 
     // Pausing a stopped manager keeps it stopped.
@@ -15068,7 +15075,7 @@ fn agents_tab_refuses_the_assistant_for_pause() {
     screen.type_keys(b"\t");
     screen.wait_for_text("└─ w");
     screen.type_keys(b"z");
-    screen.wait_for_words("`plete manager pause` is for a task under the assistant");
+    screen.wait_for_words("`plete task pause` is for a task under the assistant");
     assert_eq!(lab.run_state_of(&w), ("run".into(), None));
 
     screen.esc();
@@ -15547,7 +15554,7 @@ fn a_worker_that_uses_its_turns_up_is_paused_and_blocked_on_budget() {
     let output = lab.plete_at(&["manager", "resume", "w"], &lab.home(), &env);
     assert!(!output.status.success());
     assert!(
-        stderr_of(&output).contains("raise it with `plete manager budget` first"),
+        stderr_of(&output).contains("raise it with `plete task budget` first"),
         "{}",
         stderr_of(&output)
     );

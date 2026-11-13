@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{
     AliasCommands, Commands, ManagerCommands, PrCommands, ProjectCommands, ReviewCommands,
-    SetupCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    SetupCommands, TaskCommands, TreeCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::NotifyLevel;
 use crate::config::{self, ManagerPolicy};
@@ -136,22 +136,30 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     cap("manager.create", "make managers", &["plete manager new"]),
     cap(
-        "manager.grant",
+        "task.grant",
         "change what tasks under it may do and spend",
-        &["plete manager grant", "plete manager budget"],
+        &[
+            "plete task grant",
+            "plete task budget",
+            "plete manager grant",
+            "plete manager budget",
+        ],
     ),
-    // Used through `--interrupt` on `plete report` and `plete task send
-    // assistant`, which check it themselves; never in a default grant.
-    cap("assistant.interrupt", "interrupt the assistant", &[]),
     cap(
-        "manager.stop",
+        "task.stop",
         "pause, resume and stop tasks under it",
         &[
+            "plete task pause",
+            "plete task resume",
+            "plete task stop",
             "plete manager pause",
             "plete manager resume",
             "plete manager stop",
         ],
     ),
+    // Used through `--interrupt` on `plete report` and `plete task send
+    // assistant`, which check it themselves; never in a default grant.
+    cap("assistant.interrupt", "interrupt the assistant", &[]),
 ];
 
 const fn cap(
@@ -301,6 +309,8 @@ pub const READ_ONLY: &[&str] = &[
     "plete task path",
     "plete task prs",
     "plete task last",
+    "plete task tree",
+    "plete task show",
     "plete worktree ls",
     "plete worktree path",
     "plete manager ls",
@@ -314,7 +324,19 @@ pub const READ_ONLY: &[&str] = &[
 pub const OWN: &[&str] = &["plete todo", "plete brief"];
 
 pub fn capability(name: &str) -> Option<&'static Capability> {
+    let name = match name {
+        // Their names before any task could have tasks under it.
+        "manager.grant" => "task.grant",
+        "manager.stop" => "task.stop",
+        name => name,
+    };
     CAPABILITIES.iter().find(|c| c.name == name)
+}
+
+/// Whether `name`, as written in config or a grant, is `capability`, by
+/// its name or an old one.
+fn is(name: &str, capability: &str) -> bool {
+    self::capability(name.trim()).is_some_and(|c| c.name == capability)
 }
 
 /// A capability on the command line (`--allow`, `manager grant`): one plete
@@ -477,11 +499,7 @@ pub fn effective(app: &App, node: &TaskRecord) -> Result<Vec<&'static str>> {
 /// its grant does not name it.
 pub fn cut_by(app: &App, node: &TaskRecord, capability: &str) -> Result<Option<String>> {
     if effective(app, node)?.contains(&capability)
-        || !app
-            .db
-            .grants(&node.id)?
-            .iter()
-            .any(|g| g.trim() == capability)
+        || !app.db.grants(&node.id)?.iter().any(|g| is(g, capability))
     {
         return Ok(None);
     }
@@ -768,35 +786,11 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
                 format!("created manager {name} and started its agent"),
             ),
             // Each checks who asks and shows only what it may see.
-            ManagerCommands::Ls { .. } | ManagerCommands::Show { .. } => Gate::Free,
+            ManagerCommands::Ls { .. } => Gate::Free,
             // Starts only what is queued already, each through the same
             // start gate; the `Ended` hook runs it with no caller to check.
             ManagerCommands::Drain { .. } => Gate::Free,
-            ManagerCommands::Grant { name, caps, .. } => needs(
-                "manager.grant",
-                match caps.is_empty() {
-                    true => format!("set task {name}'s grant to nothing"),
-                    false => format!("set task {name}'s grant to {}", caps.join(", ")),
-                },
-            ),
-            ManagerCommands::Budget { name, change } => needs(
-                "manager.grant",
-                format!(
-                    "changed task {name}'s budget by {}",
-                    crate::manager::budget::change_label(*change)
-                ),
-            ),
-            ManagerCommands::Pause { name } => needs("manager.stop", format!("paused task {name}")),
-            ManagerCommands::Resume { name } => {
-                needs("manager.stop", format!("resumed task {name}"))
-            }
-            ManagerCommands::Stop { name, .. } => needs(
-                "manager.stop",
-                match name {
-                    Some(name) => format!("stopped task {name}"),
-                    None => "stopped every task under the assistant".into(),
-                },
-            ),
+            ManagerCommands::Subtree(command) => tree_gate(command),
         },
         Commands::Projects { command } => match command {
             None if terminal => Gate::Interactive,
@@ -911,6 +905,40 @@ fn task_gate(command: &TaskCommands) -> Gate {
             "task.resync",
             format!("copied project files into task {name} again"),
         ),
+        // Each checks who asks and shows only what it may see.
+        TaskCommands::Tree { .. } => Gate::Free,
+        TaskCommands::Subtree(command) => tree_gate(command),
+    }
+}
+
+/// The gate of a tree verb, under `plete task` or `plete manager`.
+fn tree_gate(command: &TreeCommands) -> Gate {
+    match command {
+        // Checks who asks and shows only what it may see.
+        TreeCommands::Show { .. } => Gate::Free,
+        TreeCommands::Grant { name, caps, .. } => needs(
+            "task.grant",
+            match caps.is_empty() {
+                true => format!("set task {name}'s grant to nothing"),
+                false => format!("set task {name}'s grant to {}", caps.join(", ")),
+            },
+        ),
+        TreeCommands::Budget { name, change } => needs(
+            "task.grant",
+            format!(
+                "changed task {name}'s budget by {}",
+                crate::manager::budget::change_label(*change)
+            ),
+        ),
+        TreeCommands::Pause { name } => needs("task.stop", format!("paused task {name}")),
+        TreeCommands::Resume { name } => needs("task.stop", format!("resumed task {name}")),
+        TreeCommands::Stop { name, .. } => needs(
+            "task.stop",
+            match name {
+                Some(name) => format!("stopped task {name}"),
+                None => "stopped every task under the assistant".into(),
+            },
+        ),
     }
 }
 
@@ -946,7 +974,7 @@ fn first_line(text: &str, max: usize) -> String {
 /// Why `allow` does not let the assistant use `capability`, or nothing when
 /// it does.
 pub fn refusal(capability: &str, allow: &[String], config_path: &Path) -> Option<String> {
-    if allow.iter().any(|a| a.trim() == capability) {
+    if allow.iter().any(|a| is(a, capability)) {
         return None;
     }
     let about = self::capability(capability).map_or("do that", |c| c.about);
@@ -1078,7 +1106,7 @@ pub fn may_interrupt(app: &App, caller: &Caller, action: &str) -> Result<Option<
 pub fn allowed_commands(allow: &[String]) -> Vec<String> {
     let allowed = CAPABILITIES
         .iter()
-        .filter(|c| allow.iter().any(|a| a.trim() == c.name))
+        .filter(|c| allow.iter().any(|a| is(a, c.name)))
         .flat_map(|c| c.commands.iter().chain(c.external));
     READ_ONLY
         .iter()
@@ -1312,7 +1340,7 @@ pub fn authorize_as(
     }
     if *caller == Caller::Root && stops_all(command) {
         bail!(
-            "only the user stops every task under the assistant; `plete manager stop <task>` \
+            "only the user stops every task under the assistant; `plete task stop <task>` \
              stops one"
         );
     }
@@ -1428,13 +1456,18 @@ fn node_only(command: Option<&Commands>) -> Option<&'static str> {
     }
 }
 
-/// Whether `command` is `plete manager stop --all`, the user's alone (M11).
+/// Whether `command` is `plete task stop --all` (or `manager stop --all`),
+/// the user's alone (M11).
 fn stops_all(command: Option<&Commands>) -> bool {
     matches!(
         command,
-        Some(Commands::Manager {
-            command: ManagerCommands::Stop { name: None, .. }
-        })
+        Some(
+            Commands::Manager {
+                command: ManagerCommands::Subtree(TreeCommands::Stop { name: None, .. })
+            } | Commands::Task {
+                command: TaskCommands::Subtree(TreeCommands::Stop { name: None, .. })
+            }
+        )
     )
 }
 
@@ -1632,12 +1665,12 @@ impl Verb {
             Verb::TaskResync => "task resync",
             Verb::TaskNew => "task new",
             Verb::ManagerNew => "manager new",
-            Verb::ManagerShow => "manager show",
-            Verb::ManagerGrant => "manager grant",
-            Verb::ManagerBudget => "manager budget",
-            Verb::ManagerPause => "manager pause",
-            Verb::ManagerResume => "manager resume",
-            Verb::ManagerStop => "manager stop",
+            Verb::ManagerShow => "task show",
+            Verb::ManagerGrant => "task grant",
+            Verb::ManagerBudget => "task budget",
+            Verb::ManagerPause => "task pause",
+            Verb::ManagerResume => "task resume",
+            Verb::ManagerStop => "task stop",
         }
     }
 
@@ -1672,6 +1705,28 @@ enum Scope {
     Listed,
     /// The task `Target` names, which must be in the verb's reach.
     Verb(Verb, Target),
+}
+
+/// The scope of a tree verb, under `plete task` or `plete manager`.
+fn tree_scope(command: &TreeCommands) -> Option<Scope> {
+    let key = |key: &String| Target::Key {
+        key: key.clone(),
+        exact: false,
+    };
+    let verb = |verb: Verb, target: Target| Some(Scope::Verb(verb, target));
+    match command {
+        TreeCommands::Show { name, .. } => verb(Verb::ManagerShow, key(name)),
+        TreeCommands::Grant { name, .. } => verb(Verb::ManagerGrant, key(name)),
+        TreeCommands::Budget { name, .. } => verb(Verb::ManagerBudget, key(name)),
+        TreeCommands::Pause { name } => verb(Verb::ManagerPause, key(name)),
+        TreeCommands::Resume { name } => verb(Verb::ManagerResume, key(name)),
+        TreeCommands::Stop {
+            name: Some(name), ..
+        } => verb(Verb::ManagerStop, key(name)),
+        // `--all`: refused to all but the user before this is asked
+        // ([`node_only`]).
+        TreeCommands::Stop { name: None, .. } => Some(Scope::NoTarget),
+    }
 }
 
 /// The table of what a task with a parent may run each command on
@@ -1771,6 +1826,8 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
                 },
             ),
             TaskCommands::Resync { name, .. } => verb(Verb::TaskResync, key(name)),
+            TaskCommands::Tree { .. } => Some(Scope::Listed),
+            TaskCommands::Subtree(command) => tree_scope(command),
             TaskCommands::New { delegation, .. } => verb(
                 Verb::TaskNew,
                 Target::Parent(delegation.parent.clone()),
@@ -1782,17 +1839,7 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
                 Target::Parent(delegation.parent.clone()),
             ),
             ManagerCommands::Ls { .. } => Some(Scope::Listed),
-            ManagerCommands::Show { name, .. } => verb(Verb::ManagerShow, key(name)),
-            ManagerCommands::Grant { name, .. } => verb(Verb::ManagerGrant, key(name)),
-            ManagerCommands::Budget { name, .. } => verb(Verb::ManagerBudget, key(name)),
-            ManagerCommands::Pause { name } => verb(Verb::ManagerPause, key(name)),
-            ManagerCommands::Resume { name } => verb(Verb::ManagerResume, key(name)),
-            ManagerCommands::Stop {
-                name: Some(name), ..
-            } => verb(Verb::ManagerStop, key(name)),
-            // `--all`: refused to all but the user before this is asked
-            // ([`node_only`]).
-            ManagerCommands::Stop { name: None, .. } => Some(Scope::NoTarget),
+            ManagerCommands::Subtree(command) => tree_scope(command),
             // Starts only what is queued already.
             ManagerCommands::Drain { .. } => Some(Scope::NoTarget),
         },
@@ -2202,34 +2249,30 @@ mod tests {
             ),
             (
                 &["manager", "grant", "m", "task.send,worktree.add"],
-                "manager.grant",
+                "task.grant",
                 "set task m's grant to task.send, worktree.add",
             ),
             (
                 &["manager", "grant", "m", "--none"],
-                "manager.grant",
+                "task.grant",
                 "set task m's grant to nothing",
             ),
             (
                 &["manager", "budget", "m", "+1h,20turns"],
-                "manager.grant",
+                "task.grant",
                 "changed task m's budget by +1h,20turns",
             ),
             (
                 &["manager", "budget", "m", "=90m"],
-                "manager.grant",
+                "task.grant",
                 "changed task m's budget by =90m",
             ),
-            (&["manager", "pause", "m"], "manager.stop", "paused task m"),
-            (
-                &["manager", "resume", "m"],
-                "manager.stop",
-                "resumed task m",
-            ),
-            (&["manager", "stop", "m"], "manager.stop", "stopped task m"),
+            (&["manager", "pause", "m"], "task.stop", "paused task m"),
+            (&["manager", "resume", "m"], "task.stop", "resumed task m"),
+            (&["manager", "stop", "m"], "task.stop", "stopped task m"),
             (
                 &["manager", "stop", "--all"],
-                "manager.stop",
+                "task.stop",
                 "stopped every task under the assistant",
             ),
         ];
@@ -2874,7 +2917,8 @@ mod tests {
             let e = node_of(&app, &row("m"), args, false)
                 .unwrap_err()
                 .to_string();
-            assert!(e.contains(&format!("plete {} {}", args[0], args[1])), "{e}");
+            // The tree verbs are named as `plete task` has them.
+            assert!(e.contains(&format!("plete task {}", args[1])), "{e}");
             assert!(e.contains("plete report"), "{e}");
         }
         // Sideways messages say why.
@@ -2898,8 +2942,7 @@ mod tests {
                     let tree_node = !["assistant", "top", "fix"].contains(&target);
                     // `manager new` names a parent, which may be the
                     // assistant; whether it may have one is for the command.
-                    let manager_verb =
-                        verb.name().starts_with("manager ") && verb != Verb::ManagerNew;
+                    let manager_verb = verb.reach() == Reach::Tree;
                     match !manager_verb || tree_node {
                         true => result.unwrap_or_else(|e| panic!("{caller:?} {args:?}: {e:#}")),
                         false => {
@@ -2918,8 +2961,7 @@ mod tests {
         ] {
             let e = run_as(&app, &Caller::Root, args, false).unwrap_err();
             assert!(
-                e.to_string()
-                    .contains(&format!("plete {} {}", args[0], args[1])),
+                e.to_string().contains(&format!("plete task {}", args[1])),
                 "{e}"
             );
         }
@@ -3176,6 +3218,13 @@ mod tests {
             (&["task", "resync", "x"], true),
             (&["manager", "new", "x"], true),
             (&["manager", "ls"], true),
+            (&["task", "tree"], true),
+            (&["task", "show", "x"], true),
+            (&["task", "grant", "x", "--none"], true),
+            (&["task", "budget", "x", "+1h"], true),
+            (&["task", "pause", "x"], true),
+            (&["task", "resume", "x"], true),
+            (&["task", "stop", "x"], true),
             (&["manager", "show", "x"], true),
             (&["manager", "grant", "x", "--none"], true),
             (&["manager", "budget", "x", "+1h"], true),
@@ -3297,6 +3346,20 @@ mod tests {
         assert!(rules.contains(&"plete pr merge".to_string()));
     }
 
+    /// `manager.grant` and `manager.stop`, in config and stored grants, are
+    /// the names `task.grant` and `task.stop` had.
+    #[test]
+    fn the_old_tree_capability_names_still_work() {
+        assert_eq!(capability("manager.grant").unwrap().name, "task.grant");
+        assert_eq!(parse_capability(" manager.stop ").unwrap(), "task.stop");
+        let path = Path::new("/c.toml");
+        assert_eq!(refusal("task.stop", &["manager.stop".into()], path), None);
+        assert!(refusal("task.grant", &["manager.stop".into()], path).is_some());
+        let commands = allowed_commands(&["manager.grant".into()]);
+        assert!(commands.contains(&"plete task grant".to_string()));
+        assert!(commands.contains(&"plete manager budget".to_string()));
+    }
+
     #[test]
     fn every_capability_command_is_one_it_gates() {
         for c in CAPABILITIES {
@@ -3305,10 +3368,8 @@ mod tests {
                 // Enough arguments for clap to accept it.
                 match c.name {
                     "task.send" if *command == "plete task send" => args.extend(["x", "hi"]),
-                    "manager.grant" if *command == "plete manager grant" => {
-                        args.extend(["x", "task.send"])
-                    }
-                    "manager.grant" => args.extend(["x", "+1h"]),
+                    "task.grant" if command.ends_with(" grant") => args.extend(["x", "task.send"]),
+                    "task.grant" => args.extend(["x", "+1h"]),
                     "worktree.add" | "worktree.rm" | "repo.clone" => args.push("x"),
                     "review.start" | "pr.merge" => args.push("1"),
                     "project.read" | "repo.sync" | "repo.import" | "shell.install"

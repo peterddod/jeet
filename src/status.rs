@@ -977,7 +977,7 @@ fn auto_body(
 
 /// Tell the task's parent what this hook means for it, if anything.
 /// Nothing for a task plete stopped itself (archived or deleted, or stopped
-/// with `plete manager stop`, whose caller says so) and, as ever, nothing on
+/// with `plete task stop`, whose caller says so) and, as ever, nothing on
 /// stdout.
 fn report_step(
     hook: &HookEvent,
@@ -2242,7 +2242,7 @@ mod tests {
             hold: Some(RunState::Stopped),
             ..quiet_ctx(app)
         };
-        // `plete manager stop`, which ended it, said so to whoever asked.
+        // `plete task stop`, which ended it, said so to whoever asked.
         report_step(&ended, &ctx, Some("w"), 500).unwrap();
         assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
         // Paused, or running, its end is news to its parent.

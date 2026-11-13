@@ -350,18 +350,7 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                     },
                 )?,
                 ManagerCommands::Ls { json } => commands::manager::ls(&app, json)?,
-                ManagerCommands::Show { name, json } => commands::manager::show(&app, &name, json)?,
-                ManagerCommands::Grant { name, caps, none } => {
-                    commands::manager::grant(&app, &name, &caps, none)?
-                }
-                ManagerCommands::Budget { name, change } => {
-                    commands::manager::set_budget(&app, &name, change)?
-                }
-                ManagerCommands::Pause { name } => commands::manager::pause(&app, &name)?,
-                ManagerCommands::Resume { name } => commands::manager::resume(&app, &name)?,
-                ManagerCommands::Stop { name, all } => {
-                    commands::manager::stop(&app, name.as_deref(), all)?
-                }
+                ManagerCommands::Subtree(command) => commands::manager::run_tree(&app, command)?,
                 ManagerCommands::Drain { after } => {
                     commands::manager::drain(&app, after.as_deref())?
                 }
@@ -428,6 +417,8 @@ fn run(command: Option<Commands>, wake: Option<waiter::WakeEnv>) -> Result<()> {
                     commands::task::last(&app, &name, count.into(), json)?
                 }
                 TaskCommands::Resync { name, force } => commands::task::resync(&app, &name, force)?,
+                TaskCommands::Tree { json } => commands::manager::ls(&app, json)?,
+                TaskCommands::Subtree(command) => commands::manager::run_tree(&app, command)?,
             }
         }
         Commands::Projects { command } => {

@@ -1700,11 +1700,11 @@ mod tests {
         assert_eq!(
             told(
                 StartOutcome::Held {
-                    why: "task w is paused; `plete manager resume w` first".into()
+                    why: "task w is paused; `plete task resume w` first".into()
                 },
                 &[]
             ),
-            "plete: not started: task w is paused; `plete manager resume w` first; it starts \
+            "plete: not started: task w is paused; `plete task resume w` first; it starts \
              with its brief then\n"
         );
     }

@@ -670,7 +670,7 @@ fn end_agent(
     Ok(jobs)
 }
 
-/// End `review`'s agent and jobs for `plete manager stop --all`, and leave
+/// End `review`'s agent and jobs for `plete task stop --all`, and leave
 /// the review as it is: not archived, and started again the next time it is
 /// asked for or opened. Says what came of it.
 pub fn stop(app: &App, review: &ReviewRecord) -> Result<String> {

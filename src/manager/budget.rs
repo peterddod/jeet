@@ -128,7 +128,7 @@ pub fn label(limits: Limits) -> String {
     }
 }
 
-/// `change` as `plete manager budget` takes it: `+1h`, `=2h,40turns`.
+/// `change` as `plete task budget` takes it: `+1h`, `=2h,40turns`.
 pub fn change_label(change: Change) -> String {
     match change {
         Change::Add(limits) => format!("+{}", label(limits)),
@@ -450,7 +450,7 @@ fn blocked_body(app: &App, node: &TaskRecord) -> Result<String> {
     }
     Ok(format!(
         "budget used up{whose}; blocked: budget. Paused until the budget is raised \
-         (`plete manager budget`) and it is resumed"
+         (`plete task budget`) and it is resumed"
     ))
 }
 
