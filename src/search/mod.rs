@@ -1,4 +1,4 @@
-//! `jeet search`: find the documents (notes, briefs, reports, plans, READMEs)
+//! `plete search`: find the documents (notes, briefs, reports, plans, READMEs)
 //! that answer a question put in plain language. Documents are listed from
 //! their sources, indexed into one SQLite file when a search runs, and ranked
 //! by BM25 over their passages. Code is not searched.

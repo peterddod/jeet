@@ -1,6 +1,6 @@
-//! The `jeet` file explorer.
+//! The `plete` file explorer.
 //!
-//! `jeet explore`, or `e` in the tasks list, opens this: a single
+//! `plete explore`, or `e` in the tasks list, opens this: a single
 //! level of the tree at a time, arrow keys or the mouse to move through it,
 //! and shortcuts for the things you actually came to do — switch worktree,
 //! edit a file, or open the task's coding agent.
@@ -102,7 +102,7 @@ pub fn run(app: &App, repo: Option<&RepoRecord>, root: &Path, start_dir: &Path) 
 
 /// Run the explorer on a terminal that is already up — the tasks list's —
 /// returning how it was left. With `back`, esc on an empty filter leaves it
-/// with [`Exit::Back`] for that screen rather than quitting jeet.
+/// with [`Exit::Back`] for that screen rather than quitting plete.
 pub fn explore(
     terminal: &mut Tui,
     app: &App,
@@ -123,7 +123,7 @@ pub fn explore(
     )?;
     explorer.back = back.map(str::to_string);
     if explorer.back.is_some() {
-        // The shell is wherever jeet was started, not where this screen
+        // The shell is wherever plete was started, not where this screen
         // opened the explorer: ctrl-q has to move it even from here.
         if let Ok(cwd) = std::env::current_dir() {
             explorer.origin = cwd;
@@ -323,7 +323,7 @@ fn handle_browse_key(
             }
         }
         KeyCode::Esc => {
-            // Escape backs out of what you typed before it backs out of jeet.
+            // Escape backs out of what you typed before it backs out of plete.
             // Clearing takes the status with it: a "nothing matches" left over
             // the full listing describes a state that is no longer on screen.
             if explorer.clear_filter() {
@@ -890,7 +890,7 @@ fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
             "task archived",
             vec![
                 format!("task {} is archived", task.name),
-                format!("`jeet task unarchive {}` brings it back", task.slug),
+                format!("`plete task unarchive {}` brings it back", task.slug),
             ],
         ),
         Ok(Some(task)) => return Some(task),
@@ -902,7 +902,7 @@ fn task_here(app: &App, explorer: &mut Explorer) -> Option<TaskRecord> {
                 String::new(),
                 "a task's agent runs in tmux, in the task's directory,".into(),
                 "with its worktrees around it. n in the tasks list".into(),
-                "(`jeet`) or `jeet task new <name> --repo <repo>` makes one".into(),
+                "(`plete`) or `plete task new <name> --repo <repo>` makes one".into(),
             ],
         ),
         Err(e) => ("agent", vec![format!("{e:#}")]),
@@ -1139,7 +1139,7 @@ fn open_repo_prs(app: &App, terminal: &mut Tui, explorer: &mut Explorer, keep: O
 
 /// ⏎ in the PR list: browse the PR in a task — the one whose worktree has
 /// its branch already, else the PR's review, made if need be — and record
-/// it in that task's PR history, if it is a task. Deliberately not `jeet review`: no review
+/// it in that task's PR history, if it is a task. Deliberately not `plete review`: no review
 /// command starts from here, this is only a way in.
 fn check_out_pr(
     app: &App,
@@ -1510,7 +1510,7 @@ fn display_relative(explorer: &Explorer, path: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-/// Directory the explorer should start listing, given where the user ran jeet.
+/// Directory the explorer should start listing, given where the user ran plete.
 pub fn start_dir(root: &Path, cwd: &Path) -> PathBuf {
     if cwd.starts_with(root) {
         cwd.to_path_buf()

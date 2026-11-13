@@ -11,7 +11,8 @@ use crate::permissions::parse_capability;
 
 #[derive(Parser)]
 #[command(
-    name = "jeet",
+    name = "plete",
+    bin_name = "plete",
     version,
     about = "Global git repo index and worktree manager"
 )]
@@ -26,7 +27,7 @@ pub enum Commands {
     /// Clone a repository into the canonical store  
     Clone { url: String },
 
-    /// Bring repositories, branches and worktrees from outside jeet into the
+    /// Bring repositories, branches and worktrees from outside plete into the
     /// store and into tasks (scans `scan_roots` when no path is given)
     Import {
         /// Directories to scan for repositories instead of `scan_roots`
@@ -59,9 +60,9 @@ pub enum Commands {
     /// Check a pull request out into its review and have the review's agent
     /// review it, opening nothing (a review is one per pull request, with a
     /// worktree and a session of its own). Prints the review's worktree path,
-    /// and on stderr the commands to go to it: `jeet review explore|diff|open
+    /// and on stderr the commands to go to it: `plete review explore|diff|open
     /// <review>`; `--open` goes there now. Archive and delete a review with
-    /// `jeet task archive|delete <review>`
+    /// `plete task archive|delete <review>`
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Review {
         /// PR number, with or without a leading #, or the PR's URL
@@ -90,7 +91,7 @@ pub enum Commands {
         command: PrCommands,
     },
 
-    /// Run the background job recorded on a review (started by `jeet review`)
+    /// Run the background job recorded on a review (started by `plete review`)
     #[command(hide = true)]
     ReviewJob { review: String },
 
@@ -105,7 +106,7 @@ pub enum Commands {
     #[command(hide = true)]
     StoreSync,
 
-    /// The tasks list: open, explore, archive and delete tasks (also plain `jeet`)
+    /// The tasks list: open, explore, archive and delete tasks (also plain `plete`)
     Tasks,
 
     /// Talk to the assistant: resume its most recently active session in
@@ -120,7 +121,7 @@ pub enum Commands {
         pick: bool,
     },
 
-    /// Set jeet up in a chat with the setup agent, which stages changes
+    /// Set plete up in a chat with the setup agent, which stages changes
     /// for you to apply (with a subcommand: apply, list or drop them)
     #[command(args_conflicts_with_subcommands = true)]
     Setup {
@@ -138,10 +139,11 @@ pub enum Commands {
         command: Option<TodoCommands>,
     },
 
-    /// Check that jeet's own machinery works
+    /// Check that plete's own machinery works
     Doctor {
+        /// Without one: what is left over from jeet's old name
         #[command(subcommand)]
-        command: DoctorCommands,
+        command: Option<DoctorCommands>,
     },
 
     /// Tasks: a workspace directory with any number of worktrees in it
@@ -172,7 +174,7 @@ pub enum Commands {
         /// The harness whose hook it is
         #[arg(long, default_value = "claude-code")]
         harness: String,
-        /// The task jeet launched the agent for
+        /// The task plete launched the agent for
         #[arg(long)]
         task: Option<String>,
     },
@@ -184,17 +186,17 @@ pub enum Commands {
         command: InboxCommands,
     },
 
-    /// Watch a task's agent start, for a trust prompt (run by jeet)
+    /// Watch a task's agent start, for a trust prompt (run by plete)
     #[command(hide = true)]
     TaskStartup {
         /// The task's id
         task: String,
-        /// The session jeet started it with
+        /// The session plete started it with
         #[arg(long)]
         session: Option<String>,
     },
 
-    /// Worktrees of the current task (from $JEET_TASK_ID or the current directory)
+    /// Worktrees of the current task (from $PLETE_TASK_ID or the current directory)
     Worktree(WorktreeArgs),
 
     /// Print the path to a repository's trunk in the store
@@ -240,9 +242,9 @@ pub enum Commands {
         url: Option<String>,
     },
 
-    /// Open a jeet:// link: switch to the jeet screen that is open, or start one
+    /// Open a plete:// link: switch to the plete screen that is open, or start one
     Open {
-        /// A link: jeet://task/<slug>, jeet://review/<slug> or jeet://report/<id>
+        /// A link: plete://task/<slug>, plete://review/<slug> or plete://report/<id>
         url: String,
     },
 
@@ -253,7 +255,7 @@ pub enum Commands {
         what: ReportCommands,
     },
 
-    /// Print the whole text of a report (r123) or a message (m45) that jeet
+    /// Print the whole text of a report (r123) or a message (m45) that plete
     /// gave you as a line or in a digest
     Show {
         /// The reference: r and a report's number, or m and a message's
@@ -301,6 +303,22 @@ pub enum Commands {
     /// Configure shell integration in ~/.zshrc or ~/.bashrc
     InstallShell,
 
+    /// The short name `pt`: a link to plete, made only when you ask
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommands,
+    },
+
+    /// Move the data home from ~/.jeet to ~/.plete
+    MigrateHome {
+        /// Go ahead (without it, the plan is printed and nothing moves)
+        #[arg(long)]
+        yes: bool,
+        /// Go ahead although agent sessions are running
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Generate completion scripts for different shells  
     Completions {
         #[arg(value_enum)]
@@ -311,7 +329,7 @@ pub enum Commands {
     Complete { what: String },
 }
 
-/// A kind of document `jeet search --in` narrows to.
+/// A kind of document `plete search --in` narrows to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum SearchKind {
     Assistant,
@@ -373,7 +391,7 @@ pub enum ReportCommands {
     /// Answer an open question you hold (any in the tree, at your own
     /// terminal); the task that asked gets it, each manager in between a copy
     Answer {
-        /// The question's report id, as `jeet report ls` shows it
+        /// The question's report id, as `plete report ls` shows it
         id: i64,
         #[arg(allow_hyphen_values = true)]
         message: String,
@@ -393,7 +411,7 @@ pub enum InboxCommands {
     /// Hand the agent of the session whose start hook runs this what is
     /// queued for it, through its wake channel, until the session ends
     Watch {
-        /// The task jeet launched the agent for
+        /// The task plete launched the agent for
         #[arg(long)]
         task: String,
         /// The harness whose hook runs it
@@ -481,7 +499,7 @@ pub enum TaskCommands {
     },
 
     /// End the task's agent and resume its session in a new one, so
-    /// it runs on this jeet and keeps its conversation (`assistant`: each of
+    /// it runs on this plete and keeps its conversation (`assistant`: each of
     /// the assistant's windows). Whatever it left running in the background
     /// (subagents, workflows, /loop schedules) ends with it (a review's name
     /// works too)
@@ -494,10 +512,10 @@ pub enum TaskCommands {
         force: bool,
     },
 
-    /// Vouch for an agent an older jeet started, which jeet has no record
-    /// of, so its jeet commands work without restarting it (`assistant`:
+    /// Vouch for an agent an older plete started, which plete has no record
+    /// of, so its plete commands work without restarting it (`assistant`:
     /// the assistant's windows). Run it yourself, from a terminal outside
-    /// jeet's tmux sessions
+    /// plete's tmux sessions
     Adopt {
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: String,
@@ -548,7 +566,7 @@ pub enum TaskCommands {
 
     /// Look up the task's pull requests on GitHub and list its PR history
     Prs {
-        /// Task to list; defaults to $JEET_TASK_ID, then the task you are in
+        /// Task to list; defaults to $PLETE_TASK_ID, then the task you are in
         #[arg(add = ArgValueCandidates::new(task_candidates))]
         name: Option<String>,
         /// List what is recorded, without asking GitHub
@@ -700,7 +718,7 @@ pub enum ManagerCommands {
     },
 
     /// Start what waits on `[managers] max_live`, while there is room (run
-    /// by jeet when a task's session ends)
+    /// by plete when a task's session ends)
     #[command(hide = true)]
     Drain {
         /// The task whose session is ending: wait a few seconds for it to
@@ -710,11 +728,11 @@ pub enum ManagerCommands {
     },
 }
 
-/// What `jeet review` reaches in a review that exists.
+/// What `plete review` reaches in a review that exists.
 #[derive(Subcommand)]
 pub enum ReviewCommands {
     /// Attach to the review's agent in tmux, starting it if needed: what
-    /// `jeet task open <review>` does
+    /// `plete task open <review>` does
     Open {
         #[arg(add = ArgValueCandidates::new(review_candidates))]
         review: String,
@@ -758,7 +776,26 @@ pub enum PrCommands {
 }
 
 #[derive(Subcommand)]
+pub enum AliasCommands {
+    /// Link `pt` to plete in ~/.local/bin or ~/bin, whichever is on PATH
+    /// (never over another pt)
+    Install {
+        /// Put the link in this directory instead
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Say whether pt is plete's, shadowed, or someone else's
+    Status,
+    /// Remove the pt link, if it is plete's
+    Uninstall,
+}
+
+#[derive(Subcommand)]
 pub enum DoctorCommands {
+    /// List what is left from before the rename from jeet: its launchd jobs,
+    /// tmux sessions, task markers, the shell line, the data home and the
+    /// pt alias (read-only)
+    Rename,
     /// Show each live session's wake channel: watched, backing off after a
     /// refused post, due a repair, or off, and when it was last resumed to
     /// get a new watcher (read-only)
@@ -793,7 +830,7 @@ pub enum TodoCommands {
     /// Tick items off, by text or number
     Done {
         /// The item's text, or enough of it to tell it apart; or its number
-        /// in `jeet todo ls`, which moves as items are added and removed
+        /// in `plete todo ls`, which moves as items are added and removed
         #[arg(required = true, value_name = "ITEM")]
         items: Vec<String>,
         /// Put them back as not done
@@ -808,7 +845,7 @@ pub enum TodoCommands {
     #[command(alias = "remove")]
     Rm {
         /// The item's text, or enough of it to tell it apart; or its number
-        /// in `jeet todo ls`, which moves as items are added and removed
+        /// in `plete todo ls`, which moves as items are added and removed
         #[arg(required = true, value_name = "ITEM")]
         items: Vec<String>,
         /// Print the removed items as JSON
@@ -847,7 +884,7 @@ pub enum WatchCommands {
 #[derive(Subcommand)]
 pub enum NotifyCommands {
     /// Send what is queued for the user as it comes, until killed: what
-    /// `jeet notify install` keeps running
+    /// `plete notify install` keeps running
     Serve,
 
     /// Keep the sender running in the background: a launchd agent on
@@ -857,12 +894,12 @@ pub enum NotifyCommands {
     /// Stop running the sender in the background
     Uninstall,
 
-    /// Register jeet as the handler of jeet:// links, so a notification, a
+    /// Register plete as the handler of plete:// links, so a notification, a
     /// browser or Slack can open a task, review or report (asks for nothing
     /// else; refused from an agent's pane)
     InstallLink,
 
-    /// Remove the jeet:// link handler
+    /// Remove the plete:// link handler
     UninstallLink,
 
     /// Set a backend up at your own terminal: for slack, store the bot
@@ -877,7 +914,7 @@ pub enum NotifyCommands {
     /// Queue a test notification and say whether the sender sent it
     Test,
 
-    /// Print the Slack app manifest for `jeet notify setup slack`
+    /// Print the Slack app manifest for `plete notify setup slack`
     SlackManifest,
 }
 
@@ -919,13 +956,13 @@ pub enum ProjectCommands {
     },
 }
 
-/// `jeet worktree <op>`, scoped to one task.
+/// `plete worktree <op>`, scoped to one task.
 #[derive(Args)]
 pub struct WorktreeArgs {
     #[command(subcommand)]
     pub command: WorktreeCommands,
 
-    /// Task to act on; defaults to $JEET_TASK_ID, then the task you are in
+    /// Task to act on; defaults to $PLETE_TASK_ID, then the task you are in
     #[arg(long, global = true, add = ArgValueCandidates::new(task_candidates))]
     pub task: Option<String>,
 }
@@ -971,7 +1008,7 @@ mod tests {
     use clap::Parser;
 
     fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(std::iter::once("jeet").chain(args.iter().copied())).unwrap()
+        Cli::try_parse_from(std::iter::once("plete").chain(args.iter().copied())).unwrap()
     }
 
     #[test]
@@ -1015,6 +1052,6 @@ mod tests {
                 ..
             })
         ));
-        assert!(Cli::try_parse_from(["jeet", "review"]).is_err());
+        assert!(Cli::try_parse_from(["plete", "review"]).is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! The terminal every jeet screen draws on: raw mode and the alternate
+//! The terminal every plete screen draws on: raw mode and the alternate
 //! screen going up and coming down, the safety net that puts them back on a
 //! panic or a signal, stepping out of the way for a program that wants the
 //! terminal to itself, and a spinner while slow work runs off the draw path.
@@ -44,7 +44,7 @@ pub fn init_terminal() -> Result<Tui> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, Print(MOUSE_ON)).context("enter alternate screen")?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")?;
-    // `jeet review` talks on stderr right up to this point, and a terminal
+    // `plete review` talks on stderr right up to this point, and a terminal
     // that does not blank its alternate screen would leave that showing
     // through every cell the first frame leaves empty.
     blank(&mut terminal).context("clear terminal")?;

@@ -26,6 +26,7 @@ const SKIP_DIRS: &[&str] = &[
     ".git",
     ".claude",
     ".jeet",
+    ".plete",
     "node_modules",
     "target",
     "vendor",
@@ -140,7 +141,7 @@ pub fn list(app: &App, source: &Source) -> Result<Vec<FileEntry>> {
 }
 
 /// A task's own documents: the allowed files at the top of its folder,
-/// except the AGENTS.md and CLAUDE.md jeet writes, and everything under
+/// except the AGENTS.md and CLAUDE.md plete writes, and everything under
 /// `notes/` and `docs/`. Its other folders are worktrees and scratch.
 fn task_files(root: &Path) -> Vec<FileEntry> {
     let mut files = Vec::new();

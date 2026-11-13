@@ -82,7 +82,7 @@ const MIGRATIONS: &[&str] = &[
     // v2: the hard cut to tasks. Every worktree belongs to a task now, so the
     // free-standing `worktrees` table goes. Nothing in it is lost: each row
     // named a worktree of an indexed trunk, which `git worktree list` on that
-    // trunk still reports, and that is where `jeet import` finds them.
+    // trunk still reports, and that is where `plete import` finds them.
     "
     DROP TABLE IF EXISTS worktrees;
     ",
@@ -143,7 +143,7 @@ const MIGRATIONS: &[&str] = &[
     ",
     // v5: where a task's agent runs (`placement`; only `local`, tmux on this
     // machine, for now: a confined placement widens the CHECK when it is
-    // built, in a migration that rebuilds `tasks` as v6 does), and the processes jeet
+    // built, in a migration that rebuilds `tasks` as v6 does), and the processes plete
     // launched for a task, keyed by pid and start time so a reused pid
     // never matches. Additive only.
     "
@@ -233,7 +233,7 @@ const MIGRATIONS: &[&str] = &[
     // (repo, PR): no parent, no children, no brief, one worktree and one
     // session, kept as columns of the row. A review task keeps its id and
     // slug as its review's, so a review agent running across the upgrade
-    // keeps its tmux session, its hooks and `$JEET_TASK_ID`. Per PR the
+    // keeps its tmux session, its hooks and `$PLETE_TASK_ID`. Per PR the
     // newest review task is kept; the others' worktrees go to
     // `review_leftovers` for `review::migrate_leftovers` to archive, and a
     // review task with no PR is dropped the same way. Every row of a review
@@ -466,9 +466,9 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX task_reports_task ON task_reports(task_id, id);
     ",
     // v9: the deprecated `[review] command`'s job moves onto its review's row
-    // (it was a JSON state file under `$JEET_HOME/reviews`). A job exists
+    // (it was a JSON state file under `$PLETE_HOME/reviews`). A job exists
     // while `job_started_at` is set. `review::adopt_jobs` makes reviews of
-    // the files older jeets left, and `review_job_files` records each one it
+    // the files older pletes left, and `review_job_files` records each one it
     // has been through, so none is looked at twice.
     "
     ALTER TABLE reviews ADD COLUMN job_head TEXT;
@@ -490,13 +490,13 @@ const MIGRATIONS: &[&str] = &[
         at INTEGER NOT NULL
     );
     ",
-    // v10: a work task's own PR policy (`jeet task new --pr`), over its
+    // v10: a work task's own PR policy (`plete task new --pr`), over its
     // project's and the global `[tasks] pr`; NULL when it names none.
     // Additive only.
     "
     ALTER TABLE tasks ADD COLUMN pr TEXT CHECK (pr IS NULL OR pr IN ('auto', 'draft', 'ask'));
     ",
-    // v11: what jeet core tells the user of (`[notify] events`). Who
+    // v11: what plete core tells the user of (`[notify] events`). Who
     // started a task (`started_by`: 'user' for the user, at the terminal or
     // through the assistant's `--for-user`, else the id of the task that
     // made it; NULL for one made before), whether it is quiet, and whether
@@ -509,7 +509,7 @@ const MIGRATIONS: &[&str] = &[
     -- Blocks from before are not told of all at once on the first poll.
     UPDATE task_reports SET stuck_told = 1;
     ",
-    // v12: the `setup` kind, for the setup agent (`jeet setup`): only ever
+    // v12: the `setup` kind, for the setup agent (`plete setup`): only ever
     // one, kept out of the task lists as the assistant is. `tasks` is
     // rebuilt for the kind CHECK, v8's way, keeping v10's `pr` and v11's
     // `started_by` and `quiet`.
@@ -568,7 +568,7 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one
-/// registered before the hard cut to tasks, which `jeet import` moves there.
+/// registered before the hard cut to tasks, which `plete import` moves there.
 /// (The `managed` column that told the two apart is no longer read.)
 #[derive(Debug, Clone)]
 pub struct RepoRecord {
@@ -625,8 +625,8 @@ impl Database {
         let latest = MIGRATIONS.len() as i64;
         if current > latest {
             bail!(
-                "the index is at schema v{current} but this jeet only knows up to v{latest}; \
-                 upgrade jeet"
+                "the index is at schema v{current} but this plete only knows up to v{latest}; \
+                 upgrade plete"
             );
         }
         if current < latest {
@@ -712,11 +712,11 @@ impl Database {
 /// Set to `1` to let a development build migrate the index at a default
 /// home under `$HOME` anyway, or to the index's own path to let it migrate
 /// that one, even in the account's real home.
-const ALLOW_DEV_MIGRATE: &str = "JEET_ALLOW_DEV_MIGRATE";
+const ALLOW_DEV_MIGRATE: &str = "PLETE_ALLOW_DEV_MIGRATE";
 
 /// Refuse to migrate the index at a default home (`~/.jeet` or `~/.plete`) from a
 /// development build: one built from an unreleased main would take it to a
-/// schema the installed release cannot open, and every jeet command would
+/// schema the installed release cannot open, and every plete command would
 /// fail until it was restored from the backup.
 ///
 /// The account's real home is looked up from the user database as well as
@@ -742,9 +742,9 @@ fn refuse_dev_migration(index: &Path, current: i64, latest: i64) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "this is a development build of jeet ({exe}); it will not migrate the index at {} \
-         from schema v{current} to v{latest}, which the installed jeet could not then open. \
-         Set JEET_HOME to a scratch directory (e.g. JEET_HOME=$(mktemp -d)), or \
+        "this is a development build of plete ({exe}); it will not migrate the index at {} \
+         from schema v{current} to v{latest}, which the installed plete could not then open. \
+         Set PLETE_HOME to a scratch directory (e.g. PLETE_HOME=$(mktemp -d)), or \
          {ALLOW_DEV_MIGRATE}={} to migrate it anyway",
         index.display(),
         index.display()
@@ -866,7 +866,7 @@ fn migrate_from(conn: &mut Connection, current: i64, latest: i64) -> Result<()> 
     if current > 0 || has_tasks || has_repos {
         let backup = back_up(conn, &path, current)?;
         eprintln!(
-            "jeet: backed up the index to {} before migrating it to schema v{latest}",
+            "plete: backed up the index to {} before migrating it to schema v{latest}",
             backup.display()
         );
     }
@@ -922,7 +922,7 @@ fn apply_migrations(conn: &mut Connection, current: i64) -> Result<()> {
         }
         // v8 deletes rows by hand with foreign keys off: a row it leaves
         // pointing at one of them fails the step, and the index is as it
-        // was. One that pointed nowhere before, an older jeet's, is not v8's.
+        // was. One that pointed nowhere before, an older plete's, is not v8's.
         let before = match version {
             8 => dangling(&tx)?,
             _ => Vec::new(),
@@ -1790,7 +1790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
         v7_index(&path);
-        // A session of a task that is not there, left by an older jeet:
+        // A session of a task that is not there, left by an older plete:
         // not v8's doing, so not v8's to refuse over.
         Connection::open(&path)
             .unwrap()
@@ -1850,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn an_index_from_a_newer_jeet_is_refused() {
+    fn an_index_from_a_newer_plete_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
         {

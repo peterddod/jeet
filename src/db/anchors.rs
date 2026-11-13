@@ -1,6 +1,6 @@
-//! The processes jeet launched for a task (schema v5, `task_anchors`): a
+//! The processes plete launched for a task (schema v5, `task_anchors`): a
 //! task's agent pane, or a review job's runner, keyed by pid and start time
-//! so a reused pid never matches. Written only by the jeet that launched the
+//! so a reused pid never matches. Written only by the plete that launched the
 //! process, and never re-bound; see [`crate::identity`].
 
 use anyhow::Result;

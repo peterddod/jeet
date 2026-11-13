@@ -1,4 +1,4 @@
-//! `jeet sync [--repo R]`: fetch the store now, in the foreground.
+//! `plete sync [--repo R]`: fetch the store now, in the foreground.
 
 use anyhow::{bail, Result};
 
@@ -20,7 +20,7 @@ pub fn run(app: &App, repo: Option<&str>) -> Result<()> {
     }
     let (failed, total) = store::sync_now(app)?;
     if total == 0 {
-        eprintln!("jeet: no repositories to sync; `jeet clone <url>` adds one");
+        eprintln!("plete: no repositories to sync; `plete clone <url>` adds one");
     }
     if failed > 0 {
         bail!("{failed} of {total} repositories failed to sync");

@@ -1,8 +1,8 @@
 //! The `command` backend: a program of the user's, run directly (split like
-//! `agent`) with the notification in `JEET_NOTIFY_TITLE`,
-//! `JEET_NOTIFY_SUBTITLE`, `JEET_NOTIFY_BODY` and `JEET_NOTIFY_URL`.
+//! `agent`) with the notification in `PLETE_NOTIFY_TITLE`,
+//! `PLETE_NOTIFY_SUBTITLE`, `PLETE_NOTIFY_BODY` and `PLETE_NOTIFY_URL`.
 //!
-//! `[notify] command` names it for `via = ["command"]`; `$JEET_NOTIFY_CMD`,
+//! `[notify] command` names it for `via = ["command"]`; `$PLETE_NOTIFY_CMD`,
 //! in the process that sends, runs in place of the `desktop` backend, for
 //! tests and for anyone who wants notifications somewhere else.
 
@@ -41,17 +41,17 @@ fn invocation(event: &Event, command: &str) -> Option<Invocation> {
     }
     let url = event.link.as_deref().filter(|u| openable_url(u));
     let env = [
-        ("JEET_NOTIFY_TITLE", one_line(&event.title, TITLE_MAX)),
+        ("PLETE_NOTIFY_TITLE", one_line(&event.title, TITLE_MAX)),
         (
-            "JEET_NOTIFY_SUBTITLE",
+            "PLETE_NOTIFY_SUBTITLE",
             event
                 .subtitle
                 .as_deref()
                 .map(|s| one_line(s, TITLE_MAX))
                 .unwrap_or_default(),
         ),
-        ("JEET_NOTIFY_BODY", one_line(&event.body, BODY_MAX)),
-        ("JEET_NOTIFY_URL", url.unwrap_or_default().to_string()),
+        ("PLETE_NOTIFY_BODY", one_line(&event.body, BODY_MAX)),
+        ("PLETE_NOTIFY_URL", url.unwrap_or_default().to_string()),
     ];
     Some(Invocation {
         argv,
@@ -80,11 +80,11 @@ mod tests {
                 .find(|(key, _)| key == k)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(get("JEET_NOTIFY_TITLE"), Some("t"));
-        assert_eq!(get("JEET_NOTIFY_SUBTITLE"), Some("sub"));
-        assert_eq!(get("JEET_NOTIFY_BODY"), Some("b more"));
+        assert_eq!(get("PLETE_NOTIFY_TITLE"), Some("t"));
+        assert_eq!(get("PLETE_NOTIFY_SUBTITLE"), Some("sub"));
+        assert_eq!(get("PLETE_NOTIFY_BODY"), Some("b more"));
         // Not a web page: never opened.
-        assert_eq!(get("JEET_NOTIFY_URL"), Some(""));
+        assert_eq!(get("PLETE_NOTIFY_URL"), Some(""));
         assert!(invocation(&n, "  ").is_none());
     }
 }

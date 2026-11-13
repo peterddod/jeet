@@ -1,9 +1,9 @@
 //! What a task's agent is doing, as its harness's hooks report it.
 //!
-//! jeet launches the agent with hooks (see [`Harness::hook_args`]) that run
-//! the hidden `jeet task-hook <Event>`. Each run hands the hook's stdin to
+//! plete launches the agent with hooks (see [`Harness::hook_args`]) that run
+//! the hidden `plete task-hook <Event>`. Each run hands the hook's stdin to
 //! the harness, which says what it means as a [`HookEvent`], and rewrites
-//! `<task>/.jeet/status/<session>.json` with the state the event leaves that
+//! `<task>/.plete/status/<session>.json` with the state the event leaves that
 //! session in. The tasks list reads those files back, together with whether
 //! the task's tmux pane is still alive, into an [`Activity`].
 //!
@@ -12,7 +12,7 @@
 //! and always exits 0: a broken status line must never get in its way.
 //!
 //! The exceptions: a turn ending ([`EventKind::Stopped`]) that finds
-//! messages queued for the agent by `jeet task send` prints the harness's
+//! messages queued for the agent by `plete task send` prints the harness's
 //! [`Harness::continue_output`] with them, so the agent carries on with them
 //! instead of stopping. A turn the user interrupts ends with no Stop, so the
 //! agent reporting itself idle ([`EventKind::Idle`]) types anything still
@@ -50,7 +50,7 @@ use crate::tasks;
 use crate::waiter;
 use crate::worktrees::now_secs;
 
-/// More than any hook payload jeet cares about; a pasted novel of a prompt
+/// More than any hook payload plete cares about; a pasted novel of a prompt
 /// is cut off rather than held in memory.
 pub(crate) const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
@@ -173,7 +173,7 @@ pub fn launched_at(task_dir: &Path) -> Option<i64> {
     crate::agent::mtime_secs(&std::fs::metadata(launched_path(task_dir)).ok()?)
 }
 
-/// Touched when jeet types a message into the task's agent, so a pause can
+/// Touched when plete types a message into the task's agent, so a pause can
 /// tell a turn about to start from an idle agent.
 fn typed_path(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("typed")
@@ -300,7 +300,7 @@ pub fn mark_startup_prompt(
 /// The event of the status a pause leaves an interrupted session in.
 pub const PAUSED_EVENT: &str = "Paused";
 
-/// The event of the status `jeet task interrupt` leaves a session in.
+/// The event of the status `plete task interrupt` leaves a session in.
 pub const INTERRUPTED_EVENT: &str = "Interrupted";
 
 /// Mark the task's latest session idle, its turn ended by a pause.
@@ -309,7 +309,7 @@ pub fn mark_paused(task_dir: &Path, now: i64) -> Result<()> {
 }
 
 /// Mark the task's latest session idle, as `event` with `detail`: a turn
-/// jeet interrupted ends with no Stop hook to say so, and its busy spell is
+/// plete interrupted ends with no Stop hook to say so, and its busy spell is
 /// closed here. Nothing for a task with no status.
 pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) -> Result<()> {
     let Some(current) = current_status(task_dir) else {
@@ -328,16 +328,16 @@ pub fn mark_interrupted(task_dir: &Path, event: &str, detail: &str, now: i64) ->
     )
 }
 
-/// `jeet task-hook [--task <id>] <event>`: record what the hook on stdin
+/// `plete task-hook [--task <id>] <event>`: record what the hook on stdin
 /// says, as the harness called `harness` reports it, for `task`, the one
-/// jeet launched the agent for (none from hooks older than `--task`).
+/// plete launched the agent for (none from hooks older than `--task`).
 /// Never fails, and prints to stdout only what the harness takes from a
 /// hook (a session's context, a prompt's hidden line, a Stop's handover);
 /// what goes wrong is noted on stderr, which the agent keeps out of the
 /// conversation.
 pub fn run_hook(harness: &str, event: &str, task: Option<&str>) {
     let Some(found) = harness::by_id(harness) else {
-        eprintln!("jeet task-hook {event}: no harness {harness:?}");
+        eprintln!("plete task-hook {event}: no harness {harness:?}");
         return;
     };
     let mut raw = String::new();
@@ -345,7 +345,7 @@ pub fn run_hook(harness: &str, event: &str, task: Option<&str>) {
         let _ = std::io::stdin().take(MAX_INPUT).read_to_string(&mut raw);
     }
     if let Err(e) = handle_hook(found, event, task, &raw, now_secs()) {
-        eprintln!("jeet task-hook {event}: {e:#}");
+        eprintln!("plete task-hook {event}: {e:#}");
     }
 }
 
@@ -367,7 +367,7 @@ fn handle_hook(
     let launched_for = task.map(str::trim).filter(|t| !t.is_empty());
     let mut app = None;
     let Some((task_dir, task_id)) = locate_task(launched_for, &hook, &mut app)? else {
-        // Not a jeet task: nothing to report to.
+        // Not a plete task: nothing to report to.
         return Ok(());
     };
     let ctx = hook_ctx(app, &task_dir, &task_id, launched_for, &hook, now)?;
@@ -376,7 +376,7 @@ fn handle_hook(
         // A review has the one session: this one, from now on.
         if let Some(review) = &ctx.review {
             if let Err(e) = app.db.set_review_session(&review.id, session_id) {
-                eprintln!("jeet task-hook {event}: {e:#}");
+                eprintln!("plete task-hook {event}: {e:#}");
             }
             let _ = app.db.touch_review(&review.id, now);
         }
@@ -395,7 +395,7 @@ fn handle_hook(
                 if let Err(e) = messages::Inbox::lock(&task_dir)
                     .and_then(|inbox| inbox.readdress(before, session_id))
                 {
-                    eprintln!("jeet task-hook {event}: {e:#}");
+                    eprintln!("plete task-hook {event}: {e:#}");
                 }
             }
             record_session(app, task, session_id, *source, before.as_deref(), now)?;
@@ -403,9 +403,9 @@ fn handle_hook(
             // cannot be made costs the session its context, not its start.
             if assistant && harness.session_context_output("").is_some() {
                 // The summary points at the root's skills: a home made by
-                // an older jeet gets the ones it lacks before it is read.
+                // an older plete gets the ones it lacks before it is read.
                 if let Err(e) = assistant::ensure_files(&task_dir) {
-                    eprintln!("jeet task-hook {event}: {e:#}");
+                    eprintln!("plete task-hook {event}: {e:#}");
                 }
                 match assistant::session_context(app, task, session_id, now) {
                     Ok(context) => {
@@ -413,7 +413,7 @@ fn handle_hook(
                             println!("{output}");
                         }
                     }
-                    Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
+                    Err(e) => eprintln!("plete task-hook {event}: {e:#}"),
                 }
             } else if harness.session_context_output("").is_some() {
                 let parented = task.parent_id.is_some() && attributed(launched_for, &task.id, app);
@@ -426,7 +426,7 @@ fn handle_hook(
                         // changed while it was archived, or in config, is
                         // in it before it is read.
                         if let Err(e) = manager::write_brief(app, task) {
-                            eprintln!("jeet task-hook {event}: {e:#}");
+                            eprintln!("plete task-hook {event}: {e:#}");
                         }
                         manager::context::session_context(app, task, session_id, now).map(Some)
                     }
@@ -445,7 +445,7 @@ fn handle_hook(
                         match tasks::pr_mode(app, task) {
                             Ok(mode) => Some(tasks::pr_policy_line(mode)),
                             Err(e) => {
-                                eprintln!("jeet task-hook {event}: {e:#}");
+                                eprintln!("plete task-hook {event}: {e:#}");
                                 None
                             }
                         }
@@ -463,7 +463,7 @@ fn handle_hook(
                             println!("{output}");
                         }
                     }
-                    Err(e) => eprintln!("jeet task-hook {event}: {e:#}"),
+                    Err(e) => eprintln!("plete task-hook {event}: {e:#}"),
                 }
             }
         }
@@ -478,7 +478,7 @@ fn handle_hook(
     // this queues comes with it.
     if let Some(EventKind::Stopped) = &hook.kind {
         if let Err(e) = sweep_if_assistant(&ctx.app, &task_id, now) {
-            eprintln!("jeet task-hook {event}: {e:#}");
+            eprintln!("plete task-hook {event}: {e:#}");
         }
     }
     if matches!(hook.kind, Some(EventKind::Working(_))) {
@@ -506,7 +506,7 @@ fn handle_hook(
         budget::report_blocked_review(&ctx.app, review);
     }
     if let Err(e) = report_step(&hook, &ctx, launched_for, now) {
-        eprintln!("jeet task-hook {event}: {e:#}");
+        eprintln!("plete task-hook {event}: {e:#}");
     }
     if let Some(task) = &ctx.task {
         messages::sweep_rejected(&ctx.app, task);
@@ -520,15 +520,19 @@ fn handle_hook(
     ) && ctx.task.is_some()
         && crate::wake::sweep_own(&ctx.app, &task_dir, session_id, now)
     {
-        // The test binary is no jeet.
+        // The test binary is no plete.
         if !cfg!(test) {
-            crate::watch::maybe_background(&ctx.app.home, &ctx.app.config);
+            crate::watch::maybe_background(
+                &ctx.app.home,
+                ctx.app.new_home.as_deref(),
+                &ctx.app.config,
+            );
         }
     }
     // A slot under `max_live` may be free now.
     if let Some(EventKind::Ended { cleared: false }) = hook.kind {
         if let Err(e) = spawn_drain(&ctx.app, &task_id) {
-            eprintln!("jeet task-hook {event}: {e:#}");
+            eprintln!("plete task-hook {event}: {e:#}");
         }
     }
     result
@@ -626,7 +630,7 @@ fn hook_ctx_with(
         match charged {
             Ok(crossed) => threshold = crossed,
             Err(e) => eprintln!(
-                "jeet task-hook {}: could not charge its limits: {e:#}",
+                "plete task-hook {}: could not charge its limits: {e:#}",
                 hook.name
             ),
         }
@@ -640,7 +644,7 @@ fn hook_ctx_with(
         match charged {
             Ok(crossed) => threshold = crossed,
             Err(e) => eprintln!(
-                "jeet task-hook {}: could not charge its budget: {e:#}",
+                "plete task-hook {}: could not charge its budget: {e:#}",
                 hook.name
             ),
         }
@@ -653,7 +657,7 @@ fn hook_ctx_with(
         (Some(task), _) if in_tree && asks => match run::hold(&app, task) {
             Ok(hold) => hold.map(|(_, state)| state),
             Err(e) => {
-                eprintln!("jeet task-hook {}: {e:#}", hook.name);
+                eprintln!("plete task-hook {}: {e:#}", hook.name);
                 None
             }
         },
@@ -661,7 +665,7 @@ fn hook_ctx_with(
         (None, Some(review)) if asks => match app.db.get_review(&review.id) {
             Ok(fresh) => fresh.filter(|r| r.paused).map(|_| RunState::Paused),
             Err(e) => {
-                eprintln!("jeet task-hook {}: {e:#}", hook.name);
+                eprintln!("plete task-hook {}: {e:#}", hook.name);
                 None
             }
         },
@@ -866,16 +870,16 @@ pub fn fold_busy_review(
     budget::enforce_review(app, review)
 }
 
-/// Where a detached drain's output goes, in jeet's home.
+/// Where a detached drain's output goes, in plete's home.
 const DRAIN_LOG: &str = "drain.log";
 
 /// Start what waits on `max_live` now that task `task_id`'s session is
-/// ending: a detached `jeet manager drain --after <task_id>`, as
+/// ending: a detached `plete manager drain --after <task_id>`, as
 /// [`crate::startup::launch`] starts its job, since a hook has seconds to
 /// run and the pane it runs in may be going; the drain waits for it to go.
 /// Nothing when nothing waits.
 fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
-    // The test binary is no jeet.
+    // The test binary is no plete.
     if cfg!(test) || (app.db.queued_starts()?.is_empty() && app.db.queued_reviews()?.is_empty()) {
         return Ok(());
     }
@@ -885,7 +889,7 @@ fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
         .append(true)
         .open(&log)
         .with_context(|| format!("open {}", log.display()))?;
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     let mut cmd = Command::new("nohup");
     crate::env::set_home(&mut cmd, &app.home, app.new_home.as_deref());
     crate::env::remove_both(&mut cmd, crate::permissions::ASSISTANT_ENV);
@@ -901,13 +905,13 @@ fn spawn_drain(app: &App, task_id: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn().context("start jeet manager drain")?;
+    cmd.spawn().context("start plete manager drain")?;
     Ok(())
 }
 
 /// What the hook for `event`, the user's prompt to an assistant session
 /// off the push path, prints to tell it what was kept for it since its
-/// last `jeet brief`: nothing when nothing was, or for any other task.
+/// last `plete brief`: nothing when nothing was, or for any other task.
 fn prompt_summary(
     harness: &dyn Harness,
     event: &str,
@@ -923,7 +927,7 @@ fn prompt_summary(
     match assistant::brief::summary_line(task_dir, session_id) {
         Ok(line) => harness.prompt_context_output(event, &line?),
         Err(e) => {
-            eprintln!("jeet task-hook {event}: {e:#}");
+            eprintln!("plete task-hook {event}: {e:#}");
             None
         }
     }
@@ -972,8 +976,8 @@ fn auto_body(
 }
 
 /// Tell the task's parent what this hook means for it, if anything.
-/// Nothing for a task jeet stopped itself (archived or deleted, or stopped
-/// with `jeet manager stop`, whose caller says so) and, as ever, nothing on
+/// Nothing for a task plete stopped itself (archived or deleted, or stopped
+/// with `plete manager stop`, whose caller says so) and, as ever, nothing on
 /// stdout.
 fn report_step(
     hook: &HookEvent,
@@ -1025,7 +1029,7 @@ fn held_now(ctx: &HookCtx) -> bool {
         return match ctx.app.db.get_review(&review.id) {
             Ok(fresh) => fresh.is_some_and(|r| r.paused),
             Err(e) => {
-                eprintln!("jeet task-hook: {e:#}");
+                eprintln!("plete task-hook: {e:#}");
                 ctx.hold.is_some()
             }
         };
@@ -1034,7 +1038,7 @@ fn held_now(ctx: &HookCtx) -> bool {
         Some(task) if task.parent_id.is_some() => match run::hold(&ctx.app, task) {
             Ok(hold) => hold.is_some(),
             Err(e) => {
-                eprintln!("jeet task-hook: {e:#}");
+                eprintln!("plete task-hook: {e:#}");
                 ctx.hold.is_some()
             }
         },
@@ -1042,7 +1046,7 @@ fn held_now(ctx: &HookCtx) -> bool {
     }
 }
 
-/// Stop: hand over what `jeet task send` queued, else go idle. The inbox
+/// Stop: hand over what `plete task send` queued, else go idle. The inbox
 /// stays locked until the status is written, so a message is either taken
 /// here or sent after the session is idle, and typed in. Returns the
 /// harness's [`Harness::continue_output`] to print, if it carries on. A
@@ -1059,7 +1063,7 @@ fn stop(
     let event = hook.name.as_str();
     // A broken inbox must not keep the status from being written.
     let inbox = messages::Inbox::lock(task_dir)
-        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
+        .inspect_err(|e| eprintln!("plete task-hook {event}: {e:#}"))
         .ok();
     // Held or not: this only keeps the queue whole.
     if let Some(inbox) = &inbox {
@@ -1083,7 +1087,7 @@ fn stop(
     let (queued, rendered) = match &inbox {
         Some(inbox) => take_at_stop(inbox, task_dir, session_id, &ctx.app, quiet, now)
             .unwrap_or_else(|e| {
-                eprintln!("jeet task-hook {event}: {e:#}");
+                eprintln!("plete task-hook {event}: {e:#}");
                 (Vec::new(), false)
             }),
         None => (Vec::new(), false),
@@ -1112,7 +1116,7 @@ fn stop(
             ),
         );
         if let Err(e) = written {
-            eprintln!("jeet task-hook {event}: {e:#}");
+            eprintln!("plete task-hook {event}: {e:#}");
         }
         return Ok(output);
     }
@@ -1167,7 +1171,7 @@ fn take_at_stop(
 fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Result<()> {
     let event = hook.name.as_str();
     let inbox = messages::Inbox::lock(task_dir)
-        .inspect_err(|e| eprintln!("jeet task-hook {event}: {e:#}"))
+        .inspect_err(|e| eprintln!("plete task-hook {event}: {e:#}"))
         .ok();
     // Idle before anything is typed in, so the prompt it submits is what
     // marks it running again. Idle since the turn ended, not since it was
@@ -1205,7 +1209,7 @@ fn idle_prompt(task_dir: &Path, hook: &HookEvent, ctx: &HookCtx, now: i64) -> Re
 /// is warned of: it must not keep the hook from its work.
 fn recover_wake(inbox: &messages::Inbox, task_dir: &Path, session_id: &str, event: &str, now: i64) {
     if let Err(e) = waiter::recover(inbox, task_dir, session_id, now) {
-        eprintln!("jeet task-hook {event}: {e:#}");
+        eprintln!("plete task-hook {event}: {e:#}");
     }
 }
 
@@ -1229,7 +1233,7 @@ pub(crate) fn idle_agent<'a>(
 /// The task the hook ran for: the one its `--task` names, wherever the
 /// session has `cd`ed. A hook from before `--task` finds it by walking up
 /// from the session's directory, which needs no index, else by
-/// `$JEET_TASK_ID`. The assistant goes by `$JEET_TASK_ID` first: it may
+/// `$PLETE_TASK_ID`. The assistant goes by `$PLETE_TASK_ID` first: it may
 /// well `cd` into a task's directory, and its sessions must not report as
 /// that task's. Nor does another task's agent that `cd`s into the
 /// assistant's home go as the assistant: its inbox holds the reports of
@@ -1327,7 +1331,7 @@ fn record_session(
     // A work task or manager has the one session: this one, from now on.
     if matches!(task.kind, TaskKind::Work | TaskKind::Manager) {
         if let Err(e) = app.db.set_task_session(task_id, session_id) {
-            eprintln!("jeet task-hook SessionStart: {e:#}");
+            eprintln!("plete task-hook SessionStart: {e:#}");
         }
     }
     app.db.touch_task(task_id, now)
@@ -1969,7 +1973,7 @@ mod tests {
         assert!(output.contains(&format!("[… {} more bytes", tail.message.len())));
     }
 
-    /// An item as jeet queues one of `class`, from `from`, at `at`.
+    /// An item as plete queues one of `class`, from `from`, at `at`.
     fn classed(
         at: i64,
         class: crate::render::Class,
@@ -2133,7 +2137,7 @@ mod tests {
             output.contains("Messages and reports were sent to you"),
             "{output}"
         );
-        assert!(!output.contains("jeet show"), "{output}");
+        assert!(!output.contains("plete show"), "{output}");
         // The same task rendered quietly: one line, headed.
         messages::Inbox::lock(&dir)
             .unwrap()
@@ -2156,7 +2160,7 @@ mod tests {
         let output = stop(harness, &dir, &stop_hook, "s", &quiet, 400)
             .unwrap()
             .unwrap();
-        assert!(output.contains("jeet: 1 update (jeet show"), "{output}");
+        assert!(output.contains("plete: 1 update (plete show"), "{output}");
         assert!(output.contains("done from task b"), "{output}");
         assert!(!output.contains("Messages and reports"), "{output}");
     }
@@ -2238,7 +2242,7 @@ mod tests {
             hold: Some(RunState::Stopped),
             ..quiet_ctx(app)
         };
-        // `jeet manager stop`, which ended it, said so to whoever asked.
+        // `plete manager stop`, which ended it, said so to whoever asked.
         report_step(&ended, &ctx, Some("w"), 500).unwrap();
         assert!(ctx.app.db.last_status_report("w").unwrap().is_none());
         // Paused, or running, its end is news to its parent.
@@ -2683,7 +2687,7 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(
-            line.starts_with("jeet: 2 new reports (1 question, 1 done) since your last"),
+            line.starts_with("plete: 2 new reports (1 question, 1 done) since your last"),
             "{line}"
         );
         // Only the prompt's hook, and only the assistant's.

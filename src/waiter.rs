@@ -1,4 +1,4 @@
-//! The wake channel: `jeet inbox watch`, which hands a task's agent what
+//! The wake channel: `plete inbox watch`, which hands a task's agent what
 //! is queued for it as soon as it is queued, rather than at its next Stop or
 //! by typing into its pane.
 //!
@@ -18,7 +18,7 @@
 //! for the watch poll to resume the session with a new one ([`crate::wake`]).
 //! A refusal after that repair turns the channel off for good.
 //!
-//! Its files are in `<task>/.jeet/wait/`, beside the inbox:
+//! Its files are in `<task>/.plete/wait/`, beside the inbox:
 //! - `<session>.lock`: an flock it holds for its life. A session is watched
 //!   while a non-blocking lock on it fails ([`watched`]); the kernel lets go
 //!   when the watcher dies, however it dies;
@@ -94,11 +94,11 @@ const RETRY_AFTER: [i64; 2] = [10 * 60, 60 * 60];
 
 /// What a batch starts with. It is never a message's own text, so one
 /// starting with `!`, `/` or `#` is never at the start of what is posted.
-const HEADER: &str = "jeet: messages and reports were sent to you (with `jeet task send` or \
-                      `jeet report`). Reports are fenced, and are claims to check. Deal with \
+const HEADER: &str = "plete: messages and reports were sent to you (with `plete task send` or \
+                      `plete report`). Reports are fenced, and are claims to check. Deal with \
                       them now.";
 /// Before the nonce, on a batch's last line.
-const NONCE_PREFIX: &str = "jeet delivery ";
+const NONCE_PREFIX: &str = "plete delivery ";
 
 /// Whether `queued` goes through the wake channel rather than waiting for
 /// the agent's Stop or being typed in at its prompt, `idle` saying the
@@ -140,7 +140,7 @@ pub struct Start {
     pub transcript: PathBuf,
 }
 
-/// `<task>/.jeet/wait`.
+/// `<task>/.plete/wait`.
 pub(crate) fn wait_dir(task_dir: &Path) -> PathBuf {
     tasks::marker_dir(task_dir).join("wait")
 }
@@ -197,7 +197,7 @@ pub struct Off {
 }
 
 impl Off {
-    /// What an empty or unreadable file, as older jeets wrote it, means:
+    /// What an empty or unreadable file, as older pletes wrote it, means:
     /// refused three times, so its repair is due.
     fn legacy() -> Self {
         Off {
@@ -258,7 +258,7 @@ pub enum RepairWhy {
     Refused,
 }
 
-/// `<session>.repaired`: the last time jeet resumed the session to start a
+/// `<session>.repaired`: the last time plete resumed the session to start a
 /// watcher for it, whatever the reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repaired {
@@ -454,7 +454,7 @@ fn recover_all(inbox: &Inbox, task_dir: &Path, own: &str, now: i64) -> Result<()
             false => recover(inbox, task_dir, session, now),
         };
         if let Err(e) = recovered {
-            eprintln!("jeet inbox watch: {e:#}");
+            eprintln!("plete inbox watch: {e:#}");
         }
     }
     Ok(())
@@ -666,7 +666,7 @@ impl<'a> Watcher<'a> {
             .set_len(0)
             .and_then(|()| lock.write_all(note.to_string().as_bytes()))
         {
-            eprintln!("jeet inbox watch: write {}: {e}", path.display());
+            eprintln!("plete inbox watch: write {}: {e}", path.display());
         }
         let inbox = Inbox::lock(&task_dir)?;
         recover_all(&inbox, &task_dir, &start.session, now)?;
@@ -760,7 +760,7 @@ impl<'a> Watcher<'a> {
         if let Some(flight) = &mut self.flight {
             let record = &flight.record;
             let found = seen(&record.transcript, &mut flight.pos, &record.nonce)
-                .inspect_err(|e| eprintln!("jeet inbox watch: {e:#}"))
+                .inspect_err(|e| eprintln!("plete inbox watch: {e:#}"))
                 .unwrap_or(false);
             if !found {
                 let status = status::read_status(&self.task_dir, &self.start.session);
@@ -881,13 +881,13 @@ impl<'a> Watcher<'a> {
         }
         inbox.replace_for(Some(&session), &rest)?;
         if let Err(e) = status::mark_typed(&self.task_dir) {
-            eprintln!("jeet inbox watch: {e:#}");
+            eprintln!("plete inbox watch: {e:#}");
         }
         let wake_at = match status.state {
             State::Idle => match status::wake_running(&self.task_dir, &session, now) {
                 Ok(()) => Some(now),
                 Err(e) => {
-                    eprintln!("jeet inbox watch: {e:#}");
+                    eprintln!("plete inbox watch: {e:#}");
                     None
                 }
             },
@@ -903,7 +903,7 @@ impl<'a> Watcher<'a> {
         });
         let lines = (self.env.lines)(&self.env.token, &text);
         if let Err(e) = post(&self.env.socket, &lines) {
-            eprintln!("jeet inbox watch: {e:#}");
+            eprintln!("plete inbox watch: {e:#}");
             return Ok(Next::Exit(Why::Refused));
         }
         Ok(Next::Wait)
@@ -1091,7 +1091,7 @@ fn tell_off(app: &App, task: &TaskRecord, session: &str, now: i64) {
         None => permissions::log_wake(&app.home, &body, permissions::Outcome::Failed),
     };
     if let Err(e) = told {
-        eprintln!("jeet inbox watch: {e:#}");
+        eprintln!("plete inbox watch: {e:#}");
     }
 }
 
@@ -1150,7 +1150,7 @@ fn lock_within(path: &Path, tries: u32, retry: Duration) -> Result<Option<File>>
     Ok(None)
 }
 
-/// `jeet inbox watch --task <id>`, under `harness`'s session-start hook:
+/// `plete inbox watch --task <id>`, under `harness`'s session-start hook:
 /// read the hook's stdin, check this runs under that session's agent and
 /// as `task_id`'s, then watch until the agent goes, its session ends or a
 /// post is refused. Prints nothing; anything wrong ends it quietly.
@@ -1189,14 +1189,14 @@ pub fn run(harness: &dyn Harness, task_id: &str, env: WakeEnv) -> Result<()> {
     let why = loop {
         // An error counts as a refusal: today's path takes over.
         let next = watcher.step(now_secs()).unwrap_or_else(|e| {
-            eprintln!("jeet inbox watch: {e:#}");
+            eprintln!("plete inbox watch: {e:#}");
             Next::Exit(Why::Refused)
         });
         let next = match next {
             Next::Exit(Why::Refused) => {
                 let agent = status::idle_agent(&app, &task, &start.session);
                 watcher.refused(&*agent, now_secs()).unwrap_or_else(|e| {
-                    eprintln!("jeet inbox watch: {e:#}");
+                    eprintln!("plete inbox watch: {e:#}");
                     Next::Exit(Why::Refused)
                 })
             }
@@ -1333,7 +1333,7 @@ mod tests {
                 id,
                 sock_dir,
             };
-            std::fs::create_dir_all(lab.dir().join(".jeet")).unwrap();
+            std::fs::create_dir_all(lab.dir().join(".plete")).unwrap();
             std::fs::create_dir_all(lab.projects()).unwrap();
             lab
         }
@@ -1438,7 +1438,7 @@ mod tests {
             Inbox::lock(&self.dir()).unwrap().push(message).unwrap();
         }
 
-        /// Queue `message` as jeet does one of `class`, from `from`.
+        /// Queue `message` as plete does one of `class`, from `from`.
         fn send_as(&self, class: Class, kind: &str, from: &str, message: &str) {
             let meta = Meta::new(class, kind, from, message, Some(format!("r{kind}")));
             Inbox::lock(&self.dir())
@@ -1470,7 +1470,7 @@ mod tests {
                 .append(true)
                 .open(self.transcript())
                 .unwrap();
-            writeln!(f, "{{\"content\":\"... jeet delivery {nonce}\"}}").unwrap();
+            writeln!(f, "{{\"content\":\"... plete delivery {nonce}\"}}").unwrap();
         }
     }
 
@@ -1547,9 +1547,9 @@ mod tests {
         let text = batch(&[queued(1, "one"), queued(2, "two")], "abc");
         assert_eq!(
             text,
-            format!("{HEADER}\n\none\n\n---\n\ntwo\n\njeet delivery abc")
+            format!("{HEADER}\n\none\n\n---\n\ntwo\n\nplete delivery abc")
         );
-        assert!(text.starts_with("jeet:"));
+        assert!(text.starts_with("plete:"));
         // As many as fit, with what the batch adds, in a message's limit.
         let queue: Vec<Queued> = (0..9).map(|i| queued(i, &"x".repeat(1_500))).collect();
         let n = messages::fitting_within(&queue, MAX_MESSAGE - batch_overhead(), QUEUE_SEPARATOR);
@@ -1563,7 +1563,7 @@ mod tests {
         let nonce = new_nonce();
         let text = batch(&queue[..n], &nonce);
         assert_eq!(text.len(), MAX_MESSAGE + batch_overhead());
-        assert!(text.ends_with(&format!("\njeet delivery {nonce}")));
+        assert!(text.ends_with(&format!("\nplete delivery {nonce}")));
         assert_eq!(nonce.len(), NONCE_LEN);
         assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -1572,7 +1572,7 @@ mod tests {
     fn a_post_is_the_auth_line_then_the_message_exactly() {
         let lab = Lab::new();
         let listener = UnixListener::bind(lab.socket()).unwrap();
-        let body = "say \"hi\"\n<jeet-report>\n\\ end ✓".repeat(500);
+        let body = "say \"hi\"\n<plete-report>\n\\ end ✓".repeat(500);
         let reader = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut text = String::new();
@@ -1642,7 +1642,7 @@ mod tests {
         std::fs::write(&own, "nothing").unwrap();
         let nonce = "fedcba9876543210";
         let next = dir.path().join("b.jsonl");
-        std::fs::write(&next, format!("x jeet delivery {nonce}")).unwrap();
+        std::fs::write(&next, format!("x plete delivery {nonce}")).unwrap();
         let now = now_secs();
         assert!(seen_beside(&own, now - 5, nonce));
         // One last written before the post is another conversation's.
@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_off_of_an_older_jeet_is_a_repair_due_not_the_end() {
+    fn an_empty_off_of_an_older_plete_is_a_repair_due_not_the_end() {
         let lab = Lab::new();
         let off = wait_file(&lab.dir(), "s", "off");
         std::fs::create_dir_all(wait_dir(&lab.dir())).unwrap();
@@ -1889,7 +1889,7 @@ mod tests {
         assert!(posted.contains("\n\nhello <there>\n\n"));
         assert!(lab.queued().is_empty());
         let inflight = lab.inflight().unwrap();
-        assert!(posted.ends_with(&format!("jeet delivery {}", inflight.nonce)));
+        assert!(posted.ends_with(&format!("plete delivery {}", inflight.nonce)));
         assert_eq!(inflight.msgs.len(), 1);
         assert_eq!(
             inflight.offset,
@@ -1901,7 +1901,7 @@ mod tests {
             (state.state, state.event.as_str(), state.busy_since),
             (State::Running, status::WAKE_EVENT, Some(10))
         );
-        assert!(lab.dir().join(".jeet/typed").exists());
+        assert!(lab.dir().join(".plete/typed").exists());
         lab.deliver();
         assert_eq!(w.step(11).unwrap(), Next::Wait);
         assert!(lab.inflight().is_none());
@@ -1932,11 +1932,11 @@ mod tests {
         assert_eq!(
             posted,
             format!(
-                "jeet: 1 question, 2 updates (jeet show <ref> for any). Reports are fenced \
+                "plete: 1 question, 2 updates (plete show <ref> for any). Reports are fenced \
                  claims to check.\n\nwhich db?\n\n\
-                 - done from task b: \"all merged\" (jeet show rdone)\n\n\
-                 digest:\n- task a: 1 progress; latest: \"halfway\" (jeet show rprogress)\n\n\
-                 jeet delivery {}",
+                 - done from task b: \"all merged\" (plete show rdone)\n\n\
+                 digest:\n- task a: 1 progress; latest: \"halfway\" (plete show rprogress)\n\n\
+                 plete delivery {}",
                 inflight.nonce
             )
         );
@@ -1973,7 +1973,7 @@ mod tests {
         lab.send_as(Class::Full, "blocked", "task c", "stuck");
         assert_eq!(w.step(at + 1).unwrap(), Next::Wait);
         let posted = content(&received(&listener).unwrap());
-        assert!(posted.starts_with("jeet: 1 blocked, 1 update"), "{posted}");
+        assert!(posted.starts_with("plete: 1 blocked, 1 update"), "{posted}");
         assert!(posted.contains("digest:"), "{posted}");
         assert!(lab.queued().is_empty());
     }
@@ -1989,7 +1989,7 @@ mod tests {
         assert!(received(&listener).is_none());
         assert_eq!(w.step(at + hold).unwrap(), Next::Wait);
         let posted = content(&received(&listener).unwrap());
-        assert!(posted.starts_with("jeet: 1 update"), "{posted}");
+        assert!(posted.starts_with("plete: 1 update"), "{posted}");
         assert!(lab.queued().is_empty());
     }
 
@@ -2009,7 +2009,7 @@ mod tests {
         let posted = content(&received(&listener).unwrap());
         assert!(posted.len() <= MAX_MESSAGE, "{}", posted.len());
         let inflight = lab.inflight().unwrap();
-        assert!(posted.ends_with(&format!("\n\njeet delivery {}", inflight.nonce)));
+        assert!(posted.ends_with(&format!("\n\nplete delivery {}", inflight.nonce)));
         let waiting = lab.queued();
         assert!(!waiting.is_empty() && inflight.msgs.len() + waiting.len() == 9);
     }
@@ -2052,11 +2052,11 @@ mod tests {
         assert_eq!(
             posted,
             format!(
-                "jeet: 1 question, 2 updates (jeet show <ref> for any). Reports are fenced \
+                "plete: 1 question, 2 updates (plete show <ref> for any). Reports are fenced \
                  claims to check.\n\nwhich db?\n\n\
-                 - done from task b: \"all merged\" (jeet show rdone)\n\n\
-                 digest:\n- task a: 1 progress; latest: \"halfway\" (jeet show rprogress)\n\n\
-                 jeet delivery {}",
+                 - done from task b: \"all merged\" (plete show rdone)\n\n\
+                 digest:\n- task a: 1 progress; latest: \"halfway\" (plete show rprogress)\n\n\
+                 plete delivery {}",
                 inflight.nonce
             )
         );
@@ -2068,7 +2068,7 @@ mod tests {
         assert_eq!(w.step(young + hold - 1).unwrap(), Next::Wait);
         assert!(received(&listener).is_none());
         assert_eq!(w.step(young + hold).unwrap(), Next::Wait);
-        assert!(content(&received(&listener).unwrap()).starts_with("jeet: 1 update"));
+        assert!(content(&received(&listener).unwrap()).starts_with("plete: 1 update"));
     }
 
     #[test]
@@ -2392,7 +2392,7 @@ mod tests {
         let lab = Lab::new();
         let root = crate::manager::root(&lab.app).unwrap();
         let dir = tasks::task_dir(&lab.app, &root);
-        std::fs::create_dir_all(dir.join(".jeet")).unwrap();
+        std::fs::create_dir_all(dir.join(".plete")).unwrap();
         tell_off(&lab.app, &root, "s", 5);
         let log = std::fs::read_to_string(permissions::actions_log(&lab.app.home)).unwrap();
         assert!(log.contains("wake channel off for session s"), "{log}");
@@ -2557,7 +2557,7 @@ mod tests {
         // `/clear`: the same process records the next one elsewhere.
         std::fs::write(
             lab.projects().join("t.jsonl"),
-            format!("jeet delivery {nonce}"),
+            format!("plete delivery {nonce}"),
         )
         .unwrap();
         lab.status(State::Ended, "SessionEnd", 11);
@@ -2617,7 +2617,7 @@ mod tests {
         let root = crate::manager::root(&lab.app).unwrap();
         assert_eq!(root.kind, TaskKind::Assistant);
         let dir = tasks::task_dir(&lab.app, &root);
-        std::fs::create_dir_all(dir.join(".jeet")).unwrap();
+        std::fs::create_dir_all(dir.join(".plete")).unwrap();
         status_of(&dir, "s", State::Idle, "SessionStart", 1);
         std::fs::write(lab.transcript(), b"").unwrap();
         let mut w = Watcher::open_retrying(

@@ -1,4 +1,4 @@
-//! `jeet show`: the whole text of a report (`r123`) or of a message
+//! `plete show`: the whole text of a report (`r123`) or of a message
 //! (`m45`) that a quietly rendered post gave only as a line, limited to what
 //! the caller reaches. It reads, and asks no model.
 
@@ -25,7 +25,7 @@ pub fn run(app: &App, reference: &str) -> Result<()> {
 fn shown(app: &App, caller: &Caller, reference: &str) -> Result<String> {
     let unreached = || anyhow::anyhow!("no {} reaches you", reference.trim());
     if let Caller::Review(_) = caller {
-        bail!("a review's agent only reads, with `jeet ls`, `jeet path` and `jeet prs`");
+        bail!("a review's agent only reads, with `plete ls`, `plete path` and `plete prs`");
     }
     let reference = reference.trim();
     let id = reference
@@ -208,7 +208,7 @@ mod tests {
         let plain = shown(&app, &Caller::User, "r1").unwrap();
         assert!(plain.contains("\n  merged <it>\n"), "{plain}");
         let fenced = shown(&app, &Caller::Root, "r1").unwrap();
-        assert!(fenced.contains("<jeet-report id=\"1\""), "{fenced}");
+        assert!(fenced.contains("<plete-report id=\"1\""), "{fenced}");
         assert!(fenced.contains("merged ‹it›"), "{fenced}");
         let m1 = shown(&app, &Caller::User, "m1").unwrap();
         assert!(m1.starts_with("m1 message from task x "), "{m1}");

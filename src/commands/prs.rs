@@ -1,4 +1,4 @@
-//! `jeet prs [repo]`: the open pull requests, and which of them you have.
+//! `plete prs [repo]`: the open pull requests, and which of them you have.
 
 use std::path::Path;
 
@@ -20,7 +20,7 @@ const LIMIT: usize = 100;
 
 const TITLE_WIDTH: usize = 50;
 
-/// An open PR and what is true of it for you — shared by `jeet prs` and the
+/// An open PR and what is true of it for you — shared by `plete prs` and the
 /// explorer's PR list, so the two never disagree.
 #[derive(Debug, Clone)]
 pub struct PrRow {
@@ -81,7 +81,7 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
             match crate::resolve::resolve_context(app, &cwd) {
                 Ok(ctx) => ctx.repo,
                 Err(e) => anyhow::bail!(
-                    "{e}\nrun from inside a repository or name one: `jeet prs <repo>`"
+                    "{e}\nrun from inside a repository or name one: `plete prs <repo>`"
                 ),
             }
         }
@@ -146,10 +146,10 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
         println!("</github-data>");
     }
     let hint = match filter {
-        Some(f) => format!("jeet review <number> --repo {f}"),
-        None => "jeet review <number>".to_string(),
+        Some(f) => format!("plete review <number> --repo {f}"),
+        None => "plete review <number>".to_string(),
     };
-    eprintln!("jeet: `{hint}` checks one out to review");
+    eprintln!("plete: `{hint}` checks one out to review");
     Ok(())
 }
 

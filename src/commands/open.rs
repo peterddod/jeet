@@ -1,8 +1,8 @@
-//! `jeet open <url>`: take the user to what a `jeet://` link names.
+//! `plete open <url>`: take the user to what a `plete://` link names.
 //!
-//! The nearest thing wins: a jeet screen that is open is sent to the link
+//! The nearest thing wins: a plete screen that is open is sent to the link
 //! and brought forward; failing that, a task's or review's tmux session is
-//! switched to on the terminal already attached to jeet's; failing that,
+//! switched to on the terminal already attached to plete's; failing that,
 //! the screen is run here if this is a terminal, and else in a terminal
 //! that is started. It acts on the user's screen, so it is the user's own
 //! terminal's alone.
@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::commands::tasks;
 use crate::context::App;
@@ -29,10 +29,10 @@ const TAKE_WAIT: Duration = Duration::from_millis(1500);
 
 pub fn run(app: &App, url: &str) -> Result<()> {
     if !permissions::at_terminal(app)? {
-        bail!("jeet open acts on your screen: run it from your own terminal, not a jeet pane");
+        bail!("plete open acts on your screen: run it from your own terminal, not a plete pane");
     }
     // Read once and not passed on: what the screen run here starts is not
-    // a terminal jeet started.
+    // a terminal plete started.
     let started = crate::env::var_os(STARTED_ENV).is_some();
     for name in crate::env::both_names(STARTED_ENV) {
         std::env::remove_var(name);
@@ -56,7 +56,7 @@ pub fn run(app: &App, url: &str) -> Result<()> {
                     Bring::Nothing => Ok("sent"),
                 };
                 let said = said.unwrap_or_else(|e| {
-                    eprintln!("jeet: could not bring it forward: {e:#}");
+                    eprintln!("plete: could not bring it forward: {e:#}");
                     "sent"
                 });
                 activate(screen.app.as_deref(), setting);
@@ -67,7 +67,7 @@ pub fn run(app: &App, url: &str) -> Result<()> {
                     screens.retain(|s| s.pid != screen.pid);
                     continue;
                 }
-                println!("{said}: {link} on the jeet screen (pid {})", screen.pid);
+                println!("{said}: {link} on the plete screen (pid {})", screen.pid);
                 return Ok(());
             }
             Plan::Session { client, session } => {
@@ -106,12 +106,12 @@ enum Bring {
     Nothing,
 }
 
-/// What `jeet open` does.
+/// What `plete open` does.
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
     /// Send the link to a screen that is open.
     Screen { screen: Screen, bring: Bring },
-    /// Switch the client attached to jeet's tmux to the session of a task or
+    /// Switch the client attached to plete's tmux to the session of a task or
     /// review.
     Session { client: String, session: String },
     /// Run the screen in this terminal.
@@ -205,18 +205,24 @@ fn activate(bundle: Option<&str>, setting: Option<&str>) {
 
 fn start_terminal(app: &App, link: &Link, started: bool) -> Result<()> {
     if started {
-        bail!("the terminal jeet started is not one; not starting another");
+        bail!("the terminal plete started is not one; not starting another");
     }
     let setting = app.config.notify.terminal.as_deref();
     let choice = terminal::resolve(setting, terminal::os(), terminal::exists)?;
     if choice == Choice::Off {
-        bail!("no jeet screen is open and `[notify] terminal` is none");
+        bail!("no plete screen is open and `[notify] terminal` is none");
     }
-    let exe = std::env::current_exe().context("find the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     let path = std::env::var("PATH").unwrap_or_default();
-    let jeet = terminal::open_argv(&exe, &app.home, &path, &link.to_string());
+    let plete = terminal::open_argv(
+        &exe,
+        &app.home,
+        app.new_home.as_deref(),
+        &path,
+        &link.to_string(),
+    );
     let script = registry::dir(&app.home).join(format!("open-{}.command", std::process::id()));
-    terminal::start(&terminal::invocation(&choice, &jeet, &script)?)?;
+    terminal::start(&terminal::invocation(&choice, &plete, &script)?)?;
     println!("started a terminal for {link}");
     Ok(())
 }
@@ -286,8 +292,8 @@ mod tests {
     fn a_screen_under_tmux_attach_is_detached_back() {
         let screens = [screen(1, 10, None, Some("/dev/ttys007"))];
         let clients = [
-            client("/dev/ttys003", "jeet-a", 500),
-            client("/dev/ttys007", "jeet-b", 100),
+            client("/dev/ttys003", "plete-a", 500),
+            client("/dev/ttys007", "plete-b", 100),
         ];
         let Plan::Screen { bring, .. } = plan(&task(), &screens, &clients, |_| false, false) else {
             panic!("expected a screen");
@@ -299,7 +305,7 @@ mod tests {
             }
         );
         // No client on its terminal: nothing to detach.
-        let other = [client("/dev/ttys003", "jeet-a", 500)];
+        let other = [client("/dev/ttys003", "plete-a", 500)];
         let Plan::Screen { bring, .. } = plan(&task(), &screens, &other, |_| false, false) else {
             panic!("expected a screen");
         };
@@ -309,30 +315,30 @@ mod tests {
     #[test]
     fn with_no_screen_a_live_session_is_switched_to() {
         let clients = [
-            client("/dev/c1", "jeet-other", 100),
+            client("/dev/c1", "plete-other", 100),
             client("/dev/c2", "work", 900),
-            client("/dev/c3", "jeet-third", 300),
+            client("/dev/c3", "plete-third", 300),
         ];
-        let exists = |name: &str| name == "jeet-fix";
+        let exists = |name: &str| name == "plete-fix";
         assert_eq!(
             plan(&task(), &[], &clients, exists, true),
             Plan::Session {
                 client: "/dev/c3".into(),
-                session: "jeet-fix".into()
+                session: "plete-fix".into()
             }
         );
         assert_eq!(
             plan(&Link::review("fix"), &[], &clients, exists, true),
             Plan::Session {
                 client: "/dev/c3".into(),
-                session: "jeet-fix".into()
+                session: "plete-fix".into()
             }
         );
     }
 
     #[test]
     fn otherwise_it_runs_here_or_in_a_terminal() {
-        let clients = [client("/dev/c1", "jeet-a", 100)];
+        let clients = [client("/dev/c1", "plete-a", 100)];
         // A report, or a session that is gone, falls through.
         assert_eq!(
             plan(&Link::Report(3), &[], &clients, |_| true, true),
@@ -349,7 +355,7 @@ mod tests {
             plan(&task(), &[], &clients, |_| false, false),
             Plan::Terminal
         );
-        // No client on a jeet session, whatever exists.
+        // No client on a plete session, whatever exists.
         let elsewhere = [client("/dev/c1", "work", 100)];
         assert_eq!(plan(&task(), &[], &elsewhere, |_| true, true), Plan::Here);
         assert_eq!(plan(&task(), &[], &[], |_| true, false), Plan::Terminal);

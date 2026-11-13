@@ -1,9 +1,9 @@
 # Adding a harness
 
-A *harness* is everything jeet knows about one coding agent. Claude Code's is
+A *harness* is everything plete knows about one coding agent. Claude Code's is
 `src/harness/claude.rs`. Adding another (OpenCode, Goose, …) should take one
 self-contained PR: a module, a line in the registry, fixtures and tests. No
-other part of jeet should need to change, because the rest of jeet sees only
+other part of plete should need to change, because the rest of plete sees only
 the `Harness` trait (`src/harness/mod.rs`) and its neutral events.
 
 ## What to implement
@@ -11,7 +11,7 @@ the `Harness` trait (`src/harness/mod.rs`) and its neutral events.
 Create `src/harness/<name>.rs` with a unit struct that implements `Harness`,
 and add it to `HARNESSES` in `src/harness/mod.rs`. Only the first three
 methods are required. Every other method defaults to "not supported", and
-jeet does without that feature:
+plete does without that feature:
 
 | Method | What it is for | When it is unsupported |
 | --- | --- | --- |
@@ -20,34 +20,34 @@ jeet does without that feature:
 | `default_command` | the binary run when config.toml names no command | `None`: a command has to be configured |
 | `runs_program` | recognises `agent = "/path/to/bin"` without a `harness` key | the user sets `harness` |
 | `tested_version` | the latest version you tested; older ones get a warning | no version check |
-| `new_session_args(id, name)` | starts a session under an id jeet picks | no recorded sessions, no resume, no assistant |
+| `new_session_args(id, name)` | starts a session under an id plete picks | no recorded sessions, no resume, no assistant |
 | `resume_args(id)` | resumes a recorded session | as above |
 | `prompt_args(prompt)` | gives the interactive session its first prompt (after every other argument) | `task new --prompt` (the task is still made), and `task send` to an agent that is not running, fail with a clear message, also when the start would wait on a pause, stop or `max_live`, so nothing waits for a start that could not give it; a message held for a paused task whose agent runs waits for the resume to type it in, or, if the agent is gone by then, for the next delivery |
-| `hook_args(&HookSetup)` | installs jeet's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (pre-approved without a prompt, not a limit; for a task: `jeet worktree`, `jeet ls`, `jeet report`; for a manager, also the read-only jeet commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
-| `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). jeet writes it 0600 under `$JEET_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
-| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and `jeet manager new` refuses the harness, naming "deny rules" |
-| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); jeet presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `jeet task interrupt` refuses, and `jeet manager pause` says it could not interrupt the task and leaves its turn to end, after which it is handed nothing until resumed (with no hooks, what waited is then typed in, as `task send` would) |
+| `hook_args(&HookSetup)` | installs plete's hooks for this launch only, plus permission for the commands in `HookSetup::allow` (pre-approved without a prompt, not a limit; for a task: `plete worktree`, `plete ls`, `plete report`; for a manager, also the read-only plete commands and the commands of each capability it holds) and, when the harness enforces rules, refusal of the commands in `HookSetup::deny` (see [Deny rules](#deny-rules)) | no status, `task send` types straight in |
+| `hook_file(&HookSetup, path)` | `hook_args` read from a file instead: what to write at `path` and the arguments naming it (Claude Code: `--settings <path>`). plete writes it 0600 under `$PLETE_HOME/run/<task id>/`, outside the task, at each launch, so the hooks and rules cost the command line, which shares tmux's 16KB limit with the first prompt, only the path; a launch removes the files of the task's sessions no longer running, and the rest go with the task at archive and delete. A harness may have this without `hook_args`; the file is always `<session>.json`, whatever format it holds | `hook_args` on the command line |
+| `enforcement` | how far the harness enforces `HookSetup::deny`: `Enforcement::Rules` when its own permission rules refuse those commands (a `Sandbox` level waits for a confined placement, which is future work) | `None`: deny rules are dropped, a parented task launches with a warning that its agent is not stopped from force-pushing or merging, and `plete manager new` refuses the harness, naming "deny rules" |
+| `interrupt_keys` | the tmux keys that end the running turn and keep the session (Claude Code: `Escape`); plete presses them once, only while the agent is running or waiting on a prompt a hook reported since its launch (never at a startup prompt), and only when `has_draft` sees no unsent text (and, while waiting or while `in_dialog` says it shows a dialog of its own, no one is attached to the session, who may be typing into the prompt). A harness with these keys needs `hook_args` or `hook_file` too, or no hook ever reports and nothing is pressed, and `has_draft`, or the keys are pressed over what the user is typing | `None`: `plete task interrupt` refuses, and `plete manager pause` says it could not interrupt the task and leaves its turn to end, after which it is handed nothing until resumed (with no hooks, what waited is then typed in, as `task send` would) |
 | `in_dialog` | whether a status that reads as working is the agent showing the user a dialog of its own (Claude Code: a PreToolUse for `AskUserQuestion` or `ExitPlanMode`, which, with no hook for the answer, stays the status until the next tool call or the end of the turn), for `interrupt_keys` to leave alone while someone is attached | `false`: only a waiting status counts as a prompt |
 | `parse_hook(event, raw)` | turns a hook's stdin into a `HookEvent` | – |
-| `wake_hook` | whether the harness can have a wake channel: `hook_args`/`hook_file` then add a background session-start hook running `jeet inbox watch` when `HookSetup::wake` asks (see [The wake channel](#the-wake-channel)) | `false`: what is queued waits for `continue_output` at the turn's end, or is typed in once the agent is idle |
-| `wake_env` | reads, and removes from the environment, how the session whose hook runs `jeet inbox watch --harness <id>` takes messages from outside it (Claude Code: its messaging socket, token and process id), returning a `waiter::WakeEnv` with the harness's wire format | `None`: the watcher ends at once |
+| `wake_hook` | whether the harness can have a wake channel: `hook_args`/`hook_file` then add a background session-start hook running `plete inbox watch` when `HookSetup::wake` asks (see [The wake channel](#the-wake-channel)) | `false`: what is queued waits for `continue_output` at the turn's end, or is typed in once the agent is idle |
+| `wake_env` | reads, and removes from the environment, how the session whose hook runs `plete inbox watch --harness <id>` takes messages from outside it (Claude Code: its messaging socket, token and process id), returning a `waiter::WakeEnv` with the harness's wire format | `None`: the watcher ends at once |
 | `continue_output(reason)` | what a turn-end hook prints so the agent carries on with queued messages | queued messages are typed in once it is idle |
 | `session_context_output(context)` | what a session-start hook prints to add context (the assistant's summary, a manager's summary, a task's brief) | the assistant starts without its summary; a manager reads its `BRIEF.md`, as its `AGENTS.md` says |
-| `last_messages(dir, id, n)` | reads a session's last `n` messages and how its last turn ended (finished, interrupted, an API error, still running) from the agent's own record | `jeet task last` says the agent's record cannot be read |
-| `has_session`, `sessions`, `copy_sessions`, `latest_activity` | read the agent's own session store for a directory | sessions are only what jeet recorded; `jeet import` copies none |
+| `last_messages(dir, id, n)` | reads a session's last `n` messages and how its last turn ended (finished, interrupted, an API error, still running) from the agent's own record | `plete task last` says the agent's record cannot be read |
+| `has_session`, `sessions`, `copy_sessions`, `latest_activity` | read the agent's own session store for a directory | sessions are only what plete recorded; `plete import` copies none |
 | `startup_prompt(pane)`, `accept_trust(pane)` | spot a prompt that blocks the agent before its first hook, and accept a trust prompt one key at a time | the task shows `needs input – startup prompt?` after 15s |
-| `instructions_file`, `instructions_import` | the file the agent reads its instructions from, and, when that is not `AGENTS.md`, what jeet writes in it to import `AGENTS.md` (Claude Code: `CLAUDE.md` holding `@AGENTS.md`) | none of jeet's instruction files is written for it |
+| `instructions_file`, `instructions_import` | the file the agent reads its instructions from, and, when that is not `AGENTS.md`, what plete writes in it to import `AGENTS.md` (Claude Code: `CLAUDE.md` holding `@AGENTS.md`) | none of plete's instruction files is written for it |
 
 A manager needs five of these: `new_session_args` and `resume_args`
-(jeet installs hooks, deny rules and the first prompt only on a recorded
+(plete installs hooks, deny rules and the first prompt only on a recorded
 session), `hook_args` or `hook_file`, `continue_output`, `interrupt_keys`
 and `Enforcement::Rules`. Making one
-on a harness without them all (`jeet manager new`) is refused, naming each that is missing ("recorded sessions", "hook
+on a harness without them all (`plete manager new`) is refused, naming each that is missing ("recorded sessions", "hook
 events", "continue-turn output", "interrupt_keys", "deny rules"), and so
 is starting one made before the configured harness changed; a worker
 starts without them. A manager is started with a first prompt, so its
 harness needs `prompt_args` too; without it the manager is made, and
-`jeet manager new` says its agent did not start. Only a worker with a parent is warned, and
+`plete manager new` says its agent did not start. Only a worker with a parent is warned, and
 only when the harness has no deny rules.
 
 `AgentSpec::supports_sessions` and `AgentSpec::has_hooks` (`hook_args` or
@@ -56,11 +56,11 @@ ones included.
 
 ### Hooks
 
-jeet's hook command is `jeet task-hook --task <id> <Event>`, with the event's
-payload on stdin; `<id>` is `HookSetup::task_id`, the task jeet launched the
+plete's hook command is `plete task-hook --task <id> <Event>`, with the event's
+payload on stdin; `<id>` is `HookSetup::task_id`, the task plete launched the
 agent for, and only a hook that names it, and runs as a descendant of the
-process jeet starts in the task's pane, reports to the task's parent (jeet
-identifies callers by process ancestry; the agent's own `jeet` commands are
+process plete starts in the task's pane, reports to the task's parent (plete
+identifies callers by process ancestry; the agent's own `plete` commands are
 held to the same, so a harness that runs hooks or shell tools from a
 separate daemon gets status but no reports, and gated commands refused). For
 any harness except Claude Code, add `--harness <id>` so that `task-hook`
@@ -70,7 +70,7 @@ must print nothing on stdout except the outputs above, and always exits 0.
 
 If the agent can take hooks only from a file, not a flag or an environment
 variable, implement `hook_file` instead of `hook_args`. If it cannot start
-a session under an id jeet picks, jeet has to learn the id from the first
+a session under an id plete picks, plete has to learn the id from the first
 hook instead of recording it before launch. That needs a change to the
 trait, so raise it in the PR.
 
@@ -80,7 +80,7 @@ trait, so raise it in the PR.
 the status file), the `session_id`, the session's `cwd` (used to find the
 task), its `transcript` file when the payload names one (where the wake
 channel looks for what it posted), and a `kind`. Map each event the agent sends to the `EventKind` that
-describes it, and use `None` for events jeet does not use:
+describes it, and use `None` for events plete does not use:
 
 | `EventKind` | Meaning | Status shown | Claude Code event |
 | --- | --- | --- | --- |
@@ -110,17 +110,17 @@ the user when it does not.
 
 For a task with a parent (one the assistant made), some events also become
 `status` reports to the parent: `NeedsInput` (once until the prompt is
-answered), `Ended` unless `cleared` or the task was stopped (`jeet manager
+answered), `Ended` unless `cleared` or the task was stopped (`plete manager
 stop`), and `Idle` for longer than `[managers]
-idle_report_mins`, which `jeet watch` and the assistant's own Stop hook look
+idle_report_mins`, which `plete watch` and the assistant's own Stop hook look
 for. A task with a budget is charged from its own hooks (attributed, as
 these reports are): a turn for each `Stopped`, and the time from the first
 `Working` or `NeedsInput` of a busy spell to the `Stopped`, `Ended` or
 `Idle` that closes it (the status file keeps when the spell began, and
-`jeet watch` charges a long one as it goes, while its agent's pane is
-alive: an agent that died with no `Ended` is charged no more). A turn jeet
-ends with `interrupt_keys` (`jeet task interrupt`, `jeet manager pause`) is
-charged, while its agent's pane is alive, and its status set idle, by jeet
+`plete watch` charges a long one as it goes, while its agent's pane is
+alive: an agent that died with no `Ended` is charged no more). A turn plete
+ends with `interrupt_keys` (`plete task interrupt`, `plete manager pause`) is
+charged, while its agent's pane is alive, and its status set idle, by plete
 itself; one the user interrupts
 stays charged until the harness's `Idle` or next `Stopped`, so a harness
 that maps no `Idle` charges it until its next turn ends. A harness
@@ -128,46 +128,46 @@ with no `Stopped` event is charged no turns. A task that is paused
 or stopped, or that its turn's charge used its budget up, is handed nothing
 at `Stopped` or `Idle`: no `continue_output` is printed and the queue stays
 in its inbox. An `Ended` that is not `cleared` frees a slot under `[managers]
-max_live`: when a start waits on it, the hook leaves a detached `jeet manager
+max_live`: when a start waits on it, the hook leaves a detached `plete manager
 drain --after <task>` behind, which waits a few seconds for the task's pane
 to go and then starts what waits. On a harness with no hooks, or one that
 maps no `Ended`, nothing drains when its agent exits: a queued start waits
-for the next `jeet watch` poll, TUI refresh, `jeet manager stop` or
-`resume`, or a `jeet manager drain`. The same task's `SessionStarted` prints its brief through
+for the next `plete watch` poll, TUI refresh, `plete manager stop` or
+`resume`, or a `plete manager drain`. The same task's `SessionStarted` prints its brief through
 `session_context_output` (a manager's: its summary, brief included, and
 what is queued for it, handed over unless it is held); a harness that
 returns `None` there gets none.
 Both need the hook to carry `--task <id>` (`hook_args` or `hook_file`) and to run as a
-descendant of the process jeet starts in the task's pane: jeet reports and
-briefs only when `--task` names the task found and jeet confirms, by walking
+descendant of the process plete starts in the task's pane: plete reports and
+briefs only when `--task` names the task found and plete confirms, by walking
 the hook's process ancestry up to that recorded process, that it is that
 task's agent. The environment is only a hint. Status needs only `--task` or
 the cwd, so a hook run by a plugin host, daemon or server outside the
 pane's process tree still shows status, and idle reports (swept from
 status) still go out, but it silently never sends the other reports or
 briefs; run hooks as children of the agent. The same holds for the agent's
-shell tool: its `jeet report`, `jeet worktree add` and other gated jeet
-commands are refused ("jeet can't confirm this is task X's agent") unless
+shell tool: its `plete report`, `plete worktree add` and other gated plete
+commands are refused ("plete can't confirm this is task X's agent") unless
 they run under the pane's process. So a harness that runs shell tools in a
 sandbox with its own process ids, as Claude Code's sandbox does on Linux
-(bubblewrap with a pid namespace), must run `jeet` outside it. jeet also
-writes under `$JEET_HOME` (its index, the repository store, task
+(bubblewrap with a pid namespace), must run `plete` outside it. plete also
+writes under `$PLETE_HOME` (its index, the repository store, task
 directories), which a sandbox confining writes to the working directory
-refuses on any platform. So Claude Code's settings from jeet list `jeet` in
+refuses on any platform. So Claude Code's settings from plete list `plete` in
 `sandbox.excludedCommands`, for every launch. The cost, when the user turns
-the sandbox on: jeet runs unconfined, and Claude Code decides per Bash
-command, so a command that chains other commands with `jeet` may run them
+the sandbox on: plete runs unconfined, and Claude Code decides per Bash
+command, so a command that chains other commands with `plete` may run them
 unconfined too. Only what the harness knows (the `clear` reason, say) belongs in its module:
-the reporting itself is jeet's.
+the reporting itself is plete's.
 
 ### The wake channel
 
 Optional. A harness whose agent can take a message from outside its
-session while it runs (Claude Code's messaging socket) can have jeet hand
+session while it runs (Claude Code's messaging socket) can have plete hand
 it what is queued for it as soon as it is queued, rather than at its turn's
 end or by typing. `wake_hook` returns `true`, and when `HookSetup::wake` is
 set (from `wake_hook` and `[harness] wake`, on by default), the hooks install
-a second session-start hook that runs `jeet inbox watch --task <id>` in the
+a second session-start hook that runs `plete inbox watch --task <id>` in the
 background for the session's life (Claude Code: `"async": true` with a
 `timeout` of `WAKE_TIMEOUT_SECS`). The watcher must run as a descendant of
 the agent's process, prints nothing and always exits 0. It needs, all from
@@ -188,7 +188,7 @@ the harness's module:
   ends with the session.
 
 For any harness except Claude Code, add `--harness <id>` to the command, as
-for `task-hook`. The user's own `jeet task send` to an idle agent is still
+for `task-hook`. The user's own `plete task send` to an idle agent is still
 typed in; everything else goes through the channel and arrives as the
 harness frames a message from outside the session (Claude Code: from
 another session, which cannot approve anything). See
@@ -196,7 +196,7 @@ another session, which cannot approve anything). See
 
 ## Deny rules
 
-`HookSetup::deny` lists commands the agent must not run. By default jeet
+`HookSetup::deny` lists commands the agent must not run. By default plete
 fills it only for a task with a parent, and for a review's agent, with the
 commands of each capability whoever asked does not hold (the last item
 below). The rest of the list below is opt-in: with `[permissions] guards =
@@ -207,19 +207,19 @@ commenting on or reviewing the pull request through the API. `[permissions.<role
 deny` adds rules of your own.
 The legacy, deprecated `[review] command` of a review the assistant asked
 for is the exception (the review agent that replaces it is launched like
-any other, deny rules and all): it is the user's own command, run by `jeet
+any other, deny rules and all): it is the user's own command, run by `plete
 review-job` rather than launched through a harness, so it gets no deny rules,
-and `jeet review` warns when it starts one.
+and `plete review` warns when it starts one.
 The list under `guards` is:
 
 - force pushes (`--force*`, `-f`, a `+` refspec, `--mirror`), `--all`
   and its git 2.46 synonym `--branches`, and pushes naming a default
-  branch: `main`, `master` and the default branches of the repos jeet has
+  branch: `main`, `master` and the default branches of the repos plete has
   indexed, up to eight in all, the ones most repos use first, as a
   destination (`git push *
   main`, `*:main`, and `*heads/main`, which covers `refs/heads/main` and
   `heads/main` with or without a source);
-- merging outside `jeet pr merge`: `gh pr merge`, the REST merge endpoints
+- merging outside `plete pr merge`: `gh pr merge`, the REST merge endpoints
   (`pulls/*/merge`, and `repos/*/merges`, which merges branches) through
   `gh api` or `curl`, matched where the path ends there (followed by a
   space or nothing, so `repos/acme/mergesort/pulls` or
@@ -232,7 +232,7 @@ The list under `guards` is:
   hold: `gh pr comment` and `gh issue comment` without `pr.comment`,
   `gh pr review` without `pr.review`. A held capability's commands are
   not denied, but still go to the user's permission prompt (a worker's
-  allow list stays `jeet worktree`, `jeet ls` and `jeet report`; a
+  allow list stays `plete worktree`, `plete ls` and `plete report`; a
   manager, started with nobody at its pane, has the commands of what it
   holds pre-approved, read at each start). The assistant is never denied these: it holds them by
   default, and at worst the user approves them at the prompt. Only these
@@ -242,13 +242,13 @@ The list under `guards` is:
   and `git switch -c`: its worktrees are read-only, and workers make the
   changes. `git branch` is not denied, so `git branch -a` still reads.
 
-A repo's default branch is what jeet recorded when it cloned or imported
+A repo's default branch is what plete recorded when it cloned or imported
 it: `origin/HEAD`, or, without one, the branch checked out then, which may
 be a feature branch. That name is then denied as a push destination in
 every repo, to every agent under `guards`; a push the agent
 cannot make, say so, and push it yourself.
 
-`jeet pr merge` runs `gh` from jeet's own process, so the merge denies do
+`plete pr merge` runs `gh` from plete's own process, so the merge denies do
 not touch it.
 
 **Pattern syntax.** Each entry is neutral, not any harness's own rule
@@ -264,7 +264,7 @@ and `git push * main` becomes `Bash(git push * main)` and
 `Bash(git push * main *)`: with only the second, `git push origin main`
 would get through. Allow rules keep the `Bash(<prefix>:*)` form.
 Claude Code checks deny rules from `--settings` before any allow rule from
-any scope, and a denied command cannot be approved at the prompt. jeet
+any scope, and a denied command cannot be approved at the prompt. plete
 leaves the `deny` key out when the list is empty.
 
 Patterns are anchored at the start of the command on purpose: an
@@ -350,15 +350,15 @@ for Claude Code 2.1.296):
   no prompt) into `tests/fixtures/panes/<id>/`. Test that `accept_trust` never
   returns a confirming key unless the accept option is the one selected.
 - **Launch arguments**: test each `*_args` method, and that the hook arguments
-  install every event with the jeet binary path shell-quoted (and, with
+  install every event with the plete binary path shell-quoted (and, with
   `wake_hook`, the watcher only when `HookSetup::wake` is set), render
   `HookSetup::deny` in the harness's syntax, and leave deny rules out when
   the list is empty. Check by hand that the keys `interrupt_keys` returns
   end a turn in the real agent.
-- **Integration**: `tests/integration.rs` runs jeet against a stub `tmux`
+- **Integration**: `tests/integration.rs` runs plete against a stub `tmux`
   that records each call (`stub_tmux`, `calls_of`) and feeds hooks through
-  `task-hook` (`StoreLab::hook`). Add a test that `jeet task open` with
-  `JEET_AGENT=<your binary>` launches the arguments you expect.
+  `task-hook` (`StoreLab::hook`). Add a test that `plete task open` with
+  `PLETE_AGENT=<your binary>` launches the arguments you expect.
 
 Then run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`.
 Record the version you tested in `tested_version`, and add the harness to the

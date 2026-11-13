@@ -25,8 +25,8 @@ The key rules:
   of thing. Everything tasks already have (tmux session, status hooks,
   inbox, `task send`, archive) works for managers unchanged.
 - **Authority flows down, information flows up.** A child's allow-list is
-  always a subset of its parent's, checked by jeet at every call. Reports go
-  up as fenced, untrusted messages. Only jeet, on the root's behalf, talks to
+  always a subset of its parent's, checked by plete at every call. Reports go
+  up as fenced, untrusted messages. Only plete, on the root's behalf, talks to
   the user.
 - **A manager acts only on its own subtree.**
 - **Small first step.** Phase 1 adds a parent link and reporting up, with the
@@ -38,9 +38,9 @@ The key rules:
 
 `tasks` already has a `kind`: `work`, `review` and `assistant` (one row,
 enforced by `tasks_one_assistant`). The assistant is a task row with a special
-home (`~/.jeet/assistant`), several sessions, manager files (`AGENTS.md` role,
+home (`~/.plete/assistant`), several sessions, manager files (`AGENTS.md` role,
 `notes/worklog.md`, `todo.md`, `actions.log`), a fenced inbox, and a gate in
-`permissions.rs` that is switched on by `JEET_ASSISTANT=1`.
+`permissions.rs` that is switched on by `PLETE_ASSISTANT=1`.
 
 ### Decision: one concept, two roles
 
@@ -53,7 +53,7 @@ A node in the tree is a **task row**. Its `kind` gives its role:
 | `assistant` | **root manager** | read-only only | yes | yes |
 
 **Naming (decided):** the code and the data model say *manager* (`kind =
-'manager'`, `src/manager/`, `jeet manager …`, `[managers]`, `manager.*`
+'manager'`, `src/manager/`, `plete manager …`, `[managers]`, `manager.*`
 capabilities), because "agent" already means a task's coding agent
 (`agent.rs`, `AgentSpec`, `agent = "claude"`). UI text may say *agent* where
 that is unambiguous: the **agents pane**, "needs you" rows.
@@ -71,16 +71,16 @@ Why one concept rather than two:
   tasks list are all keyed on task rows. A second table would duplicate or
   abstract all of it.
 - #23's trust watcher already scopes by "a task directory under
-  `~/.jeet/tasks`", which manager homes satisfy (but see 5.7).
+  `~/.plete/tasks`", which manager homes satisfy (but see 5.7).
 - The assistant is already a task row; this generalises what is there.
 
 **Managers hold read-only worktrees only (decided).** A manager may check a
 repository out to read it while planning, but never to change it. Workers do
 the changing, so code is changed in exactly one place and a manager's context
-stays small. For a manager, `jeet worktree add`:
+stays small. For a manager, `plete worktree add`:
 - always detaches at the default branch, and refuses `--branch`;
 - records the worktree as read-only, so the harness gets deny rules for
-  writes under it (#32) and jeet refuses to commit or push from it
+  writes under it (#32) and plete refuses to commit or push from it
   (`git.push` never applies there).
 
 Before #32 lands, read-only is cooperative, like the rest of phase 1
@@ -88,7 +88,7 @@ Before #32 lands, read-only is cooperative, like the rest of phase 1
 
 **Phase 2 (as built).** `tasks::add_worktree` refuses `--branch` for a
 manager ("a manager holds read-only worktrees; delegate the change to a
-worker (`jeet task new`)"), detaches at `origin/<default>` and records
+worker (`plete task new`)"), detaches at `origin/<default>` and records
 `read_only`; `reconcile` adopts a worktree a manager made itself as
 read-only and warns, through `task ls` and `worktree ls`, when a read-only
 worktree is on a branch; `worktree ls` shows "(read-only)". A manager's deny
@@ -101,16 +101,16 @@ lint that keeps an honest manager from writing code, not a guarantee (5.7).
 A manager's home is a task directory, so every task path keeps working:
 
 ```
-~/.jeet/tasks/backend/            # kind = 'manager'
-  .jeet/task-id
-  .jeet/inbox.jsonl               # queued messages and reports, as today
-  .jeet/status/<session>.json     # hooks, as today
+~/.plete/tasks/backend/            # kind = 'manager'
+  .plete/task-id
+  .plete/inbox.jsonl               # queued messages and reports, as today
+  .plete/status/<session>.json     # hooks, as today
   AGENTS.md  CLAUDE.md            # role (manager template) + #22's shim
-  BRIEF.md                        # written by jeet from the parent's brief; read-only
+  BRIEF.md                        # written by plete from the parent's brief; read-only
   notes/worklog.md
-  todo.md                         # edited by hand; `jeet todo` stays the assistant's (P21)
+  todo.md                         # edited by hand; `plete todo` stays the assistant's (P21)
   actions.log
-  .claude/skills/jeet-manager/SKILL.md
+  .claude/skills/plete-manager/SKILL.md
   api/                            # optional read-only worktree, detached
 ```
 
@@ -193,10 +193,10 @@ CREATE INDEX task_reports_to ON task_reports(to_id, answer);
 ```
 
 `ON DELETE RESTRICT` on `parent_id` means the database refuses to orphan a
-child. jeet removes subtrees leaves first.
+child. plete removes subtrees leaves first.
 
 The inbox stays the delivery mechanism, and `task_reports` is the record: the
-pane, a manager's session context and `jeet report ls` read it, and they need
+pane, a manager's session context and `plete report ls` read it, and they need
 it to survive a hand-over that empties the inbox.
 
 **Phase 1 (as built, D0).** v4 is additive only: `ALTER TABLE tasks ADD
@@ -238,7 +238,7 @@ child made after the migration is left without it.
 | create | none; it makes its own |
 | **pause** | the whole subtree pauses (5.4) |
 | **stop** | every coding agent in the subtree is ended; rows and work kept |
-| **archive** | refused while it has active children, unless `--recursive`. With it, jeet lists everything the subtree would lose (the existing per-task archive check, for each worker), asks once, then archives leaves first |
+| **archive** | refused while it has active children, unless `--recursive`. With it, plete lists everything the subtree would lose (the existing per-task archive check, for each worker), asks once, then archives leaves first |
 | **unarchive** | only itself; `--recursive` brings the subtree back. A child cannot be unarchived under an archived parent |
 | **delete** | refused while it has children (active or archived), unless `--recursive` (same listing, leaves first) or `--reparent` (children move to the grandparent, each grant in the moved subtrees cut to what it may use there) |
 
@@ -264,7 +264,7 @@ parent, came with phase 4 (H21-H30).
 
 ```bash
 # The assistant makes a manager for an area of work
-jeet manager new backend \
+plete manager new backend \
   --goal "Ship the v2 auth API" \
   --done "PRs open for api#120 and web#88, CI green, summary in worklog" \
   --brief-file backend-brief.md \
@@ -273,29 +273,29 @@ jeet manager new backend \
   --max-children 4
 
 # The user can do the same at a terminal; the manager is parented to the assistant
-jeet manager new frontend --goal "Migrate web to the new design system" --budget 4h
+plete manager new frontend --goal "Migrate web to the new design system" --budget 4h
 
 # The manager delegates a worker under itself (the parent defaults to the caller)
-jeet task new fix-token-refresh --repo api \
+plete task new fix-token-refresh --repo api \
   --prompt "Fix token refresh races; add a test" \
   --done "PR open against api main with a passing test" \
   --budget 2h
 
 # Or places it lower in its own subtree, under a manager below it named by slug
-jeet task new api-docs --parent docs --prompt "…"
+plete task new api-docs --parent docs --prompt "…"
 
 # Read the tree
-jeet manager ls                  # the caller's subtree (the whole tree for the user)
-jeet manager ls --json            # the same, each task with its parent and depth
-jeet manager show backend         # brief, grant, effective allow, budget, children, open reports
+plete manager ls                  # the caller's subtree (the whole tree for the user)
+plete manager ls --json            # the same, each task with its parent and depth
+plete manager show backend         # brief, grant, effective allow, budget, children, open reports
 ```
 
-- `--parent` defaults to the caller: the node whose `JEET_TASK_ID` jeet sees.
+- `--parent` defaults to the caller: the node whose `PLETE_TASK_ID` plete sees.
   A parent outside the caller's subtree is refused.
-- **The user** may make a manager directly: `jeet manager new` at a terminal,
+- **The user** may make a manager directly: `plete manager new` at a terminal,
   outside any agent, is parented to the assistant (or to any `--parent` the
   user names). Its grant is still capped by the assistant's effective list,
-  so the tree has one root and one place to narrow everything. `jeet task new`
+  so the tree has one root and one place to narrow everything. `plete task new`
   at a terminal stays top level, as today, unless the user passes `--parent`.
 - `--allow` defaults to **none** beyond the free commands. A capability the
   parent's effective list lacks is refused with the missing name, not dropped
@@ -303,7 +303,7 @@ jeet manager show backend         # brief, grant, effective allow, budget, child
 - `--budget` takes `<n>h`, `<n>m` and `<n>turns`, defaulting to
   `[managers] default_budget` (4h). A child's budget is capped at what remains
   of its parent's. There are no cost budgets until #26 (5.3).
-- `jeet task new --prompt` keeps working as today. `--goal`/`--done` add a
+- `plete task new --prompt` keeps working as today. `--goal`/`--done` add a
   brief row for any parented task.
 
 **Phase 2 (as built).** `manager tree --json` is `manager ls --json` (P13).
@@ -321,22 +321,22 @@ the effective list with what cut each named capability it lacks, the
 budget's limits and use (a review job, with no hooks, is not counted), the
 run state with who set it and which task holds it, the children with their
 state and last report, and the open reports (P13). The brief is fenced as
-`<jeet-brief>`, unable to close or open a fence, and not marked untrusted:
+`<plete-brief>`, unable to close or open a fence, and not marked untrusted:
 the child still acts on it (P21).
 
 ### What the child sees
 
 At every session start (the `SessionStarted` → additional-context path that
-the assistant uses today, via #23), the child gets a block jeet writes:
+the assistant uses today, via #23), the child gets a block plete writes:
 
 ```
-<jeet-brief from="manager backend" path="assistant/backend">
+<plete-brief from="manager backend" path="assistant/backend">
 Goal: Fix token refresh races; add a test
 Done when: PR open against api main with a passing test
 Budget: 2h wall clock (0h40 used), no turn limit
 You may: worktree.add, report
-Report with `jeet report done|progress|blocked|question "…"`.
-</jeet-brief>
+Report with `plete report done|progress|blocked|question "…"`.
+</plete-brief>
 ```
 
 `BRIEF.md` holds the same, so a harness without context injection, or the
@@ -351,7 +351,7 @@ ask for what the parent itself could do.
 assistant's tasks get it without asking, the user's only when they pass it.
 `--goal`/`--done` need a resulting parent, and `--done` needs `--goal`. The
 brief is not a `BRIEF.md` (that is a manager file, phase 2): at each
-`SessionStarted`, `/clear` included, a parented task gets `<jeet-brief
+`SessionStarted`, `/clear` included, a parented task gets `<plete-brief
 from="the assistant" path="assistant/<slug>">` with Goal, Done when, `You
 may: <effective>, report` and how to report, through
 `session_context_output`. A harness without context injection gets no brief
@@ -359,13 +359,13 @@ may: <effective>, report` and how to report, through
 
 ## 4. Reporting
 
-### Up: `jeet report`
+### Up: `plete report`
 
 ```bash
-jeet report progress "token refresh fixed; writing the test"
-jeet report done "api#131 open, CI green" --link https://github.com/acme/api/pull/131
-jeet report blocked "api tests need a Postgres 16 container; none available"
-jeet report question "Keep the v1 refresh endpoint for one release, or drop it?" \
+plete report progress "token refresh fixed; writing the test"
+plete report done "api#131 open, CI green" --link https://github.com/acme/api/pull/131
+plete report blocked "api tests need a Postgres 16 container; none available"
+plete report question "Keep the v1 refresh endpoint for one release, or drop it?" \
   --option keep --option drop
 ```
 
@@ -376,13 +376,13 @@ jeet report question "Keep the v1 refresh endpoint for one release, or drop it?"
    idle/busy/not-running rules, fenced:
 
 ```
-<jeet-report id="42" from="task fix-token-refresh" path="assistant/backend/fix-token-refresh"
+<plete-report id="42" from="task fix-token-refresh" path="assistant/backend/fix-token-refresh"
              kind="done" untrusted="true">
 api#131 open, CI green
-</jeet-report>
+</plete-report>
 ```
 
-`from` and `path` come from the row jeet resolved the caller to, not from the
+`from` and `path` come from the row plete resolved the caller to, not from the
 text. The body is cleaned by `fence_message`'s rules. A manager relays a
 child's report upward by writing its own report, never by forwarding the
 child's text as its own. So every hop is fenced once, with its true origin.
@@ -396,40 +396,40 @@ change:
 | Child event | Parent gets |
 |---|---|
 | `Stopped`, after a turn with no report since the last hand-over | nothing (avoids chatter); it counts one turn toward the budget |
-| `Idle` for longer than `[managers] idle_report_mins` (10), with no `done` | `status: idle 10m; last report #N (kind)` (jeet's words only, not the task's text) |
+| `Idle` for longer than `[managers] idle_report_mins` (10), with no `done` | `status: idle 10m; last report #N (kind)` (plete's words only, not the task's text) |
 | `NeedsInput` (a permission prompt, or #23's `trust folder`) | `status: waiting on a prompt only the user can answer`, which also rolls up as **needs you** (no agent may type into a prompt; `messages.rs` already refuses to) |
 | `Ended` without `done` | `status: ended without reporting done` |
 | budget at 80% / 100% | `status: budget …` (5.3) |
 
 ### Questions and the user
 
-Only the **root** talks to the user, and in practice only jeet does it, on the
+Only the **root** talks to the user, and in practice only plete does it, on the
 root's behalf:
 
-1. A child sends `jeet report question`. Its parent answers it if the
+1. A child sends `plete report question`. Its parent answers it if the
    question is within the parent's own brief:
-   `jeet report answer 42 "drop it"`. jeet delivers the answer to the asker
-   as `<jeet-answer to="42" from="manager backend">`.
-2. Otherwise the parent escalates: `jeet report escalate 42`. `to_id`
+   `plete report answer 42 "drop it"`. plete delivers the answer to the asker
+   as `<plete-answer to="42" from="manager backend">`.
+2. Otherwise the parent escalates: `plete report escalate 42`. `to_id`
    moves to the grandparent, and the original row keeps its origin. There
    is no `--note`: an escalating manager that wants to add context sends
-   its own `jeet report progress "re #42: …"` (H6).
-   The root's only escalation is to the user: `jeet report escalate 42` at the
+   its own `plete report progress "re #42: …"` (H6).
+   The root's only escalation is to the user: `plete report escalate 42` at the
    root sets `needs_user = 1`.
 3. With `needs_user = 1`, every ancestor shows **needs you** in the pane, and
-   jeet sends one desktop notification (via `notify.rs`, as `jeet watch` does
+   plete sends one desktop notification (via `notify.rs`, as `plete watch` does
    today).
-4. The user answers in the pane (`a`) or with `jeet report answer 42 "drop
+4. The user answers in the pane (`a`) or with `plete report answer 42 "drop
    it"` at a terminal, outside any agent. That answer goes **straight to the
-   asker**, fenced as `<jeet-answer from="user">`. It is the one message an
-   agent may treat as the user's, because jeet only stamps it when the
-   command ran at a terminal with no `JEET_TASK_ID`. **Each manager on the
-   path gets a copy (decided)**, `<jeet-answer to="42" from="user"
+   asker**, fenced as `<plete-answer from="user">`. It is the one message an
+   agent may treat as the user's, because plete only stamps it when the
+   command ran at a terminal with no `PLETE_TASK_ID`. **Each manager on the
+   path gets a copy (decided)**, `<plete-answer to="42" from="user"
    copy="true">`, so it can update its own plan. A copy is for information:
    the asker acts on the answer, and a manager that disagrees reports up to
    the user rather than countermanding it.
 
-Managers and workers below the root lose `jeet notify`. For them it becomes a report.
+Managers and workers below the root lose `plete notify`. For them it becomes a report.
 
 Until the agents pane reads `needs_user` (the TUI half of phase 4, still to
 come), the only *needs you* it shows (§6) is a prompt: one in the
@@ -440,7 +440,7 @@ assistant's own pane, or one rolled up from below.
   escalated like a question). It is *open* while it is unanswered and is
   the asker's last `done`, `blocked` or `question` report: a task that
   reports done, is blocked or asks again has moved on and the old ask
-  closes. A `progress` report ("still waiting on #42") and jeet's own
+  closes. A `progress` report ("still waiting on #42") and plete's own
   `status` do not close it. An answer closes it at once (H3), and so does
   archiving the asker.
 - Only the holder (`to_id`) answers or escalates, and never once it has
@@ -456,33 +456,33 @@ assistant's own pane, or one rolled up from below.
 - `answered_by` is the answerer's task id, or `user` (§2); a deleted
   answerer shows as "a deleted task" (H9).
 - The needs-you notification is sent whatever `[assistant] notify` says:
-  that flag mutes the assistant's own `jeet notify` (H11).
-- `jeet report ls` lists the open asks the caller holds; for the user, at
+  that flag mutes the assistant's own `plete notify` (H11).
+- `plete report ls` lists the open asks the caller holds; for the user, at
   their own terminal, every one in the tree, those with the user first
   (H12).
 - An answer is kept even when its delivery fails, and is not sent again
   (H10).
 
-**Phase 1 (as built).** `jeet report` takes no `--link`/`--option` (D18).
+**Phase 1 (as built).** `plete report` takes no `--link`/`--option` (D18).
 A report holds at most 2000 bytes once cleaned, so even fenced it fits a
 message (D16). The row is kept when delivery fails, and the command says so
 and exits 0 (D17). `progress` and `status` reports never start an assistant
 session: typed into an idle one, queued for a busy one, held otherwise (D4).
-No event fires at N minutes idle and jeet has no daemon, so the idle report
-is a sweep from `jeet watch` and the assistant's own Stop hook, debounced in
+No event fires at N minutes idle and plete has no daemon, so the idle report
+is a sweep from `plete watch` and the assistant's own Stop hook, debounced in
 the index (D9). An end by `/clear` is not reported (D10), nor one of a task
 archived or deleted; the race with `runtime::stop` before archiving is
-accepted (D21). A hook reports only when `$JEET_TASK_ID` is the task it
+accepted (D21). A hook reports only when `$PLETE_TASK_ID` is the task it
 located, so a worker in its sibling's directory reports as neither (D14).
 
 ## 5. Permissions and safety
 
 ### 5.1 Allow-lists
 
-- **The caller's identity** is the task whose pane or review job jeet
+- **The caller's identity** is the task whose pane or review job plete
   launched, found by walking the caller's process ancestry (5.7, #33).
-  `JEET_TASK_ID`, which jeet sets in each node's tmux environment, and the
-  root's `JEET_ASSISTANT=1` are hints that must agree with it.
+  `PLETE_TASK_ID`, which plete sets in each node's tmux environment, and the
+  root's `PLETE_ASSISTANT=1` are hints that must agree with it.
   `permissions::authorize` changes from "is assistant mode on" to "which
   node is calling".
 - **The effective allow-list** of a node is
@@ -490,15 +490,15 @@ located, so a worker in its sibling's directory reports as neither (D14).
   It is computed on every check, so removing a capability from a parent (or
   from config.toml) removes it from the whole subtree at once. There is no
   copy to drift.
-- Granting checks the subset at creation and at `jeet manager grant`.
+- Granting checks the subset at creation and at `plete manager grant`.
   Escalating privilege is impossible by construction: no command writes a
   grant outside `effective(caller)`.
 - **Scope.** Every mutating command that names a task (`task send`,
   `archive`, `delete`, `manager stop`, …) is refused unless the target is a
   strict descendant of the caller. The only way to address anything else is
-  `jeet report`, which only goes to the parent.
+  `plete report`, which only goes to the parent.
 - **No sideways messages.** Siblings, cousins and other subtrees cannot
-  message each other: `jeet task send` to any node that is not a descendant is
+  message each other: `plete task send` to any node that is not a descendant is
   refused. Anything two siblings need to share goes up to their common parent
   in a report, and the parent decides what to send down.
 - **Workers with a parent are gated too (decided).** Top-level tasks the user
@@ -506,8 +506,8 @@ located, so a worker in its sibling's directory reports as neither (D14).
   `worktree.add` plus `report`, from phase 1.
 - **Held capabilities.** `pr.merge`, `pr.comment`, `pr.review` and
   `task.delete` are never part of a default grant. They stay with the root
-  unless a parent that holds one names it in `--allow` (or `jeet manager
-  grant`) for a child. jeet logs each such grant to the granter's
+  unless a parent that holds one names it in `--allow` (or `plete manager
+  grant`) for a child. plete logs each such grant to the granter's
   `actions.log` and notifies the user.
 - **New capabilities:** `manager.create`, `manager.stop`, `manager.grant` and
   `git.push` (deferred, P7). `pr.merge` comes from #25 (below). `bash_allow` emits each
@@ -520,7 +520,7 @@ check, and empty when its parent is not the assistant (D2); `report` is free,
 not a capability (D7). A Node's scope is itself: `worktree add` resolves its
 target the way the command does and compares ids (D3). Nodes lose `notify`,
 `todo` and `review-job` (D6). Identity: a task with a parent named by
-`$JEET_TASK_ID` is a Node even under `JEET_ASSISTANT=1`; otherwise the
+`$PLETE_TASK_ID` is a Node even under `PLETE_ASSISTANT=1`; otherwise the
 assistant is the root and anyone else the user; the working directory never
 decides, and an index error fails closed (D13). A user's shell inside a
 worker's tmux session inherits its id and is gated as it (D23).
@@ -546,7 +546,7 @@ A `held` capability in `worker_default` or `manager_default` is a config
 error. Left unset, `worker_default` is the built-in `["worktree.add"]` less
 whatever `held` names, so holding `worktree.add` needs no second key.
 
-`max_live` is checked when jeet starts an agent (`task new --prompt`,
+`max_live` is checked when plete starts an agent (`task new --prompt`,
 `task open`, a message to a stopped agent). Over the limit, the start is
 queued: the row is made, its first prompt waits in its inbox, and the parent
 is told `status: queued on [managers] max_live, 8/8 live`. It starts when a
@@ -563,18 +563,18 @@ toward no budget above it, only its own, which `[review] time` and `turns`
   from status files.
 - **Turns:** one per `Stopped` event.
 - **Cost: none for now (decided).** No harness reports usage yet. Cost
-  budgets wait for #26 (a `usage()` on the #23 trait). Until then jeet does
+  budgets wait for #26 (a `usage()` on the #23 trait). Until then plete does
   not accept or show them.
 
 A child's spend counts toward every ancestor. At 80% the node and its parent
-get a `status` report. At 100% jeet **pauses** the node's subtree and reports
-`blocked: budget`. The parent can `jeet manager budget fix-x +1h` within its
-own remaining budget, or stop it. (`jeet manager budget` works on any
+get a `status` report. At 100% plete **pauses** the node's subtree and reports
+`blocked: budget`. The parent can `plete manager budget fix-x +1h` within its
+own remaining budget, or stop it. (`plete manager budget` works on any
 descendant, workers included.)
 
 **Phase 2 (as built).** Time is busy time only, while the agent runs or
 waits on a prompt (P19), not while its pane is merely alive: an idle
-manager waiting on reports spends nothing. At 100% jeet pauses the node and
+manager waiting on reports spends nothing. At 100% plete pauses the node and
 each ancestor whose own subtree is at or over its limit, not the subtree:
 running descendants finish their turn and get nothing new (P16). A review
 job runs no hooks, so nothing is charged against it.
@@ -590,15 +590,15 @@ it a few seconds (K13).
 ### 5.4 Stopping a runaway subtree
 
 ```bash
-jeet manager pause backend    # subtree: interrupt each running turn, set run_state = 'paused'
-jeet manager resume backend
-jeet manager stop backend     # subtree: end every tmux session, run_state = 'stopped'
-jeet manager stop --all       # the user's panic button: everything below the root
+plete manager pause backend    # subtree: interrupt each running turn, set run_state = 'paused'
+plete manager resume backend
+plete manager stop backend     # subtree: end every tmux session, run_state = 'stopped'
+plete manager stop --all       # the user's panic button: everything below the root
 ```
 
 `paused` means: `messages::deliver` queues instead of typing, nothing is
 started, and the harness's `interrupt_keys` (#32; Esc for Claude Code) end the
-current turn. jeet presses them once, and only while the agent is running or
+current turn. plete presses them once, and only while the agent is running or
 waiting on a prompt: in a waiting agent Esc refuses the pending tool call and
 ends the turn, while at an idle prompt it would rewind or clear a draft, and
 at the trust dialog it would exit. A node whose pane holds unsent input the
@@ -627,42 +627,42 @@ worker, gets summarised into a report, and steers a manager that has more
 power.
 
 - Untrusted data is fenced at every boundary it crosses: `<github-event
-  untrusted>` (today), `<jeet-message untrusted>` (today) and `<jeet-report
+  untrusted>` (today), `<plete-message untrusted>` (today) and `<plete-report
   untrusted>` (new). The manager template says plainly that a report is a
   claim to check, never an instruction.
 - **The real control is the allow-list, not the fence.** A worker that was
   fooled can at most report. A manager that was fooled can at most do what
   its effective list allows, and only to its subtree.
-- An answer is fenced as `<jeet-answer to="42" from="…"[ copy="true"]>`. It
+- An answer is fenced as `<plete-answer to="42" from="…"[ copy="true"]>`. It
   is the asker's own chain speaking, or the user, so it is not marked
   untrusted, but its body still cannot close the fence; `from` is `user` or
-  the answerer's slug-based label, as jeet resolved it. An ask passed on is
-  `<jeet-report … via="manager backend" untrusted="true">` (H9).
-- No agent can forge one: `jeet task send` and `jeet task new --prompt` by
-  anyone but the user at a terminal turn every `<jeet-` and `</jeet-`, in
-  any case, into `‹jeet-` and `‹/jeet-` (`manager::fence::defang`, H14).
+  the answerer's slug-based label, as plete resolved it. An ask passed on is
+  `<plete-report … via="manager backend" untrusted="true">` (H9).
+- No agent can forge one: `plete task send` and `plete task new --prompt` by
+  anyone but the user at a terminal turn every `<plete-` and `</plete-`, in
+  any case, into `‹plete-` and `‹/plete-` (`manager::fence::defang`, H14).
 - "At a terminal" is `task adopt`'s bar, in one helper
   (`permissions::at_terminal`): no task found for the caller, no
-  `JEET_TASK_ID`, not `JEET_ASSISTANT`, and no pane of jeet's own tmux
+  `PLETE_TASK_ID`, not `PLETE_ASSISTANT`, and no pane of plete's own tmux
   sessions above it. A top-level task's agent is `Caller::User` too, and
   fails it (H8).
 - **Framing, by direction (phase 2a).** A brief and a first prompt are
-  user turns. The user's own `jeet task send` from their terminal to an
+  user turns. The user's own `plete task send` from their terminal to an
   idle agent is typed in, a user turn with the user's authority. With a
   wake channel (§12), everything else arrives as a peer message, which
   Claude Code introduces as from another session, not typed by the user,
-  and which cannot approve anything (spike E2, E4): an agent's `jeet task
+  and which cannot approve anything (spike E2, E4): an agent's `plete task
   send` (the root's or a manager's), reports, answers and their copies,
   escalations, watch events, the user's message to an agent that is busy,
   waiting on a prompt or holding a draft, and anything to the assistant.
   An answer from the user still carries `from="user"` in its fence: the
   fence, not the framing, says whose answer it is. A Stop hand-over is
   hook feedback. Typing, where there is no wake channel, is a user turn.
-- `jeet watch` routes to the root, to the task a PR belongs to, and to a
+- `plete watch` routes to the root, to the task a PR belongs to, and to a
   manager a rule names (`action = "manager:backend"`, phase 4). The slug
   is resolved as each poll sends, by slug alone (a manager writes names);
   with no active manager of that slug, the event goes to the assistant. The
-  manager gets it fenced, under a line in jeet's words, and may be started
+  manager gets it fenced, under a line in plete's words, and may be started
   for it through the start gate (H18-H20).
 - Dangerous actions are kept out of reach by default: the `held`
   capabilities stay at the root unless a parent grants one by name, and the
@@ -670,8 +670,8 @@ power.
 
 ### 5.6 Merge, push, comment
 
-These go through `git`/`gh`, not jeet, so jeet cannot gate them in-process.
-They are gated by the harness permission rules jeet writes for the root and
+These go through `git`/`gh`, not plete, so plete cannot gate them in-process.
+They are gated by the harness permission rules plete writes for the root and
 every parented node (`--settings` for Claude Code). Top-level tasks the user
 made get no deny rules, by design: they stay ungated (D1, D23), and a deny
 would also refuse the user's own `--force-with-lease` with no prompt to
@@ -683,9 +683,9 @@ approve it.
 | `git push --force`, push to a default branch | denied to the root and every parented node |
 | `gh pr create` | workers with `git.push` |
 | `gh pr comment` / `review` | the holder of `pr.comment` / `pr.review` (the root by default); denied to a parented node that does not hold it |
-| merge | only through `jeet pr merge` (#25), by the holder of `pr.merge`: the root by default, or a node a parent granted it to by name. `gh pr merge` and the merge API are denied to the root and every parented node |
+| merge | only through `plete pr merge` (#25), by the holder of `pr.merge`: the root by default, or a node a parent granted it to by name. `gh pr merge` and the merge API are denied to the root and every parented node |
 
-`jeet pr merge` refuses a PR that is a draft, conflicted, failing or pending
+`plete pr merge` refuses a PR that is a draft, conflicted, failing or pending
 checks, or awaiting changes or review, and merges only the head it checked
 (#25). So the capability is the only control that needs the hierarchy.
 
@@ -701,17 +701,17 @@ on a default branch. Nothing confines a node yet (5.7).
 
 Every node, managers below the root included, runs locally in a tmux pane,
 as the user, with a shell: cooperative and unconfined (§11). An agent that
-sets out to bypass jeet can detach from its pane's process tree with the
+sets out to bypass plete can detach from its pane's process tree with the
 env stripped, spawn through `tmux`, or edit `config.toml` or `index.db`
 (the table below lists what is open and closed). The gate stops honest mistakes and agents
-steered through jeet's own commands. jeet writes no confining rules (no
+steered through plete's own commands. plete writes no confining rules (no
 write limits outside the node's own directory, no refusal of `tmux`,
-`sqlite3` or edits to `~/.jeet/config.toml`): its deny rules cover only
+`sqlite3` or edits to `~/.plete/config.toml`): its deny rules cover only
 pushes and merges (5.6). Confinement would come from a confined placement,
-which is future work (§13). It goes the other way for jeet itself: the
-settings jeet gives Claude Code list `jeet` in `sandbox.excludedCommands`,
+which is future work (§13). It goes the other way for plete itself: the
+settings plete gives Claude Code list `plete` and `jeet` in `sandbox.excludedCommands`,
 since the ancestry walk cannot see past a sandbox's pid namespace (Linux)
-and jeet writes under `~/.jeet`, so with the user's sandbox on, jeet, and
+and plete writes under `~/.plete`, so with the user's sandbox on, plete, and
 possibly whatever a Bash command chains with it, runs unconfined. The
 `auto_trust` scope from #23 covers managers as it covers workers: a manager
 is started by its parent with nobody at its pane, so a trust prompt would
@@ -726,11 +726,11 @@ cloud runtime) would plug into later (§11). No node is refused for where it
 sits in the tree.
 
 **Local identity.** A local caller is the task bound to the nearest
-`(pid, start time)` in its process ancestry that jeet recorded when it
+`(pid, start time)` in its process ancestry that plete recorded when it
 launched that pane or review job. The record is written only by the
-launching jeet, or by the user adopting an agent an older jeet launched
-(`jeet task adopt`, below), never re-bound, and ignored after a reboot. `JEET_TASK_ID`
-and `JEET_ASSISTANT` are hints. A hint that disagrees with the anchor is
+launching plete, or by the user adopting an agent an older plete launched
+(`plete task adopt`, below), never re-bound, and ignored after a reboot. `PLETE_TASK_ID`
+and `PLETE_ASSISTANT` are hints. A hint that disagrees with the anchor is
 refused and logged. A hint that claims a parented task or the root with no
 anchor behind it is refused as unconfirmed. Hooks carry their task in argv
 (`--task`), and report up only when that agrees with the anchor. These
@@ -739,25 +739,25 @@ boundary against a local agent that sets out to escape:
 
 | Escape | Status |
 |---|---|
-| Forging `JEET_TASK_ID` / `JEET_ASSISTANT` | closed (mismatch / unconfirmed) |
-| Stripping the env inside the pane | closed (the anchor still binds); open for a pane whose anchor could not be recorded (jeet warns at start) |
+| Forging `PLETE_TASK_ID` / `PLETE_ASSISTANT` | closed (mismatch / unconfirmed) |
+| Stripping the env inside the pane | closed (the anchor still binds); open for a pane whose anchor could not be recorded (plete warns at start) |
 | A Node claiming Root | closed (mismatch) |
 | Pid reuse | closed (start time; on Linux tagged with the boot id) |
-| A pre-created `jeet-<slug>` session | closed (not adopted; warning), unless the user adopts it at a terminal outside jeet's panes, shown its pane's process first |
-| An agent adopting itself or another (`jeet task adopt`) | closed (user only, refused under any pane of jeet's sessions, typed confirmation at a terminal); open through the orphan, tmux and fake-terminal rows, which already run as the user |
+| A pre-created `plete-<slug>` session | closed (not adopted; warning), unless the user adopts it at a terminal outside plete's panes, shown its pane's process first |
+| An agent adopting itself or another (`plete task adopt`) | closed (user only, refused under any pane of plete's sessions, typed confirmation at a terminal); open through the orphan, tmux and fake-terminal rows, which already run as the user |
 | Calling `review-job` directly | closed (go byte plus job anchor at the process itself) |
 | Forged `task-hook --task <other>` | closed for reports up; status files remain writable |
 | Orphaning (`nohup … & exit`, `setsid`, double fork) with the env stripped | **open locally**: resolves as the user |
 | Spawning through tmux (`new-window`, `split-window`, `new-session`, or `send-keys` into another pane, including the assistant's) | **open locally**: the process has no anchor, or acts as the other pane |
-| Driving jeet's interactive screens (`jeet tasks`, `projects`, `chat`) through a fake terminal (`script`, a pty) | **open locally**: an interactive command needs only a terminal, kept so a person at a pane's own terminal still gets the screen; the screen then acts ungated |
-| Direct edits to `index.db` or `config.toml`; a forged `JEET_HOME` (acts only on a fake index) | **open locally** / harmless |
+| Driving plete's interactive screens (`plete tasks`, `projects`, `chat`) through a fake terminal (`script`, a pty) | **open locally**: an interactive command needs only a terminal, kept so a person at a pane's own terminal still gets the screen; the screen then acts ungated |
+| Direct edits to `index.db` or `config.toml`; a forged `PLETE_HOME` (acts only on a fake index) | **open locally** / harmless |
 | User windows opened inside a parented task's or the assistant's session | refused for gated commands (inherited hint, no anchor), by design |
-| jeet's own helpers (`watch --once`, `task-startup`, `inbox watch`) while their parent is alive | may resolve as the task; they are Free and never need an identity to act. `inbox watch` calls `identity::identify` only to refuse a watcher that is not `--task`'s agent, as `task-hook`'s `attributed` does |
+| plete's own helpers (`watch --once`, `task-startup`, `inbox watch`) while their parent is alive | may resolve as the task; they are Free and never need an identity to act. `inbox watch` calls `identity::identify` only to refuse a watcher that is not `--task`'s agent, as `task-hook`'s `attributed` does |
 
 The open rows close only when a confined placement exists, which is future
 work (§13); until then they stay open for every node. Agents started before
-#33 have no anchor: the user restarts them (`jeet task restart`, which
-resumes their session) or adopts them (`jeet task adopt`); see the
+#33 have no anchor: the user restarts them (`plete task restart`, which
+resumes their session) or adopts them (`plete task adopt`); see the
 restart and adopt notes in §10.
 
 ## 6. Agents pane (TUI)
@@ -768,7 +768,7 @@ tree's root. The tab is called *agents*, which is the UI text that decision 1
 allows.
 
 ```text
-┌ jeet · agents ──────────────────────────────────────────────────────────────┐
+┌ plete · agents ──────────────────────────────────────────────────────────────┐
 │ live 5/8   needs you 1   / filter  ⇥ switch                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
  ✦ assistant           ◆ needs you (1)        3 children   inbox 2  todo 4
@@ -779,7 +779,7 @@ allows.
  └─ ▸ frontend         ⏸ paused (2 below)     3h50/4h      budget 96%
 ```
 
-Siblings are in slug order, as `jeet manager ls` has them. The view holds
+Siblings are in slug order, as `plete manager ls` has them. The view holds
 the assistant and its **active** descendants only: top-level tasks are in
 *active*, archived ones in *archived*. A manager always shows `▾` or `▸`,
 so its kind is visible; everything starts open and nothing is persisted.
@@ -805,23 +805,23 @@ is no cost column (#26) and no wake cell (§12).
 | `→` / `←` | expand / collapse; on a node with nothing to open or close, to its first child / its parent; collapse is ignored while a filter is set |
 | `l` | the worklog (`notes/worklog.md`) of the assistant or a manager, read-only, scrollable |
 | `i` | the node's open ask, inbox and reports by and to it, newest first; `⏎` opens the node's PRs (a report carries no link, D18) |
-| `a` | answer the open question at this node or nearest below it, one with the user first (§4, "Questions and the user"; H15), as `jeet report answer` does as the user |
+| `a` | answer the open question at this node or nearest below it, one with the user first (§4, "Questions and the user"; H15), as `plete report answer` does as the user |
 | `b` | brief, grant, effective allow-list, budget, run state and its own open ask |
-| `p` / `P` | pause / resume the subtree; refused on the assistant, as `jeet manager pause` refuses it |
+| `p` / `P` | pause / resume the subtree; refused on the assistant, as `plete manager pause` refuses it |
 | `x` | stop the subtree (asks first, listing what is running); on the assistant, every task under it (`stop --all`, P8) |
 | `n` | new task or manager under the assistant or a manager (#21's form, plus kind, goal, done, budget, allow; a manager has no repositories). A manager starts at once; a worker is made but not started, as `n` in the active view starts none, and `⏎` starts it. On a worker `n` is refused |
 
 The pane acts as the user: `l`, `i` and `b` (and the keys that change
-something, `a` among them) refuse unless jeet runs at the user's own
+something, `a` among them) refuse unless plete runs at the user's own
 terminal (H8, H17): not inside an agent's or a top-level task's pane, nor a
-window of jeet's tmux sessions, nor when who runs it cannot be told. `c`,
+window of plete's tmux sessions, nor when who runs it cannot be told. `c`,
 `C` and `t` are the assistant's, as in the other views; the worktree, PR,
 archive and delete keys are the active view's alone.
 
 ## 7. Harness neutrality
 
 Managers run on any harness that implements the #23 trait. A harness that
-lacks a **required** item refuses `jeet manager new` with the missing piece
+lacks a **required** item refuses `plete manager new` with the missing piece
 named. As built there is no `--harness` flag: the configured harness is
 checked, as the manager is made and at each start (P12). Workers keep #23's degrade-don't-fail rule.
 
@@ -848,29 +848,29 @@ it is acceptable only as a worker until then.
 - `tasks.parent_id` (v4 migration, without the `manager` kind or the other
   tables except `task_reports` and `task_briefs`). A task the assistant makes gets
   `parent_id = assistant`.
-- `jeet report progress|done|blocked|question`, and the automatic `status`
+- `plete report progress|done|blocked|question`, and the automatic `status`
   reports from #23 events.
 - The assistant's session context lists its children with their last report.
 - Parented workers are gated (default `worktree.add` + `report`), and scope
   checks apply.
 - Touch points: `db/mod.rs` (v4), `db/tasks.rs` (parent, children,
   descendants), `cli.rs` + `commands/task.rs` (`--parent`, `--goal`, `--done`,
-  `report`), `permissions.rs` (identity by `JEET_TASK_ID`, scope, gating
+  `report`), `permissions.rs` (identity by `PLETE_TASK_ID`, scope, gating
   parented workers), `assistant/mod.rs` (`fence_report`, children in
   `context_text`), the hook path in `status.rs`/`runtime.rs` (events →
-  parent), `messages.rs` (deliver to parent), the task `jeet` skill in
-  `tasks.rs` (teach `jeet report`), and `tui/tasks_ui.rs` (a `↳ assistant`
+  parent), `messages.rs` (deliver to parent), the task `plete` skill in
+  `tasks.rs` (teach `plete report`), and `tui/tasks_ui.rs` (a `↳ assistant`
   marker and the last report in the row).
 
-Phase 1 as built: review tasks the root makes with `jeet review` are
+Phase 1 as built: review tasks the root makes with `plete review` are
 parented; the TUI's `browse_pr` stays top level (D5; both call sites run in
 the foreground). The `[review] command` of a parented review task runs with
-that task's `JEET_TASK_ID` and without `JEET_ASSISTANT`, so it is the task's
+that task's `PLETE_TASK_ID` and without `PLETE_ASSISTANT`, so it is the task's
 Node and reports; the `review-job` runner around it stays the assistant's,
 and, as the command has no hooks, sends the `ended` status report when it
 exits without having reported done. No tree helpers and no delete/archive pre-checks yet, since
 only the assistant can be a parent and both already refuse it; FK RESTRICT is
-the backstop (D19). Only `jeet watch`'s background job drops `JEET_TASK_ID`
+the backstop (D19). Only `plete watch`'s background job drops `PLETE_TASK_ID`
 (D20). The TUI marks a parented row ` ↳ assistant` and dims its last report
 in what the name leaves of its column (D22; the columns after it fill the
 row, so past the last column it would never show).
@@ -886,7 +886,7 @@ row, so past the last column it would never show).
 - Managers just work locally: every node, managers below the root included,
   runs in a local tmux pane like any other task (5.7), with budgets,
   pause/stop and interrupt as designed for local panes (5.3, 5.4).
-- `kind = 'manager'`, `jeet manager new|ls|show|grant|budget|pause|resume|stop`,
+- `kind = 'manager'`, `plete manager new|ls|show|grant|budget|pause|resume|stop`,
   `task_grants`, effective allow-lists, held capabilities, depth/fan-out/
   `max_live`, time and turn budgets, read-only worktrees, and recursive
   archive/delete.
@@ -912,8 +912,8 @@ row, so past the last column it would never show).
   `try_peek`). As built: see the phase 3 implementation notes.
 
 **Phase 4: escalation to the user and the rest.** (#36)
-- `needs_user`, `jeet report answer|escalate`, answers from the user (with
-  copies to each manager on the path), `jeet watch` rules targeting
+- `needs_user`, `plete report answer|escalate`, answers from the user (with
+  copies to each manager on the path), `plete watch` rules targeting
   managers, and `--reparent`.
 - `a` in the agents pane: answer the node's open ask, or the nearest one
   below it (moved from phase 3).
@@ -945,7 +945,7 @@ row, so past the last column it would never show).
   (`wake_hook`, `wake_env`, `wake_lines`, `HookSetup.wake`,
   `HookEvent.transcript`, the settings entry, `WAKE_TIMEOUT_SECS`);
   `config.rs` (`[harness] wake`); `cli.rs`, `main.rs` and `permissions.rs`
-  (the hidden `jeet inbox watch`); `assistant/mod.rs`,
+  (the hidden `plete inbox watch`); `assistant/mod.rs`,
   `commands/{task,report}.rs`, `reports.rs`, `tasks.rs` and `watch.rs`
   (the sender, and `Wake`'s wording). As built: see the phase 2a
   implementation notes.
@@ -956,7 +956,7 @@ pane.
 
 Each phase is useful on its own. Phase 1 alone fixes the commonest pain:
 the assistant hears when a task finishes or gets stuck, without polling
-`jeet task ls`.
+`plete task ls`.
 
 ## 9. Alternatives considered
 
@@ -964,16 +964,16 @@ the assistant hears when a task finishes or gets stuck, without polling
   doubles status, inbox, tmux, archive and TUI code, and the assistant is
   already a task row. Rejected.
 - **The harness's own subagents (e.g. Claude Code's Task tool).** Free and
-  fast, but invisible to jeet: no worktrees, no status, no allow-list, no
+  fast, but invisible to plete: no worktrees, no status, no allow-list, no
   pane, and not harness-neutral. These stay fine *inside* a worker.
 - **A flat list with groups/tags.** Gives grouping in the TUI but no
   delegation of authority or reporting. It does not answer the request.
-- **Managers that poll (`jeet task ls` on a timer) instead of reports
+- **Managers that poll (`plete task ls` on a timer) instead of reports
   pushed.** Simpler, but it burns turns, misses `needs input` until the next
   poll, and leaves no record. Pushed reports reuse the inbox, which already
   handles idle/busy/not running.
-- **A jeet daemon owning the tree.** It would make budgets and rollup exact,
-  but jeet has deliberately stayed daemon-free (`jeet watch` is a launchd
+- **A plete daemon owning the tree.** It would make budgets and rollup exact,
+  but plete has deliberately stayed daemon-free (`plete watch` is a launchd
   job). The hooks plus the TUI's refresh thread are enough.
 - **Copying the parent's allow-list into the child at creation.** It goes
   stale when the user narrows the root. Intersection at check time does not.
@@ -994,7 +994,7 @@ in §13.
    planning, but no writable ones (§1).
 3. **Gating.** Parented workers are gated, with `worktree.add` + `report` by
    default from phase 1 (5.1).
-4. **Merge.** `pr.merge` comes from #25 (`jeet pr merge`). The root holds it
+4. **Merge.** `pr.merge` comes from #25 (`plete pr merge`). The root holds it
    by default, and a parent may grant it down only by naming it. It is never
    in a default grant (5.1, 5.6).
 5. **Answers.** The user's answers go straight to the asker and are copied
@@ -1003,7 +1003,7 @@ in §13.
    budget. No cost budgets until a harness can report usage (#26) (5.2,
    5.3).
 7. **Pane.** The agents pane is a third tab view (§6).
-8. **The user may make managers directly.** `jeet manager new` at a
+8. **The user may make managers directly.** `plete manager new` at a
    terminal makes one parented to the assistant (§3).
 9. **No sideways messaging.** Siblings never message each other; everything
    goes through the common parent (5.1).
@@ -1012,7 +1012,7 @@ in §13.
     per-node placement that is `local` only for now; a confined placement
     (sandvault is a candidate) can plug into the seam later, and the cloud
     design is parked as future work (§13). Local callers are identified by
-    process ancestry to a pane or job jeet recorded, and fail closed; the
+    process ancestry to a pane or job plete recorded, and fail closed; the
     env is a hint. `libc` is approved as a direct dependency for macOS pid
     lookups (5.7, §11, #33). This replaces an earlier #33 decision that
     managers below the root must run behind a boundary (I22).
@@ -1038,25 +1038,25 @@ Where phase 1 (#31) settled what this RFC left open, or departed from it:
 - **D7** `report` is free, not a capability, so an empty allow list still
   hears from its tasks.
 - **D8** `[managers] idle_report_mins` (default 10) in `config.rs`.
-- **D9** Idle reports come from a sweep in `jeet watch` and the assistant's
+- **D9** Idle reports come from a sweep in `plete watch` and the assistant's
   Stop hook, debounced in the index; idle `since` holds still.
 - **D10** `Ended { cleared }`: a `/clear` is not reported.
 - **D11** Fencing stays in `assistant/mod.rs` (`fence_body`, `attr`,
   `fence_report`, `fence_brief`).
 - **D12** `--parent` takes only `assistant`.
-- **D13** Caller is User, Root or Node, by `$JEET_TASK_ID` and
-  `JEET_ASSISTANT` only; the narrower reading wins; errors fail closed.
-- **D14** Hooks report only when `$JEET_TASK_ID` is the located task.
-  A hook whose cwd is the assistant's home but whose `$JEET_TASK_ID`
+- **D13** Caller is User, Root or Node, by `$PLETE_TASK_ID` and
+  `PLETE_ASSISTANT` only; the narrower reading wins; errors fail closed.
+- **D14** Hooks report only when `$PLETE_TASK_ID` is the located task.
+  A hook whose cwd is the assistant's home but whose `$PLETE_TASK_ID`
   names another task is that task's: no assistant context, no handover
   of the assistant's inbox.
 - **D15** `--goal`/`--done` are stored in `task_briefs` and shown as
-  `<jeet-brief>` at session start; no `BRIEF.md` yet.
+  `<plete-brief>` at session start; no `BRIEF.md` yet.
 - **D16** Reports are capped at 2000 bytes.
 - **D17** A report is kept even when it cannot be delivered.
 - **D18** No `--link`/`--option` yet.
 - **D19** No tree helpers or delete/archive pre-checks yet.
-- **D20** Only `jeet watch`'s background job drops `JEET_TASK_ID`.
+- **D20** Only `plete watch`'s background job drops `PLETE_TASK_ID`.
 - **D21** No ended report for an archived or missing task; the archive race
   is accepted.
 - **D22** TUI: ` ↳ assistant` and the last report, dimmed.
@@ -1086,8 +1086,8 @@ RFC left open, or departed from it:
   tasks get none (D1, D23), so 5.6's "every agent" now reads "the root and
   every parented node". The exception is a parented review task's
   `[review] command`: the user's own command, run by `review-job`, not
-  launched through a harness, so jeet has no settings to put the rules in.
-  `jeet review` warns when it starts one, as E13 does.
+  launched through a harness, so plete has no settings to put the rules in.
+  `plete review` warns when it starts one, as E13 does.
 - **E5** Default branches are every indexed repo's `default_branch` plus
   `main` and `master`, deduplicated, snapshot at launch, and capped at
   eight (`MAX_DEFAULT_BRANCHES`): `main`, `master`, then the ones most
@@ -1121,10 +1121,10 @@ RFC left open, or departed from it:
   `mergePullRequest`, `enablePullRequestAutoMerge`, `mergeBranch` and
   `enqueuePullRequest` mutations, matched anywhere after `gh api` or
   `curl`. `git push --branches` is denied with `--all`, its synonym.
-  `jeet pr merge` runs `gh` from jeet's process and is unaffected.
+  `plete pr merge` runs `gh` from plete's process and is unaffected.
 - **E8** A node's allow list is unchanged; narrowing it is phase 2's.
 - **E9** #32 kept the settings inline on argv; #33 writes them to a 0600
-  file, `$JEET_HOME/run/<task id>/<session>.json` (directory 0700), and
+  file, `$PLETE_HOME/run/<task id>/<session>.json` (directory 0700), and
   passes `--settings <path>` (`Harness::hook_file`, `runtime::hook_args`).
   It is written to a new file renamed into place at each launch, so a
   running agent never reads a half-written one. Each launch removes the
@@ -1160,19 +1160,19 @@ RFC left open, or departed from it:
   pause), as no Stop hook follows; a manual Esc still reads `running`
   until the next hook. The assistant is refused (5.4).
   The draft check and the keys aim at the agent's own pane, by the id
-  (`%3`) jeet notes in the session option `@jeet-agent-pane` when it
+  (`%3`) plete notes in the session option `@plete-agent-pane` when it
   starts the session, not the session's active pane, which may be a pane
   the user split off the agent's window or a window they opened there; a
   session started before the id was noted falls back to the active pane
-  of its first window (`=<session>:^`). `jeet task send` and the startup
+  of its first window (`=<session>:^`). `plete task send` and the startup
   watcher aim there too.
-- **E12** `jeet task interrupt <name>` (new CLI), gated on `task.send`
+- **E12** `plete task interrupt <name>` (new CLI), gated on `task.send`
   (whose pre-approved commands include it, so an allowed interrupt does
   not prompt);
   nodes are refused because it is not in their grant.
 - **E13** A parented task launched on a harness with `Enforcement::None`
   gets a warning that its agent is not stopped from force-pushing or
-  merging, and only jeet's own commands are gated (§7, degrade, don't
+  merging, and only plete's own commands are gated (§7, degrade, don't
   fail).
 - **E14** The manager refusal lands with phase 2's `manager new` (P12,
   P22) as `harness::manager_missing(&dyn Harness) -> Vec<&'static str>`,
@@ -1192,15 +1192,15 @@ what this RFC left open, or departed from it:
   only `LocalTmux`, and this text. No cloud code, no `[cloud]` config, no
   `Delivered::Sent`/`Watched`, no MAC crate.
 - **I1** The anchor is the identity: a `(pid, start)` row in
-  `task_anchors`, kind `pane` or `job`, recorded only by the jeet that
+  `task_anchors`, kind `pane` or `job`, recorded only by the plete that
   spawned that pid, at one of three launch paths: a task's tmux session
   (`runtime`), an assistant window (`assistant::open`) and a review job's
-  runner (`jeet review`). A process never records its own anchor.
-- **I2** The walk starts at jeet's own pid and goes up through the kernel:
+  runner (`plete review`). A process never records its own anchor.
+- **I2** The walk starts at plete's own pid and goes up through the kernel:
   `/proc/<pid>/stat` on Linux (split after the last `)`), `proc_pidinfo`
   (`PROC_PIDTBSDINFO`) through `libc` on macOS. It stops at pid ≤ 1, a
   failed lookup, a zombie, a cycle or depth 64. Other unix targets find
-  nothing and fail closed. jeet never runs `ps` for identity. macOS reads
+  nothing and fail closed. plete never runs `ps` for identity. macOS reads
   only the caller's own processes in full, so a walk from a terminal stops
   at the root-owned `login` (or `sshd`) above the shell; a failed lookup of
   another user's process (its owner read with `PROC_PIDT_SHORTBSDINFO`,
@@ -1214,8 +1214,8 @@ what this RFC left open, or departed from it:
   is stepped (deviation: the plan compared rows' `created_at` with
   `btime`). macOS start times are absolute.
 - **I4** Resolution, nearest anchor first: a job anchor at the process
-  itself is that job; an anchor whose task disagrees with `JEET_TASK_ID`,
-  or a non-root anchor under `JEET_ASSISTANT`, is a mismatch; an anchor is
+  itself is that job; an anchor whose task disagrees with `PLETE_TASK_ID`,
+  or a non-root anchor under `PLETE_ASSISTANT`, is a mismatch; an anchor is
   that task; no anchor but a hint naming a parented task, the root or a
   task the index does not know is unconfirmed; anything else is the user.
   Deviation: the plan took an unknown task for the user, but a review job
@@ -1224,11 +1224,11 @@ what this RFC left open, or departed from it:
   `task archive`: the runner recorded as the task's, and an unfinished one
   in the task's worktrees whose recorded runner is still live, which is how
   a job the assistant started for a top-level review task (recorded as the
-  assistant's) is found. `jeet review` writes the runner's pid and start
+  assistant's) is found. `plete review` writes the runner's pid and start
   into the job's file before the go byte, so the job is found from the
   moment it is launched. Both wait for the job's processes to exit
   (killing what outlives the grace period) before anything is saved or
-  removed, and both are refused from a jeet running under that job, which
+  removed, and both are refused from a plete running under that job, which
   ending it would end part-way.
 - **I5** An anchored assistant is Root, an anchored task with a parent is a
   Node, anything else the user. Supersedes D13 and D23: a user shell in a
@@ -1245,23 +1245,23 @@ what this RFC left open, or departed from it:
   already running when its row goes in, so the insert comes first and
   dead rows are pruned after it (or before a retry, when a dead row
   holds the same pid and start). If a start time cannot be read, nothing is
-  recorded and jeet warns that the agent cannot be identified. Archiving a
+  recorded and plete warns that the agent cannot be identified. Archiving a
   task deletes its pane anchors; deleting it cascades. A launch's
   settings file is kept while a window launched as that session runs,
-  whatever session the window has gone on to (`@jeet_launch`).
+  whatever session the window has gone on to (`@plete_launch`).
 - **I9** No backfill: matching sessions by name is spoofable. A live session
   with no live anchor is not adopted; `task open` warns to stop and reopen
-  it. `jeet chat` going back to an assistant window whose pane has no live
-  anchor warns the same way (exit it there and `jeet chat` again). **Reopen running tasks after upgrading:** older agents are refused for
+  it. `plete chat` going back to an assistant window whose pane has no live
+  anchor warns the same way (exit it there and `plete chat` again). **Reopen running tasks after upgrading:** older agents are refused for
   `report` and `worktree add`, and old hooks no longer report up
-  (`jeet task restart` and `jeet task adopt` since, R1 and R2).
-- **I10** `jeet review` starts the runner with stdin piped, records its job
+  (`plete task restart` and `plete task adopt` since, R1 and R2).
+- **I10** `plete review` starts the runner with stdin piped, records its job
   anchor, then writes one go byte `g`. The anchor names the review task when
   it has a parent, else the assistant when the caller is the root (a
   top-level review task the root reviews again is never moved under it),
   else the top-level review task itself, which classifies as the user (I5)
   and lets archive and delete find the job; that runner starts without the
-  `JEET_TASK_ID` and `JEET_ASSISTANT` it would inherit, which would
+  `PLETE_TASK_ID` and `PLETE_ASSISTANT` it would inherit, which would
   otherwise disagree with its anchor. Deviation: the plan recorded nothing
   for the user, which left a job the user started running after its task's
   archive or delete. The runner's pid and start go in the job file before
@@ -1272,10 +1272,10 @@ what this RFC left open, or departed from it:
   records its job as ended with 126, so it never reads as running; so does
   one that gets EOF before the byte, its launcher having died. `review-job` refuses to run on a
   terminal, on EOF or on any other byte ("review-job is started only by
-  `jeet review`"), before `authorize`. Every caller of `review-job` is then
-  held to the reviews-dir check ("review jobs run only from jeet's reviews
+  `plete review`"), before `authorize`. Every caller of `review-job` is then
+  held to the reviews-dir check ("review jobs run only from plete's reviews
   dir"), and a Node is refused it by `node_only` even with the go byte.
-- **I11** Hooks run `jeet task-hook --task <id> <event>`. `--task` locates
+- **I11** Hooks run `plete task-hook --task <id> <event>`. `--task` locates
   the task first; a `--task` the index does not know writes nothing and does
   not fall back. Without `--task`, today's env-then-cwd lookup still writes
   status, but nothing reports up and no brief is sent. A hook reports up
@@ -1296,23 +1296,23 @@ what this RFC left open, or departed from it:
   session you are in) and the `[assistant] notify` opt-out, where a wrong
   hint cannot widen anything. Message sender labels use the identified
   task and fall back to the env, then the cwd; they never fail a send.
-- **I18** No `TMUX` or `jeet-` session check: jeet uses the user's default
+- **I18** No `TMUX` or `plete-` session check: plete uses the user's default
   tmux server, and an orphan can unset `TMUX`.
 - **I19** v5 is additive; the `tasks` rebuild is v6 (§2).
 - **I20** `libc` is a macOS-only direct dependency, already in the lock
   file as a transitive one.
 - **I21** As built, beyond the decisions above:
-  - The refusals read "jeet can't confirm this is task X's agent: reopen
-    the task (agents started before this jeet must be restarted), or run
+  - The refusals read "plete can't confirm this is task X's agent: reopen
+    the task (agents started before this plete must be restarted), or run
     this outside the agent's tmux session" (or "… this is the assistant:
-    exit the assistant in its window and run `jeet chat` again …"), and "this jeet runs under task X's agent (<id>), but
-    $JEET_TASK_ID says it is task Y (<id>); jeet refuses a caller that
-    claims to be another" (or "… $JEET_ASSISTANT says it is the
+    exit the assistant in its window and run `plete chat` again …"), and "this plete runs under task X's agent (<id>), but
+    $PLETE_TASK_ID says it is task Y (<id>); plete refuses a caller that
+    claims to be another" (or "… $PLETE_ASSISTANT says it is the
     assistant …"). `identify` itself logs a mismatch, so every command
     that resolves identity does (gated and node-only ones through
     `authorize`, `report`, `task new`, `worktree ls`/`path`/`add` through
     `tasks::current`, hooks reporting up). The record is `denied` under
-    capability `identity`, in jeet's words only: "task X's agent (<id>)
+    capability `identity`, in plete's words only: "task X's agent (<id>)
     claimed to be another task or the assistant". The claimed id and the
     command's text are the caller's and stay out of the log the assistant
     reads as its own.
@@ -1324,18 +1324,18 @@ what this RFC left open, or departed from it:
     hooks with `--task` walk it themselves. `task-startup`, `watch --once`
     and the other free commands do not.
   - `tasks::current` (`worktree ls`, `path` and `add` without `--task`)
-    takes the identified task first, then `$JEET_TASK_ID`, then the cwd. An
+    takes the identified task first, then `$PLETE_TASK_ID`, then the cwd. An
     identity error propagates, so these are refused as unconfirmed in a
     user window inside a parented task's or the assistant's session.
   - `tmux::new_session` reads `#{pane_id}\t#{pane_pid}` back and fails if
     tmux reports no pane. The pane id it reads is also the one noted in
-    `@jeet-agent-pane` (E11), so the anchor and the pane interrupt and send
+    `@plete-agent-pane` (E11), so the anchor and the pane interrupt and send
     aim at are the same pane. A failed record warns "task X's agent cannot be
-    identified (<cause>): its jeet commands that name the task are
-    refused, but one run without $JEET_TASK_ID and $JEET_ASSISTANT runs as
+    identified (<cause>): its plete commands that name the task are
+    refused, but one run without $PLETE_TASK_ID and $PLETE_ASSISTANT runs as
     the user; stop it and open the task again". The agent is still
     started (I8). A live session with no live anchor warns "tmux session S
-    was started by an older jeet or outside jeet, so jeet cannot confirm
+    was started by an older plete or outside plete, so plete cannot confirm
     its agent is task X's; stop it and open the task again".
   - The prune after each insert removes rows of dead processes and rows
     whose start differs (on Linux, every row from an earlier boot).
@@ -1358,10 +1358,10 @@ what this RFC left open, or departed from it:
 
 ### Restart and adopt implementation notes
 
-Bringing agents an older jeet started onto this one, which has no anchor
+Bringing agents an older plete started onto this one, which has no anchor
 for them (I9):
 
-- **R1** `jeet task restart <task>` ends the agent (`tmux kill-session`,
+- **R1** `plete task restart <task>` ends the agent (`tmux kill-session`,
   which gives it `EXIT_GRACE` to exit, as a stop does), forgets its pane
   anchors and starts it again through `ensure_running` with the session
   `latest_session` picks, so it is resumed (or started afresh under the
@@ -1378,13 +1378,13 @@ for them (I9):
   busy windows are left and the command fails. Background work the agent
   started (subagents, workflows, `/loop` schedules) ends with it, so adopt
   exists too.
-- **R2** `jeet task adopt <task>` records the live process in the task's
+- **R2** `plete task adopt <task>` records the live process in the task's
   agent pane (`#{pane_pid}`, the process a launch would have recorded) as a
   `pane` anchor, on the user's word. It is sound against I1's rule that an
   agent never anchors itself because every way an agent could run it is
   already refused or already the user: the caller must resolve as the user
-  and carry no `$JEET_TASK_ID`/`$JEET_ASSISTANT` (an unanchored agent with
-  its hint is unconfirmed); it must not run under any live pane of jeet's
+  and carry no `$PLETE_TASK_ID`/`$PLETE_ASSISTANT` (an unanchored agent with
+  its hint is unconfirmed); it must not run under any live pane of plete's
   tmux sessions, nor under the pane being adopted (`identity::adopt` walks
   the ancestry, which stripping the env does not change); it needs a
   terminal on stdin and stderr (an agent's tool calls have none), and the
@@ -1392,17 +1392,17 @@ for them (I9):
   and its program. It is `Gate::Interactive` (refused to the assistant
   without a terminal) and left out of `node_scope` (refused to every Node).
   What gets past these is an orphan with its env stripped, a process
-  started through tmux outside jeet's sessions, or a fake terminal: the
+  started through tmux outside plete's sessions, or a fake terminal: the
   open rows of §5.7, which already run as the user and can do more than
   adopt. Adoption never re-binds: a task with a live pane anchor is not
   adopted again, and an assistant window only when its own process has
   none. A session pre-created under a task's name (I9's reason for no
   backfill) is adopted only if the user, shown its process, confirms it.
-- **R3** An adopted agent keeps the hooks of the jeet that started it
+- **R3** An adopted agent keeps the hooks of the plete that started it
   (from before `--task`, I11), so its hooks write status but do not report
   up until it is restarted; adopt says so.
 - **R4** `runtime::unanchored` (a live agent pane with no live anchor at its
-  pid) and `assistant::unanchored_windows` drive `jeet task ls`
+  pid) and `assistant::unanchored_windows` drive `plete task ls`
   (`(unanchored)` after the status, the fix on stderr) and the tasks list
   (`unanchored ·` before the status, the fix on the status line for the
   selected row, a count on the assistant's line). The tasks list's poller
@@ -1422,7 +1422,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
 - **P2** Teardown refusals (§2 "Creation and teardown") land before any
   manager can be made, and apply to every task with children.
 - **P3** Every `Manager` arm that restricts a manager lands before
-  `jeet manager new` can make one: teardown refusals (P2), read-only
+  `plete manager new` can make one: teardown refusals (P2), read-only
   worktrees and git denies (P4) and the trust scope (P5). Until it lands
   (P22) no manager row exists for a report or a `--parent` to reach (P11,
   P14).
@@ -1461,16 +1461,16 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `path`), itself or below (`task last`, `path`, `prs`), strictly below
   (`task send`, `open`, `archive`, `delete`, …, `manager show`, `grant`,
   `budget`, `pause`, `resume`, `stop`), a
-  manager at or below it as `--parent`, or no task at all (`jeet ls`,
-  `jeet prs`, `report`, hooks, screens). A name is resolved within the
+  manager at or below it as `--parent`, or no task at all (`plete ls`,
+  `plete prs`, `report`, hooks, screens). A name is resolved within the
   node's subtree, so a prefix cannot reach outside it; delete, `archive --recursive` and
   `--parent` take exact names. A command the table leaves out is refused
   to every node, reads included (`worktree rm`, `projects`, `sync`, …).
-  `jeet clone` names no task, so a node holding `repo.clone` may run it;
+  `plete clone` names no task, so a node holding `repo.clone` may run it;
   `worktree add` and `task new --repo` naming a repository the store lacks
   clone it only for a caller holding `repo.clone` (`permissions::may_clone`),
   so neither reaches the store around `clone`'s gate; the clone, made or
-  refused, is logged (and the assistant's announced) as `jeet clone`'s is.
+  refused, is logged (and the assistant's announced) as `plete clone`'s is.
   Every route refuses a URL or id whose host, owner or repo has an empty,
   `.` or `..` segment, a control or invisible character, `<`, `>` or `\`
   (`remote::parse_remote_url`), so a clone stays under the store and its
@@ -1479,9 +1479,9 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (compared case-folded), so a clone cannot plant `.cargo/` or the like in
   another checkout; a trunk registered in place before tasks (outside the
   store, maybe above it) is not compared, so it blocks no clone, its own
-  `jeet import` included.
-  `jeet pr merge` names no task: `pr.merge` is held, so only a grant naming
-  it lets a node merge. The root keeps D1; the `jeet manager` verbs act
+  `plete import` included.
+  `plete pr merge` names no task: `pr.merge` is held, so only a grant naming
+  it lets a node merge. The root keeps D1; the `plete manager` verbs act
   only on a task under the assistant, for anyone, and `manager stop --all`
   is refused to all but the user (M11). `task ls` lists a node's
   subtree only. `task send assistant` and `task interrupt assistant` mean
@@ -1494,32 +1494,32 @@ Managers run locally in tmux, as the user, like any other task (I22).
   and announced whatever `[assistant] notify` says, except the user's own,
   once the task is fully made (its worktrees added), so no entry names a
   task that was undone.
-  `jeet task last` fences what it prints for any caller but the user: an
+  `plete task last` fences what it prints for any caller but the user: an
   agent's words may carry text it read (5.5). The status beside them and
   an API error, which its agent can write too, reach an agent unable to
-  close a fence or open one (as `jeet task ls`'s STATUS column does), and
-  everyone without control characters. So does `jeet manager show`,
+  close a fence or open one (as `plete task ls`'s STATUS column does), and
+  everyone without control characters. So does `plete manager show`,
   for the children's reports and for the brief's goal and done-when, which
   a manager writes from what it has read. A task made under a parent has a
   name of at most 100 characters on one line with no `<` or `>` and no
   bidirectional, zero-width or other invisible format character, and the
   root's summary lists a task whose parent is neither the root nor none by
-  its slug alone: a manager may name it from text it read. `jeet task ls`
-  (NAME `-`) and `jeet task last --json` (`name` null) do the same for an
+  its slug alone: a manager may name it from text it read. `plete task ls`
+  (NAME `-`) and `plete task last --json` (`name` null) do the same for an
   agent, which sees names only of tasks with no parent, under the root, or
   under itself; `send`, `interrupt`, `archive`, `unarchive`, `delete`,
-  `resync`, `prs`, `last` and `open`, and `jeet worktree ls`, `path`,
+  `resync`, `prs`, `last` and `open`, and `plete worktree ls`, `path`,
   `add` and `rm`, name any other by its slug in what they print, as do
-  the start warnings and errors they pass on, `jeet review`'s, and every
+  the start warnings and errors they pass on, `plete review`'s, and every
   message that names the task holding a branch or the task whose
-  workspace a command was run in. The root's summary, `jeet
-  task ls` and `jeet task last` give such a task's status without its
+  workspace a command was run in. The root's summary, `plete
+  task ls` and `plete task last` give such a task's status without its
   detail (the first line of its last prompt, which a manager wrote), as a
   manager's summary does for every task below its own children, and every
   task's status there unable to close a fence or open one.
 - **P10** A manager's harness settings pre-approve the commands of what it
   holds (§7 "allow rules from capabilities"), read at each start, since it
-  is started with nobody at its pane. Never `jeet *`.
+  is started with nobody at its pane. Never `plete *`.
 - **P11** Making a child (§3, 5.1) is planned, then made: the plan checks,
   writing nothing, the parent (`assistant` or an exact name, within a
   node's subtree), that the caller may make tasks under it, that it is
@@ -1546,12 +1546,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   them; only a
   worker with a parent is warned, and only of missing deny rules.
   There is no `--harness` flag: the configured harness is checked.
-- **P13** `jeet manager ls [--json]` is the tree (a flat list with each
-  task's parent and depth), in place of `manager tree --json`. `jeet
+- **P13** `plete manager ls [--json]` is the tree (a flat list with each
+  task's parent and depth), in place of `manager tree --json`. `plete
   manager show` lists, as open, the children's last reports that are
-  `blocked` or `question`. `jeet manager grant` warns of each running task
-  below that lost a capability with commands outside jeet (`pr.comment`,
-  `pr.review`, which jeet never sees run): its agent may still run them
+  `blocked` or `question`. `plete manager grant` warns of each running task
+  below that lost a capability with commands outside plete (`pr.comment`,
+  `pr.review`, which plete never sees run): its agent may still run them
   until it next starts, when its harness deny rules change.
 - **P14** Reports (5.5) go to a manager parent through its pane, as a
   message does: typed in when it sits idle, queued while it is busy, and,
@@ -1560,17 +1560,17 @@ Managers run locally in tmux, as the user, like any other task (I22).
   inbox. While the parent is held the report waits in its inbox, typed
   into nothing (P18); a start it makes passes the start gate (P17), and is
   queued, with the report in its inbox, over `max_live`.
-  `<jeet-report>` names the sender as `task <slug>`
-  or `manager <slug>`, with its tree path; `<jeet-brief>` names the parent
+  `<plete-report>` names the sender as `task <slug>`
+  or `manager <slug>`, with its tree path; `<plete-brief>` names the parent
   (`the assistant`, `manager <slug>`) with the task's tree path, and its
   last line says whom to report to. A broken chain that hides what a task
   may do costs the brief its list, with a warning, and its path (the bare
-  slug), not the brief. `jeet report` names the parent it reported to.
-- **P15** A task is named by its kind wherever jeet names one in the tree:
+  slug), not the brief. `plete report` names the parent it reported to.
+- **P15** A task is named by its kind wherever plete names one in the tree:
   `manager <slug>` or `task <slug>` in a refusal's "cut by", in `task new`'s
-  "reports to" line, in a report's sender and `jeet report`'s output, and
-  (with its tree path) in the fences of `task last` and `manager show`. `jeet task ls` marks a
-  manager `(manager)` after its name (M29); `jeet manager ls` has a kind
+  "reports to" line, in a report's sender and `plete report`'s output, and
+  (with its tree path) in the fences of `task last` and `manager show`. `plete task ls` marks a
+  manager `(manager)` after its name (M29); `plete manager ls` has a kind
   column.
 - **P16** Run state (5.4) is changed by `manager/run.rs`. A pause writes
   the target's row, then interrupts its subtree leaves first, through a
@@ -1578,14 +1578,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `placement::runtime_for` and `runtime::is_own_session`, which
   `runtime::interrupt` and `refuse_inside_session` share), so the walk is
   tested with a fake runtime and no tmux. It skips the assistant and the
-  node this jeet runs in, turns each refusal or error into a line and goes
+  node this plete runs in, turns each refusal or error into a line and goes
   on, and marks an interrupted node idle (`Paused`), since an interrupted
   turn has no Stop hook. Each node is interrupted under its inbox lock, so
   a delivery that found it not held yet has typed its message in first.
   A node handed input in the last `STARTING_SECS` (launched with hooks
-  and its brief on its command line, which `.jeet/launched` records, or
+  and its brief on its command line, which `.plete/launched` records, or
   typed a message since its launch: `TmuxAgent::type_in` touches
-  `.jeet/typed` first; a launch with no first prompt hands it none, and
+  `.plete/typed` first; a launch with no first prompt hands it none, and
   its pause waits for nothing) that no hook has reported on since
   (`status::input_unreported`; a status in the same second does not
   count, nor does a session start's, written before the prompt on its
@@ -1621,10 +1621,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   (`run::stop_with`; production: `run::end_agent`). It also ends the
   review jobs running as the node or in its directory, as an archive does
   (a review task's agent is its review command, with no session to end or
-  interrupt), and `jeet review` refuses to start a held review task's job, with a note,
+  interrupt), and `plete review` refuses to start a held review task's job, with a note,
   and still opens the review and hands off its worktree. `max_live` counts the
-  active tasks below the assistant whose `jeet-<slug>` session one `tmux
-  list-sessions` lists and whose agent's pane (the `@jeet-agent-pane` jeet
+  active tasks below the assistant whose `plete-<slug>` session one `tmux
+  list-sessions` lists and whose agent's pane (the `@plete-agent-pane` plete
   notes when it starts the session; any pane, for a session with none
   noted) is alive; a session the user's `remain-on-exit`, or a window
   the user opened there, keeps after its agent exits does not count.
@@ -1657,16 +1657,16 @@ Managers run locally in tmux, as the user, like any other task (I22).
   is running already: a live pane is attached to, held or not, and
   nothing is started from that path (one gone meanwhile is not restarted
   unadmitted). A held
-  task is refused ("`jeet manager resume <holder>` first") for every
+  task is refused ("`plete manager resume <holder>` first") for every
   caller. Over `max_live` a start is queued (`Started::Queued`, the
-  prompt handed back) for whoever asked, except the user's `jeet task
+  prompt handed back) for whoever asked, except the user's `plete task
   open` and the TUI's open, which start it anyway and warn "over
   max_live". A start with no prompt (`task open`, the TUI's open, with a
   session named or not) takes the task's inbox lock before the start lock
   and starts it with what waits there, as a drain would, resuming the
   session named if any (`runtime::start_with_inbox`): a brief queued on `max_live` is not left
   behind by an open that starts it first. Under a harness that takes no
-  first prompt from jeet (`prompt_args` is `None`), it starts with none and
+  first prompt from plete (`prompt_args` is `None`), it starts with none and
   leaves the inbox for a delivery to type in, rather than fail every open.
   On such a harness a start with a prompt (`task new --prompt`, a delivery
   to an agent not running) is refused before it is held or queued
@@ -1685,8 +1685,8 @@ Managers run locally in tmux, as the user, like any other task (I22).
   start for the resume's drain and succeeds, whether the hold is seen
   before the start or only by the start gate (a pause in between). A drain returns what a start
   warns of rather than print it (the TUI drains too). Unit tests never run tmux: under `cfg(test)`, `tmux::binary`
-  names one that does not exist, whatever `$JEET_TMUX` says.
-- **P18** A held task (5.4) is handed nothing, and `jeet task-startup`
+  names one that does not exist, whatever `$PLETE_TMUX` says.
+- **P18** A held task (5.4) is handed nothing, and `plete task-startup`
   accepts no trust prompt for it (asked before each key), which would let
   a brief given before the pause run: the prompt is left for the user. `messages::deliver` asks
   `Agent::held` first, under the inbox lock, and queues for a held agent
@@ -1711,7 +1711,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   `max_live`; a drain that finds it waiting on a full tree tells the
   parent then, once per queued start (`queued` debounced against
   `queued_at`), and says so to its caller (a resume prints `task <slug> is
-  queued on max_live (n/max live)`). `jeet watch` notifies the user of a held
+  queued on max_live (n/max live)`). `plete watch` notifies the user of a held
   delivery only when the agent could not be started (`Held`), not when it
   is paused or waits on `max_live`, and drains the start queue each poll.
 - **P19** Budgets (5.3) are charged in the hook, before it acts on the
@@ -1723,13 +1723,13 @@ Managers run locally in tmux, as the user, like any other task (I22).
   a refused permission), the time left; then the budgets are checked, and only
   then is the run state read, so a turn that uses a budget up is held at
   its own end: no `continue_output`, its queue left in the inbox, and its
-  parent told `blocked: budget` from the hook itself, with no `jeet`
+  parent told `blocked: budget` from the hook itself, with no `plete`
   spawned. The Stop hook and `idle_prompt` read the hold again once they
   hold the inbox lock, before handing anything over, so a pause written
   in between, whose walk interrupts under that lock, holds them too, and
   a resume written in between, which reads each agent's activity under
   that lock to hand over what queued, leaves it to them. How far a session's time is charged is kept beside its status
-  (`.<session>.charged`, under a lock), so a sweep (`jeet watch`, the
+  (`.<session>.charged`, under a lock), so a sweep (`plete watch`, the
   assistant's turns), a pause's interrupt and a stop, which each charge a
   spell still going, never charge the same time as the hook that ends it.
   A sweep, a stop, an archive and a delete charge only an agent whose own
@@ -1738,17 +1738,17 @@ Managers run locally in tmux, as the user, like any other task (I22).
   charges no top-level task, as `task interrupt` would otherwise): one that
   died with no `Ended` (a crash, a reboot) leaves a status that still says
   busy, which is no busy time, nor is it once a new agent is launched and
-  has not reported yet (a status older than `.jeet/launched`). Archiving
+  has not reported yet (a status older than `.plete/launched`). Archiving
   or deleting a task in the tree charges its live agent's spell so far
   before its session ends, as a stop does, since no hook or sweep charges
   it after. A sweep, and a pause's or `task interrupt`'s interrupt, that use a budget up report `blocked: budget` themselves; a stop's does not, as a stopped node's end is not reported. A status report is debounced against the last one of the same event (its word), so a `budget` or `queued` report between two sweeps of one idle spell does not make it news again. Deleting a task adds what it used to its parent's use, in the same transaction, so its spend still counts toward every budget above it. An
-  `Ended` that no new session replaces starts a detached `jeet manager
-  drain` (output to `drain.log` in jeet's home) when a start waits on
+  `Ended` that no new session replaces starts a detached `plete manager
+  drain` (output to `drain.log` in plete's home) when a start waits on
   `max_live`, as a hook has seconds to run; a stopped task's `Ended` is not
   reported to its parent. A harness with no hooks, or no `Ended`, has
   nothing drain when its agent exits: a queued start waits for the next
   drain from `run_once`, the TUI refresh, a stop or a resume (M22's list).
-- **P20** `jeet manager budget <task> +…|=…` (`manager.grant`) raises
+- **P20** `plete manager budget <task> +…|=…` (`manager.grant`) raises
   a limit the task has (`+` on a unit with no limit is refused: there is
   no cap to raise) or sets one, keeping the unit not given; the result
   must fit what is left above the task and, for a node, what it has left
@@ -1758,12 +1758,12 @@ Managers run locally in tmux, as the user, like any other task (I22).
   checked at once (`budget::enforce`), so a limit set at or below what
   the task has used pauses it now, not after a turn past it. Otherwise it
   leaves the run state alone: a task its budget paused runs again only once resumed, and the
-  command says so. A manager's `BRIEF.md` is written again (P21). `jeet
+  command says so. A manager's `BRIEF.md` is written again (P21). `plete
   manager pause`, `resume` and `stop` (`manager.stop`) print one line per
   node the walk touched. `stop --all` is the user's alone, refused before
   any scope check to the assistant and to a node (M11); the assistant may
   still stop one task. `manager show` names a node that set a run state
-  by its slug. The hidden `jeet manager drain` takes `--after <task id>`:
+  by its slug. The hidden `plete manager drain` takes `--after <task id>`:
   the `Ended` hook runs before its agent exits, so the drain it leaves
   behind waits up to ten seconds for that task's agent's pane to go before it
   counts, or the ending session would still fill the slot it frees. A
@@ -1771,19 +1771,19 @@ Managers run locally in tmux, as the user, like any other task (I22).
   which drains on a full refresh (opening, and `r`), shows the first in
   its status line rather than on the screen it draws.
 - **P21** A manager's role (§1 "Layout"): its home gets, in place of the
-  worker's `jeet` skill (which says what a worker may do), the manager's
+  worker's `plete` skill (which says what a worker may do), the manager's
   `AGENTS.md` (read `BRIEF.md` first; the subtree only, no messages
-  sideways; report with `jeet report`; the budget, pause and stop;
-  read-only worktrees, so delegate code changes; jeet's limits are
+  sideways; report with `plete report`; the budget, pause and stop;
+  read-only worktrees, so delegate code changes; plete's limits are
   cooperative, stay within them; the untrusted-fence paragraphs), the
-  `jeet-manager` skill, `notes/worklog.md` and `todo.md`, written once as
-  the assistant's are. `jeet todo` stays the assistant's list (D6) and is
+  `plete-manager` skill, `notes/worklog.md` and `todo.md`, written once as
+  the assistant's are. `plete todo` stays the assistant's list (D6) and is
   refused to every task: a manager edits its `todo.md` by hand, its
-  templates never name `jeet todo`, its settings do not pre-approve it,
-  and its summary reads the file as `jeet todo` would parse it. Its
+  templates never name `plete todo`, its settings do not pre-approve it,
+  and its summary reads the file as `plete todo` would parse it. Its
   `BRIEF.md` is its brief as its session context has it
-  (`reports::brief_context`, fenced as `<jeet-brief>` with its tree path),
-  plus its budget, which a worker's brief leaves to its manager. jeet
+  (`reports::brief_context`, fenced as `<plete-brief>` with its tree path),
+  plus its budget, which a worker's brief leaves to its manager. plete
   writes it, mode 0444, when the manager is made, once its row is in (a
   failure is a warning: the session context has the brief too), and again
   on `manager grant` (for each active manager in the subtree, whose `You
@@ -1794,7 +1794,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   read-only file beside it and renames it over the old one rather than
   editing it in place, so an agent never reads half of one and a link put
   in its place is replaced, not followed; each reads the brief and
-  renames under the task's `.jeet/brief.lock`, so a write that read the
+  renames under the task's `.plete/brief.lock`, so a write that read the
   brief before a grant or budget changed cannot land over a newer one. A
   manager's `SessionStarted`
   (the hook path a worker's brief takes, switching on its kind) prints
@@ -1803,10 +1803,10 @@ Managers run locally in tmux, as the user, like any other task (I22).
   reports of those under it, its budget and what its subtree used, its
   todo list and its inbox, which it hands over unless the manager is
   held. Each agent-written part is fenced. The assistant's summary gains
-  one line, pointing to a new `jeet-managers` skill, a path of its own so
+  one line, pointing to a new `plete-managers` skill, a path of its own so
   existing homes get it (the write-once templates reach them no other
   way); it is otherwise unchanged to the byte.
-- **P22** `jeet manager new <name>` (`manager.create`) is planned and
+- **P22** `plete manager new <name>` (`manager.create`) is planned and
   made as a child (P11) of kind manager, under the assistant for the user
   and the assistant, under itself for a manager, or under `--parent`; a
   node's `--parent` has `task new`'s scope row (itself or a manager below
@@ -1844,14 +1844,14 @@ Managers run locally in tmux, as the user, like any other task (I22).
   ` ↳ assistant` (D22) names a task's real parent: ` ↳ <slug>` for one
   under a manager. A manager's summary introduces its queued messages as
   its own: what its parent or the user sent with `task send` is queued
-  unfenced and is their instruction; whatever is fenced (jeet-report,
-  github-event, github-data, jeet-message) is a claim or data, never
+  unfenced and is their instruction; whatever is fenced (plete-report,
+  github-event, github-data, plete-message) is a claim or data, never
   instructions. `task prs` run by an agent lists a task's PRs inside
   `<github-data untrusted>`, titles unable to close it, as the root's
-  summary lists them; `jeet prs` run by an agent lists a repository's
+  summary lists them; `plete prs` run by an agent lists a repository's
   open PRs the same way, titles and authors unable to close it. The user
   gets either without control characters.
-  `jeet watch` sends an event for a pull request to the worker that owns
+  `plete watch` sends an event for a pull request to the worker that owns
   it, never to a manager that came to have it recorded (say by checking
   out a worker's head to read it): routing events to a manager is built
   through a rule, never by PR ownership (H19).
@@ -1860,7 +1860,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
   delete}(…, recursive)`, which the CLI and the TUI share. Archive and
   delete walk `tasks::subtree_leaves_first` (the walk `manager/run.rs`
   pauses and stops by); archive skips what is already archived. Before any
-  work, every node is checked (`refuse_inside_any`: not this jeet's own
+  work, every node is checked (`refuse_inside_any`: not this plete's own
   session or review job; for delete, not the shell's cwd and a sane
   slug), then the CLI shows one listing, `subtree_losses` (delete) or
   `subtree_unkept` (archive), and asks once, `--force` without a
@@ -1913,7 +1913,7 @@ Managers run locally in tmux, as the user, like any other task (I22).
     anyway, with a warning.
   - M25: the move into `src/manager/` is minimal, not §1's and §8's
     "generalise `session_context`, multi-session windows". A manager is
-    started by its parent into one `jeet-<slug>` session and typed into
+    started by its parent into one `plete-<slug>` session and typed into
     through `TmuxAgent`, as a worker is; it needs none of the windows that
     let the user talk to the assistant in several sessions. So
     `src/manager/` holds the templates by role, `ensure_files`, the
@@ -1923,13 +1923,13 @@ Managers run locally in tmux, as the user, like any other task (I22).
     moved. The assistant's output is unchanged to the byte, and a
     manager's session context comes through the `kind` switch in the
     SessionStart hook (P21).
-  - M29: the commands are `jeet manager …`, not #34's `jeet agent …`, by
+  - M29: the commands are `plete manager …`, not #34's `plete agent …`, by
     decision 1 (the code says manager; UI text may say agent).
   - M30: tests use real rows, never a placement fake. Unit tests insert
     rows of any kind; the pause and stop walks take the runtime lookup as
-    a parameter (P16). Integration tests make managers with `jeet manager
+    a parameter (P16). Integration tests make managers with `plete manager
     new` and their children from the manager's own pane, against a stub
-    tmux with several sessions and a temporary `JEET_HOME`; raw SQL is
+    tmux with several sessions and a temporary `PLETE_HOME`; raw SQL is
     left only for states the CLI refuses to make.
 
 ### Phase 3 implementation notes
@@ -1947,12 +1947,12 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   agent's text (`l`, `i`, `b`) work only for `Caller::User`; an identity
   error counts as not the user. So do the actions (`p`, `P`, `x`, `n`),
   which pass `Caller::User` to the library. Anything else gets "the agents pane
-  acts as you; open jeet from your own terminal, not from an agent's pane"
+  acts as you; open plete from your own terminal, not from an agent's pane"
   (phase 4 made the check and the words stricter: H17). The
   tree, `⏎` and moving about stay open, as the active view is. Known gap,
   left as it is: the other views' `a` and `D` still run with no caller.
 - **A3** A third view between *active* and *archived*: `⇥` cycles active →
-  agents → archived, `⇧⇥` goes back. The title is `jeet · agents`, and the
+  agents → archived, `⇧⇥` goes back. The title is `plete · agents`, and the
   assistant's pinned line is not drawn: it is the root. The tab counts the
   tree's nodes; the list's title says how many of them a closed manager or
   the filter leaves shown.
@@ -1994,7 +1994,7 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   and `queued n` (starts waiting on `max_live`), the last two only when not
   0. No wake cell.
 - **A9** The columns: the tree's rails, `▾`/`▸` for a manager and the
-  slug (jeet's, never a name an agent wrote), `✦ assistant` at the root;
+  slug (plete's, never a name an agent wrote), `✦ assistant` at the root;
   the status, glyph and words with the agent's detail (`● running – Edit`,
   `◆ needs input – Bash`, `! question`, `$ budget`, `✓ done`); the budget,
   `0h40/2h` against a time limit, else `12/40 turns`, and for the
@@ -2022,11 +2022,11 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   newest first (`Database::reports_for`). On the assistant it lists its
   children's reports to it. `⏎` opens the node's PRs when it has some: a
   report carries no link (D18), so there is no "linked PR".
-- **A14** `b` is `jeet manager show`'s text (`commands::manager::shown`
+- **A14** `b` is `plete manager show`'s text (`commands::manager::shown`
   and `shown_text`) as the user, unfenced, with the node's own open ask
   after it. On the assistant too: it is a read for the user, so
   `manager show`'s scope, which refuses the assistant, is not asked.
-- **A15** `p` and `P` pause and resume the node's subtree as `jeet manager
+- **A15** `p` and `P` pause and resume the node's subtree as `plete manager
   pause` and `resume` do: `permissions::in_scope` as the user (the CLI's
   `scoped`, since `run::*` checks no scope), then `run::pause` or
   `run::resume` (which asks `check_resume`), on the node as the index has it
@@ -2047,7 +2047,7 @@ actions (`p`, `P`, `x`, `n`), whose notes are A15-A17 and A20.
   task also has project, repositories and branch, a manager none (`manager
   new` takes none). The form parses the budget (`budget::parse_part`) and
   the capabilities (`permissions::parse_capability`) as clap would, then
-  `⏎` runs what `jeet task new --parent` and `jeet manager new` run, as the
+  `⏎` runs what `plete task new --parent` and `plete manager new` run, as the
   user: `tasks::plan_child`, then `tasks::create`. `--parent` is
   `assistant` for the root and the node's id below it (`find_exact` never
   finds the assistant, even by id). What `plan_child` refuses (a manager
@@ -2103,12 +2103,12 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   or question report. A `progress` report does not (the user's decision on
   the plan's Q13, against its default): a task that reports "still waiting
   on #42" keeps its question open, and one with the user stays the
-  user's to answer. Nor does a `status` report, which is jeet's.
+  user's to answer. Nor does a `status` report, which is plete's.
 - **H4** A question reaches the user only by escalation: there is no
   `--to-user`, since each manager above may be able to answer within its
   brief. When the assistant passes one up, `needs_user` becomes 1 and
   `to_id` stays the assistant.
-- **H5** `jeet report escalate <id>`: the caller must hold the ask, open,
+- **H5** `plete report escalate <id>`: the caller must hold the ask, open,
   not yet with the user. A manager's goes to its parent, fenced as
   `fence_escalated(.., via = "manager <slug>")`, which a question or
   blocked may wake (P14). The assistant's sets `needs_user` and notifies.
@@ -2121,7 +2121,7 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   escalator's own `progress` report.
 - **H7** The user answers any open ask in the tree. The assistant and a
   manager answer only what they hold and have not passed to the user. Both
-  commands refuse in jeet's words: no such report, not an ask ("#41 is a
+  commands refuse in plete's words: no such report, not an ask ("#41 is a
   progress report"), answered ("#42 was answered by the user"), superseded
   by a done, blocked or question report ("task w has filed a done report
   since (#57); #42 is no longer open"), held by
@@ -2129,11 +2129,11 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   archived asker ("unarchive it first").
 - **H8** Acting as the user (answering, or listing every open ask) needs
   `permissions::at_terminal`, the bar `task adopt` set and now shares: no
-  task identified, `JEET_TASK_ID` unset or blank, not assistant mode, and
-  no pane of jeet's tmux sessions above the process (so a window an agent
-  opens in its own `jeet-<slug>` session with the env cleared fails). No
+  task identified, `PLETE_TASK_ID` unset or blank, not assistant mode, and
+  no pane of plete's tmux sessions above the process (so a window an agent
+  opens in its own `plete-<slug>` session with the env cleared fails). No
   stdin-is-a-terminal check. An identity error fails closed. Otherwise:
-  "answering as you runs at your own terminal, outside jeet's tmux
+  "answering as you runs at your own terminal, outside plete's tmux
   sessions and any task's pane". An orphaned, env-stripped process still
   passes, as 5.7 records.
 - **H9** `fence_answer` and `fence_escalated` in `manager/fence.rs`. An
@@ -2147,7 +2147,7 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   copies, never started (`may_start = false`; the assistant's through
   `assistant::deliver(.., false)`). Copies go to the asker's ancestors from
   its parent up to and including the holder, less the answerer. A copy is
-  the question, fenced as `fence_escalated(.., via = "jeet (copy)")`, then
+  the question, fenced as `fence_escalated(.., via = "plete (copy)")`, then
   `fence_answer(.., copy = true)`. Fencing triples each `<`/`>`, so a long
   question and a long answer could exceed `MAX_MESSAGE`; the answer is kept
   whole and the question cut to fit, ending "… (cut; #42 is kept in
@@ -2155,43 +2155,43 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   `MAX_REPORT` bytes. A failed delivery leaves the row answered: the
   command says so and exits 0, and nothing re-sends it.
 - **H11** When `needs_user` becomes 1, one desktop notification: title
-  `jeet: task w asks you (#42)`, subtitle the asker's tree path, body the
+  `plete: task w asks you (#42)`, subtitle the asker's tree path, body the
   question as written (not passed through `printable` first: the notifier
   already drops control characters and cuts it at `BODY_MAX`), no url.
   It ignores `[assistant] notify`. A question that reaches only the assistant
   notifies nobody. The notifier and the delivery are parameters of
   `reports::escalate`/`answer`'s cores, so no unit test reaches tmux or a
-  real notifier; end to end it is tested with `JEET_NOTIFY_CMD` pointed at
+  real notifier; end to end it is tested with `PLETE_NOTIFY_CMD` pointed at
   a recording stub.
-- **H12** `jeet report ls`. The user, at a terminal (H8), sees every open
+- **H12** `plete report ls`. The user, at a terminal (H8), sees every open
   ask, those with the user first, marked `with you`, bodies made printable;
   a top-level task's agent is refused, or it would read every question
   unfenced. The assistant or a manager sees what it holds, its `needs_user`
-  ones marked `with the user`, bodies fenced as `<jeet-report>`. A worker
+  ones marked `with the user`, bodies fenced as `<plete-report>`. A worker
   sees its own open ask. A line is `#42 question task assistant/api/w 12m
-  ago[, with you]`, then the question. No `--json`. `jeet report` became a
-  subcommand; `jeet report <kind> "…"` parses and prints as before.
+  ago[, with you]`, then the question. No `--json`. `plete report` became a
+  subcommand; `plete report <kind> "…"` parses and prints as before.
 - **H13** What agents read. The assistant's and each manager's summary have
-  "## Questions you hold" (fenced in `<jeet-reports untrusted>`, with how
+  "## Questions you hold" (fenced in `<plete-reports untrusted>`, with how
   to answer and escalate), and nothing when they hold none, so the summary
   is otherwise unchanged. `manager show`'s `open` is what the node holds,
   however deep the asker, marked `escalated from <path>` and `with the
-  user`. Every parented node's brief says what a `<jeet-answer>` is, and a
+  user`. Every parented node's brief says what a `<plete-answer>` is, and a
   manager's how to answer and escalate: templates reach new homes only
   (`ensure_files` never replaces one), so the brief, read at every
   SessionStart, carries the meaning. The brief's body goes through
   `fence_body`, which would turn a spelled-out tag into `‹…›`, so those
-  lines name the fence in words ("fenced in jeet-answer, to= its id") and
-  not as `<jeet-answer …>`. The inbox texts explain a queued answer, and
+  lines name the fence in words ("fenced in plete-answer, to= its id") and
+  not as `<plete-answer …>`. The inbox texts explain a queued answer, and
   only when one is queued. The TUI's `i` marks each report `answered by …` or `with the
-  user`, with the answer under it. The templates and the `jeet`,
-  `jeet-manager` and `jeet-managers` skills say how to answer, escalate
+  user`, with the answer under it. The templates and the `plete`,
+  `plete-manager` and `plete-managers` skills say how to answer, escalate
   and act on an answer.
-- **H14** `jeet task send` and `jeet task new --prompt` put a sender's raw
+- **H14** `plete task send` and `plete task new --prompt` put a sender's raw
   text before an agent, so for anyone but the user at a terminal (H8) both
-  `defang` it: `<jeet-` and `</jeet-`, in any ASCII case, become `‹jeet-`
-  and `‹/jeet-`. Control characters are dropped first, as delivery drops
-  them, so `<\x01jeet-` cannot hide a tag, and invisible format
+  `defang` it: `<plete-` and `</plete-`, in any ASCII case, become `‹plete-`
+  and `‹/plete-`. Control characters are dropped first, as delivery drops
+  them, so `<\x01plete-` cannot hide a tag, and invisible format
   characters (a zero-width space, say) are looked past, though kept. The
   user's own commands and the TUI's `n` form are unchanged.
 - **H15** `a` in the agents view answers the open ask at the node or
@@ -2206,7 +2206,7 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   none, "that question was answered or withdrawn meanwhile"), and opens a
   form with the id, kind, the asker's tree path, `with you` when it is, and the
   question (`printable_text`), with a one-line input. `⏎` calls
-  `reports::answer` with `Caller::User`, as `jeet report answer` does at
+  `reports::answer` with `Caller::User`, as `plete report answer` does at
   the user's terminal, and shows how the answer and each copy went in a
   message; then the tree thread gathers again. An empty answer says "type
   an answer"; a refusal (answered or withdrawn meanwhile) stays on the
@@ -2222,11 +2222,11 @@ TUI; H15-H17 (`a` and the needs-you rollup) came with the TUI's part.
   `Caller::User` **and** `permissions::at_terminal` (H8), so a top-level
   task's agent, `Caller::User` to the gate, gets none of the agents view's
   keys that read or act (`l`, `i`, `b`, `p`, `P`, `x`, `n`, `a`). The
-  refusal reads "the agents pane acts as you; open jeet from your own
-  terminal, outside jeet's tmux sessions and any task's pane". `?` lists
+  refusal reads "the agents pane acts as you; open plete from your own
+  terminal, outside plete's tmux sessions and any task's pane". `?` lists
   `a` and puts it on the "only from your own terminal" line. The check is
   made once, when the tasks screen starts; `⏎` in the answer form does not
-  make it again, since where jeet runs does not change while it runs.
+  make it again, since where plete runs does not change while it runs.
 
 ### Phase 4 implementation notes: watch rules to a manager
 
@@ -2247,7 +2247,7 @@ Notes H18-H20, numbered as the phase 4 plan maps them (its R18-R20).
   log, as a `task` rule's do with a PR no task has; what the assistant
   cannot be given is notified. A manager's events are batched under
   `MAX_MESSAGE`, as the assistant's are (`watch::batched`, one function
-  for both), each message headed by `MANAGER_HEAD`, unfenced and in jeet's
+  for both), each message headed by `MANAGER_HEAD`, unfenced and in plete's
   words only, since a manager takes unfenced text as its parent's or the
   user's; each event is fenced as `<github-event untrusted="true">`. Each
   is logged as `manager <slug>`, which the poll's summary line and the
@@ -2270,7 +2270,7 @@ Notes H18-H20, numbered as the phase 4 plan maps them (its R18-R20).
 ### Phase 4 implementation notes: --reparent
 
 Notes H21-H30, numbered as the phase 4 plan maps them (its R21-R30). Only
-`jeet task delete <manager> --reparent` is built; `jeet task move`, which
+`plete task delete <manager> --reparent` is built; `plete task move`, which
 the plan left to the user's say, is not, nor what only it needs (a cycle
 check, depth, budget room above, a node-scoped `--parent`).
 
@@ -2307,7 +2307,7 @@ check, depth, budget room above, a node-scoped `--parent`).
   effective run state changes (H26); and the subtrees, their stored grants
   and the setters to rewrite are as planned, and no planned grant is
   wider than the new chain of managers holds now (a narrowing meanwhile,
-  C14). Anything that changed since the plan is "the tasks to move changed since jeet looked; try again".
+  C14). Anything that changed since the plan is "the tasks to move changed since plete looked; try again".
   `check_move` runs it before anything is asked or removed, and
   `apply_move` again in one IMMEDIATE transaction before it writes. A
   reparent moves to the grandparent, so it cannot make a cycle, every
@@ -2343,7 +2343,7 @@ check, depth, budget room above, a node-scoped `--parent`).
   were kept. The manager's own reports go with its row. After the commit,
   each of those that is an open ask (A1's `OPEN_ASK`) the new parent now
   holds is delivered to it again (`reports::redeliver_moved`, last in
-  `after_move`), fenced as an escalated question `via="jeet (moved)"` and
+  `after_move`), fenced as an escalated question `via="plete (moved)"` and
   allowed to start it only as `escalate` would, so never a held node; an
   ask the user holds (`needs_user`) stays with the user. Each is a line in
   the output, a failed delivery too. A report the deleted manager answered
@@ -2354,7 +2354,7 @@ check, depth, budget room above, a node-scoped `--parent`).
   its path changed (`manager::write_briefs`, moved from the CLI module so
   the library can call it); a running mover is handed its new brief
   (`reports::brief_context`) with `may_start(false)`, and one not running
-  gets it as it starts; and each active mover files a jeet-worded
+  gets it as it starts; and each active mover files a plete-worded
   `status` report to its new parent, "moved here from manager api by the
   user; its open question #42 is yours now" (`StatusEvent::Moved`,
   through `reports::auto_status` as the hooks' status events, so it never
@@ -2392,7 +2392,7 @@ built.
   routing and the recovery; nothing starts a watcher, so delivery is
   unchanged unless one is started by hand. The second installs the hook
   entry that starts it and rewrites §12.
-- **K3** Its files are in `<task>/.jeet/wait/`: `<session>.lock`, an
+- **K3** Its files are in `<task>/.plete/wait/`: `<session>.lock`, an
   flock held for the watcher's life (`waiter::watched` is a non-blocking
   lock that fails; it opens without creating, so a probe makes nothing);
   `<session>.inflight`, the batch posted and not yet seen, 0600; and
@@ -2440,9 +2440,9 @@ built.
   `busy_since` now (`status::wake_running`). The watcher takes all that
   is queued for its session, the user's messages included: which messages
   go through the channel is decided where they are sent (K10).
-- **K7** The batch is "jeet: messages and reports were sent to you…",
+- **K7** The batch is "plete: messages and reports were sent to you…",
   the messages joined as the Stop hand-over joins them
-  (`messages::QUEUE_SEPARATOR`), and a last line `jeet delivery <nonce>`,
+  (`messages::QUEUE_SEPARATOR`), and a last line `plete delivery <nonce>`,
   16 hex characters. The wire format is the harness's
   (`harness::claude::wake_lines`: an `auth` line with the token, then a
   `user` message), passed to the library in `WakeEnv.lines`.
@@ -2480,9 +2480,9 @@ built.
   under it (K9), so a message is either queued while it watches or routed
   as before after.
   **By sender** (the user's decision, second PR). `Queued.from` records who
-  queued a message: `user` for `jeet task send` by `Caller::User` at a
+  queued a message: `user` for `plete task send` by `Caller::User` at a
   terminal (`permissions::at_terminal`, the same test that leaves its text
-  undefanged), `agent` for everyone else and for jeet itself (reports,
+  undefanged), `agent` for everyone else and for plete itself (reports,
   answers and copies, escalations, budget notes, watch events, briefs held
   for a start). `waiter::wakes(queued, idle)` is false only for the user's
   own message to an idle agent, which `deliver` then types in as before,
@@ -2523,7 +2523,7 @@ built.
   `false`; only the table form of `[harness]` has it) in `task_hooks` and
   `assistant_hooks`. With it, Claude Code's `settings_json` adds a second
   hook to `SessionStart`'s one group, after `task-hook`:
-  `{"type":"command","command":"<jeet> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
+  `{"type":"command","command":"<plete> inbox watch --task <id>","async":true,"timeout":WAKE_TIMEOUT_SECS}`.
   `WAKE_TIMEOUT_SECS` is a day. The live check (K21 (a)) found Claude does
   not enforce an async hook's timeout; were a later version to, the
   watcher's lock frees at the timeout, its batch is recovered (K11) and
@@ -2532,7 +2532,7 @@ built.
   `wake_hook` is not in `manager_missing`: the channel is optional, and
   `Generic` and any other harness are unchanged. Claude Code's variable
   names and wire format stay in `harness/claude.rs` (K4, K7).
-- **K16** The verb is `jeet inbox watch --task <id> [--harness <id>]`
+- **K16** The verb is `plete inbox watch --task <id> [--harness <id>]`
   (default `claude-code`), hidden from `--help`; §12's `take` is not
   built. It is `Free` in the gate and `NoTarget` in a node's scope, as
   `task-hook` is, so the gate opens no index for it. `main` runs it under
@@ -2540,8 +2540,8 @@ built.
   session-start hook's stdout is the agent's context); an error is one
   line on stderr. It calls `identity::identify` only to refuse a watcher
   that is not the agent of `--task`, as `task-hook`'s `attributed` does;
-  §5.7's row for jeet's helpers says so.
-- **K17** No wake indicator. `jeet task send` says "sent to w's agent;
+  §5.7's row for plete's helpers says so.
+- **K17** No wake indicator. `plete task send` says "sent to w's agent;
   it gets it now, through its wake channel" (for the assistant, "sent to
   the assistant's session <id>, through its wake channel"); a report or
   answer says "delivered to <to>'s session"; a watch event delivered so is
@@ -2551,18 +2551,18 @@ built.
   never seen goes back readdressed as session start readdresses the
   queue: to the session recorded as following on from it, if any.
 - **K19** The library is tested without a real Claude, tmux server or
-  `~/.jeet`: a `UnixListener` under `/tmp` for the socket, temp files for
+  `~/.plete`: a `UnixListener` under `/tmp` for the socket, temp files for
   transcripts, the test process or a killed `sleep` for `CLAUDE_PID`,
   time passed to `Watcher::step`, and a recording `Agent` for the
   fallback's typing, which `run` gets from `status::idle_agent` (shared
   with `idle_prompt`). The verb is tested end to end with the stub tmux
-  and a temp `JEET_HOME`: a watcher started from a task's pane shell
+  and a temp `PLETE_HOME`: a watcher started from a task's pane shell
   (standing in for `CLAUDE_PID`) posts what was queued and what `task
   send` sends, auth line first, typing nothing; it is confirmed by
   appending the nonce to a temp transcript; a second watcher for the
   session, one under another task's agent and one told of no socket do
   nothing; the token is in no file of `wait/`; and with the shell killed
-  the lock frees and `task send` types as before. The suite's `jeet`
+  the lock frees and `task send` types as before. The suite's `plete`
   loses `CLAUDE_CODE_MESSAGING_SOCKET`, `_TOKEN`, `CLAUDE_PID` and
   `CLAUDE_CODE_SESSION_ID`, so a watcher under test never posts into the
   Claude session the suite runs in; a watcher a test starts is killed on
@@ -2579,8 +2579,8 @@ built.
   residual of one batch), 5.5 (framing by direction), §5.7's helper row,
   §8 and §9; `docs/harnesses.md` (`wake_hook`, `wake_env`, the hook); the
   README (how messages reach an agent, `[harness] wake`).
-- **K21** The live check, on real Claude Code 2.1.296 sessions with a jeet
-  built from this PR, a scratch `JEET_HOME` and a separate tmux server:
+- **K21** The live check, on real Claude Code 2.1.296 sessions with a plete
+  built from this PR, a scratch `PLETE_HOME` and a separate tmux server:
   (j) the watcher's parent is the claude process, no shell between;
   the user's own `task send` to an idle agent was typed, a message while
   busy was posted and landed at the next tool boundary with its nonce, and
@@ -2593,7 +2593,7 @@ built.
   peer message; (h) a paused child's message stayed queued and was
   delivered once on resume; (c) compaction left exactly one watcher;
   (f) after `/exit`, and a tmux kill, every watcher was gone within a
-  second; (k) `jeet task restart` hands the lock to the new watcher;
+  second; (k) `plete task restart` hands the lock to the new watcher;
   (a) a 30 s async hook timeout is not enforced (alive at 69 s). Not
   checked: a batch posted just before `/clear`, the mid-turn pause residual
   (5.4) and where an async hook's stderr goes.
@@ -2627,8 +2627,8 @@ dispatch through it, and so does typing into a live session
 (`TmuxAgent::type_in`). An unknown placement cannot reach it: the
 `tasks.placement` `CHECK` allows only `local`, and a new placement widens it
 in a migration that rebuilds `tasks` (v6 rebuilds it anyway). That raises
-the schema version, so this jeet refuses a later jeet's index as a whole
-("upgrade jeet") before any task is read. Only a hand edit that bypasses the
+the schema version, so this plete refuses a later plete's index as a whole
+("upgrade plete") before any task is read. Only a hand edit that bypasses the
 `CHECK` stores one, and then reading the task fails, so nothing reaches tmux
 for it; every read of the tasks table fails with it (listing, archive,
 delete) until the row is fixed.
@@ -2658,7 +2658,7 @@ phase 2–4 code can degrade per placement rather than per runtime.
 
 ## 12. Message delivery through a watcher (phase 2a)
 
-Before phase 2a, jeet typed a message into an idle agent's pane, and queued
+Before phase 2a, plete typed a message into an idle agent's pane, and queued
 it for a busy one until its Stop hook handed the queue over. Phase 2a adds a
 *wake channel*: a background process, started by a hook, hands the agent
 what is queued for it as soon as it is queued. This section is as built
@@ -2668,7 +2668,7 @@ what is queued for it as soon as it is queued. This section is as built
 |---|---|
 | G1: seen once | the user does not see a message twice, typed and then fenced |
 | G2: any time | an agent can be messaged while busy, not only idle or at Stop |
-| G3: no typing | jeet never types into an input box: no draft check, no risk of answering a trust or permission prompt |
+| G3: no typing | plete never types into an input box: no draft check, no risk of answering a trust or permission prompt |
 | G4: no pane | the same path could serve nodes without a pane |
 
 **Verdict: adopted partly.** An optional wake channel for local Claude Code
@@ -2676,7 +2676,7 @@ nodes. It meets G1 and G3, and G2 at tool-call boundaries. It needs no
 daemon and falls back to today's path wherever it is missing. G4 is not
 pursued: the watcher is the agent's own hook child. Not done:
 
-- making it the transport: `.jeet/inbox.jsonl` stays the queue,
+- making it the transport: `.plete/inbox.jsonl` stays the queue,
   `Inbox::lock` the one place a message is taken, and `task_reports` the
   record;
 - requiring it of any harness (§7: an optional row);
@@ -2686,19 +2686,19 @@ pursued: the watcher is the agent's own hook child. Not done:
 
 **Candidates.** The spike picked W1, and W1 was built.
 
-| | W1: hook-started poster (built) | W2: the harness watches the inbox | W3: jeet posts directly |
+| | W1: hook-started poster (built) | W2: the harness watches the inbox | W3: plete posts directly |
 |---|---|---|---|
-| Started by | a `SessionStart` hook entry with `async: true`, in jeet's `--settings` | `SessionStart` returns `watchPaths: [<task>/.jeet/inbox.jsonl]`; a `FileChanged` hook with `asyncRewake: true` | nothing; `SessionStart` stores the socket path and token |
+| Started by | a `SessionStart` hook entry with `async: true`, in plete's `--settings` | `SessionStart` returns `watchPaths: [<task>/.plete/inbox.jsonl]`; a `FileChanged` hook with `asyncRewake: true` | nothing; `SessionStart` stores the socket path and token |
 | Reaches the model | posts to `CLAUDE_CODE_MESSAGING_SOCKET` from the agent's own hook, so no `crossSessionInbound` setting is needed | exit 2 with the messages on stderr, as a system reminder | `deliver` posts to the socket; needs `crossSessionInbound: "accept"` |
 | Mid-turn | the next tool-call boundary (spike E3) | unverified | documented |
 
 W1 wakes an idle session and lands mid-turn by documented paths, needs no
 settings change, and its process is the agent's. W2 (untested) would put
 the messages in a system reminder, trusted more than user text, a larger
-injection risk; W3 would keep a session token in jeet.
+injection risk; W3 would keep a session token in plete.
 
 **The spike** (`notes/spike-2a.md`: Claude Code 2.1.296, tmux 3.8, macOS,
-a scratch directory outside `~/.jeet` and a test tmux server) found:
+a scratch directory outside `~/.plete` and a test tmux server) found:
 
 - **E1, environment.** Hooks get `CLAUDE_CODE_MESSAGING_SOCKET` (under
   `/tmp/cc-socks/`, 0600, owner only), `CLAUDE_CODE_MESSAGING_TOKEN` and
@@ -2721,13 +2721,13 @@ a scratch directory outside `~/.jeet` and a test tmux server) found:
   binds no socket. A dropped post is detectable only by its absence from
   the transcript, hence a nonce.
 - **E6, auth and bursts.** On macOS a post without the auth line was
-  accepted; jeet sends the token anyway. Eleven posts in 0.1 s were all
+  accepted; plete sends the token anyway. Eleven posts in 0.1 s were all
   delivered, folded into a few turns (Claude's receive queue holds 50).
 - **E7, lifetime.** An async hook survives `/exit` and `tmux kill-session`,
   reparented to pid 1, while the socket goes. So the watcher must end
   itself when `CLAUDE_PID` (with its start time) is gone.
 
-Not tested by the spike: W2, `--bg` sessions (jeet never starts them),
+Not tested by the spike: W2, `--bg` sessions (plete never starts them),
 compaction and `/clear`, and whether a child acts on a manager's
 instruction delivered as a peer message. The live check (K21) covered the
 last two: one watcher survives compaction, `/clear` hands over to the new
@@ -2735,9 +2735,9 @@ session's, and a child carried out a manager's instruction sent this way.
 
 **How it works.**
 
-- **Start.** jeet's `--settings` for a Claude Code agent, task or
+- **Start.** plete's `--settings` for a Claude Code agent, task or
   assistant, add a second `SessionStart` hook beside `task-hook`:
-  `jeet inbox watch --task <id>` with `"async": true` and a `timeout` of
+  `plete inbox watch --task <id>` with `"async": true` and a `timeout` of
   `WAKE_TIMEOUT_SECS` (a day; Claude does not enforce an async hook's
   timeout, K21 (a), and if a later version does, the watcher ends then,
   its batch is recovered and delivery falls back to today's path).
@@ -2749,7 +2749,7 @@ session's, and a child carried out a manager's instruction sent this way.
   environment and removes them, so nothing it starts inherits the token.
   It runs only under `CLAUDE_PID`, as the agent of `--task`
   (`identity::identify`), when the session has no `.off`, and when it gets
-  the session's lock in `<task>/.jeet/wait/` within 2 s (a second watcher,
+  the session's lock in `<task>/.plete/wait/` within 2 s (a second watcher,
   after compaction, does not). It then recovers the task's stale inflight
   batches.
 - **Waiting.** Each 500 ms it checks `CLAUDE_PID`, compares the inbox
@@ -2763,8 +2763,8 @@ session's, and a child carried out a manager's instruction sent this way.
   messages as fit `MAX_MESSAGE`, writes `<session>.inflight` (0600; never
   the token) before it takes them, marks the input typed, writes a
   `Running` status with event `wake` ("reading messages") for an idle
-  session, and posts one batch: a jeet-worded header, the messages joined
-  as the Stop hand-over joins them, and a last line `jeet delivery
+  session, and posts one batch: a plete-worded header, the messages joined
+  as the Stop hand-over joins them, and a last line `plete delivery
   <nonce>`.
 - **Confirm, or fall back.** Each tick it looks for the nonce in the
   transcript. Found, the batch was delivered. Not found after 20 s with the
@@ -2801,14 +2801,14 @@ session's, and a child carried out a manager's instruction sent this way.
   20 s old (a younger one may still be delivered by Claude, and pushing it
   back would deliver it twice).
 - The pane shows only a preview line, so the full text is read in Ctrl+O,
-  the agents pane's `i` and `jeet report ls`. Fencing is unchanged.
+  the agents pane's `i` and `plete report ls`. Fencing is unchanged.
 
 **Which messages go through it: by sender.** Each queued message records
-who sent it (`Queued.from`: `user` or `agent`). The user's own `jeet task
+who sent it (`Queued.from`: `user` or `agent`). The user's own `plete task
 send` from their terminal (`permissions::at_terminal`) to an idle agent is
 still typed in, a user turn with the user's authority; through the channel
 it would arrive as a peer's, which cannot approve anything. Everything
-else goes through the channel: an agent's `jeet task send` (the root's, a
+else goes through the channel: an agent's `plete task send` (the root's, a
 manager's), reports, answers and their copies, escalations, budget notes
 and watch events, and the user's own message to an agent that is busy,
 waiting on a prompt or holding a draft (it would be queued, not typed,
@@ -2830,7 +2830,7 @@ Code's inbound limits (50 queued, identical repeats folded) and its silent
 refusal.
 
 **The off switch.** `[harness] wake = false` in `config.toml` installs no
-watcher, from each agent's next launch (`jeet task restart` for one
+watcher, from each agent's next launch (`plete task restart` for one
 running). The default is on.
 
 **Corrections to the design as first written.**
@@ -2842,7 +2842,7 @@ running). The default is on.
 - `deliver` returns `Delivered::Wake`, not `Watched`:
   `runtime::Interrupted::Watched` already means a user is attached.
 - No worklog note per delivery: it would be noise, and the inbox and
-  `task_reports` stay the record. Nor is there a `jeet inbox take` verb.
+  `task_reports` stay the record. Nor is there a `plete inbox take` verb.
 
 **Risks, as they stand.** Claude Code only. A peer message cannot approve
 anything, which suits reports going up, but a child may weigh a manager's
@@ -2858,19 +2858,19 @@ in the watcher's initial environment block, which `ps eww` shows to the
 same user, who can read it from Claude's own process anyway (I22).
 
 **Live check.** Before the phase merges, it is run on real Claude Code
-sessions, on a test tmux server and a scratch `JEET_HOME`: whether an
+sessions, on a test tmux server and a scratch `PLETE_HOME`: whether an
 async hook's `timeout` is enforced; whether `UserPromptSubmit` fires on a
 wake from idle; that compaction's second watcher exits; a refused post
 falling back, typed once; that a child acts on a manager's instruction
 delivered as a peer message; `/exit`; `/clear` with a batch just posted; a
 pause while a batch is in flight, mid-turn and from idle; where an async
-hook's stderr goes; whether the hook runs through `sh -c`; and `jeet task
+hook's stderr goes; whether the hook runs through `sh -c`; and `plete task
 restart`. Its results go in `notes/spike-2a.md` and K21.
 
 | Phase | What lands |
 |---|---|
 | Before 2a | the spike (done; above) |
-| 2a (#34) | built: `src/waiter.rs` and the hidden `jeet inbox watch --task`; `Delivered::Wake` routing by sender (`Queued.from`) in `messages.rs`; the idle and resume skip and inflight recovery in `status.rs`; `Harness::wake_hook`, `wake_env` and `HookSetup.wake`, the settings entry and `[harness] wake` |
+| 2a (#34) | built: `src/waiter.rs` and the hidden `plete inbox watch --task`; `Delivered::Wake` routing by sender (`Queued.from`) in `messages.rs`; the idle and resume skip and inflight recovery in `status.rs`; `Harness::wake_hook`, `wake_env` and `HookSetup.wake`, the settings entry and `[harness] wake` |
 | 3 (#35) | the `i` view and inbox depth on each row (built); no wake indicator (A19; decided again for 2a, K17) |
 | 4 (#36) | answers, copies and watch events go through the wake channel as any message not the user's own does; the wake cap and turn accounting apply to them |
 
@@ -2894,12 +2894,12 @@ in that branch's history.
 
 A boundary *around the user's machine*: a cloud node cannot reach
 `index.db`, `config.toml`, tmux, other nodes' homes, the user's `gh` token
-or the user's shell. Every jeet action it takes goes through one broker, the
-local jeet process, which re-checks identity, scope and the effective
+or the user's shell. Every plete action it takes goes through one broker, the
+local plete process, which re-checks identity, scope and the effective
 allow-list on every call. It is *not* a boundary between cloud nodes, and it
 does not limit what a node does directly through git or GitHub: all nodes
 push and comment as one GitHub identity, share one cloud environment's
-egress and environment variables, and hold their jeet identity as a key in
+egress and environment variables, and hold their plete identity as a key in
 their own conversation. Local agents stay cooperative (5.7), and if they can
 read the cloud login they can drive cloud nodes: it protects the machine
 from cloud nodes, not cloud nodes from local agents. Upward prompt injection
@@ -2907,7 +2907,7 @@ remains the main risk.
 
 ### 13.2 Running a node
 
-- **Start.** Push the node's branch `jeet/<node-id>/base` from a store
+- **Start.** Push the node's branch `plete/<node-id>/base` from a store
   worktree, then run `claude --cloud "<brief>"` there with
   `CLAUDE_CONFIG_DIR=[cloud].config_dir`, and store the session id and URL.
   If the CLI prints no parseable session id without a terminal, fall back to
@@ -2915,12 +2915,12 @@ remains the main risk.
   single-repo.
 - **Send.** `claude -p "<fenced msg>" --cloud <session-id> --output-format
   json`. The server queues it; it fails on archived sessions, which is how
-  jeet notices archiving. This is the cloud node's wake channel (no watcher).
+  plete notices archiving. This is the cloud node's wake channel (no watcher).
 - **Brief.** The first prompt carries the node id, goal and done text, the
-  mailbox protocol and the node key. jeet relies on no repo hooks there, as
+  mailbox protocol and the node key. plete relies on no repo hooks there, as
   the node can edit them.
-- **Shim.** An environment setup script embeds a small untrusted `jeet` shim
-  (POSIX sh plus python3) that turns `jeet report …`, `jeet task new …` and
+- **Shim.** An environment setup script embeds a small untrusted `plete` shim
+  (POSIX sh plus python3) that turns `plete report …`, `plete task new …` and
   the like into signed envelopes on the mailbox branch.
 - **Message-driven managers.** Idle VMs are reclaimed and background
   commands die after about 30 minutes, so a manager ends each turn with its
@@ -2929,16 +2929,16 @@ remains the main risk.
 
 ### 13.3 The mailbox: the callback up from a node
 
-- A node writes one file per envelope (`<seq>.json`) to `jeet-mail/<node-id>`
+- A node writes one file per envelope (`<seq>.json`) to `plete-mail/<node-id>`
   in its session's repo, pushed through the proxy: `{v, node_id,
   session_id, seq, ts, argv[], body}` plus `mac = HMAC-SHA256(K_node,
   canonical_json_without_mac)`. At most 8 KiB each and 32 per node per
   tick; an issue or PR comment is never a command.
-- `collect()` runs `git fetch origin '+refs/heads/jeet-mail/*:refs/jeet-mail/*'`
+- `collect()` runs `git fetch origin '+refs/heads/plete-mail/*:refs/plete-mail/*'`
   in the store (`core.hooksPath=/dev/null`, `core.fsmonitor=false`,
   `GIT_CONFIG_NOSYSTEM=1`) and reads new blobs with `git cat-file`: no HTTP
-  client. It runs on the `jeet watch` tick, the TUI refresh thread every
-  `poll_secs`, and `jeet cloud sync`, under `WatchLock`. Each envelope is
+  client. It runs on the `plete watch` tick, the TUI refresh thread every
+  `poll_secs`, and `plete cloud sync`, under `WatchLock`. Each envelope is
   claimed by a unique `(node_id, seq)` row before it runs.
 - An envelope is accepted only if the MAC verifies, `node_id` matches the
   branch, `session_id` the bound session, `seq` is above the last seen, `ts`
@@ -2952,7 +2952,7 @@ remains the main risk.
   a descendant, `manager …` on a descendant (pause and stop mean fence-off),
   its own subtree's `tree`/`task ls`, `pr create` with a head in its own
   namespace. `pr comment|review|merge` are refused.
-- Results go down batched per tick, `<jeet-result seq=N ok=…>` with a MAC.
+- Results go down batched per tick, `<plete-result seq=N ok=…>` with a MAC.
   Parent messages and GitHub events are fenced, and a GitHub event goes down
   as a pointer only. A cloud `-p` message carries full user authority, so no
   event text may look like a result or a rekey.
@@ -2961,10 +2961,10 @@ remains the main risk.
 
 - **GitHub.** The Claude GitHub App on the attested repos only, not
   `/web-setup`. The proxy does not limit which branches a push updates, so
-  no-bypass rulesets must protect default branches and `jeet-mail/**`; they
+  no-bypass rulesets must protect default branches and `plete-mail/**`; they
   bind the user too. Branch namespaces are enforced only on brokered
   actions. A repo is attested only when no secrets are reachable from
-  `jeet/**` and `jeet-mail/**` workflows and there is no comment-triggered
+  `plete/**` and `plete-mail/**` workflows and there is no comment-triggered
   automation.
 - **Anthropic account.** A dedicated claude.ai login with no connectors, as
   connectors reach every cloud session. Not available to Bedrock, Vertex,
@@ -2976,22 +2976,22 @@ remains the main risk.
 
 ### 13.5 What a cloud placement could not provide
 
-*Fence-off* means: jeet sets `run_state = 'stopped'|'paused'`, rejects all
+*Fence-off* means: plete sets `run_state = 'stopped'|'paused'`, rejects all
 of the node's envelopes, sends it nothing more, fences off its subtree the
 same way, and notifies the user with each session URL to stop or archive on
-claude.ai. Each gap degrades to "jeet stops brokering for the node and tells
+claude.ai. Each gap degrades to "plete stops brokering for the node and tells
 the user".
 
 | Requirement (§) | Cloud placement | How, or why not |
 |---|---|---|
 | Managers below the root (§1, ph2) | **Supported** | cloud session plus mailbox, message-driven |
-| Effective allow-lists, intersection, scope, no sideways sends (5.1) | **Supported for jeet commands** | enforced at the local broker on every envelope |
+| Effective allow-lists, intersection, scope, no sideways sends (5.1) | **Supported for plete commands** | enforced at the local broker on every envelope |
 | Same, for direct git/`gh` actions (5.6) | **Not supported per node** | one GitHub identity. Repo-wide no-bypass rulesets plus attestation only |
-| Held capabilities (5.1) | **Supported by refusal** | never grantable to cloud nodes. Merge is root-only through `jeet pr merge` |
+| Held capabilities (5.1) | **Supported by refusal** | never grantable to cloud nodes. Merge is root-only through `plete pr merge` |
 | Depth, fan-out (5.2) | **Supported** | every spawn goes through the broker, if nodes cannot create sessions themselves |
-| `max_live` and queueing (5.2) | **Degraded** | jeet cannot see whether a session is running or idle |
+| `max_live` and queueing (5.2) | **Degraded** | plete cannot see whether a session is running or idle |
 | Time budget (5.3) | **Degraded** | wall clock since start, enforced by fence-off. The node is not paused |
-| Turn budget (5.3), cost budget (#26) | **Not supported** | no turn events or usage reach jeet |
+| Turn budget (5.3), cost budget (#26) | **Not supported** | no turn events or usage reach plete |
 | Pause / resume (5.4) | **Degraded** | fence-off plus holding the down-queue. The current turn keeps running |
 | Stop, `stop --all` (5.4) | **Degraded** | fence-off. Real stop or archive is UI-only |
 | Harness interrupt (#32) | **Not supported** | no CLI or API |
@@ -2999,9 +2999,9 @@ the user".
 | Read-only worktrees (§1) | **Not supported** | the node has a writable clone and push access |
 | `worktree add` mid-session, multi-repo node | **Not supported** | one repo per session, fixed at start. Use a child node |
 | Recursive archive/delete (ph2) | **Degraded** | index bookkeeping only; sessions are archived by the user in the UI |
-| Agents pane rollup, worklog, inbox (ph3) | **Degraded** | from reports, verified envelopes and jeet's sent log; no live status |
+| Agents pane rollup, worklog, inbox (ph3) | **Degraded** | from reports, verified envelopes and plete's sent log; no live status |
 | Attach `⏎` (ph3) | **Degraded** | opens the claude.ai URL; `--teleport` gives a one-way local copy |
-| Escalation, watch rules, reparent (ph4) | **Supported, with latency** | through the mailbox and `-p`, one poll tick a hop. Answers on claude.ai bypass jeet |
+| Escalation, watch rules, reparent (ph4) | **Supported, with latency** | through the mailbox and `-p`, one poll tick a hop. Answers on claude.ai bypass plete |
 | Tree works while the Mac sleeps | **Not supported** | brokering, spawns, answers and budget checks stop |
 | Non-Claude harnesses | **Not supported** | cloud runs Claude Code only |
 
@@ -3009,8 +3009,8 @@ the user".
 synchronous, session-bound callback with no key in the conversation,
 `user.interrupt`, per-session usage and repo tokens) but is another product:
 another agent loop without Claude Code hooks, Console API billing, a
-workspace and key, and an HTTP client in jeet. Rejected for a first cloud
-runtime: a jeet remote MCP server (a daemon and a public tunnel), transcript
+workspace and key, and an HTTP client in plete. Rejected for a first cloud
+runtime: a plete remote MCP server (a daemon and a public tunnel), transcript
 polling, Claude Code Projects (UI only), and self-hosted environments (Team
 or Enterprise and a runner).
 
@@ -3025,7 +3025,7 @@ or Enterprise and a runner).
    by absolute path?
 4. **GitHub.** The App limited to the nodes' repos, no-bypass rulesets that
    bind the user too, the automation attestation, and optionally a
-   jeet-owned App whose required check keeps merges with the local root.
+   plete-owned App whose required check keeps merges with the local root.
 5. **Probes.** Permission to run live, billed probes of the CLI, the VM's
    credentials, reclaimed VMs, push limits, the GitHub actor, connectors,
    permission mode and the base image.

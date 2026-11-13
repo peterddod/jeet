@@ -1,6 +1,6 @@
 //! Pull requests, through the GitHub CLI.
 //!
-//! jeet never talks to the GitHub API itself: `gh` already knows which host a
+//! plete never talks to the GitHub API itself: `gh` already knows which host a
 //! remote points at, holds the user's credentials, and understands forks. So
 //! everything here is a `gh` subprocess run from inside the repository, and a
 //! machine without `gh` simply has no pull requests to show.
@@ -11,7 +11,7 @@ use std::process::{Command, Output, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// The fields jeet asks `gh pr view` / `gh pr list` for.
+/// The fields plete asks `gh pr view` / `gh pr list` for.
 const PR_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,headRefName,headRefOid,baseRefName,isCrossRepository";
 
 /// [`PR_FIELDS`] plus what a task's PR history shows: the size of the change
@@ -352,7 +352,7 @@ pub fn prs_for_commit(repo_dir: &Path, sha: &str) -> Result<Vec<HistoryPr>> {
     serde_json::from_str(&text).context("parse gh pr list output")
 }
 
-/// A PR as `jeet prs` lists it: enough to decide which one to review.
+/// A PR as `plete prs` lists it: enough to decide which one to review.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListedPr {
@@ -384,7 +384,7 @@ pub struct Login {
 
 impl ListedPr {
     /// Same rule as [`PullRequest::local_branch`], so a listed PR can be
-    /// matched to the worktree `jeet review` would have put it in.
+    /// matched to the worktree `plete review` would have put it in.
     pub fn local_branch(&self) -> String {
         if self.is_cross_repository {
             format!("pr/{}", self.number)
@@ -556,7 +556,7 @@ pub enum StatusCheck {
         #[serde(default)]
         state: String,
     },
-    /// A kind GitHub may add later: jeet cannot tell whether it passed.
+    /// A kind GitHub may add later: plete cannot tell whether it passed.
     #[serde(other)]
     Unknown,
 }
@@ -574,7 +574,7 @@ impl StatusCheck {
         match self {
             StatusCheck::CheckRun { name, .. } => name,
             StatusCheck::StatusContext { context, .. } => context,
-            StatusCheck::Unknown => "a check jeet cannot read",
+            StatusCheck::Unknown => "a check plete cannot read",
         }
     }
 
@@ -1289,7 +1289,7 @@ struct NewReview {
 }
 
 // ---------------------------------------------------------------------------
-// What `jeet watch` asks GitHub
+// What `plete watch` asks GitHub
 // ---------------------------------------------------------------------------
 
 /// One notification thread, as `GET /notifications` lists it. Everything in
@@ -1397,7 +1397,7 @@ fn header_value_ok(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii() && !c.is_ascii_control())
 }
 
-/// Threads from a notifications page; one GitHub wrote in a shape jeet does
+/// Threads from a notifications page; one GitHub wrote in a shape plete does
 /// not know is skipped rather than failing the rest.
 pub fn parse_notifications(body: &str) -> Result<Vec<Notification>> {
     let values: Vec<serde_json::Value> =
@@ -1811,7 +1811,7 @@ mod tests {
         assert_eq!(response.body, "");
         assert!(parse_included("gh: HTTP 401").is_none());
         assert!(parse_included("").is_none());
-        // A thread in a shape jeet does not know is skipped.
+        // A thread in a shape plete does not know is skipped.
         let threads = parse_notifications(
             r#"[{"id":"1"},{"id":"2","subject":{},"repository":{"full_name":"a/b"}}]"#,
         )

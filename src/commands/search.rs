@@ -1,4 +1,4 @@
-//! `jeet search`: the documents that answer a question, with their best
+//! `plete search`: the documents that answer a question, with their best
 //! passages. It reads, and asks no model.
 
 use anyhow::{bail, Result};
@@ -36,7 +36,7 @@ pub fn run(
     }
     let query = query.join(" ");
     if query.trim().is_empty() {
-        bail!("say what to search for, e.g. `jeet search what did we decide about retries`");
+        bail!("say what to search for, e.g. `plete search what did we decide about retries`");
     }
     let hits = search::search(app, &scope, &query, limit.clamp(1, MAX_LIMIT))?;
     if json {

@@ -1,4 +1,4 @@
-//! The tasks list: `jeet tasks`, and `jeet` with no arguments.
+//! The tasks list: `plete tasks`, and `plete` with no arguments.
 //!
 //! One row per task — what its agent is doing, its name, the worktrees it
 //! holds, how much disk it takes and when anything last happened in it —
@@ -110,7 +110,7 @@ pub const RESIZE_EVERY: Duration = Duration::from_secs(120);
 /// tasks that came and went behind the list's back.
 pub const REREAD_EVERY: Duration = Duration::from_secs(5);
 
-/// How often the list sees whether a GitHub poll (`jeet watch --once`) is
+/// How often the list sees whether a GitHub poll (`plete watch --once`) is
 /// due, while it is open; `[watch] interval_secs` says how often one is.
 const WATCH_EVERY: Duration = Duration::from_secs(30);
 
@@ -131,14 +131,14 @@ const NO_NODE: &str = "no assistant yet — c starts it, and the tree grows unde
 
 /// Said when a key of the agents view that shows an agent's text, or acts,
 /// is pressed by anyone but the user at their own terminal (Q2, R17).
-const NOT_USER: &str = "the agents pane acts as you; open jeet from your own terminal, outside \
-     jeet's tmux sessions and any task's pane";
+const NOT_USER: &str = "the agents pane acts as you; open plete from your own terminal, outside \
+     plete's tmux sessions and any task's pane";
 
 /// Said for a key of the active view the agents view does not take (Q22).
 const NOT_IN_AGENTS: &str = "not in the agents view; ⇥ to active";
 
 /// Said when a key of the reviews view has no review under the cursor.
-const NO_REVIEW: &str = "no review selected — jeet review <pr> starts one";
+const NO_REVIEW: &str = "no review selected — plete review <pr> starts one";
 
 /// Said for ⏎ on an empty answer.
 const TYPE_AN_ANSWER: &str = "type an answer";
@@ -160,9 +160,9 @@ pub struct TaskRow {
     pub last_activity: i64,
     /// Bytes on disk, once the size walker has been through the task.
     pub size: Option<u64>,
-    /// What a task with a parent last told it, or jeet did for it.
+    /// What a task with a parent last told it, or plete did for it.
     pub report: Option<TaskReportRecord>,
-    /// Its agent runs without jeet knowing its process, as the last poll
+    /// Its agent runs without plete knowing its process, as the last poll
     /// found ([`runtime::unanchored`]).
     pub unanchored: bool,
 }
@@ -447,7 +447,7 @@ pub struct TaskSpec {
 }
 
 /// A task or manager to make under a node, as the form describes it: what
-/// `jeet task new --parent` or `jeet manager new` would be given.
+/// `plete task new --parent` or `plete manager new` would be given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSpec {
     /// `assistant`, or the node's id.
@@ -781,7 +781,7 @@ pub enum Panel {
         /// The new item being typed, after `a`.
         adding: Option<String>,
     },
-    /// `i`: what is queued for the assistant, the GitHub events jeet saw and
+    /// `i`: what is queued for the assistant, the GitHub events plete saw and
     /// what the assistant did, newest first.
     Inbox {
         selected: usize,
@@ -1059,7 +1059,7 @@ pub struct TasksUi {
     pub tree_failed: bool,
     /// What each tree node shows, by task id ([`managers::rollup`]).
     pub shown: HashMap<String, (Urgency, u32)>,
-    /// jeet runs as the user, not inside an agent's pane: the agents
+    /// plete runs as the user, not inside an agent's pane: the agents
     /// view's keys that show an agent's text or act need it (Q2).
     pub user: bool,
     /// The reviews, newest activity first: not tasks, so not in `rows`.
@@ -3681,9 +3681,9 @@ pub fn dir_size(dir: &Path) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
     List,
-    /// `jeet projects` on a terminal: the projects view.
+    /// `plete projects` on a terminal: the projects view.
     Projects,
-    /// `jeet open` with no screen open: the list, at what a link names.
+    /// `plete open` with no screen open: the list, at what a link names.
     Link(Link),
 }
 
@@ -3716,13 +3716,13 @@ fn is_user(caller: Result<Caller>, at_terminal: Result<bool>) -> bool {
 pub fn run(app: &App, start: Start) -> Result<Exit> {
     // Keep git's own output off the alternate screen.
     git::set_capture_output(true);
-    // Inside an agent's pane jeet is that agent: the agents view will not
+    // Inside an agent's pane plete is that agent: the agents view will not
     // act or show agents' text for it, nor when who it is cannot be told.
     let ui = TasksUi {
         user: is_user(permissions::caller(app), permissions::at_terminal(app)),
         ..TasksUi::default()
     };
-    // A screen the user is at is findable by `jeet open` while it lasts.
+    // A screen the user is at is findable by `plete open` while it lasts.
     let _registered = ui
         .user
         .then(|| registry::register(&app.home, &registry::Screen::here()))
@@ -3781,17 +3781,20 @@ impl Screen<'_> {
             while let Ok(update) = self.bg.updates.try_recv() {
                 self.take(update);
             }
-            // GitHub is polled by a jeet of its own, started off the draw
+            // GitHub is polled by a plete of its own, started off the draw
             // path; it reports through the assistant, tasks and
             // notifications, not this screen.
             if last_watch.elapsed() >= WATCH_EVERY {
                 last_watch = Instant::now();
                 let home = self.app.home.clone();
+                let new_home = self.app.new_home.clone();
                 let config = self.app.config.clone();
-                std::thread::spawn(move || watch::maybe_background(&home, &config));
+                std::thread::spawn(move || {
+                    watch::maybe_background(&home, new_home.as_deref(), &config)
+                });
             }
             // The agent adds and removes worktrees as it goes, and other
-            // jeets make and archive tasks: keep the rows in step.
+            // pletes make and archive tasks: keep the rows in step.
             if last_read.elapsed() >= REREAD_EVERY && self.ui.panel.is_none() {
                 last_read = Instant::now();
                 if let Err(e) = self.reread() {
@@ -3805,7 +3808,7 @@ impl Screen<'_> {
             if self.ui.view == View::Reviews && stale {
                 self.look_at_reviews();
             }
-            // `jeet open` asks a screen that is open to go to a link by
+            // `plete open` asks a screen that is open to go to a link by
             // leaving it in a file.
             if self.ui.user {
                 if let Some(text) = registry::take_request(&self.app.home, std::process::id()) {
@@ -3974,7 +3977,7 @@ impl Screen<'_> {
         }
     }
 
-    /// Archive review `id`, as `jeet watch` does, now GitHub says its
+    /// Archive review `id`, as `plete watch` does, now GitHub says its
     /// PR is `state`: not while its agent is mid-turn (a later look tries
     /// again), and not when archiving would delete ignored files a build
     /// does not make again.
@@ -4086,7 +4089,7 @@ impl Screen<'_> {
                         .err()
                         .map(|e| format!("could not reconcile worktrees: {e:#}"));
                     // Start what waits on `max_live` and has room now, as
-                    // `jeet watch` does each poll (M22).
+                    // `plete watch` does each poll (M22).
                     let drained = match run::drain(app) {
                         Ok(warnings) => warnings.into_iter().next(),
                         Err(e) => Some(format!("could not start what waits on max_live: {e:#}")),
@@ -4331,7 +4334,7 @@ impl Screen<'_> {
             self.ui.message(
                 "cannot delete",
                 vec![
-                    format!("the shell jeet runs in is inside {}", dir.display()),
+                    format!("the shell plete runs in is inside {}", dir.display()),
                     "cd out of it, then delete the review".into(),
                 ],
                 None,
@@ -4998,7 +5001,7 @@ impl Screen<'_> {
     }
 
     /// `n` in the agents view: make the task or manager `spec` describes,
-    /// as `jeet task new --parent` and `jeet manager new` make it, as the
+    /// as `plete task new --parent` and `plete manager new` make it, as the
     /// user: `plan_child`, then `create`, then, for a manager, its start
     /// (Q17). A worker is not started, as `n` in the active view does not
     /// start one. What `plan_child` refuses stays on the form.
@@ -5073,7 +5076,7 @@ impl Screen<'_> {
         let mut warnings = created.warnings;
         let made = match task.kind {
             // A manager has only its brief to work towards: it starts now,
-            // or queued or held, as `jeet manager new` starts it (M35).
+            // or queued or held, as `plete manager new` starts it (M35).
             TaskKind::Manager => {
                 let started = self
                     .progress(&format!("starting {}", task.slug), || {
@@ -5160,7 +5163,7 @@ impl Screen<'_> {
         Ok(())
     }
 
-    /// ⏎ in the answer form: answer ask `id` as the user, as `jeet report
+    /// ⏎ in the answer form: answer ask `id` as the user, as `plete report
     /// answer` does at the user's terminal, which `ui.user` says this is
     /// (R17); then how the answer and each copy went. A refusal stays on
     /// the form.
@@ -5258,7 +5261,7 @@ impl Screen<'_> {
     }
 
     /// `z`, `Z` and `x` in the agents view: `verb` on task `task_id` and its
-    /// subtree, or with `None` `stop --all`, as `jeet manager pause`,
+    /// subtree, or with `None` `stop --all`, as `plete manager pause`,
     /// `resume` and `stop` do it: `in_scope`, then [`run`], as the user
     /// (Q15). What came of each node is shown; then the screen is painted
     /// afresh and the tree gathered anew, so nothing older shows after it.
@@ -5295,7 +5298,7 @@ impl Screen<'_> {
                     (Verb::ManagerPause, Some(task)) => run::pause(app, &user, task)?,
                     (Verb::ManagerResume, Some(task)) => run::resume(app, &user, task)?,
                     (Verb::ManagerStop, task) => run::stop(app, &user, task.as_ref())?,
-                    _ => bail!("`jeet {}` needs a task", verb.name()),
+                    _ => bail!("`plete {}` needs a task", verb.name()),
                 };
                 let after = match &task {
                     Some(task) => app.db.get_task(&task.id)?.map(|t| t.run_state),
@@ -5461,7 +5464,7 @@ impl Screen<'_> {
                 self.refresh(false);
                 self.ui.set_status("");
             }
-            // ctrl-c or ctrl-q in the explorer: done with jeet altogether.
+            // ctrl-c or ctrl-q in the explorer: done with plete altogether.
             exit => self.ui.quit(exit),
         }
         Ok(())
@@ -5537,7 +5540,7 @@ impl Screen<'_> {
             }
             PrToView::None => {
                 self.ui.set_status(format!(
-                    "{} has no pull request jeet knows of; p looks for them",
+                    "{} has no pull request plete knows of; p looks for them",
                     row.task.name
                 ));
                 Ok(())
@@ -5585,7 +5588,7 @@ impl Screen<'_> {
         self.view_pr_at(&path, number)
     }
 
-    /// `R` on a review: `jeet review <pr> --rerun`, without the viewer.
+    /// `R` on a review: `plete review <pr> --rerun`, without the viewer.
     fn rerun_review(&mut self, task_id: &str) -> Result<()> {
         let Some(review) = self.review(task_id) else {
             return Ok(());
@@ -5636,7 +5639,7 @@ impl Screen<'_> {
             self.ui.message(
                 "cannot delete",
                 vec![
-                    format!("the shell jeet runs in is inside {}", row.dir.display()),
+                    format!("the shell plete runs in is inside {}", row.dir.display()),
                     "cd out of it, then delete the task".into(),
                 ],
                 None,
@@ -5697,7 +5700,7 @@ impl Screen<'_> {
             self.ui.message(
                 "cannot delete",
                 vec![
-                    format!("the shell jeet runs in is inside {}", dir.display()),
+                    format!("the shell plete runs in is inside {}", dir.display()),
                     "cd out of it, then delete the task".into(),
                 ],
                 None,
@@ -6092,7 +6095,7 @@ fn report_lines(app: &App, task: &TaskRecord, dir: &Path) -> Result<(Vec<String>
     Ok((lines, prs))
 }
 
-/// What `b` shows of `task`: `jeet manager show`'s text, to the user, and
+/// What `b` shows of `task`: `plete manager show`'s text, to the user, and
 /// the ask it has open itself.
 fn brief_lines(app: &App, task: &TaskRecord) -> Result<Vec<String>> {
     let mut text =
@@ -7944,7 +7947,7 @@ mod tests {
         let probe = Probe {
             id: "x".into(),
             dir: dir.path().to_path_buf(),
-            session: "jeet-x".into(),
+            session: "plete-x".into(),
             touched: 77,
             active: false,
             review: false,
@@ -7972,7 +7975,7 @@ mod tests {
     fn the_background_threads_answer_and_stop_with_the_screen() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f"), [1u8; 9]).unwrap();
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
+        let bg = Background::start(Path::new("/nonexistent/plete-home"), &Config::default());
         let mut row = task("t", "t", TaskState::Archived, 3);
         row.dir = dir.path().to_path_buf();
         bg.watch(&[row], &[]);
@@ -7993,7 +7996,7 @@ mod tests {
     #[test]
     fn the_pollers_hold_off_while_the_screen_takes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
+        let bg = Background::start(Path::new("/nonexistent/plete-home"), &Config::default());
         let rows: Vec<TaskRow> = (0..10)
             .map(|i| {
                 let mut row = task(&format!("t{i}"), "t", TaskState::Archived, 3);
@@ -8947,7 +8950,7 @@ mod tests {
             newest.is_some() && older.is_some() && newest < older,
             "{text}"
         );
-        assert!(!text.contains("jeet-report"), "{text}");
+        assert!(!text.contains("plete-report"), "{text}");
 
         // Its manager hears of them too, and has no ask of its own.
         let (lines, _) = report_lines(&app, &api, &tasks::task_dir(&app, &api)).unwrap();
@@ -9108,7 +9111,7 @@ mod tests {
 
     #[test]
     fn the_pr_thread_answers_for_each_task() {
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
+        let bg = Background::start(Path::new("/nonexistent/plete-home"), &Config::default());
         bg.find_prs(vec![pr_history::Job {
             task_id: "t".into(),
             sources: Vec::new(),
@@ -9389,7 +9392,7 @@ mod tests {
         let dir = home.path().join("assistant");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("todo.md"), "- [ ] !p1 one\n").unwrap();
-        let bg = Background::start(Path::new("/nonexistent/jeet-home"), &Config::default());
+        let bg = Background::start(Path::new("/nonexistent/plete-home"), &Config::default());
         bg.look_at_assistant(assistant_info::Probe {
             home: home.path().to_path_buf(),
             dir,

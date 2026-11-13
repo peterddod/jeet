@@ -18,7 +18,7 @@ use crate::context::App;
 /// The layout of the tables below. A file with another number is dropped and
 /// rebuilt.
 const SCHEMA_VERSION: &str = "1";
-/// How long to wait for another jeet writing the index.
+/// How long to wait for another plete writing the index.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many passages a query ranks before they are grouped by document.
 const CANDIDATES: usize = 200;

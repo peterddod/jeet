@@ -52,7 +52,7 @@ pub struct RepoContext {
 /// Resolve the repository context for any directory inside a trunk or worktree.
 ///
 /// Works from nested directories and from linked worktrees. A repository
-/// that is not in the index is refused, with the way to bring it in: jeet
+/// that is not in the index is refused, with the way to bring it in: plete
 /// works on its store and its tasks, not on checkouts elsewhere.
 pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoContext> {
     let root = match crate::git::git_toplevel(dir) {
@@ -62,7 +62,7 @@ pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoCont
         Err(_) => match crate::tasks::task_at(app, dir).unwrap_or(None) {
             Some(task) => bail!(
                 "{} is in task {}'s workspace, not in one of its worktrees; \
-                 `jeet worktree ls` lists them",
+                 `plete worktree ls` lists them",
                 dir.display(),
                 crate::commands::task::called(app, &task)
             ),
@@ -73,7 +73,7 @@ pub fn resolve_context(app: &crate::context::App, dir: &Path) -> Result<RepoCont
 
     let Some(repo) = find_repo_by_trunk(&app.db, &trunk)? else {
         bail!(
-            "{} is not in jeet's store; `jeet import {}` brings it and its work into tasks",
+            "{} is not in plete's store; `plete import {}` brings it and its work into tasks",
             trunk.display(),
             trunk.display()
         );

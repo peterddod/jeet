@@ -1,7 +1,7 @@
-//! `jeet projects …`: project templates from the command line.
+//! `plete projects …`: project templates from the command line.
 //!
 //! `new` prints the project's directory, and only that, on stdout; everything
-//! else jeet has to say goes to stderr.
+//! else plete has to say goes to stderr.
 
 use std::io::{IsTerminal, Write};
 
@@ -14,7 +14,7 @@ use crate::projects;
 pub fn ls(app: &App) -> Result<()> {
     let names = projects::list(app)?;
     if names.is_empty() {
-        eprintln!("jeet: no projects; `jeet projects new <name>` makes one");
+        eprintln!("plete: no projects; `plete projects new <name>` makes one");
         return Ok(());
     }
     println!("{:<20} {:<6} {:<20} REPOS", "PROJECT", "TASKS", "FILES");
@@ -42,10 +42,10 @@ pub fn ls(app: &App) -> Result<()> {
 
 pub fn new(app: &App, name: &str, repos: &[String]) -> Result<()> {
     let dir = projects::create(app, name, repos)?;
-    eprintln!("jeet: project {name} -> {}", dir.display());
+    eprintln!("plete: project {name} -> {}", dir.display());
     eprintln!(
-        "jeet: put agent instructions in AGENTS.md and skills in skills/; \
-         `jeet projects edit {name}` sets its repositories"
+        "plete: put agent instructions in AGENTS.md and skills in skills/; \
+         `plete projects edit {name}` sets its repositories"
     );
     println!("{}", dir.display());
     Ok(())
@@ -64,7 +64,7 @@ pub fn edit(app: &App, name: &str) -> Result<()> {
     match projects::load(app, name) {
         Ok(project) => {
             eprintln!(
-                "jeet: project {name}: {} repositor{}",
+                "plete: project {name}: {} repositor{}",
                 project.config.repos.len(),
                 if project.config.repos.len() == 1 {
                     "y"
@@ -74,7 +74,7 @@ pub fn edit(app: &App, name: &str) -> Result<()> {
             );
             Ok(())
         }
-        Err(e) => bail!("{e:#}\n`jeet projects edit {name}` to fix it"),
+        Err(e) => bail!("{e:#}\n`plete projects edit {name}` to fix it"),
     }
 }
 
@@ -94,7 +94,7 @@ pub fn rm(app: &App, name: &str, force: bool) -> Result<()> {
         if !std::io::stdin().is_terminal() {
             bail!("{report}\npass --force to delete it without a terminal");
         }
-        eprintln!("jeet: {report}");
+        eprintln!("plete: {report}");
         eprint!("delete it? [y/N] ");
         std::io::stderr().flush()?;
         let mut answer = String::new();
@@ -104,7 +104,7 @@ pub fn rm(app: &App, name: &str, force: bool) -> Result<()> {
         }
     }
     projects::remove(app, name)?;
-    eprintln!("jeet: deleted project {name}");
+    eprintln!("plete: deleted project {name}");
     Ok(())
 }
 

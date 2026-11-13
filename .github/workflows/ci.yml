@@ -33,7 +33,7 @@ jobs:
         if: always()
         run: |
           sleep 2
-          if pgrep -fl 'target/debug/jeet|tmux-stub'; then
+          if pgrep -fl 'target/debug/plete|tmux-stub'; then
             echo "::error::the tests left the processes above running"
             exit 1
           fi
@@ -42,10 +42,10 @@ jobs:
         run: |
           chmod +x packaging/completions/generate.sh
           cargo build --release --locked
-          packaging/completions/generate.sh target/release/jeet
+          packaging/completions/generate.sh target/release/plete
           cargo install cargo-deb --locked
           cargo deb --no-build
-          dpkg-deb -c target/debian/jeet_*.deb | tee /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/bash-completion/completions/jeet' /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/zsh/vendor-completions/_jeet' /tmp/jeet-deb-contents.txt
-          grep -q 'usr/share/fish/vendor_completions.d/jeet.fish' /tmp/jeet-deb-contents.txt
+          dpkg-deb -c target/debian/plete_*.deb | tee /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/bash-completion/completions/plete' /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/zsh/vendor-completions/_plete' /tmp/plete-deb-contents.txt
+          grep -q 'usr/share/fish/vendor_completions.d/plete.fish' /tmp/plete-deb-contents.txt

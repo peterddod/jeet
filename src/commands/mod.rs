@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod chat;
 pub mod clone;
 pub mod completions;
@@ -8,6 +9,7 @@ pub mod import;
 pub mod install_shell;
 pub mod ls;
 pub mod manager;
+pub mod migrate;
 pub mod notify;
 pub mod open;
 pub mod path;

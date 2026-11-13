@@ -13,7 +13,7 @@ use crate::projects;
 use crate::resolve;
 
 /// Repositories that hold the tool's own docs, matched by the end of their
-/// store id. Every caller may search them, so an agent can look up how jeet
+/// store id. Every caller may search them, so an agent can look up how plete
 /// and plete work.
 const PLETE_REPOS: &[&str] = &["github.com/peterddod/jeet", "github.com/peterddod/plete"];
 
