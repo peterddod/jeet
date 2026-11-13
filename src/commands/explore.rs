@@ -1,4 +1,4 @@
-//! `jeet explore`: the interactive file explorer.
+//! `plete explore`: the interactive file explorer.
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -24,7 +24,7 @@ pub fn run(app: &App) -> Result<()> {
 /// whoever sent us to `dir` meant the user to end up there.
 pub fn run_at(app: &App, dir: &Path) -> Result<()> {
     if !io::stdout().is_terminal() {
-        bail!("the jeet explorer needs an interactive terminal; try `jeet ls` or `jeet path`");
+        bail!("the plete explorer needs an interactive terminal; try `plete ls` or `plete path`");
     }
 
     // Inside a task's workspace but in none of its worktrees: the canvas
@@ -35,7 +35,7 @@ pub fn run_at(app: &App, dir: &Path) -> Result<()> {
             Some((root, _)) if tasks::task_at(app, dir).is_ok_and(|t| t.is_some()) => (None, root),
             _ => {
                 return Err(anyhow::anyhow!(
-                    "{e}\nrun `jeet cd <repo>` first, or `jeet ls` to see indexed repositories"
+                    "{e}\nrun `plete cd <repo>` first, or `plete ls` to see indexed repositories"
                 ))
             }
         },
@@ -70,11 +70,11 @@ pub fn hand_off(dir: &Path) -> Result<()> {
 pub fn land(path: &Path) -> Result<()> {
     cd::request(path)?;
     if cd::wrapper_active() {
-        eprintln!("jeet: {}", path.display());
+        eprintln!("plete: {}", path.display());
     } else {
         println!("{}", path.display());
         eprintln!(
-            "jeet: add `eval \"$(jeet init-shell)\"` to your shell rc to cd here automatically"
+            "plete: add `eval \"$(plete init-shell)\"` to your shell rc to cd here automatically"
         );
     }
     Ok(())

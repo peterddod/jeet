@@ -5,10 +5,10 @@
 //! started from it starts from something recent. Commands that go to the
 //! network anyway, and the explorer on launch, call [`maybe_sync_background`]:
 //! at most once per `sync_interval_secs` it launches the hidden
-//! `jeet store-sync` detached, and the command carries on without waiting.
-//! `jeet sync` does the same work in the foreground.
+//! `plete store-sync` detached, and the command carries on without waiting.
+//! `plete sync` does the same work in the foreground.
 //!
-//! Two files under `$JEET_HOME` coordinate it: `.last-sync` holds when the
+//! Two files under `$PLETE_HOME` coordinate it: `.last-sync` holds when the
 //! last sync started, and `.sync.lock` the pid of the one running now.
 //!
 //! A third kind, `.sync-locks/<repo>.lock`, serializes fetches of one repo.
@@ -48,7 +48,7 @@ const STALE_LOCK_SECS: u64 = 60 * 60;
 /// a sync creating the file and writing to it.
 const UNWRITTEN_LOCK_SECS: u64 = 60;
 
-/// How long `jeet sync` waits for a background sync to finish first, and
+/// How long `plete sync` waits for a background sync to finish first, and
 /// anything waits for another fetch of the same repo.
 const LOCK_WAIT: Duration = Duration::from_secs(120);
 
@@ -59,7 +59,7 @@ pub enum Outcome {
     UpToDate,
     /// Fetched, and the trunk moved forward between these commits.
     FastForwarded { from: String, to: String },
-    /// Fetched only: the trunk is not jeet's to move — it lives outside the
+    /// Fetched only: the trunk is not plete's to move — it lives outside the
     /// store, where it is somebody's working copy.
     Fetched,
     /// Fetched, but the trunk was left where it is, for this reason.
@@ -88,7 +88,7 @@ fn short(sha: &str) -> &str {
 ///
 /// Anything else about the trunk — another branch checked out, uncommitted
 /// changes, commits origin does not have — is reported as [`Outcome::Held`]
-/// rather than repaired: those are someone's work, and jeet does not move it.
+/// rather than repaired: those are someone's work, and plete does not move it.
 pub fn sync_repo(app: &App, repo: &RepoRecord) -> Result<Outcome> {
     let trunk = Path::new(&repo.trunk_path);
     if !trunk.is_dir() {
@@ -152,10 +152,10 @@ pub(crate) fn in_store(store_root: &Path, trunk: &Path) -> bool {
 pub fn report(repo: &RepoRecord, result: &Result<Outcome>) {
     match result {
         Ok(Outcome::Held(why)) => {
-            eprintln!("jeet: warning: {}: {why}; not fast-forwarded", repo.id)
+            eprintln!("plete: warning: {}: {why}; not fast-forwarded", repo.id)
         }
-        Ok(outcome) => eprintln!("jeet: {}: {}", repo.id, outcome.describe()),
-        Err(e) => eprintln!("jeet: {}: sync failed: {e:#}", repo.id),
+        Ok(outcome) => eprintln!("plete: {}: {}", repo.id, outcome.describe()),
+        Err(e) => eprintln!("plete: {}: sync failed: {e:#}", repo.id),
     }
 }
 
@@ -356,9 +356,9 @@ fn wait_for_lock(home: &Path) -> Result<SyncLock> {
         if !said {
             match lock_holder(home) {
                 Some(pid) if pid != 0 => {
-                    eprintln!("jeet: waiting for the sync already running (pid {pid})")
+                    eprintln!("plete: waiting for the sync already running (pid {pid})")
                 }
-                _ => eprintln!("jeet: waiting for the sync already running"),
+                _ => eprintln!("plete: waiting for the sync already running"),
             }
             said = true;
         }
@@ -376,19 +376,19 @@ pub fn sync_now(app: &App) -> Result<(usize, usize)> {
     Ok((failed, results.len()))
 }
 
-/// `jeet store-sync`: the background sync. Quietly does nothing when another
+/// `plete store-sync`: the background sync. Quietly does nothing when another
 /// sync is already running — two launches racing is expected, not an error.
 pub fn run_background(app: &App) -> Result<()> {
     let Some(_lock) = try_lock(&app.home)? else {
-        eprintln!("jeet: another sync is running");
+        eprintln!("plete: another sync is running");
         return Ok(());
     };
     record_sync(&app.home, now_secs())?;
-    eprintln!("jeet: store sync started");
+    eprintln!("plete: store sync started");
     let results = sync_all(app)?;
     let failed = results.iter().filter(|(_, r)| r.is_err()).count();
     eprintln!(
-        "jeet: store sync finished: {} synced, {failed} failed",
+        "plete: store sync finished: {} synced, {failed} failed",
         results.len() - failed
     );
     Ok(())
@@ -413,22 +413,22 @@ pub fn maybe_sync_background(app: &App) {
     // Claim this interval before the runner has started and taken the lock,
     // so commands run in quick succession launch one sync between them.
     if let Err(e) = record_sync(&app.home, now) {
-        eprintln!("jeet: could not start a background sync: {e:#}");
+        eprintln!("plete: could not start a background sync: {e:#}");
         return;
     }
     if let Err(e) = launch(app) {
-        eprintln!("jeet: could not start a background sync: {e:#}");
+        eprintln!("plete: could not start a background sync: {e:#}");
     }
 }
 
-/// Launch `jeet store-sync` detached, as `review::launch` does a review: under
+/// Launch `plete store-sync` detached, as `review::launch` does a review: under
 /// `nohup` so closing the terminal does not kill it, in its own process group
 /// so a ctrl-c meant for the explorer does not either.
 fn launch(app: &App) -> Result<()> {
     let home = &app.home;
     let log = home.join(LOG_FILE);
     let out = File::create(&log).with_context(|| format!("create {}", log.display()))?;
-    let exe = std::env::current_exe().context("locate the jeet binary")?;
+    let exe = crate::paths::plete_exe()?;
     let mut cmd = Command::new("nohup");
     crate::env::set_home(&mut cmd, home, app.new_home.as_deref());
     cmd.arg(exe)
@@ -442,7 +442,7 @@ fn launch(app: &App) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn().context("start jeet store-sync")?;
+    cmd.spawn().context("start plete store-sync")?;
     Ok(())
 }
 
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn a_dead_holders_lock_is_taken_over() {
         let home = tempfile::tempdir().unwrap();
-        // No pid is this large on any system jeet runs on.
+        // No pid is this large on any system plete runs on.
         std::fs::write(lock_path(home.path()), "4294967294\n").unwrap();
         assert!(lock_holder(home.path()).is_none());
         let lock = try_lock(home.path()).unwrap();
@@ -552,14 +552,14 @@ mod tests {
 
     #[test]
     fn only_trunks_under_the_store_are_moved() {
-        let store = Path::new("/home/.jeet/store");
+        let store = Path::new("/home/.plete/store");
         assert!(in_store(
             store,
-            Path::new("/home/.jeet/store/github.com/a/b")
+            Path::new("/home/.plete/store/github.com/a/b")
         ));
         assert!(!in_store(store, Path::new("/home/me/Projects/b")));
         // A sibling that merely shares the prefix as text is not inside.
-        assert!(!in_store(store, Path::new("/home/.jeet/store-old/a/b")));
+        assert!(!in_store(store, Path::new("/home/.plete/store-old/a/b")));
     }
 
     #[test]

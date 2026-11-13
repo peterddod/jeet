@@ -12,7 +12,7 @@
 //! to say ([`Harness::instructions_file`], [`Harness::instructions_import`]):
 //! [`imports`] lists them all, so a task works whichever harness runs in it.
 //!
-//! Before AGENTS.md, jeet wrote `CLAUDE.md` itself. [`migrate`] moves such a
+//! Before AGENTS.md, plete wrote `CLAUDE.md` itself. [`migrate`] moves such a
 //! file to `AGENTS.md` and leaves the import in its place, never replacing
 //! anything.
 //!
@@ -28,7 +28,7 @@ use crate::harness::{claude, HARNESSES};
 
 pub const AGENTS_MD: &str = "AGENTS.md";
 
-/// The file jeet wrote before AGENTS.md, which [`migrate`] moves: Claude
+/// The file plete wrote before AGENTS.md, which [`migrate`] moves: Claude
 /// Code's.
 pub const CLAUDE_MD: &str = claude::INSTRUCTIONS_FILE;
 
@@ -66,7 +66,7 @@ pub fn imports() -> Vec<Import> {
     out
 }
 
-/// Every instruction file jeet writes: `AGENTS.md`, then the imports.
+/// Every instruction file plete writes: `AGENTS.md`, then the imports.
 pub fn files() -> Vec<&'static str> {
     std::iter::once(AGENTS_MD)
         .chain(imports().into_iter().map(|i| i.file))
@@ -118,7 +118,7 @@ pub fn migrate(dir: &Path) -> Result<bool> {
         return Err(e).with_context(|| format!("write {}", agents.display()));
     }
 
-    let tmp = dir.join(".CLAUDE.md.jeet-tmp");
+    let tmp = dir.join(".CLAUDE.md.plete-tmp");
     std::fs::write(&tmp, CLAUDE_SHIM).with_context(|| format!("write {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &claude) {
         let _ = std::fs::remove_file(&tmp);
@@ -143,7 +143,7 @@ mod tests {
         assert!(migrate(dir.path()).unwrap());
         assert_eq!(read(&dir.path().join(AGENTS_MD)), "my rules\n");
         assert_eq!(read(&dir.path().join(CLAUDE_MD)), CLAUDE_SHIM);
-        assert!(!dir.path().join(".CLAUDE.md.jeet-tmp").exists());
+        assert!(!dir.path().join(".CLAUDE.md.plete-tmp").exists());
         // Done once: nothing more to move.
         assert!(!migrate(dir.path()).unwrap());
         assert_eq!(read(&dir.path().join(AGENTS_MD)), "my rules\n");

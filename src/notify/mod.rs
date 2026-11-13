@@ -1,8 +1,8 @@
 //! Notifications to the user, through the backends `[notify] via` names.
 //!
 //! [`event`] is the one way in. It only queues the notification, to
-//! `$JEET_HOME/run/notify/outbox.jsonl` (owner-only), for the sender
-//! (`jeet notify serve`, [`sender`]) to route and send at once. Routing —
+//! `$PLETE_HOME/run/notify/outbox.jsonl` (owner-only), for the sender
+//! (`plete notify serve`, [`sender`]) to route and send at once. Routing —
 //! `[[notify.rules]]`, deduplication by `(why, ref)`, `max_per_hour` — is
 //! [`route`]'s. Only the sender reads a backend's token ([`Tokens`]); with
 //! no sender running, [`when_no_sender`] decides what the process that
@@ -36,7 +36,7 @@ use crate::context::App;
 use crate::db::tasks::TaskKind;
 use crate::worktrees::now_secs;
 
-pub const COMMAND_ENV: &str = "JEET_NOTIFY_CMD";
+pub const COMMAND_ENV: &str = "PLETE_NOTIFY_CMD";
 
 /// Longest title or subtitle shown; Notification Center cuts them shorter.
 const TITLE_MAX: usize = 120;
@@ -203,9 +203,9 @@ impl Tokens for NoTokens {
     }
 }
 
-/// The backend `via` calls `name`, or `None` for a name jeet does not know
-/// (or `command` with no `[notify] command`). `$JEET_NOTIFY_CMD`, in this
-/// process, stands in for `desktop`. `home` is the jeet home it sends for.
+/// The backend `via` calls `name`, or `None` for a name plete does not know
+/// (or `command` with no `[notify] command`). `$PLETE_NOTIFY_CMD`, in this
+/// process, stands in for `desktop`. `home` is the plete home it sends for.
 fn backend(name: &str, config: &NotifyConfig, home: &Path) -> Option<Box<dyn Notifier>> {
     match name {
         "desktop" => match override_command() {
@@ -247,7 +247,7 @@ fn backend(name: &str, config: &NotifyConfig, home: &Path) -> Option<Box<dyn Not
 pub const BACKENDS: &[&str] = &["desktop", "command", "slack", "ntfy"];
 
 /// What in `[notify]` would send nothing where it was meant to: a `via`
-/// name jeet has no backend for, or `command` listed with no `[notify]
+/// name plete has no backend for, or `command` listed with no `[notify]
 /// command` to run. Sending skips either, with a warning, so this is for
 /// checking a config before it is used.
 pub fn check(config: &NotifyConfig) -> Result<()> {
@@ -264,7 +264,7 @@ pub fn check(config: &NotifyConfig) -> Result<()> {
         }
         if name == slack::NAME && config.slack_user().is_none() {
             bail!(
-                "[notify] via lists `slack`, but `[notify.slack] user` is not set (`jeet notify setup slack`)"
+                "[notify] via lists `slack`, but `[notify.slack] user` is not set (`plete notify setup slack`)"
             );
         }
         if name == ntfy::NAME {
@@ -277,7 +277,7 @@ pub fn check(config: &NotifyConfig) -> Result<()> {
 /// `[notify.ntfy]`: a topic ntfy takes, on an http(s) server.
 fn check_ntfy(config: &NotifyConfig) -> Result<()> {
     let Some(topic) = config.ntfy_topic() else {
-        bail!("[notify] via lists `ntfy`, but `[notify.ntfy] topic` is not set (`jeet notify setup ntfy`)");
+        bail!("[notify] via lists `ntfy`, but `[notify.ntfy] topic` is not set (`plete notify setup ntfy`)");
     };
     if !ntfy::valid_topic(topic) {
         bail!("[notify.ntfy] topic: {topic:?} is not an ntfy topic (1 to 64 letters, digits, `-` or `_`)");
@@ -296,7 +296,7 @@ fn backends(config: &NotifyConfig, home: &Path) -> Vec<Box<dyn Notifier>> {
         .filter_map(|name| {
             let found = backend(name, config, home);
             if found.is_none() {
-                eprintln!("jeet: [notify] via: no backend `{name}`; skipped");
+                eprintln!("plete: [notify] via: no backend `{name}`; skipped");
             }
             found
         })
@@ -315,10 +315,10 @@ pub fn event(app: &App, event: Event) {
     event_in(&app.home, event)
 }
 
-/// [`event`], for a caller with only jeet's home.
+/// [`event`], for a caller with only plete's home.
 pub fn event_in(home: &Path, event: Event) {
     if let Err(e) = enqueue(home, &event) {
-        eprintln!("jeet: could not queue a notification: {e:#}");
+        eprintln!("plete: could not queue a notification: {e:#}");
         return;
     }
     // The test binary sends nothing: what it queues stays in the outbox,
@@ -339,11 +339,11 @@ pub fn queued(home: &Path) -> Vec<Event> {
 
 /// What the process that queued a notification does while no sender runs.
 /// The user's choice: send through the backends that need no token, here
-/// and now, as jeet did before it had a sender; what a token backend would
+/// and now, as plete did before it had a sender; what a token backend would
 /// send waits in the outbox for one, and [`notice`] says so.
 fn when_no_sender(home: &Path) {
     if let Err(e) = drain(home, &NoTokens, false) {
-        eprintln!("jeet: could not send a notification: {e:#}");
+        eprintln!("plete: could not send a notification: {e:#}");
     }
 }
 
@@ -351,7 +351,7 @@ fn when_no_sender(home: &Path) {
 // The outbox
 // ---------------------------------------------------------------------------
 
-/// `$JEET_HOME/run/notify`: the outbox, its lock, the routing state and the
+/// `$PLETE_HOME/run/notify`: the outbox, its lock, the routing state and the
 /// sender's lock. Its owner's only.
 pub fn dir(home: &Path) -> PathBuf {
     home.join("run").join("notify")
@@ -458,7 +458,7 @@ fn read_all(outbox: &mut File) -> Result<Vec<Event>> {
         .filter_map(|l| match serde_json::from_str(l) {
             Ok(event) => Some(event),
             Err(e) => {
-                eprintln!("jeet: dropped a notification jeet could not read: {e}");
+                eprintln!("plete: dropped a notification plete could not read: {e}");
                 None
             }
         })
@@ -502,7 +502,7 @@ pub struct Drained {
 /// fails to send is put back for it, to be tried again after a while
 /// ([`retry`]).
 pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Drained> {
-    // A config jeet cannot read keeps what is queued: sending it without
+    // A config plete cannot read keeps what is queued: sending it without
     // the user's rules could send what they said not to.
     let config = config::load_or_create(home)
         .context("read config.toml, so notifications wait in the outbox")?
@@ -544,10 +544,10 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
         outbox.set_len(0).context("empty the outbox")?;
         // What is routed is sent whatever happens here.
         if let Err(e) = outbox.write_all(lines.as_bytes()) {
-            eprintln!("jeet: could not keep notifications for the sender: {e}");
+            eprintln!("plete: could not keep notifications for the sender: {e}");
         }
         if let Err(e) = save_state(home, &state) {
-            eprintln!("jeet: could not save what notifications were sent: {e:#}");
+            eprintln!("plete: could not save what notifications were sent: {e:#}");
         }
         (sends, kept, lines.len() as u64)
     };
@@ -573,7 +573,7 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
                 continue;
             };
             if !e.is::<Said>() {
-                eprintln!("jeet: notify via {}: {e:#}", backend.name());
+                eprintln!("plete: notify via {}: {e:#}", backend.name());
             }
             if !backend.needs_token() {
                 continue;
@@ -584,7 +584,7 @@ pub fn drain(home: &Path, tokens: &dyn Tokens, as_sender: bool) -> Result<Draine
             }
             match again.tries >= GIVE_UP_TRIES {
                 true => eprintln!(
-                    "jeet: gave up sending {:?} via {} after {} tries",
+                    "plete: gave up sending {:?} via {} after {} tries",
                     event.title,
                     backend.name(),
                     again.tries
@@ -658,7 +658,7 @@ fn plan(
     (sends, kept)
 }
 
-/// Whether a sender (`jeet notify serve`) holds its lock.
+/// Whether a sender (`plete notify serve`) holds its lock.
 pub fn sender_running(home: &Path) -> bool {
     let path = sender_lock_path(home);
     let Ok(file) = open_owned(&path, OpenOptions::new().read(true)) else {
@@ -694,7 +694,7 @@ pub fn notice(home: &Path, config: &NotifyConfig) -> Option<String> {
         false => format!("{} notifications", token.join(", ")),
     };
     Some(format!(
-        "{what} wait in the outbox: no sender runs (`jeet notify install`)"
+        "{what} wait in the outbox: no sender runs (`plete notify install`)"
     ))
 }
 
@@ -796,7 +796,7 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn every_backend_check_allows_is_one_jeet_sends_through() {
+    fn every_backend_check_allows_is_one_plete_sends_through() {
         let config = NotifyConfig {
             command: Some("page-me".into()),
             ..NotifyConfig::default()
@@ -816,11 +816,11 @@ mod tests {
         };
         assert!(check(&ntfy("")).is_err());
         assert!(check(&ntfy("[ntfy]\ntopic = \"a/b\"")).is_err());
-        assert!(check(&ntfy("[ntfy]\ntopic = \"jeet-x\"\nserver = \"ftp://x\"")).is_err());
-        let good = ntfy("[ntfy]\ntopic = \"jeet-x\"");
+        assert!(check(&ntfy("[ntfy]\ntopic = \"plete-x\"\nserver = \"ftp://x\"")).is_err());
+        let good = ntfy("[ntfy]\ntopic = \"plete-x\"");
         assert!(check(&good).is_ok());
         assert_eq!(good.ntfy_server(), "https://ntfy.sh");
-        let own = ntfy("[ntfy]\ntopic = \"jeet-x\"\nserver = \"https://ntfy.example.com/\"");
+        let own = ntfy("[ntfy]\ntopic = \"plete-x\"\nserver = \"https://ntfy.example.com/\"");
         assert!(check(&own).is_ok());
         assert_eq!(own.ntfy_server(), "https://ntfy.example.com");
         let unset = NotifyConfig {
@@ -860,7 +860,7 @@ mod tests {
             task: Some("api".into()),
             reference: Some("r41".into()),
             title: "Question #41".into(),
-            link: Some("jeet://later".into()),
+            link: Some("plete://later".into()),
             at: Some(5),
             ..Event::default()
         };
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(
             text,
             "{\"why\":\"needs-user\",\"kind\":\"question\",\"level\":\"manager\",\"task\":\"api\",\
-             \"ref\":\"r41\",\"title\":\"Question #41\",\"body\":\"\",\"link\":\"jeet://later\",\"at\":5}\n"
+             \"ref\":\"r41\",\"title\":\"Question #41\",\"body\":\"\",\"link\":\"plete://later\",\"at\":5}\n"
         );
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&outbox_path(home.path())), 0o600);
@@ -997,7 +997,7 @@ mod tests {
         make_dir(home.path()).unwrap();
         std::fs::write(outbox_path(home.path()), "{}\n").unwrap();
         let said = notice(home.path(), &config).unwrap();
-        assert!(said.contains("jeet notify install"), "{said}");
+        assert!(said.contains("plete notify install"), "{said}");
     }
 
     #[test]

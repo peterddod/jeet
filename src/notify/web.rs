@@ -121,21 +121,21 @@ impl Http for Offline {
 /// What the sender has learnt of a backend's service.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
-    /// `false` once the service refused a message for its `jeet://` link:
+    /// `false` once the service refused a message for its `plete://` link:
     /// until then messages go with one.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         alias = "plete_links"
     )]
-    pub jeet_links: Option<bool>,
+    pub plete_links: Option<bool>,
     /// A missing or refused token has been logged, and is not again until
     /// a send goes through.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bad_token_said: bool,
 }
 
-/// `$JEET_HOME/run/notify/<backend>.json`.
+/// `$PLETE_HOME/run/notify/<backend>.json`.
 fn state_path(home: &Path, backend: &str) -> PathBuf {
     dir(home).join(format!("{backend}.json"))
 }
@@ -170,7 +170,7 @@ pub fn bad_token(home: &Path, backend: &str, message: &str) -> anyhow::Error {
     }
     state.bad_token_said = true;
     if let Err(e) = save(home, backend, &state) {
-        eprintln!("jeet: could not save that the {backend} token was refused: {e:#}");
+        eprintln!("plete: could not save that the {backend} token was refused: {e:#}");
     }
     anyhow!(Down(anyhow!("{message}")))
 }
@@ -181,17 +181,17 @@ pub fn token_works(home: &Path, backend: &str) {
     if state.bad_token_said {
         state.bad_token_said = false;
         if let Err(e) = save(home, backend, &state) {
-            eprintln!("jeet: could not save that the {backend} token works: {e:#}");
+            eprintln!("plete: could not save that the {backend} token works: {e:#}");
         }
     }
 }
 
-/// `backend`'s service refused a `jeet://` link: none is sent again.
-pub fn refuse_jeet_links(home: &Path, backend: &str) {
+/// `backend`'s service refused a `plete://` link: none is sent again.
+pub fn refuse_plete_links(home: &Path, backend: &str) {
     let mut state = load(home, backend);
-    state.jeet_links = Some(false);
+    state.plete_links = Some(false);
     if let Err(e) = save(home, backend, &state) {
-        eprintln!("jeet: could not save that: {e:#}");
+        eprintln!("plete: could not save that: {e:#}");
     }
 }
 
@@ -200,9 +200,9 @@ pub mod tests {
     #[test]
     fn the_links_field_is_read_under_its_new_name_too() {
         let new: State = serde_json::from_str(r#"{"plete_links":false}"#).unwrap();
-        assert_eq!(new.jeet_links, Some(false));
-        let old: State = serde_json::from_str(r#"{"jeet_links":false}"#).unwrap();
-        assert_eq!(old.jeet_links, Some(false));
+        assert_eq!(new.plete_links, Some(false));
+        let old: State = serde_json::from_str(r#"{"plete_links":false}"#).unwrap();
+        assert_eq!(old.plete_links, Some(false));
     }
 
     use super::*;

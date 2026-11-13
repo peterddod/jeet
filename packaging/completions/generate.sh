@@ -2,18 +2,18 @@
 set -euo pipefail
 
 # Generate shell completion scripts for packaging (deb, local install).
-# Usage: generate.sh <path-to-jeet-binary> [output-dir]
+# Usage: generate.sh <path-to-plete-binary> [output-dir]
 
-JEET="${1:?jeet binary path required}"
+PLETE="${1:?plete binary path required}"
 OUT="${2:-$(cd "$(dirname "$0")" && pwd)}"
 
 mkdir -p "${OUT}"
 
-"${JEET}" completions bash >"${OUT}/jeet.bash"
-"${JEET}" completions zsh >"${OUT}/_jeet"
-"${JEET}" completions fish >"${OUT}/jeet.fish"
+"${PLETE}" completions bash >"${OUT}/plete.bash"
+"${PLETE}" completions zsh >"${OUT}/_plete"
+"${PLETE}" completions fish >"${OUT}/plete.fish"
 
-for f in jeet.bash _jeet jeet.fish; do
+for f in plete.bash _plete plete.fish; do
   if [[ ! -s "${OUT}/${f}" ]]; then
     echo "empty or missing completion file: ${OUT}/${f}" >&2
     exit 1

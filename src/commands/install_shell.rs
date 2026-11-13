@@ -10,25 +10,20 @@ pub fn run() -> Result<()> {
         Some(path) => path.into(),
         None => {
             eprintln!("Unsupported shell: {}\nSupported shells: zsh, bash", shell);
-            eprintln!("Run jeet install-shell from a supported shell");
+            eprintln!("Run plete install-shell from a supported shell");
             anyhow::bail!("unsupported shell");
         }
     };
 
-    let _marker = "# jeet shell integration — run 'jeet cd'";
-    let install_line = "source <(jeet init-shell)";
+    let _marker = "# plete shell integration — run 'plete cd'";
+    let install_line = "source <(plete init-shell)";
 
     // Check if already configured (look for exact match at line start, skip comments)
     if rc_file.exists() {
         let content = fs::read_to_string(&rc_file).context("read rc file")?;
-        let has_install = content.lines().any(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with('#') && trimmed == "source <(jeet init-shell)"
-        });
-
-        if has_install {
+        if has_integration(&content) {
             println!(
-                "{}: jeet shell integration already configured",
+                "{}: plete shell integration already configured",
                 rc_file.display()
             );
             return Ok(());
@@ -43,24 +38,55 @@ pub fn run() -> Result<()> {
         .context("open rc file")?;
 
     writeln!(file).context("write newline")?;
-    writeln!(file, "{}", install_line).context("write jeet config line")?;
+    writeln!(file, "{}", install_line).context("write plete config line")?;
 
     println!("Added to {}: {}", rc_file.display(), install_line);
     println!();
     println!(
-        "Run `source {}` to enable jeet cd in this shell.",
+        "Run `source {}` to enable plete cd in this shell.",
         rc_file.display()
     );
 
     Ok(())
 }
 
-fn detect_rc_file(shell: &str) -> Option<String> {
+/// Whether `rc` already sources the shell integration, under either name
+/// (comments skipped).
+fn has_integration(rc: &str) -> bool {
+    rc.lines()
+        .map(str::trim)
+        .any(|line| line == "source <(plete init-shell)" || line == "source <(jeet init-shell)")
+}
+
+/// Whether `rc` still sources the integration through the old name.
+pub fn has_old_integration(rc: &str) -> bool {
+    rc.lines()
+        .map(str::trim)
+        .any(|line| line == "source <(jeet init-shell)")
+}
+
+pub(crate) fn detect_rc_file(shell: &str) -> Option<String> {
     if shell.contains("zsh") {
         dirs::home_dir().map(|h| h.join(".zshrc").to_string_lossy().into_owned())
     } else if shell.contains("bash") {
         dirs::home_dir().map(|h| h.join(".bashrc").to_string_lossy().into_owned())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn either_name_counts_as_installed() {
+        assert!(has_integration("a\nsource <(plete init-shell)\n"));
+        assert!(has_integration("  source <(jeet init-shell)  \n"));
+        assert!(!has_integration(
+            "# source <(plete init-shell)\nsource <(other init-shell)\n"
+        ));
+        assert!(has_old_integration("source <(jeet init-shell)"));
+        assert!(!has_old_integration("source <(plete init-shell)"));
     }
 }

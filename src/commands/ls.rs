@@ -27,7 +27,7 @@ pub fn run(app: &App, filter: Option<&str>) -> Result<()> {
         println!("{:<45} {} ({})", repo.id, repo.trunk_path, notes.join(", "));
     }
     if outside > 0 {
-        eprintln!("jeet: `jeet import` moves repositories outside the store into it");
+        eprintln!("plete: `plete import` moves repositories outside the store into it");
     }
     Ok(())
 }

@@ -3,7 +3,7 @@
 //! server's root), with the access token, if one is stored, that only the
 //! sender reads.
 //!
-//! Whether the server takes `jeet://` links is kept beside the outbox.
+//! Whether the server takes `plete://` links is kept beside the outbox.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::worktrees::now_secs;
 
-use super::slack::{act, age, ci_status, cut, has_jeet_link, header, jeet_link};
+use super::slack::{act, age, ci_status, cut, has_plete_link, header, plete_link};
 use super::web::{self, bad_token, Http, Status, Ureq};
 use super::{openable_url, Down, Event, Notifier, Tokens, Why};
 
@@ -64,13 +64,13 @@ impl Notifier for Ntfy {
     fn send(&self, event: &Event, tokens: &dyn Tokens) -> Result<()> {
         let Some(topic) = &self.topic else {
             return Err(anyhow!(Down(anyhow!(
-                "[notify.ntfy] topic is not set: run `jeet notify setup ntfy`"
+                "[notify.ntfy] topic is not set: run `plete notify setup ntfy`"
             ))));
         };
         let token = tokens.token(NAME)?;
         let ci = ci_status(&self.home, event.pr.as_deref());
         let now = now_secs();
-        let links = web::load(&self.home, NAME).jeet_links.unwrap_or(true);
+        let links = web::load(&self.home, NAME).plete_links.unwrap_or(true);
         let publish = |links: bool| {
             self.http.call(
                 "",
@@ -79,15 +79,15 @@ impl Notifier for Ntfy {
             )
         };
         let published = match publish(links) {
-            // The server may not take a `jeet://` link: once more without,
+            // The server may not take a `plete://` link: once more without,
             // and if that goes, never with one again.
-            Err(e) if links && has_jeet_link(event) && status(&e) == Some(400) => {
+            Err(e) if links && has_plete_link(event) && status(&e) == Some(400) => {
                 let published = publish(false);
                 if published.is_ok() {
                     eprintln!(
-                        "jeet: ntfy refused a jeet:// link ({e:#}); messages go without one from now on"
+                        "plete: ntfy refused a plete:// link ({e:#}); messages go without one from now on"
                     );
-                    web::refuse_jeet_links(&self.home, NAME);
+                    web::refuse_plete_links(&self.home, NAME);
                 }
                 published
             }
@@ -100,10 +100,10 @@ impl Notifier for Ntfy {
                     NAME,
                     &match token {
                         Some(_) => format!(
-                            "ntfy refused the access token ({e:#}): store a new one with `jeet notify setup ntfy`"
+                            "ntfy refused the access token ({e:#}): store a new one with `plete notify setup ntfy`"
                         ),
                         None => format!(
-                            "ntfy refused to publish to {topic} without a token ({e:#}): store one with `jeet notify setup ntfy`"
+                            "ntfy refused to publish to {topic} without a token ({e:#}): store one with `plete notify setup ntfy`"
                         ),
                     },
                 ),
@@ -125,7 +125,7 @@ fn status(e: &anyhow::Error) -> Option<u16> {
     e.downcast_ref::<Status>().map(|s| s.code)
 }
 
-/// `event` as ntfy's JSON publish body, for `topic`; `jeet://` links as
+/// `event` as ntfy's JSON publish body, for `topic`; `plete://` links as
 /// links only if `links`.
 pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bool) -> Value {
     let summary = match event.body.trim() {
@@ -148,7 +148,7 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
     if let Some(at) = event.at {
         fields.push(format!("Age: {}", age(now - at)));
     }
-    let jeet = jeet_link(event);
+    let plete = plete_link(event);
     let mut tail = Vec::new();
     if !fields.is_empty() {
         tail.push(fields.join(" · "));
@@ -156,8 +156,8 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
     if let Some(act) = act(event) {
         tail.push(act);
     }
-    if let Some(jeet) = &jeet {
-        tail.push(format!("jeet open {jeet}"));
+    if let Some(plete) = &plete {
+        tail.push(format!("plete open {plete}"));
     }
     let tail = tail.join("\n");
     // The summary gives way, so the command and the link are kept.
@@ -170,7 +170,7 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
         text.push_str(&tail);
     }
     if text.is_empty() {
-        text = "jeet".to_string();
+        text = "plete".to_string();
     }
 
     let pr = event.pr.as_deref().filter(|u| openable_url(u));
@@ -179,7 +179,7 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
         .link
         .as_deref()
         .filter(|u| openable_url(u) && Some(*u) != pr);
-    let jeet = jeet.filter(|_| links);
+    let plete = plete.filter(|_| links);
     let mut actions = Vec::new();
     let mut view = |label: &str, url: &str| {
         actions.push(json!({ "action": "view", "label": label, "url": url }))
@@ -190,8 +190,8 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
     if let Some(page) = page {
         view("Open", page);
     }
-    if let Some(jeet) = &jeet {
-        view("Open in jeet", jeet);
+    if let Some(plete) = &plete {
+        view("Open in plete", plete);
     }
 
     let mut message = json!({
@@ -201,7 +201,7 @@ pub fn message(topic: &str, event: &Event, ci: Option<&str>, now: i64, links: bo
         "priority": priority(event.why),
         "tags": tags(event),
     });
-    if let Some(click) = pr.or(jeet.as_deref()).or(page) {
+    if let Some(click) = pr.or(plete.as_deref()).or(page) {
         message["click"] = json!(click);
     }
     if !actions.is_empty() {
@@ -261,7 +261,7 @@ pub fn valid_topic(topic: &str) -> bool {
 
 /// A topic hard to guess, for a public server.
 pub fn random_topic() -> String {
-    format!("jeet-{}", uuid::Uuid::new_v4().simple())
+    format!("plete-{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Whether `token` could be an access token: printable, no spaces.
@@ -306,7 +306,7 @@ mod tests {
         make_dir(home).unwrap();
         let calls = Calls::default();
         let ntfy = Ntfy {
-            topic: Some("jeet-abc".into()),
+            topic: Some("plete-abc".into()),
             home: home.to_path_buf(),
             http: Box::new(Fake {
                 calls: calls.clone(),
@@ -344,10 +344,10 @@ mod tests {
             level: Some(NotifyLevel::Task),
             task: Some("x".into()),
             reference: Some("r41".into()),
-            title: "jeet: task x has a question (#41)".into(),
+            title: "plete: task x has a question (#41)".into(),
             subtitle: Some("assistant/x".into()),
             body: "Ship it <now> & then?".into(),
-            link: Some("jeet://report/41".into()),
+            link: Some("plete://report/41".into()),
             pr: Some("https://github.com/acme/api/pull/7".into()),
             at: Some(1000),
             ..Event::default()
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let (token, m) = &calls[0];
         assert_eq!(token.as_deref(), Some("tk_abc"));
-        assert_eq!(m["topic"], "jeet-abc");
+        assert_eq!(m["topic"], "plete-abc");
         assert_eq!(m["title"], "Question #41 from task x");
         assert_eq!(m["priority"], 4);
         assert_eq!(m["tags"], json!(["question"]));
@@ -373,7 +373,7 @@ mod tests {
             m["actions"],
             json!([
                 { "action": "view", "label": "Pull request", "url": "https://github.com/acme/api/pull/7" },
-                { "action": "view", "label": "Open in jeet", "url": "jeet://report/41" },
+                { "action": "view", "label": "Open in plete", "url": "plete://report/41" },
             ])
         );
         let text = m["message"].as_str().unwrap();
@@ -382,8 +382,8 @@ mod tests {
             text.contains("Task: x · Where: assistant/x · Kind: question · Age: "),
             "{text}"
         );
-        assert!(text.contains("\njeet report answer 41 \"…\"\n"), "{text}");
-        assert!(text.ends_with("\njeet open jeet://report/41"), "{text}");
+        assert!(text.contains("\nplete report answer 41 \"…\"\n"), "{text}");
+        assert!(text.ends_with("\nplete open plete://report/41"), "{text}");
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn priorities_and_the_click_fall_back_to_the_jeet_link() {
+    fn priorities_and_the_click_fall_back_to_the_plete_link() {
         let mut event = question();
         event.pr = None;
         event.why = Why::Finished;
@@ -403,16 +403,16 @@ mod tests {
         let m = message("t", &event, None, 1000, true);
         assert_eq!(m["priority"], 3);
         assert_eq!(m["tags"], json!(["white_check_mark", "done"]));
-        assert_eq!(m["click"], "jeet://report/41");
+        assert_eq!(m["click"], "plete://report/41");
         assert_eq!(m["actions"].as_array().unwrap().len(), 1);
-        // Without jeet links: the command stays, no click, no button.
+        // Without plete links: the command stays, no click, no button.
         let m = message("t", &event, None, 1000, false);
         assert!(m.get("click").is_none(), "{m}");
         assert!(m.get("actions").is_none(), "{m}");
         assert!(m["message"]
             .as_str()
             .unwrap()
-            .contains("jeet open jeet://report/41"));
+            .contains("plete open plete://report/41"));
 
         event.why = Why::Info;
         event.link = Some("https://example.com/x".into());
@@ -435,8 +435,8 @@ mod tests {
         // The summary gives way; the command and the link stay.
         assert!(text.starts_with("éé"), "{text}");
         assert!(text.contains("é…\n\nTask: x · Where: üü"), "{text}");
-        assert!(text.contains("\njeet report answer 41 \"…\"\n"), "{text}");
-        assert!(text.ends_with("\njeet open jeet://report/41"), "{text}");
+        assert!(text.contains("\nplete report answer 41 \"…\"\n"), "{text}");
+        assert!(text.ends_with("\nplete open plete://report/41"), "{text}");
         assert_eq!(cut_bytes("abc", 3), "abc");
         assert_eq!(cut_bytes("ab€d", 5), "ab…");
         assert_eq!(cut_bytes("ab€d", 4), "a…");
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_jeet_link_is_resent_without_and_never_tried_again() {
+    fn a_refused_plete_link_is_resent_without_and_never_tried_again() {
         let home = tempfile::tempdir().unwrap();
         let mut event = question();
         event.pr = None;
@@ -456,7 +456,7 @@ mod tests {
         ntfy.send(&event, &tokens).unwrap();
         assert_eq!(calls.borrow().len(), 2);
         assert!(calls.borrow()[1].1.get("click").is_none());
-        assert_eq!(web::load(home.path(), NAME).jeet_links, Some(false));
+        assert_eq!(web::load(home.path(), NAME).plete_links, Some(false));
         calls.borrow_mut().clear();
         ntfy.send(&event, &tokens).unwrap();
         assert_eq!(calls.borrow().len(), 1);
@@ -493,7 +493,7 @@ mod tests {
         let first = ntfy_401.send(&question(), &tokens).unwrap_err();
         assert!(first.is::<Down>());
         assert!(
-            format!("{first:#}").contains("jeet notify setup ntfy"),
+            format!("{first:#}").contains("plete notify setup ntfy"),
             "{first:#}"
         );
         let again = ntfy_401.send(&question(), &tokens).unwrap_err();
@@ -524,7 +524,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         make_dir(home.path()).unwrap();
         let ntfy = Ntfy {
-            topic: Some("jeet-abc".into()),
+            topic: Some("plete-abc".into()),
             home: home.path().to_path_buf(),
             http: Box::new(http(server)),
         };
@@ -540,12 +540,12 @@ mod tests {
         );
         let body: Value =
             serde_json::from_str(&asked[asked.find("\r\n\r\n").unwrap() + 4..]).unwrap();
-        assert_eq!(body["topic"], "jeet-abc");
+        assert_eq!(body["topic"], "plete-abc");
     }
 
     #[test]
     fn helpers() {
-        assert!(valid_topic("jeet-abc_1"));
+        assert!(valid_topic("plete-abc_1"));
         assert!(!valid_topic(""));
         assert!(!valid_topic("a/b"));
         assert!(!valid_topic(&"a".repeat(65)));

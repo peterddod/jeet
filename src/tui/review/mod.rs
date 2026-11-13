@@ -40,7 +40,7 @@ pub const POLL_EVERY: Duration = Duration::from_secs(30);
 pub enum Exit {
     /// Esc: back to wherever it was opened from.
     Back,
-    /// ctrl-c or ctrl-q: the user is done with jeet altogether.
+    /// ctrl-c or ctrl-q: the user is done with plete altogether.
     Quit,
 }
 
@@ -64,7 +64,7 @@ pub fn view(terminal: &mut Tui, dir: &Path, pr: &PullRequest) -> Result<Outcome>
     })
 }
 
-/// The viewer on a terminal of its own, for `jeet review`.
+/// The viewer on a terminal of its own, for `plete review`.
 pub fn run(dir: &Path, pr: &PullRequest) -> Result<Outcome> {
     let mut terminal = super::init_terminal()?;
     let outcome = view(&mut terminal, dir, pr);

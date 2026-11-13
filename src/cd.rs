@@ -1,6 +1,6 @@
 //! Directory hand-off to the shell wrapper.
 //!
-//! The `jeet` shell function created by `jeet init-shell` sets `JEET_CD_FILE`
+//! The `plete` shell function created by `plete init-shell` sets `PLETE_CD_FILE`
 //! to a temporary file and `cd`s to whatever path the binary writes there. This
 //! lets commands (and the explorer) leave the shell in a new directory without
 //! having to parse stdout.
@@ -9,9 +9,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub const CD_FILE_ENV: &str = "JEET_CD_FILE";
+pub const CD_FILE_ENV: &str = "PLETE_CD_FILE";
 
-/// Ask the shell wrapper to `cd` into `path` once jeet exits.
+/// Ask the shell wrapper to `cd` into `path` once plete exits.
 pub fn request(path: &Path) -> Result<()> {
     let Some(file) = crate::env::var(CD_FILE_ENV).ok().filter(|f| !f.is_empty()) else {
         return Ok(());

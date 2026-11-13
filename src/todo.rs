@@ -1,5 +1,5 @@
-//! The assistant's todo list: `$JEET_HOME/assistant/todo.md`, the one place
-//! it is kept. The assistant edits it, `jeet todo` scripts it, the tasks
+//! The assistant's todo list: `$PLETE_HOME/assistant/todo.md`, the one place
+//! it is kept. The assistant edits it, `plete todo` scripts it, the tasks
 //! list shows it.
 //!
 //! It is plain markdown. Every line that is a checkbox is an item, in
@@ -12,7 +12,7 @@
 //!
 //! `!p1`, `!p2`… mark an item's priority, and `@slug` links it to a task.
 //! Everything else in the file — headings, notes, blank lines — is kept
-//! exactly as written, and so is every item jeet does not change.
+//! exactly as written, and so is every item plete does not change.
 //!
 //! Changes are made under a lock and written to a temporary file that is
 //! renamed over the list, so two writers never lose each other's items and
@@ -155,10 +155,10 @@ pub struct TodoList {
     newline: bool,
 }
 
-/// An item as `jeet todo --json` reports it.
+/// An item as `plete todo --json` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ItemView {
-    /// Its number in the list, from 1, as `jeet todo done` takes it.
+    /// Its number in the list, from 1, as `plete todo done` takes it.
     pub id: usize,
     pub done: bool,
     pub text: String,
@@ -349,7 +349,7 @@ fn find_by_text(views: &[ItemView], text: &str) -> Result<usize> {
         .collect();
     match partly.as_slice() {
         [id] => Ok(*id),
-        [] => bail!("no item reads {text:?}; `jeet todo ls` shows what there is"),
+        [] => bail!("no item reads {text:?}; `plete todo ls` shows what there is"),
         ids => {
             let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
             bail!(

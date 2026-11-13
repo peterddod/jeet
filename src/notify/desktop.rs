@@ -24,7 +24,7 @@ impl Notifier for Desktop {
     }
 
     fn send(&self, event: &Event, _: &dyn Tokens) -> Result<()> {
-        // A jeet:// link opens nothing until its handler is installed.
+        // A plete:// link opens nothing until its handler is installed.
         let unhandled = event
             .link
             .as_deref()
@@ -64,7 +64,7 @@ fn invocation(event: &Event, os: Os, found: impl Fn(&str) -> bool) -> Option<Inv
     let title = one_line(&event.title, TITLE_MAX);
     let subtitle = event.subtitle.as_deref().map(|s| one_line(s, TITLE_MAX));
     let body = one_line(&event.body, BODY_MAX);
-    // A web page, or a jeet:// link `jeet open` takes, parsed strictly.
+    // A web page, or a plete:// link `plete open` takes, parsed strictly.
     let url = event
         .link
         .as_deref()
@@ -213,7 +213,7 @@ mod tests {
 
     /// A title that would be another `-e` line of script, were it read as
     /// an option, once `one_line` has trimmed the space that got it past
-    /// jeet's own flags.
+    /// plete's own flags.
     const OPTION_TITLE: &str = r#" -eproperty p : (do shell script "echo INJECTED > injected")"#;
 
     #[test]
@@ -269,19 +269,19 @@ mod tests {
     }
 
     #[test]
-    fn a_jeet_link_is_opened_on_click_and_nothing_like_one_is() {
+    fn a_plete_link_is_opened_on_click_and_nothing_like_one_is() {
         let opens = |url: &str| {
             let run = invocation(&note("t", "b", Some(url)), Os::MacOs, |_| true).unwrap();
             run.argv.iter().any(|a| a == "-open")
         };
-        assert!(opens("jeet://task/fix-login"));
-        assert!(opens("jeet://report/41"));
+        assert!(opens("plete://task/fix-login"));
+        assert!(opens("plete://report/41"));
         assert!(opens("plete://task/fix-login"));
         assert!(!opens("plete://task/a b"));
         for bad in [
-            "jeet://task/a b",
-            "jeet://task/x?y",
-            "jeet://nope/x",
+            "plete://task/a b",
+            "plete://task/x?y",
+            "plete://nope/x",
             "myapp://task/x",
         ] {
             assert!(!opens(bad), "{bad}");

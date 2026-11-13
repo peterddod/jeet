@@ -1,4 +1,4 @@
-//! The reviews view of the tasks list: every review jeet knows of — each
+//! The reviews view of the tasks list: every review plete knows of — each
 //! active review, or, toggled, the archived reviews — with where its PR and
 //! its review stand on GitHub. Reviews are rows of their own
 //! ([`ReviewRow`]), never among the tasks.
@@ -29,12 +29,12 @@ pub struct PrKey {
 }
 
 impl PrKey {
-    /// `jeet`: the repository's own name.
+    /// `plete`: the repository's own name.
     pub fn repo(&self) -> &str {
         self.repo_id.rsplit('/').next().unwrap_or(&self.repo_id)
     }
 
-    /// `jeet#55`.
+    /// `plete#55`.
     pub fn label(&self) -> String {
         format!("{}#{}", self.repo(), self.number)
     }
@@ -52,7 +52,7 @@ pub struct ReviewRow {
     pub last_activity: i64,
     /// Bytes on disk, once the size walker has been through the directory.
     pub size: Option<u64>,
-    /// Its agent runs without jeet knowing its process, as the last poll
+    /// Its agent runs without plete knowing its process, as the last poll
     /// found.
     pub unanchored: bool,
 }
@@ -278,10 +278,10 @@ mod tests {
     #[test]
     fn a_pr_key_is_labelled_by_its_repository_name() {
         let key = PrKey {
-            repo_id: "github.com/peterddod/jeet".into(),
+            repo_id: "github.com/peterddod/plete".into(),
             number: 55,
         };
-        assert_eq!(key.label(), "jeet#55");
+        assert_eq!(key.label(), "plete#55");
     }
 
     fn review_row(id: &str, pr: u64, state: TaskState, last: i64) -> ReviewRow {

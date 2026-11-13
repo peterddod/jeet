@@ -17,12 +17,12 @@ pub struct App {
 
 impl App {
     pub fn open() -> Result<Self> {
-        let (home, new_home) = config::jeet_homes()?;
+        let (home, new_home) = config::plete_homes()?;
         let config = config::load_or_create(&home)?;
         // `git worktree list` always reports symlink-resolved paths, so the
         // roots we compare them against have to be resolved too — on macOS
         // `/var` is a symlink to `/private/var`, which alone is enough to make
-        // jeet stop recognising its own worktrees. Resolve the home once, up
+        // plete stop recognising its own worktrees. Resolve the home once, up
         // front, so every derived root is stable whether or not it exists yet.
         let home = home.canonicalize().unwrap_or(home);
         // The same for where new items go, which may not exist yet.

@@ -1,5 +1,5 @@
 [package]
-name = "jeet"
+name = "plete"
 version = "0.15.0"
 edition = "2021"
 description = "Global git repo index and worktree manager"
@@ -33,20 +33,23 @@ signal-hook = { version = "0.4", default-features = false }
 
 [package.metadata.deb]
 maintainer = "Peter <peterddod@users.noreply.github.com>"
-copyright = "2026, jeet contributors"
+copyright = "2026, plete contributors"
 license-file = ["LICENSE", "4"]
 extended-description = """\
-jeet manages a canonical store of git repository trunks, mirrors worktrees \
+plete manages a canonical store of git repository trunks, mirrors worktrees \
 under a predictable layout, and maintains a SQLite index for discovery."""
 depends = "$auto, git, tmux"
+provides = "jeet"
+replaces = "jeet"
+conflicts = "jeet"
 recommends = "bash-completion"
 section = "utility"
 priority = "optional"
 assets = [
-    ["target/release/jeet", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/jeet/README", "644"],
-    ["packaging/completions/jeet.bash", "usr/share/bash-completion/completions/jeet", "644"],
-    ["packaging/completions/_jeet", "usr/share/zsh/vendor-completions/_jeet", "644"],
-    ["packaging/completions/_jeet", "usr/share/zsh/site-functions/_jeet", "644"],
-    ["packaging/completions/jeet.fish", "usr/share/fish/vendor_completions.d/jeet.fish", "644"],
+    ["target/release/plete", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/plete/README", "644"],
+    ["packaging/completions/plete.bash", "usr/share/bash-completion/completions/plete", "644"],
+    ["packaging/completions/_plete", "usr/share/zsh/vendor-completions/_plete", "644"],
+    ["packaging/completions/_plete", "usr/share/zsh/site-functions/_plete", "644"],
+    ["packaging/completions/plete.fish", "usr/share/fish/vendor_completions.d/plete.fish", "644"],
 ]

@@ -336,7 +336,7 @@ fn not_the_root(path: &Path, root: &Path) -> Result<()> {
 
 /// Where a git checkout goes instead, said with every refusal of one.
 const LEAVE_IT_TO_GIT: &str =
-    "leave it to git (a task's worktree: w in the tasks list, or jeet worktree rm)";
+    "leave it to git (a task's worktree: w in the tasks list, or plete worktree rm)";
 
 /// Whether `path` is a folder with a `.git` of its own — a worktree, a clone
 /// or a submodule. A symlink is not: removing or moving it leaves its target
@@ -797,7 +797,7 @@ mod tests {
             "mkdir -p ../../made".to_string(),
             "rm -r ../..".to_string(),
             format!("rm {}", secret.display()),
-            "touch /etc/jeet-should-never-exist".to_string(),
+            "touch /etc/plete-should-never-exist".to_string(),
         ];
         for line in &lines {
             let why = refused(line, &src, &t.root);
@@ -805,7 +805,7 @@ mod tests {
         }
         assert!(secret.exists());
         assert!(!t.outside.join("copy").exists());
-        assert!(!Path::new("/etc/jeet-should-never-exist").exists());
+        assert!(!Path::new("/etc/plete-should-never-exist").exists());
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod tests {
         ] {
             let why = refused(line, cwd, &t.root);
             assert!(why.contains("git checkout"), "{line:?}: {why}");
-            assert!(why.contains("jeet worktree rm"), "{line:?}: {why}");
+            assert!(why.contains("plete worktree rm"), "{line:?}: {why}");
         }
         assert_eq!(
             fs::read_to_string(api.join("src/lib.rs")).unwrap(),
