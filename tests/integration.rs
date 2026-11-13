@@ -10150,13 +10150,15 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     let v = lab.new_task_with("v", &parent);
     assert_eq!(lab.grants_of(&v), EVERY_CAPABILITY);
     assert_eq!(lab.budget_of(&v), None);
-    let output = lab.plete_at(&["task", "new", "x", "--parent", "w"], &lab.home(), &[]);
-    assert!(!output.status.success());
-    assert!(
-        stderr_of(&output).contains("not a manager"),
-        "{}",
-        stderr_of(&output)
+    // A worker has tasks under it too, with its budget's default.
+    let output = lab.plete_at(
+        &["task", "new", "under-w", "--parent", "w"],
+        &lab.home(),
+        &[],
     );
+    succeeded(&output);
+    let under_w = task_id(&path_from(&output));
+    assert_eq!(lab.parent_of(&under_w), Some(w.clone()));
     lab.new_task_with("top", &[]);
 
     // The user's held grant is logged as theirs, and not announced.
@@ -10328,7 +10330,7 @@ fn a_root_worker_is_granted_and_budgeted_within_what_the_assistant_holds() {
     succeeded(&output);
     let listed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     let slugs: Vec<&str> = listed.iter().map(|r| r["task"].as_str().unwrap()).collect();
-    assert_eq!(slugs, ["r", "v", "w", "y", "z"]);
+    assert_eq!(slugs, ["r", "v", "w", "under-w", "y", "z"]);
 }
 
 /// A repository the store lacks is cloned by `worktree add` or `task new
@@ -10730,7 +10732,6 @@ fn a_manager_makes_and_reaches_only_its_own_subtree() {
             &["task", "new", "x", "--parent", "assistant"],
             "may not run `plete task new` on \"assistant\"",
         ),
-        (&["task", "new", "x", "--parent", "w"], "only a manager"),
         // Cut by the assistant's list above it.
         (&["task", "new", "x", "--allow", "task.send"], "`task.send`"),
         (&["task", "new", "x", "--budget", "2h"], "more than is left"),
@@ -11043,11 +11044,7 @@ fn a_root_worker_reaches_only_itself_reads_included() {
     let mut wp_agent = lab.task_pane("wp");
 
     for (args, says) in [
-        (
-            &["task", "new", "x"][..],
-            "a task with a parent cannot make tasks",
-        ),
-        (&["manager", "new", "x"], "may not run `plete manager new`"),
+        (&["manager", "new", "x"][..], "may not make managers"),
         (&["task", "send", "sib", "hi"], "never message each other"),
         (
             &["manager", "grant", "sib", "task.send"],
@@ -11385,7 +11382,10 @@ fn manager_new_is_refused_on_a_harness_a_manager_cannot_run_on() {
     let output = lab.plete_at(&["task", "open", "mgr"], &lab.home(), &env);
     assert!(!output.status.success());
     let said = stderr_of(&output);
-    assert!(said.contains("a manager needs what"), "{said}");
+    assert!(
+        said.contains("a task with tasks under it needs what"),
+        "{said}"
+    );
     assert!(said.contains("hook events"), "{said}");
     assert!(calls_of(&tmux, "new-session").is_empty());
 
@@ -11659,8 +11659,8 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
         "{w_start:?}"
     );
 
-    // A sub-manager below it, while it holds `manager.create`, and none
-    // deeper than `max_depth` lets a manager sit.
+    // A sub-manager below it, while it holds `manager.create` (the depth
+    // limit, off by default, is the unit tests').
     let mut sub_agent = PaneShell::spawn(&lab, &[("PLETE_TMUX", &tmux_env)]);
     sub_agent.as_session_pane(&tmux, "plete-sub");
     let output = mp.plete(
@@ -11685,18 +11685,6 @@ fn a_manager_runs_its_own_subtree_and_nothing_else() {
     assert_eq!(shown["path"], "assistant/api/sub");
     assert_eq!(shown["kind"], "manager");
     assert!(stub.join("alive/plete-sub").exists());
-    let output = mp.plete(
-        &["manager", "new", "deep", "--parent", "sub", "--goal", "g"],
-        &api_dir,
-        &env,
-    );
-    assert!(!output.status.success());
-    assert!(
-        stderr_of(&output).contains("`[managers] max_depth` is 3"),
-        "{}",
-        stderr_of(&output)
-    );
-    assert_eq!(slugs("deep"), 0);
 
     // Every reach outside its subtree is refused, and leaves things as
     // they were.

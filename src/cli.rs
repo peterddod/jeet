@@ -566,9 +566,10 @@ pub enum TaskCommands {
 /// Where a new task sits in the tree, and what it is asked and allowed.
 #[derive(Args, Clone, Default)]
 pub struct Delegation {
-    /// The task it reports to: `assistant`, or a manager by its exact name.
-    /// Made by the assistant, a task reports to it without this; made by a
-    /// manager, to that manager; a manager the user makes, to the assistant
+    /// The task it reports to: `assistant`, or a task under it by its exact
+    /// name. Made by the assistant, a task reports to it without this; made
+    /// by a task under it, to that task; a manager the user makes, to the
+    /// assistant
     #[arg(long, add = ArgValueCandidates::new(parent_candidates))]
     pub parent: Option<String>,
     /// What its parent wants of it, shown to its agent as each session
@@ -579,8 +580,8 @@ pub struct Delegation {
     #[arg(long = "done", allow_hyphen_values = true)]
     pub done_when: Option<String>,
     /// What it may do (comma-separated capabilities), within what its
-    /// parent holds; default `[managers] worker_default`, or
-    /// `manager_default` for a manager, else every capability
+    /// parent holds; default `[tasks] default_allow`, or `[managers]
+    /// manager_default` for a manager, else every capability
     #[arg(long, value_delimiter = ',', value_parser = parse_capability, add = ArgValueCandidates::new(capability_candidates))]
     pub allow: Option<Vec<String>>,
     /// What it may spend: hours (4h), minutes (30m) and turns (20turns),
@@ -612,7 +613,7 @@ pub enum ManagerCommands {
         #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         brief_file: Option<std::path::PathBuf>,
         /// How many active tasks it may have under it at once; at most
-        /// `[managers] max_children`, its default
+        /// `[tasks] max_children`, its default
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         max_children: Option<u32>,
         /// Project to start from: its skills and AGENTS.md (as PROJECT.md,
@@ -683,7 +684,7 @@ pub enum ManagerCommands {
         all: bool,
     },
 
-    /// Start what waits on `[managers] max_live`, while there is room (run
+    /// Start what waits on `[tasks] max_live`, while there is room (run
     /// by plete when a task's session ends)
     #[command(hide = true)]
     Drain {

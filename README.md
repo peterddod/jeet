@@ -1096,13 +1096,23 @@ as an answer: `plete task send` and `plete task new --prompt` from anyone but
 you turn the `<` of a `<plete-…` tag into `‹`.
 
 plete reports for the task too, as `status`: when its agent waits on a prompt
-only you can answer, sits idle longer than `[managers] idle_report_mins`
+only you can answer, sits idle longer than `[tasks] idle_report_mins`
 (default 10; `plete watch` and the assistant's own turns look), or ends without
-reporting done. These never start an assistant session. `--goal` and `--done`
+reporting done. These never start an assistant session.
+
+Any task under the assistant, not only a manager, may have tasks under it,
+to any depth (`[tasks] max_depth` caps it; unset, there is no limit): its
+agent runs `plete task new` when its grant holds `task.create`, and you or
+the assistant may pass `--parent <task>`. Its tasks report to it, their
+questions are its to answer or pass up, each of its sessions starts with
+them and their last reports, it hands on at most what it holds, and
+`[tasks] max_children` (default 6) caps how many it keeps at once. A task
+made under one gets `[tasks] default_budget` unless given a budget, cut to
+what is left above it. `--goal` and `--done`
 on `plete task new` give the task a definition of done, shown to its agent at
 the start of each session with what it may do and how to report. `--allow
-task.create,worktree.add` names what it may do instead of `[managers]
-worker_default` (every capability but `assistant.interrupt` unless set), refused unless its parent holds each one, and `--budget
+task.create,worktree.add` names what it may do instead of `[tasks]
+default_allow` (every capability but `assistant.interrupt` unless set), refused unless its parent holds each one, and `--budget
 1h,20turns` gives it a budget of busy time and turns (no `$`: cost budgets
 wait). A budget is charged with the time the task's agent is busy (running,
 or waiting on a prompt, while its agent's pane is alive: a window you opened in its session does not count) and a turn for each turn it ends, and counts toward
@@ -1111,7 +1121,7 @@ deleting a task mid-turn charges the turn so far first). At 80% the parent is to
 note; at 100% the task is paused and its parent told `blocked: budget`: its
 turn ends with nothing more handed to it, and messages for it wait in its
 inbox until the budget is raised and it is resumed.
-At most `[managers] max_live` tasks under the assistant run at once (a
+At most `[tasks] max_live` tasks under the assistant run at once (a
 review agent counts toward `[review] max_live` instead, and spends only its
 own `[review]` budget: [Review limits](#review-limits)): a
 start past it is queued and the task's parent told, and it starts when a
@@ -1142,11 +1152,11 @@ plete manager new api --goal "Ship the v2 API" --done "PRs open, CI green" \
 It goes under the assistant, or under `--parent` (a manager by its exact
 name); made by a manager, it goes under that manager. `--goal`, `--done`,
 `--allow` and `--budget` work as on `task new`, but an unasked grant is
-`[managers] manager_default` (every capability but `assistant.interrupt` unless set) and an unasked budget `[managers]
+`[managers] manager_default` (every capability but `assistant.interrupt` unless set) and an unasked budget `[tasks]
 default_budget`; `--brief-file` adds a longer brief after the goal (the two
 together at most 8,000 bytes; a regular file, and, named by the assistant
 or a manager, one inside its own home and of one name, no hard link), and
-`--max-children` lowers `[managers] max_children` for it. `--project <name>`
+`--max-children` lowers `[tasks] max_children` for it. `--project <name>`
 starts it from a [project](#projects): its skills are copied in and its
 `AGENTS.md` becomes `PROJECT.md`, imported from the end of the manager's own
 `AGENTS.md` (which stays as it is); no worktrees are added, as a manager holds
@@ -3172,7 +3182,7 @@ is the PR policy: `[tasks] pr = "draft"` denies `gh pr ready` and `"ask"`
 denies `gh pr create`, as that is your policy, not a default restriction. To
 restrict:
 
-- `[managers] worker_default` and `manager_default`, or `--allow` on `plete
+- `[tasks] default_allow` and `[managers] manager_default`, or `--allow` on `plete
   task new` / `plete manager new` and `plete manager grant`, narrow what a new
   task or manager may do (for example `["worktree.add"]`).
 - `[permissions] guards = true` denies force-pushes, merges outside `plete pr
@@ -3192,17 +3202,23 @@ plete command bare: `for t in a b; do plete task archive $t --force; done` or
 `Bash(plete task archive:*)` allowed.
 
 ```toml
-[managers]
-idle_report_mins = 10   # tell the assistant when a task of its sits idle this long
-max_depth = 3           # a task at most 3 below the assistant, a manager 2
-max_children = 6        # active tasks under one manager (the assistant has no limit)
-default_budget = "4h"   # for a manager's task when `--budget` names none
+[tasks]
+idle_report_mins = 10   # tell a task's parent when it sits idle this long
+max_depth = 5           # unset: no limit; set, a task sits at most this far below the assistant
+max_children = 6        # active tasks under one task (the assistant has no limit)
+default_budget = "4h"   # for a manager, or a task under a task, when `--budget` names none
 max_live = 8            # tasks under the assistant running at once, reviews apart; a start past it waits
-# Unset, both default to every capability but assistant.interrupt. Setting them restricts, e.g.:
-worker_default = ["worktree.add"]   # a new task's grant when `--allow` names none
-manager_default = ["task.create"]   # a new manager's
+# Unset, it defaults to every capability but assistant.interrupt. Setting it restricts, e.g.:
+default_allow = ["worktree.add"]    # a new task's grant when `--allow` names none
 held = []               # added to pr.merge, pr.comment, pr.review, task.delete: logged and notified when a grant names them
+
+[managers]
+manager_default = ["task.create"]   # a new manager's grant
 ```
+
+These keys lived in `[managers]` before (`default_allow` as
+`worker_default`); plete still reads each one there that `[tasks]` does not
+set.
 
 The tree's settings are checked when they are used, not when config.toml
 is read: a mistake in them (an unknown capability, a limit of 0, a `$` budget) refuses making tasks under the

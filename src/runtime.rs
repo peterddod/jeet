@@ -595,9 +595,9 @@ pub fn wake(app: &App, harness: &dyn harness::Harness) -> bool {
 /// ([`permissions::task_deny`]: nothing, for a top-level task, unless
 /// `[permissions] guards`), the read-only `gh` commands pre-approved,
 /// the rules of its role in `[permissions]` ([`with_config_rules`]) and its
-/// wake channel ([`wake`]). A manager, started with nobody at its pane, also
-/// has the commands of what it holds pre-approved, read at each start, as
-/// the assistant has those of `[assistant] allow`. A work task has
+/// wake channel ([`wake`]). A task with a parent, often started with nobody
+/// at its pane, also has the commands of what it holds pre-approved, read at
+/// each start, as the assistant has those of `[assistant] allow`. A work task has
 /// [`permissions::PUSH_ALLOW`] too under `[permissions] push = "branches"`.
 /// A work task also has the rules of its PR policy ([`pr_rules`]).
 fn task_hooks(
@@ -608,27 +608,28 @@ fn task_hooks(
 ) -> Result<HookSetup> {
     let mut allow = ALLOWED.map(str::to_string).to_vec();
     allow.extend(permissions::GH_READ_ONLY.iter().map(|c| c.to_string()));
-    match task.kind {
-        TaskKind::Manager => {
-            let held: Vec<String> = permissions::effective(app, task)?
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            for command in permissions::allowed_commands(&held) {
-                // The assistant's todo list, which a manager keeps by hand.
-                let own = permissions::OWN.contains(&command.as_str());
-                if !own && !allow.contains(&command) {
-                    allow.push(command);
-                }
+    let in_tree =
+        task.kind == TaskKind::Manager || (task.kind == TaskKind::Work && task.parent_id.is_some());
+    if in_tree {
+        let held: Vec<String> = permissions::effective(app, task)?
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for command in permissions::allowed_commands(&held) {
+            // The assistant's todo list, which a task keeps by hand.
+            let own = permissions::OWN.contains(&command.as_str());
+            if !own && !allow.contains(&command) {
+                allow.push(command);
             }
         }
-        TaskKind::Work => match app.config.permissions.push() {
+    }
+    if task.kind == TaskKind::Work {
+        match app.config.permissions.push() {
             PushPolicy::Branches => {
                 allow.extend(permissions::PUSH_ALLOW.iter().map(|c| c.to_string()))
             }
             PushPolicy::Ask => {}
-        },
-        TaskKind::Assistant | TaskKind::Setup => {}
+        }
     }
     let mut deny = permissions::task_deny(app, task)?;
     if task.kind == TaskKind::Work {
@@ -1205,16 +1206,21 @@ mod tests {
         }
         assert!(!hooks.allow.iter().any(|a| a == "plete" || a.ends_with('*')));
         assert!(!hooks.allow.contains(&"plete todo".to_string()));
-        // A worker asks at the prompt, as before, but for reading PRs and runs.
+        // A worker with a parent has the commands of what it holds too, as
+        // it may have tasks under it.
         let hooks = task_hooks(&app, &worker, claude, "/bin/plete".into()).unwrap();
-        let mut reads: Vec<String> = ALLOWED
-            .iter()
-            .chain(permissions::GH_READ_ONLY)
-            .map(|c| c.to_string())
-            .collect();
+        for read in ALLOWED.iter().chain(permissions::GH_READ_ONLY) {
+            assert!(hooks.allow.contains(&read.to_string()), "{:?}", hooks.allow);
+        }
+        let held = permissions::effective(&app, &worker).unwrap();
+        assert_eq!(
+            hooks.allow.contains(&"plete task new".to_string()),
+            held.contains(&"task.create"),
+            "{:?}",
+            hooks.allow
+        );
         // It opens draft PRs it may not mark ready (the default PR policy).
-        reads.push("gh pr create".into());
-        assert_eq!(hooks.allow, reads);
+        assert!(hooks.allow.contains(&"gh pr create".to_string()));
         assert!(hooks.deny.contains(&"gh pr ready".to_string()));
         assert!(hooks.wake);
         // `push = "branches"` lets a worker push to origin, but not a manager.

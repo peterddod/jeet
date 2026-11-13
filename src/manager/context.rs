@@ -130,6 +130,24 @@ pub fn held_text(held: &[HeldLine], up: &str) -> String {
     out
 }
 
+/// What a work task with tasks under it starts a session with besides its
+/// brief: those tasks with their last reports, and the asks it holds.
+/// Nothing for one with neither, which starts as any task does.
+pub fn work_sections(app: &App, node: &TaskRecord) -> Result<String> {
+    let mut children = Vec::new();
+    for t in app.db.children(&node.id)? {
+        if t.state == TaskState::Active && children.len() < MAX_BELOW {
+            children.push(child(app, &t)?);
+        }
+    }
+    let held = held(app, node)?;
+    Ok(format!(
+        "{}{}",
+        children_text(&children),
+        held_text(&held, "your parent")
+    ))
+}
+
 /// Most of `todo.md` the summary shows.
 pub const MAX_TODO: usize = 4000;
 
