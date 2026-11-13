@@ -3312,8 +3312,9 @@ cargo fmt --check
 A development build (a debug build, or one run from a cargo `target/`
 directory) refuses to migrate the index at the default home, `~/.plete`: it
 would leave it at a schema the installed release cannot open. Run it with
-`PLETE_HOME=$(mktemp -d)`, or set `PLETE_ALLOW_DEV_MIGRATE=1` to migrate the
-default index on purpose.
+`PLETE_HOME=$(mktemp -d)`, or set `PLETE_ALLOW_DEV_MIGRATE` to the index's
+path (e.g. `~/.plete/index.db`) to migrate it on purpose. `=1` covers only a
+default home under a `$HOME` other than the account's own, as tests use.
 
 [docs/harnesses.md](docs/harnesses.md) says how to add support for another
 coding agent.
