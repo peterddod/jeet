@@ -14,6 +14,7 @@
 mod assistant_info;
 pub mod chat;
 pub mod command;
+pub mod keys;
 mod managers;
 mod projects_tab;
 pub mod review;
@@ -587,7 +588,13 @@ fn handle_overlay_key(
             // If the terminal cannot be measured, hold the scroll where it is
             // rather than let the `?` take the panel down with it.
             let max = match terminal.size() {
-                Ok(size) => ui::help_geometry(Rect::new(0, 0, size.width, size.height)).1,
+                Ok(size) => {
+                    ui::help_geometry(
+                        Rect::new(0, 0, size.width, size.height),
+                        &keys::explorer_hints(explorer),
+                    )
+                    .1
+                }
                 Err(_) => scroll,
             };
             let moved = match key.code {

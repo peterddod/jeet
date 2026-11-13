@@ -486,16 +486,27 @@ impl Explorer {
     ///
     /// Returns false when there is nothing left to add.
     pub fn complete(&mut self) -> bool {
-        if self.in_command_mode() {
-            return self.complete_command();
-        }
-        let Some(completed) = self.completed_name(&self.filter) else {
+        let Some(filter) = self.completed_filter() else {
             return false;
         };
         let keep = self.selected_entry().map(|e| e.path.clone());
-        self.filter = completed;
+        self.filter = filter;
         self.refocus(keep.as_deref());
         true
+    }
+
+    /// Whether ⇥ would change anything, for the key legend.
+    pub fn can_complete(&self) -> bool {
+        self.completed_filter().is_some()
+    }
+
+    /// The filter ⇥ would leave, or none when it would do nothing.
+    fn completed_filter(&self) -> Option<String> {
+        if self.in_command_mode() {
+            return self.completed_command();
+        }
+        self.completed_name(&self.filter)
+            .filter(|completed| *completed != self.filter)
     }
 
     /// ⇥ while a command is typed: the verb from the verbs, and an operand
@@ -503,10 +514,8 @@ impl Explorer {
     ///
     /// Only a bare name: an operand reaching into another folder has nothing
     /// in this listing to complete against.
-    fn complete_command(&mut self) -> bool {
-        let Some(line) = self.command_line() else {
-            return false;
-        };
+    fn completed_command(&self) -> Option<String> {
+        let line = self.command_line()?;
         let tail = super::command::tail(line);
         let word = if tail.index == 0 {
             super::command::complete_verb(&tail.text)
@@ -515,21 +524,11 @@ impl Explorer {
         } else {
             self.completed_name(&tail.text)
                 .map(|name| super::command::quoted(&name))
-        };
-        let Some(word) = word else {
-            return false;
-        };
+        }?;
         let filter = format!(":{}{word}", &line[..tail.start]);
-        if filter == self.filter {
-            return false;
-        }
-        let keep = self.selected_entry().map(|e| e.path.clone());
-        self.filter = filter;
-        self.refocus(keep.as_deref());
-        true
+        (filter != self.filter).then_some(filter)
     }
 
-    /// What ⇥ turns `typed` into, against the rows on screen.
     fn completed_name(&self, typed: &str) -> Option<String> {
         let (completed, highlighted) = {
             let names: Vec<&str> = self.visible().map(|e| e.name.as_str()).collect();
@@ -657,6 +656,13 @@ impl Explorer {
             dir.push(component.as_os_str());
         }
         Some(dir)
+    }
+
+    /// Whether [`Explorer::ascend`] would go anywhere, without saying so in
+    /// the status line when it would not — the key legend asks this on every
+    /// draw. It tests exactly what `ascend` does.
+    pub fn can_ascend(&self) -> bool {
+        self.cwd != self.root && self.cwd.parent().is_some()
     }
 
     /// Go to the parent directory, never above the worktree root.
