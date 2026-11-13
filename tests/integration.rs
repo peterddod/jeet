@@ -4308,6 +4308,21 @@ impl Pty {
         std::thread::sleep(std::time::Duration::from_millis(600));
     }
 
+    /// Esc, again and again, until the screen closes.
+    fn esc_until_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            self.esc();
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!("the screen did not close:\n{}", self.screen());
+            }
+        }
+    }
+
     fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -5474,9 +5489,20 @@ fn the_explorers_pr_list_checks_out_into_tasks() {
     screen.type_keys(b"\r");
     let review = lab.home().join("tasks/review-widget-7/widget");
     wait_until("the review task", || review.join(".git").exists());
-    screen.wait_for_text("in new review review-widget-7");
-    screen.esc();
-    let status = screen.wait_for_exit();
+    // Not the status line, for the reason given below. The review's row
+    // comes before the checkout's last steps, and an esc typed while they
+    // run is thrown away, so esc is typed until the screen closes.
+    wait_until("the review's row", || {
+        lab.index()
+            .query_row(
+                "SELECT COUNT(*) FROM reviews WHERE slug = 'review-widget-7'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    });
+    let status = screen.esc_until_exit();
     assert!(status.success(), "plete explore exited with {status}");
 
     assert_eq!(
