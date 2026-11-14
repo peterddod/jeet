@@ -2546,6 +2546,32 @@ fn agent_profiles_are_made_listed_shown_and_edited() {
     let output = lab.plete_at(&["agents", "show", "docs"], &home, &[]);
     succeeded(&output);
     assert!(stdout_of(&output).starts_with("+++\n"));
+    // What may be secret is not shown, to an agent or anyone.
+    std::fs::write(
+        home.join("agents/tok.md"),
+        "+++\nenv = { TOKEN = \"s3cret\" }\n+++\nUse it.\n",
+    )
+    .unwrap();
+    let output = lab.plete_at(&["agents", "show", "tok"], &home, &[]);
+    succeeded(&output);
+    assert!(
+        !stdout_of(&output).contains("s3cret"),
+        "{}",
+        stdout_of(&output)
+    );
+    assert!(stdout_of(&output).contains("TOKEN"));
+    // A broken one is still opened to be fixed.
+    let output = lab.plete_at(
+        &["agents", "edit", "bad"],
+        &home,
+        &[("PLETE_EDITOR", "true")],
+    );
+    succeeded(&output);
+    assert!(
+        stderr_of(&output).contains("does not read"),
+        "{}",
+        stderr_of(&output)
+    );
     let output = lab.plete_at(&["agents", "show", "default"], &home, &[]);
     succeeded(&output);
     assert!(stderr_of(&output).contains("built-in"));

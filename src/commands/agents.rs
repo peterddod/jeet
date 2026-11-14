@@ -71,26 +71,23 @@ fn shadows(p: &Profile) -> bool {
 pub fn show(app: &App, name: &str, project: Option<&str>) -> Result<()> {
     let project = checked_project(app, project)?;
     let profile = profiles::find(app, name, project)?;
-    let text = match profile.source.path() {
-        Some(path) => {
-            eprintln!(
-                "plete: profile {name}: {}, {}",
-                profile.source.label(),
-                path.display()
-            );
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
-        }
-        None => {
-            eprintln!(
-                "plete: profile {name}: built-in; `plete agents new {name} --from {name}` \
-                 makes a copy of your own to edit"
-            );
-            profiles::starter(name, Some(&profile))?
-        }
-    };
-    print!("{text}");
-    if !text.ends_with('\n') {
-        println!();
+    match profile.source.path() {
+        Some(path) => eprintln!(
+            "plete: profile {name}: {}, {} (env values and inline MCP servers hidden; \
+             `plete agents edit {name}` opens the file)",
+            profile.source.label(),
+            path.display()
+        ),
+        None => eprintln!(
+            "plete: profile {name}: built-in; `plete agents new {name} --from {name}` \
+             makes a copy of your own to edit"
+        ),
+    }
+    // Any agent may ask, so what may be secret is not printed.
+    let settings = toml::to_string(&profiles::redacted(&profile.settings))?;
+    println!("+++\n{settings}+++");
+    if !profile.body.is_empty() {
+        println!("{}", profile.body);
     }
     Ok(())
 }
@@ -99,11 +96,17 @@ pub fn new(app: &App, name: &str, from: Option<&str>, project: Option<&str>) -> 
     profiles::check_name(name)?;
     let project = checked_project(app, project)?;
     let path = profiles::new_path(app, name, project);
-    let folder = path.with_extension("");
-    if path.exists() || folder.exists() {
+    // In either home (or, for a project's, in the project): a new file
+    // there would not be the one read.
+    let existing = match project {
+        Some(p) => profiles::file_of(app, name, project)
+            .filter(|f| f.starts_with(profiles::project_dir(app, p))),
+        None => profiles::file_of(app, name, None),
+    };
+    if let Some(existing) = existing {
         bail!(
             "profile {name} exists already at {}; `plete agents edit {name}` opens it",
-            path.display()
+            existing.display()
         );
     }
     let from = from
@@ -113,7 +116,14 @@ pub fn new(app: &App, name: &str, from: Option<&str>, project: Option<&str>) -> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    // Never over a file, or through a link, made meanwhile.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .with_context(|| format!("write {}", path.display()))?;
     if profiles::is_builtin(name) {
         eprintln!("plete: profile {name} now shadows the built-in one");
     }
@@ -122,18 +132,18 @@ pub fn new(app: &App, name: &str, from: Option<&str>, project: Option<&str>) -> 
 }
 
 pub fn edit(app: &App, name: &str, project: Option<&str>) -> Result<()> {
+    profiles::check_name(name)?;
     let project = checked_project(app, project)?;
     let profile = profiles::find(app, name, project).or_else(|e| {
         // A file that does not read is still the one to edit.
-        let path = profiles::new_path(app, name, project);
-        match path.is_file() {
-            true => Ok(Profile {
+        match profiles::file_of(app, name, project) {
+            Some(path) => Ok(Profile {
                 name: name.to_string(),
                 source: Source::User(path),
                 settings: Default::default(),
                 body: String::new(),
             }),
-            false => Err(e),
+            None => Err(e),
         }
     })?;
     let Some(path) = profile.source.path() else {

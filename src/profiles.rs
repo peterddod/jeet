@@ -162,6 +162,8 @@ pub fn check_name(name: &str) -> Result<()> {
 /// first is all body, with nothing set.
 pub fn parse(text: &str) -> Result<(Settings, String)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // Blank lines before the fence do not hide it.
+    let text = text.trim_start_matches(['\n', '\r', ' ', '\t']);
     let Some(rest) = strip_fence_line(text) else {
         return Ok((Settings::default(), text.trim().to_string()));
     };
@@ -250,6 +252,29 @@ pub fn new_path(app: &App, name: &str, project: Option<&str>) -> PathBuf {
         None => app.new_root(crate::config::agents_root),
     };
     dir.join(format!("{name}.md"))
+}
+
+/// The file profile `name` is read from, broken or not, as [`find`] looks:
+/// the project's, then each home's. Nothing for a built-in, or none.
+pub fn file_of(app: &App, name: &str, project: Option<&str>) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = project.map(|p| project_dir(app, p)).into_iter().collect();
+    dirs.extend(user_dirs(app));
+    dirs.iter().find_map(|dir| in_dir(dir, name))
+}
+
+/// `settings` with what may be secret hidden: env values and MCP servers
+/// written inline, for showing to whoever asks.
+pub fn redacted(settings: &Settings) -> Settings {
+    let mut s = settings.clone();
+    for value in s.env.values_mut() {
+        *value = "<hidden>".into();
+    }
+    if let Some(Mcp::Servers { servers }) = &mut s.mcp {
+        for value in servers.values_mut() {
+            *value = toml::Value::String("<hidden>".into());
+        }
+    }
+    s
 }
 
 /// The file of profile `name` in `dir`, as a file or a folder.
@@ -446,6 +471,9 @@ mod tests {
             Some(Mcp::Servers { servers }) => assert!(servers.contains_key("docs")),
             other => panic!("{other:?}"),
         }
+        // Blank lines before the fence, and CRLF.
+        let (s, body) = parse("\n\r\n+++\r\nmodel = \"x\"\r\n+++\r\nGo.\r\n").unwrap();
+        assert_eq!((s.model.as_deref(), body.as_str()), (Some("x"), "Go."));
         // No settings: all body.
         let (s, body) = parse("Just do it.\n").unwrap();
         assert_eq!((s, body.as_str()), (Settings::default(), "Just do it."));
@@ -473,6 +501,18 @@ mod tests {
         );
         // An old capability name is still one.
         parse("+++\nallow = [\"manager.create\"]\n+++\n").unwrap();
+    }
+
+    #[test]
+    fn what_may_be_secret_is_hidden_when_shown() {
+        let (s, _) = parse(
+            "+++\nmodel = \"x\"\nenv = { TOKEN = \"s3cret\" }\n\
+             [mcp.servers.docs]\nheaders = { auth = \"s3cret\" }\n+++\n",
+        )
+        .unwrap();
+        let shown = toml::to_string(&redacted(&s)).unwrap();
+        assert!(!shown.contains("s3cret"), "{shown}");
+        assert!(shown.contains("TOKEN") && shown.contains("docs") && shown.contains("model"));
     }
 
     #[test]
