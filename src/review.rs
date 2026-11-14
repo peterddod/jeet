@@ -1114,6 +1114,7 @@ fn start_tmux(
         spec,
         hooks,
         warnings,
+        env: Vec::new(),
     };
     let running = runtime::launch_tmux(
         app,

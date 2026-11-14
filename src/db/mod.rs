@@ -565,6 +565,14 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE tasks ADD COLUMN session_id TEXT;
     ",
+    // v15: the agent profile a task is started as (`task new --agent`); no
+    // row for the default. Its own table, so no rebuild of `tasks` loses it.
+    "
+    CREATE TABLE task_agents (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        agent TEXT NOT NULL
+    );
+    ",
 ];
 
 /// A repository in the index. Its trunk is in the store, except for one

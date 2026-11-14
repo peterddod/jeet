@@ -44,6 +44,7 @@ use crate::manager;
 use crate::manager::budget::{self, Threshold};
 use crate::manager::run;
 use crate::messages;
+use crate::profiles;
 use crate::reports::{self, StatusEvent};
 use crate::runtime;
 use crate::tasks;
@@ -452,8 +453,23 @@ fn handle_hook(
                     }
                     _ => None,
                 };
+                // Its agent profile's instructions, after its brief, on the
+                // same terms as the policy line.
+                let own =
+                    parented || (task.parent_id.is_none() && names_task(launched_for, &task.id));
+                let profile = match (own, task.kind) {
+                    (true, TaskKind::Work) => match profiles::of_task(app, task) {
+                        Ok(profile) => profile.as_ref().and_then(profiles::brief_section),
+                        Err(e) => {
+                            eprintln!("plete task-hook {event}: {e:#}");
+                            None
+                        }
+                    },
+                    _ => None,
+                };
                 let context = brief.map(|brief| {
-                    let parts: Vec<String> = brief.into_iter().chain(policy).collect();
+                    let parts: Vec<String> =
+                        brief.into_iter().chain(profile).chain(policy).collect();
                     parts.join("\n\n")
                 });
                 match context {

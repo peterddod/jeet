@@ -722,9 +722,18 @@ brief, the model it runs, what it is granted and may spend, and the skills,
 MCP servers, environment and harness rules it starts with. plete ships two:
 `default` (a task's agent as it always was) and `planner` (plans an area of
 work, delegates it to tasks under it, checks what they report and reports
-up: what a manager does). Starting a task as one, `plete task new <name>
---agent <profile>`, is not wired up yet; for now profiles are
-written and checked here.
+up: what a manager does). `plete task new <name> --agent <profile>` starts
+a task as one:
+
+- as it is made, the profile's `allow`, `budget`, `max_children` and `pr`
+  are the task's defaults (`--allow`, `--budget` and `--pr` win; a grant is
+  cut to its parent's as ever);
+- at each start of its agent, its instructions follow the brief (in a
+  `<plete-profile>` section), and its `model` (over `[models]`; a project's
+  `--model` argument still wins), `mcp`, `env`, `[permissions]` and
+  `skills` (copied into `.claude/skills/`) apply. An edit takes effect at
+  the next start; a profile gone or broken since stops the start, rather
+  than run the agent without it.
 
 ```bash
 plete agents                         # the profiles, and where each is from

@@ -305,6 +305,8 @@ pub const READ_ONLY: &[&str] = &[
     "plete worktree path",
     "plete manager ls",
     "plete manager show",
+    "plete agents ls",
+    "plete agents show",
     "plete notify",
 ];
 
