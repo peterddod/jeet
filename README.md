@@ -556,6 +556,17 @@ plete task resync launch                       # --force replaces the task's edi
 plete manager new web --goal "Own the web app" --project web   # its tasks start from web too
 ```
 
+A project also keeps shared docs, in `docs/` beside its `AGENTS.md` (made with
+a starter `index.md`; a project from before gets it at its next task's
+start): what its tasks know and keep for the tasks after them. They are not
+copied into tasks. Each task in the project (a task made under one starts from
+its project too) is told where they are as each session starts, and its agent
+is given the folder (Claude Code: `--add-dir`). Your own tasks, and tasks whose grant holds
+`project.write` (in the default grant), may edit them: one file per topic,
+listed in `index.md`, kept up to date rather than appended to. Without
+`project.write` they are read-only: its agent's edits there are denied. Writes are last-writer-wins, and the folder
+keeps no history of its own.
+
 `AGENTS.md` is the file Codex, Cursor, Amp, Gemini CLI and most other coding
 agents read, so a project works whichever agent you run. Next to it, plete writes
 a `CLAUDE.md` holding only `@AGENTS.md`, an import: Claude Code reads
@@ -3003,7 +3014,7 @@ push = false    # keep what is sent to it for `plete brief` (the default)
 The capabilities: `task.create`, `task.open`, `task.send`, `task.archive`,
 `task.unarchive`, `task.delete`, `task.resync`, `worktree.add`, `worktree.rm`,
 `review.start`, `project.read`, `project.create`, `project.delete`,
-`repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
+`project.write` (the project's shared docs), `repo.clone`, `repo.import`, `repo.sync`, `shell.install`, `watch.install`,
 `pr.comment`, `pr.review`, `pr.merge` (`plete pr merge`), `manager.grant`
 (`plete manager grant` and `budget`), `manager.create` (`plete manager new`)
 `manager.stop` (`plete manager pause`, `resume` and `stop`) and
