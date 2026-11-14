@@ -165,6 +165,14 @@ pub enum Commands {
         command: Option<ProjectCommands>,
     },
 
+    /// Agent profiles: what a task's agent is started as (`task new --agent
+    /// <name>`), kept in $PLETE_HOME/agents/ and in projects (with no
+    /// subcommand: the list)
+    Agents {
+        #[command(subcommand)]
+        command: Option<AgentsCommands>,
+    },
+
     /// Record an agent's hook event for a task's status (run by the agent)
     #[command(hide = true)]
     TaskHook {
@@ -691,6 +699,43 @@ pub enum ManagerCommands {
         /// go first, as its own slot is the one to fill
         #[arg(long, value_name = "TASK_ID")]
         after: Option<String>,
+    },
+}
+
+/// `plete agents`.
+#[derive(Subcommand)]
+pub enum AgentsCommands {
+    /// The profiles a task may be started as, and where each is from
+    Ls {
+        /// As a task in this project sees them: its own come first
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
+        project: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a profile: where it is from, then its file
+    Show {
+        name: String,
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
+        project: Option<String>,
+    },
+    /// Write a new profile and print its path: a starter, or a copy of
+    /// --from (a built-in's name makes a copy of your own to edit)
+    New {
+        name: String,
+        /// The profile to copy
+        #[arg(long)]
+        from: Option<String>,
+        /// Make it the project's, for its tasks only
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
+        project: Option<String>,
+    },
+    /// Open a profile's file in your editor
+    Edit {
+        name: String,
+        #[arg(long, add = ArgValueCandidates::new(project_candidates))]
+        project: Option<String>,
     },
 }
 

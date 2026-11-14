@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod alias;
 pub mod chat;
 pub mod clone;

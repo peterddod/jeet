@@ -2498,6 +2498,81 @@ fn fake_editor(
 
 #[cfg(unix)]
 #[test]
+fn agent_profiles_are_made_listed_shown_and_edited() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+
+    // The built-ins, with nothing written.
+    let output = lab.plete_at(&["agents"], &home, &[]);
+    succeeded(&output);
+    let listed = stdout_of(&output);
+    assert!(
+        listed.contains("default") && listed.contains("planner"),
+        "{listed}"
+    );
+
+    // A starter, which reads, and a copy of the planner that shadows it.
+    let output = lab.plete_at(&["agents", "new", "docs"], &home, &[]);
+    succeeded(&output);
+    assert_eq!(path_from(&output), home.join("agents/docs.md"));
+    let output = lab.plete_at(
+        &["agents", "new", "planner", "--from", "planner"],
+        &home,
+        &[],
+    );
+    succeeded(&output);
+    assert!(stderr_of(&output).contains("shadows the built-in"));
+    let output = lab.plete_at(&["agents", "new", "docs"], &home, &[]);
+    assert!(
+        stderr_of(&output).contains("exists already"),
+        "{}",
+        stderr_of(&output)
+    );
+
+    // A broken one is listed as broken; the rest still are.
+    std::fs::write(home.join("agents/bad.md"), "+++\nmodle = \"x\"\n+++\n").unwrap();
+    let output = lab.plete_at(&["agents", "ls", "--json"], &home, &[]);
+    succeeded(&output);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let row = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap().clone();
+    assert_eq!(row("planner")["source"], "user");
+    assert_eq!(row("planner")["shadows_builtin"], true);
+    assert_eq!(row("default")["source"], "built-in");
+    assert!(row("bad")["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown field"));
+
+    let output = lab.plete_at(&["agents", "show", "docs"], &home, &[]);
+    succeeded(&output);
+    assert!(stdout_of(&output).starts_with("+++\n"));
+    let output = lab.plete_at(&["agents", "show", "default"], &home, &[]);
+    succeeded(&output);
+    assert!(stderr_of(&output).contains("built-in"));
+
+    // Edit opens the file in the editor; a built-in is not edited in place.
+    let output = lab.plete_at(
+        &["agents", "edit", "docs"],
+        &home,
+        &[("PLETE_EDITOR", "true")],
+    );
+    succeeded(&output);
+    let output = lab.plete_at(
+        &["agents", "edit", "default"],
+        &home,
+        &[("PLETE_EDITOR", "true")],
+    );
+    assert!(
+        stderr_of(&output).contains("is built in"),
+        "{}",
+        stderr_of(&output)
+    );
+    let output = lab.plete_at(&["agents", "new", "Bad Name"], &home, &[]);
+    assert!(stderr_of(&output).contains("no profile name"));
+}
+
+#[cfg(unix)]
+#[test]
 fn projects_are_made_listed_edited_and_removed() {
     let lab = StoreLab::new();
     let home = lab.home();
