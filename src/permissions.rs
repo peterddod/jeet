@@ -32,8 +32,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    AliasCommands, Commands, ManagerCommands, PrCommands, ProjectCommands, ReviewCommands,
-    SetupCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
+    AgentsCommands, AliasCommands, Commands, ManagerCommands, PrCommands, ProjectCommands,
+    ReviewCommands, SetupCommands, TaskCommands, WatchCommands, WorktreeArgs, WorktreeCommands,
 };
 use crate::config::NotifyLevel;
 use crate::config::{self, ManagerPolicy};
@@ -691,6 +691,12 @@ pub fn gate(command: Option<&Commands>, terminal: bool) -> Gate {
         Commands::Tasks | Commands::Explore | Commands::Exec { .. } | Commands::Chat { .. } => {
             Gate::Interactive
         }
+        // Reads only.
+        Commands::Agents {
+            command: None | Some(AgentsCommands::Ls { .. } | AgentsCommands::Show { .. }),
+        } => Gate::Free,
+        // A profile is trusted instructions and a grant: the user's to write.
+        Commands::Agents { .. } => Gate::Interactive,
         // The sender reads tokens no agent may, and installing it changes
         // what runs on the user's machine: the user's, at a terminal.
         Commands::Notify {
@@ -1695,6 +1701,9 @@ fn node_scope(command: Option<&Commands>) -> Option<Scope> {
         | Commands::Path { .. }
         | Commands::Prs { .. }
         | Commands::Notify { command: None, .. }
+        | Commands::Agents {
+            command: None | Some(AgentsCommands::Ls { .. } | AgentsCommands::Show { .. }),
+        }
         | Commands::Report { .. }
         | Commands::Todo { .. }
         | Commands::Brief { .. }
@@ -3174,6 +3183,11 @@ mod tests {
             (&["task", "prs"], true),
             (&["task", "last", "x"], true),
             (&["task", "resync", "x"], true),
+            (&["agents"], true),
+            (&["agents", "ls"], true),
+            (&["agents", "show", "planner"], true),
+            (&["agents", "new", "x"], false),
+            (&["agents", "edit", "x"], false),
             (&["manager", "new", "x"], true),
             (&["manager", "ls"], true),
             (&["manager", "show", "x"], true),

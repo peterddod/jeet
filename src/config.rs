@@ -822,7 +822,7 @@ pub struct RoleRules {
 }
 
 impl RoleRules {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.allow.is_empty() && self.deny.is_empty()
     }
 }
@@ -1331,6 +1331,11 @@ pub fn tasks_root(home: &Path) -> PathBuf {
 /// Project templates a task can be started from.
 pub fn projects_root(home: &Path) -> PathBuf {
     home.join("projects")
+}
+
+/// The user's agent profiles ([`crate::profiles`]).
+pub fn agents_root(home: &Path) -> PathBuf {
+    home.join("agents")
 }
 
 /// The assistant's home: its AGENTS.md, worklog, todo, inbox and

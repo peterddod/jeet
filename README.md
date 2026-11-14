@@ -715,6 +715,53 @@ how each went is shown when it is done, and a refusal (answered meanwhile,
 say) stays on the form. The worktree, PR, archive and delete keys are the
 active tab's: `⇥` back to it.
 
+### Agent profiles
+
+A profile is what a task's agent is started as: instructions added to its
+brief, the model it runs, what it is granted and may spend, and the skills,
+MCP servers, environment and harness rules it starts with. plete ships two:
+`default` (a task's agent as it always was) and `planner` (plans an area of
+work, delegates it to tasks under it, checks what they report and reports
+up: what a manager does). Starting a task as one, `plete task new <name>
+--agent <profile>`, is not wired up yet; for now profiles are
+written and checked here.
+
+```bash
+plete agents                         # the profiles, and where each is from
+plete agents new docs                # a starter in $PLETE_HOME/agents/docs.md; prints its path
+plete agents new planner --from planner   # your own copy of a built-in, which shadows it
+plete agents new web-docs --project web   # in projects/web/agents/, for that project's tasks only
+plete agents show planner            # its file
+plete agents edit docs               # in your editor
+```
+
+A profile is `<name>.md`, or `<name>/AGENT.md` with a `skills/` folder
+beside it: settings in TOML between `+++` lines, then the instructions.
+
+```markdown
++++
+description = "Writes and checks the docs"
+model = "sonnet"                  # over [models]
+allow = ["worktree.add"]          # its grant unless --allow names one; cut to its parent's
+budget = "2h,40turns"             # unless --budget names one
+max_children = 4                  # active tasks it may keep under it
+pr = "draft"                      # auto, draft or ask
+skills = ["style-guide"]          # from its skills/, the project's, or built-in
+mcp = "docs.mcp.json"             # a file beside it, or [mcp.servers.<name>] tables
+env = { RUST_LOG = "info" }       # PLETE_* and JEET_* are refused
+[permissions]                     # harness rules, as [permissions.task]
+allow = ["Bash(mdbook build:*)"]
++++
+Keep the README and docs/ in step with the code. …
+```
+
+The first found wins: the task's project's `agents/`, then
+`$PLETE_HOME/agents/`, then the built-ins. A file that does not read (an
+unknown key, a capability plete does not know, a budget that does not
+parse) is listed as broken and refused rather than skipped. Profiles are
+never read from a repository, since a profile is trusted instructions and a
+grant. Any agent may list and show them; only you write them.
+
 ### The projects tab
 
 The fourth tab groups the active tasks and managers by project: the plete
