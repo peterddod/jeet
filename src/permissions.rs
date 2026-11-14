@@ -113,6 +113,9 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("project.read", "list projects", &["plete projects ls"]),
     cap("project.create", "make projects", &["plete projects new"]),
     cap("project.delete", "delete projects", &["plete projects rm"]),
+    // Its files, not a command: the launch adds the project's docs folder
+    // with edit rules for it ([`crate::projects::docs_line`]).
+    cap("project.write", "write project docs", &[]),
     cap(
         "repo.clone",
         "clone repositories into the store",

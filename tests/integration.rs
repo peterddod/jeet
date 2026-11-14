@@ -590,7 +590,7 @@ fn path_from(output: &std::process::Output) -> std::path::PathBuf {
 /// bare repo. Commands run against it with only `PLETE_HOME` set, so the
 /// trunk's own config refuses the network outright should anything try.
 /// What a child is granted unless something narrows it, by name.
-const EVERY_CAPABILITY: [&str; 24] = [
+const EVERY_CAPABILITY: [&str; 25] = [
     "manager.create",
     "manager.grant",
     "manager.stop",
@@ -600,6 +600,7 @@ const EVERY_CAPABILITY: [&str; 24] = [
     "project.create",
     "project.delete",
     "project.read",
+    "project.write",
     "repo.clone",
     "repo.import",
     "repo.sync",
@@ -4128,6 +4129,62 @@ fn a_project_task_agent_gets_the_projects_arguments() {
     let argv = calls_of(&tmux, "new-session").pop().unwrap();
     let dash = argv.iter().position(|a| a == "--").unwrap();
     assert_eq!(argv[dash + 1..], ["aider", "--yes", "--verbose"]);
+}
+
+/// A task in a project reaches the project's shared docs: its agent is
+/// given the folder, and may edit it while it holds `project.write`.
+#[test]
+fn a_project_task_reaches_the_projects_shared_docs() {
+    let lab = StoreLab::new();
+    let home = lab.home();
+    std::fs::write(
+        home.join("config.toml"),
+        "scan_roots = []\n[assistant]\nallow = [\"worktree.add\", \"project.write\"]\n",
+    )
+    .unwrap();
+    let output = lab.plete_at(&["projects", "new", "web"], &home, &[]);
+    succeeded(&output);
+    let docs = path_from(&output).join("docs");
+    assert!(std::fs::read_to_string(docs.join("index.md"))
+        .unwrap()
+        .starts_with("# web: shared docs"));
+    succeeded(&lab.plete_at(&["task", "new", "Site", "--project", "web"], &home, &[]));
+    succeeded(&lab.plete_at(
+        &[
+            "task",
+            "new",
+            "Reader",
+            "--project",
+            "web",
+            "--parent",
+            "assistant",
+            "--allow",
+            "worktree.add",
+        ],
+        &home,
+        &[],
+    ));
+
+    let launch = |slug: &str| {
+        let scratch = TempDir::new().unwrap();
+        let tmux = stub_tmux(scratch.path());
+        let tmux_env = tmux.to_string_lossy().to_string();
+        let env = [("PLETE_TMUX", tmux_env.as_str()), ("PLETE_AGENT", "claude")];
+        succeeded(&lab.plete_at(&["task", "open", slug], &home, &env));
+        let argv = calls_of(&tmux, "new-session").pop().unwrap();
+        let after = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
+        let settings = std::fs::read_to_string(after("--settings")).unwrap();
+        (after("--add-dir"), settings)
+    };
+    let rule = format!("Edit(/{}/**)", docs.display());
+    // The user's own task may write them.
+    let (dir, settings) = launch("site");
+    assert_eq!(std::path::PathBuf::from(dir), docs);
+    assert!(settings.contains(&rule), "{settings}");
+    // One under the assistant without `project.write` reads them only.
+    let (dir, settings) = launch("reader");
+    assert_eq!(std::path::PathBuf::from(dir), docs);
+    assert!(!settings.contains(&rule), "{settings}");
 }
 
 // ---------------------------------------------------------------------------

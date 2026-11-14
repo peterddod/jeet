@@ -136,6 +136,18 @@ pub trait Harness: Sync {
         None
     }
 
+    /// Arguments that let this launch's agent reach the directory `path`
+    /// outside its own (a project's shared docs).
+    fn add_dir_args(&self, _path: &Path) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Allow rules, in the harness's syntax, that let the agent edit the
+    /// files under `path`, which [`Harness::add_dir_args`] added.
+    fn edit_rules(&self, _path: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Arguments, after every other, that give an interactive session its
     /// first prompt.
     fn prompt_args(&self, _prompt: &str) -> Option<Vec<String>> {

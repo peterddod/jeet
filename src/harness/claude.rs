@@ -116,6 +116,15 @@ impl Harness for ClaudeCode {
 
     /// `--` first, so a prompt that starts with a dash is a prompt, not a
     /// flag.
+    fn add_dir_args(&self, path: &Path) -> Option<Vec<String>> {
+        Some(vec!["--add-dir".to_string(), path.display().to_string()])
+    }
+
+    fn edit_rules(&self, path: &Path) -> Vec<String> {
+        // `//` makes a rule's path absolute.
+        vec![format!("Edit(/{}/**)", path.display())]
+    }
+
     fn prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["--".to_string(), prompt.to_string()])
     }

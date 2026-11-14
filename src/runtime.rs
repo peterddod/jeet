@@ -256,6 +256,21 @@ fn start_tmux(
         Ok(args) => spec.argv.extend(args),
         Err(e) => warnings.push(format!("no agent arguments from the task's project: {e:#}")),
     }
+    // The project's shared docs, outside the task, for its agent to read and,
+    // when it may, to write.
+    let docs = match (&task.project, task.kind) {
+        (Some(project), TaskKind::Work) => match projects::ensure_docs(app, project) {
+            Ok(docs) => spec.harness.add_dir_args(&docs).map(|args| {
+                spec.argv.extend(args);
+                docs
+            }),
+            Err(e) => {
+                warnings.push(format!("no shared docs for project {project}: {e:#}"));
+                None
+            }
+        },
+        _ => None,
+    };
     // After the project's arguments, so a `--model` there wins too.
     let spec = spec.with_model(app.config.models.for_kind(task.kind));
     let dir = tasks::task_dir(app, task);
@@ -280,7 +295,14 @@ fn start_tmux(
     let hooks = match spec.supports_sessions() {
         true => {
             let exe = crate::paths::plete_exe()?;
-            Some(task_hooks(app, task, spec.harness, exe)?)
+            let mut hooks = task_hooks(app, task, spec.harness, exe)?;
+            if let Some(docs) = docs
+                .as_deref()
+                .filter(|_| projects::may_write_docs(app, task))
+            {
+                hooks.extra_allow.extend(spec.harness.edit_rules(docs));
+            }
+            Some(hooks)
         }
         false => None,
     };

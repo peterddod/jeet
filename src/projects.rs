@@ -241,7 +241,8 @@ pub fn create(app: &App, name: &str, repos: &[String]) -> Result<PathBuf> {
                     .with_context(|| format!("write {}", import.file))
             })
         })
-        .and_then(|_| std::fs::create_dir(dir.join(SKILLS_DIR)).context("create skills/"));
+        .and_then(|_| std::fs::create_dir(dir.join(SKILLS_DIR)).context("create skills/"))
+        .and_then(|_| ensure_docs_in(&dir, name).map(|_| ()));
     if let Err(e) = written {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
@@ -270,6 +271,68 @@ fn template(repos: &[String]) -> String {
          # pr = \"draft\"\n",
         list.join(", ")
     )
+}
+
+/// The folder of a project's shared docs: what its tasks know and record
+/// for the tasks after them, searched as the project's documents.
+pub const DOCS_DIR: &str = "docs";
+
+/// Project `name`'s docs folder, made with a starter `index.md` if it is
+/// not there yet (a project from before it).
+pub fn ensure_docs(app: &App, name: &str) -> Result<PathBuf> {
+    ensure_docs_in(&existing_dir(app, name)?, name)
+}
+
+fn ensure_docs_in(project_dir: &Path, name: &str) -> Result<PathBuf> {
+    let docs = project_dir.join(DOCS_DIR);
+    if !docs.is_dir() {
+        std::fs::create_dir_all(&docs).with_context(|| format!("create {}", docs.display()))?;
+    }
+    let index = docs.join("index.md");
+    if !index.exists() {
+        std::fs::write(&index, starter_docs_index(name))
+            .with_context(|| format!("write {}", index.display()))?;
+    }
+    Ok(docs)
+}
+
+fn starter_docs_index(name: &str) -> String {
+    format!(
+        "# {name}: shared docs\n\n\
+         What the tasks of project {name} know and keep for the tasks after them: decisions \
+         and why, how things work, what was tried. One file per topic, listed here.\n\n\
+         ## Topics\n\n"
+    )
+}
+
+/// What a task in project `name` is told of its docs at each start: where
+/// they are and, when it may write them (`may_write`), how to keep them.
+pub fn docs_line(name: &str, docs: &Path, may_write: bool) -> String {
+    let mut line = format!(
+        "Project {name} keeps shared docs at {}: read index.md there first, and the topics \
+         it lists that bear on your work.",
+        docs.display()
+    );
+    match may_write {
+        true => line.push_str(
+            " Record there what later tasks in the project should know (a decision and why, \
+             how something works, what failed): one file per topic, updated rather than \
+             appended to, each listed in index.md. Write in your own words; never copy fenced \
+             or untrusted text in.",
+        ),
+        false => line.push_str(" They are read-only to you."),
+    }
+    line
+}
+
+/// Whether `task` may write its project's docs: the user's own task, or one
+/// whose grant holds `project.write`, cut as ever by those above it.
+pub fn may_write_docs(app: &App, task: &TaskRecord) -> bool {
+    match task.parent_id {
+        None => true,
+        Some(_) => crate::permissions::effective(app, task)
+            .is_ok_and(|held| held.contains(&"project.write")),
+    }
 }
 
 fn starter_agents_md(name: &str) -> String {
@@ -660,6 +723,26 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_projects_docs_are_made_once_and_described_as_it_may_use_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = ensure_docs_in(dir.path(), "web").unwrap();
+        std::fs::write(docs.join("index.md"), "mine").unwrap();
+        ensure_docs_in(dir.path(), "web").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(docs.join("index.md")).unwrap(),
+            "mine"
+        );
+        let line = docs_line("web", &docs, true);
+        assert!(
+            line.contains("index.md") && line.contains("one file per topic"),
+            "{line}"
+        );
+        let line = docs_line("web", &docs, false);
+        assert!(line.ends_with("They are read-only to you."), "{line}");
+    }
+
     use super::*;
     use crate::instructions::CLAUDE_SHIM;
 
