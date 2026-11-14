@@ -276,6 +276,15 @@ fn start_tmux(
                 ),
             }
         }
+        let rules = &profile.settings.permissions;
+        let has_rules = !rules.allow.is_empty() || !rules.deny.is_empty();
+        if has_rules && !spec.supports_sessions() {
+            warnings.push(format!(
+                "profile {}'s [permissions] rules are not given: {} takes no hooks from plete",
+                profile.name,
+                spec.harness.name()
+            ));
+        }
         warnings.extend(profiles::install_skills(
             app,
             profile,

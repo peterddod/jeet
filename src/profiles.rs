@@ -529,8 +529,34 @@ pub fn install_skills(
     let project_skills =
         project.map(|p| app.item_dir(crate::config::projects_root, p).join("skills"));
     let skills_root = task_dir.join(".claude").join("skills");
+    // Written as the user, into a directory the agent writes: never through
+    // a link it left there.
+    for dir in [task_dir.join(".claude"), skills_root.clone()] {
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            warnings.push(format!(
+                "profile {}: no skills installed: {} is a link",
+                profile.name,
+                dir.display()
+            ));
+            return warnings;
+        }
+    }
     for skill in &profile.settings.skills {
         let to = skills_root.join(skill);
+        // Afresh each start; a link there goes, not what it points at.
+        let cleared = match std::fs::symlink_metadata(&to) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&to),
+            Ok(_) => std::fs::remove_file(&to),
+            Err(_) => Ok(()),
+        };
+        if let Err(e) = cleared {
+            warnings.push(format!(
+                "profile {}: skill {skill} not installed: clear {}: {e}",
+                profile.name,
+                to.display()
+            ));
+            continue;
+        }
         let from = [own.as_ref(), project_skills.as_ref()]
             .into_iter()
             .flatten()
@@ -696,6 +722,41 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no file"));
+    }
+
+    /// A skill is written afresh into the task, never through a link the
+    /// agent left where it goes.
+    #[cfg(unix)]
+    #[test]
+    fn skills_are_installed_afresh_and_never_through_a_link() {
+        let (dir, app) = app();
+        let task = dir.path().join("task");
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "keep").unwrap();
+        let skill = task.join(".claude/skills/plete-planner");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::os::unix::fs::symlink(&outside, skill.join("SKILL.md")).unwrap();
+        let planner = builtin("planner").unwrap();
+        assert!(install_skills(&app, &planner, None, &task).is_empty());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        let installed = skill.join("SKILL.md");
+        assert!(!std::fs::symlink_metadata(&installed)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(installed)
+            .unwrap()
+            .contains("plete-planner"));
+
+        // A linked skills folder: nothing is written.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(task.join("x")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let task2 = task.join("x");
+        std::os::unix::fs::symlink(&other, task2.join(".claude")).unwrap();
+        let warnings = install_skills(&app, &planner, None, &task2);
+        assert!(warnings[0].contains("is a link"), "{warnings:?}");
+        assert!(std::fs::read_dir(&other).unwrap().next().is_none());
     }
 
     #[test]

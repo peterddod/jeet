@@ -145,7 +145,11 @@ fn profile_project(app: &App, caller: &Caller, args: &NewTaskArgs) -> Option<Str
         (Caller::Node(node), None) => Some(node.clone()),
         _ => None,
     };
-    parent.and_then(|p| p.project)
+    // As `tasks::create` does: a project that no longer loads is dropped,
+    // so the profile is looked up as the task will see it at each start.
+    parent
+        .and_then(|p| p.project)
+        .filter(|p| crate::projects::load(app, p).is_ok())
 }
 
 /// `d` with what `profile` sets wherever the command line left it unset:
