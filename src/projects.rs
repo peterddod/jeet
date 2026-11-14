@@ -284,14 +284,30 @@ pub fn ensure_docs(app: &App, name: &str) -> Result<PathBuf> {
 }
 
 fn ensure_docs_in(project_dir: &Path, name: &str) -> Result<PathBuf> {
+    // Tasks write here; plete, writing as the user, never follows a link
+    // one left.
     let docs = project_dir.join(DOCS_DIR);
-    if !docs.is_dir() {
-        std::fs::create_dir_all(&docs).with_context(|| format!("create {}", docs.display()))?;
+    match std::fs::symlink_metadata(&docs) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => bail!("{} is not a folder", docs.display()),
+        Err(_) => {
+            std::fs::create_dir(&docs).with_context(|| format!("create {}", docs.display()))?
+        }
     }
     let index = docs.join("index.md");
-    if !index.exists() {
-        std::fs::write(&index, starter_docs_index(name))
-            .with_context(|| format!("write {}", index.display()))?;
+    if std::fs::symlink_metadata(&index).is_err() {
+        use std::io::Write;
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&index)
+            .and_then(|mut f| f.write_all(starter_docs_index(name).as_bytes()));
+        match written {
+            Ok(()) => {}
+            // Made meanwhile, by another start.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("write {}", index.display())),
+        }
     }
     Ok(docs)
 }
@@ -741,6 +757,22 @@ mod tests {
         );
         let line = docs_line("web", &docs, false);
         assert!(line.ends_with("They are read-only to you."), "{line}");
+
+        // A link left in place of the folder or its index is not followed.
+        #[cfg(unix)]
+        {
+            let outside = dir.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let p2 = dir.path().join("p2");
+            std::fs::create_dir(&p2).unwrap();
+            std::os::unix::fs::symlink(&outside, p2.join(DOCS_DIR)).unwrap();
+            assert!(ensure_docs_in(&p2, "p2").is_err());
+            std::fs::remove_file(p2.join(DOCS_DIR)).unwrap();
+            std::fs::create_dir(p2.join(DOCS_DIR)).unwrap();
+            std::os::unix::fs::symlink(outside.join("new.md"), p2.join("docs/index.md")).unwrap();
+            ensure_docs_in(&p2, "p2").unwrap();
+            assert!(!outside.join("new.md").exists());
+        }
     }
 
     use super::*;

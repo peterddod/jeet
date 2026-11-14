@@ -296,11 +296,12 @@ fn start_tmux(
         true => {
             let exe = crate::paths::plete_exe()?;
             let mut hooks = task_hooks(app, task, spec.harness, exe)?;
-            if let Some(docs) = docs
-                .as_deref()
-                .filter(|_| projects::may_write_docs(app, task))
-            {
-                hooks.extra_allow.extend(spec.harness.edit_rules(docs));
+            if let Some(docs) = docs.as_deref() {
+                let rules = spec.harness.edit_rules(docs);
+                match projects::may_write_docs(app, task) {
+                    true => hooks.extra_allow.extend(rules),
+                    false => hooks.extra_deny.extend(rules),
+                }
             }
             Some(hooks)
         }

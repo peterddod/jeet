@@ -564,7 +564,7 @@ its project too) is told where they are as each session starts, and its agent
 is given the folder (Claude Code: `--add-dir`). Your own tasks, and tasks whose grant holds
 `project.write` (in the default grant), may edit them: one file per topic,
 listed in `index.md`, kept up to date rather than appended to. Without
-`project.write` they are read-only. Writes are last-writer-wins, and the folder
+`project.write` they are read-only: its agent's edits there are denied. Writes are last-writer-wins, and the folder
 keeps no history of its own.
 
 `AGENTS.md` is the file Codex, Cursor, Amp, Gemini CLI and most other coding

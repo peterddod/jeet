@@ -4181,10 +4181,17 @@ fn a_project_task_reaches_the_projects_shared_docs() {
     let (dir, settings) = launch("site");
     assert_eq!(std::path::PathBuf::from(dir), docs);
     assert!(settings.contains(&rule), "{settings}");
-    // One under the assistant without `project.write` reads them only.
+    // One under the assistant without `project.write` reads them only: its
+    // edits there are denied.
     let (dir, settings) = launch("reader");
     assert_eq!(std::path::PathBuf::from(dir), docs);
-    assert!(!settings.contains(&rule), "{settings}");
+    let json: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    let has = |list: &str| {
+        json["permissions"][list]
+            .as_array()
+            .is_some_and(|rules| rules.iter().any(|r| r == &serde_json::json!(rule)))
+    };
+    assert!(!has("allow") && has("deny"), "{settings}");
 }
 
 // ---------------------------------------------------------------------------

@@ -142,8 +142,10 @@ pub trait Harness: Sync {
         None
     }
 
-    /// Allow rules, in the harness's syntax, that let the agent edit the
-    /// files under `path`, which [`Harness::add_dir_args`] added.
+    /// Rules, in the harness's syntax, matching edits of the files under
+    /// `path`, which [`Harness::add_dir_args`] added: allowed to an agent
+    /// that may write there, denied to one that may not. None when the
+    /// path cannot be written in a rule.
     fn edit_rules(&self, _path: &Path) -> Vec<String> {
         Vec::new()
     }
