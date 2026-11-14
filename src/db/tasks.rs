@@ -973,6 +973,28 @@ impl Database {
         Ok(())
     }
 
+    /// Record the agent profile task `id` is started as.
+    pub fn set_task_agent(&self, id: &str, agent: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO task_agents (task_id, agent) VALUES (?1, ?2)
+             ON CONFLICT(task_id) DO UPDATE SET agent = excluded.agent",
+            params![id, agent],
+        )?;
+        Ok(())
+    }
+
+    /// The agent profile task `id` is started as, if it was given one.
+    pub fn task_agent(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT agent FROM task_agents WHERE task_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// A task's own PR policy, if it was given one.
     pub fn task_pr(&self, id: &str) -> Result<Option<PrMode>> {
         let pr: Option<Option<String>> = self

@@ -404,6 +404,7 @@ fn start(app: &App, task: &TaskRecord, spec: AgentSpec, new: bool) -> Result<run
         spec,
         hooks: Some(hooks),
         warnings: Vec::new(),
+        env: Vec::new(),
     };
     let prompt = (!resumes).then_some(FIRST_PROMPT);
     let running = runtime::launch_tmux(

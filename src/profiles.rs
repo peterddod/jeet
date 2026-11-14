@@ -40,6 +40,10 @@ description = "A task's agent as plete starts one: its brief, and nothing added"
 
 const PLANNER: &str = include_str!("profiles/planner.md");
 
+/// The skills plete ships for its profiles, by name.
+const BUILTIN_SKILLS: &[(&str, &str)] =
+    &[("plete-planner", include_str!("profiles/planner-SKILL.md"))];
+
 /// Where a profile was read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -443,6 +447,172 @@ time a session starts.
     ))
 }
 
+/// The profile `task` was started as, read afresh (an edit takes effect at
+/// its next start); none for one given no `--agent`. A profile gone or
+/// broken since is an error: its agent is not started without it.
+pub fn of_task(app: &App, task: &crate::db::tasks::TaskRecord) -> Result<Option<Profile>> {
+    match app.db.task_agent(&task.id)? {
+        Some(name) => find(app, &name, task.project.as_deref())
+            .map(Some)
+            .with_context(|| format!("task {} is started as profile {name}", task.slug)),
+        None => Ok(None),
+    }
+}
+
+/// The file `profile`'s MCP servers are in, for its agent's launch: its
+/// own file, relative to it, or the servers it names inline written to
+/// `inline` as `{"mcpServers": {…}}`. None when it names none.
+pub fn mcp_file(profile: &Profile, inline: &Path) -> Result<Option<PathBuf>> {
+    match &profile.settings.mcp {
+        None => Ok(None),
+        Some(Mcp::File(file)) => {
+            let base = profile.source.path().and_then(Path::parent);
+            let path = match base {
+                Some(base) => base.join(file),
+                None => PathBuf::from(file),
+            };
+            if !path.is_file() {
+                bail!(
+                    "profile {}: mcp: {} is no file",
+                    profile.name,
+                    path.display()
+                );
+            }
+            Ok(Some(path))
+        }
+        Some(Mcp::Servers { servers }) => {
+            let servers = serde_json::to_value(servers)?;
+            let json = serde_json::json!({ "mcpServers": servers });
+            if let Some(dir) = inline.parent() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("create {}", dir.display()))?;
+            }
+            write_private(inline, &serde_json::to_vec_pretty(&json)?)?;
+            Ok(Some(inline.to_path_buf()))
+        }
+    }
+}
+
+/// Write `bytes` to `path`, readable by the user alone: inline servers may
+/// carry tokens.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(path)
+        .and_then(|mut f| f.write_all(bytes))
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Copy the skills `profile` names into `task_dir`'s `.claude/skills/`,
+/// each from the profile's own `skills/`, else the project's, else plete's
+/// built-in ones; written again at each start, so an edit reaches the task.
+/// Returns a warning for each it could not find or copy.
+pub fn install_skills(
+    app: &App,
+    profile: &Profile,
+    project: Option<&str>,
+    task_dir: &Path,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let own = profile
+        .source
+        .path()
+        .filter(|p| p.file_name().is_some_and(|f| f == FOLDER_FILE))
+        .and_then(Path::parent)
+        .map(|dir| dir.join("skills"));
+    let project_skills =
+        project.map(|p| app.item_dir(crate::config::projects_root, p).join("skills"));
+    let skills_root = task_dir.join(".claude").join("skills");
+    // Written as the user, into a directory the agent writes: never through
+    // a link it left there.
+    for dir in [task_dir.join(".claude"), skills_root.clone()] {
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            warnings.push(format!(
+                "profile {}: no skills installed: {} is a link",
+                profile.name,
+                dir.display()
+            ));
+            return warnings;
+        }
+    }
+    for skill in &profile.settings.skills {
+        let to = skills_root.join(skill);
+        // Afresh each start; a link there goes, not what it points at.
+        let cleared = match std::fs::symlink_metadata(&to) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&to),
+            Ok(_) => std::fs::remove_file(&to),
+            Err(_) => Ok(()),
+        };
+        if let Err(e) = cleared {
+            warnings.push(format!(
+                "profile {}: skill {skill} not installed: clear {}: {e}",
+                profile.name,
+                to.display()
+            ));
+            continue;
+        }
+        let from = [own.as_ref(), project_skills.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|root| root.join(skill))
+            .find(|dir| dir.join("SKILL.md").is_file());
+        let done = match (from, BUILTIN_SKILLS.iter().find(|(n, _)| n == skill)) {
+            (Some(from), _) => copy_dir(&from, &to),
+            (None, Some((_, text))) => std::fs::create_dir_all(&to)
+                .and_then(|_| std::fs::write(to.join("SKILL.md"), text))
+                .map_err(Into::into),
+            (None, None) => Err(anyhow::anyhow!(
+                "it is in neither the profile's skills/, the project's, nor plete's"
+            )),
+        };
+        if let Err(e) = done {
+            warnings.push(format!(
+                "profile {}: skill {skill} not installed: {e:#}",
+                profile.name
+            ));
+        }
+    }
+    warnings
+}
+
+/// Copy directory `from` over `to`, files and folders; links are skipped.
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
+    for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target)
+                .with_context(|| format!("copy {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The section a task's brief gains from `profile`: its instructions, in
+/// the user's words; nothing for a profile with none.
+pub fn brief_section(profile: &Profile) -> Option<String> {
+    if profile.body.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "<plete-profile name=\"{}\">\nYou were started as agent profile {}, which the user \
+         wrote. Follow it alongside your brief.\n\n{}\n</plete-profile>",
+        profile.name,
+        profile.name,
+        profile.body.trim()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +686,80 @@ mod tests {
     }
 
     #[test]
+    fn a_profiles_instructions_follow_the_brief_and_inline_servers_are_private() {
+        assert_eq!(brief_section(&builtin("default").unwrap()), None);
+        let section = brief_section(&builtin("planner").unwrap()).unwrap();
+        assert!(
+            section.starts_with("<plete-profile name=\"planner\">"),
+            "{section}"
+        );
+        assert!(section.contains("notes/worklog.md"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, body) =
+            parse("+++\n[mcp.servers.docs]\ncommand = \"d\"\nargs = [\"-x\"]\n+++\n").unwrap();
+        let p = Profile {
+            name: "p".into(),
+            source: Source::Builtin,
+            settings,
+            body,
+        };
+        let inline = dir.path().join("run/t/mcp.json");
+        assert_eq!(mcp_file(&p, &inline).unwrap(), Some(inline.clone()));
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&inline).unwrap()).unwrap();
+        assert_eq!(json["mcpServers"]["docs"]["args"][0], "-x");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&inline).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // A file it names must be there.
+        let (settings, _) = parse("+++\nmcp = \"gone.json\"\n+++\n").unwrap();
+        let p = Profile { settings, ..p };
+        assert!(mcp_file(&p, &inline)
+            .unwrap_err()
+            .to_string()
+            .contains("no file"));
+    }
+
+    /// A skill is written afresh into the task, never through a link the
+    /// agent left where it goes.
+    #[cfg(unix)]
+    #[test]
+    fn skills_are_installed_afresh_and_never_through_a_link() {
+        let (dir, app) = app();
+        let task = dir.path().join("task");
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "keep").unwrap();
+        let skill = task.join(".claude/skills/plete-planner");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::os::unix::fs::symlink(&outside, skill.join("SKILL.md")).unwrap();
+        let planner = builtin("planner").unwrap();
+        assert!(install_skills(&app, &planner, None, &task).is_empty());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        let installed = skill.join("SKILL.md");
+        assert!(!std::fs::symlink_metadata(&installed)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(installed)
+            .unwrap()
+            .contains("plete-planner"));
+
+        // A linked skills folder: nothing is written.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(task.join("x")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let task2 = task.join("x");
+        std::os::unix::fs::symlink(&other, task2.join(".claude")).unwrap();
+        let warnings = install_skills(&app, &planner, None, &task2);
+        assert!(warnings[0].contains("is a link"), "{warnings:?}");
+        assert!(std::fs::read_dir(&other).unwrap().next().is_none());
+    }
+
+    #[test]
     fn names_are_file_and_word_safe() {
         for ok in ["planner", "a", "doc-writer", "x_2"] {
             check_name(ok).unwrap();
@@ -535,8 +779,10 @@ mod tests {
         assert_eq!(planner.settings.skills, ["plete-planner"]);
         assert!(!planner.body.is_empty());
         // The skill it names, which plete installs with it.
-        let skill = include_str!("profiles/planner-SKILL.md");
-        assert!(skill.starts_with("---\nname: plete-planner\n"));
+        for skill in &planner.settings.skills {
+            let (_, text) = BUILTIN_SKILLS.iter().find(|(n, _)| n == skill).unwrap();
+            assert!(text.starts_with(&format!("---\nname: {skill}\n")));
+        }
     }
 
     fn app() -> (tempfile::TempDir, App) {

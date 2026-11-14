@@ -116,6 +116,10 @@ impl Harness for ClaudeCode {
 
     /// `--` first, so a prompt that starts with a dash is a prompt, not a
     /// flag.
+    fn mcp_args(&self, path: &Path) -> Option<Vec<String>> {
+        Some(vec!["--mcp-config".to_string(), path.display().to_string()])
+    }
+
     fn prompt_args(&self, prompt: &str) -> Option<Vec<String>> {
         Some(vec!["--".to_string(), prompt.to_string()])
     }

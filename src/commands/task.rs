@@ -3,6 +3,7 @@
 //! Commands that print a path print exactly that one line on stdout;
 //! everything else plete has to say goes to stderr.
 
+use crate::profiles::{self, Profile};
 use std::io::{IsTerminal, Write};
 
 use anyhow::{bail, Context, Result};
@@ -36,6 +37,8 @@ pub struct NewTaskArgs<'a> {
     pub prompt: Option<&'a str>,
     /// `--pr`: the task's own PR policy.
     pub pr: Option<PrMode>,
+    /// `--agent`: the profile it is started as.
+    pub agent: Option<&'a str>,
     pub delegation: &'a Delegation,
 }
 
@@ -53,6 +56,14 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         Err(e) => bail!("--prompt: {e:#}"),
     };
     let flags = notify_flags(app, &caller, d)?;
+    let profile = match args.agent {
+        Some(name) => Some(profiles::find(
+            app,
+            name,
+            profile_project(app, &caller, args).as_deref(),
+        )?),
+        None => None,
+    };
     // The user's task is top-level unless given a parent; what the
     // assistant or a manager makes reports to it (M12).
     let plan = match (&caller, &d.parent) {
@@ -69,14 +80,17 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
             }
             None
         }
-        _ => Some(tasks::plan_child(
-            app,
-            &caller,
-            TaskKind::Work,
-            args.name,
-            d,
-            None,
-        )?),
+        _ => {
+            let (d, max_children) = with_profile(d, profile.as_ref())?;
+            Some(tasks::plan_child(
+                app,
+                &caller,
+                TaskKind::Work,
+                args.name,
+                &d,
+                max_children,
+            )?)
+        }
     };
     let parent = match plan.as_ref().and_then(|p| p.record.parent_id.as_deref()) {
         Some(id) => app.db.get_task(id)?,
@@ -95,9 +109,13 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
     )?;
     warn_all(&created.warnings);
     set_notify_flags(app, &created.task.id, &flags)?;
-    // Before its agent can start, which reads it.
-    if args.pr.is_some() {
-        app.db.set_task_pr(&created.task.id, args.pr)?;
+    // Before its agent can start, which reads them.
+    let pr = args.pr.or(profile.as_ref().and_then(|p| p.settings.pr));
+    if pr.is_some() {
+        app.db.set_task_pr(&created.task.id, pr)?;
+    }
+    if let Some(profile) = &profile {
+        app.db.set_task_agent(&created.task.id, &profile.name)?;
     }
     let dir = tasks::task_dir(app, &created.task);
     eprintln!("plete: task {} -> {}", created.task.name, dir.display());
@@ -114,6 +132,47 @@ pub fn new(app: &App, args: &NewTaskArgs) -> Result<()> {
         Some(prompt) => start_new(app, &created.task, &prompt),
         None => Ok(()),
     }
+}
+
+/// The project whose profiles `--agent` is looked up in: `--project`, else
+/// the parent's, which a task made under it defaults to.
+fn profile_project(app: &App, caller: &Caller, args: &NewTaskArgs) -> Option<String> {
+    if let Some(project) = args.project {
+        return Some(project.to_string());
+    }
+    let parent = match (caller, &args.delegation.parent) {
+        (_, Some(key)) => tasks::find(app, key).ok(),
+        (Caller::Node(node), None) => Some(node.clone()),
+        _ => None,
+    };
+    // As `tasks::create` does: a project that no longer loads is dropped,
+    // so the profile is looked up as the task will see it at each start.
+    parent
+        .and_then(|p| p.project)
+        .filter(|p| crate::projects::load(app, p).is_ok())
+}
+
+/// `d` with what `profile` sets wherever the command line left it unset:
+/// the grant and the budget; and the profile's fan-out limit.
+fn with_profile(d: &Delegation, profile: Option<&Profile>) -> Result<(Delegation, Option<u32>)> {
+    let mut d = d.clone();
+    let Some(profile) = profile else {
+        return Ok((d, None));
+    };
+    let s = &profile.settings;
+    if d.allow.is_none() {
+        d.allow = s.allow.clone();
+    }
+    if d.budget.is_empty() {
+        if let Some(budget) = &s.budget {
+            d.budget = budget
+                .split(',')
+                .map(|part| crate::manager::budget::parse_part(part.trim()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| anyhow::anyhow!("profile {}: budget: {e}", profile.name))?;
+        }
+    }
+    Ok((d, s.max_children))
 }
 
 /// Who starts the task `caller` makes, and whether it is quiet, as `d`

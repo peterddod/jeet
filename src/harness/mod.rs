@@ -136,6 +136,12 @@ pub trait Harness: Sync {
         None
     }
 
+    /// Arguments that give this launch the MCP servers in the file at
+    /// `path`, `{"mcpServers": {…}}` (an agent profile's `mcp`).
+    fn mcp_args(&self, _path: &Path) -> Option<Vec<String>> {
+        None
+    }
+
     /// Arguments, after every other, that give an interactive session its
     /// first prompt.
     fn prompt_args(&self, _prompt: &str) -> Option<Vec<String>> {

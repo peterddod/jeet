@@ -418,6 +418,11 @@ pub enum TaskCommands {
         /// `[tasks] pr`: auto (a ready PR), draft, or ask first
         #[arg(long, value_enum)]
         pr: Option<crate::config::PrMode>,
+        /// The agent profile to start it as (`plete agents ls`): its
+        /// instructions follow the brief, and its settings are the task's
+        /// defaults
+        #[arg(long, value_name = "PROFILE")]
+        agent: Option<String>,
         #[command(flatten)]
         delegation: Box<Delegation>,
     },
